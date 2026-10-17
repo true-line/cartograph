@@ -1,1 +1,0 @@
-../../../.agents/skills/add-language-adapter/SKILL.md
