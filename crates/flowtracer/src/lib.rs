@@ -39,6 +39,11 @@ pub const FLOW_EDGE_LABELS: &[&str] = &[
     "DEPENDS_ON",
 ];
 
+/// Edge labels the tracer walks against their stored direction:
+/// `SUBSCRIBES` is stored consumer → channel and `DEFINED_IN` symbol → file,
+/// but hops run channel → consumer and entry file → symbol.
+pub const REVERSED_FLOW_LABELS: &[&str] = &["DEFINED_IN", "SUBSCRIBES"];
+
 /// Node labels the tracer needs (for classification and display names).
 pub const FLOW_NODE_LABELS: &[&str] = &[
     "Screen",
@@ -104,6 +109,18 @@ pub struct Hop {
     pub gap_reason: Option<String>,
     /// Escalation tiers already attempted before the explicit Gap was emitted.
     pub attempted_tiers: Vec<String>,
+}
+
+impl Hop {
+    /// The stored edge this hop traverses, as `(src, label, dst)`: the hop's
+    /// own endpoints, swapped back for a label in `REVERSED_FLOW_LABELS`.
+    pub fn stored_edge(&self) -> (&str, &str, &str) {
+        if REVERSED_FLOW_LABELS.contains(&self.label.as_str()) {
+            (&self.dst, &self.label, &self.src)
+        } else {
+            (&self.src, &self.label, &self.dst)
+        }
+    }
 }
 
 /// One traced flow: a trigger and every hop reachable from it.

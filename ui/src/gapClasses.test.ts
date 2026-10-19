@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isEscalatable } from './gapClasses';
+import { classOmissionLabel, isEscalatable, omissionLabel } from './gapClasses';
 import type { SpecAssertion } from './store';
 
 const assertion = (overrides: Partial<SpecAssertion> = {}): SpecAssertion => ({
@@ -49,5 +49,38 @@ describe('isEscalatable (AC-0231, #238)', () => {
     });
     expect(isEscalatable(edgeGap, ['PUBLISHES', 'CALLS'])).toBe(false);
     expect(isEscalatable(edgeGap, ['IMPORTS'])).toBe(true);
+  });
+});
+
+describe('omission labels (AC-0254, #585)', () => {
+  const missing = assertion({
+    omission: { class: 'missing_input', seam: 'manifest_input', detail: 'env key X not found' },
+  });
+  const unresolved = assertion({
+    id: 'node:gap:b',
+    omission: { class: 'unresolved_relationship', seam: 'adapter', detail: 'unresolved call target' },
+  });
+
+  it('names the class and the seam that would fill it', () => {
+    expect(omissionLabel(missing)).toBe('missing input · filled by manifest input');
+    expect(omissionLabel(unresolved)).toBe('unresolved relationship · filled by adapter');
+  });
+
+  it('labels a uniform class, says when members differ, and stays silent on legacy rows', () => {
+    expect(classOmissionLabel([missing, missing])).toBe('missing input · filled by manifest input');
+    expect(classOmissionLabel([missing, unresolved])).toBe('mixed omission classes');
+    expect(classOmissionLabel([assertion()])).toBeNull();
+    expect(omissionLabel(assertion())).toBeNull();
+  });
+
+  it('marks the unclassified fallback instead of presenting it as established (#603 review)', () => {
+    const fallback = assertion({
+      omission: {
+        class: 'unresolved_relationship',
+        seam: 'interpretation',
+        detail: 'unclassified: something entirely new',
+      },
+    });
+    expect(omissionLabel(fallback)).toBe('unclassified (unresolved relationship) · filled by interpretation');
   });
 });

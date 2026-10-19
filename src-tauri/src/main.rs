@@ -4597,6 +4597,7 @@ mod tests {
                 subject_kind: "Node".into(),
                 summary: "fixture assertion".into(),
                 edge_label: None,
+                omission: None,
                 provenance: provenance.clone(),
             })
             .collect();
