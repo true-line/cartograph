@@ -65,6 +65,7 @@ fn finding_provenance(support: &Provenance, canonical: &[u8]) -> Option<Provenan
         canonical,
     )
     .ok()
+    .map(|provenance| provenance.with_method(crate::spec_rule(extractor)))
 }
 
 fn endpoint_name(node: &Node) -> String {

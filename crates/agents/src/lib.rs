@@ -859,7 +859,7 @@ fn validate_curatable_assertion(assertion: &CuratableAssertion) -> Result<(), Ag
 /// and content hash are unchanged.
 fn with_model(mut proposal: AgentProposal, provider: &dyn LlmProvider) -> AgentProposal {
     proposal.provenance = proposal.provenance.with_method(ProducingMethod::Model {
-        model: provider.id().into(),
+        model: provider.completion_model_id(),
     });
     proposal
 }

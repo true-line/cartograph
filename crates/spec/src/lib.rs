@@ -11,6 +11,19 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 mod adr;
+
+/// Version of the spec compiler's projection rules, recorded with every
+/// rule-derived statement's producing method (AC-0244). Bump when a rule's
+/// output changes for the same input.
+pub const SPEC_RULE_VERSION: &str = "1";
+
+/// The producing method of a statement derived by the named spec rule.
+pub(crate) fn spec_rule(rule: &str) -> core_prov::ProducingMethod {
+    core_prov::ProducingMethod::Rule {
+        rule: rule.into(),
+        version: SPEC_RULE_VERSION.into(),
+    }
+}
 mod rules;
 mod security;
 mod workbench;

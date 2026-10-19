@@ -419,7 +419,7 @@ pub fn propose(
                     hop.gap_id, hop.source_id, hop.edge_label, target_id
                 );
                 let method = ProducingMethod::Model {
-                    model: provider.id().into(),
+                    model: provider.embedding_model_id(),
                 };
                 let provenance = Provenance::new(
                     Tier::Semantic,

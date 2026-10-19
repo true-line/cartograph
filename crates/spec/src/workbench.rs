@@ -694,7 +694,8 @@ fn projection_gap(hop: &Hop, reason: &str) -> Hop {
         "spec.projection-gap",
         &canonical,
     )
-    .expect("Gap is within the deterministic confidence ceiling");
+    .expect("Gap is within the deterministic confidence ceiling")
+    .with_method(crate::spec_rule("spec.projection-gap"));
     Hop {
         label: "UNRESOLVED".into(),
         src: hop.src.clone(),
