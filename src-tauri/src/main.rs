@@ -1678,14 +1678,44 @@ fn stitch_http_bindings(
     }
     // Several call sites of one symbol may bind to one endpoint: they are one
     // edge whose evidence unions every site, as on the load path (AC-0203).
-    let joined: Vec<Edge> = outcome
+    // An edge already stored under that key (a relative call from the same
+    // symbol in the serving repo) is one more occurrence, never overwritten.
+    let joined_keys: std::collections::BTreeSet<EdgeKey> = outcome
         .joined
         .iter()
-        .map(|joined| joined.edge.clone())
+        .map(|joined| edge_key(&joined.edge))
         .collect();
-    for edge in merge_edge_occurrences(&joined).into_values() {
+    // It came from the per-repo extractor, so it is re-stamped as an
+    // occurrence of this pass (the merger unions one extractor's sites) and
+    // the edge records which extractor first resolved it.
+    let mut also_extracted_by = std::collections::BTreeMap::<EdgeKey, Vec<String>>::new();
+    let stored: Vec<Edge> = fetch_edges
+        .iter()
+        .filter(|edge| joined_keys.contains(&edge_key(edge)))
+        .map(|edge| {
+            let mut edge = edge.clone();
+            if let Some(extractor) = edge.props["prov"]["extractor_id"].as_str()
+                && extractor != events::http_binding::EXTRACTOR_ID
+            {
+                also_extracted_by
+                    .entry(edge_key(&edge))
+                    .or_default()
+                    .push(extractor.to_string());
+                edge.props["prov"]["extractor_id"] = events::http_binding::EXTRACTOR_ID.into();
+            }
+            edge
+        })
+        .collect();
+    let occurrences: Vec<Edge> = stored
+        .into_iter()
+        .chain(outcome.joined.iter().map(|joined| joined.edge.clone()))
+        .collect();
+    for (key, mut edge) in merge_edge_occurrences(&occurrences) {
+        if let Some(extractors) = also_extracted_by.remove(&key) {
+            edge.props["also_extracted_by"] = extractors.into();
+        }
         graph.put_edge(&edge).map_err(|e| e.to_string())?;
-        facts.edges.insert(edge_key(&edge));
+        facts.edges.insert(key);
     }
     for node in &outcome.kept_nodes {
         graph.put_node(node).map_err(|e| e.to_string())?;
@@ -5781,54 +5811,14 @@ export function queue() {
 
     #[test]
     fn manifest_service_binding_joins_a_fetch_to_another_repos_endpoint() {
-        // AC-0240/AC-0241 (#589): each repo is extracted alone, so a web
+        // AC-0240/AC-0241 (#589): each repo is extracted alone, with the
+        // manifest's bound origins deferred as in a system add, so a web
         // client's absolute-URL call to the API repo starts as a fetch Gap.
-        // After both load, the manifest's declared service joins it to the
-        // API endpoint; an undeclared host keeps its Gap with a reason.
+        // After both load, the declared service joins it to the API
+        // endpoint; an undeclared host keeps its Gap with a reason.
         let dir = tempfile::tempdir().unwrap();
         let mut store = SqliteGraphStore::open_in_memory().unwrap();
         let mut published = crate::OperationFacts::default();
-        let files = [
-            (
-                "api",
-                "server.ts",
-                "import express from 'express';\nconst app = express();\napp.post('/v1/orders', (req, res) => {});\n",
-            ),
-            (
-                "web",
-                "client.tsx",
-                "export function Checkout() {\n  const submit = () => fetch('https://orders.example.com/v1/orders', { method: 'POST' });\n  const other = () => fetch('https://elsewhere.example.com/v1/orders', { method: 'POST' });\n  const again = () => fetch('https://orders.example.com/v1/orders', { method: 'POST' });\n  return <button onClick={submit}>Order</button>;\n}\n",
-            ),
-        ];
-        for (repo, file, source) in files {
-            let root = dir.path().join(repo);
-            std::fs::create_dir_all(&root).unwrap();
-            std::fs::write(root.join(file), source).unwrap();
-            let identity = format!("local/{repo}");
-            let extraction = crate::extract_tree(
-                &root,
-                &identity,
-                "workdir",
-                &[],
-                &std::collections::BTreeMap::new(),
-                None,
-                None,
-                &[],
-            )
-            .unwrap();
-            published.record_load(
-                crate::load_into_graph(&mut store, &extraction, &identity, &root, "workdir")
-                    .unwrap()
-                    .published,
-            );
-        }
-        let gaps_before = store.nodes_with_label("Gap").unwrap();
-        let fetch_gaps: Vec<&Node> = gaps_before
-            .iter()
-            .filter(|gap| gap.id.starts_with("gap:fetch:local/web@"))
-            .collect();
-        assert_eq!(fetch_gaps.len(), 3, "{gaps_before:?}");
-
         let manifest_path = dir.path().join(ingest::manifest::MANIFEST_NAME);
         std::fs::write(
             &manifest_path,
@@ -5842,15 +5832,88 @@ export function queue() {
             .collect();
         let bindings = crate::manifest_http_bindings(&manifest, &repo_keys);
         assert_eq!(bindings.len(), 1);
+        let deferred = events::binding_origins(&bindings);
+        let files = [
+            (
+                "api",
+                "server.ts",
+                "import express from 'express';\nconst app = express();\napp.post('/v1/orders', (req, res) => {});\n",
+            ),
+            // #606 review: one serving-repo symbol calls the endpoint both
+            // relatively and through its bound absolute URL.
+            (
+                "api",
+                "sync.tsx",
+                "export function sync() {\n  fetch('/v1/orders', { method: 'POST' });\n  fetch('https://orders.example.com/v1/orders', { method: 'POST' });\n}\n",
+            ),
+            (
+                "web",
+                "client.tsx",
+                "export function Checkout() {\n  const submit = () => fetch('https://orders.example.com/v1/orders', { method: 'POST' });\n  const other = () => fetch('https://elsewhere.example.com/v1/orders', { method: 'POST' });\n  const again = () => fetch('https://orders.example.com/v1/orders', { method: 'POST' });\n  return <button onClick={submit}>Order</button>;\n}\n",
+            ),
+        ];
+        for (repo, file, source) in files {
+            let root = dir.path().join(repo);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(file), source).unwrap();
+        }
+        for repo in ["api", "web"] {
+            let root = dir.path().join(repo);
+            let identity = format!("local/{repo}");
+            let (extraction, _, _) = crate::extract_tree_with_primary(
+                &root,
+                &identity,
+                "workdir",
+                &[],
+                &std::collections::BTreeMap::new(),
+                &deferred,
+                None,
+                None,
+                &[],
+                &mut crate::RepoExtractionCache::default(),
+                &[],
+                &mut |_| {},
+                None,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            published.record_load(
+                crate::load_into_graph(&mut store, &extraction, &identity, &root, "workdir")
+                    .unwrap()
+                    .published,
+            );
+        }
+        let gaps_before = store.nodes_with_label("Gap").unwrap();
+        let fetch_gaps: Vec<&Node> = gaps_before
+            .iter()
+            .filter(|gap| gap.id.starts_with("gap:fetch:"))
+            .collect();
+        assert_eq!(fetch_gaps.len(), 4, "{gaps_before:?}");
+
         assert_eq!(
             crate::stitch_http_bindings(&mut store, &bindings, &mut published).unwrap(),
-            2
+            3
         );
 
         let fetches = store.edges_with_labels(&["FETCHES"]).unwrap();
+        let evidence = |edge: &Edge| edge.props["prov"]["evidence"].as_array().unwrap().len();
+        let sync: Vec<&Edge> = fetches
+            .iter()
+            .filter(|edge| edge.dst == "ep:local/api@POST:/v1/orders" && edge.src.contains("sync"))
+            .collect();
+        let [sync] = sync.as_slice() else {
+            panic!("one serving-repo edge: {fetches:?}")
+        };
+        // The relative call's citation survives beside the bound one, and
+        // the edge says the per-repo extractor resolved it first.
+        assert_eq!(evidence(sync), 2, "{sync:?}");
+        assert_eq!(
+            sync.props["also_extracted_by"],
+            serde_json::json!(["t0.events"])
+        );
         let bound: Vec<&Edge> = fetches
             .iter()
-            .filter(|edge| edge.dst == "ep:local/api@POST:/v1/orders")
+            .filter(|edge| edge.dst == "ep:local/api@POST:/v1/orders" && edge.src.contains("web"))
             .collect();
         let [bound] = bound.as_slice() else {
             panic!("one bound edge: {fetches:?}")
