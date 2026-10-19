@@ -101,9 +101,10 @@
 - **AC-0010** Given a literal channel id on both sides, when matched, then a Confirmed PUBLISHES/SUBSCRIBES edge is created.
 - **AC-0011** Given a channel id from a present config/env file, when resolved, then the edge is Confirmed via the config resolver.
 - **AC-0012** Given a runtime-computed channel id, when unresolved at T0, then the hop escalates and, if still unresolved, emits a Gap with reason.
+- **AC-0256** Given an EventBridge `PutEvents` site whose detail type is unresolved at T0, when an OTel trace is applied, then the Gap is filled only by observations attributed to that site that establish bus and detail type (with literal static components) as exactly one distinct scoped identity; a bus-only, contradicting, unattributed, multi-identity or batched case keeps the Gap with a reason naming the shortfall, and an observed bus is preserved as its own fact.
 - **Security:** —
 - **Performance:** Channel index keyed by identity for O(1) match.
-- **Trace:** M3,M5,M6 · `events`, `dynamic`, `flowtracer`, `app` · — · T-0010..0012
+- **Trace:** M3,M5,M6 · `events`, `dynamic`, `adapters-fw`, `adapters-lang-ts`, `flowtracer`, `app` · — · T-0010..0012, T-0256
 
 ### US-0005 — Client-side interaction graph (React first)
 - **Actor:** Engine

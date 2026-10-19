@@ -405,6 +405,8 @@ fn site(pending: PendingSite, identity: IdentityExpr) -> EventSite {
         path: pending.path,
         byte_start: pending.byte_start,
         byte_end: pending.byte_end,
+        components: Default::default(),
+        batch: None,
     }
 }
 

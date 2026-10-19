@@ -26,6 +26,9 @@ use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
+mod eventbridge;
+pub use eventbridge::DETAIL_TYPE_ATTR as EVENTBRIDGE_DETAIL_TYPE_ATTR;
+
 /// Extractor id stamped on every observed fact.
 pub const EXTRACTOR_ID: &str = "t1.terraform-state";
 
@@ -926,7 +929,43 @@ fn enrich_http_endpoints(nodes: &mut [Node], trace: &ObservedTrace, trace_path: 
 /// code location there must be exactly one Gap and one observed identity
 /// for that channel kind. Otherwise the Gap remains explicit and records
 /// that T1 was attempted (R-INT-4).
+///
+/// EventBridge Gaps follow the stricter composite-identity contract in
+/// [`eventbridge`] (#573): source attribution is required and a bus-only
+/// span never fills a detail-type Gap.
 pub fn apply_trace(
+    nodes: &mut Vec<Node>,
+    edges: &mut [Edge],
+    trace: &ObservedTrace,
+    trace_path: &str,
+) -> TraceEnrichment {
+    apply_traces(nodes, edges, &[(trace, trace_path)])
+}
+
+/// Apply several OTLP trace files, each `(trace, path)`. HTTP enrichment
+/// and the generic channel match run per file in the given order;
+/// EventBridge Gaps are decided once over every file's spans, so a conflict
+/// split across files is still seen and the result does not depend on
+/// file order (#573).
+pub fn apply_traces(
+    nodes: &mut Vec<Node>,
+    edges: &mut [Edge],
+    traces: &[(&ObservedTrace, &str)],
+) -> TraceEnrichment {
+    let mut report = TraceEnrichment::default();
+    for (trace, trace_path) in traces {
+        let pass = apply_generic_trace(nodes, edges, trace, trace_path);
+        report.endpoints_enriched += pass.endpoints_enriched;
+        report.channel_gaps_resolved += pass.channel_gaps_resolved;
+        report.channel_gaps_unresolved += pass.channel_gaps_unresolved;
+    }
+    let (resolved, unresolved) = eventbridge::apply(nodes, edges, traces);
+    report.channel_gaps_resolved += resolved;
+    report.channel_gaps_unresolved += unresolved;
+    report
+}
+
+fn apply_generic_trace(
     nodes: &mut Vec<Node>,
     edges: &mut [Edge],
     trace: &ObservedTrace,
@@ -939,6 +978,10 @@ pub fn apply_trace(
     let gaps: Vec<(String, String, String)> = nodes
         .iter()
         .filter(|node| node.label == "Gap")
+        .filter(|node| {
+            node.props.get("kind").and_then(serde_json::Value::as_str)
+                != Some(eventbridge::GAP_KIND)
+        })
         .filter_map(|node| {
             Some((
                 node.id.clone(),

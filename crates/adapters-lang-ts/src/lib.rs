@@ -18,7 +18,8 @@
 
 use adapters_fw::client::{FetchSite, NEXT_PAGES_DIR, REACT_ROUTER};
 use adapters_fw::events::{
-    ChannelRole, EVENT_SDKS, EventSite, IdentityArg, IdentityExpr, SdkPattern,
+    ChannelRole, EVENT_BATCH_KEYS, EVENT_QUALIFIERS, EVENT_SDKS, EventSite, IdentityArg,
+    IdentityExpr, SdkPattern,
 };
 use adapters_fw::{HTTP_FACTORIES, NEST};
 use core_graph::{Edge, Node};
@@ -1232,6 +1233,61 @@ fn identity_in_args(
     }
 }
 
+/// First `pair` whose key is `key`, anywhere in the call's first argument,
+/// in document order.
+fn pair_value_in_args<'t>(cx: &FileCx, args: &TsNode<'t>, key: &str) -> Option<TsNode<'t>> {
+    let mut w = args.walk();
+    let first = args.children(&mut w).find(|c| c.is_named())?;
+    let mut stack = vec![first];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "pair"
+            && let Some(k) = node.child_by_field_name("key")
+            && cx.text(&k).trim_matches(['"', '\'']) == key
+        {
+            return node.child_by_field_name("value");
+        }
+        let mut w = node.walk();
+        let children: Vec<_> = node.children(&mut w).collect();
+        stack.extend(children.into_iter().rev());
+    }
+    None
+}
+
+/// Literal-proven qualifier components for a site of `kind` (#573).
+fn site_components(
+    cx: &FileCx,
+    args: &TsNode,
+    kind: &str,
+    classify: &impl Fn(&TsNode) -> IdentityExpr,
+) -> BTreeMap<String, String> {
+    EVENT_QUALIFIERS
+        .iter()
+        .filter(|q| q.kind == kind)
+        .filter_map(|q| match classify(&pair_value_in_args(cx, args, q.key)?) {
+            IdentityExpr::Literal(value) => Some((q.component.to_string(), value)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Batch shape of a site of `kind`: `None` for a single literal entry.
+fn site_batch(cx: &FileCx, args: &TsNode, kind: &str) -> Option<String> {
+    let (_, key) = EVENT_BATCH_KEYS.iter().find(|(k, _)| *k == kind)?;
+    let value = pair_value_in_args(cx, args, key)?;
+    if value.kind() != "array" {
+        return Some("computed entries".into());
+    }
+    let mut w = value.walk();
+    let entries: Vec<_> = value
+        .named_children(&mut w)
+        .filter(|c| c.kind() != "comment")
+        .collect();
+    if entries.iter().any(|e| e.kind() == "spread_element") {
+        return Some("computed entries".into());
+    }
+    (entries.len() > 1).then(|| format!("{} entries", entries.len()))
+}
+
 /// Extract facts from one TypeScript source file.
 pub fn extract_source(
     source: &[u8],
@@ -2148,6 +2204,7 @@ fn extract_source_recording(
                      kind: &str,
                      role: ChannelRole,
                      identity: IdentityExpr,
+                     args: &TsNode,
                      site: &TsNode| {
         out.event_sites.push(EventSite {
             kind: kind.into(),
@@ -2157,6 +2214,8 @@ fn extract_source_recording(
             path: path.into(),
             byte_start: site.start_byte() as u64,
             byte_end: site.end_byte() as u64,
+            components: site_components(&cx, args, kind, &classify),
+            batch: site_batch(&cx, args, kind),
         });
     };
 
@@ -2194,7 +2253,7 @@ fn extract_source_recording(
                 continue;
             }
             let identity = identity_in_args(&cx, &args, sdk.identity, &classify);
-            push_site(&mut out, sdk.kind, sdk.role, identity, &site);
+            push_site(&mut out, sdk.kind, sdk.role, identity, &args, &site);
         }
     }
 
@@ -2252,7 +2311,7 @@ fn extract_source_recording(
             };
             if matched {
                 let identity = identity_in_args(&cx, &args, sdk.identity, &classify);
-                push_site(&mut out, sdk.kind, sdk.role, identity, &site);
+                push_site(&mut out, sdk.kind, sdk.role, identity, &args, &site);
             }
         }
     }
