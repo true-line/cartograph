@@ -76,8 +76,8 @@ The owner chose the pilot in [#575](https://github.com/true-line/cartograph/disc
   API reference to score the reconstructed contract against. It self-hosts
   with Docker, so the full change, re-ingest and verify cycle can run. It
   exercises cross-repo HTTP stitching (W2) and lifecycle artifacts for a real
-  product domain. Known limits: `.vue` files are not parsed, Kotlin call sites
-  are not recovered, the Swift clients are unsupported, and infrastructure is
+  product domain. Known limits: `.vue` files are not parsed, Kotlin HTTP client
+  calls are not recognized, the Swift clients are unsupported, and infrastructure is
   a Dockerfile and Postfix configuration with no Terraform.
 - **Depth pilot: Vendure cart readiness**, unchanged. **CI fixture:** the
   synthetic multi-repo fixture, unchanged.
@@ -85,12 +85,14 @@ The owner chose the pilot in [#575](https://github.com/true-line/cartograph/disc
   - *Proton, clients only.* The server is closed. Reconstruct its contract
     from the web and Android clients, and score it against `go-proton-api` as
     a holdout. Server behavior and infrastructure stay labeled as
-    interpretation. Needs Go and Kotlin call-site recovery and per-app ingest
+    interpretation. Needs HTTP client call recognition in the Go and Kotlin
+    adapters and per-app ingest
     of the web clients monorepo, which exceeds the TypeScript ingest limit.
   - *MongoDB Atlas, against an official spec.* Score the contract recovered
     from the Atlas CLI, Terraform provider and Kubernetes operator against the
     published spec in `mongodb/openapi`, excluding the generated
-    `atlas-sdk-go` as leakage. Needs Go call-site recovery and Atlas resources
+    `atlas-sdk-go` as leakage. Needs HTTP client call recognition in the Go adapter and
+    Atlas resources
     in the infrastructure registry.
   - *OpenMRS*, a Java REST server with TypeScript front-end repos, for
     enterprise scale.
