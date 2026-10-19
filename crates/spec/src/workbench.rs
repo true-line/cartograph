@@ -256,7 +256,7 @@ fn hop_assertion(flow: &Flow, hop: &Hop, index: usize) -> SpecAssertion {
     }
 }
 
-fn markdown_safe(value: &str) -> String {
+pub(crate) fn markdown_safe(value: &str) -> String {
     value.replace('|', "\\|").replace(['\r', '\n'], " ")
 }
 

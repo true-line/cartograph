@@ -241,7 +241,7 @@ pub fn flow_dossier(flows: &[Flow]) -> String {
                 hop.dst,
                 hop.tier,
                 hop.confidence,
-                hop.provenance.method.label(),
+                workbench::markdown_safe(&hop.provenance.method.label()),
                 evidence,
                 hop.provenance.extractor_id,
                 hop.provenance.content_hash,
@@ -382,6 +382,32 @@ mod tests {
         assert!(dossier.contains("| 1 | HANDLES `ep:GET:/users` → `sym:app.ts#list` | Deterministic | Confirmed | not recorded | local/test:src/app.ts bytes 1..9 @ abc123 | `spec.test` |"));
         // Deterministic (US-0014).
         assert_eq!(dossier, flow_dossier(&flows));
+    }
+
+    #[test]
+    fn flow_dossier_escapes_the_producing_method_cell() {
+        // AC-0244 (#601 review): a method label cannot break the table.
+        let mut handles = hop("HANDLES", "ep:GET:/users", "sym:app.ts#list", "Confirmed");
+        handles.provenance.method = core_prov::ProducingMethod::Rule {
+            rule: "split|rule\nnext".into(),
+            version: "1".into(),
+        };
+        let flows = vec![Flow {
+            trigger: "ep:GET:/users".into(),
+            trigger_kind: "Endpoint".into(),
+            trigger_name: "GET /users".into(),
+            hops: vec![handles],
+            status: flowtracer::FlowStatus::Partial,
+            score: 0.5,
+            depth_limited: false,
+        }];
+        let dossier = flow_dossier(&flows);
+        let row = dossier
+            .lines()
+            .find(|line| line.starts_with("| 1 | HANDLES"))
+            .expect("hop row");
+        assert!(row.contains("| rule split\\|rule next@1 |"), "{row}");
+        assert!(!dossier.contains("rule\nnext"));
     }
 
     #[test]
