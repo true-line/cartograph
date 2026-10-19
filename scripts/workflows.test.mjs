@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const PLAYBOOK_RUNTIME_PIN = 'e750f52d2f013e671347b19cd9b602a077a254d6';
+const PLAYBOOK_RUNTIME_PIN = '4b9f9ac0a966cff01e6200b7e114927c29a35d26';
 
 test('version-cut preserves review, evidence, and immutable-tag gates', () => {
   const workflow = readFileSync(path.join(root, '.github/workflows/version-cut.yml'), 'utf8');

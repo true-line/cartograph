@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Authorize direct workflow event
-        uses: qwts/qwts-agent-ci/.github/actions/ci-policy@e750f52d2f013e671347b19cd9b602a077a254d6
+        uses: qwts/qwts-agent-ci/.github/actions/ci-policy@4b9f9ac0a966cff01e6200b7e114927c29a35d26
         with:
           authorization-only: 'true'
 
