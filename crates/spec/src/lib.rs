@@ -206,8 +206,12 @@ pub fn flow_dossier(flows: &[Flow]) -> String {
         out.push_str("```\n");
 
         // Provenance table (R-INT-2: tier + confidence on every hop).
-        out.push_str("\n| # | Hop | Tier | Confidence | Evidence | Extractor | Content hash |\n");
-        out.push_str("|---|-----|------|------------|----------|-----------|--------------|\n");
+        out.push_str(
+            "\n| # | Hop | Tier | Confidence | Method | Evidence | Extractor | Content hash |\n",
+        );
+        out.push_str(
+            "|---|-----|------|------------|--------|----------|-----------|--------------|\n",
+        );
         for (i, hop) in flow.hops.iter().enumerate() {
             let evidence = if hop.provenance.evidence.is_empty() {
                 "—".into()
@@ -230,13 +234,14 @@ pub fn flow_dossier(flows: &[Flow]) -> String {
             };
             writeln!(
                 out,
-                "| {} | {} `{}` → `{}` | {} | {} | {} | `{}` | `{}` |",
+                "| {} | {} `{}` → `{}` | {} | {} | {} | {} | `{}` | `{}` |",
                 i + 1,
                 hop.label,
                 hop.src,
                 hop.dst,
                 hop.tier,
                 hop.confidence,
+                hop.provenance.method.label(),
                 evidence,
                 hop.provenance.extractor_id,
                 hop.provenance.content_hash,
@@ -372,8 +377,9 @@ mod tests {
         // Confirmed hops are solid, Gap hops visibly broken (R-INT-4).
         assert!(dossier.contains("p0->>p1: HANDLES [Confirmed]"));
         assert!(dossier.contains("p1--xp2: PUBLISHES [Gap]"));
-        // Provenance table carries tier + confidence + evidence (R-INT-2).
-        assert!(dossier.contains("| 1 | HANDLES `ep:GET:/users` → `sym:app.ts#list` | Deterministic | Confirmed | local/test:src/app.ts bytes 1..9 @ abc123 | `spec.test` |"));
+        // Provenance table carries tier + confidence + method + evidence
+        // (R-INT-2, AC-0244: a fact without a method says so).
+        assert!(dossier.contains("| 1 | HANDLES `ep:GET:/users` → `sym:app.ts#list` | Deterministic | Confirmed | not recorded | local/test:src/app.ts bytes 1..9 @ abc123 | `spec.test` |"));
         // Deterministic (US-0014).
         assert_eq!(dossier, flow_dossier(&flows));
     }

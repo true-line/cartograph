@@ -546,6 +546,22 @@ button:disabled {
 }
 
 /* Confidence tiers (R-INT-2): confirmed / inferred / gap never look alike. */
+.tier-badge-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.method-badge {
+  font-size: 0.65rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  border: 1px dashed currentcolor;
+  opacity: 0.8;
+  white-space: nowrap;
+}
+
 .tier-badge {
   font-size: 0.7rem;
   font-weight: 600;

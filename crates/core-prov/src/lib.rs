@@ -58,6 +58,54 @@ pub fn may_overwrite(producer: Tier, existing: ConfidenceTier) -> bool {
     }
 }
 
+/// How a fact was produced, recorded separately from its claim kind, tier
+/// and confidence (ADR-0036 §3, AC-0244). It labels derived statements
+/// without a new confidence label and never changes tier or confidence:
+/// accepting or validating a model's output keeps it a model's output.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProducingMethod {
+    /// A named, versioned deterministic rule.
+    Rule {
+        /// Rule name (e.g. `projection.api-catalog`).
+        rule: String,
+        /// Rule version; a changed rule is a different producer.
+        version: String,
+    },
+    /// A model: an embedding model or an LLM, named by its provider id.
+    Model {
+        /// Provider/model id as the producer reported it.
+        model: String,
+    },
+    /// A human decision.
+    Human {
+        /// Who decided, as recorded by the deciding surface.
+        actor: String,
+    },
+    /// Legacy facts written before methods were recorded, and producers
+    /// that do not record one yet. Shown explicitly as "not recorded".
+    #[default]
+    Unrecorded,
+}
+
+impl ProducingMethod {
+    /// Whether no method was recorded.
+    pub fn is_unrecorded(&self) -> bool {
+        matches!(self, ProducingMethod::Unrecorded)
+    }
+
+    /// Short human label: `rule name@version`, `model id`, `human actor`,
+    /// or `not recorded`.
+    pub fn label(&self) -> String {
+        match self {
+            ProducingMethod::Rule { rule, version } => format!("rule {rule}@{version}"),
+            ProducingMethod::Model { model } => format!("model {model}"),
+            ProducingMethod::Human { actor } => format!("human {actor}"),
+            ProducingMethod::Unrecorded => "not recorded".into(),
+        }
+    }
+}
+
 /// A source span backing a fact (SPEC-00 §4.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceRef {
@@ -87,6 +135,10 @@ pub struct Provenance {
     /// Content-addressed hash for idempotent re-ingest. Derived only from the
     /// fact's canonical bytes — never timestamps (US-0014).
     pub content_hash: String,
+    /// Producing method (AC-0244). Omitted from the wire form when not
+    /// recorded, so facts without one serialize exactly as before.
+    #[serde(default, skip_serializing_if = "ProducingMethod::is_unrecorded")]
+    pub method: ProducingMethod,
 }
 
 impl Provenance {
@@ -111,7 +163,16 @@ impl Provenance {
             evidence,
             extractor_id: extractor_id.into(),
             content_hash: content_hash(fact_bytes),
+            method: ProducingMethod::Unrecorded,
         })
+    }
+
+    /// Record the producing method. Tier, confidence, evidence and content
+    /// hash are unchanged.
+    #[must_use]
+    pub fn with_method(mut self, method: ProducingMethod) -> Self {
+        self.method = method;
+        self
     }
 
     /// Re-validate provenance loaded from an external graph or IPC payload.
@@ -266,5 +327,60 @@ mod tests {
             forged.validate(),
             Err(IntegrityError::AboveCeiling { .. })
         ));
+    }
+
+    #[test]
+    fn producing_method_is_recorded_separately_from_tier_and_confidence() {
+        // AC-0244 (T-0244): the method is its own field; recording it never
+        // changes tier, confidence or content hash, and a fact without one
+        // keeps the legacy wire form and reads as "not recorded".
+        let base = Provenance::new(
+            Tier::Semantic,
+            ConfidenceTier::InferredWeak,
+            vec![],
+            "t2.rule",
+            b"fact",
+        )
+        .unwrap();
+        let legacy_wire = serde_json::to_value(&base).unwrap();
+        assert!(legacy_wire.get("method").is_none());
+        let legacy: Provenance = serde_json::from_value(legacy_wire).unwrap();
+        assert_eq!(legacy.method, ProducingMethod::Unrecorded);
+        assert_eq!(legacy.method.label(), "not recorded");
+
+        let ruled = base.clone().with_method(ProducingMethod::Rule {
+            rule: "projection.api-catalog".into(),
+            version: "1".into(),
+        });
+        assert_eq!(ruled.tier, base.tier);
+        assert_eq!(ruled.confidence_tier, base.confidence_tier);
+        assert_eq!(ruled.content_hash, base.content_hash);
+        let wire = serde_json::to_value(&ruled).unwrap();
+        assert_eq!(
+            wire["method"],
+            serde_json::json!({"kind": "rule", "rule": "projection.api-catalog", "version": "1"})
+        );
+        assert_eq!(serde_json::from_value::<Provenance>(wire).unwrap(), ruled);
+        assert_eq!(ruled.method.label(), "rule projection.api-catalog@1");
+
+        // A fully justified structural projection under a named rule may be T0.
+        let projection = Provenance::new(
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+            vec![],
+            "projection",
+            b"projection",
+        )
+        .unwrap()
+        .with_method(ruled.method.clone());
+        assert!(projection.validate().is_ok());
+        let model = ProducingMethod::Model {
+            model: "local:llm".into(),
+        };
+        assert_eq!(model.label(), "model local:llm");
+        let human = ProducingMethod::Human {
+            actor: "owner".into(),
+        };
+        assert_eq!(human.label(), "human owner");
     }
 }

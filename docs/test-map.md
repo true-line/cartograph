@@ -256,7 +256,7 @@ exists, not that its AC or delivery gate has passed.
 | T-0241 | AC-0241 | reserved | — | unbound cross-repo calls stay Gaps (ROADMAP W2) |
 | T-0242 | AC-0242 | rust | spec::artifacts_carry_deterministic_schema_and_content_identity, spec::artifact_identity_changes_with_content_assertions_or_schema, spec::artifact_identity_survives_json_key_reordering, app::preview_spec_bundle_caps_content_and_assertions_but_keeps_totals | artifact schema and content identity (#586, ROADMAP W3); UI: `ui/src/specExport.test.ts` identity guards on copy and export |
 | T-0243 | AC-0243 | reserved | — | content acceptance with partial artifacts (ROADMAP W3) |
-| T-0244 | AC-0244 | reserved | — | method recorded apart from tier (ROADMAP W3) |
+| T-0244 | AC-0244 | rust | core-prov::producing_method_is_recorded_separately_from_tier_and_confidence, agents::llm_proposal_records_model_method_and_keeps_it_through_acceptance, semantic::semantic_proposals_record_the_embedding_model_as_method, spec::exports_show_producing_method_beside_tier_and_confidence, spec::flow_dossier_renders_sequence_and_provenance_table | method recorded apart from tier (#584, ROADMAP W3); UI: stories Atlas/TierBadge/RuleDerivedSemantic, ModelAfterAcceptance, LegacyUnrecorded and `ui/src/producingMethod.test.ts` |
 | T-0245 | AC-0245 | reserved | — | qualified test links (ROADMAP W3) |
 | T-0246 | AC-0246 | reserved | — | rendered views (ROADMAP W4) |
 | T-0247 | AC-0247 | reserved | — | view evidence links (ROADMAP W4) |
