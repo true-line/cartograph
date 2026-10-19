@@ -51,7 +51,7 @@ test('CI enforces the governed lifecycle without draft jobs', () => {
   assert.match(workflow, /github\.event\.pull_request\.draft == false/u);
   assert.match(
     workflow,
-    new RegExp(`qwts/qwts-agent-ci/\\.github/actions/ci-policy@${PLAYBOOK_RUNTIME_PIN}`, 'u'),
+    new RegExp(`true-line/trueline-agent-ci/\\.github/actions/ci-policy@${PLAYBOOK_RUNTIME_PIN}`, 'u'),
   );
   assert.match(workflow, /head_sha=\$TARGET_SHA/u);
   assert.match(workflow, /head_sha=\$GITHUB_SHA/u);
