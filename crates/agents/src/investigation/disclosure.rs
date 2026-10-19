@@ -11,6 +11,7 @@ pub const MAX_DISCLOSURE_BYTES: usize = 64 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisclosureOmissionReason {
+    /// Reserved; compact projections currently share supplied representations.
     DuplicateRepresentation,
     NotSelected,
     WorkingSetBudget,
@@ -31,6 +32,14 @@ impl DisclosureRepresentation {
     }
 
     fn validate(&self) -> Result<(), InvestigationError> {
+        if matches!(
+            self,
+            Self::Omitted {
+                reason: DisclosureOmissionReason::DuplicateRepresentation
+            }
+        ) {
+            return Err(InvestigationError::InvalidInput);
+        }
         if let Self::Supplied {
             representation_hash,
         } = self
@@ -66,6 +75,8 @@ pub struct DisclosedInvestigationSource {
     pub representation: DisclosureRepresentation,
     /// Actual supplied text hash, distinct from the original ledger text hash.
     pub disclosed_text_hash: Option<String>,
+    /// True when supplied text differs from, or cannot be compared with, the
+    /// ledger text hash (including a missing legacy hash); not proof of a rewrite.
     pub redacted: bool,
 }
 

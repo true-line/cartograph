@@ -7,6 +7,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+const MAX_TOTAL_QUERY_BYTES: usize = 96 * 1024;
+const MAX_QUERY_DEPTH: usize = 32;
+const MAX_QUERY_VALUES: usize = 16384;
+const MAX_QUERY_ARRAY_ITEMS: usize = 16384;
+
 #[derive(Debug, Serialize)]
 pub struct CompactInvestigationContext {
     /// Complete fact objects, including all original provenance and properties.
@@ -43,10 +48,16 @@ impl CompactInvestigationContext {
             total_bytes = total_bytes
                 .checked_add(raw.len())
                 .ok_or(InvestigationError::LimitExceeded)?;
-            if total_bytes > 96 * 1024 {
+            if total_bytes > MAX_TOTAL_QUERY_BYTES {
                 return Err(InvestigationError::LimitExceeded);
             }
-            strict::preflight(raw, MAX_QUERY_BYTES, 32, 16384, 16384)?;
+            strict::preflight(
+                raw,
+                MAX_QUERY_BYTES,
+                MAX_QUERY_DEPTH,
+                MAX_QUERY_VALUES,
+                MAX_QUERY_ARRAY_ITEMS,
+            )?;
             let mut page: Value =
                 serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidInput)?;
             let envelope = page

@@ -6,6 +6,10 @@ use llm::CompletionPayload;
 use llm::bounded::PreparedBoundedCompletion;
 use serde_json::{Value, json};
 
+const MAX_PROMPT_DEPTH: usize = 40;
+const MAX_PROMPT_VALUES: usize = 16384;
+const MAX_PROMPT_ARRAY_ITEMS: usize = 32768;
+
 pub(super) fn seal(
     ledger: &InvestigationInputLedger,
     original: &CompletionPayload,
@@ -131,7 +135,13 @@ pub(super) fn seal(
         history: ledger
             .supplied_history_hash
             .as_ref()
-            .map(|_| supplied(&after["prior_findings_as_t3_history"]))
+            .map(|_| {
+                let history = after
+                    .get("prior_findings_as_t3_history")
+                    .filter(|history| !history.is_null())
+                    .ok_or(InvestigationError::InvalidInput)?;
+                supplied(history)
+            })
             .transpose()?,
     };
     disclosure.validate(ledger)?;
@@ -139,7 +149,13 @@ pub(super) fn seal(
 }
 
 fn parse_prompt(raw: &str) -> Result<Value, InvestigationError> {
-    strict::preflight(raw, MAX_INPUT_BYTES, 40, 16384, 32768)?;
+    strict::preflight(
+        raw,
+        MAX_INPUT_BYTES,
+        MAX_PROMPT_DEPTH,
+        MAX_PROMPT_VALUES,
+        MAX_PROMPT_ARRAY_ITEMS,
+    )?;
     serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidInput)
 }
 

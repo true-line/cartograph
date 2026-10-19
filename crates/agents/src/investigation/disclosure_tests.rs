@@ -166,3 +166,34 @@ fn disclosure_binds_redacted_text_and_actual_payload_separately_from_original_so
         InvestigationEvidenceOrigin::WorkingTreeUnverified
     ));
 }
+
+#[test]
+fn disclosure_rejects_reserved_duplicate_omission_in_every_representation() {
+    // AC-0234: shared compact entries remain supplied, never omitted duplicates.
+    let mut basis = basis_with_source();
+    basis.supplied_history_hash = Some(content_hash(b"saved-history"));
+    basis.supplied_history_bytes = b"saved-history".len();
+    let mut valid = manifest(&basis);
+    valid.sources[0].representation = DisclosureRepresentation::Omitted {
+        reason: DisclosureOmissionReason::NotSelected,
+    };
+    valid.sources[0].disclosed_text_hash = None;
+    valid.history = Some(supplied(b"history-representation"));
+    valid.validate(&basis).unwrap();
+    for location in 0..4 {
+        let mut changed = valid.clone();
+        let representation = match location {
+            0 => &mut changed.facts[0].representation,
+            1 => &mut changed.queries[0].representation,
+            2 => &mut changed.sources[0].representation,
+            _ => changed.history.as_mut().unwrap(),
+        };
+        *representation = DisclosureRepresentation::Omitted {
+            reason: DisclosureOmissionReason::DuplicateRepresentation,
+        };
+        assert_eq!(
+            changed.validate(&basis),
+            Err(InvestigationError::InvalidInput)
+        );
+    }
+}
