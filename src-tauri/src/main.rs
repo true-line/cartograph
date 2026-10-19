@@ -1594,6 +1594,95 @@ fn stitch_backings(
     Ok(candidates.len() as u64)
 }
 
+/// Binding evidence a system manifest declares (#589, AC-0240): each
+/// service base URL and each gateway route, resolved to the serving repo's
+/// key through the manifest's own repo list.
+fn manifest_http_bindings(
+    manifest: &ingest::manifest::SystemManifest,
+    repo_keys: &std::collections::BTreeMap<String, String>,
+) -> Vec<events::HttpBinding> {
+    let declared_in = ingest::manifest::MANIFEST_NAME.to_string();
+    let mut bindings = Vec::new();
+    for service in &manifest.services {
+        let Some(repo) = repo_keys.get(&service.repo) else {
+            continue;
+        };
+        for base_url in &service.base_urls {
+            bindings.push(events::HttpBinding {
+                service: service.name.clone(),
+                repo: repo.clone(),
+                base_url: base_url.clone(),
+                kind: events::BindingKind::DeclaredService,
+                declared_in: declared_in.clone(),
+            });
+        }
+    }
+    for route in &manifest.gateway_routes {
+        let Some(repo) = manifest
+            .services
+            .iter()
+            .find(|service| service.name == route.service)
+            .and_then(|service| repo_keys.get(&service.repo))
+        else {
+            continue;
+        };
+        bindings.push(events::HttpBinding {
+            service: route.service.clone(),
+            repo: repo.clone(),
+            base_url: route.base_url.clone(),
+            kind: events::BindingKind::GatewayRoute {
+                prefix: route.prefix.clone(),
+                strip_prefix: route.strip_prefix,
+            },
+            declared_in: declared_in.clone(),
+        });
+    }
+    bindings
+}
+
+/// After every repo is in, join client calls to endpoints in other repos
+/// only on binding evidence (#589, AC-0240/AC-0241). A joined Gap and its
+/// Gap edge are replaced by one cited `FETCHES` edge; every other covered
+/// call keeps its Gap with a cross-repo reason. Runs once per system.
+fn stitch_http_bindings(
+    graph: &mut SqliteGraphStore,
+    bindings: &[events::HttpBinding],
+    facts: &mut OperationFacts,
+) -> Result<u64, String> {
+    if bindings.is_empty() {
+        return Ok(0);
+    }
+    let gaps = graph.nodes_with_label("Gap").map_err(|e| e.to_string())?;
+    let fetch_edges = graph
+        .edges_with_labels(&["FETCHES"])
+        .map_err(|e| e.to_string())?;
+    let endpoint_ids: Vec<String> = graph
+        .nodes_with_label("Endpoint")
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|node| node.id)
+        .collect();
+    let outcome = events::stitch_cross_repo(&gaps, &fetch_edges, &endpoint_ids, bindings);
+    for joined in &outcome.joined {
+        for edge in fetch_edges.iter().filter(|edge| edge.dst == joined.gap_id) {
+            facts.edges.remove(&edge_key(edge));
+        }
+        graph
+            .delete_node(&joined.gap_id)
+            .map_err(|e| e.to_string())?;
+        facts.nodes.remove(&joined.gap_id);
+        graph.put_edge(&joined.edge).map_err(|e| e.to_string())?;
+        facts.edges.insert(edge_key(&joined.edge));
+    }
+    for node in &outcome.kept_nodes {
+        graph.put_node(node).map_err(|e| e.to_string())?;
+    }
+    for edge in &outcome.kept_edges {
+        graph.put_edge(edge).map_err(|e| e.to_string())?;
+    }
+    Ok(outcome.joined.len() as u64)
+}
+
 /// Reconcile explicit found-ADR target ids against the complete graph.
 /// Each repo is initially extracted in isolation, but decisions in a docs
 /// repo may govern facts loaded later from another repo in the same system.
@@ -3863,6 +3952,20 @@ fn add_system_blocking<R: tauri::Runtime>(
         let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
         ensure_running_job(&state, &execution)?;
         stitch_backings(&mut graph, &mut published).map_err(&fail)?;
+        // AC-0240: declared services and gateway routes join absolute-URL
+        // fetches to the owning repo's endpoints.
+        let repo_keys = manifest
+            .repos
+            .iter()
+            .zip(&admitted)
+            .map(|(entry, (source, _))| (entry.url.clone(), source.repo_key.clone()))
+            .collect();
+        stitch_http_bindings(
+            &mut graph,
+            &manifest_http_bindings(&manifest, &repo_keys),
+            &mut published,
+        )
+        .map_err(&fail)?;
     }
     relink_found_adrs(&state, &operation, &execution, &mut published).map_err(&fail)?;
     // One history record for the whole system; the per-repo identities are
@@ -5659,6 +5762,111 @@ export function queue() {
             "a per-repo sum double counts"
         );
         assert!(published.merged.nodes >= 1);
+    }
+
+    #[test]
+    fn manifest_service_binding_joins_a_fetch_to_another_repos_endpoint() {
+        // AC-0240/AC-0241 (#589): each repo is extracted alone, so a web
+        // client's absolute-URL call to the API repo starts as a fetch Gap.
+        // After both load, the manifest's declared service joins it to the
+        // API endpoint; an undeclared host keeps its Gap with a reason.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SqliteGraphStore::open_in_memory().unwrap();
+        let mut published = crate::OperationFacts::default();
+        let files = [
+            (
+                "api",
+                "server.ts",
+                "import express from 'express';\nconst app = express();\napp.post('/v1/orders', (req, res) => {});\n",
+            ),
+            (
+                "web",
+                "client.tsx",
+                "export function Checkout() {\n  const submit = () => fetch('https://orders.example.com/v1/orders', { method: 'POST' });\n  const other = () => fetch('https://elsewhere.example.com/v1/orders', { method: 'POST' });\n  return <button onClick={submit}>Order</button>;\n}\n",
+            ),
+        ];
+        for (repo, file, source) in files {
+            let root = dir.path().join(repo);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(file), source).unwrap();
+            let identity = format!("local/{repo}");
+            let extraction = crate::extract_tree(
+                &root,
+                &identity,
+                "workdir",
+                &[],
+                &std::collections::BTreeMap::new(),
+                None,
+                None,
+                &[],
+            )
+            .unwrap();
+            published.record_load(
+                crate::load_into_graph(&mut store, &extraction, &identity, &root, "workdir")
+                    .unwrap()
+                    .published,
+            );
+        }
+        let gaps_before = store.nodes_with_label("Gap").unwrap();
+        let fetch_gaps: Vec<&Node> = gaps_before
+            .iter()
+            .filter(|gap| gap.id.starts_with("gap:fetch:local/web@"))
+            .collect();
+        assert_eq!(fetch_gaps.len(), 2, "{gaps_before:?}");
+
+        let manifest_path = dir.path().join(ingest::manifest::MANIFEST_NAME);
+        std::fs::write(
+            &manifest_path,
+            "[[repos]]\nurl = \"api\"\n[[repos]]\nurl = \"web\"\n[[services]]\nname = \"orders\"\nrepo = \"api\"\nbase_urls = [\"https://orders.example.com\"]\n",
+        )
+        .unwrap();
+        let manifest = ingest::manifest::SystemManifest::load(&manifest_path).unwrap();
+        let repo_keys = [("api", "local/api"), ("web", "local/web")]
+            .into_iter()
+            .map(|(url, key)| (url.to_string(), key.to_string()))
+            .collect();
+        let bindings = crate::manifest_http_bindings(&manifest, &repo_keys);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            crate::stitch_http_bindings(&mut store, &bindings, &mut published).unwrap(),
+            1
+        );
+
+        let fetches = store.edges_with_labels(&["FETCHES"]).unwrap();
+        let bound: Vec<&Edge> = fetches
+            .iter()
+            .filter(|edge| edge.dst == "ep:local/api@POST:/v1/orders")
+            .collect();
+        let [bound] = bound.as_slice() else {
+            panic!("one bound edge: {fetches:?}")
+        };
+        assert_eq!(bound.props["prov"]["confidence_tier"], "Confirmed");
+        assert_eq!(bound.props["binding"][0]["service"], "orders");
+        assert_eq!(
+            bound.props["binding"][0]["declared_in"],
+            ingest::manifest::MANIFEST_NAME
+        );
+        let gaps_after = store.nodes_with_label("Gap").unwrap();
+        let kept: Vec<&Node> = gaps_after
+            .iter()
+            .filter(|gap| gap.id.starts_with("gap:fetch:local/web@"))
+            .collect();
+        let [kept] = kept.as_slice() else {
+            panic!("one kept gap: {gaps_after:?}")
+        };
+        assert_eq!(
+            kept.props["reason"],
+            "no binding evidence: no declared service or gateway route covers https://elsewhere.example.com"
+        );
+        assert_eq!(
+            kept.props["t0_reason"],
+            "no recovered endpoint matches POST /v1/orders"
+        );
+        // The operation's facts follow the store exactly.
+        assert_eq!(
+            store.fact_counts().unwrap(),
+            (published.nodes(), published.edges())
+        );
     }
 
     #[test]

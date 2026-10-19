@@ -183,6 +183,61 @@ ORDERS_QUEUE = "https://sqs.example/orders"
     );
 }
 
+// AC-0240 (#589): services and gateway routes are author-declared binding
+// evidence; references and base URLs are validated at load.
+#[test]
+fn manifest_declares_services_and_gateway_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join(manifest::MANIFEST_NAME);
+    std::fs::write(
+        &f,
+        r#"
+[[repos]]
+url = "simple-login/app"
+
+[[repos]]
+url = "simple-login/browser-extension"
+
+[[services]]
+name = "api"
+repo = "simple-login/app"
+base_urls = ["https://app.simplelogin.io", "http://localhost:7777"]
+
+[[gateway_routes]]
+base_url = "https://gateway.example.com"
+prefix = "/sl"
+service = "api"
+strip_prefix = true
+"#,
+    )
+    .unwrap();
+    let m = manifest::SystemManifest::load(&f).unwrap();
+    assert_eq!(m.services[0].name, "api");
+    assert_eq!(m.services[0].repo, "simple-login/app");
+    assert_eq!(m.services[0].base_urls.len(), 2);
+    assert_eq!(m.gateway_routes[0].prefix, "/sl");
+    assert!(m.gateway_routes[0].strip_prefix);
+
+    for (body, expected) in [
+        (
+            "[[repos]]\nurl = \"a/b\"\n[[services]]\nname = \"s\"\nrepo = \"x/y\"\n",
+            "names repo \"x/y\"",
+        ),
+        (
+            "[[repos]]\nurl = \"a/b\"\n[[services]]\nname = \"s\"\nrepo = \"a/b\"\nbase_urls = [\"app.example.com\"]\n",
+            "base URL \"app.example.com\" must be absolute",
+        ),
+        (
+            "[[repos]]\nurl = \"a/b\"\n[[gateway_routes]]\nbase_url = \"https://g.example\"\nprefix = \"/p\"\nservice = \"nope\"\n",
+            "undeclared service \"nope\"",
+        ),
+    ] {
+        std::fs::write(&f, body).unwrap();
+        let err = manifest::SystemManifest::load(&f).unwrap_err().to_string();
+        assert!(err.contains(expected), "{err}");
+    }
+}
+
 #[test]
 fn manifest_rejects_unknown_layers() {
     let dir = tempfile::tempdir().unwrap();

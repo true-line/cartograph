@@ -18,6 +18,9 @@ use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+pub mod http_binding;
+pub use http_binding::{BindingKind, CrossRepoStitch, HttpBinding, JoinedFetch, stitch_cross_repo};
+
 /// Stitching errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StitchError {
@@ -334,13 +337,20 @@ pub fn stitch_fetches(
             )
         };
 
-        let resolved: Option<(String, String)> = match &site.url {
-            IdentityExpr::Literal(u) => Some((url_path(u), "literal".into())),
-            IdentityExpr::EnvRef(key) => cfg
-                .resolve(key)
-                .map(|(value, file)| (url_path(value), format!("config:{file}"))),
+        let resolved_url: Option<String> = match &site.url {
+            IdentityExpr::Literal(u) => Some(u.clone()),
+            IdentityExpr::EnvRef(key) => cfg.resolve(key).map(|(value, _)| value.to_string()),
             IdentityExpr::Computed(_) => None,
         };
+        let url_source: Option<String> = match &site.url {
+            IdentityExpr::Literal(_) => Some("literal".into()),
+            IdentityExpr::EnvRef(key) => cfg.resolve(key).map(|(_, file)| format!("config:{file}")),
+            IdentityExpr::Computed(_) => None,
+        };
+        let resolved: Option<(String, String)> = resolved_url
+            .as_deref()
+            .zip(url_source.clone())
+            .map(|(url, source)| (url_path(url), source));
 
         let outcome: Result<(&str, String), String> = match (&resolved, site.method.as_str()) {
             (None, _) => Err(match &site.url {
@@ -385,14 +395,23 @@ pub fn stitch_fetches(
             }
             Err(reason) => {
                 let gap_id = format!("gap:fetch:{}@{}@{}", id.repo, site.path, site.byte_start);
+                let mut props = serde_json::json!({
+                    "reason": &reason,
+                    "attempted_tiers": ["T0"],
+                    "prov": fetch_prov(ConfidenceTier::Gap, &format!("Gap {gap_id}")),
+                });
+                // The resolved request, for system-wide binding (#589).
+                if let (Some(url), Some(source)) = (resolved_url.as_ref(), url_source.as_ref()) {
+                    props["request"] = serde_json::json!({
+                        "method": site.method,
+                        "url": url,
+                        "url_source": source,
+                    });
+                }
                 out.nodes.push(Node {
                     id: gap_id.clone(),
                     label: "Gap".into(),
-                    props: serde_json::json!({
-                        "reason": &reason,
-                        "attempted_tiers": ["T0"],
-                        "prov": fetch_prov(ConfidenceTier::Gap, &format!("Gap {gap_id}")),
-                    }),
+                    props,
                 });
                 out.edges.push(Edge {
                     src,
