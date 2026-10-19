@@ -423,6 +423,11 @@ fn observations<'a>(
                 .into(),
                 provenance: provenance(&node.props, &node.id),
                 edge_label: None,
+                omission: crate::workbench::gap_omission(
+                    &provenance(&node.props, &node.id),
+                    &node.props,
+                    "source-rule payload unavailable",
+                ),
             }];
             // A malformed payload renders no relationships, so it asserts none.
             if parsed.is_some() {
@@ -436,6 +441,11 @@ fn observations<'a>(
                             summary: format!("Source-rule {} relationship", edge.label),
                             provenance: provenance(&edge.props, &identity),
                             edge_label: Some(edge.label.clone()),
+                            omission: crate::workbench::gap_omission(
+                                &provenance(&edge.props, &identity),
+                                &edge.props,
+                                "unresolved source-rule relationship",
+                            ),
                         });
                     }
                 }

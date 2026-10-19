@@ -3467,6 +3467,14 @@ button.register-row:hover {
   color: var(--accent);
 }
 
+/* Omission class and filling seam of a gap (#585, AC-0254). */
+.omission-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 0.5em;
+  white-space: nowrap;
+}
+
 .register-row.static .register-tail {
   color: var(--text-muted);
 }

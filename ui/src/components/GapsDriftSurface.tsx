@@ -1,5 +1,13 @@
 import { useState } from 'react';
-import { GROUP_THRESHOLD, groupGapClasses, isEscalatable, nextTier, type GapClass } from '../gapClasses';
+import {
+  GROUP_THRESHOLD,
+  classOmissionLabel,
+  groupGapClasses,
+  isEscalatable,
+  nextTier,
+  omissionLabel,
+  type GapClass,
+} from '../gapClasses';
 import { HelpTip } from './HelpTip';
 import { TierBadge } from './TierBadge';
 import { ProposalHistory, type ProposalHistoryProps } from './ProposalHistory';
@@ -66,6 +74,11 @@ function GapRows({
           <button type="button" className="register-row gap-row" onClick={() => onOpenGap(gap)}>
             <code className="register-id">{gapId(index)}</code>
             <span className="register-text">{gap.summary}</span>
+            {omissionLabel(gap) && (
+              <span className="register-tail omission-chip" data-testid="gap-omission">
+                {omissionLabel(gap)}
+              </span>
+            )}
             {isEscalatable(gap, allowedEdgeLabels) ? (
               <span className="register-tail">{nextTier(gap)} next</span>
             ) : (
@@ -168,6 +181,11 @@ function GapClassRow({
           </span>
         )}
         <code className="register-tail">{gapClass.extractor}</code>
+        {classOmissionLabel(gapClass.members) && (
+          <span className="register-tail omission-chip" data-testid="gap-class-omission">
+            {classOmissionLabel(gapClass.members)}
+          </span>
+        )}
         {classOfferable ? (
           <span className="register-tail">{gapClass.tier} next</span>
         ) : (

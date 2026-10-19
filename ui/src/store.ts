@@ -303,6 +303,26 @@ export interface SpecAssertion {
    *  just null) on artifacts that predate this field. `null`/undefined both
    *  read as "unknown"; see `isEscalatable` in `gapClasses.ts`. */
   edge_label?: string | null;
+  /** Why a Gap is missing and which seam would fill it (#585, AC-0254).
+   *  Present exactly on Gap assertions. */
+  omission?: Omission;
+}
+
+export type OmissionClass =
+  | 'unsupported_extractor'
+  | 'missing_input'
+  | 'unresolved_relationship'
+  | 'contradictory_or_stale'
+  | 'product_gap';
+
+export type FillSeam = 'adapter' | 'registry' | 'manifest_input' | 'interpretation' | 'requirement';
+
+/** Mirrors `core_graph::omission::Omission`. */
+export interface Omission {
+  class: OmissionClass;
+  seam: FillSeam;
+  /** The specific stop reason, verbatim. */
+  detail: string;
 }
 
 export interface SpecArtifact {
