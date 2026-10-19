@@ -70,8 +70,7 @@ PR traceable to a user story / acceptance criterion. See
 ### Agent skills
 
 Repo-local skills for coding agents live in [`.agents/skills/`](.agents/skills/)
-— the tool-agnostic home; `.claude/skills/` symlinks into it so Claude Code
-discovers them automatically. Agents whose harness does not auto-discover
+— the tool-agnostic home. Agents whose harness does not auto-discover
 skills should read the relevant `SKILL.md` directly before starting the task
 it covers.
 

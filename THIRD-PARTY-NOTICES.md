@@ -9290,7 +9290,7 @@ FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 ```
 
-## @tauri-apps/api 2.11.1
+## @tauri-apps/api 2.12.4
 
 License: Apache-2.0 OR MIT
 
@@ -9554,7 +9554,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## material-symbols 0.47.4
+## material-symbols 0.48.0
 
 License: Apache-2.0
 
@@ -9763,7 +9763,7 @@ License: Apache-2.0
    limitations under the License.
 ```
 
-## react 19.3.0
+## react 19.3.1
 
 License: MIT
 
@@ -9791,7 +9791,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## react-dom 19.3.0
+## react-dom 19.3.1
 
 License: MIT
 
