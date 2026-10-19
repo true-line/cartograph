@@ -72,4 +72,15 @@ describe('omission labels (AC-0254, #585)', () => {
     expect(classOmissionLabel([assertion()])).toBeNull();
     expect(omissionLabel(assertion())).toBeNull();
   });
+
+  it('marks the unclassified fallback instead of presenting it as established (#603 review)', () => {
+    const fallback = assertion({
+      omission: {
+        class: 'unresolved_relationship',
+        seam: 'interpretation',
+        detail: 'unclassified: something entirely new',
+      },
+    });
+    expect(omissionLabel(fallback)).toBe('unclassified (unresolved relationship) · filled by interpretation');
+  });
 });

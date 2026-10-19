@@ -266,17 +266,64 @@ fn edge_assertion(edge: &Edge) -> SpecAssertion {
     }
 }
 
-fn hop_assertion(flow: &Flow, hop: &Hop, index: usize) -> SpecAssertion {
+/// The originating facts a flow hop restates, for recovering its exact
+/// omission (#603 review): edges by `(src, label, dst)` and nodes by id.
+struct HopOrigins<'a> {
+    edges: BTreeMap<(&'a str, &'a str, &'a str), &'a Edge>,
+    nodes: BTreeMap<&'a str, &'a Node>,
+}
+
+impl<'a> HopOrigins<'a> {
+    fn new(nodes: &[&'a Node], edges: &[&'a Edge]) -> Self {
+        Self {
+            edges: edges
+                .iter()
+                .map(|edge| {
+                    (
+                        (edge.src.as_str(), edge.label.as_str(), edge.dst.as_str()),
+                        *edge,
+                    )
+                })
+                .collect(),
+            nodes: nodes.iter().map(|node| (node.id.as_str(), *node)).collect(),
+        }
+    }
+
+    /// A Gap hop's omission: the exact Gap edge it traverses, else the Gap
+    /// node it ends at, else its own stop reason classified.
+    fn omission(&self, hop: &Hop) -> Option<Omission> {
+        if hop.provenance.confidence_tier != ConfidenceTier::Gap {
+            return None;
+        }
+        let fallback = hop
+            .gap_reason
+            .clone()
+            .unwrap_or_else(|| format!("unresolved {} hop", hop.label));
+        let edge = self
+            .edges
+            .get(&(hop.src.as_str(), hop.label.as_str(), hop.dst.as_str()))
+            .filter(|edge| provenance(&edge.props, "").confidence_tier == ConfidenceTier::Gap);
+        if let Some(edge) = edge {
+            return Some(Omission::of_gap(&edge.props, &fallback));
+        }
+        if let Some(node) = self
+            .nodes
+            .get(hop.dst.as_str())
+            .filter(|node| is_gap_node(node))
+        {
+            return Some(Omission::of_gap(&node.props, &fallback));
+        }
+        Some(Omission::classify(&fallback))
+    }
+}
+
+fn hop_assertion(flow: &Flow, hop: &Hop, index: usize, origins: &HopOrigins<'_>) -> SpecAssertion {
     SpecAssertion {
         id: format!("flow:{}:{index}:{}:{}", flow.trigger, hop.label, hop.dst),
         subject_id: format!("{} {} {}", hop.src, hop.label, hop.dst),
         subject_kind: "FlowHop".into(),
         summary: format!("{}: {} → {}", hop.label, hop.src_name, hop.dst_name),
-        omission: gap_omission(
-            &hop.provenance,
-            &serde_json::json!({"reason": hop.gap_reason}),
-            &format!("unresolved {} hop", hop.label),
-        ),
+        omission: origins.omission(hop),
         provenance: hop.provenance.clone(),
         // A flow-hop row never opens the Resolution Strategy modal (App.tsx
         // only escalates `node:`-prefixed assertions), so it carries no
@@ -744,7 +791,10 @@ fn flow_artifact(
     flows: &[Flow],
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
+    nodes: &[&Node],
+    edges: &[&Edge],
 ) -> (String, Vec<SpecAssertion>) {
+    let origins = HopOrigins::new(nodes, edges);
     let projected = project_flows(flows, mode, rejected_hashes);
     let assertions = projected
         .iter()
@@ -752,7 +802,7 @@ fn flow_artifact(
             flow.hops
                 .iter()
                 .enumerate()
-                .map(|(index, hop)| hop_assertion(flow, hop, index))
+                .map(|(index, hop)| hop_assertion(flow, hop, index, &origins))
         })
         .collect();
     (flow_dossier(&projected), assertions)
@@ -1092,22 +1142,28 @@ struct GapRegisterIndex<'a> {
 struct OmissionRollup {
     class: OmissionClass,
     seam: FillSeam,
+    /// True for the fallback no rule could classify (#603 review).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    unclassified: bool,
     findings: usize,
 }
 
 /// Findings counted per (omission class, seam), in taxonomy order.
 fn omission_rollup(findings: &[SpecAssertion]) -> Vec<OmissionRollup> {
-    let mut counts: BTreeMap<(OmissionClass, FillSeam), usize> = BTreeMap::new();
+    let mut counts: BTreeMap<(OmissionClass, FillSeam, bool), usize> = BTreeMap::new();
     for finding in findings {
         if let Some(omission) = &finding.omission {
-            *counts.entry((omission.class, omission.seam)).or_default() += 1;
+            *counts
+                .entry((omission.class, omission.seam, omission.is_unclassified()))
+                .or_default() += 1;
         }
     }
     counts
         .into_iter()
-        .map(|((class, seam), findings)| OmissionRollup {
+        .map(|((class, seam, unclassified), findings)| OmissionRollup {
             class,
             seam,
+            unclassified,
             findings,
         })
         .collect()
@@ -1122,10 +1178,14 @@ fn render_omission_rollup(content: &mut String, rollup: &[OmissionRollup]) {
          | Omission class | Filled by | Findings |\n|---|---|---|\n",
     );
     for row in rollup {
+        let class = if row.unclassified {
+            format!("unclassified ({})", row.class.label())
+        } else {
+            row.class.label().to_string()
+        };
         writeln!(
             content,
-            "| {} | {} | {} |",
-            row.class.label(),
+            "| {class} | {} | {} |",
             row.seam.label(),
             row.findings
         )
@@ -1133,10 +1193,11 @@ fn render_omission_rollup(content: &mut String, rollup: &[OmissionRollup]) {
     }
 }
 
-/// Reader labels for an assertion's omission cells.
-fn omission_cells(omission: Option<&Omission>) -> (&'static str, &'static str) {
-    omission.map_or(("—", "—"), |omission| {
-        (omission.class.label(), omission.seam.label())
+/// Reader labels for an assertion's omission cells; an unclassified
+/// fallback says so (#603 review).
+fn omission_cells(omission: Option<&Omission>) -> (String, &'static str) {
+    omission.map_or(("—".into(), "—"), |omission| {
+        (omission.class_label(), omission.seam.label())
     })
 }
 
@@ -1147,7 +1208,8 @@ fn uniform_omission<'a>(members: &[&'a SpecAssertion]) -> Option<&'a Omission> {
         .iter()
         .all(|member| {
             member.omission.as_ref().is_some_and(|omission| {
-                (omission.class, omission.seam) == (first.class, first.seam)
+                (omission.class, omission.seam, omission.is_unclassified())
+                    == (first.class, first.seam, first.is_unclassified())
             })
         })
         .then_some(first)
@@ -1292,7 +1354,7 @@ fn render_gap_register(
         );
         for (index, class) in shown.iter().enumerate() {
             let (omission, seam) = uniform_omission(&class.members)
-                .map_or(("mixed", "mixed"), |omission| {
+                .map_or(("mixed".into(), "mixed"), |omission| {
                     omission_cells(Some(omission))
                 });
             writeln!(
@@ -1605,7 +1667,7 @@ pub fn compile_spec(
     let edges = filter_edges(&projected_edges, mode, rejected_hashes);
     let (stories, story_assertions) = recovered_user_stories(&nodes);
     let (matrix, matrix_index, matrix_assertions) = traceability_matrix(&edges, mode);
-    let (dossiers, flow_assertions) = flow_artifact(flows, mode, rejected_hashes);
+    let (dossiers, flow_assertions) = flow_artifact(flows, mode, rejected_hashes, &nodes, &edges);
     let (topology, topology_assertions) = topology_artifact(&nodes, &edges);
     let (data, data_assertions) = data_model(&nodes, &edges);
     let (adrs, adr_assertions) = adr_set(&nodes, &edges);
@@ -2530,27 +2592,25 @@ mod tests {
         );
         let content = &register.content;
         assert!(content.contains(
-            "| C-01 | computed identity | `spec.workbench.test` | T1 | unresolved relationship | interpretation | 30 |"
+            "| C-01 | computed identity | `spec.workbench.test` | T1 | unclassified (unresolved relationship) | interpretation | 30 |"
         ));
         // AC-0254 (#585): the register groups findings by omission class and
         // names the seam that would fill each.
         assert!(content.contains(
             "## By omission class\n\nWhy each finding is missing, and the seam that would fill it.\n\n\
              | Omission class | Filled by | Findings |\n|---|---|---|\n\
-             | missing input | manifest input | 8 |\n\
              | unresolved relationship | adapter | 7 |\n\
-             | unresolved relationship | interpretation | 31 |\n"
+             | unclassified (unresolved relationship) | interpretation | 39 |\n"
         ));
         assert_eq!(
             index["by_omission"],
             serde_json::json!([
-                {"class": "missing_input", "seam": "manifest_input", "findings": 8},
                 {"class": "unresolved_relationship", "seam": "adapter", "findings": 7},
-                {"class": "unresolved_relationship", "seam": "interpretation", "findings": 31},
+                {"class": "unresolved_relationship", "seam": "interpretation", "unclassified": true, "findings": 39},
             ])
         );
-        assert_eq!(classes[1]["omission_class"], "missing_input");
-        assert_eq!(classes[1]["seam"], "manifest_input");
+        assert_eq!(classes[2]["omission_class"], "unresolved_relationship");
+        assert_eq!(classes[2]["seam"], "adapter");
         // Every Gap assertion carries its own omission; an unrecognized
         // reason says it is unclassified rather than guessing.
         assert!(
@@ -2917,7 +2977,7 @@ mod tests {
             assert!(
                 register.content.contains(&format!(
                     "| {} | {} |\n",
-                    omission.class.label(),
+                    omission.class_label(),
                     omission.seam.label()
                 )),
                 "{} row names its class",
@@ -2933,6 +2993,94 @@ mod tests {
                 .filter(|assertion| assertion.provenance.confidence_tier != ConfidenceTier::Gap)
                 .all(|assertion| assertion.omission.is_none())
         );
+    }
+
+    #[test]
+    fn gap_flow_hop_keeps_its_originating_explicit_omission() {
+        // #603 review (Codex reproduction): a hop restating a Gap edge keeps
+        // that edge's exact omission instead of reclassifying its reason.
+        let prov = review_gap_prov();
+        let explicit = serde_json::json!({"class": "product_gap", "seam": "requirement", "detail": "no refund rule specified"});
+        let nodes = vec![
+            Node {
+                id: "ep".into(),
+                label: "Endpoint".into(),
+                props: serde_json::json!({"prov": prov}),
+            },
+            Node {
+                id: "gap".into(),
+                label: "Gap".into(),
+                props: serde_json::json!({"prov": prov, "reason": "unresolved dependency", "omission": explicit}),
+            },
+        ];
+        let edges = vec![Edge {
+            src: "ep".into(),
+            dst: "gap".into(),
+            label: "HANDLES".into(),
+            props: serde_json::json!({"prov": prov, "reason": "unresolved dependency", "omission": explicit}),
+        }];
+        let flows = flowtracer::trace(&nodes, &edges);
+        let bundle = compile_spec(
+            &nodes,
+            &edges,
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        );
+        let (register, _) = gap_artifacts(&bundle);
+        let edge = register
+            .assertions
+            .iter()
+            .find(|a| a.subject_kind == "HANDLES")
+            .unwrap();
+        let hop = register
+            .assertions
+            .iter()
+            .find(|a| a.subject_kind == "FlowHop")
+            .unwrap();
+        let expected = edge.omission.as_ref().unwrap();
+        assert_eq!(
+            (expected.class, expected.seam),
+            (OmissionClass::ProductGap, FillSeam::Requirement)
+        );
+        assert_eq!(hop.omission.as_ref(), Some(expected));
+    }
+
+    #[test]
+    fn unclassified_omission_is_visibly_unclassified_in_the_register() {
+        // #603 review (Codex reproduction): the fallback is never shown as
+        // an established class.
+        let nodes = vec![Node {
+            id: "gap".into(),
+            label: "Gap".into(),
+            props: serde_json::json!({"prov": review_gap_prov(), "reason": "something entirely new"}),
+        }];
+        let bundle = compile_spec(&nodes, &[], &[], ExportMode::BestEffort, &BTreeSet::new());
+        let (register, index) = gap_artifacts(&bundle);
+        assert_eq!(
+            register.assertions[0].omission.as_ref().unwrap().detail,
+            "unclassified: something entirely new"
+        );
+        assert!(
+            register
+                .content
+                .contains("| unclassified (unresolved relationship) | interpretation |")
+        );
+        assert_eq!(index["by_omission"][0]["unclassified"], true);
+    }
+
+    fn review_gap_prov() -> serde_json::Value {
+        serde_json::to_value(
+            Provenance::new(
+                Tier::Deterministic,
+                ConfidenceTier::Gap,
+                vec![],
+                "review",
+                b"gap",
+            )
+            .unwrap(),
+        )
+        .unwrap()
     }
 
     fn reorder_keys(value: &serde_json::Value) -> String {
