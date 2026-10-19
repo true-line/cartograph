@@ -852,6 +852,7 @@ fn extract_tree_incremental(
         commit,
         layers,
         manifest_env,
+        &std::collections::BTreeSet::new(),
         state_json,
         pulumi_json,
         otel_jsonl,
@@ -870,6 +871,8 @@ fn extract_tree_with_primary(
     commit: &str,
     layers: &[String],
     manifest_env: &std::collections::BTreeMap<String, String>,
+    // Origins the system manifest binds (#589); empty outside a system add.
+    deferred_origins: &std::collections::BTreeSet<String>,
     state_json: Option<&std::path::Path>,
     pulumi_json: Option<&std::path::Path>,
     otel_jsonl: &[std::path::PathBuf],
@@ -1139,6 +1142,7 @@ fn extract_tree_with_primary(
     }
     let mut cfg = events::ConfigIndex::from_dir(root).map_err(|e| e.to_string())?;
     cfg.apply_manifest(manifest_env, ingest::manifest::MANIFEST_NAME);
+    cfg.defer_origins(deferred_origins);
     let ev_id = events::SourceId { repo, commit };
     let stitched = events::stitch(&extraction.event_sites, &cfg, &ev_id);
     layers.ts.nodes += distinct_node_count(&stitched.nodes);
@@ -1671,8 +1675,17 @@ fn stitch_http_bindings(
             .delete_node(&joined.gap_id)
             .map_err(|e| e.to_string())?;
         facts.nodes.remove(&joined.gap_id);
-        graph.put_edge(&joined.edge).map_err(|e| e.to_string())?;
-        facts.edges.insert(edge_key(&joined.edge));
+    }
+    // Several call sites of one symbol may bind to one endpoint: they are one
+    // edge whose evidence unions every site, as on the load path (AC-0203).
+    let joined: Vec<Edge> = outcome
+        .joined
+        .iter()
+        .map(|joined| joined.edge.clone())
+        .collect();
+    for edge in merge_edge_occurrences(&joined).into_values() {
+        graph.put_edge(&edge).map_err(|e| e.to_string())?;
+        facts.edges.insert(edge_key(&edge));
     }
     for node in &outcome.kept_nodes {
         graph.put_node(node).map_err(|e| e.to_string())?;
@@ -3283,6 +3296,7 @@ fn run_ingest<R: tauri::Runtime>(
             "workdir",
             &[],
             &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
             None,
             None,
             &[],
@@ -3658,6 +3672,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
             &cloned.commit_sha,
             &[],
             &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
             None,
             None,
             &[],
@@ -3856,6 +3871,16 @@ fn add_system_blocking<R: tauri::Runtime>(
     // published: a later repo's failure must leave every register pending.
     let mut proofs = Vec::new();
     let mut on_file = detail_throttle(&app, job_id);
+    // AC-0240: declared services and gateway routes, resolved to repo keys
+    // once. Their origins are deferred from each repo's own fetch matching.
+    let repo_keys = manifest
+        .repos
+        .iter()
+        .zip(&admitted)
+        .map(|(entry, (source, _))| (entry.url.clone(), source.repo_key.clone()))
+        .collect();
+    let http_bindings = manifest_http_bindings(&manifest, &repo_keys);
+    let deferred_origins = events::binding_origins(&http_bindings);
     for (entry, (source, remote)) in manifest.repos.iter().zip(&admitted) {
         if job_cancelled(&state, &execution)? {
             return Err("cancelled".to_string());
@@ -3895,6 +3920,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 &commit,
                 &entry.layers,
                 &manifest.env,
+                &deferred_origins,
                 state_path.as_deref(),
                 pulumi_path.as_deref(),
                 &trace_paths,
@@ -3954,18 +3980,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         stitch_backings(&mut graph, &mut published).map_err(&fail)?;
         // AC-0240: declared services and gateway routes join absolute-URL
         // fetches to the owning repo's endpoints.
-        let repo_keys = manifest
-            .repos
-            .iter()
-            .zip(&admitted)
-            .map(|(entry, (source, _))| (entry.url.clone(), source.repo_key.clone()))
-            .collect();
-        stitch_http_bindings(
-            &mut graph,
-            &manifest_http_bindings(&manifest, &repo_keys),
-            &mut published,
-        )
-        .map_err(&fail)?;
+        stitch_http_bindings(&mut graph, &http_bindings, &mut published).map_err(&fail)?;
     }
     relink_found_adrs(&state, &operation, &execution, &mut published).map_err(&fail)?;
     // One history record for the whole system; the per-repo identities are
@@ -5782,7 +5797,7 @@ export function queue() {
             (
                 "web",
                 "client.tsx",
-                "export function Checkout() {\n  const submit = () => fetch('https://orders.example.com/v1/orders', { method: 'POST' });\n  const other = () => fetch('https://elsewhere.example.com/v1/orders', { method: 'POST' });\n  return <button onClick={submit}>Order</button>;\n}\n",
+                "export function Checkout() {\n  const submit = () => fetch('https://orders.example.com/v1/orders', { method: 'POST' });\n  const other = () => fetch('https://elsewhere.example.com/v1/orders', { method: 'POST' });\n  const again = () => fetch('https://orders.example.com/v1/orders', { method: 'POST' });\n  return <button onClick={submit}>Order</button>;\n}\n",
             ),
         ];
         for (repo, file, source) in files {
@@ -5812,7 +5827,7 @@ export function queue() {
             .iter()
             .filter(|gap| gap.id.starts_with("gap:fetch:local/web@"))
             .collect();
-        assert_eq!(fetch_gaps.len(), 2, "{gaps_before:?}");
+        assert_eq!(fetch_gaps.len(), 3, "{gaps_before:?}");
 
         let manifest_path = dir.path().join(ingest::manifest::MANIFEST_NAME);
         std::fs::write(
@@ -5829,7 +5844,7 @@ export function queue() {
         assert_eq!(bindings.len(), 1);
         assert_eq!(
             crate::stitch_http_bindings(&mut store, &bindings, &mut published).unwrap(),
-            1
+            2
         );
 
         let fetches = store.edges_with_labels(&["FETCHES"]).unwrap();
@@ -5842,6 +5857,13 @@ export function queue() {
         };
         assert_eq!(bound.props["prov"]["confidence_tier"], "Confirmed");
         assert_eq!(bound.props["binding"][0]["service"], "orders");
+        // #606 review: both call sites of the one symbol are one edge whose
+        // evidence cites each, not the last site alone.
+        assert_eq!(
+            bound.props["prov"]["evidence"].as_array().unwrap().len(),
+            2,
+            "{bound:?}"
+        );
         assert_eq!(
             bound.props["binding"][0]["declared_in"],
             ingest::manifest::MANIFEST_NAME
@@ -5856,7 +5878,7 @@ export function queue() {
         };
         assert_eq!(
             kept.props["reason"],
-            "no binding evidence: no declared service or gateway route covers https://elsewhere.example.com"
+            "no binding evidence: no declared service or gateway route covers https://elsewhere.example.com/v1/orders"
         );
         assert_eq!(
             kept.props["t0_reason"],

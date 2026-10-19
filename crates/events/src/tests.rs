@@ -1099,7 +1099,7 @@ fn gateway_routes_forward_on_whole_prefix_segments() {
     };
     assert_eq!(
         kept.props["reason"],
-        "no binding evidence: no declared service or gateway route covers https://gw.example.com"
+        "no binding evidence: no declared service or gateway route covers https://gw.example.com/ordersx/v1/orders/7"
     );
 }
 
@@ -1140,6 +1140,102 @@ fn root_gateway_prefix_forwards_child_and_root_paths() {
     }
 }
 
+// AC-0240 (#606 review): an origin the manifest binds is deferred by the
+// per-repo pass, so a same-repo route that merely shares the path never
+// confirms the call; the system pass then binds it to the declared service.
+// Undeclared origins still match in-repo as before. (T-0240)
+#[test]
+fn bound_origins_defer_same_repo_path_coincidences_to_the_binding() {
+    let mut cfg = ConfigIndex::default();
+    cfg.defer_origins(&["https://orders.example.com".to_string()].into());
+    let id = SourceId {
+        repo: "web",
+        commit: "deadbeef",
+    };
+    let own = eps(&["ep:web@GET:/v1/orders"]);
+    let out = stitch_fetches(
+        &[
+            fetch_site(
+                "GET",
+                IdentityExpr::Literal("https://ORDERS.example.com/v1/orders".into()),
+            ),
+            FetchSite {
+                byte_start: 50,
+                ..fetch_site(
+                    "GET",
+                    IdentityExpr::Literal("https://bff.example.com/v1/orders".into()),
+                )
+            },
+        ],
+        &own,
+        &cfg,
+        &id,
+    );
+    let local: Vec<&str> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "FETCHES" && e.dst.starts_with("ep:"))
+        .map(|e| e.dst.as_str())
+        .collect();
+    assert_eq!(
+        local,
+        ["ep:web@GET:/v1/orders"],
+        "only the undeclared origin"
+    );
+    let gaps: Vec<Node> = out.nodes.into_iter().filter(|n| n.label == "Gap").collect();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(
+        gaps[0].props["reason"],
+        "deferred to system binding: https://orders.example.com is bound in the system manifest"
+    );
+    let edges: Vec<Edge> = out
+        .edges
+        .into_iter()
+        .filter(|e| e.dst.starts_with("gap:"))
+        .collect();
+    let mut endpoints = own.clone();
+    endpoints.push("ep:api@GET:/v1/orders".into());
+    let bound = stitch_cross_repo(
+        &gaps,
+        &edges,
+        &endpoints,
+        &[service("orders", "api", "https://orders.example.com")],
+    );
+    assert_eq!(bound.joined.len(), 1);
+    assert_eq!(bound.joined[0].edge.dst, "ep:api@GET:/v1/orders");
+}
+
+// AC-0240/AC-0241 (#606 review): a declared base URL with a path offers both
+// the full path and the path relative to the base. One match joins; matches
+// under both readings that differ stay an ambiguous Gap. (T-0240, T-0241)
+#[test]
+fn declared_base_path_offers_both_readings_and_never_guesses_between_them() {
+    let (gaps, edges) = web_gaps(
+        &[fetch_site(
+            "GET",
+            IdentityExpr::Literal("https://example.com/api/orders".into()),
+        )],
+        &ConfigIndex::default(),
+    );
+    let bindings = [service("orders", "api", "https://example.com/api")];
+    for routes in [["ep:api@GET:/orders"], ["ep:api@GET:/api/orders"]] {
+        let out = stitch_cross_repo(&gaps, &edges, &eps(&routes), &bindings);
+        assert_eq!(out.joined.len(), 1, "{routes:?}");
+        assert_eq!(out.joined[0].edge.dst, routes[0]);
+    }
+    let out = stitch_cross_repo(
+        &gaps,
+        &edges,
+        &eps(&["ep:api@GET:/orders", "ep:api@GET:/api/orders"]),
+        &bindings,
+    );
+    assert!(out.joined.is_empty());
+    assert_eq!(
+        out.kept_nodes[0].props["reason"],
+        "ambiguous cross-repo binding for GET https://example.com/api/orders: 2 equally supported targets"
+    );
+}
+
 // AC-0241: without binding evidence the call stays a Gap whose reason says
 // so, and the original same-repo reason is kept beside it. (T-0241)
 #[test]
@@ -1161,7 +1257,7 @@ fn fetch_without_binding_evidence_stays_a_gap_with_its_reason() {
     for props in [&node.props, &edge.props] {
         assert_eq!(
             props["reason"],
-            "no binding evidence: no declared service or gateway route covers https://unknown.example.com"
+            "no binding evidence: no declared service or gateway route covers https://unknown.example.com/x"
         );
         assert_eq!(props["t0_reason"], "no recovered endpoint matches GET /x");
     }

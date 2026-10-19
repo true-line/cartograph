@@ -19,7 +19,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 pub mod http_binding;
-pub use http_binding::{BindingKind, CrossRepoStitch, HttpBinding, JoinedFetch, stitch_cross_repo};
+pub use http_binding::{
+    BindingKind, CrossRepoStitch, DEFERRED_REASON_PREFIX, HttpBinding, JoinedFetch,
+    binding_origins, stitch_cross_repo,
+};
 
 /// Stitching errors.
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +58,9 @@ const EXTRACTOR_ID: &str = "t0.events";
 pub struct ConfigIndex {
     /// key → (value, repo-relative source file)
     env: BTreeMap<String, (String, String)>,
+    /// Origins the system manifest binds; absolute calls to them wait for
+    /// the system pass (#589).
+    deferred_origins: std::collections::BTreeSet<String>,
 }
 
 impl ConfigIndex {
@@ -94,6 +100,13 @@ impl ConfigIndex {
     /// Resolve an env key to `(value, source file)`.
     pub fn resolve(&self, key: &str) -> Option<(&str, &str)> {
         self.env.get(key).map(|(v, f)| (v.as_str(), f.as_str()))
+    }
+
+    /// Defer absolute-URL calls to these origins (`scheme://host`) to the
+    /// system-wide binding pass instead of matching them by path in this
+    /// repo (#589): the manifest's declaration outranks a path coincidence.
+    pub fn defer_origins(&mut self, origins: &std::collections::BTreeSet<String>) {
+        self.deferred_origins.extend(origins.iter().cloned());
     }
 
     /// Apply author-declared identities from the topology manifest
@@ -352,7 +365,16 @@ pub fn stitch_fetches(
             .zip(url_source.clone())
             .map(|(url, source)| (url_path(url), source));
 
+        let deferred = resolved_url
+            .as_deref()
+            .and_then(http_binding::url_origin)
+            .filter(|origin| cfg.deferred_origins.contains(origin));
         let outcome: Result<(&str, String), String> = match (&resolved, site.method.as_str()) {
+            (Some(_), method) if method != "?" && deferred.is_some() => Err(format!(
+                "{} {} is bound in the system manifest",
+                http_binding::DEFERRED_REASON_PREFIX,
+                deferred.as_deref().unwrap_or_default()
+            )),
             (None, _) => Err(match &site.url {
                 IdentityExpr::EnvRef(key) => {
                     format!("env key {key} not found in any env file in the repo")

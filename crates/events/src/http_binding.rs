@@ -16,6 +16,25 @@ use std::collections::BTreeMap;
 /// Extractor id of a cross-repo `FETCHES` edge.
 pub const EXTRACTOR_ID: &str = "t0.http-cross-repo";
 
+/// Stop reason of an absolute-URL call whose origin the system manifest
+/// binds: the per-repo pass defers it instead of matching a same-repo route
+/// by path alone, and the system pass decides it on the binding.
+pub const DEFERRED_REASON_PREFIX: &str = "deferred to system binding:";
+
+/// Origins (`scheme://host`) the bindings cover, for the per-repo pass to
+/// defer (`ConfigIndex::defer_origins`).
+pub fn binding_origins(bindings: &[HttpBinding]) -> std::collections::BTreeSet<String> {
+    bindings
+        .iter()
+        .filter_map(|binding| origin(&binding.base_url))
+        .collect()
+}
+
+/// `scheme://host` of an absolute URL, lowercased, when it has one.
+pub fn url_origin(url: &str) -> Option<String> {
+    origin(url)
+}
+
 /// How a binding reaches its service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindingKind {
@@ -71,18 +90,29 @@ impl HttpBinding {
         }
     }
 
-    /// The path the serving repo receives for `url`, when this binding
-    /// covers it.
-    fn forwarded_path(&self, url: &str) -> Option<String> {
+    /// The paths the serving repo may receive for `url`, empty when this
+    /// binding does not cover it. A declared service whose base URL has a
+    /// path may serve routes with or without that path, so both are offered;
+    /// if they reach different endpoints the call is ambiguous, never guessed.
+    fn forwarded_paths(&self, url: &str) -> Vec<String> {
         let base = normalize(self.base_url.trim_end_matches('/'));
         let url = normalize(url.split(['?', '#']).next().unwrap_or(url));
-        let rest = url.strip_prefix(&base)?;
+        let Some(rest) = url.strip_prefix(&base) else {
+            return Vec::new();
+        };
         if !(rest.is_empty() || rest.starts_with('/')) {
-            return None;
+            return Vec::new();
         }
         let path = url_path(&url);
+        let relative = if rest.is_empty() { "/" } else { rest };
         match &self.kind {
-            BindingKind::DeclaredService => Some(path),
+            BindingKind::DeclaredService => {
+                let mut paths = vec![path];
+                if paths[0] != relative {
+                    paths.push(relative.to_string());
+                }
+                paths
+            }
             BindingKind::GatewayRoute {
                 prefix,
                 strip_prefix,
@@ -92,13 +122,15 @@ impl HttpBinding {
                 let routed = if segment.is_empty() {
                     rest
                 } else {
-                    let routed = rest.strip_prefix(format!("/{segment}").as_str())?;
+                    let Some(routed) = rest.strip_prefix(format!("/{segment}").as_str()) else {
+                        return Vec::new();
+                    };
                     if !(routed.is_empty() || routed.starts_with('/')) {
-                        return None;
+                        return Vec::new();
                     }
                     routed
                 };
-                Some(if *strip_prefix {
+                vec![if *strip_prefix {
                     if routed.is_empty() {
                         "/".into()
                     } else {
@@ -106,7 +138,7 @@ impl HttpBinding {
                     }
                 } else {
                     path
-                })
+                }]
             }
         }
     }
@@ -212,6 +244,7 @@ pub fn stitch_cross_repo(
         };
         let reason = gap.props["reason"].as_str().unwrap_or_default();
         let unmatched = reason.starts_with("no recovered endpoint matches")
+            || reason.starts_with(DEFERRED_REASON_PREFIX)
             || gap.props["t0_reason"].is_string();
         let (Some(origin), Some(gap_edge)) = (origin(url), gap_edges.get(gap.id.as_str())) else {
             continue;
@@ -224,17 +257,21 @@ pub fn stitch_cross_repo(
         let mut covering = Vec::new();
         let mut targets: BTreeMap<&str, Vec<&HttpBinding>> = BTreeMap::new();
         for binding in by_origin.get(&origin).into_iter().flatten() {
-            let Some(path) = binding.forwarded_path(url) else {
+            let paths = binding.forwarded_paths(url);
+            if paths.is_empty() {
                 continue;
-            };
+            }
             covering.push(*binding);
             for (endpoint, route) in endpoints
                 .get(&(binding.repo.as_str(), method))
                 .into_iter()
                 .flatten()
             {
-                if route_matches(route, &path) {
-                    targets.entry(endpoint).or_default().push(binding);
+                if paths.iter().any(|path| route_matches(route, path)) {
+                    let supporting = targets.entry(endpoint).or_default();
+                    if !supporting.contains(binding) {
+                        supporting.push(binding);
+                    }
                 }
             }
         }
@@ -279,9 +316,7 @@ pub fn stitch_cross_repo(
         let path = url_path(url);
         let (kept_reason, candidates) = if covering.is_empty() {
             (
-                format!(
-                    "no binding evidence: no declared service or gateway route covers {origin}"
-                ),
+                format!("no binding evidence: no declared service or gateway route covers {url}"),
                 Vec::new(),
             )
         } else if targets.is_empty() {

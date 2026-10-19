@@ -55,6 +55,7 @@ pub(super) fn capture(state: &AppState, source: &RegisteredSource, publish: bool
             "workdir",
             &layers,
             &BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
             None,
             None,
             &[],
