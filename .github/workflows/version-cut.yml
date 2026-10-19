@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Authorize direct workflow event
-        uses: qwts/qwts-agent-ci/.github/actions/ci-policy@4b9f9ac0a966cff01e6200b7e114927c29a35d26
+        uses: qwts/qwts-agent-ci/.github/actions/ci-policy@87c6b301057992f79a723f63c64624bf40c9d06a
         with:
           authorization-only: 'true'
 
@@ -53,7 +53,7 @@ jobs:
           cache: npm
 
       - name: Install version tooling
-        uses: qwts/qwts-agent-ci/.github/actions/bounded-command@4b9f9ac0a966cff01e6200b7e114927c29a35d26
+        uses: qwts/qwts-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
         with:
           task: Install version tooling
           executable: npm
