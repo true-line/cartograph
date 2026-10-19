@@ -544,7 +544,8 @@ fn eventbridge_attributed_complete_observation_fills_gap_with_one_identity() {
     let (out, report) = eb_t1(EB_SITE, &otlp(&[("s1", span)]));
     assert_eq!(report.channel_gaps_resolved, 1);
     assert!(out.nodes.iter().all(|n| n.label != "Gap"));
-    let id = "chan:eventbridge-detail-type:order.placed|bus=orders|scope=111122223333:us-east-1:?";
+    let id =
+        "chan:eventbridge-scoped:detail=order.placed|bus=orders|scope=111122223333:us-east-1:?";
     let channel = out.nodes.iter().find(|n| n.id == id).expect("one identity");
     assert_eq!(channel.props["identity"], "order.placed");
     assert_eq!(channel.props["components"]["bus"], "orders");
@@ -569,7 +570,7 @@ fn eventbridge_static_bus_completes_detail_only_observation() {
     let channel = out
         .nodes
         .iter()
-        .find(|n| n.id == "chan:eventbridge-detail-type:order.placed|bus=orders|scope=?:?:?")
+        .find(|n| n.id == "chan:eventbridge-scoped:detail=order.placed|bus=orders|scope=?:?:?")
         .expect("static bus plus observed detail type");
     assert_eq!(channel.props["bus_source"], "static");
 }
@@ -585,7 +586,7 @@ fn eventbridge_bus_only_observation_keeps_gap_and_preserves_bus() {
         gap.props["attempted_tiers"],
         serde_json::json!(["T0", "T1"])
     );
-    let bus_id = "chan:eventbridge-bus:orders|scope=?:?:?";
+    let bus_id = "chan:eventbridge-scoped:bus=orders|scope=?:?:?";
     assert_eq!(gap.props["t1_observed_bus"], serde_json::json!([bus_id]));
     let bus = out
         .nodes
@@ -750,4 +751,118 @@ fn eventbridge_literal_site_is_confirmed_at_t0_and_untouched_by_trace() {
     assert_eq!(confidence(&channel.props), "Confirmed");
     let publish = out.edges.iter().find(|e| e.label == "PUBLISHES").unwrap();
     assert_eq!(publish.props["components"]["bus"], "orders");
+}
+
+// Review regressions on #599 (Codex cross-review and automated review).
+
+#[test]
+fn eventbridge_literal_neighbour_in_same_file_blocks_file_only_attribution() {
+    let source = format!(
+        "{EB_SITE}\nexport function other() {{ return new PutEventsCommand({{ Entries: [{{ EventBusName: 'orders', DetailType: 'order.placed', Detail: '{{}}' }}] }}); }}"
+    );
+    let span: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        ("messaging.destination.name", "orders"),
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+    ];
+    let (out, report) = eb_t1(&source, &otlp(&[("literal-site-span", span)]));
+    assert_eq!(report.channel_gaps_resolved, 0);
+    assert_eq!(
+        eb_gap(&out).props["t1_reason"],
+        "source attribution ambiguous: 2 EventBridge sites in pub.ts"
+    );
+}
+
+#[test]
+fn eventbridge_composite_id_never_aliases_a_legacy_literal() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pub.ts"), EB_SITE).unwrap();
+    let colliding = EB_SITE.replace("`order.${kind}`", "'order.placed|bus=orders|scope=?:?:?'");
+    std::fs::write(dir.path().join("other.ts"), colliding).unwrap();
+    let mut out = stitch_dir(dir.path());
+    let span: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        ("messaging.destination.name", "orders"),
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+    ];
+    let trace = dynamic::parse_otlp_jsonl(&otlp(&[("s1", span)])).unwrap();
+    dynamic::apply_trace(&mut out.nodes, &mut out.edges, &trace, "trace.jsonl");
+    let publish = out
+        .edges
+        .iter()
+        .find(|e| e.src.contains("pub.ts") && e.label == "PUBLISHES")
+        .expect("site edge");
+    let channel = out.nodes.iter().find(|n| n.id == publish.dst).unwrap();
+    assert_eq!(channel.props["identity"], "order.placed");
+    assert!(
+        out.nodes
+            .iter()
+            .any(|n| n.id == "chan:eventbridge-detail-type:order.placed|bus=orders|scope=?:?:?")
+    );
+}
+
+#[test]
+fn eventbridge_conflict_split_across_trace_files_keeps_gap_in_any_order() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pub.ts"), EB_SITE).unwrap();
+    let placed: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+    ];
+    let shipped: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.shipped"),
+    ];
+    let a = dynamic::parse_otlp_jsonl(&otlp(&[("a1", placed)])).unwrap();
+    let b = dynamic::parse_otlp_jsonl(&otlp(&[("b1", shipped)])).unwrap();
+    for order in [
+        [(&a, "a.jsonl"), (&b, "b.jsonl")],
+        [(&b, "b.jsonl"), (&a, "a.jsonl")],
+    ] {
+        let mut out = stitch_dir(dir.path());
+        let report = dynamic::apply_traces(&mut out.nodes, &mut out.edges, &order);
+        assert_eq!(report.channel_gaps_resolved, 0);
+        assert_eq!(eb_gap(&out).props["t1_reason"], "2 distinct identities");
+    }
+    // Agreeing files fill the Gap and cite the same evidence in any order.
+    let again = dynamic::parse_otlp_jsonl(&otlp(&[("b2", placed)])).unwrap();
+    let mut cited = Vec::new();
+    for order in [
+        [(&a, "a.jsonl"), (&again, "b.jsonl")],
+        [(&again, "b.jsonl"), (&a, "a.jsonl")],
+    ] {
+        let mut out = stitch_dir(dir.path());
+        let report = dynamic::apply_traces(&mut out.nodes, &mut out.edges, &order);
+        assert_eq!(report.channel_gaps_resolved, 1);
+        let channel = out
+            .nodes
+            .iter()
+            .find(|n| n.id.starts_with("chan:eventbridge-scoped:detail="))
+            .unwrap();
+        cited.push(channel.props["observed"]["span_id"].clone());
+    }
+    assert_eq!(
+        cited,
+        vec![serde_json::json!("a1"), serde_json::json!("a1")]
+    );
+}
+
+#[test]
+fn eventbridge_batched_site_still_preserves_observed_bus() {
+    let batched = EB_SITE.replace(
+        "Detail: '{}' }],",
+        "Detail: '{}' }, { Source: 'shop', DetailType: 'order.audit', Detail: '{}' }],",
+    );
+    let span: &[(&str, &str)] = &[EB, AT_SITE, ("messaging.destination.name", "orders")];
+    let (out, _) = eb_t1(&batched, &otlp(&[("s1", span)]));
+    let bus_id = "chan:eventbridge-scoped:bus=orders|scope=?:?:?";
+    assert_eq!(
+        eb_gap(&out).props["t1_observed_bus"],
+        serde_json::json!([bus_id])
+    );
+    assert!(out.nodes.iter().any(|n| n.id == bus_id));
 }

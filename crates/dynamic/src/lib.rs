@@ -939,6 +939,38 @@ pub fn apply_trace(
     trace: &ObservedTrace,
     trace_path: &str,
 ) -> TraceEnrichment {
+    apply_traces(nodes, edges, &[(trace, trace_path)])
+}
+
+/// Apply several OTLP trace files, each `(trace, path)`. HTTP enrichment
+/// and the generic channel match run per file in the given order;
+/// EventBridge Gaps are decided once over every file's spans, so a conflict
+/// split across files is still seen and the result does not depend on
+/// file order (#573).
+pub fn apply_traces(
+    nodes: &mut Vec<Node>,
+    edges: &mut [Edge],
+    traces: &[(&ObservedTrace, &str)],
+) -> TraceEnrichment {
+    let mut report = TraceEnrichment::default();
+    for (trace, trace_path) in traces {
+        let pass = apply_generic_trace(nodes, edges, trace, trace_path);
+        report.endpoints_enriched += pass.endpoints_enriched;
+        report.channel_gaps_resolved += pass.channel_gaps_resolved;
+        report.channel_gaps_unresolved += pass.channel_gaps_unresolved;
+    }
+    let (resolved, unresolved) = eventbridge::apply(nodes, edges, traces);
+    report.channel_gaps_resolved += resolved;
+    report.channel_gaps_unresolved += unresolved;
+    report
+}
+
+fn apply_generic_trace(
+    nodes: &mut Vec<Node>,
+    edges: &mut [Edge],
+    trace: &ObservedTrace,
+    trace_path: &str,
+) -> TraceEnrichment {
     let mut report = TraceEnrichment {
         endpoints_enriched: enrich_http_endpoints(nodes, trace, trace_path),
         ..TraceEnrichment::default()
@@ -1055,9 +1087,6 @@ pub fn apply_trace(
 
     nodes.retain(|node| !resolved_gap_ids.contains(&node.id));
     nodes.extend(new_channels.into_values());
-    let (resolved, unresolved) = eventbridge::apply(nodes, edges, trace, trace_path);
-    report.channel_gaps_resolved += resolved;
-    report.channel_gaps_unresolved += unresolved;
     report
 }
 

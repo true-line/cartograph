@@ -1158,17 +1158,20 @@ fn extract_tree_with_primary(
     extraction.edges.extend(fetched.edges);
     // T1: observed messaging identities fill only explicit channel Gaps;
     // observed HTTP attributes enrich T0 endpoints beside their provenance.
+    // All trace files are applied together so an EventBridge identity
+    // conflict split across files is still seen (#573).
+    let mut traces = Vec::new();
     for trace_path in otel_jsonl {
         let raw = std::fs::read_to_string(trace_path)
             .map_err(|e| format!("otel_jsonl {}: {e}", trace_path.display()))?;
         let trace = dynamic::parse_otlp_jsonl(&raw).map_err(|e| e.to_string())?;
-        dynamic::apply_trace(
-            &mut extraction.nodes,
-            &mut extraction.edges,
-            &trace,
-            &trace_path.to_string_lossy(),
-        );
+        traces.push((trace, trace_path.to_string_lossy().into_owned()));
     }
+    let traces: Vec<(&dynamic::ObservedTrace, &str)> = traces
+        .iter()
+        .map(|(trace, path)| (trace, path.as_str()))
+        .collect();
+    dynamic::apply_traces(&mut extraction.nodes, &mut extraction.edges, &traces);
     // Found ADR/RFC files are T0 facts. They are parsed after all code/infra
     // layers so explicit `Governs:` ids can link to existing graph targets.
     let adr_facts = spec::extract_found_adrs(root, repo, commit, &extraction.nodes)
