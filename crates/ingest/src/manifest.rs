@@ -39,6 +39,10 @@ pub enum ManifestError {
         /// The undeclared service name.
         service: String,
     },
+    /// Two `[[services]]` entries share a name, so a gateway route naming
+    /// it could not say which repo it reaches.
+    #[error("service \"{0}\" is declared more than once")]
+    DuplicateService(String),
     /// A base URL is not an absolute `http(s)://host[/path]` URL.
     #[error("base URL \"{0}\" must be absolute http(s)://host[/path], without query or fragment")]
     InvalidBaseUrl(String),
@@ -156,10 +160,14 @@ impl SystemManifest {
         Ok(manifest)
     }
 
-    /// Check that services name declared repos, gateway routes name
-    /// declared services, and every base URL is absolute.
+    /// Check that service names are unique, services name declared repos,
+    /// gateway routes name declared services, and every base URL is absolute.
     pub fn validate_bindings(&self) -> Result<(), ManifestError> {
+        let mut names = std::collections::BTreeSet::new();
         for service in &self.services {
+            if !names.insert(service.name.as_str()) {
+                return Err(ManifestError::DuplicateService(service.name.clone()));
+            }
             if !self.repos.iter().any(|repo| repo.url == service.repo) {
                 return Err(ManifestError::UnknownServiceRepo {
                     service: service.name.clone(),

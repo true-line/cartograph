@@ -1103,6 +1103,43 @@ fn gateway_routes_forward_on_whole_prefix_segments() {
     );
 }
 
+// AC-0240 (#606 review): a root gateway prefix forwards every path under
+// its base URL, stripped or kept, including the root itself. (T-0240)
+#[test]
+fn root_gateway_prefix_forwards_child_and_root_paths() {
+    let (gaps, edges) = web_gaps(
+        &[
+            fetch_site(
+                "GET",
+                IdentityExpr::Literal("https://gw.example.com/users".into()),
+            ),
+            FetchSite {
+                byte_start: 50,
+                ..fetch_site(
+                    "GET",
+                    IdentityExpr::Literal("https://gw.example.com".into()),
+                )
+            },
+        ],
+        &ConfigIndex::default(),
+    );
+    let endpoints = eps(&["ep:api@GET:/users", "ep:api@GET:/"]);
+    for (prefix, strip) in [("/", true), ("/", false), ("", true)] {
+        let out = stitch_cross_repo(
+            &gaps,
+            &edges,
+            &endpoints,
+            &[route("api", "api", "https://gw.example.com", prefix, strip)],
+        );
+        let joined: Vec<&str> = out.joined.iter().map(|j| j.edge.dst.as_str()).collect();
+        assert_eq!(
+            joined,
+            ["ep:api@GET:/users", "ep:api@GET:/"],
+            "prefix {prefix:?}, strip {strip}"
+        );
+    }
+}
+
 // AC-0241: without binding evidence the call stays a Gap whose reason says
 // so, and the original same-repo reason is kept beside it. (T-0241)
 #[test]

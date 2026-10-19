@@ -87,11 +87,17 @@ impl HttpBinding {
                 prefix,
                 strip_prefix,
             } => {
-                let prefix = format!("/{}", prefix.trim_matches('/'));
-                let routed = rest.strip_prefix(prefix.as_str())?;
-                if !(routed.is_empty() || routed.starts_with('/')) {
-                    return None;
-                }
+                // A root prefix covers every path under the base URL.
+                let segment = prefix.trim_matches('/');
+                let routed = if segment.is_empty() {
+                    rest
+                } else {
+                    let routed = rest.strip_prefix(format!("/{segment}").as_str())?;
+                    if !(routed.is_empty() || routed.starts_with('/')) {
+                        return None;
+                    }
+                    routed
+                };
                 Some(if *strip_prefix {
                     if routed.is_empty() {
                         "/".into()

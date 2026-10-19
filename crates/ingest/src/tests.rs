@@ -231,6 +231,11 @@ strip_prefix = true
             "[[repos]]\nurl = \"a/b\"\n[[gateway_routes]]\nbase_url = \"https://g.example\"\nprefix = \"/p\"\nservice = \"nope\"\n",
             "undeclared service \"nope\"",
         ),
+        (
+            // #606 review: declaration order must never choose a route's repo.
+            "[[repos]]\nurl = \"a/b\"\n[[repos]]\nurl = \"c/d\"\n[[services]]\nname = \"api\"\nrepo = \"a/b\"\n[[services]]\nname = \"api\"\nrepo = \"c/d\"\n",
+            "service \"api\" is declared more than once",
+        ),
     ] {
         std::fs::write(&f, body).unwrap();
         let err = manifest::SystemManifest::load(&f).unwrap_err().to_string();
