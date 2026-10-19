@@ -287,6 +287,10 @@ pub struct InvestigationResult {
     pub result_id: String,
     pub input_ledger_hash: String,
     pub graph_snapshot_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_step_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure_hash: Option<String>,
     pub findings: Vec<InvestigationFinding>,
     pub knowledge_completeness: KnowledgeCompleteness,
     pub limitations: Vec<String>,

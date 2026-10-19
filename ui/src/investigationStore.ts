@@ -22,6 +22,17 @@ function validSummary(value: InvestigationSummary | null, id?: string): value is
     typeof value.actions?.can_follow_up === 'boolean';
 }
 
+/** Host validates result content; the UI also rejects malformed version bindings. */
+function validResultBinding(result: InvestigationResult): boolean {
+  if (result.schema_version === 1) {
+    return !('invocation_step_id' in result) && !('disclosure_hash' in result);
+  }
+  return result.schema_version === 2 && typeof result.invocation_step_id === 'string' &&
+    /^[A-Za-z0-9_:-]{1,128}(?![\s\S])/.test(result.invocation_step_id) &&
+    typeof result.disclosure_hash === 'string' &&
+    /^investigation-disclosure-v1:[0-9a-f]{64}(?![\s\S])/.test(result.disclosure_hash);
+}
+
 function mergeHistory(existing: InvestigationSummary[], incoming: InvestigationSummary[]) {
   const byId = new Map(existing.map((item) => [item.investigation_id, item]));
   for (const item of incoming) {
@@ -231,7 +242,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         // Independent reads can straddle the result commit; refresh instead of
         // recording a task whose detail and findings disagree.
         if ((result !== null) !== detail.has_result) throw new Error('Result observation changed.');
-        if (result && (result.schema_version !== 1 || result.investigation_id !== id ||
+        if (result && (!validResultBinding(result) || result.investigation_id !== id ||
             result.graph_snapshot_id !== detail.graph_snapshot_id)) throw new Error('Wrong result.');
         if (consent && (consent.investigation_id !== id || consent.revision !== detail.revision ||
             detail.status !== 'awaiting_consent' || detail.cancel_requested ||

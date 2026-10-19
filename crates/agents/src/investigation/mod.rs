@@ -5,15 +5,20 @@
 //! store, filesystem, network dispatch or target-code mutation authority.
 
 mod admission;
+mod disclosure;
 mod input;
 mod privacy;
+mod projection;
 mod protocol;
 mod records;
+mod sealing;
 mod specialists;
 mod strict;
 
+pub use disclosure::*;
 pub use input::*;
 pub use privacy::{redacted_history_text, reject_prose_replay};
+pub use projection::*;
 pub use protocol::*;
 pub use records::*;
 pub use specialists::*;
@@ -81,3 +86,6 @@ pub fn decode_record<T: serde::de::DeserializeOwned + serde::Serialize>(
     }
     Ok(value)
 }
+
+#[cfg(test)]
+mod result_disclosure_tests;

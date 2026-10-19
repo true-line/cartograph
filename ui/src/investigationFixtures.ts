@@ -7,10 +7,10 @@ import type {
 export const investigationCatalog: InvestigationCatalog = {
   schema_version: 1,
   specialists: [
-    { id: 'domain-analyst@2', name: 'Domain analyst', version: 2, prompt_fingerprint: 'prompt:domain-v2',
+    { id: 'domain-analyst@3', name: 'Domain analyst', version: 3, prompt_fingerprint: 'prompt:domain-v3',
       purpose: 'Explain business behavior and its unresolved dependencies.',
       operations: ['query_context', 'read_evidence', 'finish'], tier: 'Agentic', confidence_tier: 'InferredWeak' },
-    { id: 'evidence-auditor@2', name: 'Evidence auditor', version: 2, prompt_fingerprint: 'prompt:audit-v2',
+    { id: 'evidence-auditor@3', name: 'Evidence auditor', version: 3, prompt_fingerprint: 'prompt:audit-v3',
       purpose: 'Inspect the support and limits of recovered claims.',
       operations: ['query_context', 'read_evidence', 'finish'], tier: 'Agentic', confidence_tier: 'InferredWeak' },
   ],
@@ -43,7 +43,7 @@ export const investigationCitations: InvestigationCitation[] = [
 
 export function investigationDetail(id = 'inv-fixture', overrides: Partial<InvestigationDetail> = {}): InvestigationDetail {
   return { schema_version: 1, investigation_id: id, conversation_id: `conversation-${id}`, parent_id: null,
-    job_id: 91, specialist_id: 'domain-analyst@2', question: 'What stock behavior is supported, and what remains unknown?',
+    job_id: 91, specialist_id: 'domain-analyst@3', question: 'What stock behavior is supported, and what remains unknown?',
     scope: { type: 'neighborhood', anchor: 'rule:stock', hops: 1 }, provider_mode: 'local',
     status: 'completed', revision: 9, cancel_requested: false, invocation_pending: false,
     actions: { can_cancel: false, can_follow_up: true }, graph_snapshot_id: 'snapshot:original',
@@ -73,7 +73,7 @@ export function investigationEvents(id = 'inv-fixture'): InvestigationEvent[] {
 }
 
 export function investigationResult(id = 'inv-fixture'): InvestigationResult {
-  return { schema_version: 1, investigation_id: id, result_id: `result:${id}`, input_ledger_hash: 'ledger:original',
+  return { schema_version: 2, invocation_step_id: 'step-1', disclosure_hash: `investigation-disclosure-v1:${'a'.repeat(64)}`, investigation_id: id, result_id: `result:${id}`, input_ledger_hash: 'ledger:original',
     graph_snapshot_id: 'snapshot:original', knowledge_completeness: 'partial',
     findings: [
       { finding_id: 'F1', claim_kind: 'implemented_behavior', title: 'A local stock guard is present',
@@ -100,4 +100,18 @@ export function investigationConsent(id = 'inv-fixture', revision = 4, step = 's
       locality: 'Cloud', endpoint_id: 'https://example.openai.azure.com/investigation-fixture', requested_model: 'fixture-cloud-model' },
     completion_limits: { input_bytes: 98304, request_bytes: 131072, response_bytes: 65536,
       output_text_bytes: 16384, max_output_tokens: 2048, request_timeout_ms: 30000 } };
+}
+
+/** Original saved role/result shapes remain readable without current defaults. */
+export function legacyInvestigationDetail(version: 1 | 2 = 2, id = 'inv-legacy'): InvestigationDetail {
+  const specialist = { ...investigationCatalog.specialists[0], id: `domain-analyst@${version}` as const,
+    version, prompt_fingerprint: `prompt:domain-v${version}` };
+  return investigationDetail(id, { specialist_id: specialist.id, specialist });
+}
+
+export function legacyInvestigationResult(id = 'inv-legacy'): InvestigationResult {
+  const result = { ...investigationResult(id), schema_version: 1 as const };
+  delete result.invocation_step_id;
+  delete result.disclosure_hash;
+  return result;
 }

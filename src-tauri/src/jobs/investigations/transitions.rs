@@ -58,6 +58,7 @@ impl JobStore {
             }
             InvestigationTransition::AwaitConsent { step } => {
                 check_ready(&task, &step)?;
+                validate_step_basis(&tx, &task, &step)?;
                 if task.detail.provider.mode != InvestigationProviderMode::Cloud {
                     return Err(InvestigationStoreError::Invalid);
                 }
@@ -77,6 +78,7 @@ impl JobStore {
             }
             InvestigationTransition::BeginInvocation { step } => {
                 validate_step(&step)?;
+                validate_step_basis(&tx, &task, &step)?;
                 if task.ledger_hash.as_ref() != Some(&step.input_ledger_hash) {
                     return Err(InvestigationStoreError::Conflict);
                 }
@@ -119,7 +121,7 @@ impl JobStore {
                     &id,
                     &step.step_id,
                     &step,
-                    4096,
+                    MAX_INVOCATION_BYTES,
                 )?;
                 task.detail.usage = usage;
                 task.pending = Some(step.clone());
@@ -191,7 +193,7 @@ impl JobStore {
                 if let Some(result) = &result {
                     let ledger =
                         load_ledger(&tx, &task)?.ok_or(InvestigationStoreError::Invalid)?;
-                    result.validate(&ledger)?;
+                    validate_result_basis(result, &ledger, &invoked)?;
                     if result.investigation_id != id
                         || result.observed_response_model != response.observed_model
                     {

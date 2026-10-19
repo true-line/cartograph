@@ -108,6 +108,36 @@ fn action() -> CompletionAction {
     }
 }
 
+#[test]
+fn prepared_bounded_action_binding_survives_redaction_without_accepting_replacements() {
+    let provider = OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test-model",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let mut original = action();
+    original.payload.spans[0].text = "password=supersecret123".into();
+    let prepared = firewall
+        .prepare_bounded(&provider, &original, &CompletionLimits::default())
+        .unwrap();
+    assert!(prepared.matches_action(&original));
+    assert_ne!(
+        prepared.preview().egress.payload.spans[0].text,
+        original.payload.spans[0].text
+    );
+    let mut replacement = original.clone();
+    replacement.payload.spans[0].text = "password=differentsecret456".into();
+    assert!(!prepared.matches_action(&replacement));
+    replacement = original.clone();
+    replacement.action_id = "different-action".into();
+    assert!(!prepared.matches_action(&replacement));
+    replacement = original;
+    replacement.payload.spans[0].path = "different.ts".into();
+    assert!(!prepared.matches_action(&replacement));
+}
+
 fn authorize(provider: &dyn LlmProvider, limits: CompletionLimits) -> AuthorizedBoundedCompletion {
     let firewall = EgressFirewall::new(EgressPolicy::allow_cloud_for([AnalysisTier::Agentic]));
     let prepared = firewall

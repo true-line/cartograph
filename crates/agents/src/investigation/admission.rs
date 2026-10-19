@@ -247,12 +247,64 @@ impl InvestigationResult {
         observed_response_model: Option<String>,
         created_at: String,
     ) -> Result<Self, InvestigationError> {
+        Self::admit_bound(
+            investigation_id,
+            ledger,
+            None,
+            action,
+            supplied_strings,
+            observed_response_model,
+            created_at,
+        )
+    }
+
+    /// Admit a finish only against representations disclosed to this invocation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_with_disclosure<'a>(
+        investigation_id: &str,
+        ledger: &InvestigationInputLedger,
+        step_id: &str,
+        disclosure: &InvestigationDisclosure,
+        action: &InvestigationAction,
+        supplied_strings: impl IntoIterator<Item = &'a str>,
+        observed_response_model: Option<String>,
+        created_at: String,
+    ) -> Result<Self, InvestigationError> {
+        Self::admit_bound(
+            investigation_id,
+            ledger,
+            Some((step_id, disclosure)),
+            action,
+            supplied_strings,
+            observed_response_model,
+            created_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit_bound<'a>(
+        investigation_id: &str,
+        ledger: &InvestigationInputLedger,
+        binding: Option<(&str, &InvestigationDisclosure)>,
+        action: &InvestigationAction,
+        supplied_strings: impl IntoIterator<Item = &'a str>,
+        observed_response_model: Option<String>,
+        created_at: String,
+    ) -> Result<Self, InvestigationError> {
         ledger.validate()?;
-        let citations = ledger
-            .citations
-            .iter()
-            .map(|c| c.citation_id.clone())
-            .collect();
+        let citations = match binding {
+            Some((step, disclosure)) => {
+                if !super::records::opaque_id(step) {
+                    return Err(InvestigationError::InvalidInput);
+                }
+                disclosure.eligible_citations(ledger)?
+            }
+            None => ledger
+                .citations
+                .iter()
+                .map(|c| c.citation_id.clone())
+                .collect(),
+        };
         let supplied = supplied_strings.into_iter().collect::<Vec<_>>();
         let findings = action.admit_finish(&citations, supplied.iter().copied())?;
         let InvestigationAction::Finish {
@@ -282,11 +334,15 @@ impl InvestigationResult {
             return Err(InvestigationError::InvalidAction);
         };
         let mut result = Self {
-            schema_version: 1,
+            schema_version: if binding.is_some() { 2 } else { 1 },
             investigation_id: investigation_id.into(),
             result_id: String::new(),
             input_ledger_hash: ledger.fingerprint()?,
             graph_snapshot_id: ledger.graph_snapshot_id.clone(),
+            invocation_step_id: binding.map(|(step, _)| step.to_owned()),
+            disclosure_hash: binding
+                .map(|(_, disclosure)| disclosure.fingerprint(ledger))
+                .transpose()?,
             findings,
             knowledge_completeness: *knowledge_completeness,
             limitations: limitations.clone(),
@@ -294,26 +350,74 @@ impl InvestigationResult {
             created_at,
         };
         result.result_id = result.content_id()?;
-        result.validate(ledger)?;
+        match binding {
+            Some((step, disclosure)) => {
+                result.validate_with_disclosure(ledger, step, disclosure)?
+            }
+            None => result.validate(ledger)?,
+        }
         Ok(result)
     }
 
     fn content_id(&self) -> Result<String, InvestigationError> {
         let mut content = self.clone();
         content.result_id.clear();
-        Ok(format!(
-            "investigation-result-v1:{}",
-            crate::source_basis::domain_hash(
+        let (prefix, domain): (&str, &[u8]) = match self.schema_version {
+            1 => (
+                "investigation-result-v1",
                 b"cartograph:investigation-result:v1\0",
-                &bounded_bytes(&content, MAX_RESULT_BYTES)?,
-            )
+            ),
+            2 => (
+                "investigation-result-v2",
+                b"cartograph:investigation-result:v2\0",
+            ),
+            _ => return Err(InvestigationError::InvalidInput),
+        };
+        Ok(format!(
+            "{prefix}:{}",
+            crate::source_basis::domain_hash(domain, &bounded_bytes(&content, MAX_RESULT_BYTES)?,)
         ))
     }
 
     pub fn validate(&self, ledger: &InvestigationInputLedger) -> Result<(), InvestigationError> {
-        ledger.validate()?;
         if self.schema_version != 1
-            || !super::records::opaque_id(&self.investigation_id)
+            || self.invocation_step_id.is_some()
+            || self.disclosure_hash.is_some()
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let citations = ledger
+            .citations
+            .iter()
+            .map(|c| c.citation_id.clone())
+            .collect();
+        self.validate_bound(ledger, &citations)
+    }
+
+    /// Validate saved v2 results using the exact saved invocation disclosure.
+    pub fn validate_with_disclosure(
+        &self,
+        ledger: &InvestigationInputLedger,
+        step_id: &str,
+        disclosure: &InvestigationDisclosure,
+    ) -> Result<(), InvestigationError> {
+        if self.schema_version != 2
+            || !super::records::opaque_id(step_id)
+            || self.invocation_step_id.as_deref() != Some(step_id)
+            || self.disclosure_hash.as_deref() != Some(disclosure.fingerprint(ledger)?.as_str())
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        self.validate_bound(ledger, &disclosure.eligible_citations(ledger)?)
+    }
+
+    fn validate_bound(
+        &self,
+        ledger: &InvestigationInputLedger,
+        citations: &BTreeSet<String>,
+    ) -> Result<(), InvestigationError> {
+        ledger.validate()?;
+        if !super::records::opaque_id(&self.investigation_id)
             || !text(&self.created_at, 64)
             || self.graph_snapshot_id != ledger.graph_snapshot_id
             || self.input_ledger_hash != ledger.fingerprint()?
@@ -350,12 +454,7 @@ impl InvestigationResult {
             knowledge_completeness: self.knowledge_completeness,
             limitations: self.limitations.clone(),
         };
-        let citations = ledger
-            .citations
-            .iter()
-            .map(|c| c.citation_id.clone())
-            .collect();
-        action.admit_finish(&citations, std::iter::empty())?;
+        action.admit_finish(citations, std::iter::empty())?;
         bounded_bytes(self, MAX_RESULT_BYTES)?;
         Ok(())
     }

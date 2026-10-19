@@ -26,6 +26,9 @@ const TASK_CAPACITY: usize = 2 * 1024 * 1024;
 const TERMINAL_RESERVE: usize = 256 * 1024;
 const STORE_CAPACITY: usize = 256 * 1024 * 1024;
 const MAX_EVENTS: u64 = 96;
+// Inline metadata-only disclosure has its own bound plus the legacy step envelope.
+// Task/global capacity and MAX_RECORD_BYTES remain authoritative admission caps.
+const MAX_INVOCATION_BYTES: usize = MAX_DISCLOSURE_BYTES + 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InvestigationStoreError {
@@ -81,7 +84,8 @@ pub(crate) struct InvestigationStart {
     pub created: bool,
 }
 
-/// Safe identity only. The exact payload/preview exists exclusively in its live worker.
+/// Safe identity and optional metadata-only disclosure. The exact payload/preview
+/// exists exclusively in its live worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PendingInvestigationStep {
@@ -90,6 +94,8 @@ pub(crate) struct PendingInvestigationStep {
     pub input_ledger_hash: String,
     pub input_bytes: usize,
     pub generated_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure: Option<InvestigationDisclosure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

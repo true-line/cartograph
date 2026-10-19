@@ -20,9 +20,19 @@ impl Fixture {
         }
     }
     fn start(&mut self, nonce: &str, mode: InvestigationProviderMode) -> (String, JobExecution) {
+        self.start_as(nonce, mode, SpecialistId::DomainAnalyst)
+    }
+    fn start_as(
+        &mut self,
+        nonce: &str,
+        mode: InvestigationProviderMode,
+        specialist: SpecialistId,
+    ) -> (String, JobExecution) {
+        let mut requested = request(nonce, mode);
+        requested.specialist_id = specialist;
         let detail = self
             .store
-            .start_investigation(&request(nonce, mode), Some(&provider(mode)))
+            .start_investigation(&requested, Some(&provider(mode)))
             .unwrap()
             .detail;
         let id = detail.summary.investigation_id;
@@ -170,6 +180,7 @@ fn step(ledger: &InvestigationInputLedger, index: u32) -> PendingInvestigationSt
         input_ledger_hash: ledger.fingerprint().unwrap(),
         input_bytes: 1024,
         generated_tokens: 2048,
+        disclosure: None,
     }
 }
 fn begin(
@@ -1184,4 +1195,309 @@ fn investigation_failed_invocation_retains_elapsed_and_marks_aggregate_usage_unk
         let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
         assert_eq!(reopened.investigation(&id).unwrap(), stopped);
     }
+}
+
+#[test]
+fn investigation_compact_disclosure_is_durable_and_finishing_binding_is_revalidated() {
+    // AC-0234/0235: persist exact disclosure before execution; reopen never
+    // relies on current source or merely the cumulative citation membership.
+    let mut fixture = Fixture::new();
+    let (id, execution) = fixture.start_as(
+        "compact",
+        InvestigationProviderMode::Local,
+        SpecialistId::DomainAnalystV3,
+    );
+    let ledger = fixture.prepare(&id, &execution, false);
+    let mut pending = step(&ledger, 1);
+    let current = fixture.store.investigation(&id).unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .advance_investigation(
+                &execution,
+                current.summary.revision,
+                InvestigationTransition::BeginInvocation {
+                    step: pending.clone()
+                }
+            )
+            .unwrap_err(),
+        InvestigationStoreError::Invalid
+    );
+    let supplied = || DisclosureRepresentation::Supplied {
+        representation_hash: hash("representation"),
+    };
+    let disclosure = InvestigationDisclosure {
+        schema_version: 1,
+        policy: COMPACT_DISCLOSURE_POLICY.into(),
+        input_ledger_hash: ledger.fingerprint().unwrap(),
+        graph_snapshot_id: ledger.graph_snapshot_id.clone(),
+        scope_snapshot_id: ledger.scope_snapshot_id.clone(),
+        payload_hash: pending.payload_hash.clone(),
+        facts: ledger
+            .selected_facts
+            .iter()
+            .map(|selected| DisclosedInvestigationFact {
+                fact: selected.fact.clone(),
+                representation: supplied(),
+            })
+            .collect(),
+        queries: ledger
+            .queries
+            .iter()
+            .enumerate()
+            .map(|(query_index, _)| DisclosedInvestigationQuery {
+                query_index,
+                representation: supplied(),
+            })
+            .collect(),
+        sources: vec![],
+        history: None,
+    };
+    pending.disclosure = Some(disclosure.clone());
+    let mut mismatched = pending.clone();
+    mismatched.payload_hash = hash("wrong-payload");
+    assert!(validate_step(&mismatched).is_err());
+    begin(&mut fixture, &id, &execution, pending.clone());
+    let saved: PendingInvestigationStep = read_body(
+        &fixture.store.conn,
+        "investigation_invocations",
+        "step_id",
+        &id,
+        &pending.step_id,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(saved, pending);
+    let result = InvestigationResult::admit_with_disclosure(
+        &id,
+        &ledger,
+        &pending.step_id,
+        &disclosure,
+        &InvestigationAction::Finish {
+            findings: vec![],
+            knowledge_completeness: KnowledgeCompleteness::InsufficientEvidence,
+            limitations: vec!["Only bounded metadata was inspected.".into()],
+        },
+        std::iter::empty(),
+        Some("fixture-model".into()),
+        "2026-09-11T00:00:00Z".into(),
+    )
+    .unwrap();
+    let current = fixture.store.investigation(&id).unwrap();
+    fixture
+        .store
+        .advance_investigation(
+            &execution,
+            current.summary.revision,
+            InvestigationTransition::ActionAdmitted {
+                response: response(&pending.step_id, 100),
+                tool: None,
+                result: Some(Box::new(result.clone())),
+            },
+        )
+        .unwrap();
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(
+        reopened.investigation_result(&id).unwrap(),
+        Some(result.clone())
+    );
+    // Valid body/hash tampering still cannot remove the finishing disclosure.
+    let mut missing = pending;
+    missing.disclosure = None;
+    let body = encode(&missing, MAX_INVOCATION_BYTES).unwrap();
+    assert!(validate_result_basis(&result, &ledger, &missing).is_err());
+    assert!(
+        fixture
+            .store
+            .conn
+            .execute(
+                "UPDATE investigation_invocations SET body=?1, body_hash=?2 WHERE task_id=?3",
+                params![body, core_prov::content_hash(&body), id],
+            )
+            .is_err()
+    );
+    assert_eq!(reopened.investigation_result(&id).unwrap(), Some(result));
+}
+
+#[test]
+fn investigation_legacy_step_serialization_omits_disclosure() {
+    let pending = step(&ledger(false), 1);
+    let body = encode(&pending, 4096).unwrap();
+    let literal = format!(
+        "{{\"step_id\":\"step:1\",\"payload_hash\":\"{}\",\"input_ledger_hash\":\"{}\",\"input_bytes\":1024,\"generated_tokens\":2048}}",
+        pending.payload_hash, pending.input_ledger_hash
+    );
+    assert_eq!(body, literal.as_bytes());
+    let decoded: PendingInvestigationStep =
+        decode_record(std::str::from_utf8(&body).unwrap()).unwrap();
+    assert_eq!(encode(&decoded, 4096).unwrap(), body);
+}
+
+fn compact_step(ledger: &InvestigationInputLedger) -> PendingInvestigationStep {
+    let mut pending = step(ledger, 1);
+    let supplied = || DisclosureRepresentation::Supplied {
+        representation_hash: hash("representation"),
+    };
+    pending.disclosure = Some(InvestigationDisclosure {
+        schema_version: 1,
+        policy: COMPACT_DISCLOSURE_POLICY.into(),
+        input_ledger_hash: ledger.fingerprint().unwrap(),
+        graph_snapshot_id: ledger.graph_snapshot_id.clone(),
+        scope_snapshot_id: ledger.scope_snapshot_id.clone(),
+        payload_hash: pending.payload_hash.clone(),
+        facts: ledger
+            .selected_facts
+            .iter()
+            .map(|selected| DisclosedInvestigationFact {
+                fact: selected.fact.clone(),
+                representation: supplied(),
+            })
+            .collect(),
+        queries: ledger
+            .queries
+            .iter()
+            .enumerate()
+            .map(|(query_index, _)| DisclosedInvestigationQuery {
+                query_index,
+                representation: supplied(),
+            })
+            .collect(),
+        sources: vec![],
+        history: None,
+    });
+    pending
+}
+
+#[test]
+fn investigation_compact_storage_failure_before_dispatch_reserves_nothing() {
+    // AC-0234/0188: failure at the invocation write boundary cannot authorize
+    // a call or consume budgets; the full state reopens unchanged.
+    let mut fixture = Fixture::new();
+    let (id, execution) = fixture.start_as(
+        "write-failure",
+        InvestigationProviderMode::Local,
+        SpecialistId::DomainAnalystV3,
+    );
+    let ledger = fixture.prepare(&id, &execution, false);
+    let before = fixture.store.investigation(&id).unwrap();
+    fixture
+        .store
+        .conn
+        .pragma_update(None, "query_only", true)
+        .unwrap();
+    assert!(
+        fixture
+            .store
+            .advance_investigation(
+                &execution,
+                before.summary.revision,
+                InvestigationTransition::BeginInvocation {
+                    step: compact_step(&ledger)
+                }
+            )
+            .is_err()
+    );
+    fixture
+        .store
+        .conn
+        .pragma_update(None, "query_only", false)
+        .unwrap();
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&id).unwrap(), before);
+    let count: i64 = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT count(*) FROM investigation_invocations WHERE task_id=?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(before.usage.model_invocations, 0);
+    assert_eq!(before.usage.generated_token_reservations, 0);
+}
+
+#[test]
+fn investigation_compact_consent_binds_exact_manifest_across_reopen() {
+    // AC-0234/0186: matching payload alone is insufficient when a different
+    // disclosure is substituted after approval; the original starts only once.
+    let mut fixture = Fixture::new();
+    let (id, execution) = fixture.start_as(
+        "compact-cloud",
+        InvestigationProviderMode::Cloud,
+        SpecialistId::DomainAnalystV3,
+    );
+    let ledger = fixture.prepare(&id, &execution, false);
+    let pending = compact_step(&ledger);
+    let current = fixture.store.investigation(&id).unwrap();
+    let waiting = fixture
+        .store
+        .advance_investigation(
+            &execution,
+            current.summary.revision,
+            InvestigationTransition::AwaitConsent {
+                step: pending.clone(),
+            },
+        )
+        .unwrap();
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(
+        reopened.investigation_pending_step(&id).unwrap(),
+        Some((waiting.summary.revision, pending.clone(), false))
+    );
+    let approved = fixture
+        .store
+        .approve_investigation(
+            &id,
+            waiting.summary.revision,
+            &pending.step_id,
+            &pending.payload_hash,
+        )
+        .unwrap();
+    let mut substituted = pending.clone();
+    substituted.disclosure.as_mut().unwrap().facts[0].representation =
+        DisclosureRepresentation::Omitted {
+            reason: DisclosureOmissionReason::NotSelected,
+        };
+    assert!(
+        fixture
+            .store
+            .advance_investigation(
+                &execution,
+                approved.summary.revision,
+                InvestigationTransition::BeginInvocation { step: substituted }
+            )
+            .is_err()
+    );
+    assert_eq!(
+        fixture
+            .store
+            .investigation(&id)
+            .unwrap()
+            .usage
+            .model_invocations,
+        0
+    );
+    let started = fixture
+        .store
+        .advance_investigation(
+            &execution,
+            approved.summary.revision,
+            InvestigationTransition::BeginInvocation {
+                step: pending.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(started.usage.model_invocations, 1);
+    assert!(
+        fixture
+            .store
+            .advance_investigation(
+                &execution,
+                started.summary.revision,
+                InvestigationTransition::BeginInvocation { step: pending }
+            )
+            .is_err()
+    );
 }

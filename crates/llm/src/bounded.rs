@@ -129,6 +129,7 @@ pub struct BoundedEgressPreview {
 /// Only the firewall constructs this validated, redacted input. No deserializer.
 pub struct PreparedBoundedCompletion {
     preview: BoundedEgressPreview,
+    original_action_hash: String,
 }
 
 impl std::fmt::Debug for PreparedBoundedCompletion {
@@ -140,6 +141,14 @@ impl std::fmt::Debug for PreparedBoundedCompletion {
 }
 
 impl PreparedBoundedCompletion {
+    /// Bind a caller's validated acquisition to this firewall preparation even
+    /// when redaction changed the payload. This transient hash is never an
+    /// egress identity or a replacement for exact-preview consent.
+    pub fn matches_action(&self, action: &CompletionAction) -> bool {
+        original_action_hash(action, self.preview.limits.0.input_bytes)
+            .is_ok_and(|hash| hash == self.original_action_hash)
+    }
+
     pub fn preview(&self) -> &BoundedEgressPreview {
         &self.preview
     }
@@ -358,6 +367,7 @@ impl EgressFirewall {
         )?;
         let payload_hash = blake3::hash(&hash_input).to_hex().to_string();
         Ok(PreparedBoundedCompletion {
+            original_action_hash: original_action_hash(action, limits.0.input_bytes)?,
             preview: BoundedEgressPreview {
                 egress: EgressPreview {
                     provider_id: profile.provider_id.clone(),
@@ -398,6 +408,20 @@ impl EgressFirewall {
             preview: prepared.preview.clone(),
         })
     }
+}
+
+fn original_action_hash(
+    action: &CompletionAction,
+    payload_limit: u64,
+) -> Result<String, BoundedCallError> {
+    // Payload has its own existing bound; the envelope adds a bounded action ID.
+    encode(&action.payload, payload_limit, FailureCode::InputTooLarge)?;
+    let bytes = encode(
+        &("cartograph-original-bounded-action-v1", action),
+        payload_limit + 4096,
+        FailureCode::InputTooLarge,
+    )?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
 fn validate_provider(
