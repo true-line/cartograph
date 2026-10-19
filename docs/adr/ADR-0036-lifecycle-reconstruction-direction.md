@@ -135,3 +135,27 @@ and how extensibility is measured.
 - Review tiers are unchanged (ADR-0029); this file stays owner-reviewed.
 - Extends ADR-0019 (context hub, MCP/ACP) and keeps ADR-0007's integrity
   principles; supersedes nothing.
+
+## Alternatives
+
+1. Keep the staged roadmap of ADR-0007 and add lifecycle artifacts as more
+   spec-compiler outputs: rejected. Artifacts built from the current facts
+   compile empty on real input, and without content acceptance an empty or
+   thin artifact cannot be told apart from a complete one.
+2. Treat deterministic-first as a global prerequisite, finishing every
+   producer before any interpretation: rejected. Missing producers would
+   block useful, explicitly qualified reads indefinitely; recording scoped
+   coverage and stopping reasons gives the same honesty without the stall.
+3. Add a new confidence label for derived meaning: rejected. It would blur
+   tier ceilings that `core-prov` enforces. Recording the producing method
+   separately keeps the epistemic tier meaningful.
+4. Let LLM interpretations rise in tier after validation or human
+   acceptance: rejected. Acceptance is review, not evidence; the claim keeps
+   its tier and the review state is recorded beside it.
+5. Build a general agent chat, roster or pool first, as #251 and #252
+   propose: deferred, not rejected. A bounded investigation must first
+   return a cited finding with a real provider; the named specialists stay.
+6. Hand work to implementers as free-form issues: rejected as the handoff
+   unit. A versioned work packet keeps evidence, intent, acceptance and
+   return separable and reviewable; issues are rendered from it at publish
+   time.

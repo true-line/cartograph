@@ -47,7 +47,7 @@ issues that implement them.
   take to close it (unsupported extractor, missing input, unresolved
   relationship, contradictory or stale evidence, genuine product gap), is what
   the next human or agent works on.
-- **No writes to the ingested target** (NG2, ADR-0019). Work leaves the
+- **No writes to the ingested target** (NG1, ADR-0019). Work leaves the
   product as packets and issues; implementation happens in a separately
   authorized checkout and comes back through re-ingest.
 - **Determinism and provenance.** Re-ingesting the same commit and source registration with the same producers and configuration yields identical graph content; every claim
