@@ -54,10 +54,54 @@ pub struct SpecArtifact {
     pub title: String,
     /// `markdown`, `mermaid`, or `json`.
     pub format: String,
+    /// Versioned schema id, `cartograph.spec/<id>@<version>` (AC-0242).
+    pub schema: String,
+    /// Deterministic content identity of the complete artifact (AC-0242):
+    /// computed at compile time over schema, id, file name, title, format,
+    /// full content and every structured assertion, so a capped preview and
+    /// the full artifact carry the same value.
+    pub content_id: String,
     /// Complete portable artifact text.
     pub content: String,
     /// Every assertion rendered by the artifact, with inline provenance.
     pub assertions: Vec<SpecAssertion>,
+}
+
+/// Version of every artifact's schema. Bump when an artifact's structure
+/// changes; the content identity changes with it.
+pub const SPEC_ARTIFACT_SCHEMA_VERSION: u32 = 1;
+
+impl SpecArtifact {
+    /// The schema id an artifact with this id must carry.
+    pub fn expected_schema(id: &str) -> String {
+        format!("cartograph.spec/{id}@{SPEC_ARTIFACT_SCHEMA_VERSION}")
+    }
+
+    /// Recompute the content identity from the artifact's own fields.
+    pub fn compute_content_id(&self) -> String {
+        let bytes = serde_json::to_vec(&(
+            &self.schema,
+            &self.id,
+            &self.file_name,
+            &self.title,
+            &self.format,
+            &self.content,
+            &self.assertions,
+        ))
+        .expect("spec artifact serializes");
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"cartograph:spec-artifact:v1\0");
+        hasher.update(&bytes);
+        format!("spec-artifact-v1:{}", hasher.finalize().to_hex())
+    }
+
+    /// Whether schema and content identity match the artifact's fields: the
+    /// seam a consumer (export, work packet) uses to reject a stale or
+    /// altered selection.
+    pub fn verify_identity(&self) -> bool {
+        self.schema == Self::expected_schema(&self.id)
+            && self.content_id == self.compute_content_id()
+    }
 }
 
 /// Full official spec export returned to the Workbench.
@@ -272,14 +316,30 @@ fn artifact(
     assertions: Vec<SpecAssertion>,
 ) -> SpecArtifact {
     append_assertions(&mut content, &assertions);
-    SpecArtifact {
+    identified_artifact(id, file_name, title, format, content, assertions)
+}
+
+/// An artifact whose content is final, stamped with schema and identity.
+fn identified_artifact(
+    id: &str,
+    file_name: &str,
+    title: &str,
+    format: &str,
+    content: String,
+    assertions: Vec<SpecAssertion>,
+) -> SpecArtifact {
+    let mut artifact = SpecArtifact {
         id: id.into(),
         file_name: file_name.into(),
         title: title.into(),
         format: format.into(),
+        schema: SpecArtifact::expected_schema(id),
+        content_id: String::new(),
         content,
         assertions,
-    }
+    };
+    artifact.content_id = artifact.compute_content_id();
+    artifact
 }
 
 fn filter_nodes<'a>(
@@ -1455,23 +1515,23 @@ pub fn compile_spec(
             story_assertions,
         ),
         // The matrix renders its own bounded provenance table (#487).
-        SpecArtifact {
-            id: "us-tm".into(),
-            file_name: "US-TM.md".into(),
-            title: "US traceability matrix".into(),
-            format: "markdown".into(),
-            content: matrix,
-            assertions: matrix_assertions,
-        },
+        identified_artifact(
+            "us-tm",
+            "US-TM.md",
+            "US traceability matrix",
+            "markdown",
+            matrix,
+            matrix_assertions,
+        ),
         // Every matrix link by class; the assertions stay on the matrix.
-        SpecArtifact {
-            id: "us-tm-index".into(),
-            file_name: "US-TM.json".into(),
-            title: "US traceability matrix index".into(),
-            format: "json".into(),
-            content: matrix_index,
-            assertions: Vec::new(),
-        },
+        identified_artifact(
+            "us-tm-index",
+            "US-TM.json",
+            "US traceability matrix index",
+            "json",
+            matrix_index,
+            Vec::new(),
+        ),
         artifact(
             "flow-dossiers",
             "flow_dossiers.md",
@@ -1505,24 +1565,24 @@ pub fn compile_spec(
             adr_assertions,
         ),
         // The register renders its own bounded provenance table (#240).
-        SpecArtifact {
-            id: "gap-register".into(),
-            file_name: "gap_register.md".into(),
-            title: "Gap register".into(),
-            format: "markdown".into(),
-            content: gaps,
-            assertions: gap_assertions,
-        },
+        identified_artifact(
+            "gap-register",
+            "gap_register.md",
+            "Gap register",
+            "markdown",
+            gaps,
+            gap_assertions,
+        ),
         // Every register instance by class; the assertions stay on the
         // register above so they are counted once.
-        SpecArtifact {
-            id: "gap-register-index".into(),
-            file_name: "gap_register.json".into(),
-            title: "Gap register index".into(),
-            format: "json".into(),
-            content: gap_index,
-            assertions: Vec::new(),
-        },
+        identified_artifact(
+            "gap-register-index",
+            "gap_register.json",
+            "Gap register index",
+            "json",
+            gap_index,
+            Vec::new(),
+        ),
         artifact(
             "drift-register",
             "drift_register.md",
@@ -1548,23 +1608,23 @@ pub fn compile_spec(
             toolchain_assertions,
         ),
         // The inventory renders its own bounded provenance table (#487).
-        SpecArtifact {
-            id: "rule-evidence".into(),
-            file_name: "rule-evidence.md".into(),
-            title: "Source rule evidence".into(),
-            format: "markdown".into(),
-            content: rules,
-            assertions: rule_assertions,
-        },
+        identified_artifact(
+            "rule-evidence",
+            "rule-evidence.md",
+            "Source rule evidence",
+            "markdown",
+            rules,
+            rule_assertions,
+        ),
         // Every observation and relationship by source file.
-        SpecArtifact {
-            id: "rule-evidence-index".into(),
-            file_name: "rule-evidence.json".into(),
-            title: "Source rule evidence index".into(),
-            format: "json".into(),
-            content: rule_index,
-            assertions: Vec::new(),
-        },
+        identified_artifact(
+            "rule-evidence-index",
+            "rule-evidence.json",
+            "Source rule evidence index",
+            "json",
+            rule_index,
+            Vec::new(),
+        ),
     ];
     let assertion_count = artifacts
         .iter()
@@ -2647,5 +2707,135 @@ mod tests {
         }
         assert_eq!(index["links"], 36);
         assert_eq!(index["classes"].as_array().unwrap().len(), 5);
+    }
+
+    fn reorder_keys(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::Object(map) => {
+                let fields: Vec<String> = map
+                    .iter()
+                    .rev()
+                    .map(|(key, child)| {
+                        format!(
+                            "{}:{}",
+                            serde_json::to_string(key).unwrap(),
+                            reorder_keys(child)
+                        )
+                    })
+                    .collect();
+                format!("{{{}}}", fields.join(","))
+            }
+            serde_json::Value::Array(items) => {
+                let items: Vec<String> = items.iter().map(reorder_keys).collect();
+                format!("[{}]", items.join(","))
+            }
+            other => other.to_string(),
+        }
+    }
+
+    #[test]
+    fn artifacts_carry_deterministic_schema_and_content_identity() {
+        let (nodes, edges, flows) = fixture();
+        let compile = || {
+            compile_spec(
+                &nodes,
+                &edges,
+                &flows,
+                ExportMode::BestEffort,
+                &BTreeSet::new(),
+            )
+        };
+        let first = compile();
+        let second = compile();
+        assert!(!first.artifacts.is_empty());
+        let mut seen = BTreeSet::new();
+        for (a, b) in first.artifacts.iter().zip(&second.artifacts) {
+            assert_eq!(
+                a.schema,
+                format!("cartograph.spec/{}@{}", a.id, SPEC_ARTIFACT_SCHEMA_VERSION)
+            );
+            assert!(
+                a.content_id.starts_with("spec-artifact-v1:"),
+                "{}",
+                a.content_id
+            );
+            assert!(a.verify_identity(), "{} verifies", a.file_name);
+            assert_eq!(
+                a.content_id, b.content_id,
+                "{} is deterministic",
+                a.file_name
+            );
+            assert!(
+                seen.insert(a.content_id.clone()),
+                "{} identity is distinct",
+                a.file_name
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_identity_changes_with_content_assertions_or_schema() {
+        let (nodes, edges, flows) = fixture();
+        let bundle = compile_spec(
+            &nodes,
+            &edges,
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        );
+        let original = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| !artifact.assertions.is_empty())
+            .expect("an artifact with assertions")
+            .clone();
+
+        let mut content = original.clone();
+        content.content.push('\n');
+        let mut assertion = original.clone();
+        assertion.assertions[0].provenance.content_hash.push('x');
+        let mut schema = original.clone();
+        schema.schema = format!(
+            "cartograph.spec/{}@{}",
+            schema.id,
+            SPEC_ARTIFACT_SCHEMA_VERSION + 1
+        );
+        for (what, changed) in [
+            ("content", content),
+            ("assertion", assertion),
+            ("schema", schema),
+        ] {
+            assert!(
+                !changed.verify_identity(),
+                "a changed {what} fails verification"
+            );
+            assert_ne!(
+                changed.compute_content_id(),
+                original.content_id,
+                "{what} is hashed"
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_identity_survives_json_key_reordering() {
+        let (nodes, edges, flows) = fixture();
+        let bundle = compile_spec(
+            &nodes,
+            &edges,
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        );
+        for artifact in &bundle.artifacts {
+            let value = serde_json::to_value(artifact).unwrap();
+            let reordered: SpecArtifact = serde_json::from_str(&reorder_keys(&value)).unwrap();
+            assert_eq!(&reordered, artifact);
+            assert!(
+                reordered.verify_identity(),
+                "{} key order is irrelevant",
+                artifact.file_name
+            );
+        }
     }
 }

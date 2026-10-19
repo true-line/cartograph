@@ -138,6 +138,8 @@ const FAKE_SPEC: SpecBundle = {
       title: index === 0 ? 'User stories' : index === 5 ? 'Architecture decisions' : fileName,
       format: fileName.endsWith('.mmd') ? 'mermaid' : 'markdown',
       content,
+      schema: `cartograph.spec/${fileName}@1`,
+      content_id: `spec-artifact-v1:fixture-${fileName}`,
       content_truncated: false,
       content_byte_len: content.length,
       assertions,

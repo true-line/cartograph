@@ -4115,6 +4115,10 @@ struct SpecArtifactPreview {
     file_name: String,
     title: String,
     format: String,
+    /// Full artifact's schema and content identity (AC-0242), unchanged by
+    /// the preview cap.
+    schema: String,
+    content_id: String,
     content: String,
     content_truncated: bool,
     content_byte_len: usize,
@@ -4155,6 +4159,8 @@ fn preview_spec_bundle(bundle: spec::SpecBundle) -> SpecBundlePreview {
                 file_name: artifact.file_name,
                 title: artifact.title,
                 format: artifact.format,
+                schema: artifact.schema,
+                content_id: artifact.content_id,
                 content,
                 content_truncated,
                 content_byte_len,
@@ -4198,6 +4204,8 @@ fn full_artifact_preview(artifact: spec::SpecArtifact) -> SpecArtifactPreview {
         file_name: artifact.file_name,
         title: artifact.title,
         format: artifact.format,
+        schema: artifact.schema,
+        content_id: artifact.content_id,
         content: artifact.content,
         content_truncated: false,
         content_byte_len,
@@ -4596,6 +4604,8 @@ mod tests {
                 file_name: "big.md".into(),
                 title: "Big artifact".into(),
                 format: "markdown".into(),
+                schema: "cartograph.spec/artifact-1@1".into(),
+                content_id: "spec-artifact-v1:fixture".into(),
                 content: big_content,
                 assertions,
             }],
@@ -4607,6 +4617,9 @@ mod tests {
 
         let preview = super::preview_spec_bundle(bundle);
         let artifact = &preview.artifacts[0];
+        // AC-0242: the capped preview carries the full artifact's identity.
+        assert_eq!(artifact.schema, "cartograph.spec/artifact-1@1");
+        assert_eq!(artifact.content_id, "spec-artifact-v1:fixture");
         assert!(artifact.content_truncated);
         assert!(artifact.content.len() <= super::SPEC_ARTIFACT_CONTENT_PREVIEW_BYTES);
         assert_eq!(

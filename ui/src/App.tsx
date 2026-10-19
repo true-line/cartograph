@@ -32,7 +32,13 @@ import { InvestigationsSurface } from './components/InvestigationsSurface';
 import { investigationIsActive, useInvestigationStore } from './investigationStore';
 import type { InvestigationChanged } from './investigationTypes';
 import type { Job, PreflightProgress, SpecArtifact, SpecAssertion, SpecBundle } from './store';
-import { resolveArtifactForCopy, withFullArtifacts, type ReadSpecArtifact } from './specExport';
+import {
+  isSameArtifact,
+  resolveArtifactForCopy,
+  withFullArtifacts,
+  type ReadSpecArtifact,
+  type ReportSpecError,
+} from './specExport';
 
 const AtlasCanvas = lazy(() =>
   import('./components/AtlasCanvas').then(({ AtlasCanvas: Component }) => ({
@@ -50,12 +56,20 @@ const SpecWorkbench = lazy(() =>
   })),
 );
 
+/** Surfaces a refused export or copy (e.g. a stale artifact identity) in
+ *  the Workbench's error banner. */
+const reportSpecError: ReportSpecError = (message) => useAppStore.setState({ specError: message });
+
 /** Exports the bundle, or aborts (leaving `specError` for the Workbench to
  *  show) if any truncated artifact's full content couldn't be fetched — see
  *  `withFullArtifacts` in `specExport.ts`. Never downloads a file built from
  *  capped previews. */
-async function exportSpecBundle(bundle: SpecBundle, readSpecArtifact: ReadSpecArtifact) {
-  const artifacts = await withFullArtifacts(bundle.artifacts, readSpecArtifact);
+async function exportSpecBundle(
+  bundle: SpecBundle,
+  readSpecArtifact: ReadSpecArtifact,
+  reportError: ReportSpecError,
+) {
+  const artifacts = await withFullArtifacts(bundle.artifacts, readSpecArtifact, reportError);
   if (artifacts === null) return;
   const files = Object.fromEntries(artifacts.map((artifact) => [artifact.file_name, artifact.content]));
   const blob = new Blob([JSON.stringify({ ...bundle, artifacts, files }, null, 2)], {
@@ -73,8 +87,12 @@ async function exportSpecBundle(bundle: SpecBundle, readSpecArtifact: ReadSpecAr
  *  Workbench to show) if the on-demand full fetch failed — see
  *  `resolveArtifactForCopy` in `specExport.ts`. Never copies the capped
  *  preview in its place. */
-async function copySpecArtifact(artifact: SpecArtifact, readSpecArtifact: ReadSpecArtifact) {
-  const full = await resolveArtifactForCopy(artifact, readSpecArtifact);
+async function copySpecArtifact(
+  artifact: SpecArtifact,
+  readSpecArtifact: ReadSpecArtifact,
+  reportError: ReportSpecError,
+) {
+  const full = await resolveArtifactForCopy(artifact, readSpecArtifact, reportError);
   if (full === null) return;
   void navigator.clipboard?.writeText(full.content);
 }
@@ -393,7 +411,11 @@ export default function App() {
     if (truncated.length === 0) return;
     let cancelled = false;
     void Promise.all(
-      truncated.map(async (artifact) => [artifact.id, await readSpecArtifact(artifact.id)] as const),
+      truncated.map(async (artifact) => {
+        const full = await readSpecArtifact(artifact.id);
+        // AC-0242: never show register rows from a different compilation.
+        return [artifact.id, full && isSameArtifact(artifact, full) ? full : null] as const;
+      }),
     ).then((results) => {
       if (cancelled) return;
       setFullRegisterAssertions((current) => {
@@ -525,8 +547,8 @@ export default function App() {
               onCurate={(assertion, decision, note) =>
                 void curateAssertion(assertion, decision, note)
               }
-              onCopyArtifact={(artifact) => void copySpecArtifact(artifact, readSpecArtifact)}
-              onExportBundle={(bundle) => void exportSpecBundle(bundle, readSpecArtifact)}
+              onCopyArtifact={(artifact) => void copySpecArtifact(artifact, readSpecArtifact, reportSpecError)}
+              onExportBundle={(bundle) => void exportSpecBundle(bundle, readSpecArtifact, reportSpecError)}
             />
           </Suspense>
         );

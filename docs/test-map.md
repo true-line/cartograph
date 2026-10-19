@@ -254,7 +254,7 @@ exists, not that its AC or delivery gate has passed.
 | T-0239 | AC-0239 | reserved | — | qualified interpretation under recorded limits (ROADMAP W1) |
 | T-0240 | AC-0240 | reserved | — | cross-repo stitching on binding evidence (ROADMAP W2) |
 | T-0241 | AC-0241 | reserved | — | unbound cross-repo calls stay Gaps (ROADMAP W2) |
-| T-0242 | AC-0242 | reserved | — | artifact schema and content identity (ROADMAP W3) |
+| T-0242 | AC-0242 | rust | spec::artifacts_carry_deterministic_schema_and_content_identity, spec::artifact_identity_changes_with_content_assertions_or_schema, spec::artifact_identity_survives_json_key_reordering, app::preview_spec_bundle_caps_content_and_assertions_but_keeps_totals | artifact schema and content identity (#586, ROADMAP W3); UI: `ui/src/specExport.test.ts` identity guards on copy and export |
 | T-0243 | AC-0243 | reserved | — | content acceptance with partial artifacts (ROADMAP W3) |
 | T-0244 | AC-0244 | reserved | — | method recorded apart from tier (ROADMAP W3) |
 | T-0245 | AC-0245 | reserved | — | qualified test links (ROADMAP W3) |

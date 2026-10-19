@@ -42,6 +42,8 @@ const BUNDLE = {
     title: fileName,
     format: 'markdown' as const,
     content: `# ${fileName}`,
+    schema: `cartograph.spec/${fileName}@1`,
+    content_id: `spec-artifact-v1:fixture-${fileName}`,
     content_truncated: false,
     content_byte_len: `# ${fileName}`.length,
     assertions: [],
