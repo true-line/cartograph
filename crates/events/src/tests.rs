@@ -770,7 +770,7 @@ fn eventbridge_literal_neighbour_in_same_file_blocks_file_only_attribution() {
     assert_eq!(report.channel_gaps_resolved, 0);
     assert_eq!(
         eb_gap(&out).props["t1_reason"],
-        "source attribution ambiguous: 2 EventBridge sites in pub.ts"
+        "source attribution ambiguous: an observed code path matches 2 EventBridge sites"
     );
 }
 
@@ -865,4 +865,66 @@ fn eventbridge_batched_site_still_preserves_observed_bus() {
         serde_json::json!([bus_id])
     );
     assert!(out.nodes.iter().any(|n| n.id == bus_id));
+}
+
+#[test]
+fn eventbridge_suffix_aliasing_files_keep_both_gaps() {
+    // Codex re-review on #599: `publish.ts` and `src/publish.ts` both match
+    // `/srv/shop/src/publish.ts` by suffix, so one span proves neither.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("publish.ts"), EB_SITE).unwrap();
+    std::fs::write(dir.path().join("src/publish.ts"), EB_SITE).unwrap();
+    let mut out = stitch_dir(dir.path());
+    let span: &[(&str, &str)] = &[
+        EB,
+        ("code.file.path", "/srv/shop/src/publish.ts"),
+        ("messaging.destination.name", "orders"),
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+    ];
+    let trace = dynamic::parse_otlp_jsonl(&otlp(&[("s1", span)])).unwrap();
+    let report = dynamic::apply_trace(&mut out.nodes, &mut out.edges, &trace, "trace.jsonl");
+    assert_eq!(report.channel_gaps_resolved, 0);
+    let gaps: Vec<_> = out.nodes.iter().filter(|n| n.label == "Gap").collect();
+    assert_eq!(gaps.len(), 2);
+    for gap in gaps {
+        assert_eq!(
+            gap.props["t1_reason"],
+            "source attribution ambiguous: an observed code path matches 2 EventBridge sites"
+        );
+    }
+}
+
+#[test]
+fn eventbridge_same_path_in_two_repos_is_not_unique_attribution() {
+    // Codex re-review on #599: repository identity is part of the site, so
+    // identical paths and offsets in two repos never collapse into one site.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pub.ts"), EB_SITE).unwrap();
+    let sites = extract_sites(dir.path());
+    let cfg = ConfigIndex::default();
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    for repo in ["shop", "billing"] {
+        let out = stitch(
+            &sites,
+            &cfg,
+            &SourceId {
+                repo,
+                commit: "deadbeef",
+            },
+        );
+        nodes.extend(out.nodes);
+        edges.extend(out.edges);
+    }
+    let span: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        ("messaging.destination.name", "orders"),
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+    ];
+    let trace = dynamic::parse_otlp_jsonl(&otlp(&[("s1", span)])).unwrap();
+    let report = dynamic::apply_trace(&mut nodes, &mut edges, &trace, "trace.jsonl");
+    assert_eq!(report.channel_gaps_resolved, 0);
+    assert_eq!(report.channel_gaps_unresolved, 2);
 }

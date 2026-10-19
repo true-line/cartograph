@@ -53,9 +53,13 @@ struct Identity {
     detail_type: String,
 }
 
+/// One source site: repository, repo-relative path and byte offset. Sites
+/// in different repositories never collapse, even at the same path.
+type SiteKey = (String, String, Option<u64>);
+
 /// What the source site's T0 facts establish.
 struct StaticSite {
-    path: String,
+    key: SiteKey,
     raw: String,
     bus: Option<String>,
     detail_template: Option<Vec<String>>,
@@ -205,8 +209,12 @@ fn static_site(node: &Node) -> Option<StaticSite> {
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let mut key = evidence_site(&node.props)?;
+    if key.1.is_empty() {
+        key.1 = gap_source_path(node)?.to_string();
+    }
     Some(StaticSite {
-        path: gap_source_path(node)?.to_string(),
+        key,
         bus: node
             .props
             .pointer("/components/bus")
@@ -261,7 +269,7 @@ struct Filled<'a> {
 fn decide<'a>(
     site: &StaticSite,
     spans: &[Seen<'a>],
-    sites_in_path: usize,
+    sites: &BTreeSet<SiteKey>,
 ) -> Result<Filled<'a>, Kept<'a>> {
     let kept = |reason: String| Kept {
         reason,
@@ -274,16 +282,30 @@ fn decide<'a>(
         .iter()
         .copied()
         .filter(|seen| {
-            attr_str(seen.span, CODE_PATH_ATTRS).is_some_and(|path| paths_match(path, &site.path))
+            attr_str(seen.span, CODE_PATH_ATTRS).is_some_and(|path| paths_match(path, &site.key.1))
         })
         .collect();
     if attributed.is_empty() {
         return Err(kept("source attribution missing".into()));
     }
-    if sites_in_path > 1 {
+    // A span is attributed to this site only when its code path matches no
+    // other EventBridge site under the same suffix rule: another file whose
+    // path is also a suffix, the same path in another repository, or another
+    // site in the same file all make it ambiguous.
+    let widest = attributed
+        .iter()
+        .map(|seen| {
+            let path = attr_str(seen.span, CODE_PATH_ATTRS).unwrap_or_default();
+            sites
+                .iter()
+                .filter(|other| paths_match(path, &other.1))
+                .count()
+        })
+        .max()
+        .unwrap_or(1);
+    if widest > 1 {
         return Err(kept(format!(
-            "source attribution ambiguous: {sites_in_path} EventBridge sites in {}",
-            site.path
+            "source attribution ambiguous: an observed code path matches {widest} EventBridge sites"
         )));
     }
     // From here every attributed span belongs to this site, so its bus is
@@ -376,9 +398,14 @@ fn observed(span: &ObservedSpan) -> serde_json::Value {
     })
 }
 
-fn evidence_site(props: &serde_json::Value) -> Option<(String, Option<u64>)> {
+fn evidence_site(props: &serde_json::Value) -> Option<SiteKey> {
     let evidence = props.pointer("/prov/evidence/0")?;
     Some((
+        evidence
+            .get("repo")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         evidence.get("path")?.as_str()?.to_string(),
         evidence
             .get("byte_start")
@@ -386,14 +413,14 @@ fn evidence_site(props: &serde_json::Value) -> Option<(String, Option<u64>)> {
     ))
 }
 
-/// EventBridge sites per source file: the Gaps plus literal sites already
+/// Every EventBridge source site: the Gaps plus literal sites already
 /// confirmed at T0, whose spans would otherwise look attributed to a
 /// neighbouring Gap.
-fn sites_per_path(
+fn eventbridge_sites(
     nodes: &[Node],
     edges: &[Edge],
     gap_ids: &BTreeSet<&str>,
-) -> BTreeMap<String, usize> {
+) -> BTreeSet<SiteKey> {
     let t0_channels: BTreeSet<&str> = nodes
         .iter()
         .filter(|node| {
@@ -402,7 +429,7 @@ fn sites_per_path(
         })
         .map(|node| node.id.as_str())
         .collect();
-    let mut sites = BTreeSet::<(String, Option<u64>)>::new();
+    let mut sites = BTreeSet::<SiteKey>::new();
     for node in nodes
         .iter()
         .filter(|node| gap_ids.contains(node.id.as_str()))
@@ -419,11 +446,7 @@ fn sites_per_path(
     }) {
         sites.extend(evidence_site(&edge.props));
     }
-    let mut per_path = BTreeMap::<String, usize>::new();
-    for (path, _) in sites {
-        *per_path.entry(path).or_default() += 1;
-    }
-    per_path
+    sites
 }
 
 /// Apply EventBridge observations from every trace file at once, so the
@@ -446,7 +469,8 @@ pub(crate) fn apply(
         return (0, 0);
     }
     let gap_ids: BTreeSet<&str> = gaps.iter().map(|(id, _)| id.as_str()).collect();
-    let per_path = sites_per_path(nodes, edges, &gap_ids);
+    let mut sites = eventbridge_sites(nodes, edges, &gap_ids);
+    sites.extend(gaps.iter().map(|(_, site)| site.key.clone()));
     let spans: Vec<Seen> = traces
         .iter()
         .flat_map(|(trace, trace_path)| {
@@ -462,8 +486,7 @@ pub(crate) fn apply(
     let mut new_nodes = BTreeMap::<String, Node>::new();
 
     for (gap_id, site) in &gaps {
-        let sites_in_path = per_path.get(&site.path).copied().unwrap_or(1);
-        match decide(site, &spans, sites_in_path) {
+        match decide(site, &spans, &sites) {
             Ok(filled) => {
                 let channel_id = filled.identity.channel_id();
                 let seen = filled.seen;
