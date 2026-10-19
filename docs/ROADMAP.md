@@ -4,10 +4,11 @@ Status: proposed in [#572](https://github.com/true-line/cartograph/issues/572)
 for owner review. Direction: [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md).
 Vision elements V1–V9: [VISION.md](VISION.md). Baseline: `main` at `cb0e876` (v0.15.5).
 
-This plan was agreed between the two implementation agents (Claude for core
-recovery and lifecycle artifacts, Codex for the agentic layer), each reviewing
-the other's half. It authorizes no implementation by itself: every item below
-lands through its own scoped issue and pull request.
+The decisions in section 3 were agreed between the two implementation agents
+(Claude for core recovery and lifecycle artifacts, Codex for the agentic
+layer). This document is the proposed roadmap built on them, under cross-review
+in #574. It authorizes no implementation by itself: every item below lands
+through its own scoped issue and pull request.
 
 ## 1. North star and how it is measured
 
@@ -93,13 +94,17 @@ target test recovery and skills.
 
 | Phase | Content | Demo that ends it |
 |-------|---------|-------------------|
-| P0 | W0 contracts; #573 fixed | Reviewers can point at one schema per artifact and one omission class per Gap |
+| P0 | W0 contracts | Reviewers can point at one schema per artifact and one omission class per Gap |
 | P1 | W1, W2 on the synthetic multi-repo fixture; W3 on Vendure cart readiness; W9 matrix | Drop the fixture, see stitched calls and a coverage matrix; open the cart-readiness use case with its decision table and partial markers |
 | P2 | W5 curated projection; W4 views | Accept a proposal, see it in the Workbench, the export and an agent read with the same curated revision |
 | P3 | W6 packets; W7 compact investigation and discovery | Ask a scoped question, get a cited finding and an auditor follow-up, turn a gap into a reviewed packet |
 | P4 | W8 MCP and ACP | An external agent reads the same context and runs the same bounded task |
 | P5 | The north-star cycle on the owner's real pilot app | The full cycle in section 1, with its measurements recorded |
 
+Phases are ordered by dependency, not as a waterfall. Recovered-only work
+packets (AP-1a) and compact disclosure (AP-2a) can progress before the curated
+projection lands, and target-test recovery runs in parallel throughout. #573 is
+a separate correctness fix whose evidence the W2 stitching demo must include.
 P1 runs on the synthetic fixture until the owner names the real pilot. Nothing
 in P1–P4 waits on that answer; P5 does.
 

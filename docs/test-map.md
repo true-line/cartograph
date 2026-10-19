@@ -249,7 +249,7 @@ exists, not that its AC or delivery gate has passed.
 | T-0234 | AC-0234 | reserved | — | per-invocation disclosure manifest (AP-2a, #256 slice) |
 | T-0235 | AC-0235 | reserved | — | undisclosed-source citation rejection (AP-2a) |
 | T-0236 | AC-0236 | reserved | — | matched compact/baseline measurement (AP-2a) |
-| T-0237 | AC-0237 | reserved | — | drop intake (ROADMAP W1) |
+| T-0237 | AC-0237 | reserved | — | drop intake with per-folder outcomes (ROADMAP W1) |
 | T-0238 | AC-0238 | reserved | — | coverage inventory and stopping reasons (ROADMAP W1) |
 | T-0239 | AC-0239 | reserved | — | qualified interpretation under recorded limits (ROADMAP W1) |
 | T-0240 | AC-0240 | reserved | — | cross-repo stitching on binding evidence (ROADMAP W2) |
@@ -261,7 +261,7 @@ exists, not that its AC or delivery gate has passed.
 | T-0246 | AC-0246 | reserved | — | rendered views (ROADMAP W4) |
 | T-0247 | AC-0247 | reserved | — | view evidence links (ROADMAP W4) |
 | T-0248 | AC-0248 | reserved | — | packet canonical identity (AP-1a, ROADMAP W6) |
-| T-0249 | AC-0249 | reserved | — | packet omissions and status dimensions (AP-1a) |
+| T-0249 | AC-0249 | reserved | — | packet omissions, status dimensions and distinguishable conflicting or stale interpretations (AP-1a, recovered-only; curated cases are H3-dependent) |
 | T-0250 | AC-0250 | reserved | — | conflict-safe packet review (AP-1a) |
 | T-0251 | AC-0251 | reserved | — | embedded instructions stay data (AP-1a) |
 | T-0252 | AC-0252 | reserved | — | equivalent UI and export packet (AP-1a) |

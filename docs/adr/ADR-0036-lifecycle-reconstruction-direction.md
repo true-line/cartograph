@@ -23,9 +23,10 @@ TypeScript. Terraform/AWS, Pulumi and OpenTelemetry feed the IaC and dynamic
 tiers; the semantic tier is eval-gated and ephemeral; a bounded T3 broker and
 durable specialists exist behind per-step consent. The spec compiler emits its
 artifacts, but no producer outside `crates/spec` creates Capability,
-BusinessFlow, DomainEntity or Actor claims, so user stories and journeys
-compile empty while BusinessRule guarded-exit observations, ADR recovery and
-technical flow tracing (every hop Confirmed, no business journey) do exist.
+BusinessFlow, DomainEntity or Actor claims, so recovered user stories lack
+Capability facts and journey recovery is absent. BusinessRule guarded-exit
+observations, ADR recovery and technical flow tracing (with confirmed, inferred
+and explicit Gap hops) do exist.
 Cross-repo HTTP stitching is deferred; the plugin ABI is single-file
 extraction; no MCP, ACP or socket server exists in product code; the
 specialist loop re-serializes its whole ledger on every invocation; of the

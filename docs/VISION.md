@@ -26,7 +26,7 @@ issues that implement them.
 | Id | Element |
 |----|---------|
 | V1 | **Ingest unit.** An app, a set of repos, or one repo, dragged in; everything below is reconstructed from it. |
-| V2 | **Deterministic-first.** Everything tooling can gather is gathered before any embedding, graph inference or model phase; the semantic and agentic tiers fill what remains and say so. |
+| V2 | **Deterministic-first.** For a declared question and revision, every applicable and available deterministic and observational acquisition runs first, and its coverage, missing inputs and stopping reasons are recorded; unavailable acquisition does not block a qualified read, and the semantic and agentic tiers fill what remains and say so. |
 | V3 | **Embeddings and a knowledge graph** built on those deterministic facts, as retrieval indexes and labeled inference aids, never as a substitute for them. |
 | V4 | **Work back through the lifecycle.** Journeys and use-case planning, documentation and architecture, test arrangements and validation: reconstruct the typical artifacts of an enterprise or consumer app. |
 | V5 | **Visualize the flows** and the roles the infrastructure plays in them. |
@@ -50,7 +50,7 @@ issues that implement them.
 - **No writes to the ingested target** (NG2, ADR-0019). Work leaves the
   product as packets and issues; implementation happens in a separately
   authorized checkout and comes back through re-ingest.
-- **Determinism and provenance.** Re-ingest is byte-identical; every claim
+- **Determinism and provenance.** Re-ingesting the same commit and source registration with the same producers and configuration yields identical graph content; every claim
   cites revision-bound evidence.
 
 ## How the thesis evolved
