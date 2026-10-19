@@ -297,6 +297,23 @@ struct StageContent {
     context_status: ContextStatus,
 }
 
+/// The rebuilt proposal carries no method; take the staged one's model, or
+/// none for legacy proposals. A broker proposal is never staged as a rule or
+/// human fact (AC-0244).
+fn with_recorded_method(
+    mut validated: AgentProposal,
+    proposal: &AgentProposal,
+) -> Result<AgentProposal, StagingError> {
+    if !matches!(
+        proposal.provenance.method,
+        core_prov::ProducingMethod::Model { .. } | core_prov::ProducingMethod::Unrecorded
+    ) {
+        return Err(StagingError::InvalidRecord);
+    }
+    validated.provenance.method = proposal.provenance.method.clone();
+    Ok(validated)
+}
+
 impl StageContent {
     fn build(
         task: &AgentTask,
@@ -318,13 +335,16 @@ impl StageContent {
         let citations = match_citations(task, proposal).ok_or_else(|| {
             AgentError::Integrity("proposal citations do not match the host task".into())
         })?;
-        let validated = broker.validate_response(
-            task,
-            RawProposal {
-                target_id: proposal.target_id.clone(),
-                annotation: proposal.annotation.clone(),
-                citations,
-            },
+        let validated = with_recorded_method(
+            broker.validate_response(
+                task,
+                RawProposal {
+                    target_id: proposal.target_id.clone(),
+                    annotation: proposal.annotation.clone(),
+                    citations,
+                },
+            )?,
+            proposal,
         )?;
         if &validated != proposal {
             return Err(AgentError::Integrity(
@@ -491,14 +511,17 @@ impl StageContentV2 {
         reject_annotation_replay(task.task(), &proposal.annotation)?;
         let citations =
             match_citations(task.task(), proposal).ok_or(StagingError::InvalidRecord)?;
-        let validated = broker.validate_response_with_basis(
-            task.task(),
-            RawProposal {
-                target_id: proposal.target_id.clone(),
-                annotation: proposal.annotation.clone(),
-                citations,
-            },
-            task.basis_hash()?,
+        let validated = with_recorded_method(
+            broker.validate_response_with_basis(
+                task.task(),
+                RawProposal {
+                    target_id: proposal.target_id.clone(),
+                    annotation: proposal.annotation.clone(),
+                    citations,
+                },
+                task.basis_hash()?,
+            )?,
+            proposal,
         )?;
         if validated != *proposal {
             return Err(StagingError::InvalidRecord);

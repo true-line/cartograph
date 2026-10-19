@@ -48,12 +48,23 @@ export interface EvidenceRef {
 
 export type Tier = 'Confirmed' | 'InferredStrong' | 'InferredWeak' | 'Gap';
 
+/**
+ * How a fact was produced (AC-0244), separate from tier and confidence.
+ * Absent on the wire for legacy facts and producers that record none.
+ */
+export type ProducingMethod =
+  | { kind: 'rule'; rule: string; version: string }
+  | { kind: 'model'; model: string }
+  | { kind: 'human'; actor: string }
+  | { kind: 'unrecorded' };
+
 export interface Provenance {
   tier: string;
   confidence_tier: Tier;
   evidence: EvidenceRef[];
   extractor_id: string;
   content_hash: string;
+  method?: ProducingMethod;
 }
 
 /** A graph node as returned by the core (props schema varies by label). */

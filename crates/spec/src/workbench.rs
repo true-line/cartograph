@@ -256,7 +256,7 @@ fn hop_assertion(flow: &Flow, hop: &Hop, index: usize) -> SpecAssertion {
     }
 }
 
-fn markdown_safe(value: &str) -> String {
+pub(crate) fn markdown_safe(value: &str) -> String {
     value.replace('|', "\\|").replace(['\r', '\n'], " ")
 }
 
@@ -288,17 +288,18 @@ pub(crate) fn append_assertions(content: &mut String, assertions: &[SpecAssertio
         return;
     }
     content.push_str(
-        "| Assertion | Tier | Confidence | Evidence | Extractor | Content hash |\n\
-         |---|---|---|---|---|---|\n",
+        "| Assertion | Tier | Confidence | Method | Evidence | Extractor | Content hash |\n\
+         |---|---|---|---|---|---|---|\n",
     );
     for assertion in assertions {
         let provenance = &assertion.provenance;
         writeln!(
             content,
-            "| {} | {:?} | {:?} | {} | `{}` | `{}` |",
+            "| {} | {:?} | {:?} | {} | {} | `{}` | `{}` |",
             markdown_safe(&assertion.summary),
             provenance.tier,
             provenance.confidence_tier,
+            markdown_safe(&provenance.method.label()),
             markdown_safe(&evidence_text(provenance)),
             markdown_safe(&provenance.extractor_id),
             markdown_safe(&provenance.content_hash),
@@ -693,7 +694,8 @@ fn projection_gap(hop: &Hop, reason: &str) -> Hop {
         "spec.projection-gap",
         &canonical,
     )
-    .expect("Gap is within the deterministic confidence ceiling");
+    .expect("Gap is within the deterministic confidence ceiling")
+    .with_method(crate::spec_rule("spec.projection-gap"));
     Hop {
         label: "UNRESOLVED".into(),
         src: hop.src.clone(),
@@ -2707,6 +2709,35 @@ mod tests {
         }
         assert_eq!(index["links"], 36);
         assert_eq!(index["classes"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn exports_show_producing_method_beside_tier_and_confidence() {
+        // AC-0244 (T-0244): exported assertions carry a Method column; facts
+        // without a recorded method say so explicitly.
+        let (nodes, edges, flows) = fixture();
+        let bundle = compile_spec(
+            &nodes,
+            &edges,
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        );
+        let table = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| {
+                artifact
+                    .content
+                    .contains("## Assertions and inline provenance")
+            })
+            .expect("an artifact with inline provenance");
+        assert!(
+            table
+                .content
+                .contains("| Assertion | Tier | Confidence | Method | Evidence |")
+        );
+        assert!(table.content.contains("| not recorded |"));
     }
 
     fn reorder_keys(value: &serde_json::Value) -> String {

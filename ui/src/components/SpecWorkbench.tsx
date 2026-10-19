@@ -8,7 +8,7 @@ import type {
   SpecExportMode,
   Tier,
 } from '../store';
-import { TierBadge } from './TierBadge';
+import { TierBadge, methodLabel } from './TierBadge';
 
 export interface SpecWorkbenchProps {
   bundle: SpecBundle | null;
@@ -270,10 +270,11 @@ export function SpecWorkbench({
                                 <p className="eyebrow">{assertion.subject_kind}</p>
                                 <strong>{assertion.summary}</strong>
                               </div>
-                              <TierBadge tier={provenance.confidence_tier} />
+                              <TierBadge tier={provenance.confidence_tier} provenance={provenance} />
                             </div>
                             <dl className="spec-provenance">
                               <div><dt>Producer</dt><dd>{provenance.tier}</dd></div>
+                              <div><dt>Method</dt><dd>{methodLabel(provenance.method)}</dd></div>
                               <div><dt>Extractor</dt><dd><code>{provenance.extractor_id}</code></dd></div>
                               <div className="wide"><dt>Content hash</dt><dd><code>{provenance.content_hash}</code></dd></div>
                               <div className="wide">

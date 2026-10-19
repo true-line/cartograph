@@ -123,7 +123,7 @@ export function EvidencePanel({
           <p className="evidence-kicker">Evidence · read-only</p>
           <h2>{String(name)}</h2>
         </div>
-        {prov && <TierBadge tier={prov.confidence_tier} />}
+        {prov && <TierBadge tier={prov.confidence_tier} provenance={prov} />}
         <button type="button" aria-label="Close evidence" onClick={onClose}>
           ✕
         </button>

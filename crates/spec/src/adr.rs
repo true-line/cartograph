@@ -177,7 +177,8 @@ pub fn extract_found_adrs(
                 .expect("ADR identity serializes")
                 .as_slice(),
         )
-        .expect("Confirmed is within the deterministic confidence ceiling");
+        .expect("Confirmed is within the deterministic confidence ceiling")
+        .with_method(crate::spec_rule(FOUND_ADR_EXTRACTOR_ID));
         let forbids = list_field(&markdown, "Forbids")
             .into_iter()
             .filter(|label| {
@@ -222,7 +223,8 @@ pub fn extract_found_adrs(
                 FOUND_ADR_EXTRACTOR_ID,
                 format!("{adr_id} DECIDES {target}").as_bytes(),
             )
-            .expect("Confirmed is within the deterministic confidence ceiling");
+            .expect("Confirmed is within the deterministic confidence ceiling")
+            .with_method(crate::spec_rule(FOUND_ADR_EXTRACTOR_ID));
             facts.edges.push(Edge {
                 src: adr_id.clone(),
                 dst: target,
@@ -344,7 +346,8 @@ fn recovered_adrs(nodes: &[Node], edges: &[Edge]) -> AdrFacts {
             RECOVERED_ADR_EXTRACTOR_ID,
             &canonical,
         )
-        .expect("recovered confidence is within the semantic confidence ceiling");
+        .expect("recovered confidence is within the semantic confidence ceiling")
+        .with_method(crate::spec_rule(RECOVERED_ADR_EXTRACTOR_ID));
         facts.nodes.push(Node {
             id: adr_id.clone(),
             label: "ADR".into(),
@@ -364,7 +367,8 @@ fn recovered_adrs(nodes: &[Node], edges: &[Edge]) -> AdrFacts {
             RECOVERED_ADR_EXTRACTOR_ID,
             format!("{adr_id} DECIDES {}", channel.id).as_bytes(),
         )
-        .expect("recovered confidence is within the semantic confidence ceiling");
+        .expect("recovered confidence is within the semantic confidence ceiling")
+        .with_method(crate::spec_rule(RECOVERED_ADR_EXTRACTOR_ID));
         facts.edges.push(Edge {
             src: adr_id,
             dst: channel.id.clone(),
@@ -439,19 +443,21 @@ fn drift_facts(nodes: &[Node], edges: &[Edge], flows: &[Flow]) -> AdrFacts {
                 ConfidenceTier::InferredStrong | ConfidenceTier::InferredWeak => Tier::Semantic,
                 ConfidenceTier::Gap => unreachable!("gap facts were filtered above"),
             };
+            let drift_extractor = match drift_tier {
+                Tier::Deterministic => "t0.adr-drift",
+                Tier::Dynamic => "t1.adr-drift",
+                Tier::Semantic => "t2.adr-drift",
+                Tier::Agentic => "t3.adr-drift",
+            };
             let provenance = Provenance::new(
                 drift_tier,
                 edge_provenance.confidence_tier,
                 cited,
-                match drift_tier {
-                    Tier::Deterministic => "t0.adr-drift",
-                    Tier::Dynamic => "t1.adr-drift",
-                    Tier::Semantic => "t2.adr-drift",
-                    Tier::Agentic => "t3.adr-drift",
-                },
+                drift_extractor,
                 &canonical,
             )
-            .expect("Drift retains the offending fact confidence ceiling");
+            .expect("Drift retains the offending fact confidence ceiling")
+            .with_method(crate::spec_rule(drift_extractor));
             facts.nodes.push(Node {
                 id: drift_id.clone(),
                 label: "Drift".into(),
@@ -652,11 +658,24 @@ mod tests {
             .unwrap();
         assert_eq!(recovered.props["prov"]["tier"], "Semantic");
         assert_eq!(recovered.props["prov"]["confidence_tier"], "InferredStrong");
+        // AC-0244 (#601 review): a rule-derived semantic candidate names its
+        // versioned rule as the producing method, apart from tier.
+        assert_eq!(
+            recovered.props["prov"]["method"],
+            serde_json::json!({"kind": "rule", "rule": RECOVERED_ADR_EXTRACTOR_ID, "version": crate::SPEC_RULE_VERSION})
+        );
+        let decides = facts
+            .edges
+            .iter()
+            .find(|edge| edge.src == recovered.id && edge.label == "DECIDES")
+            .unwrap();
+        assert_eq!(decides.props["prov"]["method"]["kind"], "rule");
         let drift = facts
             .nodes
             .iter()
             .find(|node| node.label == "Drift")
             .unwrap();
+        assert_eq!(drift.props["prov"]["method"]["rule"], "t0.adr-drift");
         assert_eq!(
             drift.props["offending_edge"],
             "sym:handler CALLS sym:remote"

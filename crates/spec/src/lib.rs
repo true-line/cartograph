@@ -11,6 +11,19 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 mod adr;
+
+/// Version of the spec compiler's projection rules, recorded with every
+/// rule-derived statement's producing method (AC-0244). Bump when a rule's
+/// output changes for the same input.
+pub const SPEC_RULE_VERSION: &str = "1";
+
+/// The producing method of a statement derived by the named spec rule.
+pub(crate) fn spec_rule(rule: &str) -> core_prov::ProducingMethod {
+    core_prov::ProducingMethod::Rule {
+        rule: rule.into(),
+        version: SPEC_RULE_VERSION.into(),
+    }
+}
 mod rules;
 mod security;
 mod workbench;
@@ -206,8 +219,12 @@ pub fn flow_dossier(flows: &[Flow]) -> String {
         out.push_str("```\n");
 
         // Provenance table (R-INT-2: tier + confidence on every hop).
-        out.push_str("\n| # | Hop | Tier | Confidence | Evidence | Extractor | Content hash |\n");
-        out.push_str("|---|-----|------|------------|----------|-----------|--------------|\n");
+        out.push_str(
+            "\n| # | Hop | Tier | Confidence | Method | Evidence | Extractor | Content hash |\n",
+        );
+        out.push_str(
+            "|---|-----|------|------------|--------|----------|-----------|--------------|\n",
+        );
         for (i, hop) in flow.hops.iter().enumerate() {
             let evidence = if hop.provenance.evidence.is_empty() {
                 "—".into()
@@ -230,13 +247,14 @@ pub fn flow_dossier(flows: &[Flow]) -> String {
             };
             writeln!(
                 out,
-                "| {} | {} `{}` → `{}` | {} | {} | {} | `{}` | `{}` |",
+                "| {} | {} `{}` → `{}` | {} | {} | {} | {} | `{}` | `{}` |",
                 i + 1,
                 hop.label,
                 hop.src,
                 hop.dst,
                 hop.tier,
                 hop.confidence,
+                workbench::markdown_safe(&hop.provenance.method.label()),
                 evidence,
                 hop.provenance.extractor_id,
                 hop.provenance.content_hash,
@@ -372,10 +390,37 @@ mod tests {
         // Confirmed hops are solid, Gap hops visibly broken (R-INT-4).
         assert!(dossier.contains("p0->>p1: HANDLES [Confirmed]"));
         assert!(dossier.contains("p1--xp2: PUBLISHES [Gap]"));
-        // Provenance table carries tier + confidence + evidence (R-INT-2).
-        assert!(dossier.contains("| 1 | HANDLES `ep:GET:/users` → `sym:app.ts#list` | Deterministic | Confirmed | local/test:src/app.ts bytes 1..9 @ abc123 | `spec.test` |"));
+        // Provenance table carries tier + confidence + method + evidence
+        // (R-INT-2, AC-0244: a fact without a method says so).
+        assert!(dossier.contains("| 1 | HANDLES `ep:GET:/users` → `sym:app.ts#list` | Deterministic | Confirmed | not recorded | local/test:src/app.ts bytes 1..9 @ abc123 | `spec.test` |"));
         // Deterministic (US-0014).
         assert_eq!(dossier, flow_dossier(&flows));
+    }
+
+    #[test]
+    fn flow_dossier_escapes_the_producing_method_cell() {
+        // AC-0244 (#601 review): a method label cannot break the table.
+        let mut handles = hop("HANDLES", "ep:GET:/users", "sym:app.ts#list", "Confirmed");
+        handles.provenance.method = core_prov::ProducingMethod::Rule {
+            rule: "split|rule\nnext".into(),
+            version: "1".into(),
+        };
+        let flows = vec![Flow {
+            trigger: "ep:GET:/users".into(),
+            trigger_kind: "Endpoint".into(),
+            trigger_name: "GET /users".into(),
+            hops: vec![handles],
+            status: flowtracer::FlowStatus::Partial,
+            score: 0.5,
+            depth_limited: false,
+        }];
+        let dossier = flow_dossier(&flows);
+        let row = dossier
+            .lines()
+            .find(|line| line.starts_with("| 1 | HANDLES"))
+            .expect("hop row");
+        assert!(row.contains("| rule split\\|rule next@1 |"), "{row}");
+        assert!(!dossier.contains("rule\nnext"));
     }
 
     #[test]

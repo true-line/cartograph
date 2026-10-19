@@ -264,6 +264,17 @@ pub trait LlmProvider: Send + Sync {
     fn capabilities(&self) -> ProviderCaps;
     /// Embed a batch of texts in input order.
     fn embed(&self, batch: &[String]) -> Result<Vec<Embedding>, ProviderError>;
+    /// Identity of the model `embed` uses, recorded as a fact's producing
+    /// method (AC-0244). Defaults to the provider identity; a provider that
+    /// pairs separate embedding and completion models names only this one.
+    fn embedding_model_id(&self) -> String {
+        self.id().to_string()
+    }
+    /// Identity of the model completions use, recorded as a proposal's
+    /// producing method (AC-0244). Defaults to the provider identity.
+    fn completion_model_id(&self) -> String {
+        self.id().to_string()
+    }
     /// Execute a completion already authorized and redacted by the firewall.
     fn complete(&self, _request: &ProviderCompletionRequest) -> Result<Completion, ProviderError> {
         Err(ProviderError::Unsupported("chat completion"))
@@ -539,6 +550,14 @@ impl LlmProvider for OllamaProvider {
 
     fn id(&self) -> &str {
         &self.provider_id
+    }
+
+    fn embedding_model_id(&self) -> String {
+        format!("ollama:{}", self.embedding_model)
+    }
+
+    fn completion_model_id(&self) -> String {
+        format!("ollama:{}", self.completion_model)
     }
 
     fn locality(&self) -> Locality {
@@ -928,5 +947,21 @@ mod tests {
         .unwrap();
         let error = provider.embed(&["orders".into()]).unwrap_err();
         assert!(matches!(error, ProviderError::Request(_)));
+    }
+
+    #[test]
+    fn ollama_records_each_operation_model_apart_from_provider_identity() {
+        // AC-0244 (#601 review): an embedding fact must not name the
+        // completion model, and vice versa.
+        let split = OllamaProvider::with_models(
+            OllamaProvider::DEFAULT_URL,
+            "nomic-embed-text",
+            "qwen3:8b",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(split.id(), "ollama:nomic-embed-text+qwen3:8b");
+        assert_eq!(split.embedding_model_id(), "ollama:nomic-embed-text");
+        assert_eq!(split.completion_model_id(), "ollama:qwen3:8b");
     }
 }

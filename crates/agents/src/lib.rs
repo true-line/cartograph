@@ -5,7 +5,9 @@
 //! [`AgentProposal`] values. This crate deliberately has no graph-store
 //! dependency or mutation API: T3 cannot write confirmed facts.
 
-use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier, content_hash, may_overwrite};
+use core_prov::{
+    ConfidenceTier, EvidenceRef, ProducingMethod, Provenance, Tier, content_hash, may_overwrite,
+};
 use llm::{
     AnalysisTier, CompletionAction, CompletionPayload, ConsentGrant, EgressFirewall, EgressPreview,
     LlmProvider, PayloadSpan,
@@ -228,7 +230,7 @@ impl AgentBroker {
         let completion = firewall.complete(provider, &action, consent)?;
         let raw: RawProposal = serde_json::from_str(&completion.text)
             .map_err(|error| AgentError::InvalidResponse(error.to_string()))?;
-        self.validate_response(task, raw)
+        Ok(with_model(self.validate_response(task, raw)?, provider))
     }
 
     /// Preview the original prepared task, including descriptive origins and a
@@ -254,7 +256,10 @@ impl AgentBroker {
         let completion = firewall.complete(provider, &action, consent)?;
         let raw: RawProposal = serde_json::from_str(&completion.text)
             .map_err(|_| AgentError::InvalidResponse("invalid proposal response".into()))?;
-        self.validate_response_with_basis(task.task(), raw, task.basis_hash()?)
+        Ok(with_model(
+            self.validate_response_with_basis(task.task(), raw, task.basis_hash()?)?,
+            provider,
+        ))
     }
 
     fn prepare_prepared(&self, task: &PreparedAgentTask) -> Result<CompletionAction, AgentError> {
@@ -850,11 +855,26 @@ fn validate_curatable_assertion(assertion: &CuratableAssertion) -> Result<(), Ag
     Ok(())
 }
 
+/// Record the model that produced a proposal (AC-0244). Tier, confidence
+/// and content hash are unchanged.
+fn with_model(mut proposal: AgentProposal, provider: &dyn LlmProvider) -> AgentProposal {
+    proposal.provenance = proposal.provenance.with_method(ProducingMethod::Model {
+        model: provider.completion_model_id(),
+    });
+    proposal
+}
+
 fn validate_staged_proposal(proposal: &AgentProposal) -> Result<(), AgentError> {
+    // A broker proposal is a model's output. Acceptance never relabels it
+    // as a rule or human fact; legacy proposals carry no method.
     if proposal.provenance.tier != Tier::Agentic
         || proposal.provenance.confidence_tier != ConfidenceTier::InferredWeak
         || proposal.provenance.extractor_id != AGENT_EXTRACTOR_ID
         || proposal.provenance.evidence.is_empty()
+        || !matches!(
+            proposal.provenance.method,
+            ProducingMethod::Model { .. } | ProducingMethod::Unrecorded
+        )
     {
         return Err(AgentError::Integrity(
             "decision log accepts only cited Agentic/InferredWeak broker proposals".into(),
@@ -1340,5 +1360,56 @@ mod tests {
             ConfidenceTier::InferredWeak
         );
         assert_eq!(proposal.provenance.evidence.len(), 2);
+    }
+
+    #[test]
+    fn llm_proposal_records_model_method_and_keeps_it_through_acceptance() {
+        // AC-0244 (T-0244): an LLM interpretation records its model and stays
+        // T3/InferredWeak after acceptance; relabeling it as a human or rule
+        // fact is refused.
+        let provider = FixedProvider {
+            calls: AtomicUsize::new(0),
+            response: r#"{"target_id":"res:orders_queue","annotation":"match","citations":["source","target"]}"#,
+        };
+        let staged = proposal(&provider, &task(ConfidenceTier::Gap));
+        assert_eq!(
+            staged.provenance.method,
+            ProducingMethod::Model {
+                model: "local:test-agent".into()
+            }
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut log = DecisionLog::open(&path).unwrap();
+        log.record(&staged, ProposalDecision::Accepted, Some("verified"))
+            .unwrap();
+        let record = DecisionLog::open(&path)
+            .unwrap()
+            .get(&staged.provenance.content_hash)
+            .unwrap()
+            .expect("decision persisted");
+        assert_eq!(record.proposal.provenance.tier, Tier::Agentic);
+        assert_eq!(
+            record.proposal.provenance.confidence_tier,
+            ConfidenceTier::InferredWeak
+        );
+        assert_eq!(record.proposal.provenance.method, staged.provenance.method);
+
+        for relabel in [
+            ProducingMethod::Human {
+                actor: "owner".into(),
+            },
+            ProducingMethod::Rule {
+                rule: "laundered".into(),
+                version: "1".into(),
+            },
+        ] {
+            let mut relabeled = staged.clone();
+            relabeled.provenance.method = relabel;
+            assert!(matches!(
+                log.record(&relabeled, ProposalDecision::Accepted, None),
+                Err(AgentError::Integrity(_))
+            ));
+        }
     }
 }

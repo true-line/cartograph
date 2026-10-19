@@ -11,7 +11,7 @@ mod eval_report;
 pub use eval_report::EvalReport;
 
 use core_graph::{Edge, Node};
-use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier, may_overwrite};
+use core_prov::{ConfidenceTier, EvidenceRef, ProducingMethod, Provenance, Tier, may_overwrite};
 use llm::{Embedding, LlmProvider, ProviderError};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -418,13 +418,17 @@ pub fn propose(
                     "{}:{}:{}:{}:{similarity:.6}",
                     hop.gap_id, hop.source_id, hop.edge_label, target_id
                 );
+                let method = ProducingMethod::Model {
+                    model: provider.embedding_model_id(),
+                };
                 let provenance = Provenance::new(
                     Tier::Semantic,
                     ConfidenceTier::InferredStrong,
                     evidence.clone(),
                     EXTRACTOR_ID,
                     fact.as_bytes(),
-                )?;
+                )?
+                .with_method(method.clone());
                 let target_node = candidate
                     .materialized_node
                     .as_ref()
@@ -436,7 +440,8 @@ pub fn propose(
                             evidence,
                             EXTRACTOR_ID,
                             format!("materialize {}", node.id).as_bytes(),
-                        )?;
+                        )?
+                        .with_method(method.clone());
                         node.props["prov"] = serde_json::to_value(node_provenance)
                             .expect("semantic provenance serializes");
                         Ok::<Node, SemanticError>(node)
@@ -1053,5 +1058,23 @@ mod tests {
             report.similarity_threshold,
             preview.gaps_filled
         );
+    }
+
+    #[test]
+    fn semantic_proposals_record_the_embedding_model_as_method() {
+        // AC-0244 (T-0244): T2 output names the model that produced it.
+        let (nodes, edges) = graph();
+        let (hops, candidates) = graph_inputs(&nodes, &edges);
+        let proposals = propose(&KeywordProvider, &hops, &candidates, 2).unwrap();
+        assert!(!proposals.is_empty());
+        for proposal in &proposals {
+            assert_eq!(
+                proposal.provenance.method,
+                ProducingMethod::Model {
+                    model: "test-keywords".into()
+                }
+            );
+            assert_eq!(proposal.provenance.tier, Tier::Semantic);
+        }
     }
 }
