@@ -299,6 +299,11 @@ export interface SpecArtifact {
   file_name: string;
   title: string;
   format: 'markdown' | 'mermaid' | 'json';
+  /** Versioned schema id, `cartograph.spec/<id>@<version>` (AC-0242). */
+  schema: string;
+  /** Content identity of the complete artifact, computed before the IPC
+   *  preview cap, so a preview and its full artifact share it (AC-0242). */
+  content_id: string;
   /** Capped to a preview when it crosses IPC via `export_spec` (#488); see
    *  `content_truncated`/`content_byte_len`. `read_spec_artifact` returns the
    *  untruncated artifact for copy/export. */

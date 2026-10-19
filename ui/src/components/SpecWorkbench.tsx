@@ -23,6 +23,13 @@ export interface SpecWorkbenchProps {
   onExportBundle: (bundle: SpecBundle) => void;
 }
 
+/** A readable prefix of an artifact's content identity; the full value is
+ *  kept in the element's title (AC-0242). */
+export function shortContentId(contentId: string): string {
+  const [scheme, digest] = contentId.split(':', 2);
+  return digest ? `${scheme}:${digest.slice(0, 12)}` : contentId;
+}
+
 function isInferred(tier: Tier): boolean {
   return tier === 'InferredStrong' || tier === 'InferredWeak';
 }
@@ -203,6 +210,9 @@ export function SpecWorkbench({
                     <p className="eyebrow">{selected.format} artifact</p>
                     <h3 id="selected-artifact-title">{selected.title}</h3>
                     <code>{selected.file_name}</code>
+                    <p className="muted spec-artifact-identity" data-testid="spec-artifact-identity">
+                      <span>{selected.schema}</span> · <code title={selected.content_id}>{shortContentId(selected.content_id)}</code>
+                    </p>
                   </div>
                   <button type="button" onClick={() => onCopyArtifact(selected)}>
                     Copy artifact

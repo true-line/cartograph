@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { resolveArtifactForCopy, withFullArtifacts } from './specExport';
+import { isSameArtifact, resolveArtifactForCopy, withFullArtifacts } from './specExport';
 import type { SpecArtifact } from './store';
 
 const artifact = (id: string, overrides: Partial<SpecArtifact> = {}): SpecArtifact => ({
-  id, file_name: `${id}.md`, title: id, format: 'markdown', content: `${id} preview`,
+  id, file_name: `${id}.md`, title: id, format: 'markdown', schema: `cartograph.spec/${id}@1`,
+  content_id: `spec-artifact-v1:${id}`, content: `${id} preview`,
   content_truncated: false, content_byte_len: 7, assertions: [], assertions_truncated: false,
   assertions_total: 0, ...overrides,
 });
@@ -57,5 +58,38 @@ describe('resolveArtifactForCopy aborts on a failed on-demand fetch (PR #533 rev
     const capped = artifact('gap-register', { content_truncated: true, content: 'capped preview' });
     const result = await resolveArtifactForCopy(capped, async () => null);
     expect(result).toBeNull();
+  });
+});
+
+describe('artifact identity guards copy and export (AC-0242)', () => {
+  const identified = (id: string, contentId: string, overrides: Partial<SpecArtifact> = {}) =>
+    artifact(id, { schema: `cartograph.spec/${id}@1`, content_id: contentId, ...overrides });
+
+  it('accepts a fetched full artifact with the preview identity', async () => {
+    const capped = identified('gap-register', 'spec-artifact-v1:aa', { content_truncated: true });
+    const full = identified('gap-register', 'spec-artifact-v1:aa', { content: 'complete' });
+    const errors: string[] = [];
+    expect(await resolveArtifactForCopy(capped, async () => full, (m) => errors.push(m))).toEqual(full);
+    expect(await withFullArtifacts([capped], async () => full, (m) => errors.push(m))).toEqual([full]);
+    expect(errors).toEqual([]);
+  });
+
+  it('refuses a fetched artifact whose content identity changed, and says why', async () => {
+    const capped = identified('gap-register', 'spec-artifact-v1:aa', { content_truncated: true });
+    const changed = identified('gap-register', 'spec-artifact-v1:bb', { content: 'recompiled' });
+    const errors: string[] = [];
+    expect(await resolveArtifactForCopy(capped, async () => changed, (m) => errors.push(m))).toBeNull();
+    expect(await withFullArtifacts([capped], async () => changed, (m) => errors.push(m))).toBeNull();
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toContain('gap-register.md changed since this preview was compiled');
+  });
+
+  it('refuses a fetched artifact with a different schema version', async () => {
+    const capped = identified('gap-register', 'spec-artifact-v1:aa', { assertions_truncated: true });
+    const newer = identified('gap-register', 'spec-artifact-v1:aa', {
+      schema: 'cartograph.spec/gap-register@2',
+    });
+    expect(isSameArtifact(capped, newer)).toBe(false);
+    expect(await withFullArtifacts([capped], async () => newer)).toBeNull();
   });
 });
