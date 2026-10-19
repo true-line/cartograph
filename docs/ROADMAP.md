@@ -40,7 +40,7 @@ Implemented facts at the baseline commit, with the place to look.
 - The spec compiler emits 14 artifacts in a fixed order (`crates/spec/src/workbench.rs:1448-1460`). #239 records six of ten then-existing artifacts empty for a Spring app.
 - The Vendure cart-readiness depth pilot scores 0/8 complete rules with all 41 decision cases unexecuted (`docs/evals/vendure-cart-readiness.local-definitions.score.md:3`).
 - The flow tracer is a deterministic technical path engine (`crates/flowtracer/src/lib.rs:1-21`). "Journey" appears nowhere in the product.
-- Topology, flow and ERD diagrams are Mermaid text shown as copyable text, not rendered (`ui/src/components/TopologyCard.tsx:13-30`). No test-case node exists.
+- Topology and flow dossiers (`crates/spec/src/lib.rs:65-248`) and the data-model flowchart (`crates/spec/src/workbench.rs:709-798`) are Mermaid text shown as copyable text, not rendered (`ui/src/components/TopologyCard.tsx:13-30`). No test-case node exists.
 
 **Agent team (V6).**
 - Two named specialists, each at @1 and @2, with three operations at T3/InferredWeak (`crates/agents/src/investigation/specialists.rs:7-16`, `:94-100`).
