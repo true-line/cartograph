@@ -65,8 +65,35 @@ qualified test links). Four more were agreed for this roadmap:
 - **Defaults while the owner decides.** Use cases with decision tables come first, architecture and deployment views second, journeys third, with target tests in parallel. First real-provider acceptance runs on an already supported local runtime. Export and in-app views render the same projection. Existing epics stay; this roadmap maps them to phases.
 - **EventBridge.** Matching uses a scoped composite identity with source attribution and distinct-identity counting. Identity migration is an implementation decision taken with owner review (#573).
 
-The owner's open question is which real multi-repo application is the pilot.
-Vendure stays the single-repo depth pilot until then.
+### Pilot and validation lanes
+
+The owner chose the pilot in [#575](https://github.com/true-line/cartograph/discussions/575).
+
+- **Pilot: [SimpleLogin](https://github.com/simple-login).** Both sides are open
+  source. The server, `simple-login/app`, is a Python back end and web app of
+  about 1,560 files. Its clients are a browser extension in JavaScript and Vue
+  and an Android app in Kotlin. The server's `docs/api.md` is a hand-written
+  API reference to score the reconstructed contract against. It self-hosts
+  with Docker, so the full change, re-ingest and verify cycle can run. It
+  exercises cross-repo HTTP stitching (W2) and lifecycle artifacts for a real
+  product domain. Known limits: `.vue` files are not parsed, Kotlin call sites
+  are not recovered, the Swift clients are unsupported, and infrastructure is
+  a Dockerfile and Postfix configuration with no Terraform.
+- **Depth pilot: Vendure cart readiness**, unchanged. **CI fixture:** the
+  synthetic multi-repo fixture, unchanged.
+- **Held lanes, not scheduled:**
+  - *Proton, clients only.* The server is closed. Reconstruct its contract
+    from the web and Android clients, and score it against `go-proton-api` as
+    a holdout. Server behavior and infrastructure stay labeled as
+    interpretation. Needs Go and Kotlin call-site recovery and per-app ingest
+    of the web clients monorepo, which exceeds the TypeScript ingest limit.
+  - *MongoDB Atlas, against an official spec.* Score the contract recovered
+    from the Atlas CLI, Terraform provider and Kubernetes operator against the
+    published spec in `mongodb/openapi`, excluding the generated
+    `atlas-sdk-go` as leakage. Needs Go call-site recovery and Atlas resources
+    in the infrastructure registry.
+  - *OpenMRS*, a Java REST server with TypeScript front-end repos, for
+    enterprise scale.
 
 ## 4. Workstreams
 
@@ -99,14 +126,14 @@ target test recovery and skills.
 | P2 | W5 curated projection; W4 views | Accept a proposal, see it in the Workbench, the export and an agent read with the same curated revision |
 | P3 | W6 packets; W7 compact investigation and discovery | Ask a scoped question, get a cited finding and an auditor follow-up, turn a gap into a reviewed packet |
 | P4 | W8 MCP and ACP | An external agent reads the same context and runs the same bounded task |
-| P5 | The north-star cycle on the owner's real pilot app | The full cycle in section 1, with its measurements recorded |
+| P5 | The north-star cycle on SimpleLogin | The full cycle in section 1, with its measurements recorded |
 
 Phases are ordered by dependency, not as a waterfall. Recovered-only work
 packets (AP-1a) and compact disclosure (AP-2a) can progress before the curated
 projection lands, and target-test recovery runs in parallel throughout. #573 is
 a separate correctness fix whose evidence the W2 stitching demo must include.
-P1 runs on the synthetic fixture until the owner names the real pilot. Nothing
-in P1–P4 waits on that answer; P5 does.
+P1 runs on the synthetic fixture and Vendure. SimpleLogin enters as soon as
+cross-repo HTTP stitching (W2) lands, and P5 runs on it.
 
 ## 6. First issues to file
 
@@ -127,6 +154,7 @@ Each is one objective. Owners in brackets.
 13. Complete the real-provider investigation acceptance in MT-H4-02 against independent expected answers (AC-0191) [Codex].
 14. Language × framework × capability coverage matrix with conformance fixtures [Claude].
 15. Move the event SDK and channel backing registries to versioned data files [Claude].
+16. Parse the script blocks of `.vue` files so the SimpleLogin extension's calls are recovered [Claude].
 
 Existing issues stay and are re-scoped by these slices: #239 (JPA data model,
 feeds W3), #250 and #256 (W7), #251 and #252 (after W7, per ADR-0036 §7), #255
