@@ -111,6 +111,34 @@ fn hops_record_tier_across_the_full_chain() {
     assert_eq!(last.dst, "sym:mailer.ts#onPlaced");
 }
 
+// #603 review: a reversed hop maps back to the edge as stored, so callers
+// can find the exact edge a hop came from.
+#[test]
+fn every_hop_names_the_stored_edge_it_traverses() {
+    let (nodes, edges) = event_chain();
+    let flows = trace(&nodes, &edges);
+    let stored: HashSet<(&str, &str, &str)> = edges
+        .iter()
+        .map(|e| (e.src.as_str(), e.label.as_str(), e.dst.as_str()))
+        .collect();
+    for hop in &flows[0].hops {
+        assert!(stored.contains(&hop.stored_edge()), "{hop:?}");
+    }
+    let subscribe = flows[0]
+        .hops
+        .iter()
+        .find(|h| h.label == "SUBSCRIBES")
+        .unwrap();
+    assert_eq!(
+        subscribe.stored_edge(),
+        (
+            "sym:mailer.ts#onPlaced",
+            "SUBSCRIBES",
+            "chan:inproc-event:order.placed"
+        )
+    );
+}
+
 // AC-0016: an unresolved hop truncates the branch at an explicit Gap —
 // nothing is walked past it, and the flow is Partial, never silently
 // complete. (T-0016)

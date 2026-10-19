@@ -289,7 +289,8 @@ impl<'a> HopOrigins<'a> {
         }
     }
 
-    /// A Gap hop's omission: the exact Gap edge it traverses, else the Gap
+    /// A Gap hop's omission: the exact Gap edge it traverses (in stored
+    /// direction, since the tracer walks some labels reversed), else the Gap
     /// node it ends at, else its own stop reason classified.
     fn omission(&self, hop: &Hop) -> Option<Omission> {
         if hop.provenance.confidence_tier != ConfidenceTier::Gap {
@@ -301,7 +302,7 @@ impl<'a> HopOrigins<'a> {
             .unwrap_or_else(|| format!("unresolved {} hop", hop.label));
         let edge = self
             .edges
-            .get(&(hop.src.as_str(), hop.label.as_str(), hop.dst.as_str()))
+            .get(&hop.stored_edge())
             .filter(|edge| provenance(&edge.props, "").confidence_tier == ConfidenceTier::Gap);
         if let Some(edge) = edge {
             return Some(Omission::of_gap(&edge.props, &fallback));
@@ -3032,6 +3033,73 @@ mod tests {
             .assertions
             .iter()
             .find(|a| a.subject_kind == "HANDLES")
+            .unwrap();
+        let hop = register
+            .assertions
+            .iter()
+            .find(|a| a.subject_kind == "FlowHop")
+            .unwrap();
+        let expected = edge.omission.as_ref().unwrap();
+        assert_eq!(
+            (expected.class, expected.seam),
+            (OmissionClass::ProductGap, FillSeam::Requirement)
+        );
+        assert_eq!(hop.omission.as_ref(), Some(expected));
+    }
+
+    #[test]
+    fn reversed_subscribes_hop_keeps_its_source_edge_omission() {
+        // #603 review (Codex reproduction): SUBSCRIBES is stored consumer →
+        // channel but traced channel → consumer; the hop still finds its edge.
+        let confirmed = serde_json::to_value(
+            Provenance::new(
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+                vec![],
+                "review",
+                b"confirmed",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let explicit = serde_json::json!({"class": "product_gap", "seam": "requirement", "detail": "consumer contract missing"});
+        let nodes = vec![
+            Node {
+                id: "channel".into(),
+                label: "Channel".into(),
+                props: serde_json::json!({"prov": confirmed}),
+            },
+            Node {
+                id: "consumer".into(),
+                label: "Function".into(),
+                props: serde_json::json!({"prov": confirmed}),
+            },
+        ];
+        let edges = vec![Edge {
+            src: "consumer".into(),
+            dst: "channel".into(),
+            label: "SUBSCRIBES".into(),
+            props: serde_json::json!({"prov": review_gap_prov(), "reason": "unresolved dependency", "omission": explicit}),
+        }];
+        let flows = flowtracer::trace(&nodes, &edges);
+        assert!(
+            flows
+                .iter()
+                .flat_map(|flow| &flow.hops)
+                .any(|hop| hop.src == "channel" && hop.dst == "consumer")
+        );
+        let bundle = compile_spec(
+            &nodes,
+            &edges,
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        );
+        let (register, _) = gap_artifacts(&bundle);
+        let edge = register
+            .assertions
+            .iter()
+            .find(|a| a.subject_kind == "SUBSCRIBES")
             .unwrap();
         let hop = register
             .assertions
