@@ -84,7 +84,11 @@ impl LlmProvider for Scripted {
             json!({ "type": "query_context", "query": { "scope": {"type":"all"}, "kind":"node",
                 "labels":["BusinessRule"], "max_facts":1, "max_bytes":32768, "cursor":null } })
         } else if call == 1 {
-            let option = &prompt["context_pages"][0]["evidence_options"][0];
+            let option = if prompt.get("compact_context").is_some() {
+                &prompt["compact_context"]["evidence_options"][0]
+            } else {
+                &prompt["context_pages"][0]["evidence_options"][0]
+            };
             let range = option["ranges"]
                 .as_array()
                 .unwrap()
@@ -94,7 +98,11 @@ impl LlmProvider for Scripted {
             json!({ "type":"read_evidence", "fact":option["fact"], "role":range["role"], "index":range["index"] })
         } else {
             assert_eq!(call, 2, "no hidden repair, retry or extra model step");
-            let citations = prompt["input_ledger"]["citations"].as_array().unwrap();
+            let citations = prompt
+                .get("citations")
+                .unwrap_or(&prompt["input_ledger"]["citations"])
+                .as_array()
+                .unwrap();
             let citation = citations
                 .iter()
                 .find(|citation| citation["origin"]["kind"] == "captured_primary_source")
@@ -166,6 +174,15 @@ impl Fixture {
         directory: tempfile::TempDir,
         question: &str,
     ) -> Self {
+        Self::with_specialist(provider, directory, question, SpecialistId::DomainAnalyst)
+    }
+
+    fn with_specialist(
+        provider: &dyn LlmProvider,
+        directory: tempfile::TempDir,
+        question: &str,
+        specialist_id: SpecialistId,
+    ) -> Self {
         let app_data = directory.path().join("private");
         std::fs::create_dir(&app_data).unwrap();
         let app_data = crate::paths::canonicalize(app_data).unwrap();
@@ -215,7 +232,7 @@ impl Fixture {
         let request = StartInvestigationRequest {
             schema_version: 1,
             request_nonce: "worker-fixture".into(),
-            specialist_id: SpecialistId::DomainAnalyst,
+            specialist_id,
             question: question.into(),
             scope: InvestigationScope::All,
             provider_mode: InvestigationProviderMode::Local,
@@ -428,8 +445,24 @@ fn investigation_query_pages_include_evidence_inventory_and_preserve_continuatio
 fn investigation_worker_queries_reads_captured_definition_and_persists_cited_finish() {
     // AC-0182/0183/0184/0188/0191: actual parser receipts, graph selection,
     // source retention, provider input and durable coordinator loop together.
+    assert_worker_cited_finish(SpecialistId::DomainAnalyst);
+}
+
+#[test]
+fn investigation_worker_compact_disclosure_persists_exact_finish_and_reopens() {
+    // AC-0234/0235: the production firewall seals disclosure, the invocation
+    // persists it, and schema-aware historical validation reopens the finish.
+    assert_worker_cited_finish(SpecialistId::DomainAnalystV3);
+}
+
+fn assert_worker_cited_finish(specialist: SpecialistId) {
     let provider = Arc::new(Scripted::new(Mode::Finish));
-    let fixture = Fixture::new(provider.as_ref());
+    let fixture = Fixture::with_specialist(
+        provider.as_ref(),
+        tempfile::tempdir().unwrap(),
+        "Inspect the available guard evidence and its limits.",
+        specialist,
+    );
     fixture.run(provider.clone());
     assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
     assert_eq!(*provider.copied.lock().unwrap(), vec!["ok === false"]);
@@ -446,6 +479,22 @@ fn investigation_worker_queries_reads_captured_definition_and_persists_cited_fin
     );
     assert_eq!(detail.usage.reported_input_tokens, Some(300));
     let result = jobs.investigation_result(&fixture.id).unwrap().unwrap();
+    assert_eq!(
+        result.schema_version,
+        if specialist.uses_compact_disclosure() {
+            2
+        } else {
+            1
+        }
+    );
+    assert_eq!(
+        result.disclosure_hash.is_some(),
+        specialist.uses_compact_disclosure()
+    );
+    assert_eq!(
+        result.invocation_step_id.is_some(),
+        specialist.uses_compact_disclosure()
+    );
     assert_eq!(result.findings[0].tier, Tier::Agentic);
     assert_eq!(
         result.findings[0].confidence_tier,
@@ -505,39 +554,65 @@ fn investigation_worker_queries_reads_captured_definition_and_persists_cited_fin
 fn investigation_worker_retains_late_finish_after_cancellation_and_job_cleanup() {
     // AC-0187/0191: the actual call returns after cancellation and deletion;
     // only its finish is admitted, against its unchanged original ledger.
-    let provider = Arc::new(Scripted::new(Mode::CancelFinish));
-    let fixture = Fixture::new(provider.as_ref());
-    fixture.cancel_inside_call(provider.as_ref(), true);
-    fixture.run(provider.clone());
-    let state = fixture.app.state::<AppState>();
-    let jobs = state.jobs.lock().unwrap();
-    let detail = jobs.investigation(&fixture.id).unwrap();
-    assert!(detail.summary.cancel_requested);
-    assert!(detail.summary.has_result);
-    assert!(!detail.summary.invocation_pending);
-    assert!(jobs.get(detail.summary.job_id).is_err());
-    assert!(jobs.investigation_result(&fixture.id).unwrap().is_some());
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
-    assert_eq!(detail.usage.tool_actions, 2);
+    for specialist in [SpecialistId::DomainAnalyst, SpecialistId::DomainAnalystV3] {
+        let provider = Arc::new(Scripted::new(Mode::CancelFinish));
+        let fixture = Fixture::with_specialist(
+            provider.as_ref(),
+            tempfile::tempdir().unwrap(),
+            "Inspect the available guard evidence and its limits.",
+            specialist,
+        );
+        fixture.cancel_inside_call(provider.as_ref(), true);
+        fixture.run(provider.clone());
+        let state = fixture.app.state::<AppState>();
+        let jobs = state.jobs.lock().unwrap();
+        let detail = jobs.investigation(&fixture.id).unwrap();
+        assert!(detail.summary.cancel_requested);
+        assert!(detail.summary.has_result);
+        assert!(!detail.summary.invocation_pending);
+        assert!(jobs.get(detail.summary.job_id).is_err());
+        assert!(jobs.investigation_result(&fixture.id).unwrap().is_some());
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(detail.usage.tool_actions, 2);
+        let result = jobs.investigation_result(&fixture.id).unwrap().unwrap();
+        assert_eq!(
+            result.disclosure_hash.is_some(),
+            specialist.uses_compact_disclosure()
+        );
+        drop(jobs);
+        let reopened = crate::jobs::JobStore::open(fixture.app_data.join("state.db")).unwrap();
+        assert_eq!(
+            reopened.investigation_result(&fixture.id).unwrap(),
+            Some(result)
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    }
 }
 
 #[test]
 fn investigation_worker_never_executes_a_late_tool_after_cancellation() {
     // AC-0187: a tool returned by an already-issued call is not new permission.
-    let provider = Arc::new(Scripted::new(Mode::CancelTool));
-    let fixture = Fixture::new(provider.as_ref());
-    fixture.cancel_inside_call(provider.as_ref(), false);
-    fixture.run(provider.clone());
-    let state = fixture.app.state::<AppState>();
-    let jobs = state.jobs.lock().unwrap();
-    let detail = jobs.investigation(&fixture.id).unwrap();
-    assert_eq!(detail.summary.status, InvestigationStatus::Cancelled);
-    assert_eq!(detail.usage.tool_actions, 1);
-    assert_eq!(detail.usage.evidence_requests, 0);
-    assert_eq!(detail.usage.evidence_items, 0);
-    assert!(!detail.summary.has_result);
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
-    assert!(provider.copied.lock().unwrap().is_empty());
+    for specialist in [SpecialistId::DomainAnalyst, SpecialistId::DomainAnalystV3] {
+        let provider = Arc::new(Scripted::new(Mode::CancelTool));
+        let fixture = Fixture::with_specialist(
+            provider.as_ref(),
+            tempfile::tempdir().unwrap(),
+            "Inspect the available guard evidence and its limits.",
+            specialist,
+        );
+        fixture.cancel_inside_call(provider.as_ref(), false);
+        fixture.run(provider.clone());
+        let state = fixture.app.state::<AppState>();
+        let jobs = state.jobs.lock().unwrap();
+        let detail = jobs.investigation(&fixture.id).unwrap();
+        assert_eq!(detail.summary.status, InvestigationStatus::Cancelled);
+        assert_eq!(detail.usage.tool_actions, 1);
+        assert_eq!(detail.usage.evidence_requests, 0);
+        assert_eq!(detail.usage.evidence_items, 0);
+        assert!(!detail.summary.has_result);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        assert!(provider.copied.lock().unwrap().is_empty());
+    }
 }
 
 #[test]
@@ -562,22 +637,32 @@ fn investigation_worker_rejects_malformed_actions_without_model_repair() {
 #[test]
 fn investigation_worker_records_unknown_transport_outcome_without_replay() {
     // AC-0185/0187: reservations survive unknown transport, with absent usage.
-    let provider = Arc::new(Scripted::new(Mode::Unknown));
-    let fixture = Fixture::new(provider.as_ref());
-    fixture.run(provider.clone());
-    let state = fixture.app.state::<AppState>();
-    let detail = state
-        .jobs
-        .lock()
-        .unwrap()
-        .investigation(&fixture.id)
-        .unwrap();
-    assert_eq!(detail.summary.status, InvestigationStatus::OutcomeUnknown);
-    assert_eq!(detail.usage.model_invocations, 1);
-    assert_eq!(detail.usage.generated_token_reservations, 2048);
-    assert_eq!(detail.usage.reported_input_tokens, None);
-    assert!(!detail.summary.has_result);
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    for specialist in [SpecialistId::DomainAnalyst, SpecialistId::DomainAnalystV3] {
+        let provider = Arc::new(Scripted::new(Mode::Unknown));
+        let fixture = Fixture::with_specialist(
+            provider.as_ref(),
+            tempfile::tempdir().unwrap(),
+            "Inspect the available guard evidence and its limits.",
+            specialist,
+        );
+        fixture.run(provider.clone());
+        let state = fixture.app.state::<AppState>();
+        let detail = state
+            .jobs
+            .lock()
+            .unwrap()
+            .investigation(&fixture.id)
+            .unwrap();
+        assert_eq!(detail.summary.status, InvestigationStatus::OutcomeUnknown);
+        assert_eq!(detail.usage.model_invocations, 1);
+        assert_eq!(detail.usage.generated_token_reservations, 2048);
+        assert_eq!(detail.usage.reported_input_tokens, None);
+        assert!(!detail.summary.has_result);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        let reopened = crate::jobs::JobStore::open(fixture.app_data.join("state.db")).unwrap();
+        assert_eq!(reopened.investigation(&fixture.id).unwrap(), detail);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[path = "acceptance.rs"]

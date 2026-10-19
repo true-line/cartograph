@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC as mockTauriIPC } from '@tauri-apps/api/mocks';
 import { mergeInvestigationEvents, useInvestigationStore } from './investigationStore';
-import { investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult } from './investigationFixtures';
+import { investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from './investigationFixtures';
 import type { InvestigationCitationRead, InvestigationDetail, InvestigationEvent, StartInvestigationRequest } from './investigationTypes';
 
 // These commands use named JSON arguments; Tauri also supports unrelated binary payloads.
@@ -317,5 +317,54 @@ describe('investigation consent and historical reads (AC-0186/0189/0190)', () =>
     expect(useInvestigationStore.getState().citationRead).toBeNull();
     expect(useInvestigationStore.getState().citationError).toContain('No current checkout source was substituted');
     expect(commands.filter((command) => command.startsWith('read_'))).toEqual(['read_investigation_citation']);
+  });
+});
+
+describe('versioned investigation history (AC-0180/0190/0235)', () => {
+  it.each([1, 2] as const)('retains saved specialist @%i and result v1 without disclosure fields', async (version) => {
+    mockIPC((command, args) => {
+      if (command === 'get_investigation') return legacyInvestigationDetail(version, 'legacy');
+      if (command === 'investigation_result') return legacyInvestigationResult('legacy');
+      return response(command, args);
+    });
+    await useInvestigationStore.getState().open('legacy');
+    const { detail, result } = useInvestigationStore.getState();
+    expect(detail?.specialist.id).toBe(`domain-analyst@${version}`);
+    expect(detail?.specialist.version).toBe(version);
+    expect(result?.schema_version).toBe(1);
+    expect(result).not.toHaveProperty('invocation_step_id');
+    expect(result).not.toHaveProperty('disclosure_hash');
+  });
+
+  it('keeps current specialist and result disclosure bindings on refresh', async () => {
+    mockIPC(response);
+    await useInvestigationStore.getState().open('current');
+    await useInvestigationStore.getState().refreshSelected();
+    const { detail, result } = useInvestigationStore.getState();
+    expect(detail?.specialist_id).toBe('domain-analyst@3');
+    expect(result?.schema_version).toBe(2);
+    expect(result?.invocation_step_id).toBe('step-1');
+    expect(result?.disclosure_hash).toBe(`investigation-disclosure-v1:${'a'.repeat(64)}`);
+  });
+});
+
+describe('result version binding admission (AC-0235)', () => {
+  it.each([
+    { schema_version: 2, invocation_step_id: undefined },
+    { schema_version: 2, disclosure_hash: undefined },
+    { schema_version: 2, disclosure_hash: 'investigation-disclosure-v1:short' },
+    { schema_version: 2, disclosure_hash: `investigation-disclosure-v1:${'A'.repeat(64)}` },
+    { schema_version: 2, invocation_step_id: 'step/2' },
+    { schema_version: 2, invocation_step_id: 'step-1\n' },
+    { schema_version: 2, disclosure_hash: `investigation-disclosure-v1:${'a'.repeat(64)}\n` },
+    { schema_version: 2, invocation_step_id: 'a'.repeat(129) },
+    { schema_version: 1 },
+    { schema_version: 99 },
+  ])('rejects malformed/unsupported bindings without legacy fallback: %j', async (patch) => {
+    mockIPC((command, args) => command === 'investigation_result'
+      ? { ...investigationResult('tampered'), ...patch } : response(command, args));
+    await useInvestigationStore.getState().open('tampered');
+    expect(useInvestigationStore.getState().result).toBeNull();
+    expect(useInvestigationStore.getState().error).toContain('consistently');
   });
 });

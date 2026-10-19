@@ -14,11 +14,14 @@ pub(crate) async fn investigation_specialists(
         let state = app.state::<AppState>();
         Ok(InvestigationCatalog {
             schema_version: 1,
-            specialists: [SpecialistId::DomainAnalyst, SpecialistId::EvidenceAuditor]
-                .into_iter()
-                .map(|id| id.definition())
-                .collect::<Result<_, _>>()
-                .map_err(|e| e.to_string())?,
+            specialists: [
+                SpecialistId::DomainAnalystV3,
+                SpecialistId::EvidenceAuditorV3,
+            ]
+            .into_iter()
+            .map(|id| id.definition())
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?,
             providers: [
                 InvestigationProviderMode::Local,
                 InvestigationProviderMode::Cloud,

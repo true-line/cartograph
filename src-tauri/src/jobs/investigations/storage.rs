@@ -296,6 +296,43 @@ pub(super) fn validate_step(
     {
         return Err(InvestigationStoreError::Invalid);
     }
+    if let Some(disclosure) = &step.disclosure {
+        if disclosure.payload_hash != step.payload_hash
+            || disclosure.input_ledger_hash != step.input_ledger_hash
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        encode(disclosure, MAX_DISCLOSURE_BYTES)?;
+    }
+    encode(step, MAX_INVOCATION_BYTES)?;
+    Ok(())
+}
+
+pub(super) fn validate_step_basis(
+    connection: &Connection,
+    task: &StoredTask,
+    step: &PendingInvestigationStep,
+) -> Result<(), InvestigationStoreError> {
+    if task.detail.summary.specialist_id.uses_compact_disclosure() != step.disclosure.is_some() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if let Some(disclosure) = &step.disclosure {
+        let ledger = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
+        disclosure.validate(&ledger)?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_result_basis(
+    result: &InvestigationResult,
+    ledger: &InvestigationInputLedger,
+    step: &PendingInvestigationStep,
+) -> Result<(), InvestigationStoreError> {
+    validate_step(step)?;
+    match &step.disclosure {
+        Some(disclosure) => result.validate_with_disclosure(ledger, &step.step_id, disclosure)?,
+        None => result.validate(ledger)?,
+    }
     Ok(())
 }
 
@@ -330,6 +367,9 @@ pub(super) fn load_task(
         || task.detail.context_owner != namespace
     {
         return Err(InvestigationStoreError::Invalid);
+    }
+    if let Some(pending) = &task.pending {
+        validate_step_basis(connection, &task, pending)?;
     }
     Ok(task)
 }
@@ -547,7 +587,26 @@ pub(super) fn load_result(
     }
     if let Some(result) = &result {
         let ledger = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
-        result.validate(&ledger)?;
+        if let Some(step_id) = &result.invocation_step_id {
+            let step: PendingInvestigationStep = read_body(
+                connection,
+                "investigation_invocations",
+                "step_id",
+                id,
+                step_id,
+            )?
+            .ok_or(InvestigationStoreError::Invalid)?;
+            if step.step_id != *step_id || step.disclosure.is_none() {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            validate_step_basis(connection, task, &step)?;
+            validate_result_basis(result, &ledger, &step)?;
+        } else {
+            if task.detail.summary.specialist_id.uses_compact_disclosure() {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            result.validate(&ledger)?;
+        }
         if result.investigation_id != *id {
             return Err(InvestigationStoreError::Invalid);
         }

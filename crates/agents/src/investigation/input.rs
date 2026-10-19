@@ -14,6 +14,7 @@ pub struct InvestigationInput {
     payload: CompletionPayload,
     supplied_strings: Vec<String>,
     graph_strings: Vec<String>,
+    compact: bool,
 }
 
 impl InvestigationInput {
@@ -160,17 +161,49 @@ impl InvestigationInput {
         {
             return Err(InvestigationError::LimitExceeded);
         }
-        let prompt_value = serde_json::json!({
-            "schema_version": 1,
-            "question": question,
-            "input_ledger": ledger,
-            "input_ledger_hash": ledger.fingerprint()?,
-            "context_pages": pages,
-            "prior_findings_as_t3_history": supplied_history,
-            "consumed_budgets": usage,
-            "limits": InvestigationLimits::default(),
-            "coverage": "This is a bounded recovered-context investigation. Captured source attests only its primary source; full producer input closure is not established. Unknown evidence is not proof of absence. All generated findings remain T3/InferredWeak."
-        });
+        let compact = specialist.uses_compact_disclosure();
+        let prompt_value = if compact {
+            let context = CompactInvestigationContext::prepare(&ledger, query_pages)?;
+            let citations: Vec<_> = ledger
+                .citations
+                .iter()
+                .map(|citation| {
+                    serde_json::json!({
+                        "citation_id": citation.citation_id,
+                        "fact": citation.fact,
+                        "origin": citation.origin,
+                        "role": citation.role,
+                        "index": citation.index,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "schema_version": 2,
+                "policy": COMPACT_DISCLOSURE_POLICY,
+                "question": question,
+                "input_ledger_hash": ledger.fingerprint()?,
+                "graph_snapshot_id": ledger.graph_snapshot_id,
+                "scope_snapshot_id": ledger.scope_snapshot_id,
+                "compact_context": context,
+                "citations": citations,
+                "prior_findings_as_t3_history": supplied_history,
+                "consumed_budgets": usage,
+                "limits": InvestigationLimits::default(),
+                "coverage": "Bounded recovered context only. Captured source attests its primary source, not complete producer input closure. Unknown evidence is not absence. Findings remain T3/InferredWeak."
+            })
+        } else {
+            serde_json::json!({
+                "schema_version": 1,
+                "question": question,
+                "input_ledger": ledger,
+                "input_ledger_hash": ledger.fingerprint()?,
+                "context_pages": pages,
+                "prior_findings_as_t3_history": supplied_history,
+                "consumed_budgets": usage,
+                "limits": InvestigationLimits::default(),
+                "coverage": "This is a bounded recovered-context investigation. Captured source attests only its primary source; full producer input closure is not established. Unknown evidence is not proof of absence. All generated findings remain T3/InferredWeak."
+            })
+        };
         let prompt = String::from_utf8(bounded_bytes(&prompt_value, MAX_INPUT_BYTES)?)
             .map_err(|_| InvestigationError::InvalidInput)?;
         let payload = CompletionPayload {
@@ -184,11 +217,59 @@ impl InvestigationInput {
             payload,
             supplied_strings,
             graph_strings,
+            compact,
         })
     }
 
     pub fn ledger(&self) -> &InvestigationInputLedger {
         &self.ledger
+    }
+
+    /// Host-selected bounded working set. Acquisition and replay guards retain
+    /// every source; omitted source handles remain visible for reacquisition.
+    pub fn select_sources(
+        mut self,
+        selected: &std::collections::BTreeSet<String>,
+        reason: DisclosureOmissionReason,
+    ) -> Result<Self, InvestigationError> {
+        if !self.compact || reason == DisclosureOmissionReason::DuplicateRepresentation {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let available = self.payload.spans.iter().map(|s| s.id.clone()).collect();
+        if !selected.is_subset(&available) {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let mut prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        // One selection per prepared input: omitted sources cannot be silently
+        // reintroduced without revalidating their original acquired bytes.
+        if prompt.get("omitted_sources").is_some() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let citations = prompt
+            .get_mut("citations")
+            .and_then(Value::as_array_mut)
+            .ok_or(InvestigationError::InvalidInput)?;
+        let omitted = citations
+            .iter()
+            .filter(|c| {
+                c.get("citation_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| {
+                        self.payload.spans.iter().any(|s| s.id == id) && !selected.contains(id)
+                    })
+            })
+            .map(|c| serde_json::json!({"handle": c, "reason": reason}))
+            .collect::<Vec<_>>();
+        citations.retain(|c| !omitted.iter().any(|o| o["handle"] == *c));
+        prompt["omitted_sources"] = serde_json::json!(omitted);
+        self.payload
+            .spans
+            .retain(|span| selected.contains(&span.id));
+        self.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        bounded_bytes(&self.payload, MAX_INPUT_BYTES)?;
+        Ok(self)
     }
 
     pub fn action(&self, action_id: String) -> Result<CompletionAction, InvestigationError> {
@@ -202,6 +283,21 @@ impl InvestigationInput {
         })
     }
 
+    /// Seals metadata against the exact firewall-prepared representation.
+    pub fn seal_disclosure(
+        &self,
+        prepared: &llm::bounded::PreparedBoundedCompletion,
+    ) -> Result<Option<InvestigationDisclosure>, InvestigationError> {
+        if !self.compact {
+            return Ok(None);
+        }
+        let action = self.action(prepared.preview().egress.action_id.clone())?;
+        if !prepared.matches_action(&action) {
+            return Err(InvestigationError::InvalidInput);
+        }
+        super::sealing::seal(&self.ledger, &self.payload, prepared).map(Some)
+    }
+
     pub fn admit_result(
         &self,
         investigation_id: &str,
@@ -209,6 +305,32 @@ impl InvestigationInput {
         observed_response_model: Option<String>,
         created_at: String,
     ) -> Result<InvestigationResult, InvestigationError> {
+        if self.compact {
+            return Err(InvestigationError::InvalidInput);
+        }
+        self.admit_result_for_step(
+            investigation_id,
+            "legacy",
+            None,
+            action,
+            observed_response_model,
+            created_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_result_for_step(
+        &self,
+        investigation_id: &str,
+        step_id: &str,
+        disclosure: Option<&InvestigationDisclosure>,
+        action: &InvestigationAction,
+        observed_response_model: Option<String>,
+        created_at: String,
+    ) -> Result<InvestigationResult, InvestigationError> {
+        if self.compact != disclosure.is_some() {
+            return Err(InvestigationError::InvalidInput);
+        }
         let InvestigationAction::Finish {
             findings,
             limitations,
@@ -230,6 +352,18 @@ impl InvestigationInput {
             prose,
             self.graph_strings.iter().map(String::as_str),
         )?;
+        if let Some(disclosure) = disclosure {
+            return InvestigationResult::admit_with_disclosure(
+                investigation_id,
+                &self.ledger,
+                step_id,
+                disclosure,
+                action,
+                self.supplied_strings.iter().map(String::as_str),
+                observed_response_model,
+                created_at,
+            );
+        }
         InvestigationResult::admit(
             investigation_id,
             &self.ledger,

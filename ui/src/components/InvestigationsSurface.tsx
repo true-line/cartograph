@@ -20,7 +20,7 @@ export interface InvestigationsSurfaceProps {
 
 /** Props/callbacks only: the coordinator and dedicated store own task lifecycle. */
 export function InvestigationsSurface({ state, anchors, canStart }: InvestigationsSurfaceProps) {
-  const [specialistId, setSpecialistId] = useState<SpecialistId>('domain-analyst@2');
+  const [specialistId, setSpecialistId] = useState<SpecialistId>('domain-analyst@3');
   const [providerMode, setProviderMode] = useState<InvestigationProviderMode>('local');
   const [question, setQuestion] = useState('');
   const [scopeType, setScopeType] = useState<'all' | 'neighborhood'>('all');
@@ -126,7 +126,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
               {summary.actions.can_follow_up && <button type="button" className="secondary-button" disabled={locked} onClick={() => {
                 setParent({ conversation_id: summary.conversation_id, parent_id: summary.investigation_id });
                 setScopeType(summary.scope.type); if (summary.scope.type === 'neighborhood') { setAnchor(summary.scope.anchor); setHops(summary.scope.hops); }
-                setSpecialistId(summary.specialist_id); setProviderMode(summary.provider_mode); setQuestion(''); questionRef.current?.focus();
+                setSpecialistId(summary.specialist_id.startsWith('evidence-auditor@') ? 'evidence-auditor@3' : 'domain-analyst@3'); setProviderMode(summary.provider_mode); setQuestion(''); questionRef.current?.focus();
               }}>Ask a follow-up</button>}
               {state.consent && <button type="button" disabled={state.actionBusy || state.loading} onClick={state.showConsent}>Review next cloud action</button>}
             </div>

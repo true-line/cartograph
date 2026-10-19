@@ -198,6 +198,91 @@ findings, typed references, immutable hashes and bounded safe metadata. User que
 and follow-up text has an explicit bounded/redacted history representation; an
 original input fingerprint may bind identity without storing the original secret.
 
+## Compact disclosure increment (#596)
+
+This section is the implementation contract for AP-2a, US-0032 AC-0234–0236.
+It amends the every-step full-ledger presentation and cumulative citation admission
+above for new compact specialist definitions. It does not alter the acquisition
+ledger, receipt retention accounting, existing specialist definitions or historical
+result identities. Discovery (#592) and real-provider acceptance (#598) are separate.
+
+### Acquisition, presentation and disclosure identities
+
+The complete `InvestigationInputLedger` remains the host's acquisition authority,
+with its existing v1 serialization and fingerprint. A new, independently versioned
+projection removes repeated acquisition bookkeeping from model input. The initial
+policy deduplicates identical graph fact and evidence-inventory representations by
+typed fact identity, retaining their original provenance and all distinct conflicting
+claims. Query selection/count/continuation metadata remains explicit. Exact acquired
+source spans and bounded T3 parent findings remain distinct from graph metadata.
+No same-name matching, semantic summarization or new source acquisition occurs here.
+
+A host-selected working set records every omitted acquired representation and a
+stable handle for explicit reacquisition. A handle supplies neither source content
+nor citation eligibility. The initial default preserves acquired exact source and
+unique graph facts; removing duplicate envelopes does not imply that a tool ran
+again. A required individual representation that cannot fit fails explicitly; it is
+never silently truncated. Whole model input and acquisition limits still apply.
+
+The host validates raw selected representations against acquired identities, then
+seals a metadata-only per-invocation disclosure against the firewall's actual
+redacted payload. Bind both the original acquisition/source hashes and the actual
+supplied representation hashes; a redacted representation is not the original
+unredacted text. Include projection/policy version, ledger hash, graph/scope/view,
+query and fact representation identities, supplied source citation/span identities,
+parent-history representation identity, omissions and exact payload identity.
+Do not put the manifest's own fingerprint inside the payload it fingerprints.
+Manifest construction and checking happen before invocation or consent publication.
+Unknown, replaced, conflicting or unaccounted representations fail closed.
+
+Initially the view is recovered-only. Future curated inputs must carry all DR-4
+fields through this same contract: view identity, curated revision, accepted-proposal
+IDs, unchanged tier/confidence, review status, source support and freshness/conflict.
+No private curated overlay or inferred method field is introduced by this increment.
+
+### Admission, durability and compatibility
+
+New result admission uses the invocation's disclosed citation set, not cumulative
+host membership. Source support requires the actual admitted source representation
+in that invocation; a graph representation, prior disclosure or opaque handle cannot
+substitute. A live WorkingTreeUnverified span remains explicitly unverified even
+when disclosed; history retains metadata and no source text. Source forgetting does
+not change a saved result's historical meaning or permit reading current source.
+
+Persist the bounded validated disclosure with the exact pending/invoked step before
+dispatch, under the existing transaction and logical storage reservation. Consent,
+invocation start and response admission compare the same immutable identity. A new
+result version binds its finishing step and disclosure; historical validation loads
+that saved invocation and acquisition ledger. Missing/mismatched manifests fail
+rather than silently falling back to cumulative admission. Receipt-reference indexes
+continue to cover all acquired evidence, including omitted and uncited support.
+
+Old step and result bytes retain their original serialization and hash domains.
+Old specialist definitions continue to select the legacy input path. New compact
+definitions require the new disclosure/result shapes; absence cannot downgrade a
+new invocation into legacy behavior. No backfilled manifests or reconstructed old
+prompts are allowed. Raw payloads/source stay transient. Manifest storage failure
+prevents dispatch; interruption, late finish and unknown outcomes retain the existing
+no-replay and no-late-tool guarantees. The disclosure body is capped at 64 KiB; an invocation row may contain that body
+plus 4 KiB of existing step metadata. The enclosing 256 KiB record, 2 MiB task and
+256 MiB global caps remain unchanged. Capacity is checked transactionally before
+dispatch, including a pending disclosure inside the task record.
+
+### Evidence required for acceptance
+
+Map T-0234–0236 to production-path tests for exact representation binding, host-only
+and handle-only citation rejection, deterministic compaction and measured envelope
+comparison. Include redaction, duplicate queries, changed source/receipt, omitted
+support, conflicting claims, oversized objects, source injection, storage failure,
+consent/start races, cancellation/restart and literal legacy identity fixtures.
+Inspect saved disclosure identity through history without retaining raw source.
+
+Compare old and compact envelopes on the same pinned acquisition/history inputs.
+Record serialized bytes separately from provider-reported tokens, calls and latency;
+unmeasured values remain unknown. Establish numeric efficiency claims only from
+those observations. These checks do not pass AC-0191 or any unexecuted native,
+retention or H4/H5 procedure; their receipts remain separate.
+
 ## Budgets and provider acquisition
 
 Query page byte limits cover the complete response, including evidence inventories.

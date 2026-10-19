@@ -175,12 +175,14 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             let prepared = firewall(self.state)?
                 .prepare_bounded(provider, &action, &limits)
                 .map_err(provider_failure)?;
+            let disclosure = input.seal_disclosure(&prepared)?;
             let step = PendingInvestigationStep {
                 step_id: step_id.clone(),
                 payload_hash: prepared.preview().egress.payload_hash.clone(),
                 input_ledger_hash: context.ledger.fingerprint()?,
                 input_bytes,
                 generated_tokens: limits.values().max_output_tokens,
+                disclosure: disclosure.clone(),
             };
             self.check_new_work()?;
             let consent = if provider.locality() == Locality::Cloud {
@@ -231,7 +233,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             let action = InvestigationAction::decode(&completion.text)
                 .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
             let response = InvestigationResponseMeta {
-                step_id,
+                step_id: step_id.clone(),
                 response_hash: content_hash(completion.text.as_bytes()),
                 action_hash: content_hash(&bounded_json(&action, 32 * 1024)?),
                 observed_model: completion.response_model.clone(),
@@ -253,7 +255,14 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .map_err(|_| HostError::Operational)?
                     .investigation_timestamp(0)?;
                 let result = input
-                    .admit_result(self.id, &action, completion.response_model, timestamp)
+                    .admit_result_for_step(
+                        self.id,
+                        &step_id,
+                        disclosure.as_ref(),
+                        &action,
+                        completion.response_model,
+                        timestamp,
+                    )
                     .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
                 // A valid finish belongs to the last supplied ledger, even if
                 // cancellation/Jobs cleanup won while the response was in flight.

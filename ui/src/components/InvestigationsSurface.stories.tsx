@@ -3,7 +3,7 @@ import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { InvestigationsSurface } from './InvestigationsSurface';
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
-import { investigationCatalog, investigationConsent, investigationDetail, investigationEvents, investigationResult } from '../investigationFixtures';
+import { investigationCatalog, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from '../investigationFixtures';
 import type { InvestigationDetail } from '../investigationTypes';
 
 const state = (overrides: Partial<InvestigationState> = {}): InvestigationState => ({
@@ -30,7 +30,7 @@ export const ScopedSpecialistQuestion: Story = {
     await userEvent.selectOptions(canvas.getByLabelText('Hops'), '2');
     await userEvent.type(canvas.getByLabelText('Question'), 'Which evidence supports this rule?');
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
-    await expect(args.state.start).toHaveBeenCalledWith({ specialist_id: 'evidence-auditor@2',
+    await expect(args.state.start).toHaveBeenCalledWith({ specialist_id: 'evidence-auditor@3',
       question: 'Which evidence supports this rule?', scope: { type: 'neighborhood', anchor: 'rule:stock', hops: 2 },
       provider_mode: 'local', limit_profile: investigationCatalog.limits.profile });
     await expect(canvas.getByText('Findings cover the inspected scope; knowledge remains partial.')).toBeVisible();
@@ -145,5 +145,22 @@ export const LateTaskSelectionCannotReplaceCurrent: Story = {
     await expect(canvas.getByRole('heading', { name: 'Current scope question' })).toBeVisible();
     await expect(canvas.queryByText('STALE DETAIL MUST NOT REPLACE SELECTION')).not.toBeInTheDocument();
     await expect(useInvestigationStore.getState().events.every((event) => event.investigation_id === 'current')).toBe(true);
+  },
+};
+
+export const LegacyHistoryUsesCurrentFollowUp: Story = {
+  // AC-0180/0190: preserve saved identities while new follow-ups use the current role.
+  args: { state: state({ detail: legacyInvestigationDetail(2, 'inv-fixture'),
+    history: [legacyInvestigationDetail(2, 'inv-fixture')], result: legacyInvestigationResult('inv-fixture') }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getAllByText('domain-analyst@2')[0]).toBeVisible();
+    await expect(canvas.getByText('A local stock guard is present')).toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: 'Ask a follow-up' }));
+    await expect(canvas.getByRole('radio', { name: /Domain analyst/ })).toBeChecked();
+    await userEvent.type(canvas.getByLabelText('Follow-up question'), 'Inspect this evidence again.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({
+      specialist_id: 'domain-analyst@3', parent_id: 'inv-fixture' }));
   },
 };

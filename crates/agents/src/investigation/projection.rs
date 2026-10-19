@@ -1,0 +1,135 @@
+//! Lossless compaction of verified host query pages. Only identical complete
+//! representations are shared; differing provenance or properties stay visible.
+use super::*;
+use crate::TaskFactKey;
+use core_prov::content_hash;
+use serde::Serialize;
+use serde_json::{Value, json};
+use std::collections::BTreeSet;
+
+#[derive(Debug, Serialize)]
+pub struct CompactInvestigationContext {
+    /// Complete fact objects, including all original provenance and properties.
+    pub facts: Vec<Value>,
+    /// Complete host inventories; indexes/roles remain those of acquisition.
+    pub evidence_options: Vec<Value>,
+    /// Original page metadata with ordered indexes into the two inventories.
+    pub queries: Vec<Value>,
+}
+
+impl CompactInvestigationContext {
+    pub fn prepare(
+        ledger: &InvestigationInputLedger,
+        raw_pages: &[String],
+    ) -> Result<Self, InvestigationError> {
+        ledger.validate()?;
+        if raw_pages.len() != ledger.queries.len() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let mut result = Self {
+            facts: vec![],
+            evidence_options: vec![],
+            queries: vec![],
+        };
+        let selected: BTreeSet<_> = ledger.selected_facts.iter().map(|f| &f.fact).collect();
+        let mut observed = BTreeSet::new();
+        let mut total_bytes = 0usize;
+        for (index, (raw, manifest)) in raw_pages.iter().zip(&ledger.queries).enumerate() {
+            if raw.len() != manifest.response_bytes
+                || content_hash(raw.as_bytes()) != manifest.response_hash
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+            total_bytes = total_bytes
+                .checked_add(raw.len())
+                .ok_or(InvestigationError::LimitExceeded)?;
+            if total_bytes > 96 * 1024 {
+                return Err(InvestigationError::LimitExceeded);
+            }
+            strict::preflight(raw, MAX_QUERY_BYTES, 32, 16384, 16384)?;
+            let mut page: Value =
+                serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidInput)?;
+            let envelope = page
+                .as_object_mut()
+                .ok_or(InvestigationError::InvalidInput)?;
+            // Fail closed on a changed host envelope rather than discard fields.
+            if envelope.len() != 2 {
+                return Err(InvestigationError::InvalidInput);
+            }
+            let options = envelope
+                .remove("evidence_options")
+                .and_then(|v| v.as_array().cloned())
+                .ok_or(InvestigationError::InvalidInput)?;
+            let context = envelope
+                .get_mut("context")
+                .and_then(Value::as_object_mut)
+                .ok_or(InvestigationError::InvalidInput)?;
+            if context.contains_key("fact_indexes") {
+                return Err(InvestigationError::InvalidInput);
+            }
+            let facts = context
+                .remove("facts")
+                .and_then(|v| v.as_array().cloned())
+                .ok_or(InvestigationError::InvalidInput)?;
+            if context.get("snapshot_id").and_then(Value::as_str)
+                != Some(ledger.scope_snapshot_id.as_str())
+                || context.get("total_selected").and_then(Value::as_u64)
+                    != Some(manifest.total_selected as u64)
+                || !context.contains_key("next_cursor")
+                || context.get("next_cursor").is_some_and(|v| !v.is_null()) != manifest.has_more
+                || facts.len() != manifest.returned_facts
+                || options.len() != facts.len()
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+            let mut fact_indexes = Vec::new();
+            let mut option_indexes = Vec::new();
+            let mut page_keys = BTreeSet::new();
+            for (fact, option) in facts.into_iter().zip(options) {
+                let key = key_at(&fact, "reference")?;
+                if !selected.contains(&key)
+                    || key_at(&option, "fact")? != key
+                    || !page_keys.insert(key.clone())
+                {
+                    return Err(InvestigationError::InvalidInput);
+                }
+                observed.insert(key);
+                fact_indexes.push(intern(&mut result.facts, fact));
+                option_indexes.push(intern(&mut result.evidence_options, option));
+            }
+            // Other context metadata is retained verbatim, including any future
+            // coverage annotations. No semantic summary is manufactured here.
+            context.insert("fact_indexes".into(), json!(fact_indexes));
+            result.queries.push(json!({
+                "query_index": index,
+                "selection": manifest.query,
+                "context": context,
+                "evidence_option_indexes": option_indexes,
+            }));
+        }
+        if observed.iter().collect::<BTreeSet<_>>() != selected {
+            return Err(InvestigationError::InvalidInput);
+        }
+        bounded_bytes(&result, MAX_INPUT_BYTES)?;
+        Ok(result)
+    }
+}
+
+fn key_at(value: &Value, field: &str) -> Result<TaskFactKey, InvestigationError> {
+    serde_json::from_value(
+        value
+            .get(field)
+            .cloned()
+            .ok_or(InvestigationError::InvalidInput)?,
+    )
+    .map_err(|_| InvestigationError::InvalidInput)
+}
+
+fn intern(inventory: &mut Vec<Value>, value: Value) -> usize {
+    if let Some(index) = inventory.iter().position(|prior| prior == &value) {
+        index
+    } else {
+        inventory.push(value);
+        inventory.len() - 1
+    }
+}
