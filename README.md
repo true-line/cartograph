@@ -40,6 +40,8 @@ npm run tauri dev   # first run compiles the Rust workspace — takes a few minu
 
 | Document | Purpose |
 |---|---|
+| [docs/VISION.md](docs/VISION.md) | Product vision: the end state and its elements V1–V9 |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Roadmap: workstreams, phases with demos, first issues |
 | [docs/SPEC-00_master.md](docs/SPEC-00_master.md) | Master specification — single source of truth |
 | [docs/SPEC-01_context-hub.md](docs/SPEC-01_context-hub.md) | Domain context, MCP/ACP architecture, and delivery gates |
 | [docs/SPEC-02_rule-evidence.md](docs/SPEC-02_rule-evidence.md) | Scoped rule evidence, redaction, and interpretation boundaries |

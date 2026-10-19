@@ -1,68 +1,83 @@
-# Cartograph — Vision (beyond SPEC-00 v1)
+# Cartograph — Vision
 
-> The staged roadmap below records the original ADR-0007 sequencing.
-> [ADR-0019](adr/ADR-0019-domain-context-and-agent-interoperability.md) supersedes
-> that sequencing for the owner's clarified domain context hub. Current work and
-> delivery gates are defined in [SPEC-01](SPEC-01_context-hub.md); the integrity
-> principles below continue to apply.
+> Restated by the owner on 2026-10-19. The plan to reach it is
+> [ROADMAP.md](ROADMAP.md); the direction decisions it rests on are proposed in
+> [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md). SPEC-00 and
+> SPEC-01 remain the contracts for what is built; this file says where the
+> product is going and what must stay true on the way. The earlier staged
+> roadmap (ADR-0007) is kept at the end for the record.
 
-## The thesis
+## The end state
 
-A modern agentic SDLC — specs, user stories with acceptance criteria, ADRs,
-traceability, gated CI, autonomous agents doing the mechanical work — is how
-software gets built from here on, including by people who are not software
-engineers. Two things are missing:
+Pull in an application — a set of repositories, or a single one — and get back
+what a team would have produced while building it: the journeys and use cases,
+the documentation and architecture, the test arrangements and their
+validation, the flows through the system and the roles the infrastructure
+plays in them. Work on it with a team of agents inside the app: ask them
+questions, have them raise issues, hand work to other agents with issues and
+requirements detailed enough to execute. Then let humans and agents find the
+holes together and fill them, with updates to Cartograph or plugins for it.
 
-1. **A guide.** Non-engineers (and engineers new to agentic work) have no
-   opinionated tool that walks them through running a real SDLC with agents:
-   what artifacts to keep, what gates to enforce, what to let agents do
-   autonomously and what to review.
-2. **An on-ramp for existing systems.** Large, fragmented, under-documented
-   codebases can't join an agentic SDLC because nobody can state what they do.
-   Their true specification — business flows, rules, decisions — is scattered
-   across IaC, cloud topology, server code, events, and clients.
+## Vision elements
 
-Cartograph attacks (2) first because it is the hard, differentiated problem:
-**recover the specification with provenance, never hallucinating**. But the
-recovered spec is not the end state — it is the entry ticket to (1).
+These ids are the shared vocabulary of the plan, the discussions, and the
+issues that implement them.
 
-## Staged roadmap
-
-### Stage 1 — now (SPEC-00 v1, M0–M10)
-Spec recovery only (NG2 intact). Meanwhile, **this repository dogfoods the
-target SDLC**: every change traces to a US/AC, ADRs gate decisions, CI enforces
-traceability, issues close from merged PRs, agents do the work. The repo's
-process *is* the prototype of the guidance product.
-
-### Stage 2 — the SDLC starter kit (v1.x)
-The spec compiler learns one more output profile: arrange the recovered
-artifacts as a ready-to-run agentic SDLC workspace for the *target* system —
-user stories and ACs as a seeded backlog, recovered ADRs as the decision log,
-the gap register as the first sprint of open questions, the traceability
-matrix wired to CI checks. Still documents and process artifacts, not code
-generation — NG2 survives, but the deliverable becomes *actionable* process,
-not just a report.
-
-### Stage 3 — SDLC in the core (v2)
-Cartograph becomes the guide: guided workflows for non-engineers (capture
-intent → US/AC → gates → agent execution → review), continuous re-ingest so
-spec and system never drift apart, and a porting workflow for fragmented
-codebases — recover → curate → re-specify → hand to agents — that preserves
-the business use cases as executable acceptance criteria while the
-implementation modernizes underneath them.
+| Id | Element |
+|----|---------|
+| V1 | **Ingest unit.** An app, a set of repos, or one repo, dragged in; everything below is reconstructed from it. |
+| V2 | **Deterministic-first.** Everything tooling can gather is gathered before any embedding, graph inference or model phase; the semantic and agentic tiers fill what remains and say so. |
+| V3 | **Embeddings and a knowledge graph** built on those deterministic facts, as retrieval indexes and labeled inference aids, never as a substitute for them. |
+| V4 | **Work back through the lifecycle.** Journeys and use-case planning, documentation and architecture, test arrangements and validation: reconstruct the typical artifacts of an enterprise or consumer app. |
+| V5 | **Visualize the flows** and the roles the infrastructure plays in them. |
+| V6 | **A team of agents in the app.** Ask questions, raise issues, assign work to other agents with near-perfect, detailed issues and requirements. |
+| V7 | **Humans and agents fill the holes.** Identify what is missing and close it with updates or plugins. |
+| V8 | **Easily extensible** for new language support. |
+| V9 | **Token-efficient, progressively disclosed skills**, for the agents in the product and the agents that build it. |
 
 ## What must stay true at every stage
 
 - **Integrity spine first.** Inferred is never presented as confirmed
-  (R-INT-1..5). This is the trust that makes agentic work on top safe.
-- **Local-first, explicit egress.** Especially for enterprises with fragmented
-  legacy code, nothing leaves the machine without consent.
-- **Gaps are product.** The honest 5% is what a human (or an agent sprint)
-  works on next.
+  (R-INT-1..5). A rule-derived candidate and a model inference are each
+  labeled as what they are; human acceptance changes review status, never the
+  producing tier. This is the trust that makes agentic work on top safe.
+- **Local-first, explicit egress.** Nothing leaves the machine without
+  per-tier consent; redaction precedes egress.
+- **Gaps are product.** The honest remainder, classified by what it would
+  take to close it (unsupported extractor, missing input, unresolved
+  relationship, contradictory or stale evidence, genuine product gap), is what
+  the next human or agent works on.
+- **No writes to the ingested target** (NG2, ADR-0019). Work leaves the
+  product as packets and issues; implementation happens in a separately
+  authorized checkout and comes back through re-ingest.
+- **Determinism and provenance.** Re-ingest is byte-identical; every claim
+  cites revision-bound evidence.
 
-## Revisiting NG2
+## How the thesis evolved
 
-ADR-0019 supersedes the starter-kit prerequisite for building shared domain
-context and agent investigations. It does not authorize writing the ingested
-target: future modernization execution requires a separately authorized external
-checkout and re-ingestion against approved acceptance criteria.
+The original thesis ([ADR-0007](adr/ADR-0007-agentic-sdlc-dogfood.md)) saw two
+missing pieces for an agentic SDLC: a guide for people running one, and an
+on-ramp for existing systems nobody can specify. Cartograph attacked the
+on-ramp first: recover the specification with provenance, never hallucinating.
+[ADR-0019](adr/ADR-0019-domain-context-and-agent-interoperability.md) then
+superseded the starter-kit sequencing for a persistent domain context hub
+shared by humans, in-app specialists and external agents ([SPEC-01](SPEC-01_context-hub.md)).
+
+The restated vision keeps the integrity principles and the on-ramp, and widens
+the deliverable from a recovered spec to the reconstructed lifecycle, with the
+agent team inside the product rather than only around it. The recovery engine
+and the context hub are its evidence foundation, not its end state.
+
+## Earlier staged roadmap (ADR-0007, for the record)
+
+- **Stage 1 (SPEC-00 v1, M0–M10, delivered):** spec recovery only, with this
+  repository dogfooding the target SDLC: every change traces to a US/AC, ADRs
+  gate decisions, CI enforces traceability, agents do the work.
+- **Stage 2 (starter kit):** arrange the recovered artifacts as a ready-to-run
+  agentic SDLC workspace for the target system. Superseded as a prerequisite
+  by ADR-0019; its content survives as the lifecycle artifacts and work
+  packets of V4 and V6.
+- **Stage 3 (SDLC in the core):** guided workflows, continuous re-ingest, and
+  a porting workflow that preserves business use cases as executable
+  acceptance criteria while the implementation modernizes. This remains the
+  horizon beyond [ROADMAP.md](ROADMAP.md).

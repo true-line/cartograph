@@ -313,9 +313,11 @@
 - **AC-0137** Given multiple database connections, when full or label-filtered graph snapshots are read through GraphStore, then nodes and edges belong to one SQLite revision; selections/order and malformed-unselected-property behavior are preserved, and paired counts are coherent without materializing facts.
 - **AC-0138** Given legacy Atlas, spec, flow/topology, findings, metrics or semantic-preview graph reads, when another process commits between collection reads, then the application uses the shared coherent contract and performs downstream computations after the read transaction ends, preserving existing output/filter policy.
 - **AC-0139** Given a node or edge property read failure, when a graph projection fails and its source is repaired, then the same reader can observe a later valid revision; tests exercise real spec/Atlas adapters without timing races, and no claim is made of atomic ingest or cross-store publication.
+- **AC-0232** Given a coherent snapshot and a query by exact identifier, name or text under a declared, versioned matching policy, when deterministic discovery runs, then it returns bounded candidate handles with label, source identity, match reason, counts, coverage and omissions; same-name hits in different repos stay separate candidates and no candidate becomes a binding or a relationship.
+- **AC-0233** Given a discovery continuation cursor, when the snapshot, normalized query or matching policy version differs from the one the cursor was issued for, then the continuation is rejected and no page mixes identities; an object that cannot fit the response budget fails explicitly instead of being skipped.
 - **Security:** Read-only core API; no SQL, arbitrary filesystem paths, model execution, or transport-specific privilege in requests.
 - **Performance:** At most 500 facts, 1 MiB serialized response and three hops; large-graph snapshot caching/latency is a later measured gate, not guaranteed by output bounds.
-- **Trace:** H1 (SPEC-01) · `context-hub`, `core-graph`, `app` · — · T-0101..0105,T-0137..0139
+- **Trace:** H1 (SPEC-01) · `context-hub`, `core-graph`, `app` · — · T-0101..0105,T-0137..0139,T-0232..0233
 
 ### US-0021 — Inspect and curate a persistent business-domain context
 - **Actor:** Human developer
@@ -497,6 +499,76 @@
 - **AC-0190** Given the app investigation surface, when a developer asks, navigates, approves a step, cancels or reconnects, then Workspace, palette and Jobs reach the same durable task, ordered real activity and cited findings; stale responses cannot replace another selection, missing event pages recover explicitly, existing shortcuts remain stable and unknown outcomes have no generic Retry/Resume.
 - **AC-0191** Given pinned captured TypeScript inputs and an independent expected answer, when the implementation is verified, then production-module scripted and controlled real-provider investigations record actual query/read/finish steps, citations, role/model/input identities and limits without supplying the oracle; this evidence preserves the full unexecuted H4/H5 cross-ingress obligations and never establishes complete confirmed Vendure rules from T3 output.
 - **AC-0204** Given independent reads of an investigation's detail and saved result, when they disagree about whether a result exists (a read that straddles the result commit), then the observation is rejected as inconsistent: the task is never recorded as completed without findings or as unfinished with findings, previously saved findings and activity stay visible, and the next refresh reads a consistent pair.
+- **AC-0234** Given a model step, when its input is prepared, then a versioned per-invocation disclosure manifest names exactly which fact, artifact and source representations were supplied, is validated against the full host acquisition ledger before the call, and is bound to the durable step; the host ledger keeps complete acquisition identity under the existing transient-text retention rules.
+- **AC-0235** Given a finding that cites evidence acquired by the host but not disclosed to that invocation, or only an opaque evidence handle, when the finding is admitted, then that source-support claim is rejected; a handle proves identity, not that content was read.
+- **AC-0236** Given a compact projection and the current cumulative envelope on the same pinned acquisition, when both are measured, then bytes, reported input and output tokens, calls and latency are recorded separately, unavailable measurements stay unknown, and compaction records each omission with a stable handle for reacquisition.
 - **Security:** Per-tier and per-step cloud consent, host-owned scope/execution, closed read tools, all-input replay admission, transient raw payloads and bounded durable history; no target writes or delegation.
 - **Performance:** SPEC-10 limits model/tool steps, cumulative context/source/file validation, body acquisition, time, events and total admission; start returns durable identity before expensive work on a worker.
-- **Trace:** H4 · `agents`, `llm`, `core-graph`, `context-hub`, `app`, `ui` · — · T-0180..0191,T-0204
+- **Trace:** H4 · `agents`, `llm`, `core-graph`, `context-hub`, `app`, `ui` · — · T-0180..0191,T-0204,T-0234..0236
+
+### US-0033 — Drop an application or repo set and see what was and was not covered
+- **Actor:** Engineer
+- **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.
+- **Priority:** Must · **Status:** Draft
+- **AC-0237** Given one or more folders dropped on the Connect surface, when they are accepted, then they ingest through the same path as a typed path or system manifest, each repo is listed with its commit identity, and an unreadable or unsupported folder is reported without a partial ingest.
+- **AC-0238** Given a completed ingest, when its coverage inventory is shown, then each repo reports which deterministic and observational producers ran, which inputs were missing and which capabilities are unsupported, with a scoped stopping reason for each, before any interpretation is offered.
+- **AC-0239** Given a scope with missing producers, when an interpretation or graph read is requested, then it proceeds explicitly qualified by the recorded coverage limitations and never claims exhaustive coverage.
+- **Security:** Read-only intake of local folders the user chose; no target writes, no network fetch beyond existing GitHub intake.
+- **Performance:** Existing ingest limits apply per repo; the inventory is built from facts already recorded during ingest.
+- **Trace:** P1 (ROADMAP W1) · `ingest`, `app`, `ui` · — · T-0237..0239
+
+### US-0034 — Stitch calls across repos only on binding evidence
+- **Actor:** Engineer
+- **As a** engineer **I want** a client in one repo calling a service in another to be joined to that service's endpoint or channel when evidence proves the binding **so that** cross-repo flows are traced without guessing.
+- **Priority:** Must · **Status:** Draft
+- **AC-0240** Given a client call in one repo and an endpoint or channel in another, when stitching runs after every repo is ingested, then they are joined only with binding evidence such as a declared service in the system manifest, base-URL configuration or a gateway route, and the edge cites that evidence.
+- **AC-0241** Given a cross-repo call without binding evidence, or with several equally supported targets, when stitching completes, then the call remains a Gap or labeled candidate with its reason and no new confidence tier is introduced.
+- **Security:** Uses only recovered facts and declared configuration; no live network probing.
+- **Performance:** Stitching runs once per system after ingest and scales with the number of call sites, not repos squared.
+- **Trace:** P1 (ROADMAP W2) · `events`, `ingest`, `app` · — · T-0240..0241
+
+### US-0035 — Read lifecycle artifacts as projections with content acceptance
+- **Actor:** Engineer or reviewer
+- **As a** reviewer **I want** use cases, architecture views, journeys and test arrangements built as projections over recovered facts and checked against an independently specified expected set **so that** I can tell what is implemented, documented, inferred or unknown.
+- **Priority:** Must · **Status:** Draft
+- **AC-0242** Given a compiled artifact, when it is read in the app or exported, then it carries a schema version and a content identity, and both renderings identify the same projection.
+- **AC-0243** Given an independently specified expected set for a feature, when its artifact is checked, then each expectation is labeled implemented, documented intent, inferred or unknown, and an explicitly partial artifact states what is missing instead of being reported complete.
+- **AC-0244** Given a derived statement in an artifact, when it is shown, then its producing method is recorded separately from claim kind, tier and confidence; a fully justified structural projection under a named, versioned rule may be T0, a rule-derived semantic candidate is T2/InferredWeak with a rule-derived badge, and an LLM interpretation stays T3/InferredWeak after validation or acceptance.
+- **AC-0245** Given a test discovered in a target repo, when it is linked to a requirement, then discovered test, subject dependency, observed execution or coverage, assertion support and proposed verification are distinct qualified links, and "validates requirement" appears only with its own qualification.
+- **Security:** Projections read recovered and curated facts only; no confidence promotion through rendering or acceptance.
+- **Performance:** Artifact compilation stays within the existing spec compile path; content checks run on demand.
+- **Trace:** P1 (ROADMAP W3) · `spec`, `core-prov`, `core-graph`, `app`, `ui` · — · T-0242..0245
+
+### US-0036 — See flows and the roles infrastructure plays
+- **Actor:** Engineer or architect
+- **As a** architect **I want** topology, flow and deployment views rendered in the app from the same projection as the export **so that** I can see how requests move and which infrastructure each step uses.
+- **Priority:** Should · **Status:** Draft
+- **AC-0246** Given a compiled topology, flow or deployment view, when it is opened in the app, then it renders as a diagram rather than copyable text and matches the exported projection's content identity.
+- **AC-0247** Given a node or edge in a rendered view, when it is selected, then its evidence, tier and confidence open, and Gap or partial hops are visibly distinct from confirmed ones.
+- **Security:** Rendering is local; no external diagram service.
+- **Performance:** Views render within existing payload bounds; large systems page or collapse rather than truncate silently.
+- **Trace:** P2 (ROADMAP W4) · `spec`, `ui` · — · T-0246..0247
+
+### US-0037 — Generate and review a local work packet for one change
+- **Actor:** Developer or development agent
+- **As a** developer **I want** to select evidence and state the intent of one change and get an immutable, reviewable work packet **so that** an implementer can see what is known, proposed, missing and how success would be shown.
+- **Priority:** Must · **Status:** Draft
+- **AC-0248** Given the same selected evidence in a different unordered order and a different generation time, when a packet is generated, then it has the same canonical identity; changing the objective, a cited span, relevant configuration, selected artifact content or the generator version yields a new packet linked by supersedes.
+- **AC-0249** Given missing intent, acceptance or source closure, when a packet is generated, then each omission is stated in the omission taxonomy, no actor, journey, requirement or passing test is invented, and freshness, review and execution status are reported independently with execution unoffered.
+- **AC-0250** Given two reviews made against the same expected packet revision, when both are submitted, then only one updates the current decision, the other receives an explicit conflict, and review never changes tier, confidence or source bindings.
+- **AC-0251** Given source text in the selected evidence that instructs publication or command execution, when the packet is generated, reviewed or exported, then the text stays data and no publication, model call, target write or execution occurs.
+- **AC-0252** Given a reviewed packet, when it is reopened or exported, then the app and the export show equivalent content bound to the same packet identity.
+- **Security:** Generation is local; packet text grants no capability, consent or authority; publication and execution are separate later scopes.
+- **Performance:** Packets are bounded by the selected evidence; no whole-graph serialization.
+- **Trace:** P3 (ROADMAP W6) · `agents`, `spec`, `app`, `ui` · — · T-0248..0252
+
+### US-0038 — Know and extend what each language and framework covers
+- **Actor:** Adapter author or engineer
+- **As a** adapter author **I want** coverage stated as a language × framework × capability matrix backed by conformance fixtures, and registries I can extend without editing Rust **so that** holes are visible and can be filled by an update or a plugin.
+- **Priority:** Should · **Status:** Draft
+- **AC-0253** Given the installed adapters and plugins, when preflight or Settings reports coverage, then each language × framework × capability cell is supported, partial or unsupported, and every supported claim is backed by a passing conformance fixture.
+- **AC-0254** Given a Gap or omission, when it is shown, then it names its class (unsupported extractor, missing input, unresolved relationship, contradictory or stale, genuine gap) and the seam that would fill it.
+- **AC-0255** Given the event SDK and channel backing registries, when a versioned data file adds an entry, then ingest uses it with the file's identity recorded in provenance, and an invalid file fails closed without changing recovered facts.
+- **Security:** Registry files are data, never code; plugins keep the existing WASM sandbox.
+- **Performance:** Matrix and registry loading happen once per ingest.
+- **Trace:** P1 (ROADMAP W9) · `ingest`, `adapters-fw`, `dynamic`, `adapters-plugin-host`, `app`, `ui` · — · T-0253..0255

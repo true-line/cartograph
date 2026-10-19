@@ -244,3 +244,27 @@ exists, not that its AC or delivery gate has passed.
 | T-0213 | AC-0213 | rust | adapters-lang-ts::nested_eval_gap_cites_one_outer_span_and_marks_inner_spans_unmapped | Nested eval Gap evidence (#474): `eval("eval(CODE)")`'s nested Gap and its DEPENDS_ON edge each cite the outer string literal exactly once with `unmapped_inner_spans: 2` (inner call + `CODE`), and single-span eval-recovered facts carry no marker |
 | T-0100 | AC-0100 | rust | adapters-lang-ts::directory_index_import_resolves_through_index_files, adapters-lang-ts::nodenext_js_extension_import_resolves_to_the_ts_source, adapters-lang-ts::tsconfig_paths_alias_resolves_to_a_real_file_with_the_config_cited, adapters-lang-ts::baseurl_bare_specifier_resolves_without_paths, adapters-lang-ts::workspace_package_bare_specifier_resolves_through_its_exports_map, adapters-lang-ts::unproven_alias_and_missing_index_fail_closed, adapters-lang-ts::nested_tsconfig_shadows_parent_aliases_even_when_empty, adapters-lang-ts::most_specific_paths_pattern_wins, adapters-fw::tolerates_jsonc_comments_and_trailing_commas, adapters-fw::trailing_comma_before_a_comment_is_still_trailing | real Node/ESM module resolution (#213): the directory-wide reconciliation extends AC-0095's guess-correction with the `index.<ext>` directory convention and the NodeNext `.js`-spelled-import-to-`.ts`-sibling idiom (IMPORTS and cross-file CALLS both join the real file), and a config-driven pass rewrites `mod:` IMPORTS targets through tsconfig/jsconfig `paths`/`baseUrl` aliases and workspace-package `exports`/`module`/`main` maps — each rewrite proven against files that exist and citing the deciding config as added provenance evidence, unmatched specifiers keeping their explicit `mod:`/placeholder forms; the tsconfig parse is `adapters-fw::tsconfig`, shared verbatim with the toolchain detector's stored facts (parse once, JSONC-tolerant), and resolution re-reads configs on every walk so a tsconfig edit takes effect even when every source parse is cache-reused |
 | T-0204 | AC-0204 | story | Shell/App/InvestigationResultCommitStraddleIsRejected | detail/result straddle (#414): through the App and store wiring, a refresh whose result read misses a commit the detail already reports is rejected with the consistency error and no findings, and the next refresh shows the saved findings; `ui/src/investigationStore.test.ts` also covers the reverse straddle (a result with a pre-commit detail) the retention of previously saved findings and activity, and that a consent approval's completed summary is not merged into the detail ahead of its result |
+| T-0232 | AC-0232 | reserved | — | deterministic discovery (ROADMAP W7, #250 slice) |
+| T-0233 | AC-0233 | reserved | — | discovery continuation binding (ROADMAP W7) |
+| T-0234 | AC-0234 | reserved | — | per-invocation disclosure manifest (AP-2a, #256 slice) |
+| T-0235 | AC-0235 | reserved | — | undisclosed-source citation rejection (AP-2a) |
+| T-0236 | AC-0236 | reserved | — | matched compact/baseline measurement (AP-2a) |
+| T-0237 | AC-0237 | reserved | — | drop intake (ROADMAP W1) |
+| T-0238 | AC-0238 | reserved | — | coverage inventory and stopping reasons (ROADMAP W1) |
+| T-0239 | AC-0239 | reserved | — | qualified interpretation under recorded limits (ROADMAP W1) |
+| T-0240 | AC-0240 | reserved | — | cross-repo stitching on binding evidence (ROADMAP W2) |
+| T-0241 | AC-0241 | reserved | — | unbound cross-repo calls stay Gaps (ROADMAP W2) |
+| T-0242 | AC-0242 | reserved | — | artifact schema and content identity (ROADMAP W3) |
+| T-0243 | AC-0243 | reserved | — | content acceptance with partial artifacts (ROADMAP W3) |
+| T-0244 | AC-0244 | reserved | — | method recorded apart from tier (ROADMAP W3) |
+| T-0245 | AC-0245 | reserved | — | qualified test links (ROADMAP W3) |
+| T-0246 | AC-0246 | reserved | — | rendered views (ROADMAP W4) |
+| T-0247 | AC-0247 | reserved | — | view evidence links (ROADMAP W4) |
+| T-0248 | AC-0248 | reserved | — | packet canonical identity (AP-1a, ROADMAP W6) |
+| T-0249 | AC-0249 | reserved | — | packet omissions and status dimensions (AP-1a) |
+| T-0250 | AC-0250 | reserved | — | conflict-safe packet review (AP-1a) |
+| T-0251 | AC-0251 | reserved | — | embedded instructions stay data (AP-1a) |
+| T-0252 | AC-0252 | reserved | — | equivalent UI and export packet (AP-1a) |
+| T-0253 | AC-0253 | reserved | — | coverage matrix with conformance fixtures (ROADMAP W9) |
+| T-0254 | AC-0254 | reserved | — | omission class and filling seam (ROADMAP W9) |
+| T-0255 | AC-0255 | reserved | — | data-file registries (ROADMAP W9) |

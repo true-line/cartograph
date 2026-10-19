@@ -23,7 +23,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0017 | AC-0068..0070, AC-0093 | adapters-*, ingest, app, ui | post-M10 | — | ADR-0003, ADR-0017 | T-0068..0070, T-0093 |
 | US-0018 | AC-0090..0092, AC-0222 | app, ingest, ui, scripts | post-M10 | — | ADR-0002, ADR-0018 | T-0090..0092, T-0222 |
 | US-0019 | AC-0096..0097 | ingest, core-graph, spec, app, ui | post-M10 | — | ADR-0003 | T-0096..0097 |
-| US-0020 | AC-0101..0105, AC-0137..0139 | context-hub, core-graph, app | H1 | — | ADR-0008, ADR-0019 | T-0101..0105, T-0137..0139 |
+| US-0020 | AC-0101..0105, AC-0137..0139, AC-0232..0233 | context-hub, core-graph, app | H1 | — | ADR-0008, ADR-0019 | T-0101..0105, T-0137..0139, T-0232..0233 |
 | US-0021 | AC-0106..0109 | context-hub, agents, spec, app, ui | H2–H3 | — | ADR-0019 | T-0106..0109 |
 | US-0022 | AC-0110..0114 | context-hub, agents, app, ui | H4–H5 | — | ADR-0019 | T-0110..0114 |
 | US-0023 | AC-0115..0118 | context-hub, agents, app, ui | H6–H7 | — | ADR-0019 | T-0115..0118 |
@@ -41,7 +41,13 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 
 | US-0031 | AC-0172..0179 | agents, core-graph, app, ui | H3 | — | ADR-0021, ADR-0024, ADR-0027 | T-0172..0179 |
 
-| US-0032 | AC-0180..0191, AC-0204 | agents (immutable @1/@2 specialists), llm (bounded transport @2), core-graph, context-hub, app (complete query-page budgets), ui | H4 | — | ADR-0019, ADR-0024, ADR-0025, ADR-0028 | T-0180..0191, T-0204 |
+| US-0032 | AC-0180..0191, AC-0204, AC-0234..0236 | agents (immutable @1/@2 specialists), llm (bounded transport @2), core-graph, context-hub, app (complete query-page budgets), ui | H4 | — | ADR-0019, ADR-0024, ADR-0025, ADR-0028 | T-0180..0191, T-0204, T-0234..0236 |
+| US-0033 | AC-0237..0239 | ingest, app, ui | P1 (ROADMAP) | — | ADR-0036 | T-0237..0239 |
+| US-0034 | AC-0240..0241 | events, ingest, app | P1 (ROADMAP) | F-* | ADR-0002, ADR-0036 | T-0240..0241 |
+| US-0035 | AC-0242..0245 | spec, core-prov, core-graph, app, ui | P1 (ROADMAP) | — | ADR-0036 | T-0242..0245 |
+| US-0036 | AC-0246..0247 | spec, ui | P2 (ROADMAP) | F-* | ADR-0036 | T-0246..0247 |
+| US-0037 | AC-0248..0252 | agents, spec, app, ui | P3 (ROADMAP) | — | ADR-0019, ADR-0036 | T-0248..0252 |
+| US-0038 | AC-0253..0255 | ingest, adapters-fw, dynamic, adapters-plugin-host, app, ui | P1 (ROADMAP) | — | ADR-0017, ADR-0036 | T-0253..0255 |
 
 ## Coverage assertions
 - Every Must-priority US is anchored to an original milestone, post-M10 work, or a SPEC-01 delivery gate; a milestone label alone does not establish completion.
@@ -90,3 +96,4 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0033 | Proven-external JVM import ids key on the package |
 | ADR-0034 | Explicit references override `.gitignore`; direct reads honor it |
 | ADR-0035 | Erasure-level parameter signatures in JVM method identity |
+| ADR-0036 | Lifecycle reconstruction as the product direction |
