@@ -1,8 +1,7 @@
 # Cartograph — agent context
 
 This is the shared context file for all coding agents (and humans acting like
-them). It holds the product invariants and the SDLC workflow. Tool-specific
-files (`CLAUDE.md`) only add orientation; they must not duplicate this file.
+them). It holds the product invariants and the SDLC workflow. There are no tool-specific instruction files; this file is the only agent context.
 
 ## What Cartograph is
 
@@ -12,6 +11,18 @@ and gaps to provenance across infra, cloud, server, events, and client.
 Read `docs/SPEC-00_master.md` before product code; its staged extension
 `docs/SPEC-01_context-hub.md` defines shared context, specialists, and MCP/ACP
 interoperability. Delivery gates distinguish planned capabilities from shipped ones.
+
+## Orientation
+
+- Layout: Rust workspace per SPEC-00 §8.1 (`crates/*` = analysis engine,
+  `src-tauri` = the `app` shell crate, `ui/` = React front end). Not every
+  crate under `crates/*` is implemented yet — check the crate's own source
+  before assuming a stub.
+- When implementing a milestone, work from its exit gate in SPEC-00 §14 and
+  the user stories mapped to it in `docs/US-TM.md`.
+- SPEC-00 §15 lists four "verify-at-build" claims (Kuzu fit, `hcl-rs`
+  coverage, `usearch` bindings, OTel ingest format) — confirm these against
+  current reality before relying on them; they may have drifted.
 
 ## Product invariants (violating these fails review)
 
