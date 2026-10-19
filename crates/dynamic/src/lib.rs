@@ -26,6 +26,9 @@ use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
+mod eventbridge;
+pub use eventbridge::DETAIL_TYPE_ATTR as EVENTBRIDGE_DETAIL_TYPE_ATTR;
+
 /// Extractor id stamped on every observed fact.
 pub const EXTRACTOR_ID: &str = "t1.terraform-state";
 
@@ -926,6 +929,10 @@ fn enrich_http_endpoints(nodes: &mut [Node], trace: &ObservedTrace, trace_path: 
 /// code location there must be exactly one Gap and one observed identity
 /// for that channel kind. Otherwise the Gap remains explicit and records
 /// that T1 was attempted (R-INT-4).
+///
+/// EventBridge Gaps follow the stricter composite-identity contract in
+/// [`eventbridge`] (#573): source attribution is required and a bus-only
+/// span never fills a detail-type Gap.
 pub fn apply_trace(
     nodes: &mut Vec<Node>,
     edges: &mut [Edge],
@@ -939,6 +946,10 @@ pub fn apply_trace(
     let gaps: Vec<(String, String, String)> = nodes
         .iter()
         .filter(|node| node.label == "Gap")
+        .filter(|node| {
+            node.props.get("kind").and_then(serde_json::Value::as_str)
+                != Some(eventbridge::GAP_KIND)
+        })
         .filter_map(|node| {
             Some((
                 node.id.clone(),
@@ -1044,6 +1055,9 @@ pub fn apply_trace(
 
     nodes.retain(|node| !resolved_gap_ids.contains(&node.id));
     nodes.extend(new_channels.into_values());
+    let (resolved, unresolved) = eventbridge::apply(nodes, edges, trace, trace_path);
+    report.channel_gaps_resolved += resolved;
+    report.channel_gaps_unresolved += unresolved;
     report
 }
 

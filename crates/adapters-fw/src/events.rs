@@ -75,7 +75,34 @@ pub struct EventSdk {
 }
 
 /// Registry version — bump when entries change (versioned per SPEC-00 §3.2).
-pub const EVENT_SDK_VERSION: &str = "ts-2026.07";
+pub const EVENT_SDK_VERSION: &str = "ts-2026.10";
+
+/// A secondary identity component an SDK call can prove from a literal
+/// argument, alongside the registry entry's primary identity (#573: an
+/// EventBridge channel is a detail type on a bus). Only literal-proven
+/// values are recorded; anything else stays unknown, never a wildcard.
+pub struct EventQualifier {
+    /// Channel kind of the registry entries the qualifier applies to.
+    pub kind: &'static str,
+    /// Component name recorded on the site (`bus`).
+    pub component: &'static str,
+    /// Key holding the value anywhere inside the first object argument.
+    pub key: &'static str,
+}
+
+/// Qualifier components, per channel kind.
+pub const EVENT_QUALIFIERS: &[EventQualifier] = &[EventQualifier {
+    kind: "eventbridge-detail-type",
+    component: "bus",
+    key: "EventBusName",
+}];
+
+/// Keys whose array value lists several entries in one call
+/// (`PutEvents({ Entries: [...] })`). A site with more than one entry, or
+/// a non-literal entry list, is marked as a batch: its first entry's
+/// identity cannot stand for the others, and trace observations cannot be
+/// correlated per entry (#573).
+pub const EVENT_BATCH_KEYS: &[(&str, &str)] = &[("eventbridge-detail-type", "Entries")];
 
 /// Event SDK entries (M3 initial set: AWS v3 + v2, kafkajs, node events).
 pub const EVENT_SDKS: &[EventSdk] = &[
@@ -213,6 +240,12 @@ pub struct EventSite {
     pub byte_start: u64,
     /// End of the matched call's byte span.
     pub byte_end: u64,
+    /// Literal-proven qualifier components ([`EVENT_QUALIFIERS`]), e.g.
+    /// `bus`. Absent components are unknown.
+    pub components: std::collections::BTreeMap<String, String>,
+    /// Set when the call carries several entries ([`EVENT_BATCH_KEYS`]):
+    /// `"N entries"` or `"computed entries"`.
+    pub batch: Option<String>,
 }
 
 #[cfg(test)]

@@ -464,3 +464,290 @@ fn manifest_identities_override_env_files() {
         Some(("q", "cartograph.system.toml"))
     );
 }
+
+// --- EventBridge composite identity at T1 (#573, AC-0256, T-0256) --------
+// Each case runs the real chain: TS PutEvents site → adapter → stitch →
+// OTLP trace → `dynamic::apply_trace`.
+
+const EB_SITE: &str = r#"
+import { PutEventsCommand } from '@aws-sdk/client-eventbridge';
+export function publish(kind: string) {
+  return new PutEventsCommand({
+    Entries: [{ EventBusName: 'orders', Source: 'shop', DetailType: `order.${kind}`, Detail: '{}' }],
+  });
+}
+"#;
+
+/// One OTLP JSON line; each span is `(span_id, [(attribute, value)])`.
+fn otlp(spans: &[(&str, &[(&str, &str)])]) -> String {
+    let spans: Vec<serde_json::Value> = spans
+        .iter()
+        .map(|(span_id, attrs)| {
+            serde_json::json!({
+                "traceId": "trace-eb",
+                "spanId": span_id,
+                "name": "PutEvents",
+                "attributes": attrs
+                    .iter()
+                    .map(|(k, v)| serde_json::json!({"key": k, "value": {"stringValue": v}}))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    format!(
+        "{}\n",
+        serde_json::json!({"resourceSpans": [{"resource": {"attributes": []},
+            "scopeSpans": [{"spans": spans}]}]})
+    )
+}
+
+const EB: (&str, &str) = ("messaging.system", "aws_eventbridge");
+const AT_SITE: (&str, &str) = ("code.file.path", "/srv/shop/pub.ts");
+
+fn eb_t1(source: &str, trace: &str) -> (Extraction, dynamic::TraceEnrichment) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pub.ts"), source).unwrap();
+    let mut out = stitch_dir(dir.path());
+    let trace = dynamic::parse_otlp_jsonl(trace).expect("trace parses");
+    let report = dynamic::apply_trace(&mut out.nodes, &mut out.edges, &trace, "trace.jsonl");
+    (out, report)
+}
+
+fn eb_gap(out: &Extraction) -> &Node {
+    out.nodes
+        .iter()
+        .find(|n| n.label == "Gap" && n.props["kind"] == "eventbridge-detail-type")
+        .expect("EventBridge Gap kept")
+}
+
+#[test]
+fn eventbridge_static_site_records_bus_and_keeps_detail_type_gap() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pub.ts"), EB_SITE).unwrap();
+    let out = stitch_dir(dir.path());
+    let gap = eb_gap(&out);
+    assert_eq!(gap.props["components"]["bus"], "orders");
+    assert_eq!(gap.props["raw"], "`order.${kind}`");
+    assert!(gap.props.get("batch").is_none());
+}
+
+#[test]
+fn eventbridge_attributed_complete_observation_fills_gap_with_one_identity() {
+    let span: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        ("messaging.destination.name", "orders"),
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+        ("cloud.account.id", "111122223333"),
+        ("cloud.region", "us-east-1"),
+    ];
+    let (out, report) = eb_t1(EB_SITE, &otlp(&[("s1", span)]));
+    assert_eq!(report.channel_gaps_resolved, 1);
+    assert!(out.nodes.iter().all(|n| n.label != "Gap"));
+    let id = "chan:eventbridge-detail-type:order.placed|bus=orders|scope=111122223333:us-east-1:?";
+    let channel = out.nodes.iter().find(|n| n.id == id).expect("one identity");
+    assert_eq!(channel.props["identity"], "order.placed");
+    assert_eq!(channel.props["components"]["bus"], "orders");
+    assert_eq!(channel.props["components"]["region"], "us-east-1");
+    assert_eq!(channel.props["bus_source"], "trace");
+    assert_eq!(channel.props["prov"]["tier"], "Dynamic");
+    assert_eq!(channel.props["observed"]["span_id"], "s1");
+    let publish = out.edges.iter().find(|e| e.label == "PUBLISHES").unwrap();
+    assert_eq!(publish.dst, id);
+    assert_eq!(publish.props["resolver"], dynamic::OTEL_EXTRACTOR_ID);
+}
+
+#[test]
+fn eventbridge_static_bus_completes_detail_only_observation() {
+    let span: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+    ];
+    let (out, report) = eb_t1(EB_SITE, &otlp(&[("s1", span)]));
+    assert_eq!(report.channel_gaps_resolved, 1);
+    let channel = out
+        .nodes
+        .iter()
+        .find(|n| n.id == "chan:eventbridge-detail-type:order.placed|bus=orders|scope=?:?:?")
+        .expect("static bus plus observed detail type");
+    assert_eq!(channel.props["bus_source"], "static");
+}
+
+#[test]
+fn eventbridge_bus_only_observation_keeps_gap_and_preserves_bus() {
+    let span: &[(&str, &str)] = &[EB, AT_SITE, ("messaging.destination.name", "orders")];
+    let (out, report) = eb_t1(EB_SITE, &otlp(&[("s1", span), ("s2", span)]));
+    assert_eq!(report.channel_gaps_resolved, 0);
+    let gap = eb_gap(&out);
+    assert_eq!(gap.props["t1_reason"], "detail type unobserved");
+    assert_eq!(
+        gap.props["attempted_tiers"],
+        serde_json::json!(["T0", "T1"])
+    );
+    let bus_id = "chan:eventbridge-bus:orders|scope=?:?:?";
+    assert_eq!(gap.props["t1_observed_bus"], serde_json::json!([bus_id]));
+    let bus = out
+        .nodes
+        .iter()
+        .find(|n| n.id == bus_id)
+        .expect("bus kept as its own fact");
+    assert_eq!(bus.props["kind"], "eventbridge-bus");
+    assert!(
+        out.edges.iter().all(|e| e.dst != bus_id),
+        "no edge claimed to the bus"
+    );
+}
+
+#[test]
+fn eventbridge_incompatible_observation_keeps_gap_with_contradiction() {
+    let detail: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "invoice.paid"),
+    ];
+    let (out, _) = eb_t1(EB_SITE, &otlp(&[("s1", detail)]));
+    assert_eq!(
+        eb_gap(&out).props["t1_reason"],
+        "contradiction: observed detail type invoice.paid does not fit static `order.${kind}`"
+    );
+    let bus: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        ("messaging.destination.name", "billing"),
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+    ];
+    let (out, _) = eb_t1(EB_SITE, &otlp(&[("s1", bus)]));
+    assert_eq!(
+        eb_gap(&out).props["t1_reason"],
+        "contradiction: observed bus billing contradicts static bus orders"
+    );
+}
+
+#[test]
+fn eventbridge_same_detail_type_on_distinct_buses_or_scopes_keeps_gap() {
+    let unbussed = EB_SITE.replace("EventBusName: 'orders', ", "");
+    let on = |bus: &'static str, region: &'static str| -> Vec<(&'static str, &'static str)> {
+        vec![
+            EB,
+            AT_SITE,
+            ("messaging.destination.name", bus),
+            (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+            ("cloud.region", region),
+        ]
+    };
+    let (a, b) = (on("orders", "us-east-1"), on("audit", "us-east-1"));
+    let (out, _) = eb_t1(&unbussed, &otlp(&[("s1", &a), ("s2", &b)]));
+    assert_eq!(eb_gap(&out).props["t1_reason"], "2 distinct identities");
+    let c = on("orders", "eu-west-1");
+    let (out, _) = eb_t1(&unbussed, &otlp(&[("s1", &a), ("s3", &c)]));
+    assert_eq!(eb_gap(&out).props["t1_reason"], "2 distinct identities");
+}
+
+#[test]
+fn eventbridge_observation_from_unrelated_site_keeps_gap() {
+    let span: &[(&str, &str)] = &[
+        EB,
+        ("code.file.path", "/srv/billing/invoice.ts"),
+        ("messaging.destination.name", "orders"),
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+    ];
+    let (out, report) = eb_t1(EB_SITE, &otlp(&[("s1", span)]));
+    assert_eq!(report.channel_gaps_unresolved, 1);
+    assert_eq!(
+        eb_gap(&out).props["t1_reason"],
+        "source attribution missing"
+    );
+    // Unlocated spans are not attributed either: no unique-gap fallback.
+    let unlocated: &[(&str, &str)] = &[EB, (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed")];
+    let (out, _) = eb_t1(EB_SITE, &otlp(&[("s1", unlocated)]));
+    assert_eq!(
+        eb_gap(&out).props["t1_reason"],
+        "source attribution missing"
+    );
+}
+
+#[test]
+fn eventbridge_repeated_identical_spans_count_as_one_identity() {
+    let span: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        ("messaging.destination.name", "orders"),
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+    ];
+    let (out, report) = eb_t1(EB_SITE, &otlp(&[("s1", span), ("s2", span), ("s3", span)]));
+    assert_eq!(report.channel_gaps_resolved, 1);
+    let channels: Vec<_> = out.nodes.iter().filter(|n| n.label == "Channel").collect();
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0].props["observed"]["span_id"], "s1");
+}
+
+#[test]
+fn eventbridge_several_distinct_detail_types_keep_gap() {
+    let placed: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+    ];
+    let shipped: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.shipped"),
+    ];
+    let (out, report) = eb_t1(EB_SITE, &otlp(&[("s1", placed), ("s2", shipped)]));
+    assert_eq!(report.channel_gaps_resolved, 0);
+    assert_eq!(eb_gap(&out).props["t1_reason"], "2 distinct identities");
+    assert!(
+        out.nodes
+            .iter()
+            .all(|n| n.props["kind"] != "eventbridge-detail-type" || n.label == "Gap")
+    );
+}
+
+#[test]
+fn eventbridge_batched_entries_keep_explicit_batch_gap() {
+    let span: &[(&str, &str)] = &[
+        EB,
+        AT_SITE,
+        ("messaging.destination.name", "orders"),
+        (dynamic::EVENTBRIDGE_DETAIL_TYPE_ATTR, "order.placed"),
+    ];
+    let batched = EB_SITE.replace(
+        "Detail: '{}' }],",
+        "Detail: '{}' }, { Source: 'shop', DetailType: 'order.audit', Detail: '{}' }],",
+    );
+    let (out, _) = eb_t1(&batched, &otlp(&[("s1", span)]));
+    let gap = eb_gap(&out);
+    assert_eq!(gap.props["batch"], "2 entries");
+    assert_eq!(
+        gap.props["t1_reason"],
+        "batch correlation unsupported: 2 entries in one PutEvents call"
+    );
+    let mapped = r#"
+import { PutEventsCommand } from '@aws-sdk/client-eventbridge';
+export function publishAll(events: { kind: string }[]) {
+  return new PutEventsCommand({ Entries: events.map((e) => ({ DetailType: e.kind })) });
+}
+"#;
+    let (out, _) = eb_t1(mapped, &otlp(&[("s1", span)]));
+    assert_eq!(
+        eb_gap(&out).props["t1_reason"],
+        "batch correlation unsupported: computed entries in one PutEvents call"
+    );
+}
+
+#[test]
+fn eventbridge_literal_site_is_confirmed_at_t0_and_untouched_by_trace() {
+    let literal = EB_SITE.replace("`order.${kind}`", "'order.placed'");
+    let span: &[(&str, &str)] = &[EB, AT_SITE, ("messaging.destination.name", "orders")];
+    let (out, report) = eb_t1(&literal, &otlp(&[("s1", span)]));
+    assert_eq!(report, dynamic::TraceEnrichment::default());
+    let channel = out
+        .nodes
+        .iter()
+        .find(|n| n.id == "chan:eventbridge-detail-type:order.placed")
+        .expect("stored T0 id unchanged");
+    assert_eq!(confidence(&channel.props), "Confirmed");
+    let publish = out.edges.iter().find(|e| e.label == "PUBLISHES").unwrap();
+    assert_eq!(publish.props["components"]["bus"], "orders");
+}

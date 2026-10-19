@@ -149,6 +149,20 @@ fn site_source(repo: &str, symbol: &Option<String>, path: &str) -> String {
         .unwrap_or_else(|| format!("file:{repo}@{path}"))
 }
 
+/// Record a site's qualifier components and batch shape (#573) on a node or
+/// edge's props, only when present so other kinds' facts are unchanged.
+fn add_site_qualifiers(props: &mut serde_json::Value, site: &EventSite) {
+    let Some(map) = props.as_object_mut() else {
+        return;
+    };
+    if !site.components.is_empty() {
+        map.insert("components".into(), serde_json::json!(site.components));
+    }
+    if let Some(batch) = &site.batch {
+        map.insert("batch".into(), batch.as_str().into());
+    }
+}
+
 /// Stitch event sites into channel facts. Deterministic: channels are
 /// emitted in sorted id order, edges in site order (sites arrive sorted by
 /// file from the extractor).
@@ -188,18 +202,20 @@ pub fn stitch(sites: &[EventSite], cfg: &ConfigIndex, id: &SourceId) -> Extracti
                         ),
                     }),
                 });
+                let mut props = serde_json::json!({
+                    "resolver": resolver,
+                    "registry": EVENT_SDK_VERSION,
+                    "prov": prov(
+                        id, &site.path, (site.byte_start, site.byte_end),
+                        ConfidenceTier::Confirmed, &format!("{edge_label} -> {chan_id}"),
+                    ),
+                });
+                add_site_qualifiers(&mut props, site);
                 out.edges.push(Edge {
                     src,
                     dst: chan_id.clone(),
                     label: edge_label.into(),
-                    props: serde_json::json!({
-                        "resolver": resolver,
-                        "registry": EVENT_SDK_VERSION,
-                        "prov": prov(
-                            id, &site.path, (site.byte_start, site.byte_end),
-                            ConfidenceTier::Confirmed, &format!("{edge_label} -> {chan_id}"),
-                        ),
-                    }),
+                    props,
                 });
             }
             (None, identity) => {
@@ -218,19 +234,21 @@ pub fn stitch(sites: &[EventSite], cfg: &ConfigIndex, id: &SourceId) -> Extracti
                     IdentityExpr::Literal(_) => unreachable!("literals always resolve"),
                 };
                 let gap_id = format!("gap:chan:{}@{}@{}", id.repo, site.path, site.byte_start);
+                let mut props = serde_json::json!({
+                    "reason": &reason,
+                    "raw": raw,
+                    "kind": site.kind,
+                    "attempted_tiers": ["T0"],
+                    "prov": prov(
+                        id, &site.path, (site.byte_start, site.byte_end),
+                        ConfidenceTier::Gap, &format!("Gap {gap_id}"),
+                    ),
+                });
+                add_site_qualifiers(&mut props, site);
                 out.nodes.push(Node {
                     id: gap_id.clone(),
                     label: "Gap".into(),
-                    props: serde_json::json!({
-                        "reason": &reason,
-                        "raw": raw,
-                        "kind": site.kind,
-                        "attempted_tiers": ["T0"],
-                        "prov": prov(
-                            id, &site.path, (site.byte_start, site.byte_end),
-                            ConfidenceTier::Gap, &format!("Gap {gap_id}"),
-                        ),
-                    }),
+                    props,
                 });
                 out.edges.push(Edge {
                     src,

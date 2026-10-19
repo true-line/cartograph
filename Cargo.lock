@@ -1448,6 +1448,7 @@ dependencies = [
  "adapters-lang-ts",
  "core-graph",
  "core-prov",
+ "dynamic",
  "serde_json",
  "source-walk",
  "tempfile",
