@@ -23,8 +23,8 @@ pub struct CoverageRecord {
     pub registered_source_id: Option<String>,
     /// The ingest that produced the inventory.
     pub ingest_id: String,
-    /// Identity of the configuration the ingest applied: layer hints, declared
-    /// inputs and active plugins.
+    /// Identity of the plugin basis the ingest applied. Layer hints and
+    /// declared inputs are per-ingest options recorded in the inventory body.
     pub config_hash: String,
     /// Exact inventory JSON, as serialized by the producer.
     pub inventory_json: String,

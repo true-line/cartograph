@@ -161,9 +161,17 @@ fn qualification_marks_recorded_stale_and_unrecorded_repos_and_never_exhaustive(
         Err(ContextError::InventoryUnavailable(_))
     ));
 
-    // A different registration is stale too.
+    // A different registration is stale too, and so is a matching absent one.
     let moved = [scoped("acme/api", Some("src:elsewhere"), "config:v1")];
     let coverage = CoverageQualification::new(&moved, &recorded[..1]).unwrap();
+    assert_eq!(coverage.repos[0].status, CoverageStatus::Stale);
+    let mut unregistered = recorded[0].clone();
+    unregistered.record.registered_source_id = None;
+    let coverage = CoverageQualification::new(
+        &[scoped("acme/api", None, "config:v1")],
+        std::slice::from_ref(&unregistered),
+    )
+    .unwrap();
     assert_eq!(coverage.repos[0].status, CoverageStatus::Stale);
 
     // A requested layer selection is compared as a set; a different one is

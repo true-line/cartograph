@@ -231,8 +231,11 @@ impl CoverageQualification {
             if requested.is_some() {
                 compared.push(COMPARED_LAYER_HINTS.to_string());
             }
+            // A registration must be present on both sides: two absent
+            // registrations do not make an inventory current.
             let current_basis = now.is_some_and(|now| {
-                now.registered_source_id == record.registered_source_id
+                now.registered_source_id.is_some()
+                    && now.registered_source_id == record.registered_source_id
                     && now.config_hash == record.config_hash
             });
             let derived = if current_basis {

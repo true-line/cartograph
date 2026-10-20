@@ -8966,10 +8966,9 @@ export function App() {
                 Some(source.source_id.as_str())
             );
         }
-        let scope = super::context::coverage_scope(&handle, &state).unwrap();
         let page = super::context::qualified_query_graph(
             &state.graph,
-            &scope,
+            || super::context::coverage_scope(&handle, &state),
             context_hub::coverage::QualifiedRequest {
                 request: context_hub::QueryRequest {
                     max_facts: 1,

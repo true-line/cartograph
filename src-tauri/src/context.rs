@@ -67,21 +67,45 @@ pub(crate) fn coverage_scope<R: tauri::Runtime>(
         .collect()
 }
 
+/// The scope held throughout a read bracketed by `before` and `after`. A repo
+/// whose registration or plugin basis changed in between, or that was
+/// registered only during the read, keeps no current registration and so can
+/// never qualify as recorded; a repo removed during the read is unregistered.
+fn stable_scope(before: &[ScopedRepo], after: Vec<ScopedRepo>) -> Vec<ScopedRepo> {
+    after
+        .into_iter()
+        .map(|repo| {
+            if before.contains(&repo) {
+                repo
+            } else {
+                ScopedRepo {
+                    registered_source_id: None,
+                    ..repo
+                }
+            }
+        })
+        .collect()
+}
+
 /// Copy one graph revision with the inventories recorded alongside it, then
-/// serve the page under that qualification.
+/// serve the page under that qualification. The registrations and plugin basis
+/// live outside the graph, so they are read before and after the graph copy
+/// and only what held across it is current.
 pub(crate) fn qualified_query_graph(
     graph: &Mutex<SqliteGraphStore>,
-    scope: &[ScopedRepo],
+    mut scope: impl FnMut() -> Result<Vec<ScopedRepo>, String>,
     request: QualifiedRequest<QueryRequest>,
 ) -> Result<QualifiedResponse<QueryResponse>, String> {
+    let before = scope()?;
     let ((nodes, edges), recorded) = {
         let graph = graph.lock().map_err(|error| error.to_string())?;
         graph
             .read_snapshot_with_coverage()
             .map_err(|error| error.to_string())?
     };
+    let scope = stable_scope(&before, scope()?);
     let coverage =
-        CoverageQualification::new(scope, &recorded).map_err(|error| error.to_string())?;
+        CoverageQualification::new(&scope, &recorded).map_err(|error| error.to_string())?;
     ContextSnapshot::new(nodes, edges)
         .and_then(|snapshot| snapshot.with_coverage(coverage))
         .and_then(|context| context.query(request))
@@ -102,8 +126,7 @@ pub(crate) async fn query_qualified_context(
             .validate_limits()
             .map_err(|error| error.to_string())?;
         let state = app.state::<crate::AppState>();
-        let scope = coverage_scope(&app, &state)?;
-        qualified_query_graph(&state.graph, &scope, request)
+        qualified_query_graph(&state.graph, || coverage_scope(&app, &state), request)
     })
     .await
 }
@@ -261,7 +284,7 @@ mod tests {
         });
         let first = qualified_query_graph(
             &graph,
-            &scope,
+            || Ok(scope.to_vec()),
             QualifiedRequest {
                 request: request(),
                 context_id: None,
@@ -287,7 +310,7 @@ mod tests {
         assert!(
             qualified_query_graph(
                 &graph,
-                &scope,
+                || Ok(scope.to_vec()),
                 QualifiedRequest {
                     request: next.clone(),
                     context_id: None,
@@ -297,7 +320,7 @@ mod tests {
         );
         let second = qualified_query_graph(
             &graph,
-            &scope,
+            || Ok(scope.to_vec()),
             QualifiedRequest {
                 request: next,
                 context_id: Some(first.context_id.clone()),
@@ -306,5 +329,34 @@ mod tests {
         .unwrap();
         assert_eq!(second.context_id, first.context_id);
         assert!(second.response.next_cursor.is_none());
+
+        // A registration or plugin basis that changes while the graph is
+        // copied is not current, even though the copied basis still matches
+        // the stored inventory; the drifted read has its own context.
+        for drift in [
+            |repo: &mut ScopedRepo| repo.config_hash = "config:next".into(),
+            |repo: &mut ScopedRepo| repo.registered_source_id = Some("src:other".into()),
+        ] {
+            let mut reads = 0;
+            let drifted = qualified_query_graph(
+                &graph,
+                || {
+                    reads += 1;
+                    let mut now = scope.to_vec();
+                    if reads == 1 {
+                        drift(&mut now[0]);
+                    }
+                    Ok(now)
+                },
+                QualifiedRequest {
+                    request: request(),
+                    context_id: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(reads, 2);
+            assert_eq!(drifted.coverage.repos[0].status, CoverageStatus::Stale);
+            assert_ne!(drifted.context_id, first.context_id);
+        }
     }
 }
