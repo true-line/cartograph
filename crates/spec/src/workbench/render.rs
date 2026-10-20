@@ -518,6 +518,7 @@ impl<'a> Origins<'a> {
 mod tests {
     use super::*;
     use std::fmt::Write;
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
     #[test]
     fn assertions_refuse_large_owned_fields_before_materialization() {
         let large = "quote\"\n\0é".repeat(30_000);
@@ -551,6 +552,7 @@ mod tests {
         assert!(assertions.values.is_empty());
         assert_eq!(budget.remaining(), 510);
     }
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
     #[test]
     fn cached_origin_omission_is_borrowed_through_admission() {
         let prov = Provenance::new(
@@ -601,6 +603,7 @@ mod tests {
         assert!(assertions.values.is_empty());
         assert_eq!(budget.remaining(), 510);
     }
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
     #[test]
     fn text_admits_before_reserve_and_streams_escaped_expansion() {
         let budget = Budget::new(Some(16)).unwrap();

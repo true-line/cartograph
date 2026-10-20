@@ -1,3 +1,4 @@
+// AC-0259 (T-0259): bounded derivation preserves complete ordinary ADR output.
 use super::*;
 
 fn provenance(seed: &str, evidence_bytes: usize) -> serde_json::Value {

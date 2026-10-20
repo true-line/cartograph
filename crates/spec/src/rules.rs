@@ -1647,7 +1647,7 @@ mod tests {
         fixtures
     }
 
-    // AC-0248: captured from the original renderer before this refactor;
+    // AC-0258: captured from the original renderer before this refactor;
     // no second implementation is retained in the production or test tree.
     #[test]
     fn selected_rule_inventory_matches_prechange_frozen_bytes() {
@@ -1694,7 +1694,7 @@ mod tests {
         OWNED_CONTENT.with(|c| assert_eq!(c.get(), 0));
     }
 
-    // AC-0248: selected siblings are charged exactly, including the complete
+    // AC-0258: selected siblings are charged exactly, including the complete
     // assertion tail and the empty array of an index-only native artifact.
     #[test]
     fn selected_rule_inventory_enforces_exact_combined_boundaries() {
@@ -1761,7 +1761,7 @@ mod tests {
         }
     }
 
-    // AC-0248: escaping, JSON scalar formatting and provenance metadata never
+    // AC-0258: escaping, JSON scalar formatting and provenance metadata never
     // allocate oversized output while the budget is still being measured.
     #[test]
     fn selected_rule_inventory_rejects_large_output_before_owning_it() {
@@ -1841,7 +1841,7 @@ mod tests {
         }
     }
 
-    // AC-0248: projection policy remains the caller's complete input, and
+    // AC-0258: projection policy remains the caller's complete input, and
     // selecting a native artifact preserves the ordinary compiler's bytes.
     #[test]
     fn selected_rule_inventory_matches_export_policy_and_rejected_inputs() {

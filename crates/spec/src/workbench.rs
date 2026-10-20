@@ -587,6 +587,7 @@ mod tests {
         }
     }
 
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
     #[test]
     fn ordinary_bundle_preserves_frozen_prebounded_bytes() {
         let (nodes, edges, flows) = fixture();
@@ -1643,6 +1644,7 @@ mod tests {
         assert_eq!(index["classes"].as_array().unwrap().len(), 5);
     }
 
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
     #[test]
     fn selected_producers_preserve_complete_artifacts_for_both_projection_modes() {
         let (nodes, edges, flows) = fixture();
@@ -1701,6 +1703,7 @@ mod tests {
         }
     }
 
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
     #[test]
     fn ordinary_missing_invalid_provenance_matches_original_bytes() {
         let (mut nodes, mut edges, mut flows) = fixture();
@@ -1766,6 +1769,7 @@ mod tests {
         }
     }
 
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
     #[test]
     fn selected_output_exact_boundaries_include_escaped_complete_assertion_arrays() {
         let (mut nodes, mut edges, mut flows) = fixture();
@@ -1843,6 +1847,7 @@ mod tests {
         }
     }
 
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
     #[test]
     fn selection_order_duplicates_failures_and_unknown_ids_have_explicit_semantics() {
         let n = node(
@@ -2059,6 +2064,7 @@ mod tests {
         }
     }
 
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
     #[test]
     fn streamed_artifact_identity_matches_original_typed_tuple_bytes() {
         let (nodes, edges, flows) = fixture();
