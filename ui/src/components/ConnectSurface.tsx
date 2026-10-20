@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { dropSetStatus, type DropItem, type DropStatus } from '../dropIntake';
 import type { IngestSource } from '../store';
 
 export interface ConnectSurfaceProps {
@@ -10,6 +11,55 @@ export interface ConnectSurfaceProps {
   onTargetChange: (target: string) => void;
   onBack: () => void;
   onPreflight: () => void;
+  /** Dropped folders and their outcomes (#587); null before any drop. */
+  drop?: DropItem[] | null;
+  /** True while folders are dragged over the window. */
+  dropActive?: boolean;
+  onDismissDrop?: () => void;
+}
+
+const STATUS_LABEL: Record<DropStatus, string> = {
+  rejected: 'Rejected',
+  queued: 'Queued',
+  ingesting: 'Ingesting',
+  ingested: 'Ingested',
+  failed: 'Failed',
+};
+
+/** Per-folder intake outcomes (AC-0237): every dropped path says whether it
+ *  was accepted, rejected or failed, and the set never claims completion
+ *  while anything is unresolved. */
+function DropOutcomes({ items, onDismiss }: { items: DropItem[]; onDismiss?: () => void }) {
+  const status = dropSetStatus(items);
+  return (
+    <section className="drop-outcomes" aria-label="Dropped folders" data-testid="drop-outcomes">
+      <header>
+        <strong data-testid="drop-set-status">{status.label}</strong>
+        {onDismiss && status.unresolved === 0 ? (
+          <button type="button" className="secondary-button" onClick={onDismiss}>
+            Dismiss
+          </button>
+        ) : null}
+      </header>
+      <ul>
+        {items.map((item, index) => (
+          <li key={`${index}:${item.path}`} className={`drop-item drop-${item.status}`} data-testid="drop-item">
+            <span className={`drop-status drop-status-${item.status}`}>{STATUS_LABEL[item.status]}</span>
+            <code className="drop-path">{item.path}</code>
+            {item.source ? (
+              <span className="muted">{item.source === 'manifest' ? 'system manifest' : 'local folder'}</span>
+            ) : null}
+            {item.repos.length ? (
+              <span className="drop-repos" data-testid="drop-repos">
+                {item.repos.join(' · ')}
+              </span>
+            ) : null}
+            {item.reason ? <span className="drop-reason">{item.reason}</span> : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
 }
 
 const SOURCES: { id: IngestSource; label: string; icon: string; placeholder: string }[] = [
@@ -43,6 +93,9 @@ export function ConnectSurface({
   onTargetChange,
   onBack,
   onPreflight,
+  drop = null,
+  dropActive = false,
+  onDismissDrop,
 }: ConnectSurfaceProps) {
   const active = SOURCES.find((s) => s.id === source) ?? SOURCES[0];
   const input = useRef<HTMLInputElement>(null);
@@ -98,6 +151,18 @@ export function ConnectSurface({
           onChange={(e) => onTargetChange(e.target.value)}
         />
       </label>
+      <p
+        className={`drop-hint${dropActive ? ' drop-hint-active' : ''}`}
+        data-testid="drop-hint"
+      >
+        <span className="material-symbols-outlined" aria-hidden="true">
+          drive_folder_upload
+        </span>
+        {canPreflight
+          ? 'Or drop folders here. Each ingests like a typed local path, or as a system when it holds a cartograph.system.toml.'
+          : 'Dropping folders needs the desktop app.'}
+      </p>
+      {drop?.length ? <DropOutcomes items={drop} onDismiss={onDismissDrop} /> : null}
       <p className="reassure-strip">
         <span className="material-symbols-outlined" aria-hidden="true">
           verified_user

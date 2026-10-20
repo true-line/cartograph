@@ -1,3 +1,11 @@
+import {
+  BUSY_REASON,
+  dropSetStatus,
+  summaryRepos,
+  toDropItems,
+  type DropCandidate,
+  type DropItem,
+} from './dropIntake';
 import { create } from 'zustand';
 import type { FactKey } from './primarySourceStore';
 import { invokeOr } from './tauri';
@@ -127,7 +135,8 @@ export interface IngestSummary {
     reused_files: number;
     deleted_files: number;
   };
-  /** Set for GitHub adds: the cloned repo listed with its SHA (AC-0001). */
+  /** The recovered repo's identity: a clone with its SHA (AC-0001), or a
+   *  local tree, whose commit is always `workdir` (AC-0237). */
   repo?: string;
   commit_sha?: string;
   /** Set for system-manifest adds: `identity@sha12` per repo (AC-0002). */
@@ -790,6 +799,9 @@ export interface AppStore {
   ingestSource: IngestSource;
   /** Connect-step target: repo URL, local path, or manifest path. */
   ingestTarget: string;
+  /** Folders dropped on Connect and each one's outcome (#587); kept until
+   *  the next drop or a dismiss, so completed and unresolved stay visible. */
+  dropIntake: DropItem[] | null;
   /** Local detection result; null for remote targets (detected on clone). */
   preflight: PreflightReport | null;
   preflightBusy: boolean;
@@ -840,7 +852,13 @@ export interface AppStore {
   /** Run recovery over a target. An explicit `source` (from the Connect
    *  step) picks the command directly; without one it is inferred from the
    *  target string. */
-  ingest: (path: string, source?: IngestSource) => Promise<void>;
+  /** `exactPath` ingests an OS path exactly as supplied (a dropped folder),
+   * where a typed target is trimmed. */
+  ingest: (
+    path: string,
+    source?: IngestSource,
+    options?: { exactPath?: boolean },
+  ) => Promise<void>;
   clearGraph: () => Promise<void>;
   setSpecMode: (mode: SpecExportMode) => Promise<void>;
   /** Full artifact (untruncated content and assertions) for copy/export,
@@ -875,6 +893,11 @@ export interface AppStore {
   applyJobDetail: (id: number, detail: string) => void;
   setIngestSource: (source: IngestSource) => void;
   setIngestTarget: (target: string) => void;
+  /** Classify dropped paths, then ingest each accepted one in turn through
+   *  the same `ingest` path a typed target takes (#587, AC-0237). */
+  ingestDropped: (paths: string[]) => Promise<void>;
+  /** Clear a finished drop's outcomes; an unresolved drop stays. */
+  dismissDropIntake: () => void;
   /** Navigate to Preflight and run local detection (#116). Local targets get
    *  a real report; remote/manifest targets are detected during recovery. */
   runPreflight: () => Promise<void>;
@@ -994,6 +1017,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   ingestError: null,
   ingestSource: 'github',
   ingestTarget: '',
+  dropIntake: null,
   preflight: null,
   preflightBusy: false,
   preflightError: null,
@@ -1138,14 +1162,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
     await get().refresh();
   },
 
-  ingest: async (path: string, source?: IngestSource) => {
+  ingest: async (path: string, source?: IngestSource, options?: { exactPath?: boolean }) => {
     // Clear prior outcome up front so a failed run never shows a stale summary.
     set({ ingestBusy: true, ingestError: null, ingestSummary: null });
     // A GitHub reference clones with real identity (US-0001); a topology
     // manifest ingests the whole declared system (AC-0002); anything else
     // ingests as a local tree. The Connect step's explicit source wins over
     // string inference — a manifest can also be a directory holding one.
-    const trimmed = path.trim();
+    const trimmed = options?.exactPath ? path : path.trim();
     const isRepoUrl =
       source === 'github' ||
       (source === undefined && /^(https:\/\/github\.com\/|git@github\.com:)/.test(trimmed));
@@ -1342,6 +1366,96 @@ export const useAppStore = create<AppStore>((set, get) => ({
     // persist findings for a target the user has left (#434 review).
     if (ingestSource !== 'local' && get().preflightBusy) void get().cancelPreflight();
     set({ ingestSource });
+  },
+
+  ingestDropped: async (paths) => {
+    if (paths.length === 0) return;
+    const current = get().dropIntake;
+    if (get().ingestBusy || (current && dropSetStatus(current).unresolved > 0)) {
+      // Never silently dropped: each path gets an explicit outcome.
+      const busy = paths.map((path) => ({
+        path,
+        source: null,
+        status: 'rejected' as const,
+        reason: BUSY_REASON,
+        repos: [],
+      }));
+      set({ dropIntake: [...(current ?? []), ...busy] });
+      return;
+    }
+    // Reserve the intake before awaiting classification, so a second drop
+    // sees unresolved items and is rejected rather than racing this one.
+    // A settled list stays until dismissed, so this intake appends after it
+    // and owns the next `paths.length` items; busy rejections appended
+    // meanwhile stay after them.
+    const prior = current ?? [];
+    const base = prior.length;
+    const own = paths.length;
+    set({
+      dropIntake: [
+        ...prior,
+        ...paths.map((path) => ({
+          path,
+          source: null,
+          status: 'queued' as const,
+          reason: null,
+          repos: [],
+        })),
+      ],
+    });
+    const later = () => get().dropIntake?.slice(base + own) ?? [];
+    let candidates: DropCandidate[] | null;
+    try {
+      candidates = await invokeOr<DropCandidate[] | null>('classify_drop', null, { paths });
+    } catch (e) {
+      candidates = paths.map((path) => ({ path, source: null, reason: String(e) }));
+    }
+    if (!candidates) {
+      const rest = [...prior, ...later()];
+      set({ dropIntake: rest.length > 0 ? rest : null });
+      return;
+    }
+    const items = toDropItems(candidates);
+    set({ dropIntake: [...prior, ...items, ...later()] });
+    const update = (index: number, patch: Partial<DropItem>) =>
+      set((state) => ({
+        dropIntake:
+          state.dropIntake?.map((item, at) =>
+            at === base + index ? { ...item, ...patch } : item,
+          ) ??
+          null,
+      }));
+    for (const [index, item] of items.entries()) {
+      if (item.status !== 'queued' || !item.source) continue;
+      update(index, { status: 'ingesting' });
+      let refreshError: string | null = null;
+      try {
+        await get().ingest(item.path, item.source, { exactPath: true });
+      } catch (e) {
+        // `ingest` settles its own outcome before refreshing the graph view;
+        // only that refresh can reject here. The recovery is not retried.
+        refreshError = String(e);
+      }
+      const { ingestError, ingestSummary } = get();
+      update(
+        index,
+        ingestError
+          ? { status: 'failed', reason: ingestError }
+          : ingestSummary
+            ? {
+                status: 'ingested',
+                repos: summaryRepos(ingestSummary),
+                reason: refreshError ? `ingested; graph refresh failed: ${refreshError}` : null,
+              }
+            : { status: 'failed', reason: refreshError ?? 'ingest returned no summary' },
+      );
+    }
+  },
+
+  dismissDropIntake: () => {
+    const current = get().dropIntake;
+    if (current && dropSetStatus(current).unresolved > 0) return;
+    set({ dropIntake: null });
   },
 
   setIngestTarget: (ingestTarget) => {
