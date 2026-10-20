@@ -394,7 +394,7 @@ fn investigation_acceptance_report_preserves_failed_and_unknown_outcomes() {
 
 #[test]
 fn investigation_acceptance_explicit_specialists_match_prepared_report_and_durable_tasks() {
-    // Dispatch calibration only: real-provider and independent acceptance gates
+    // AC-0191: dispatch calibration only; real-provider and independent acceptance gates
     // remain unchanged. Exercise both actual coordinator paths and saved reports.
     let mut fingerprints = Vec::new();
     for (specialists, expected_analyst, expected_auditor, version) in [
