@@ -93,6 +93,49 @@ Use an actual recovered node identity for the anchor. Continue with the returned
 are consistency tokens, not authorization credentials. No MCP endpoint is implied
 by the existence of this Tauri command.
 
+### Coverage-qualified reads (AC-0239, #588)
+
+A recovery publishes its repo's coverage inventory (AC-0238) in the same write
+transaction as the repo's facts and source bindings. A publication without an
+inventory clears the repo's previous one rather than leaving it to describe other
+facts. Graph clearing removes every inventory. The record binds the registered
+source, the ingest job, the plugin basis (`coverage-config-v1`, the sorted pinned
+plugin ids) and the inventory's content hash. Records are validated on write and
+hash-checked on read. The `coverage_*` tables must be exactly as created.
+`read_snapshot_with_coverage_bounded` admits the graph as `read_snapshot_bounded`
+does. It also counts the inventories and measures their stored bytes, both before
+any of them is copied (at most 4096 records and 16 MiB).
+
+`query_qualified_context` takes `{"request": {"request": <query request>,
+"context_id": null}}`. It reads the graph and every inventory in one
+transaction. The response is `{context_id, coverage, response}`, where `response`
+is an unchanged `query_context` page. `coverage` has contract
+`coverage-qualification@1` and always has `exhaustive: false`. It qualifies every
+registered or recorded repo with one of these statuses:
+
+- `recorded`: the registration and plugin basis are current. When the caller
+  requests a layer selection, it must match the recorded one as a set. A recorded
+  repo carries its commit, inventory hash, `limited`, producer-state counts and
+  recorded layer hints.
+- `stale`: an inventory exists, but its registration, plugin basis or requested
+  layer selection differs, or the repo is no longer registered. Only its hash is
+  reported, and nothing is derived from its body.
+- `unrecorded`: no inventory exists.
+
+`limited` is true when any producer was excluded or lacked a declared input, or
+when any capability is unsupported. A producer with nothing to read does not
+limit coverage. Each repo's `compared` field lists what was checked at read time.
+Everything else, declared inputs included, is as recorded at ingest and was not
+revalidated.
+
+`coverage_id` binds the public block and the recorded basis behind it.
+`context_id = content_identity("context-v2", {snapshot_id, coverage_id})`, and
+`snapshot_id` keeps its graph-only meaning. The envelope counts inside
+`max_bytes`. A qualification that cannot fit fails with the budget error and is
+never dropped. A continuation must send the `context_id` it was issued in.
+Qualified interpretation versions and qualified discovery build on this read.
+`query_context` and its identities are unchanged.
+
 ## Coherent legacy graph projections (#388)
 
 The same database-revision guarantee extends to the existing Atlas, specification,

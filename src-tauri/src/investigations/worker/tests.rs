@@ -222,6 +222,7 @@ impl Fixture {
             source.root(),
             "workdir",
             &bindings,
+            None,
         )
         .unwrap();
         drop(input);
