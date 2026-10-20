@@ -832,7 +832,13 @@ export interface AppStore {
   /** Run recovery over a target. An explicit `source` (from the Connect
    *  step) picks the command directly; without one it is inferred from the
    *  target string. */
-  ingest: (path: string, source?: IngestSource) => Promise<void>;
+  /** `exactPath` ingests an OS path exactly as supplied (a dropped folder),
+   * where a typed target is trimmed. */
+  ingest: (
+    path: string,
+    source?: IngestSource,
+    options?: { exactPath?: boolean },
+  ) => Promise<void>;
   clearGraph: () => Promise<void>;
   setSpecMode: (mode: SpecExportMode) => Promise<void>;
   /** Full artifact (untruncated content and assertions) for copy/export,
@@ -1136,14 +1142,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
     await get().refresh();
   },
 
-  ingest: async (path: string, source?: IngestSource) => {
+  ingest: async (path: string, source?: IngestSource, options?: { exactPath?: boolean }) => {
     // Clear prior outcome up front so a failed run never shows a stale summary.
     set({ ingestBusy: true, ingestError: null, ingestSummary: null });
     // A GitHub reference clones with real identity (US-0001); a topology
     // manifest ingests the whole declared system (AC-0002); anything else
     // ingests as a local tree. The Connect step's explicit source wins over
     // string inference — a manifest can also be a directory holding one.
-    const trimmed = path.trim();
+    const trimmed = options?.exactPath ? path : path.trim();
     const isRepoUrl =
       source === 'github' ||
       (source === undefined && /^(https:\/\/github\.com\/|git@github\.com:)/.test(trimmed));
@@ -1357,30 +1363,63 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ dropIntake: [...(current ?? []), ...busy] });
       return;
     }
+    // Reserve the intake before awaiting classification, so a second drop
+    // sees unresolved items and is rejected rather than racing this one.
+    // This intake owns the first `paths.length` items; busy rejections
+    // appended meanwhile stay after them.
+    const own = paths.length;
+    set({
+      dropIntake: paths.map((path) => ({
+        path,
+        source: null,
+        status: 'queued' as const,
+        reason: null,
+        repos: [],
+      })),
+    });
+    const later = () => get().dropIntake?.slice(own) ?? [];
     let candidates: DropCandidate[] | null;
     try {
       candidates = await invokeOr<DropCandidate[] | null>('classify_drop', null, { paths });
     } catch (e) {
       candidates = paths.map((path) => ({ path, source: null, reason: String(e) }));
     }
-    if (!candidates) return;
-    set({ dropIntake: toDropItems(candidates) });
+    if (!candidates) {
+      const rest = later();
+      set({ dropIntake: rest.length > 0 ? rest : null });
+      return;
+    }
+    const items = toDropItems(candidates);
+    set({ dropIntake: [...items, ...later()] });
     const update = (index: number, patch: Partial<DropItem>) =>
       set((state) => ({
         dropIntake:
           state.dropIntake?.map((item, at) => (at === index ? { ...item, ...patch } : item)) ??
           null,
       }));
-    for (const [index, item] of toDropItems(candidates).entries()) {
+    for (const [index, item] of items.entries()) {
       if (item.status !== 'queued' || !item.source) continue;
       update(index, { status: 'ingesting' });
-      await get().ingest(item.path, item.source);
+      let refreshError: string | null = null;
+      try {
+        await get().ingest(item.path, item.source, { exactPath: true });
+      } catch (e) {
+        // `ingest` settles its own outcome before refreshing the graph view;
+        // only that refresh can reject here. The recovery is not retried.
+        refreshError = String(e);
+      }
       const { ingestError, ingestSummary } = get();
       update(
         index,
         ingestError
           ? { status: 'failed', reason: ingestError }
-          : { status: 'ingested', repos: summaryRepos(ingestSummary) },
+          : ingestSummary
+            ? {
+                status: 'ingested',
+                repos: summaryRepos(ingestSummary),
+                reason: refreshError ? `ingested; graph refresh failed: ${refreshError}` : null,
+              }
+            : { status: 'failed', reason: refreshError ?? 'ingest returned no summary' },
       );
     }
   },

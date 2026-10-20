@@ -57,7 +57,8 @@ pub fn classify(paths: &[String]) -> Vec<DropCandidate> {
     let manifest_name = ingest::manifest::MANIFEST_NAME;
     let mut decided: Vec<(DropCandidate, Option<PathBuf>)> = Vec::new();
     for (index, raw) in paths.iter().enumerate() {
-        let path = raw.trim();
+        // The OS path is kept exactly as dropped: a folder name may end in
+        // a space, so nothing is trimmed.
         if index >= MAX_DROP_PATHS {
             decided.push((
                 DropCandidate::rejected(
@@ -68,11 +69,11 @@ pub fn classify(paths: &[String]) -> Vec<DropCandidate> {
             ));
             continue;
         }
-        if path.is_empty() {
+        if raw.is_empty() {
             decided.push((DropCandidate::rejected(raw, "empty path".into()), None));
             continue;
         }
-        let Ok(canonical) = Path::new(path).canonicalize() else {
+        let Ok(canonical) = Path::new(raw).canonicalize() else {
             decided.push((DropCandidate::rejected(raw, "not found".into()), None));
             continue;
         };
@@ -86,14 +87,22 @@ pub fn classify(paths: &[String]) -> Vec<DropCandidate> {
             ));
             continue;
         }
+        // A manifest must be a regular file: reading a FIFO or device
+        // could block intake before any job exists.
+        let special =
+            || DropCandidate::rejected(raw, format!("{manifest_name} is not a regular file"));
         let candidate = if canonical.is_dir() {
-            if canonical.join(manifest_name).is_file() {
-                DropCandidate::accepted(raw, DropSource::Manifest)
-            } else {
-                DropCandidate::accepted(raw, DropSource::Local)
+            match std::fs::metadata(canonical.join(manifest_name)) {
+                Ok(meta) if meta.is_file() => DropCandidate::accepted(raw, DropSource::Manifest),
+                Ok(_) => special(),
+                Err(_) => DropCandidate::accepted(raw, DropSource::Local),
             }
         } else if canonical.file_name().and_then(|name| name.to_str()) == Some(manifest_name) {
-            DropCandidate::accepted(raw, DropSource::Manifest)
+            if canonical.is_file() {
+                DropCandidate::accepted(raw, DropSource::Manifest)
+            } else {
+                special()
+            }
         } else {
             DropCandidate::rejected(
                 raw,
@@ -159,7 +168,7 @@ mod tests {
             s(&manifest),
             s(&file),
             s(&dir.path().join("missing")),
-            "  ".into(),
+            String::new(),
             format!("{}/", s(&repo)),
         ];
         let out = classify(&paths);
@@ -232,5 +241,44 @@ mod tests {
             out[MAX_DROP_PATHS].reason.as_deref(),
             Some("more than 64 paths in one drop")
         );
+    }
+
+    // AC-0237: the exact OS path is classified, so a trailing-space folder is
+    // never confused with its trimmed sibling, and a manifest that is not a
+    // regular file is rejected before anything reads it. (T-0237)
+    #[test]
+    fn literal_paths_and_special_manifests_are_classified_as_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let spaced = dir.path().join("project ");
+        let sibling = dir.path().join("project");
+        std::fs::create_dir_all(&spaced).unwrap();
+        std::fs::create_dir_all(sibling.join("nested")).unwrap();
+        let out = classify(&[s(&spaced), s(&sibling.join("nested"))]);
+        // The sibling's nested folder is not inside the spaced folder.
+        assert_eq!(
+            out.iter().map(|c| c.source).collect::<Vec<_>>(),
+            [Some(DropSource::Local), Some(DropSource::Local)]
+        );
+        assert_eq!(out[0].path, s(&spaced));
+
+        #[cfg(unix)]
+        {
+            let system = dir.path().join("system");
+            std::fs::create_dir_all(&system).unwrap();
+            let fifo = system.join(ingest::manifest::MANIFEST_NAME);
+            let made = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap();
+            assert!(made.success());
+            let out = classify(&[s(&fifo), s(&system)]);
+            let reason = "cartograph.system.toml is not a regular file";
+            assert_eq!(
+                out.iter()
+                    .map(|c| (c.source, c.reason.as_deref()))
+                    .collect::<Vec<_>>(),
+                [(None, Some(reason)), (None, Some(reason))]
+            );
+        }
     }
 }

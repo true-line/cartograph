@@ -140,4 +140,76 @@ describe('dropped folders ingest through the typed-path commands (AC-0237, T-023
     useAppStore.getState().dismissDropIntake();
     expect(useAppStore.getState().dropIntake).toHaveLength(2);
   });
+
+  it('reserves the intake before classification so a concurrent drop cannot race it', async () => {
+    let release: (value: unknown) => void = () => {};
+    mockIPC((command, args) => {
+      if (command === 'classify_drop') {
+        const { paths } = args as { paths: string[] };
+        if (paths[0] === '/a') {
+          return new Promise((resolve) => {
+            release = resolve;
+          }).then(() => [{ path: '/a', source: 'local', reason: null }]);
+        }
+        return [{ path: '/b', source: 'local', reason: null }];
+      }
+      if (command === 'ingest_path') {
+        const { path } = args as { path: string };
+        return { job_id: 1, repo: path === '/a' ? 'local/a' : 'local/b' };
+      }
+      return null;
+    });
+    const first = useAppStore.getState().ingestDropped(['/a']);
+    await useAppStore.getState().ingestDropped(['/b']);
+    release(null);
+    await first;
+    const items = useAppStore.getState().dropIntake ?? [];
+    expect(items.map(({ path, status, reason, repos }) => [path, status, reason, repos])).toEqual([
+      ['/a', 'ingested', null, ['local/a@workdir']],
+      ['/b', 'rejected', BUSY_REASON, []],
+    ]);
+    expect(dropSetStatus(items).complete).toBe(false);
+  });
+
+  it('settles every item when the graph refresh after an ingest rejects', async () => {
+    mockIPC((command) => {
+      if (command === 'classify_drop') {
+        return [
+          { path: '/a', source: 'local', reason: null },
+          { path: '/b', source: 'local', reason: null },
+        ];
+      }
+      if (command === 'ingest_path') return { job_id: 1, repo: 'local/a' };
+      return null;
+    });
+    const original = useAppStore.getState().refresh;
+    useAppStore.setState({ refresh: vi.fn().mockRejectedValue('store locked') });
+    try {
+      await useAppStore.getState().ingestDropped(['/a', '/b']);
+    } finally {
+      useAppStore.setState({ refresh: original });
+    }
+    const items = useAppStore.getState().dropIntake ?? [];
+    expect(items.map(({ status, reason }) => [status, reason])).toEqual([
+      ['ingested', 'ingested; graph refresh failed: store locked'],
+      ['ingested', 'ingested; graph refresh failed: store locked'],
+    ]);
+    expect(dropSetStatus(items).unresolved).toBe(0);
+  });
+
+  it('ingests a dropped path exactly as the OS gave it', async () => {
+    const calls: unknown[] = [];
+    mockIPC((command, args) => {
+      if (command === 'classify_drop') {
+        return [{ path: '/repos/project ', source: 'local', reason: null }];
+      }
+      if (command === 'ingest_path') {
+        calls.push(args);
+        return { job_id: 1, repo: 'local/project ' };
+      }
+      return null;
+    });
+    await useAppStore.getState().ingestDropped(['/repos/project ']);
+    expect(calls).toEqual([{ path: '/repos/project ' }]);
+  });
 });
