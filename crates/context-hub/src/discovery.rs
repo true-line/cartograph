@@ -58,7 +58,7 @@ impl DiscoveryQuery {
             Self::Text { text } => (
                 text.as_str(),
                 Self::Text {
-                    text: text.trim().to_lowercase(),
+                    text: lowercase(text.trim()).collect(),
                 },
             ),
         };
@@ -257,13 +257,28 @@ struct Matched<'a> {
     value: &'a str,
 }
 
-/// Whether `haystack` contains `needle` (already lowercased) after Unicode
-/// lowercasing, compared at character boundaries without allocating.
+/// Per-character Unicode lowercasing, the one mapping applied to both the
+/// query and the compared fields. Unlike `str::to_lowercase` it has no
+/// context rules (such as final sigma), so both sides always agree.
+fn lowercase(text: &str) -> impl Iterator<Item = char> + Clone + '_ {
+    text.chars().flat_map(char::to_lowercase)
+}
+
+/// Whether `haystack` contains `needle` (already lowercased) after
+/// lowercasing. Every position of the lowercased stream is a candidate start,
+/// including scalars a single source character expands into; nothing is
+/// allocated.
 fn contains_lowercase(haystack: &str, needle: &str) -> bool {
-    haystack.char_indices().any(|(at, _)| {
-        let mut rest = haystack[at..].chars().flat_map(char::to_lowercase);
-        needle.chars().all(|wanted| rest.next() == Some(wanted))
-    })
+    let mut start = lowercase(haystack);
+    loop {
+        let mut rest = start.clone();
+        if needle.chars().all(|wanted| rest.next() == Some(wanted)) {
+            return true;
+        }
+        if start.next().is_none() {
+            return false;
+        }
+    }
 }
 
 /// The first policy match for `fact`, if any.

@@ -332,6 +332,20 @@ fn text_matching_lowercases_without_widening() {
     assert!(contains_lowercase("ÜNÏ", "ünï"));
     assert!(!contains_lowercase("check out", "checkout"));
     assert!(!contains_lowercase("", "a"));
+    // A match may start inside one character's expansion: İ lowercases to
+    // i followed by U+0307.
+    assert!(contains_lowercase("İstanbul", "\u{307}stan"));
+    // The query is lowercased by the same per-character mapping, so a
+    // word-final sigma still matches its own text.
+    let normalized = DiscoveryQuery::Text {
+        text: " ΟΔΟΣ ".into(),
+    }
+    .normalized()
+    .unwrap();
+    let DiscoveryQuery::Text { text } = normalized else {
+        unreachable!()
+    };
+    assert!(contains_lowercase("ΟΔΟΣ", &text));
 }
 
 // AC-0233: a short match whose provenance is oversized is refused before any
