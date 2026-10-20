@@ -1,8 +1,16 @@
 //! Found/recovered ADR facts and deterministic ADR/code drift (US-0013).
 
 use core_graph::{Edge, Node};
-use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier, content_hash};
+use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use flowtracer::Flow;
+use serde::{Deserialize, Serialize};
+
+mod bounded;
+pub use bounded::{AdrLimit, AdrLimitExceeded, AdrLimits};
+use bounded::{
+    Budget, DriftProps, EdgeView, NodeView, OnlyProvenance, ProvenanceView, RecoveredProps, Text,
+    canonical_hash, text_hash,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -12,7 +20,7 @@ pub const FOUND_ADR_EXTRACTOR_ID: &str = "t0.adr-markdown";
 pub const RECOVERED_ADR_EXTRACTOR_ID: &str = "t2.adr-recovery";
 
 /// ADR-related graph facts produced by extraction or compilation.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct AdrFacts {
     /// Found/recovered ADR and Drift nodes.
     pub nodes: Vec<Node>,
@@ -241,39 +249,48 @@ pub fn extract_found_adrs(
 }
 
 fn typed_provenance(value: &serde_json::Value) -> Option<Provenance> {
-    serde_json::from_value::<Provenance>(value["prov"].clone())
+    Provenance::deserialize(&value["prov"])
         .ok()
         .filter(|provenance| provenance.validate().is_ok())
 }
 
-fn combined_evidence<'a>(
-    provenances: impl IntoIterator<Item = &'a Provenance>,
-) -> Vec<EvidenceRef> {
-    let mut evidence = provenances
-        .into_iter()
-        .flat_map(|provenance| provenance.evidence.clone())
-        .collect::<Vec<_>>();
-    evidence.sort_by(|left, right| {
-        (
-            &left.repo,
-            &left.path,
-            left.byte_start,
-            left.byte_end,
-            &left.commit_sha,
-        )
-            .cmp(&(
-                &right.repo,
-                &right.path,
-                right.byte_start,
-                right.byte_end,
-                &right.commit_sha,
-            ))
-    });
-    evidence.dedup();
-    evidence
+type EvidenceKey<'a> = (&'a str, &'a str, u64, u64, &'a str);
+fn evidence_key(evidence: &EvidenceRef) -> EvidenceKey<'_> {
+    (
+        &evidence.repo,
+        &evidence.path,
+        evidence.byte_start,
+        evidence.byte_end,
+        &evidence.commit_sha,
+    )
 }
 
-fn recovered_adrs(nodes: &[Node], edges: &[Edge]) -> AdrFacts {
+// Sort/deduplicate borrowed spans. Charge a lower bound on their eventual output
+// before each map insertion, so a rejected candidate never clones large evidence.
+fn combined_evidence<'a>(
+    provenances: impl IntoIterator<Item = &'a Provenance>,
+    budget: &Budget,
+) -> Result<Vec<&'a EvidenceRef>, AdrLimitExceeded> {
+    let mut evidence = BTreeMap::new();
+    let mut counter = budget.fragment_budget();
+    for provenance in provenances {
+        for item in &provenance.evidence {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                evidence.entry(evidence_key(item))
+            {
+                budget.fragment(&mut counter, item)?;
+                entry.insert(item);
+            }
+        }
+    }
+    Ok(evidence.into_values().collect())
+}
+
+fn recovered_adrs(
+    nodes: &[Node],
+    edges: &[Edge],
+    budget: &mut Budget,
+) -> Result<AdrFacts, AdrLimitExceeded> {
     let governed: BTreeSet<&str> = edges
         .iter()
         .filter(|edge| edge.label == "DECIDES")
@@ -286,217 +303,262 @@ fn recovered_adrs(nodes: &[Node], edges: &[Edge]) -> AdrFacts {
         })
         .map(|edge| edge.dst.as_str())
         .collect();
+    // Typed source provenance is copied once, linearly in the separately admitted
+    // graph; it is never repeatedly cloned for channel or ADR crossproducts.
+    let edge_provenances: Vec<_> = edges
+        .iter()
+        .map(|edge| typed_provenance(&edge.props))
+        .collect();
     let mut facts = AdrFacts::default();
     for channel in nodes.iter().filter(|node| node.label == "Channel") {
         if governed.contains(channel.id.as_str()) {
             continue;
         }
-        let related = edges
+        let related: Vec<_> = edges
             .iter()
-            .filter(|edge| {
+            .zip(&edge_provenances)
+            .filter(|(edge, _)| {
                 edge.dst == channel.id
                     && matches!(edge.label.as_str(), "PUBLISHES" | "SUBSCRIBES" | "BACKS")
             })
-            .filter_map(|edge| {
-                typed_provenance(&edge.props)
-                    .filter(|provenance| provenance.confidence_tier != ConfidenceTier::Gap)
-                    .map(|provenance| (edge, provenance))
+            .filter_map(|(edge, provenance)| {
+                provenance
+                    .as_ref()
+                    .filter(|p| p.confidence_tier != ConfidenceTier::Gap)
+                    .map(|p| (edge, p))
             })
-            .collect::<Vec<_>>();
+            .collect();
         if related.is_empty() {
             continue;
         }
+        let channel_provenance = typed_provenance(&channel.props);
+        if !related.iter().any(|(_, p)| !p.evidence.is_empty())
+            && channel_provenance
+                .as_ref()
+                .is_none_or(|p| p.evidence.is_empty())
+        {
+            continue;
+        }
+        budget.ensure_rows(2)?;
         let confidence = if related
             .iter()
-            .any(|(_, provenance)| provenance.confidence_tier == ConfidenceTier::InferredWeak)
+            .any(|(_, p)| p.confidence_tier == ConfidenceTier::InferredWeak)
         {
             ConfidenceTier::InferredWeak
         } else {
             ConfidenceTier::InferredStrong
         };
-        let mut provenances = related
-            .iter()
-            .map(|(_, provenance)| provenance.clone())
-            .collect::<Vec<_>>();
-        if let Some(channel_provenance) = typed_provenance(&channel.props) {
-            provenances.push(channel_provenance);
-        }
-        let cited = combined_evidence(provenances.iter());
-        if cited.is_empty() {
-            continue;
-        }
-        let mut edge_keys = related
+        let cited = combined_evidence(
+            related
+                .iter()
+                .map(|(_, p)| *p)
+                .chain(channel_provenance.iter()),
+            budget,
+        )?;
+        let mut edge_keys: Vec<_> = related
             .iter()
             .map(|(edge, _)| (&edge.src, &edge.label, &edge.dst))
-            .collect::<Vec<_>>();
+            .collect();
         edge_keys.sort();
-        let canonical = serde_json::to_vec(&("async-messaging", &channel.id, edge_keys))
-            .expect("recovered ADR identity serializes");
-        let hash = content_hash(&canonical);
+        let hash = canonical_hash(&("async-messaging", &channel.id, edge_keys));
         let adr_id = format!("adr:recovered:async:{}", &hash[..16]);
         let name = channel.props["identity"]
             .as_str()
             .or_else(|| channel.props["name"].as_str())
             .unwrap_or(&channel.id);
-        let title = format!("Recovered: use {name} for asynchronous messaging");
-        let provenance = Provenance::new(
+        let provenance = ProvenanceView::new(
             Tier::Semantic,
             confidence,
-            cited.clone(),
+            &cited,
             RECOVERED_ADR_EXTRACTOR_ID,
-            &canonical,
-        )
-        .expect("recovered confidence is within the semantic confidence ceiling")
-        .with_method(crate::spec_rule(RECOVERED_ADR_EXTRACTOR_ID));
-        facts.nodes.push(Node {
-            id: adr_id.clone(),
-            label: "ADR".into(),
-            props: serde_json::json!({
-                "title": title,
-                "status": "Recovered / Inferred",
-                "body": format!("The recovered graph uses channel `{}` for asynchronous messaging. This is a proposed decision, not a confirmed author statement.", channel.id),
-                "origin": "recovered",
-                "recovered": true,
-                "prov": provenance,
-            }),
+            &hash,
+        );
+        let node = NodeView {
+            id: &adr_id,
+            label: "ADR",
+            props: RecoveredProps {
+                title: Text::RecoveredTitle(name),
+                status: "Recovered / Inferred",
+                body: Text::RecoveredBody(&channel.id),
+                origin: "recovered",
+                recovered: true,
+                prov: &provenance,
+            },
+        };
+        let edge_hash = text_hash(&Text::OffendingEdge {
+            src: &adr_id,
+            label: "DECIDES",
+            dst: &channel.id,
         });
-        let edge_provenance = Provenance::new(
+        let edge_provenance = ProvenanceView::new(
             Tier::Semantic,
             confidence,
-            cited,
+            &cited,
             RECOVERED_ADR_EXTRACTOR_ID,
-            format!("{adr_id} DECIDES {}", channel.id).as_bytes(),
-        )
-        .expect("recovered confidence is within the semantic confidence ceiling")
-        .with_method(crate::spec_rule(RECOVERED_ADR_EXTRACTOR_ID));
-        facts.edges.push(Edge {
-            src: adr_id,
-            dst: channel.id.clone(),
-            label: "DECIDES".into(),
-            props: serde_json::json!({"prov": edge_provenance}),
-        });
+            &edge_hash,
+        );
+        let edge = EdgeView {
+            src: &adr_id,
+            dst: &channel.id,
+            label: "DECIDES",
+            props: OnlyProvenance {
+                prov: &edge_provenance,
+            },
+        };
+        budget.admit(&[&node], &[&edge])?;
+        facts.nodes.push(node.into_owned());
+        facts.edges.push(edge.into_owned());
     }
-    facts
+    Ok(facts)
 }
 
-fn drift_facts(nodes: &[Node], edges: &[Edge], flows: &[Flow]) -> AdrFacts {
+fn drift_facts(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    budget: &mut Budget,
+) -> Result<AdrFacts, AdrLimitExceeded> {
     let by_id: BTreeMap<&str, &Node> = nodes.iter().map(|node| (node.id.as_str(), node)).collect();
-    let mut facts = AdrFacts::default();
-    for adr in nodes
+    let node_provenances: Vec<_> = nodes
         .iter()
-        .filter(|node| node.label == "ADR" && node.props["origin"].as_str() == Some("found"))
+        .map(|node| typed_provenance(&node.props))
+        .collect();
+    let edge_provenances: Vec<_> = edges
+        .iter()
+        .map(|edge| typed_provenance(&edge.props))
+        .collect();
+    let mut facts = AdrFacts::default();
+    for (adr, adr_provenance) in nodes
+        .iter()
+        .zip(&node_provenances)
+        .filter(|(node, _)| node.label == "ADR" && node.props["origin"].as_str() == Some("found"))
     {
-        let forbidden = adr.props["forbids"]
+        let forbidden: BTreeSet<_> = adr.props["forbids"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(serde_json::Value::as_str)
-            .collect::<BTreeSet<_>>();
+            .collect();
         if forbidden.is_empty() {
             continue;
         }
-        let governed = edges
+        let governed: BTreeSet<_> = edges
             .iter()
             .filter(|edge| edge.label == "DECIDES" && edge.src == adr.id)
             .map(|edge| edge.dst.as_str())
-            .collect::<BTreeSet<_>>();
-        for edge in edges.iter().filter(|edge| {
+            .collect();
+        for (edge, edge_provenance) in edges.iter().zip(&edge_provenances).filter(|(edge, _)| {
             forbidden.contains(edge.label.as_str())
                 && (governed.contains(edge.src.as_str()) || governed.contains(edge.dst.as_str()))
         }) {
-            let Some(edge_provenance) = typed_provenance(&edge.props) else {
+            let Some(edge_provenance) = edge_provenance
+                .as_ref()
+                .filter(|p| p.confidence_tier != ConfidenceTier::Gap)
+            else {
                 continue;
             };
-            if edge_provenance.confidence_tier == ConfidenceTier::Gap {
-                continue;
-            }
-            let Some(adr_provenance) = typed_provenance(&adr.props) else {
+            let Some(adr_provenance) = adr_provenance.as_ref() else {
                 continue;
             };
-            let cited = combined_evidence([&adr_provenance, &edge_provenance]);
-            if cited.is_empty() {
+            if adr_provenance.evidence.is_empty() && edge_provenance.evidence.is_empty() {
                 continue;
             }
-            let canonical =
-                serde_json::to_vec(&("adr-drift", &adr.id, &edge.src, &edge.label, &edge.dst))
-                    .expect("Drift identity serializes");
-            let hash = content_hash(&canonical);
+            let targets: Vec<_> = [
+                ("DRIFTS_FROM", adr.id.as_str()),
+                ("CONFLICTS", edge.dst.as_str()),
+            ]
+            .into_iter()
+            .filter(|(_, target)| by_id.contains_key(target))
+            .collect();
+            budget.ensure_rows(1 + targets.len())?;
+            let cited = combined_evidence([adr_provenance, edge_provenance], budget)?;
+            let hash = canonical_hash(&("adr-drift", &adr.id, &edge.src, &edge.label, &edge.dst));
             let drift_id = format!("drift:{}", &hash[..16]);
-            let flow_triggers = flows
-                .iter()
-                .filter(|flow| {
-                    flow.hops.iter().any(|hop| {
-                        hop.src == edge.src && hop.label == edge.label && hop.dst == edge.dst
-                    })
+            let mut triggers = BTreeSet::new();
+            let mut counter = budget.fragment_budget();
+            for flow in flows.iter().filter(|flow| {
+                flow.hops.iter().any(|hop| {
+                    hop.src == edge.src && hop.label == edge.label && hop.dst == edge.dst
                 })
-                .map(|flow| flow.trigger.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
+            }) {
+                if !triggers.contains(flow.trigger.as_str()) {
+                    budget.fragment(&mut counter, &flow.trigger)?;
+                    triggers.insert(flow.trigger.as_str());
+                }
+            }
+            let flow_triggers: Vec<_> = triggers.into_iter().collect();
             let adr_title = adr.props["title"].as_str().unwrap_or(&adr.id);
-            let title = format!(
-                "{adr_title} forbids {} but graph contains {} → {}",
-                edge.label, edge.src, edge.dst
-            );
-            let drift_tier = match edge_provenance.confidence_tier {
+            let tier = match edge_provenance.confidence_tier {
                 ConfidenceTier::Confirmed => edge_provenance.tier,
                 ConfidenceTier::InferredStrong | ConfidenceTier::InferredWeak => Tier::Semantic,
                 ConfidenceTier::Gap => unreachable!("gap facts were filtered above"),
             };
-            let drift_extractor = match drift_tier {
+            let extractor = match tier {
                 Tier::Deterministic => "t0.adr-drift",
                 Tier::Dynamic => "t1.adr-drift",
                 Tier::Semantic => "t2.adr-drift",
                 Tier::Agentic => "t3.adr-drift",
             };
-            let provenance = Provenance::new(
-                drift_tier,
+            let provenance = ProvenanceView::new(
+                tier,
                 edge_provenance.confidence_tier,
-                cited,
-                drift_extractor,
-                &canonical,
-            )
-            .expect("Drift retains the offending fact confidence ceiling")
-            .with_method(crate::spec_rule(drift_extractor));
-            facts.nodes.push(Node {
-                id: drift_id.clone(),
-                label: "Drift".into(),
-                props: serde_json::json!({
-                    "kind": "drift",
-                    "title": title,
-                    "adr_id": adr.id,
-                    "offending_edge": format!("{} {} {}", edge.src, edge.label, edge.dst),
-                    "flow_triggers": flow_triggers,
-                    "prov": provenance,
-                }),
-            });
-            for (label, target) in [
-                ("DRIFTS_FROM", adr.id.as_str()),
-                ("CONFLICTS", edge.dst.as_str()),
-            ] {
-                if by_id.contains_key(target) {
-                    facts.edges.push(Edge {
-                        src: drift_id.clone(),
-                        dst: target.into(),
-                        label: label.into(),
-                        props: serde_json::json!({"prov": provenance}),
-                    });
-                }
-            }
+                &cited,
+                extractor,
+                &hash,
+            );
+            let node = NodeView {
+                id: &drift_id,
+                label: "Drift",
+                props: DriftProps {
+                    kind: "drift",
+                    title: Text::DriftTitle {
+                        adr: adr_title,
+                        label: &edge.label,
+                        src: &edge.src,
+                        dst: &edge.dst,
+                    },
+                    adr_id: &adr.id,
+                    offending_edge: Text::OffendingEdge {
+                        label: &edge.label,
+                        src: &edge.src,
+                        dst: &edge.dst,
+                    },
+                    flow_triggers: &flow_triggers,
+                    prov: &provenance,
+                },
+            };
+            let derived_edges: Vec<_> = targets
+                .iter()
+                .map(|(label, target)| EdgeView {
+                    src: &drift_id,
+                    dst: target,
+                    label,
+                    props: OnlyProvenance { prov: &provenance },
+                })
+                .collect();
+            budget.admit(&[&node], &derived_edges)?;
+            facts.nodes.push(node.into_owned());
+            facts
+                .edges
+                .extend(derived_edges.into_iter().map(EdgeView::into_owned));
         }
     }
-    facts
+    Ok(facts)
 }
 
-/// Add evidence-backed recovered ADR drafts and explicit ADR/code drift to a
-/// disposable compilation projection. Confirmed graph input is never mutated.
-pub fn derive_adr_facts(nodes: &[Node], edges: &[Edge], flows: &[Flow]) -> AdrFacts {
-    let mut recovered = recovered_adrs(nodes, edges);
+fn derive_inner(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    limits: Option<AdrLimits>,
+) -> Result<AdrFacts, AdrLimitExceeded> {
+    let mut budget = Budget::new(limits)?;
+    let mut recovered = recovered_adrs(nodes, edges, &mut budget)?;
     let mut projected_nodes = nodes.to_vec();
     projected_nodes.extend(recovered.nodes.clone());
     let mut projected_edges = edges.to_vec();
     projected_edges.extend(recovered.edges.clone());
-    let drift = drift_facts(&projected_nodes, &projected_edges, flows);
+    let drift = drift_facts(&projected_nodes, &projected_edges, flows, &mut budget)?;
     recovered.nodes.extend(drift.nodes);
     recovered.edges.extend(drift.edges);
     recovered
@@ -505,8 +567,32 @@ pub fn derive_adr_facts(nodes: &[Node], edges: &[Edge], flows: &[Flow]) -> AdrFa
     recovered.edges.sort_by(|left, right| {
         (&left.src, &left.dst, &left.label).cmp(&(&right.src, &right.dst, &right.label))
     });
-    recovered
+    Ok(recovered)
 }
+
+/// Add evidence-backed recovered ADR drafts and explicit ADR/code drift to a
+/// disposable compilation projection. Confirmed graph input is never mutated.
+pub fn derive_adr_facts(nodes: &[Node], edges: &[Edge], flows: &[Flow]) -> AdrFacts {
+    derive_inner(nodes, edges, flows, None)
+        .expect("unbounded ADR derivation has no admission limit")
+}
+
+/// Derive complete ADR facts within cumulative row and exact serialized output
+/// limits. Inputs must be admitted separately; a failure returns no partial facts.
+/// Every nonlinear occurrence is admitted before owning output evidence, strings
+/// or JSON. The ordinary API shares this exact derivation and ordering.
+pub fn derive_adr_facts_bounded(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    limits: AdrLimits,
+) -> Result<AdrFacts, AdrLimitExceeded> {
+    derive_inner(nodes, edges, flows, Some(limits))
+}
+
+#[cfg(test)]
+#[path = "adr/bounded_tests.rs"]
+mod bounded_tests;
 
 #[cfg(test)]
 mod tests {

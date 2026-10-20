@@ -1,13 +1,21 @@
 //! Deterministic full-spec bundle for the M9 Spec Workbench (US-0012).
 
-use crate::{TOPOLOGY_EDGE_LABELS, flow_dossier, topology_mermaid};
+use crate::TOPOLOGY_EDGE_LABELS;
+pub(crate) mod diagrams;
+mod producers;
+mod registers;
+pub(crate) mod render;
+mod selected;
 use core_graph::omission::{FillSeam, Omission, OmissionClass};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance, Tier};
 use flowtracer::{Flow, FlowStatus, Hop};
+pub use selected::{
+    ArtifactSelectionError, SelectedArtifactLimit, SelectedArtifactOutcome, SelectedCompileLimits,
+    compile_spec_selected,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write;
 
 /// R-INT-5 projection used by every official artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,19 +103,33 @@ impl SpecArtifact {
 
     /// Recompute the content identity from the artifact's own fields.
     pub fn compute_content_id(&self) -> String {
-        let bytes = serde_json::to_vec(&(
-            &self.schema,
-            &self.id,
-            &self.file_name,
-            &self.title,
-            &self.format,
-            &self.content,
-            &self.assertions,
-        ))
-        .expect("spec artifact serializes");
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"cartograph:spec-artifact:v1\0");
-        hasher.update(&bytes);
+        struct HashWriter<'a>(&'a mut blake3::Hasher);
+        impl std::io::Write for HashWriter<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        // Preserve the original typed tuple bytes without allocating another
+        // complete serialized artifact (including escaped content/assertions).
+        serde_json::to_writer(
+            HashWriter(&mut hasher),
+            &(
+                &self.schema,
+                &self.id,
+                &self.file_name,
+                &self.title,
+                &self.format,
+                &self.content,
+                &self.assertions,
+            ),
+        )
+        .expect("spec artifact serializes");
         format!("spec-artifact-v1:{}", hasher.finalize().to_hex())
     }
 
@@ -180,29 +202,6 @@ fn text_prop<'a>(node: &'a Node, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| node.props[*key].as_str())
 }
 
-fn node_name(node: &Node) -> String {
-    if node.label == "Endpoint"
-        && let (Some(method), Some(path)) =
-            (node.props["method"].as_str(), node.props["path"].as_str())
-    {
-        return format!("{method} {path}");
-    }
-    text_prop(
-        node,
-        &[
-            "title",
-            "name",
-            "identity",
-            "logical_id",
-            "route",
-            "path",
-            "reason",
-        ],
-    )
-    .map(String::from)
-    .unwrap_or_else(|| node.id.clone())
-}
-
 /// The relation a Gap node's escalation would need the bounded T3 broker to
 /// propose — mirrors `task_evidence::planning::plan`'s adjacent-slot lookup
 /// exactly (dst-first, then src, then the node's own stored `edge_label`
@@ -220,181 +219,8 @@ fn gap_node_edge_label<'a>(node: &'a Node, edges: &[&'a Edge]) -> Option<&'a str
         .or_else(|| node.props["edge_label"].as_str())
 }
 
-fn node_assertion(node: &Node, edge_label: Option<&str>) -> SpecAssertion {
-    let provenance = provenance(&node.props, &format!("node:{}", node.id));
-    let name = node_name(node);
-    SpecAssertion {
-        id: format!("node:{}", node.id),
-        subject_id: node.id.clone(),
-        subject_kind: node.label.clone(),
-        summary: format!("{}: {name}", node.label),
-        omission: gap_omission(&provenance, &node.props, &name),
-        provenance,
-        edge_label: edge_label.map(String::from),
-    }
-}
-
 fn edge_identity(edge: &Edge) -> String {
     format!("{} {} {}", edge.src, edge.label, edge.dst)
-}
-
-fn edge_assertion(edge: &Edge) -> SpecAssertion {
-    let identity = edge_identity(edge);
-    let provenance = provenance(&edge.props, &format!("edge:{identity}"));
-    // Gap edges carry the same `reason` as their gap node (#241) — surface it
-    // so register rows never render a bare identity in the reason column.
-    // Non-gap edges (topology, mappings, decisions) keep their identity.
-    let summary = if provenance.confidence_tier == ConfidenceTier::Gap
-        && let Some(reason) = edge.props["reason"].as_str()
-    {
-        format!("{}: {reason}", edge.label)
-    } else {
-        identity.clone()
-    };
-    SpecAssertion {
-        id: format!("edge:{identity}"),
-        omission: gap_omission(
-            &provenance,
-            &edge.props,
-            &format!("unresolved {} edge", edge.label),
-        ),
-        subject_id: identity,
-        subject_kind: edge.label.clone(),
-        summary,
-        provenance,
-        edge_label: Some(edge.label.clone()),
-    }
-}
-
-/// The originating facts a flow hop restates, for recovering its exact
-/// omission (#603 review): edges by `(src, label, dst)` and nodes by id.
-struct HopOrigins<'a> {
-    edges: BTreeMap<(&'a str, &'a str, &'a str), &'a Edge>,
-    nodes: BTreeMap<&'a str, &'a Node>,
-}
-
-impl<'a> HopOrigins<'a> {
-    fn new(nodes: &[&'a Node], edges: &[&'a Edge]) -> Self {
-        Self {
-            edges: edges
-                .iter()
-                .map(|edge| {
-                    (
-                        (edge.src.as_str(), edge.label.as_str(), edge.dst.as_str()),
-                        *edge,
-                    )
-                })
-                .collect(),
-            nodes: nodes.iter().map(|node| (node.id.as_str(), *node)).collect(),
-        }
-    }
-
-    /// A Gap hop's omission: the exact Gap edge it traverses (in stored
-    /// direction, since the tracer walks some labels reversed), else the Gap
-    /// node it ends at, else its own stop reason classified.
-    fn omission(&self, hop: &Hop) -> Option<Omission> {
-        if hop.provenance.confidence_tier != ConfidenceTier::Gap {
-            return None;
-        }
-        let fallback = hop
-            .gap_reason
-            .clone()
-            .unwrap_or_else(|| format!("unresolved {} hop", hop.label));
-        let edge = self
-            .edges
-            .get(&hop.stored_edge())
-            .filter(|edge| provenance(&edge.props, "").confidence_tier == ConfidenceTier::Gap);
-        if let Some(edge) = edge {
-            return Some(Omission::of_gap(&edge.props, &fallback));
-        }
-        if let Some(node) = self
-            .nodes
-            .get(hop.dst.as_str())
-            .filter(|node| is_gap_node(node))
-        {
-            return Some(Omission::of_gap(&node.props, &fallback));
-        }
-        Some(Omission::classify(&fallback))
-    }
-}
-
-fn hop_assertion(flow: &Flow, hop: &Hop, index: usize, origins: &HopOrigins<'_>) -> SpecAssertion {
-    SpecAssertion {
-        id: format!("flow:{}:{index}:{}:{}", flow.trigger, hop.label, hop.dst),
-        subject_id: format!("{} {} {}", hop.src, hop.label, hop.dst),
-        subject_kind: "FlowHop".into(),
-        summary: format!("{}: {} → {}", hop.label, hop.src_name, hop.dst_name),
-        omission: origins.omission(hop),
-        provenance: hop.provenance.clone(),
-        // A flow-hop row never opens the Resolution Strategy modal (App.tsx
-        // only escalates `node:`-prefixed assertions), so it carries no
-        // escalation-capability signal.
-        edge_label: None,
-    }
-}
-
-pub(crate) fn markdown_safe(value: &str) -> String {
-    value.replace('|', "\\|").replace(['\r', '\n'], " ")
-}
-
-fn evidence_text(provenance: &Provenance) -> String {
-    if provenance.evidence.is_empty() {
-        return "—".into();
-    }
-    provenance
-        .evidence
-        .iter()
-        .map(|evidence| {
-            format!(
-                "{}:{} bytes {}..{} @ {}",
-                evidence.repo,
-                evidence.path,
-                evidence.byte_start,
-                evidence.byte_end,
-                evidence.commit_sha
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-pub(crate) fn append_assertions(content: &mut String, assertions: &[SpecAssertion]) {
-    content.push_str("\n## Assertions and inline provenance\n\n");
-    if assertions.is_empty() {
-        content.push_str("No graph-backed assertions were recovered for this artifact.\n");
-        return;
-    }
-    content.push_str(
-        "| Assertion | Tier | Confidence | Method | Evidence | Extractor | Content hash |\n\
-         |---|---|---|---|---|---|---|\n",
-    );
-    for assertion in assertions {
-        let provenance = &assertion.provenance;
-        writeln!(
-            content,
-            "| {} | {:?} | {:?} | {} | {} | `{}` | `{}` |",
-            markdown_safe(&assertion.summary),
-            provenance.tier,
-            provenance.confidence_tier,
-            markdown_safe(&provenance.method.label()),
-            markdown_safe(&evidence_text(provenance)),
-            markdown_safe(&provenance.extractor_id),
-            markdown_safe(&provenance.content_hash),
-        )
-        .expect("write to string");
-    }
-}
-
-fn artifact(
-    id: &str,
-    file_name: &str,
-    title: &str,
-    format: &str,
-    mut content: String,
-    assertions: Vec<SpecAssertion>,
-) -> SpecArtifact {
-    append_assertions(&mut content, &assertions);
-    identified_artifact(id, file_name, title, format, content, assertions)
 }
 
 /// An artifact whose content is final, stamped with schema and identity.
@@ -454,35 +280,6 @@ fn filter_edges<'a>(
     selected
 }
 
-fn recovered_user_stories(nodes: &[&Node]) -> (String, Vec<SpecAssertion>) {
-    let capabilities: Vec<&Node> = nodes
-        .iter()
-        .copied()
-        .filter(|node| node.label == "Capability")
-        .filter(|node| provenance(&node.props, &node.id).confidence_tier != ConfidenceTier::Gap)
-        .collect();
-    let mut content = String::from("# Recovered user stories\n\n");
-    if capabilities.is_empty() {
-        content.push_str("No Capability facts have been recovered yet.\n");
-    } else {
-        for (index, capability) in capabilities.iter().enumerate() {
-            writeln!(
-                content,
-                "## US-R-{:04} — {}\n\n- Recovered capability assertion: `{}`\n",
-                index + 1,
-                node_name(capability),
-                capability.id,
-            )
-            .expect("write to string");
-        }
-    }
-    let assertions = capabilities
-        .into_iter()
-        .map(|node| node_assertion(node, None))
-        .collect();
-    (content, assertions)
-}
-
 const TRACE_LABELS: &[&str] = &[
     "REALIZES",
     "STEP_OF",
@@ -520,166 +317,6 @@ pub const US_TM_FLAT_LIMIT: usize = 200;
 pub const US_TM_MAX_CLASSES: usize = 50;
 /// Representative links rendered per class in `US-TM.md`.
 pub const US_TM_CLASS_REPRESENTATIVES: usize = 5;
-
-/// Structured index of every matrix link (`US-TM.json`).
-#[derive(Serialize)]
-struct MatrixIndex<'a> {
-    schema: &'static str,
-    mode: ExportMode,
-    links: usize,
-    classes: Vec<MatrixClassIndex<'a>>,
-}
-
-#[derive(Serialize)]
-struct MatrixClassIndex<'a> {
-    id: String,
-    relation: &'a str,
-    target: &'a str,
-    links: usize,
-    /// Assertion ids; each carries its full provenance in the bundle.
-    members: Vec<&'a str>,
-}
-
-fn matrix_row(content: &mut String, edge: &Edge) {
-    writeln!(
-        content,
-        "| `{}` | {} | `{}` |",
-        markdown_safe(&edge.src),
-        edge.label,
-        markdown_safe(&edge.dst)
-    )
-    .expect("write to string");
-}
-
-/// The recovered traceability matrix plus its JSON index (#487). Past
-/// [`US_TM_FLAT_LIMIT`] links the Markdown groups links by relation × target,
-/// details at most [`US_TM_MAX_CLASSES`] classes with
-/// [`US_TM_CLASS_REPRESENTATIVES`] links each, and counts every omission; the
-/// returned assertions stay complete and the index lists every link by class.
-fn traceability_matrix(edges: &[&Edge], mode: ExportMode) -> (String, String, Vec<SpecAssertion>) {
-    let relevant: Vec<(&Edge, SpecAssertion)> = edges
-        .iter()
-        .copied()
-        .filter(|edge| TRACE_LABELS.contains(&edge.label.as_str()))
-        .filter(|edge| {
-            provenance(&edge.props, &edge_identity(edge)).confidence_tier != ConfidenceTier::Gap
-        })
-        .map(|edge| (edge, edge_assertion(edge)))
-        .collect();
-    let classes = largest_groups(relevant.iter(), |(edge, _)| {
-        (edge.label.as_str(), edge.dst.as_str())
-    });
-    let mut content = String::from("# Recovered US traceability matrix\n\n");
-    if relevant.len() <= US_TM_FLAT_LIMIT {
-        content.push_str("| Source | Relation | Target |\n|---|---|---|\n");
-        for (edge, _) in &relevant {
-            matrix_row(&mut content, edge);
-        }
-        if relevant.is_empty() {
-            content.push_str("| — | No recovered mappings | — |\n");
-        }
-        let assertions: Vec<SpecAssertion> = relevant
-            .iter()
-            .map(|(_, assertion)| assertion.clone())
-            .collect();
-        append_assertions(&mut content, &assertions);
-    } else {
-        let shown = &classes[..classes.len().min(US_TM_MAX_CLASSES)];
-        writeln!(
-            content,
-            "{} recovered links in {} relation × target classes, largest first. Each \
-             class lists up to {US_TM_CLASS_REPRESENTATIVES} representative links; \
-             `US-TM.json` lists every link by class, and each link keeps its inline \
-             provenance in the bundle's assertions.\n",
-            relevant.len(),
-            classes.len(),
-        )
-        .expect("write to string");
-        content.push_str("| Class | Relation | Target | Links |\n|---|---|---|---|\n");
-        for (index, ((relation, target), members)) in shown.iter().enumerate() {
-            writeln!(
-                content,
-                "| {} | {relation} | `{}` | {} |",
-                matrix_class_id(index),
-                markdown_safe(target),
-                members.len(),
-            )
-            .expect("write to string");
-        }
-        let hidden = &classes[shown.len()..];
-        if !hidden.is_empty() {
-            writeln!(
-                content,
-                "| … | {} more classes, not detailed here — listed in `US-TM.json` | — | {} |",
-                hidden.len(),
-                hidden
-                    .iter()
-                    .map(|(_, members)| members.len())
-                    .sum::<usize>(),
-            )
-            .expect("write to string");
-        }
-        let mut representatives: Vec<SpecAssertion> = Vec::new();
-        for (index, ((relation, target), members)) in shown.iter().enumerate() {
-            writeln!(
-                content,
-                "\n## {} — {relation} `{}` ({} links)\n\n| Source | Relation | Target |\n|---|---|---|",
-                matrix_class_id(index),
-                markdown_safe(target),
-                members.len(),
-            )
-            .expect("write to string");
-            for (edge, assertion) in members.iter().take(US_TM_CLASS_REPRESENTATIVES) {
-                matrix_row(&mut content, edge);
-                representatives.push(assertion.clone());
-            }
-            let more = members.len().saturating_sub(US_TM_CLASS_REPRESENTATIVES);
-            if more > 0 {
-                writeln!(
-                    content,
-                    "\n… {more} more links in this class — listed in `US-TM.json` under `{}`.",
-                    matrix_class_id(index),
-                )
-                .expect("write to string");
-            }
-        }
-        append_assertions(&mut content, &representatives);
-        writeln!(
-            content,
-            "\nInline provenance is shown for the {} representative links above; \
-             the other {} carry theirs in the bundle's structured assertions.",
-            representatives.len(),
-            relevant.len() - representatives.len(),
-        )
-        .expect("write to string");
-    }
-    let index = MatrixIndex {
-        schema: "cartograph.us-tm-index/v1",
-        mode,
-        links: relevant.len(),
-        classes: classes
-            .iter()
-            .enumerate()
-            .map(|(index, ((relation, target), members))| MatrixClassIndex {
-                id: matrix_class_id(index),
-                relation,
-                target,
-                links: members.len(),
-                members: members
-                    .iter()
-                    .map(|(_, assertion)| assertion.id.as_str())
-                    .collect(),
-            })
-            .collect(),
-    };
-    let mut sidecar = serde_json::to_string(&index).expect("serialize matrix index");
-    sidecar.push('\n');
-    let assertions = relevant
-        .into_iter()
-        .map(|(_, assertion)| assertion)
-        .collect();
-    (content, sidecar, assertions)
-}
 
 fn matrix_class_id(index: usize) -> String {
     format!("M-{:02}", index + 1)
@@ -788,210 +425,7 @@ fn projection_gap(hop: &Hop, reason: &str) -> Hop {
     }
 }
 
-fn flow_artifact(
-    flows: &[Flow],
-    mode: ExportMode,
-    rejected_hashes: &BTreeSet<String>,
-    nodes: &[&Node],
-    edges: &[&Edge],
-) -> (String, Vec<SpecAssertion>) {
-    let origins = HopOrigins::new(nodes, edges);
-    let projected = project_flows(flows, mode, rejected_hashes);
-    let assertions = projected
-        .iter()
-        .flat_map(|flow| {
-            flow.hops
-                .iter()
-                .enumerate()
-                .map(|(index, hop)| hop_assertion(flow, hop, index, &origins))
-        })
-        .collect();
-    (flow_dossier(&projected), assertions)
-}
-
-fn topology_artifact(nodes: &[&Node], edges: &[&Edge]) -> (String, Vec<SpecAssertion>) {
-    let mut topology_edges: Vec<Edge> = edges
-        .iter()
-        .filter(|edge| TOPOLOGY_EDGE_LABELS.contains(&edge.label.as_str()))
-        .filter(|edge| {
-            provenance(&edge.props, &edge_identity(edge)).confidence_tier != ConfidenceTier::Gap
-        })
-        .map(|edge| (*edge).clone())
-        .collect();
-    let backed_channels: BTreeSet<&str> = topology_edges
-        .iter()
-        .filter(|edge| edge.label == "BACKS")
-        .map(|edge| edge.dst.as_str())
-        .collect();
-    let topology_nodes: Vec<Node> = nodes
-        .iter()
-        .filter(|node| {
-            node.label == "Resource"
-                || (node.label == "Channel" && backed_channels.contains(node.id.as_str()))
-        })
-        .filter(|node| provenance(&node.props, &node.id).confidence_tier != ConfidenceTier::Gap)
-        .map(|node| (*node).clone())
-        .collect();
-    let topology_ids: BTreeSet<&str> = topology_nodes.iter().map(|node| node.id.as_str()).collect();
-    topology_edges.retain(|edge| {
-        topology_ids.contains(edge.src.as_str()) && topology_ids.contains(edge.dst.as_str())
-    });
-    let mut assertions: Vec<SpecAssertion> = topology_nodes
-        .iter()
-        .map(|node| node_assertion(node, None))
-        .collect();
-    assertions.extend(topology_edges.iter().map(edge_assertion));
-    let diagram = topology_mermaid(&topology_nodes, &topology_edges);
-    let content = format!("# Resource topology\n\n```mermaid\n{diagram}```\n");
-    (content, assertions)
-}
-
 const DATA_EDGE_LABELS: &[&str] = &["READS", "WRITES", "MAPS_TO"];
-
-fn data_model(nodes: &[&Node], edges: &[&Edge]) -> (String, Vec<SpecAssertion>) {
-    let by_id: BTreeMap<&str, &Node> = nodes.iter().map(|node| (node.id.as_str(), *node)).collect();
-    let entities: Vec<&Node> = nodes
-        .iter()
-        .copied()
-        .filter(|node| node.label == "DataEntity")
-        .filter(|node| provenance(&node.props, &node.id).confidence_tier != ConfidenceTier::Gap)
-        .collect();
-    let entity_ids: BTreeSet<&str> = entities.iter().map(|node| node.id.as_str()).collect();
-    let mappings: Vec<&Edge> = edges
-        .iter()
-        .copied()
-        .filter(|edge| DATA_EDGE_LABELS.contains(&edge.label.as_str()))
-        .filter(|edge| {
-            provenance(&edge.props, &edge_identity(edge)).confidence_tier != ConfidenceTier::Gap
-        })
-        .filter(|edge| {
-            entity_ids.contains(edge.src.as_str()) || entity_ids.contains(edge.dst.as_str())
-        })
-        .filter(|edge| {
-            by_id.contains_key(edge.src.as_str()) && by_id.contains_key(edge.dst.as_str())
-        })
-        .collect();
-    let model_ids: BTreeSet<&str> = entity_ids
-        .iter()
-        .copied()
-        .chain(
-            mappings
-                .iter()
-                .flat_map(|edge| [edge.src.as_str(), edge.dst.as_str()]),
-        )
-        .collect();
-    let model_nodes: Vec<&Node> = model_ids
-        .iter()
-        .filter_map(|id| by_id.get(id).copied())
-        .collect();
-    let mut aliases = BTreeMap::new();
-    for (index, node) in model_nodes.iter().enumerate() {
-        aliases.insert(node.id.as_str(), format!("d{index}"));
-    }
-    let mut content = String::from("# Recovered data model\n\n```mermaid\nflowchart LR\n");
-    for node in &model_nodes {
-        let display = if node.label == "DataEntity" {
-            node_name(node)
-        } else {
-            format!("{}: {}", node.label, node_name(node))
-        };
-        writeln!(
-            content,
-            "    {}[\"{}\"]",
-            aliases[node.id.as_str()],
-            display.replace(['\r', '\n'], " ").replace('"', "'")
-        )
-        .expect("write to string");
-    }
-    for edge in &mappings {
-        if let (Some(source), Some(target)) = (
-            aliases.get(edge.src.as_str()),
-            aliases.get(edge.dst.as_str()),
-        ) {
-            writeln!(content, "    {source} -->|{}| {target}", edge.label)
-                .expect("write to string");
-        }
-    }
-    content.push_str("```\n");
-    if entities.is_empty() {
-        content.push_str("\nNo DataEntity facts have been recovered yet.\n");
-    }
-    if !mappings.is_empty() {
-        content.push_str(
-            "\n## Access and mapping relations\n\n| Source | Relation | Target |\n|---|---|---|\n",
-        );
-        for edge in &mappings {
-            writeln!(
-                content,
-                "| `{}` | {} | `{}` |",
-                markdown_safe(&edge.src),
-                edge.label,
-                markdown_safe(&edge.dst),
-            )
-            .expect("write to string");
-        }
-    }
-    let mut assertions: Vec<SpecAssertion> = model_nodes
-        .into_iter()
-        .map(|node| node_assertion(node, None))
-        .collect();
-    assertions.extend(mappings.into_iter().map(edge_assertion));
-    (content, assertions)
-}
-
-fn adr_set(nodes: &[&Node], edges: &[&Edge]) -> (String, Vec<SpecAssertion>) {
-    let adrs: Vec<&Node> = nodes
-        .iter()
-        .copied()
-        .filter(|node| node.label == "ADR")
-        .filter(|node| provenance(&node.props, &node.id).confidence_tier != ConfidenceTier::Gap)
-        .collect();
-    let adr_ids: BTreeSet<&str> = adrs.iter().map(|node| node.id.as_str()).collect();
-    let decisions: Vec<&Edge> = edges
-        .iter()
-        .copied()
-        .filter(|edge| edge.label == "DECIDES")
-        .filter(|edge| {
-            provenance(&edge.props, &edge_identity(edge)).confidence_tier != ConfidenceTier::Gap
-        })
-        .filter(|edge| adr_ids.contains(edge.src.as_str()))
-        .collect();
-    let mut content = String::from("# Found and recovered ADRs\n\n");
-    for adr in &adrs {
-        writeln!(content, "## {}\n", node_name(adr)).expect("write to string");
-        if let Some(origin) = adr.props["origin"].as_str() {
-            writeln!(content, "**Origin:** {origin}\n").expect("write to string");
-        }
-        if let Some(status) = adr.props["status"].as_str() {
-            writeln!(content, "**Status:** {status}\n").expect("write to string");
-        }
-        if let Some(body) = text_prop(adr, &["body", "content", "decision"]) {
-            writeln!(content, "{body}\n").expect("write to string");
-        }
-    }
-    if adrs.is_empty() {
-        content.push_str("No found or recovered ADR facts have been recovered yet.\n");
-    }
-    if !decisions.is_empty() {
-        content.push_str("\n## Decision links\n\n| ADR | Relation | Subject |\n|---|---|---|\n");
-        for edge in &decisions {
-            writeln!(
-                content,
-                "| `{}` | {} | `{}` |",
-                markdown_safe(&edge.src),
-                edge.label,
-                markdown_safe(&edge.dst),
-            )
-            .expect("write to string");
-        }
-    }
-    let mut assertions: Vec<SpecAssertion> = adrs
-        .into_iter()
-        .map(|node| node_assertion(node, None))
-        .collect();
-    assertions.extend(decisions.into_iter().map(edge_assertion));
-    (content, assertions)
-}
 
 /// True when `node` is an explicit System Gap. Public so the shell's
 /// findings summary counts with the register's own definition (#116) —
@@ -1057,567 +491,14 @@ fn next_tier(provenance: &Provenance) -> &'static str {
     }
 }
 
-/// A gap's cause: a Gap node's stop reason, otherwise the unresolved
-/// relation kind — the same key the Gaps lane groups by (AC-0082), so the
-/// artifact's class counts reconcile with the UI's.
-fn gap_cause(assertion: &SpecAssertion) -> String {
-    if assertion.subject_kind == "Gap" {
-        assertion
-            .summary
-            .strip_prefix("Gap: ")
-            .unwrap_or(&assertion.summary)
-            .to_string()
-    } else {
-        format!("unresolved {} edge", assertion.subject_kind)
-    }
-}
-
-/// One cause class of the gap register.
-struct GapClass<'a> {
-    cause: String,
-    extractor: &'a str,
-    next_tier: &'static str,
-    members: Vec<&'a SpecAssertion>,
-}
-
-/// Group gaps into cause classes (cause × extractor), largest first, then by
-/// cause and extractor in byte order; members keep the register's id order.
-fn gap_classes(assertions: &[SpecAssertion]) -> Vec<GapClass<'_>> {
-    let mut classes: BTreeMap<(String, &str), GapClass<'_>> = BTreeMap::new();
-    for assertion in assertions {
-        let cause = gap_cause(assertion);
-        let extractor = assertion.provenance.extractor_id.as_str();
-        classes
-            .entry((cause.clone(), extractor))
-            .or_insert_with(|| GapClass {
-                cause,
-                extractor,
-                next_tier: next_tier(&assertion.provenance),
-                members: Vec::new(),
-            })
-            .members
-            .push(assertion);
-    }
-    let mut classes: Vec<GapClass<'_>> = classes.into_values().collect();
-    classes.sort_by(|left, right| {
-        right
-            .members
-            .len()
-            .cmp(&left.members.len())
-            .then_with(|| left.cause.cmp(&right.cause))
-            .then_with(|| left.extractor.cmp(right.extractor))
-    });
-    classes
-}
-
 fn class_id(index: usize) -> String {
     format!("C-{:02}", index + 1)
-}
-
-fn short_cause(cause: &str) -> String {
-    if cause.chars().count() <= GAP_CAUSE_MAX_CHARS {
-        return cause.to_string();
-    }
-    let mut short: String = cause.chars().take(GAP_CAUSE_MAX_CHARS).collect();
-    short.push('…');
-    short
-}
-
-/// Structured index of every register instance (`gap_register.json`).
-#[derive(Serialize)]
-struct GapRegisterIndex<'a> {
-    schema: &'static str,
-    mode: ExportMode,
-    findings: usize,
-    instances: usize,
-    /// Register rows that restate a listed Gap node's finding — its
-    /// supporting Gap edges and flow-hop restatements. They are not classes
-    /// of their own, exactly as in the Gaps lane, but stay indexed here.
-    supporting: Vec<&'a str>,
-    /// Findings per omission class and filling seam (#585, AC-0254).
-    by_omission: Vec<OmissionRollup>,
-    classes: Vec<GapClassIndex<'a>>,
-}
-
-#[derive(Serialize)]
-struct OmissionRollup {
-    class: OmissionClass,
-    seam: FillSeam,
-    /// True for the fallback no rule could classify (#603 review).
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    unclassified: bool,
-    findings: usize,
-}
-
-/// Findings counted per (omission class, seam), in taxonomy order.
-fn omission_rollup(findings: &[SpecAssertion]) -> Vec<OmissionRollup> {
-    let mut counts: BTreeMap<(OmissionClass, FillSeam, bool), usize> = BTreeMap::new();
-    for finding in findings {
-        if let Some(omission) = &finding.omission {
-            *counts
-                .entry((omission.class, omission.seam, omission.is_unclassified()))
-                .or_default() += 1;
-        }
-    }
-    counts
-        .into_iter()
-        .map(|((class, seam, unclassified), findings)| OmissionRollup {
-            class,
-            seam,
-            unclassified,
-            findings,
-        })
-        .collect()
-}
-
-fn render_omission_rollup(content: &mut String, rollup: &[OmissionRollup]) {
-    if rollup.is_empty() {
-        return;
-    }
-    content.push_str(
-        "\n## By omission class\n\nWhy each finding is missing, and the seam that would fill it.\n\n\
-         | Omission class | Filled by | Findings |\n|---|---|---|\n",
-    );
-    for row in rollup {
-        let class = if row.unclassified {
-            format!("unclassified ({})", row.class.label())
-        } else {
-            row.class.label().to_string()
-        };
-        writeln!(
-            content,
-            "| {class} | {} | {} |",
-            row.seam.label(),
-            row.findings
-        )
-        .expect("write to string");
-    }
-}
-
-/// Reader labels for an assertion's omission cells; an unclassified
-/// fallback says so (#603 review).
-fn omission_cells(omission: Option<&Omission>) -> (String, &'static str) {
-    omission.map_or(("—".into(), "—"), |omission| {
-        (omission.class_label(), omission.seam.label())
-    })
-}
-
-/// A cause class's omission when every member shares it.
-fn uniform_omission<'a>(members: &[&'a SpecAssertion]) -> Option<&'a Omission> {
-    let first = members.first()?.omission.as_ref()?;
-    members
-        .iter()
-        .all(|member| {
-            member.omission.as_ref().is_some_and(|omission| {
-                (omission.class, omission.seam, omission.is_unclassified())
-                    == (first.class, first.seam, first.is_unclassified())
-            })
-        })
-        .then_some(first)
-}
-
-#[derive(Serialize)]
-struct GapClassIndex<'a> {
-    id: String,
-    cause: &'a str,
-    extractor: &'a str,
-    next_tier: &'static str,
-    /// The class's omission when all members share it; members always carry
-    /// their own in the bundle.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    omission_class: Option<OmissionClass>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    seam: Option<FillSeam>,
-    instances: usize,
-    /// Assertion ids; each carries its full provenance in the bundle.
-    members: Vec<&'a str>,
-}
-
-fn register_row(content: &mut String, assertion: &SpecAssertion) {
-    let (class, seam) = omission_cells(assertion.omission.as_ref());
-    writeln!(
-        content,
-        "| `{}` | {} | {class} | {seam} |",
-        markdown_safe(&assertion.subject_id),
-        markdown_safe(&assertion.summary)
-    )
-    .expect("write to string");
-}
-
-/// The Gap register as a bounded, grouped artifact plus its JSON sidecar
-/// (#240, AC-0210). Past [`GAP_REGISTER_FLAT_LIMIT`] rows the Markdown is
-/// grouped by cause class with at most [`GAP_CLASS_REPRESENTATIVES`]
-/// instances per class and [`GAP_REGISTER_MAX_CLASSES`] classes, and every
-/// omission is an explicit counted line — nothing is silently dropped. The
-/// returned assertions stay complete: the Gaps lane groups them and each
-/// keeps its inline provenance in the bundle. The sidecar indexes every
-/// instance by class.
-fn gap_register(
-    nodes: &[&Node],
-    edges: &[&Edge],
-    flow_assertions: &[SpecAssertion],
-    findings: usize,
-    mode: ExportMode,
-) -> (String, String, Vec<SpecAssertion>) {
-    let mut assertions: Vec<SpecAssertion> = nodes
-        .iter()
-        .filter(|node| is_gap_node(node))
-        .map(|node| node_assertion(node, gap_node_edge_label(node, edges)))
-        .collect();
-    assertions.extend(
-        edges
-            .iter()
-            .filter(|edge| is_gap_edge(edge))
-            .map(|edge| edge_assertion(edge)),
-    );
-    assertions.extend(
-        flow_assertions
-            .iter()
-            .filter(|assertion| assertion.provenance.confidence_tier == ConfidenceTier::Gap)
-            .cloned(),
-    );
-    assertions.sort_by(|left, right| left.id.cmp(&right.id));
-    assertions.dedup_by(|left, right| left.id == right.id);
-    let (content, sidecar) = render_gap_register(&assertions, findings, mode);
-    (content, sidecar, assertions)
-}
-
-/// Split register rows the way the Gaps lane does (#241): a Gap node is a
-/// finding; a Gap edge touching a listed Gap node supports that node's
-/// finding instead of doubling it, while an edge-only Gap (no Gap node on
-/// either end) stays a finding of its own; flow-hop assertions restate gaps
-/// already listed. Classes are built from the findings alone so the Markdown
-/// and the lane agree on classes and counts.
-fn lane_findings(assertions: &[SpecAssertion]) -> (Vec<SpecAssertion>, Vec<&str>) {
-    let listed: std::collections::BTreeSet<&str> = assertions
-        .iter()
-        .filter(|assertion| assertion.id.starts_with("node:"))
-        .map(|assertion| assertion.subject_id.as_str())
-        .collect();
-    let supports_listed = |assertion: &SpecAssertion| {
-        let mut parts = assertion.subject_id.split(' ');
-        let src = parts.next().unwrap_or_default();
-        let dst = parts.nth(1).unwrap_or_default();
-        listed.contains(src) || listed.contains(dst)
-    };
-    let mut findings = Vec::new();
-    let mut supporting = Vec::new();
-    for assertion in assertions {
-        let is_finding = assertion.id.starts_with("node:")
-            || (assertion.id.starts_with("edge:") && !supports_listed(assertion));
-        if is_finding {
-            findings.push(assertion.clone());
-        } else {
-            supporting.push(assertion.id.as_str());
-        }
-    }
-    (findings, supporting)
-}
-
-/// Render the register prose and its JSON index from the sorted assertions.
-fn render_gap_register(
-    assertions: &[SpecAssertion],
-    findings: usize,
-    mode: ExportMode,
-) -> (String, String) {
-    let (lane_rows, supporting) = lane_findings(assertions);
-    let classes = gap_classes(&lane_rows);
-
-    let mut content = String::from("# Gap register\n\n");
-    if assertions.len() <= GAP_REGISTER_FLAT_LIMIT {
-        content.push_str("| Subject | Reason | Omission class | Filled by |\n|---|---|---|---|\n");
-        for assertion in assertions {
-            register_row(&mut content, assertion);
-        }
-        if assertions.is_empty() {
-            content.push_str("| — | No unresolved facts | — | — |\n");
-        }
-        render_omission_rollup(&mut content, &omission_rollup(&lane_rows));
-        append_assertions(&mut content, assertions);
-    } else {
-        let shown = &classes[..classes.len().min(GAP_REGISTER_MAX_CLASSES)];
-        writeln!(
-            content,
-            "{findings} open findings · {} register rows: {} findings in {} cause \
-             classes (stop reason × extractor), largest first, plus {} supporting \
-             rows that restate a listed gap. Each class lists up to \
-             {GAP_CLASS_REPRESENTATIVES} representative instances; \
-             `gap_register.json` lists every instance by class, and each \
-             instance keeps its inline provenance in the bundle's assertions.\n",
-            assertions.len(),
-            lane_rows.len(),
-            classes.len(),
-            supporting.len(),
-        )
-        .expect("write to string");
-        content.push_str(
-            "| Class | Cause | Extractor | Next tier | Omission class | Filled by | Instances |\n|---|---|---|---|---|---|---|\n",
-        );
-        for (index, class) in shown.iter().enumerate() {
-            let (omission, seam) = uniform_omission(&class.members)
-                .map_or(("mixed".into(), "mixed"), |omission| {
-                    omission_cells(Some(omission))
-                });
-            writeln!(
-                content,
-                "| {} | {} | `{}` | {} | {omission} | {seam} | {} |",
-                class_id(index),
-                markdown_safe(&short_cause(&class.cause)),
-                markdown_safe(class.extractor),
-                class.next_tier,
-                class.members.len(),
-            )
-            .expect("write to string");
-        }
-        let hidden = &classes[shown.len()..];
-        if !hidden.is_empty() {
-            writeln!(
-                content,
-                "| … | {} more classes, not detailed here — listed in `gap_register.json` | — | — | — | — | {} |",
-                hidden.len(),
-                hidden.iter().map(|class| class.members.len()).sum::<usize>(),
-            )
-            .expect("write to string");
-        }
-        render_omission_rollup(&mut content, &omission_rollup(&lane_rows));
-        let mut representatives: Vec<SpecAssertion> = Vec::new();
-        for (index, class) in shown.iter().enumerate() {
-            writeln!(
-                content,
-                "\n## {} — {} ({} instances)\n\n| Subject | Reason | Omission class | Filled by |\n|---|---|---|---|",
-                class_id(index),
-                markdown_safe(&short_cause(&class.cause)),
-                class.members.len(),
-            )
-            .expect("write to string");
-            for member in class.members.iter().take(GAP_CLASS_REPRESENTATIVES) {
-                register_row(&mut content, member);
-                representatives.push((*member).clone());
-            }
-            let more = class
-                .members
-                .len()
-                .saturating_sub(GAP_CLASS_REPRESENTATIVES);
-            if more > 0 {
-                writeln!(
-                    content,
-                    "\n… {more} more instances in this class — listed in `gap_register.json` under `{}`.",
-                    class_id(index),
-                )
-                .expect("write to string");
-            }
-        }
-        append_assertions(&mut content, &representatives);
-        writeln!(
-            content,
-            "\nInline provenance is shown for the {} representative instances above; \
-             the other {} carry theirs in the bundle's structured assertions.",
-            representatives.len(),
-            assertions.len() - representatives.len(),
-        )
-        .expect("write to string");
-    }
-
-    let index = GapRegisterIndex {
-        schema: "cartograph.gap-register-index/v1",
-        mode,
-        findings,
-        instances: assertions.len(),
-        supporting,
-        by_omission: omission_rollup(&lane_rows),
-        classes: classes
-            .iter()
-            .enumerate()
-            .map(|(index, class)| GapClassIndex {
-                id: class_id(index),
-                cause: &class.cause,
-                extractor: class.extractor,
-                next_tier: class.next_tier,
-                omission_class: uniform_omission(&class.members).map(|omission| omission.class),
-                seam: uniform_omission(&class.members).map(|omission| omission.seam),
-                instances: class.members.len(),
-                members: class
-                    .members
-                    .iter()
-                    .map(|member| member.id.as_str())
-                    .collect(),
-            })
-            .collect(),
-    };
-    let mut sidecar = serde_json::to_string(&index).expect("serialize gap register index");
-    sidecar.push('\n');
-    (content, sidecar)
 }
 
 /// True when `node` records ADR/code drift (see [`is_gap_node`] for why
 /// these predicates are public).
 pub fn is_drift_node(node: &Node) -> bool {
     node.label == "Drift" || node.props["kind"].as_str() == Some("drift")
-}
-
-fn drift_register(nodes: &[&Node], edges: &[&Edge]) -> (String, Vec<SpecAssertion>, usize) {
-    let drift_nodes: Vec<&&Node> = nodes.iter().filter(|node| is_drift_node(node)).collect();
-    let mut assertions: Vec<SpecAssertion> = drift_nodes
-        .iter()
-        .map(|node| node_assertion(node, None))
-        .collect();
-    assertions.extend(
-        edges
-            .iter()
-            .filter(|edge| is_drift_edge(edge))
-            .map(|edge| edge_assertion(edge)),
-    );
-    let mut content = String::from(
-        "# Drift register\n\n| Finding | ADR | Offending edge | Flow triggers | Confidence |\n|---|---|---|---|---|\n",
-    );
-    for node in &drift_nodes {
-        let triggers = node.props["flow_triggers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(serde_json::Value::as_str)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let node_provenance = provenance(&node.props, &node.id);
-        writeln!(
-            content,
-            "| {} | `{}` | `{}` | {} | {:?} |",
-            markdown_safe(&node_name(node)),
-            markdown_safe(node.props["adr_id"].as_str().unwrap_or("—")),
-            markdown_safe(node.props["offending_edge"].as_str().unwrap_or("—")),
-            markdown_safe(if triggers.is_empty() {
-                "—"
-            } else {
-                &triggers
-            }),
-            node_provenance.confidence_tier,
-        )
-        .expect("write to string");
-    }
-    if drift_nodes.is_empty() {
-        content.push_str("| — | No ADR/code conflicts recovered |\n");
-    }
-    (content, assertions, drift_nodes.len())
-}
-
-fn security_view(nodes: &[&Node]) -> (String, Vec<SpecAssertion>, usize) {
-    let findings = nodes
-        .iter()
-        .filter(|node| node.label == "Finding" && node.props["kind"].as_str() == Some("security"))
-        .collect::<Vec<_>>();
-    let assertions = findings
-        .iter()
-        .map(|finding| node_assertion(finding, None))
-        .collect::<Vec<_>>();
-    let mut content = String::from(
-        "# Security findings\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n",
-    );
-    for finding in &findings {
-        let scopes = finding.props["resource_scope"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(serde_json::Value::as_str)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let actions = finding.props["actions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(serde_json::Value::as_str)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let finding_provenance = provenance(&finding.props, &finding.id);
-        writeln!(
-            content,
-            "| {} | `{}` | `{}` | {} | {} | {} / {} | {:?} |",
-            markdown_safe(&node_name(finding)),
-            markdown_safe(finding.props["category"].as_str().unwrap_or("security")),
-            markdown_safe(finding.props["subject_id"].as_str().unwrap_or("—")),
-            markdown_safe(if scopes.is_empty() { "—" } else { &scopes }),
-            markdown_safe(if actions.is_empty() { "—" } else { &actions }),
-            markdown_safe(finding.props["us_id"].as_str().unwrap_or("US-0015")),
-            markdown_safe(finding.props["ac_id"].as_str().unwrap_or("—")),
-            finding_provenance.confidence_tier,
-        )
-        .expect("write to string");
-    }
-    if findings.is_empty() {
-        content.push_str("| — | — | — | — | — | No explicit security findings | — |\n");
-    }
-    (content, assertions, findings.len())
-}
-
-/// The toolchain view (#215): what the system is built *with*, as cited
-/// facts — `Tool` nodes with their resolved settings and the config files
-/// (`DEFINED_IN`) that prove them.
-fn toolchain_view(nodes: &[&Node], edges: &[&Edge]) -> (String, Vec<SpecAssertion>) {
-    let mut content = String::from(
-        "# Toolchain\n\n| Tool | Category | Defined in | Settings | Confidence |\n|---|---|---|---|---|\n",
-    );
-    let mut assertions = Vec::new();
-    let tools: Vec<&&Node> = nodes.iter().filter(|node| node.label == "Tool").collect();
-    for tool in &tools {
-        let tool_provenance = provenance(&tool.props, &tool.id);
-        let display = tool.props["display"].as_str().unwrap_or(&tool.id);
-        let category = tool.props["category"].as_str().unwrap_or("—");
-        let mut defined_in: Vec<String> = edges
-            .iter()
-            .filter(|edge| edge.label == "DEFINED_IN" && edge.src == tool.id)
-            .map(|edge| {
-                edge.dst
-                    .split_once('@')
-                    .map(|(_, path)| path.to_string())
-                    .unwrap_or_else(|| edge.dst.clone())
-            })
-            .collect();
-        defined_in.sort();
-        defined_in.dedup();
-        let settings = if tool.props["settings_behind_code"].as_bool() == Some(true) {
-            "settings live in code — detected by presence only".to_string()
-        } else {
-            let rendered: Vec<String> = tool.props["settings"]
-                .as_object()
-                .map(|settings| {
-                    settings
-                        .iter()
-                        .map(|(key, value)| format!("{key}={value}"))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if rendered.is_empty() {
-                "—".to_string()
-            } else {
-                rendered.join("; ")
-            }
-        };
-        writeln!(
-            content,
-            "| {} | {} | {} | {} | {:?} |",
-            markdown_safe(display),
-            markdown_safe(category),
-            markdown_safe(&defined_in.join(", ")),
-            markdown_safe(&settings),
-            tool_provenance.confidence_tier,
-        )
-        .expect("write to string");
-        assertions.push(SpecAssertion {
-            id: format!("tool:{}", tool.id),
-            subject_id: tool.id.clone(),
-            subject_kind: "Tool".into(),
-            summary: format!(
-                "Toolchain: {display} ({category}) defined in {}",
-                defined_in.join(", ")
-            ),
-            omission: gap_omission(&tool_provenance, &tool.props, "toolchain fact unresolved"),
-            provenance: tool_provenance,
-            edge_label: None,
-        });
-    }
-    if tools.is_empty() {
-        content.push_str("| — | — | — | No toolchain facts recovered | — |\n");
-    }
-    (content, assertions)
 }
 
 /// Compile the complete official artifact set with one R-INT-5 policy.
@@ -1629,193 +510,7 @@ pub fn compile_spec(
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
 ) -> SpecBundle {
-    // Curation is part of the compilation projection, so derived ADRs may
-    // only consume facts that survived the selected export policy. Otherwise
-    // a rejected support edge could disappear while a new derived hash kept
-    // its conclusion visible.
-    let base_nodes = filter_nodes(nodes, mode, rejected_hashes)
-        .into_iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    // A filtered rule must not survive through a separately confirmed
-    // relationship. Keep every artifact on the same rule projection.
-    let all_rule_ids: BTreeSet<_> = nodes
-        .iter()
-        .filter(|node| node.label == "BusinessRule")
-        .map(|node| node.id.as_str())
-        .collect();
-    let visible_node_ids: BTreeSet<_> = base_nodes.iter().map(|node| node.id.as_str()).collect();
-    let base_edges = filter_edges(edges, mode, rejected_hashes)
-        .into_iter()
-        .filter(|edge| {
-            let touches_rule = all_rule_ids.contains(edge.src.as_str())
-                || all_rule_ids.contains(edge.dst.as_str());
-            !touches_rule
-                || (visible_node_ids.contains(edge.src.as_str())
-                    && visible_node_ids.contains(edge.dst.as_str()))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let projected_flows = project_flows(flows, mode, rejected_hashes);
-    let derived = crate::derive_adr_facts(&base_nodes, &base_edges, &projected_flows);
-    let security_findings = crate::security::derive_security_findings(&base_nodes, &base_edges);
-    let mut projected_nodes = base_nodes;
-    projected_nodes.extend(derived.nodes);
-    projected_nodes.extend(security_findings);
-    let mut projected_edges = base_edges;
-    projected_edges.extend(derived.edges);
-    let nodes = filter_nodes(&projected_nodes, mode, rejected_hashes);
-    let edges = filter_edges(&projected_edges, mode, rejected_hashes);
-    let (stories, story_assertions) = recovered_user_stories(&nodes);
-    let (matrix, matrix_index, matrix_assertions) = traceability_matrix(&edges, mode);
-    let (dossiers, flow_assertions) = flow_artifact(flows, mode, rejected_hashes, &nodes, &edges);
-    let (topology, topology_assertions) = topology_artifact(&nodes, &edges);
-    let (data, data_assertions) = data_model(&nodes, &edges);
-    let (adrs, adr_assertions) = adr_set(&nodes, &edges);
-    let (drifts, drift_assertions, drift_count) = drift_register(&nodes, &edges);
-    let (security, security_assertions, security_count) = security_view(&nodes);
-    let (toolchain, toolchain_assertions) = toolchain_view(&nodes, &edges);
-    let (rules, rule_index, rule_assertions) = crate::rules::inventory(&nodes, &edges, mode);
-
-    // The register still lists supporting edge and flow-hop assertions as
-    // rows, but the count the Workbench displays uses the shared finding
-    // definition, so it reconciles with the findings-summary headline.
-    let gap_count = count_gap_findings(nodes.iter().copied(), edges.iter().copied());
-    let (gaps, gap_index, gap_assertions) =
-        gap_register(&nodes, &edges, &flow_assertions, gap_count, mode);
-    let artifacts = vec![
-        artifact(
-            "user-stories",
-            "user_stories.md",
-            "User stories",
-            "markdown",
-            stories,
-            story_assertions,
-        ),
-        // The matrix renders its own bounded provenance table (#487).
-        identified_artifact(
-            "us-tm",
-            "US-TM.md",
-            "US traceability matrix",
-            "markdown",
-            matrix,
-            matrix_assertions,
-        ),
-        // Every matrix link by class; the assertions stay on the matrix.
-        identified_artifact(
-            "us-tm-index",
-            "US-TM.json",
-            "US traceability matrix index",
-            "json",
-            matrix_index,
-            Vec::new(),
-        ),
-        artifact(
-            "flow-dossiers",
-            "flow_dossiers.md",
-            "Flow dossiers",
-            "markdown",
-            dossiers,
-            flow_assertions,
-        ),
-        artifact(
-            "topology",
-            "topology.md",
-            "Resource topology",
-            "markdown",
-            topology,
-            topology_assertions,
-        ),
-        artifact(
-            "data-model",
-            "data_model.md",
-            "Data model",
-            "markdown",
-            data,
-            data_assertions,
-        ),
-        artifact(
-            "adrs",
-            "adrs.md",
-            "Architecture decisions",
-            "markdown",
-            adrs,
-            adr_assertions,
-        ),
-        // The register renders its own bounded provenance table (#240).
-        identified_artifact(
-            "gap-register",
-            "gap_register.md",
-            "Gap register",
-            "markdown",
-            gaps,
-            gap_assertions,
-        ),
-        // Every register instance by class; the assertions stay on the
-        // register above so they are counted once.
-        identified_artifact(
-            "gap-register-index",
-            "gap_register.json",
-            "Gap register index",
-            "json",
-            gap_index,
-            Vec::new(),
-        ),
-        artifact(
-            "drift-register",
-            "drift_register.md",
-            "Drift register",
-            "markdown",
-            drifts,
-            drift_assertions,
-        ),
-        artifact(
-            "security-view",
-            "security.md",
-            "Security findings",
-            "markdown",
-            security,
-            security_assertions,
-        ),
-        artifact(
-            "toolchain",
-            "toolchain.md",
-            "Toolchain",
-            "markdown",
-            toolchain,
-            toolchain_assertions,
-        ),
-        // The inventory renders its own bounded provenance table (#487).
-        identified_artifact(
-            "rule-evidence",
-            "rule-evidence.md",
-            "Source rule evidence",
-            "markdown",
-            rules,
-            rule_assertions,
-        ),
-        // Every observation and relationship by source file.
-        identified_artifact(
-            "rule-evidence-index",
-            "rule-evidence.json",
-            "Source rule evidence index",
-            "json",
-            rule_index,
-            Vec::new(),
-        ),
-    ];
-    let assertion_count = artifacts
-        .iter()
-        .map(|artifact| artifact.assertions.len())
-        .sum();
-    SpecBundle {
-        mode,
-        artifacts,
-        assertion_count,
-        gap_count,
-        drift_count,
-        security_count,
-    }
+    selected::all(nodes, edges, flows, mode, rejected_hashes)
 }
 
 #[cfg(test)]
@@ -1889,6 +584,34 @@ mod tests {
             provenance,
             gap_reason: (confidence == ConfidenceTier::Gap).then(|| "computed identity".into()),
             attempted_tiers: vec![],
+        }
+    }
+
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
+    #[test]
+    fn ordinary_bundle_preserves_frozen_prebounded_bytes() {
+        let (nodes, edges, flows) = fixture();
+        for (mode, expected) in [
+            (
+                ExportMode::VerifiedOnly,
+                "467ccb66f44328b32ebd18200f5714c624de199fada6534f78912f2705279c92",
+            ),
+            (
+                ExportMode::BestEffort,
+                "3e8b4a6f618b7ac73d9f886f76e10c63ee2b03a8c235a901ef589c961f37558e",
+            ),
+        ] {
+            let bytes = serde_json::to_vec(&compile_spec(
+                &nodes,
+                &edges,
+                &flows,
+                mode,
+                &BTreeSet::new(),
+            ))
+            .unwrap();
+            // Frozen native #603 (03d776d) output, with the already-integrated
+            // method column, projection stamping and artifact identity seams.
+            assert_eq!(blake3::hash(&bytes).to_hex().as_str(), expected, "{mode:?}");
         }
     }
 
@@ -2921,6 +1644,488 @@ mod tests {
         assert_eq!(index["classes"].as_array().unwrap().len(), 5);
     }
 
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
+    #[test]
+    fn selected_producers_preserve_complete_artifacts_for_both_projection_modes() {
+        let (nodes, edges, flows) = fixture();
+        for mode in [ExportMode::BestEffort, ExportMode::VerifiedOnly] {
+            for rejected in [
+                BTreeSet::new(),
+                nodes
+                    .iter()
+                    .map(|n| provenance(&n.props, &n.id).content_hash)
+                    .collect(),
+            ] {
+                let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
+                assert_eq!(full.artifacts.len(), 14);
+                for artifact in &full.artifacts {
+                    let selected = compile_spec_selected(
+                        &nodes,
+                        &edges,
+                        &flows,
+                        mode,
+                        &rejected,
+                        &[&artifact.id],
+                        SelectedCompileLimits {
+                            max_bytes: usize::MAX,
+                            adr: crate::AdrLimits {
+                                max_rows: usize::MAX,
+                                max_output_bytes: usize::MAX,
+                            },
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        selected,
+                        vec![SelectedArtifactOutcome::Produced(artifact.clone())],
+                        "{}",
+                        artifact.id
+                    );
+                }
+                let none = compile_spec_selected(
+                    &nodes,
+                    &edges,
+                    &flows,
+                    mode,
+                    &rejected,
+                    &[],
+                    SelectedCompileLimits {
+                        max_bytes: 0,
+                        adr: crate::AdrLimits {
+                            max_rows: 0,
+                            max_output_bytes: 0,
+                        },
+                    },
+                )
+                .unwrap();
+                assert!(none.is_empty());
+            }
+        }
+    }
+
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
+    #[test]
+    fn ordinary_missing_invalid_provenance_matches_original_bytes() {
+        let (mut nodes, mut edges, mut flows) = fixture();
+        for (i, node) in nodes.iter_mut().enumerate() {
+            if i % 2 == 0 {
+                node.props.as_object_mut().unwrap().remove("prov");
+            } else {
+                node.props["prov"] = serde_json::json!({"invalid":"stored provenance"});
+            }
+        }
+        for (i, edge) in edges.iter_mut().enumerate() {
+            if i % 2 == 0 {
+                edge.props.as_object_mut().unwrap().remove("prov");
+            } else {
+                edge.props["prov"] = serde_json::json!({"invalid":"stored provenance"});
+            }
+        }
+        flows[0].hops.clear();
+        // Frozen against native #603 03d776d, incorporating existing method,
+        // projection and identity seams; independently compared before removal.
+        for (mode, expected) in [
+            (
+                ExportMode::VerifiedOnly,
+                "51f2c15babae6634c3df1a18e8d9c8659d64c397e3fc0a8fe512b9354f1d915d",
+            ),
+            (
+                ExportMode::BestEffort,
+                "2359cee5f8dfa6e2f2b488a7cd80dafd162794e7e034addcb79f282d7d2e064b",
+            ),
+        ] {
+            let full = compile_spec(&nodes, &edges, &flows, mode, &BTreeSet::new());
+            assert_eq!(
+                blake3::hash(&serde_json::to_vec(&full).unwrap())
+                    .to_hex()
+                    .as_str(),
+                expected
+            );
+            for artifact in full.artifacts {
+                assert_eq!(
+                    compile_spec_selected(
+                        &nodes,
+                        &edges,
+                        &flows,
+                        mode,
+                        &BTreeSet::new(),
+                        &[&artifact.id],
+                        selected_limits(usize::MAX)
+                    )
+                    .unwrap(),
+                    vec![SelectedArtifactOutcome::Produced(artifact)]
+                );
+            }
+        }
+    }
+
+    fn selected_limits(max_bytes: usize) -> SelectedCompileLimits {
+        SelectedCompileLimits {
+            max_bytes,
+            adr: crate::AdrLimits {
+                max_rows: usize::MAX,
+                max_output_bytes: usize::MAX,
+            },
+        }
+    }
+
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
+    #[test]
+    fn selected_output_exact_boundaries_include_escaped_complete_assertion_arrays() {
+        let (mut nodes, mut edges, mut flows) = fixture();
+        for node in &mut nodes {
+            node.props["name"] = serde_json::json!("quote\" | \n\r é\0".repeat(20));
+        }
+        edges[0].src.push_str("\"\n\0é");
+        flows[0].hops[0].src_name = "é|\"\n\0".repeat(40);
+        flows[0].hops[0].provenance.method = core_prov::ProducingMethod::Model {
+            model: "quote\" | \n é\0".repeat(10),
+        };
+        for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
+            let full = compile_spec(&nodes, &edges, &flows, mode, &BTreeSet::new());
+            let mut total = 0;
+            for artifact in &full.artifacts {
+                let exact = artifact.content.len()
+                    + serde_json::to_vec(&artifact.assertions).unwrap().len();
+                total += exact;
+                let selected = compile_spec_selected(
+                    &nodes,
+                    &edges,
+                    &flows,
+                    mode,
+                    &BTreeSet::new(),
+                    &[&artifact.id],
+                    selected_limits(exact),
+                )
+                .unwrap();
+                assert_eq!(
+                    selected,
+                    vec![SelectedArtifactOutcome::Produced(artifact.clone())],
+                    "{}",
+                    artifact.id
+                );
+                let refused = compile_spec_selected(
+                    &nodes,
+                    &edges,
+                    &flows,
+                    mode,
+                    &BTreeSet::new(),
+                    &[&artifact.id],
+                    selected_limits(exact - 1),
+                )
+                .unwrap();
+                assert_eq!(
+                    refused,
+                    vec![SelectedArtifactOutcome::Limited {
+                        artifact_id: artifact.id.clone(),
+                        limit: SelectedArtifactLimit::OutputBytes {
+                            remaining: exact - 1
+                        }
+                    }]
+                );
+            }
+            let mut ids: Vec<_> = full.artifacts.iter().rev().map(|a| a.id.as_str()).collect();
+            ids.push("user-stories");
+            ids.push("toolchain");
+            let selected = compile_spec_selected(
+                &nodes,
+                &edges,
+                &flows,
+                mode,
+                &BTreeSet::new(),
+                &ids,
+                selected_limits(total),
+            )
+            .unwrap();
+            assert_eq!(
+                selected,
+                full.artifacts
+                    .into_iter()
+                    .map(SelectedArtifactOutcome::Produced)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
+    #[test]
+    fn selection_order_duplicates_failures_and_unknown_ids_have_explicit_semantics() {
+        let n = node(
+            "cap:large",
+            "Capability",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        let mut large = n.clone();
+        large.props["name"] = serde_json::json!("large".repeat(20_000));
+        let full = compile_spec(
+            &[large.clone()],
+            &[],
+            &[],
+            ExportMode::VerifiedOnly,
+            &BTreeSet::new(),
+        );
+        let matrix = full.artifacts.iter().find(|a| a.id == "us-tm").unwrap();
+        let bytes = matrix.content.len() + 2;
+        let selection = ["us-tm", "user-stories", "us-tm"];
+        let result = compile_spec_selected(
+            &[large.clone()],
+            &[],
+            &[],
+            ExportMode::VerifiedOnly,
+            &BTreeSet::new(),
+            &selection,
+            selected_limits(bytes),
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            vec![
+                SelectedArtifactOutcome::Limited {
+                    artifact_id: "user-stories".into(),
+                    limit: SelectedArtifactLimit::OutputBytes { remaining: bytes }
+                },
+                SelectedArtifactOutcome::Produced(matrix.clone())
+            ]
+        );
+        let reversed = compile_spec_selected(
+            &[large],
+            &[],
+            &[],
+            ExportMode::VerifiedOnly,
+            &BTreeSet::new(),
+            &["user-stories", "us-tm"],
+            selected_limits(bytes),
+        )
+        .unwrap();
+        assert_eq!(result, reversed);
+        let none = SelectedCompileLimits {
+            max_bytes: 0,
+            adr: crate::AdrLimits {
+                max_rows: 0,
+                max_output_bytes: 0,
+            },
+        };
+        assert_eq!(
+            compile_spec_selected(
+                &[n],
+                &[],
+                &[],
+                ExportMode::VerifiedOnly,
+                &BTreeSet::new(),
+                &["adrs", "unrecognized"],
+                none
+            ),
+            Err(ArtifactSelectionError::UnknownArtifact { index: 1 })
+        );
+        assert!(
+            compile_spec_selected(
+                &[],
+                &[],
+                &[],
+                ExportMode::VerifiedOnly,
+                &BTreeSet::new(),
+                &[],
+                none
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let failed = compile_spec_selected(
+            &[],
+            &[],
+            &[],
+            ExportMode::VerifiedOnly,
+            &BTreeSet::new(),
+            &["adrs", "user-stories"],
+            none,
+        )
+        .unwrap();
+        assert_eq!(
+            failed,
+            vec!["user-stories", "adrs"]
+                .into_iter()
+                .map(|id| SelectedArtifactOutcome::Limited {
+                    artifact_id: id.into(),
+                    limit: SelectedArtifactLimit::AdrDerivation(crate::AdrLimitExceeded {
+                        limit: crate::AdrLimit::OutputBytes,
+                        maximum: 0
+                    })
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    fn reorder_keys(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::Object(map) => {
+                let fields: Vec<String> = map
+                    .iter()
+                    .rev()
+                    .map(|(key, child)| {
+                        format!(
+                            "{}:{}",
+                            serde_json::to_string(key).unwrap(),
+                            reorder_keys(child)
+                        )
+                    })
+                    .collect();
+                format!("{{{}}}", fields.join(","))
+            }
+            serde_json::Value::Array(items) => {
+                let items: Vec<String> = items.iter().map(reorder_keys).collect();
+                format!("[{}]", items.join(","))
+            }
+            other => other.to_string(),
+        }
+    }
+
+    #[test]
+    fn artifacts_carry_deterministic_schema_and_content_identity() {
+        let (nodes, edges, flows) = fixture();
+        let compile = || {
+            compile_spec(
+                &nodes,
+                &edges,
+                &flows,
+                ExportMode::BestEffort,
+                &BTreeSet::new(),
+            )
+        };
+        let first = compile();
+        let second = compile();
+        assert!(!first.artifacts.is_empty());
+        let mut seen = BTreeSet::new();
+        for (a, b) in first.artifacts.iter().zip(&second.artifacts) {
+            assert_eq!(
+                a.schema,
+                format!("cartograph.spec/{}@{}", a.id, SPEC_ARTIFACT_SCHEMA_VERSION)
+            );
+            assert!(
+                a.content_id.starts_with("spec-artifact-v1:"),
+                "{}",
+                a.content_id
+            );
+            assert!(a.verify_identity(), "{} verifies", a.file_name);
+            assert_eq!(
+                a.content_id, b.content_id,
+                "{} is deterministic",
+                a.file_name
+            );
+            assert!(
+                seen.insert(a.content_id.clone()),
+                "{} identity is distinct",
+                a.file_name
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_identity_changes_with_content_assertions_or_schema() {
+        let (nodes, edges, flows) = fixture();
+        let bundle = compile_spec(
+            &nodes,
+            &edges,
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        );
+        let original = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| !artifact.assertions.is_empty())
+            .expect("an artifact with assertions")
+            .clone();
+
+        let mut content = original.clone();
+        content.content.push('\n');
+        let mut assertion = original.clone();
+        assertion.assertions[0].provenance.content_hash.push('x');
+        let mut schema = original.clone();
+        schema.schema = format!(
+            "cartograph.spec/{}@{}",
+            schema.id,
+            SPEC_ARTIFACT_SCHEMA_VERSION + 1
+        );
+        for (what, changed) in [
+            ("content", content),
+            ("assertion", assertion),
+            ("schema", schema),
+        ] {
+            assert!(
+                !changed.verify_identity(),
+                "a changed {what} fails verification"
+            );
+            assert_ne!(
+                changed.compute_content_id(),
+                original.content_id,
+                "{what} is hashed"
+            );
+        }
+    }
+
+    // AC-0258 (T-0258): selected construction and ordinary compatibility.
+    #[test]
+    fn streamed_artifact_identity_matches_original_typed_tuple_bytes() {
+        let (nodes, edges, flows) = fixture();
+        let bundle = compile_spec(
+            &nodes,
+            &edges,
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        );
+        for mut artifact in bundle.artifacts {
+            artifact
+                .content
+                .push_str("\nUnicode é and escaped \"\\\u{0000}");
+            if let Some(assertion) = artifact.assertions.first_mut() {
+                assertion.provenance.method = core_prov::ProducingMethod::Human {
+                    actor: "reviewer é\n\u{0000}".into(),
+                };
+            }
+            let legacy_bytes = serde_json::to_vec(&(
+                &artifact.schema,
+                &artifact.id,
+                &artifact.file_name,
+                &artifact.title,
+                &artifact.format,
+                &artifact.content,
+                &artifact.assertions,
+            ))
+            .unwrap();
+            let mut hash = blake3::Hasher::new();
+            hash.update(b"cartograph:spec-artifact:v1\0");
+            hash.update(&legacy_bytes);
+            assert_eq!(
+                artifact.compute_content_id(),
+                format!("spec-artifact-v1:{}", hash.finalize().to_hex())
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_identity_survives_json_key_reordering() {
+        let (nodes, edges, flows) = fixture();
+        let bundle = compile_spec(
+            &nodes,
+            &edges,
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        );
+        for artifact in &bundle.artifacts {
+            let value = serde_json::to_value(artifact).unwrap();
+            let reordered: SpecArtifact = serde_json::from_str(&reorder_keys(&value)).unwrap();
+            assert_eq!(&reordered, artifact);
+            assert!(
+                reordered.verify_identity(),
+                "{} key order is irrelevant",
+                artifact.file_name
+            );
+        }
+    }
+
     #[test]
     fn exports_show_producing_method_beside_tier_and_confidence() {
         // AC-0244 (T-0244): exported assertions carry a Method column; facts
@@ -2949,7 +2154,6 @@ mod tests {
         );
         assert!(table.content.contains("| not recorded |"));
     }
-
     #[test]
     fn flat_gap_register_names_each_gap_class_and_filling_seam() {
         // AC-0254 (#585): every Gap row names its omission class and seam.
@@ -2994,6 +2198,20 @@ mod tests {
                 .filter(|assertion| assertion.provenance.confidence_tier != ConfidenceTier::Gap)
                 .all(|assertion| assertion.omission.is_none())
         );
+    }
+
+    fn review_gap_prov() -> serde_json::Value {
+        serde_json::to_value(
+            Provenance::new(
+                Tier::Deterministic,
+                ConfidenceTier::Gap,
+                vec![],
+                "review",
+                b"gap",
+            )
+            .unwrap(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -3135,149 +2353,5 @@ mod tests {
                 .contains("| unclassified (unresolved relationship) | interpretation |")
         );
         assert_eq!(index["by_omission"][0]["unclassified"], true);
-    }
-
-    fn review_gap_prov() -> serde_json::Value {
-        serde_json::to_value(
-            Provenance::new(
-                Tier::Deterministic,
-                ConfidenceTier::Gap,
-                vec![],
-                "review",
-                b"gap",
-            )
-            .unwrap(),
-        )
-        .unwrap()
-    }
-
-    fn reorder_keys(value: &serde_json::Value) -> String {
-        match value {
-            serde_json::Value::Object(map) => {
-                let fields: Vec<String> = map
-                    .iter()
-                    .rev()
-                    .map(|(key, child)| {
-                        format!(
-                            "{}:{}",
-                            serde_json::to_string(key).unwrap(),
-                            reorder_keys(child)
-                        )
-                    })
-                    .collect();
-                format!("{{{}}}", fields.join(","))
-            }
-            serde_json::Value::Array(items) => {
-                let items: Vec<String> = items.iter().map(reorder_keys).collect();
-                format!("[{}]", items.join(","))
-            }
-            other => other.to_string(),
-        }
-    }
-
-    #[test]
-    fn artifacts_carry_deterministic_schema_and_content_identity() {
-        let (nodes, edges, flows) = fixture();
-        let compile = || {
-            compile_spec(
-                &nodes,
-                &edges,
-                &flows,
-                ExportMode::BestEffort,
-                &BTreeSet::new(),
-            )
-        };
-        let first = compile();
-        let second = compile();
-        assert!(!first.artifacts.is_empty());
-        let mut seen = BTreeSet::new();
-        for (a, b) in first.artifacts.iter().zip(&second.artifacts) {
-            assert_eq!(
-                a.schema,
-                format!("cartograph.spec/{}@{}", a.id, SPEC_ARTIFACT_SCHEMA_VERSION)
-            );
-            assert!(
-                a.content_id.starts_with("spec-artifact-v1:"),
-                "{}",
-                a.content_id
-            );
-            assert!(a.verify_identity(), "{} verifies", a.file_name);
-            assert_eq!(
-                a.content_id, b.content_id,
-                "{} is deterministic",
-                a.file_name
-            );
-            assert!(
-                seen.insert(a.content_id.clone()),
-                "{} identity is distinct",
-                a.file_name
-            );
-        }
-    }
-
-    #[test]
-    fn artifact_identity_changes_with_content_assertions_or_schema() {
-        let (nodes, edges, flows) = fixture();
-        let bundle = compile_spec(
-            &nodes,
-            &edges,
-            &flows,
-            ExportMode::BestEffort,
-            &BTreeSet::new(),
-        );
-        let original = bundle
-            .artifacts
-            .iter()
-            .find(|artifact| !artifact.assertions.is_empty())
-            .expect("an artifact with assertions")
-            .clone();
-
-        let mut content = original.clone();
-        content.content.push('\n');
-        let mut assertion = original.clone();
-        assertion.assertions[0].provenance.content_hash.push('x');
-        let mut schema = original.clone();
-        schema.schema = format!(
-            "cartograph.spec/{}@{}",
-            schema.id,
-            SPEC_ARTIFACT_SCHEMA_VERSION + 1
-        );
-        for (what, changed) in [
-            ("content", content),
-            ("assertion", assertion),
-            ("schema", schema),
-        ] {
-            assert!(
-                !changed.verify_identity(),
-                "a changed {what} fails verification"
-            );
-            assert_ne!(
-                changed.compute_content_id(),
-                original.content_id,
-                "{what} is hashed"
-            );
-        }
-    }
-
-    #[test]
-    fn artifact_identity_survives_json_key_reordering() {
-        let (nodes, edges, flows) = fixture();
-        let bundle = compile_spec(
-            &nodes,
-            &edges,
-            &flows,
-            ExportMode::BestEffort,
-            &BTreeSet::new(),
-        );
-        for artifact in &bundle.artifacts {
-            let value = serde_json::to_value(artifact).unwrap();
-            let reordered: SpecArtifact = serde_json::from_str(&reorder_keys(&value)).unwrap();
-            assert_eq!(&reordered, artifact);
-            assert!(
-                reordered.verify_identity(),
-                "{} key order is irrelevant",
-                artifact.file_name
-            );
-        }
     }
 }
