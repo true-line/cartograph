@@ -13,6 +13,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod discovery;
+pub use discovery::{
+    DISCOVERY_POLICY, DiscoveryCandidate, DiscoveryCursor, DiscoveryQuery, DiscoveryRequest,
+    DiscoveryResponse,
+};
+
 /// Maximum number of returned facts in a page.
 pub const MAX_FACTS: usize = 500;
 /// Maximum serialized successful response size, including its envelope and cursor.
@@ -250,7 +256,7 @@ pub enum ContextError {
     /// A cursor belongs to different source content.
     #[error("cursor belongs to a different snapshot")]
     CursorSnapshotMismatch,
-    /// A cursor belongs to a different normalized selection.
+    /// A cursor belongs to a different normalized selection or query.
     #[error("cursor belongs to a different selection")]
     CursorSelectionMismatch,
     /// A qualified continuation was issued in a different snapshot or coverage
@@ -266,6 +272,12 @@ pub enum ContextError {
     /// The repo's recorded inventory differs from the one requested.
     #[error("coverage inventory changed for {0}")]
     InventoryChanged(String),
+    /// A discovery cursor was issued under a different matching policy.
+    #[error("cursor belongs to a different discovery policy")]
+    CursorPolicyMismatch,
+    /// A discovery term is empty after normalization.
+    #[error("discovery term is empty")]
+    EmptyDiscoveryTerm,
     /// A cursor points beyond its selection.
     #[error("cursor offset {offset} exceeds selected fact count {total_selected}")]
     InvalidCursorOffset {
