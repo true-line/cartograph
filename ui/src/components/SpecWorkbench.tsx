@@ -17,6 +17,10 @@ export interface SpecWorkbenchProps {
   busy: boolean;
   error: string | null;
   canCurate: boolean;
+  packetBusy?: boolean;
+  onOpenPackets?: () => void;
+  onAddArtifact?: (artifact: SpecArtifact) => void;
+  onAddDecision?: (record: AssertionDecisionRecord) => void;
   onModeChange: (mode: SpecExportMode) => void;
   onCurate: (assertion: SpecAssertion, decision: AssertionDecision, note?: string) => void;
   onCopyArtifact: (artifact: SpecArtifact) => void;
@@ -101,6 +105,10 @@ export function SpecWorkbench({
   busy,
   error,
   canCurate,
+  packetBusy,
+  onOpenPackets,
+  onAddArtifact,
+  onAddDecision,
   onModeChange,
   onCurate,
   onCopyArtifact,
@@ -125,6 +133,7 @@ export function SpecWorkbench({
           </p>
         </div>
         <div className="spec-workbench-controls">
+          {onOpenPackets && <button type="button" onClick={onOpenPackets}>Agent work packets</button>}
           <div className="flow-mode-toggle" aria-label="Official spec export mode">
             {(['verified-only', 'best-effort'] as const).map((item) => (
               <button
@@ -196,6 +205,7 @@ export function SpecWorkbench({
                         <strong>{decisionLabel(record.decision)}</strong>
                         <span>{record.assertion.summary}</span>
                         {record.note && <small>{record.note}</small>}
+                        {onAddDecision && <button type="button" disabled={packetBusy || busy} onClick={() => onAddDecision(record)}>Add historical decision to packet</button>}
                       </li>
                     ))}
                   </ul>
@@ -214,6 +224,7 @@ export function SpecWorkbench({
                       <span>{selected.schema}</span> · <code title={selected.content_id}>{shortContentId(selected.content_id)}</code>
                     </p>
                   </div>
+                  {onAddArtifact && <button type="button" disabled={packetBusy || busy} onClick={() => onAddArtifact(selected)}>Add artifact to packet</button>}
                   <button type="button" onClick={() => onCopyArtifact(selected)}>
                     Copy artifact
                   </button>

@@ -7,6 +7,8 @@ export interface EvidencePanelProps {
   node: GraphNode;
   source: SourceState;
   captured?: ReactNode;
+  onAddToPacket?: () => void;
+  packetBusy?: boolean;
   onClose: () => void;
   /** Load a different supporting evidence span for the same fact. */
   onShowEvidence?: (index: number) => void;
@@ -67,6 +69,8 @@ export function EvidencePanel({
   node,
   source,
   captured,
+  onAddToPacket,
+  packetBusy,
   onClose,
   onShowEvidence,
   onOpenResolution,
@@ -129,6 +133,7 @@ export function EvidencePanel({
         </button>
       </div>
 
+      {onAddToPacket && <button type="button" disabled={packetBusy} onClick={onAddToPacket}>Add selected fact to packet</button>}
       {captured}
       <h3>Current working-tree source</h3>
       {!prov || !ev ? (

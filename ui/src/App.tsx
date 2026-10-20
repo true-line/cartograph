@@ -25,6 +25,8 @@ import { EndpointsCard } from './components/EndpointsCard';
 import { EvidencePanel } from './components/EvidencePanel';
 import { CapturedSource } from './components/CapturedSource';
 import { SourceRetention } from './components/SourceRetention';
+import { WorkPackets, WorkPacketTray } from './components/WorkPackets';
+import { useWorkPacketStore } from './workPacketStore';
 import { sameFactKey, usePrimarySourceStore } from './primarySourceStore';
 import { hasRecordedExecution, selectRecoveryJob } from './jobPresentation';
 import { TopologyCard } from './components/TopologyCard';
@@ -98,6 +100,7 @@ async function copySpecArtifact(
 }
 
 export default function App() {
+  const packets = useWorkPacketStore();
   const primarySource = usePrimarySourceStore();
   const investigations = useInvestigationStore();
   const {
@@ -559,6 +562,8 @@ export default function App() {
             />
           </Suspense>
         );
+      case 'packets':
+        return <WorkPackets state={packets} repositories={systemContents.map((repo) => repo.repo)} />;
       case 'spec':
         return (
           <Suspense
@@ -571,6 +576,13 @@ export default function App() {
               busy={specBusy}
               error={specError}
               canCurate={backend === 'up'}
+              packetBusy={packets.busy}
+              onOpenPackets={() => navigate('packets')}
+              onAddArtifact={(artifact) => {
+                if (!specBundle) return;
+                void packets.addArtifact({ id: artifact.id, schema: artifact.schema, content_id: artifact.content_id, mode: specBundle.mode });
+              }}
+              onAddDecision={(record) => void packets.addDecision(record.assertion.provenance.content_hash)}
               onModeChange={(mode) => void setSpecMode(mode)}
               onCurate={(assertion, decision, note) =>
                 void curateAssertion(assertion, decision, note)
@@ -747,6 +759,7 @@ export default function App() {
           }}
         />
         <main className="shell-content">
+          <WorkPacketTray state={packets} showError={view !== 'packets'} onOpen={() => navigate('packets')} />
           <RouteErrorBoundary view={view}>{surface}</RouteErrorBoundary>
         </main>
         <StatusBar
@@ -774,6 +787,9 @@ export default function App() {
               text={capturedSelectionMatches ? primarySource.text : null}
               loading={!capturedSelectionMatches || primarySource.loading} error={capturedSelectionMatches ? primarySource.error : null}
               onRead={(index) => void primarySource.readRange(index)} />}
+            onAddToPacket={selected.fact || atlas.nodes.some((node) => node.id === selected.node.id)
+              ? () => void packets.addFact(selected.fact ?? { kind: 'node', id: selected.node.id }) : undefined}
+            packetBusy={packets.busy}
             onClose={clearSelection}
             onShowEvidence={(index) => void select(selected.node, index, selected.fact)}
             onOpenResolution={

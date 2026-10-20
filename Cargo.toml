@@ -66,3 +66,4 @@ spec = { path = "crates/spec" }
 llm = { path = "crates/llm" }
 semantic = { path = "crates/semantic" }
 agents = { path = "crates/agents" }
+work-packets = { path = "crates/work-packets" }
