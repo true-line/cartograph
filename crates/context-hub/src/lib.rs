@@ -5,6 +5,8 @@
 //! network, evidence-file, or target-code operations. Accepted proposals are not
 //! part of this first recovered-graph projection.
 
+pub mod coverage;
+
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance};
 use serde::{Deserialize, Serialize};
@@ -251,6 +253,19 @@ pub enum ContextError {
     /// A cursor belongs to a different normalized selection.
     #[error("cursor belongs to a different selection")]
     CursorSelectionMismatch,
+    /// A qualified continuation was issued in a different snapshot or coverage
+    /// context.
+    #[error("cursor belongs to a different coverage context")]
+    CursorContextMismatch,
+    /// A recorded coverage inventory is malformed or disagrees with itself.
+    #[error("invalid recorded coverage for {0}")]
+    InvalidCoverage(String),
+    /// No recorded inventory is available for this repo.
+    #[error("coverage inventory unavailable for {0}")]
+    InventoryUnavailable(String),
+    /// The repo's recorded inventory differs from the one requested.
+    #[error("coverage inventory changed for {0}")]
+    InventoryChanged(String),
     /// A cursor points beyond its selection.
     #[error("cursor offset {offset} exceeds selected fact count {total_selected}")]
     InvalidCursorOffset {

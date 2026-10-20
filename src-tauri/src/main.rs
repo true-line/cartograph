@@ -827,6 +827,38 @@ struct ProducerReads {
     plugins: Vec<(String, ingest::coverage::ProducerCount)>,
 }
 
+/// Identity of the plugin basis an inventory was recorded under: the only
+/// part of an ingest's configuration re-derivable at read time. Layer hints
+/// and declared inputs are per-ingest options the inventory records itself.
+pub(crate) fn coverage_config_hash(plugins: &[ActivePlugin]) -> String {
+    let mut pinned: Vec<String> = plugins
+        .iter()
+        .map(|plugin| {
+            adapters_plugin_host::pinned_extractor_id(&plugin.plugin_id, &plugin.content_hash)
+        })
+        .collect();
+    pinned.sort();
+    pinned.dedup();
+    let basis = serde_json::json!({"basis": "coverage-config-v1", "plugins": pinned});
+    core_prov::content_hash(basis.to_string().as_bytes())
+}
+
+/// The inventory a publication records with its repo's facts (AC-0239).
+fn coverage_record(
+    coverage: &ingest::coverage::RepoCoverage,
+    source: &RegisteredSource,
+    job_id: i64,
+    plugins: &[ActivePlugin],
+) -> Result<core_graph::coverage::CoverageRecord, String> {
+    Ok(core_graph::coverage::CoverageRecord {
+        repo_key: coverage.repo.clone(),
+        registered_source_id: Some(source.source_id.clone()),
+        ingest_id: format!("job:{job_id}"),
+        config_hash: coverage_config_hash(plugins),
+        inventory_json: serde_json::to_string(coverage).map_err(|error| error.to_string())?,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn repo_coverage(
     repo: &str,
@@ -1538,9 +1570,12 @@ fn load_into_graph(
     _root: &std::path::Path,
     commit: &str,
 ) -> Result<ReconcileStats, String> {
-    load_into_graph_with_bindings(graph, extraction, repo, _root, commit, &[])
+    load_into_graph_with_bindings(graph, extraction, repo, _root, commit, &[], None)
 }
 
+/// Publish `repo`'s facts, its source bindings and its coverage inventory in
+/// one write transaction; a publication without an inventory clears the
+/// repo's previous one rather than leaving it to describe other facts.
 fn load_into_graph_with_bindings(
     graph: &mut SqliteGraphStore,
     extraction: &adapters_lang_ts::Extraction,
@@ -1548,6 +1583,7 @@ fn load_into_graph_with_bindings(
     _root: &std::path::Path,
     commit: &str,
     bindings: &[core_graph::source::SourceBinding],
+    coverage: Option<&core_graph::coverage::CoverageRecord>,
 ) -> Result<ReconcileStats, String> {
     let repo_prov = core_prov::Provenance::new(
         core_prov::Tier::Deterministic,
@@ -1650,7 +1686,9 @@ fn load_into_graph_with_bindings(
         }
     }
     if !graph
-        .apply_patch_with_source_bindings_if_snapshot_matches(&expected, &patch, repo, bindings)
+        .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+            &expected, &patch, repo, bindings, coverage,
+        )
         .map_err(|error| error.to_string())?
     {
         return Err("Graph changed during recovery publication; recover the source again.".into());
@@ -3473,6 +3511,28 @@ fn run_ingest<R: tauri::Runtime>(
         .persist(&primary, source, &receipts)
         .map_err(&fail)?;
     let bindings = primary_source::matching_bindings(&extraction, &receipts);
+    // Scanned before publication so the inventory is published with the
+    // facts it describes (AC-0239). Findings are still persisted only once
+    // the graph holds the recovered facts and the job has settled.
+    emit_detail(app, job_id, RECONCILE_PREFLIGHT_DETAIL);
+    let preflight = reconciled_preflight_report(
+        root,
+        primary.capture.as_ref(),
+        &plugin_coverage(&active_plugins),
+        &extraction.eval_sites,
+    )
+    .map_err(&fail)?;
+    let coverage = repo_coverage(
+        &repo,
+        "workdir",
+        &[],
+        &layers,
+        &extraction,
+        &DeclaredInputs::default(),
+        &reads,
+    )
+    .with_unsupported(&preflight);
+    let record = coverage_record(&coverage, source, job_id, &active_plugins).map_err(&fail)?;
     report_progress(app, state, execution, "load", 70.0)?;
     let mut published = OperationFacts::default();
     {
@@ -3486,6 +3546,7 @@ fn run_ingest<R: tauri::Runtime>(
                 root,
                 "workdir",
                 &bindings,
+                Some(&record),
             )
             .map_err(&fail)?
             .published,
@@ -3508,27 +3569,6 @@ fn run_ingest<R: tauri::Runtime>(
         &std::collections::BTreeSet::from([repo.clone()]),
     )
     .map_err(&fail)?;
-    // Only once the graph holds the recovered facts (#439 review): a
-    // recovery that fails earlier leaves preflight's pending findings in
-    // place instead of closing sites whose facts were never published.
-    emit_detail(app, job_id, RECONCILE_PREFLIGHT_DETAIL);
-    let preflight = reconciled_preflight_report(
-        root,
-        primary.capture.as_ref(),
-        &plugin_coverage(&active_plugins),
-        &extraction.eval_sites,
-    )
-    .map_err(&fail)?;
-    let coverage = repo_coverage(
-        &repo,
-        "workdir",
-        &[],
-        &layers,
-        &extraction,
-        &DeclaredInputs::default(),
-        &reads,
-    )
-    .with_unsupported(&preflight);
 
     // Ordered before `done` is published (#497), so a preflight the user
     // starts once they see it is newer than this reconciliation.
@@ -3873,6 +3913,27 @@ fn add_repo_blocking<R: tauri::Runtime>(
         .persist(&primary, &source, &receipts)
         .map_err(&fail)?;
     let bindings = primary_source::matching_bindings(&extraction, &receipts);
+    // As for a local recovery (AC-0200, AC-0209, AC-0239): scanned from the
+    // captured bytes the claims were proven on, before publication so the
+    // inventory is published with its facts; findings persist only later.
+    let preflight = reconciled_preflight_report(
+        root,
+        primary.capture.as_ref(),
+        &plugin_coverage(&active_plugins),
+        &extraction.eval_sites,
+    )
+    .map_err(&fail)?;
+    let coverage = repo_coverage(
+        &source.repo_key,
+        &cloned.commit_sha,
+        &[],
+        &layers,
+        &extraction,
+        &DeclaredInputs::default(),
+        &reads,
+    )
+    .with_unsupported(&preflight);
+    let record = coverage_record(&coverage, &source, job_id, &active_plugins).map_err(&fail)?;
     let mut published = OperationFacts::default();
     {
         let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
@@ -3885,6 +3946,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
                 root,
                 &cloned.commit_sha,
                 &bindings,
+                Some(&record),
             )
             .map_err(&fail)?
             .published,
@@ -3904,26 +3966,6 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &std::collections::BTreeSet::from([source.repo_key.clone()]),
     )
     .map_err(&fail)?;
-    // As for a local recovery (AC-0200, AC-0209): scanned only once the
-    // graph holds the recovered facts, from the captured bytes the claims
-    // were proven on.
-    let preflight = reconciled_preflight_report(
-        root,
-        primary.capture.as_ref(),
-        &plugin_coverage(&active_plugins),
-        &extraction.eval_sites,
-    )
-    .map_err(&fail)?;
-    let coverage = repo_coverage(
-        &source.repo_key,
-        &cloned.commit_sha,
-        &[],
-        &layers,
-        &extraction,
-        &DeclaredInputs::default(),
-        &reads,
-    )
-    .with_unsupported(&preflight);
     // Reserved before `done` is published (#497).
     let fence = app.state::<PreflightRuns>().reserve_reconcile()?;
     finish_source_operation(&state, &app, &execution, &mut operation)?;
@@ -4134,6 +4176,30 @@ fn add_system_blocking<R: tauri::Runtime>(
             .persist(&primary, source, &receipts)
             .map_err(&fail)?;
         let bindings = primary_source::matching_bindings(&extraction, &receipts);
+        // Scanned before publication so each inventory is published with its
+        // facts (AC-0239); findings persist only once the system is in.
+        let report = reconciled_preflight_report(
+            root,
+            primary.capture.as_ref(),
+            &plugin_coverage(&active_plugins),
+            &extraction.eval_sites,
+        )
+        .map_err(&fail)?;
+        let coverage = repo_coverage(
+            &repo,
+            &commit,
+            &entry.layers,
+            &repo_layers,
+            &extraction,
+            &DeclaredInputs {
+                state_json: entry.state_json.clone(),
+                pulumi_json: entry.pulumi_json.clone(),
+                otel_jsonl: entry.otel_jsonl.clone(),
+            },
+            &reads,
+        )
+        .with_unsupported(&report);
+        let record = coverage_record(&coverage, source, job_id, &active_plugins).map_err(&fail)?;
         files += repo_layers.files();
         layers.add(repo_layers);
         delta.add(
@@ -4152,6 +4218,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                     root,
                     &commit,
                     &bindings,
+                    Some(&record),
                 )
                 .map_err(&fail)?
                 .published,
@@ -4160,26 +4227,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         let sha12: String = commit.chars().take(12).collect();
         repos.push(format!("{repo}@{sha12}"));
         if repo_identities.insert(repo.clone()) {
-            let coverage = repo_coverage(
-                &repo,
-                &commit,
-                &entry.layers,
-                &repo_layers,
-                &extraction,
-                &DeclaredInputs {
-                    state_json: entry.state_json.clone(),
-                    pulumi_json: entry.pulumi_json.clone(),
-                    otel_jsonl: entry.otel_jsonl.clone(),
-                },
-                &reads,
-            );
-            proofs.push((
-                repo,
-                primary,
-                plugin_coverage(&active_plugins),
-                extraction.eval_sites,
-                coverage,
-            ));
+            proofs.push((RepoPreflight { repo, report }, coverage));
         }
     }
     {
@@ -4206,19 +4254,7 @@ fn add_system_blocking<R: tauri::Runtime>(
     )
     .map_err(&fail)?;
     // AC-0200, AC-0209: each repo reconciles exactly as a local recovery.
-    let (preflights, coverage): (Vec<_>, Vec<_>) = proofs
-        .into_iter()
-        .map(|(repo, primary, plugins, eval_sites, coverage)| {
-            let root = operation.root(&repo)?;
-            let report =
-                reconciled_preflight_report(root, primary.capture.as_ref(), &plugins, &eval_sites)?;
-            let coverage = coverage.with_unsupported(&report);
-            Ok((RepoPreflight { repo, report }, coverage))
-        })
-        .collect::<Result<Vec<_>, String>>()
-        .map_err(&fail)?
-        .into_iter()
-        .unzip();
+    let (preflights, coverage): (Vec<_>, Vec<_>) = proofs.into_iter().unzip();
     // Reserved before `done` is published (#497).
     let runs = app.state::<PreflightRuns>();
     let fence = runs.reserve_reconcile()?;
@@ -4827,6 +4863,7 @@ fn main() {
             list_nodes,
             atlas_snapshot,
             context::query_context,
+            context::query_qualified_context,
             read_evidence,
             primary_source::describe_captured_source,
             primary_source::read_captured_source,
@@ -8896,6 +8933,58 @@ export function App() {
                 .iter()
                 .all(|missing| missing.input != "state_json")
         );
+
+        // AC-0239: each inventory was published with its repo's facts, bound
+        // to its registration, the job and the plugin basis, and qualifies a
+        // context read under the current registrations. (T-0239)
+        let state = app.state::<super::AppState>();
+        let records = state.graph.lock().unwrap().coverage_records().unwrap();
+        let sources = state.sources.lock().unwrap().list().unwrap();
+        assert_eq!(records.len(), 4);
+        let reported = |repo: &str| {
+            summary
+                .coverage
+                .iter()
+                .find(|coverage| coverage.repo == repo)
+                .unwrap()
+        };
+        for stored in &records {
+            let record = &stored.record;
+            let reported = reported(&record.repo_key);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&record.inventory_json).unwrap(),
+                serde_json::to_value(reported).unwrap()
+            );
+            assert_eq!(record.ingest_id, format!("job:{}", summary.job_id));
+            assert_eq!(record.config_hash, super::coverage_config_hash(&[]));
+            let source = sources
+                .iter()
+                .find(|source| source.repo_key == record.repo_key)
+                .unwrap();
+            assert_eq!(
+                record.registered_source_id.as_deref(),
+                Some(source.source_id.as_str())
+            );
+        }
+        let scope = super::context::coverage_scope(&handle, &state).unwrap();
+        let page = super::context::qualified_query_graph(
+            &state.graph,
+            &scope,
+            context_hub::coverage::QualifiedRequest {
+                request: context_hub::QueryRequest {
+                    max_facts: 1,
+                    max_bytes: 65536,
+                    ..context_hub::QueryRequest::default()
+                },
+                context_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.coverage.repos.len(), 4);
+        for repo in &page.coverage.repos {
+            assert_eq!(repo.status, context_hub::coverage::CoverageStatus::Recorded);
+            assert_eq!(repo.limited, Some(reported(&repo.repo).limited));
+        }
     }
 
     #[test]

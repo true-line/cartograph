@@ -575,6 +575,23 @@ impl SqliteGraphStore {
         repo_key: &str,
         bindings: &[SourceBinding],
     ) -> Result<bool, GraphError> {
+        self.apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+            expected, patch, repo_key, bindings, None,
+        )
+    }
+
+    /// [`Self::apply_patch_with_source_bindings_if_snapshot_matches`], also
+    /// replacing this repo's recorded coverage inventory in the same write
+    /// transaction (AC-0239). `None` removes the old inventory, which no
+    /// longer describes the published facts.
+    pub fn apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+        &mut self,
+        expected: &(Vec<Node>, Vec<Edge>),
+        patch: &GraphPatch,
+        repo_key: &str,
+        bindings: &[SourceBinding],
+        coverage: Option<&crate::coverage::CoverageRecord>,
+    ) -> Result<bool, GraphError> {
         bounded(repo_key, MAX_REPO_BYTES)?;
         if bindings.len() > MAX_BINDINGS {
             return Err(GraphError::SourceBinding("too many associations"));
@@ -634,6 +651,7 @@ impl SqliteGraphStore {
                 return Err(GraphError::SourceBinding("association publication failed"));
             }
         }
+        crate::coverage::replace(&transaction, repo_key, coverage)?;
         transaction.commit()?;
         Ok(true)
     }

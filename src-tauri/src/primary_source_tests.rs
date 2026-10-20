@@ -93,6 +93,7 @@ fn publish(state: &AppState, source: &RegisteredSource, parsed: &Parsed) -> Vec<
         source.root(),
         "workdir",
         &bindings,
+        None,
     )
     .unwrap();
     bindings

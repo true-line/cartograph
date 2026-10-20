@@ -83,6 +83,7 @@ pub(super) fn capture(state: &AppState, source: &RegisteredSource, publish: bool
             source.root(),
             "workdir",
             &bindings,
+            None,
         )
         .unwrap();
     }

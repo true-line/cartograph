@@ -7,6 +7,7 @@
 //! benchmark ever demands it.
 
 mod bounded;
+pub mod coverage;
 pub mod omission;
 pub mod placeholder;
 pub mod rules;
@@ -348,11 +349,14 @@ impl SqliteGraphStore {
         // Private association metadata has its own schema version. Validate it
         // before any legacy fact-schema rebuild can remove existing facts.
         source::initialize(&conn)?;
+        coverage::initialize(&conn)?;
         let version: u32 = conn.query_row("SELECT * FROM pragma_user_version", [], |r| r.get(0))?;
         if version != GRAPH_SCHEMA_VERSION {
             // Pre-versioned or older-scheme db: clear the facts, keep the
             // shape. Deletion order respects the edge → node foreign keys.
-            conn.execute_batch("DELETE FROM edges; DELETE FROM nodes;")?;
+            conn.execute_batch(
+                "DELETE FROM edges; DELETE FROM nodes; DELETE FROM coverage_inventories;",
+            )?;
             conn.pragma_update(None, "user_version", GRAPH_SCHEMA_VERSION)?;
         }
         Ok(Self {
@@ -523,6 +527,7 @@ impl GraphStore for SqliteGraphStore {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM edges", [])?;
         tx.execute("DELETE FROM nodes", [])?;
+        coverage::clear(&tx)?;
         tx.commit()?;
         Ok(())
     }
