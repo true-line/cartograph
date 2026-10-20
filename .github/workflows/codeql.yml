@@ -67,8 +67,14 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: none
+          # Several runners share one host's memory; CodeQL otherwise sizes
+          # itself to the whole machine and fails finalizing the Rust database.
+          ram: 6144
+          threads: 4
 
       - name: Analyze
         uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           category: /language:${{ matrix.language }}
+          ram: 6144
+          threads: 4
