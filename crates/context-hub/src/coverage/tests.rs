@@ -196,8 +196,8 @@ fn qualification_marks_recorded_stale_and_unrecorded_repos_and_never_exhaustive(
     }
 }
 
-// AC-0239: an inventory that disagrees with its repo, its producer states or
-// its own limited flag is refused rather than qualified. (T-0239)
+// AC-0239: an inventory that disagrees with its repo, its producer states,
+// its own limited flag or its version is refused rather than qualified. (T-0239)
 #[test]
 fn qualification_refuses_inconsistent_inventories() {
     let scope = [scoped("acme/api", Some("src:acme/api"), "config:v1")];
@@ -207,6 +207,7 @@ fn qualification_refuses_inconsistent_inventories() {
         inventory("acme/api", &["ran", "not_applicable"], 0, true),
         inventory("acme/api", &["ran", "skipped"], 0, false),
         json!({"repo": "acme/api"}).to_string(),
+        inventory("acme/api", &["ran"], 0, false).replace("coverage@1", "coverage@2"),
     ] {
         assert!(matches!(
             CoverageQualification::new(&scope, &[stored("acme/api", "job-1", body)]),

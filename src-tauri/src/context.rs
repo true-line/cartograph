@@ -4,7 +4,8 @@ use context_hub::coverage::{
     CoverageQualification, QualifiedRequest, QualifiedResponse, ScopedRepo,
 };
 use context_hub::{ContextSnapshot, QueryRequest, QueryResponse};
-use core_graph::SqliteGraphStore;
+use core_graph::coverage::CoverageReadLimits;
+use core_graph::{SnapshotReadLimits, SqliteGraphStore};
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -87,7 +88,8 @@ fn stable_scope(before: &[ScopedRepo], after: Vec<ScopedRepo>) -> Vec<ScopedRepo
         .collect()
 }
 
-/// Copy one graph revision with the inventories recorded alongside it, then
+/// Copy one graph revision with the inventories recorded alongside it, both
+/// admitted under the store's read limits before either is materialized, then
 /// serve the page under that qualification. The registrations and plugin basis
 /// live outside the graph, so they are read before and after the graph copy
 /// and only what held across it is current.
@@ -100,7 +102,10 @@ pub(crate) fn qualified_query_graph(
     let ((nodes, edges), recorded) = {
         let graph = graph.lock().map_err(|error| error.to_string())?;
         graph
-            .read_snapshot_with_coverage()
+            .read_snapshot_with_coverage_bounded(
+                SnapshotReadLimits::default(),
+                CoverageReadLimits::default(),
+            )
             .map_err(|error| error.to_string())?
     };
     let scope = stable_scope(&before, scope()?);

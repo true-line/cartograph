@@ -17,6 +17,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Version of the qualification block.
 pub const COVERAGE_CONTRACT: &str = "coverage-qualification@1";
 
+/// The only inventory body version this contract derives from; any other
+/// version is refused rather than read under these semantics.
+pub const INVENTORY_VERSION: &str = "coverage@1";
+
 /// How a scoped repo's inventory relates to its current registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,7 +141,9 @@ type Derived = (String, Vec<String>, CoverageCounts);
 fn derive(repo: &str, inventory_json: &str) -> Result<Derived, ContextError> {
     let invalid = || ContextError::InvalidCoverage(repo.to_string());
     let inventory: Value = serde_json::from_str(inventory_json).map_err(|_| invalid())?;
-    if inventory["repo"].as_str() != Some(repo) {
+    if inventory["inventory"].as_str() != Some(INVENTORY_VERSION)
+        || inventory["repo"].as_str() != Some(repo)
+    {
         return Err(invalid());
     }
     let commit = inventory["commit"]
