@@ -1365,19 +1365,25 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
     // Reserve the intake before awaiting classification, so a second drop
     // sees unresolved items and is rejected rather than racing this one.
-    // This intake owns the first `paths.length` items; busy rejections
-    // appended meanwhile stay after them.
+    // A settled list stays until dismissed, so this intake appends after it
+    // and owns the next `paths.length` items; busy rejections appended
+    // meanwhile stay after them.
+    const prior = current ?? [];
+    const base = prior.length;
     const own = paths.length;
     set({
-      dropIntake: paths.map((path) => ({
-        path,
-        source: null,
-        status: 'queued' as const,
-        reason: null,
-        repos: [],
-      })),
+      dropIntake: [
+        ...prior,
+        ...paths.map((path) => ({
+          path,
+          source: null,
+          status: 'queued' as const,
+          reason: null,
+          repos: [],
+        })),
+      ],
     });
-    const later = () => get().dropIntake?.slice(own) ?? [];
+    const later = () => get().dropIntake?.slice(base + own) ?? [];
     let candidates: DropCandidate[] | null;
     try {
       candidates = await invokeOr<DropCandidate[] | null>('classify_drop', null, { paths });
@@ -1385,16 +1391,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
       candidates = paths.map((path) => ({ path, source: null, reason: String(e) }));
     }
     if (!candidates) {
-      const rest = later();
+      const rest = [...prior, ...later()];
       set({ dropIntake: rest.length > 0 ? rest : null });
       return;
     }
     const items = toDropItems(candidates);
-    set({ dropIntake: [...items, ...later()] });
+    set({ dropIntake: [...prior, ...items, ...later()] });
     const update = (index: number, patch: Partial<DropItem>) =>
       set((state) => ({
         dropIntake:
-          state.dropIntake?.map((item, at) => (at === index ? { ...item, ...patch } : item)) ??
+          state.dropIntake?.map((item, at) =>
+            at === base + index ? { ...item, ...patch } : item,
+          ) ??
           null,
       }));
     for (const [index, item] of items.entries()) {

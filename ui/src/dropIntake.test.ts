@@ -171,6 +171,23 @@ describe('dropped folders ingest through the typed-path commands (AC-0237, T-023
     expect(dropSetStatus(items).complete).toBe(false);
   });
 
+  it('keeps a settled list until dismissed and appends the next drop after it', async () => {
+    useAppStore.setState({ dropIntake: [item('ingested')] });
+    mockIPC((command) => {
+      if (command === 'classify_drop') return [{ path: '/next', source: 'local', reason: null }];
+      if (command === 'ingest_path') return { job_id: 1, repo: 'local/next' };
+      return null;
+    });
+    await useAppStore.getState().ingestDropped(['/next']);
+    const items = useAppStore.getState().dropIntake ?? [];
+    expect(items.map(({ path, status }) => [path, status])).toEqual([
+      ['/drop/ingested', 'ingested'],
+      ['/next', 'ingested'],
+    ]);
+    useAppStore.getState().dismissDropIntake();
+    expect(useAppStore.getState().dropIntake).toBeNull();
+  });
+
   it('settles every item when the graph refresh after an ingest rejects', async () => {
     mockIPC((command) => {
       if (command === 'classify_drop') {

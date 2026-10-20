@@ -27,5 +27,6 @@ Every dropped path gets its own outcome:
 
 The set is only reported as fully ingested when every path ingested. The list
 stays on Connect until you dismiss it, and it cannot be dismissed while a
-folder is still queued or ingesting. A drop that arrives while intake is
-running is rejected, not lost.
+folder is still queued or ingesting. A later drop is listed below the
+earlier outcomes. A drop that arrives while intake is running is rejected,
+not lost.
