@@ -155,11 +155,10 @@ jobs:
       always() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
-    # This lane keeps a hosted runner for now. It installs the Tauri system
-    # libraries with root and builds with cargo; the organisation's Linux
-    # runner has neither passwordless sudo nor a Rust toolchain. It moves when
-    # the runner is provisioned with both.
-    runs-on: ubuntu-latest
+    # The organisation's Linux runner has passwordless sudo, so this lane
+    # installs the Tauri system libraries and rustup from apt itself. rustup
+    # then resolves the exact toolchain from rust-toolchain.toml.
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64"]') }}
     # A hung mirror must fail the job in minutes, never hold its runner
     # slot to the 6-hour kill (#343; cold cargo builds finish well inside).
     timeout-minutes: 59
@@ -192,7 +191,7 @@ jobs:
         with:
           task: Install Tauri system dependencies
           executable: sudo
-          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev"]'
+          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
           timeout-seconds: '420'
 
       - name: Cache cargo
