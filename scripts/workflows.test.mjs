@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -186,7 +186,7 @@ test('Windows ownership tests are required by the same exact-SHA complete-suite 
   assert.equal(condition(windows), condition(rust));
   assert.equal(condition(complete), condition(rust));
   assert.match(windows, /needs: \[policy, merge-evidence, preflight-evidence\]/u);
-  assert.match(windows, /runs-on: windows-2022/u);
+  assert.match(windows, /runs-on: \$\{\{ .*vars\.WINDOWS_RUNNER \|\| 'windows-2022' \}\}/u);
   assert.match(windows, /timeout-minutes: 20/u);
   assert.match(windows, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/u);
   assert.match(
@@ -427,4 +427,14 @@ test('release publication is reviewed, exact-evidence-only, and idempotent', () 
   const publish = workflow.split('- name: Create or update release without duplicate assets')[1] ?? '';
   assert.doesNotMatch(workflow, /RELEASE_TOKEN/u);
   assert.doesNotMatch(publish, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
+});
+
+test('every job routes through a runner variable so self-hosted runners take it', () => {
+  const dir = path.join(root, '.github/workflows');
+  for (const name of readdirSync(dir).filter((file) => file.endsWith('.yml'))) {
+    const workflow = readFileSync(path.join(dir, name), 'utf8');
+    for (const [line] of workflow.matchAll(/^\s*runs-on:.*$/gmu)) {
+      assert.match(line, /vars\.(LINUX|WINDOWS|MACOS)_RUNNER/u, `${name}: ${line.trim()}`);
+    }
+  }
 });

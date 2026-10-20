@@ -13,7 +13,7 @@ permissions:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || vars.LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     permissions:
       actions: read

@@ -28,7 +28,7 @@ permissions:
 jobs:
   policy:
     name: Action Policy
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Authorize direct workflow event
@@ -40,7 +40,7 @@ jobs:
     name: Sync help to the wiki
     needs: policy
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     # The repository token only reads source; the wiki write uses the
     # dedicated secret at the push boundary.

@@ -18,7 +18,7 @@ permissions:
 jobs:
   policy:
     name: Action Policy
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Authorize direct workflow event
@@ -29,7 +29,7 @@ jobs:
   version-pr:
     name: Version packages PR
     needs: policy
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     outputs:
       has-releases: ${{ steps.version.outputs.has-releases }}
@@ -155,7 +155,7 @@ jobs:
   tag:
     name: Tag version merges
     needs: [policy, version-pr]
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-latest' }}
     # The exact-commit CI poll is intentionally allowed to wait 70 minutes;
     # leave setup and publication headroom without returning to GitHub's
     # unbounded six-hour default.
