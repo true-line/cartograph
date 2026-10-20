@@ -80,7 +80,8 @@ pub struct CoverageCell {
     pub capability: Capability,
     /// How far the adapter covers it.
     pub support: Support,
-    /// What is missed (partial) or absent (unsupported); empty when supported.
+    /// What is missed (partial) or absent (unsupported); empty exactly when
+    /// supported, so a limited cell can never count as complete.
     pub note: &'static str,
 }
 
@@ -146,7 +147,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
         "TypeScript",
         "kafkajs",
         EventSites,
-        Supported,
+        Partial,
         "the producer/consumer must be bound through named variables",
     ),
     cell("TypeScript", "node-events", EventSites, Supported, ""),
@@ -160,7 +161,11 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
         Partial,
         "ES module imports only; CommonJS require(\"express\") is not recognized",
     ),
+    cell("JavaScript", "next", ClientRoutes, Supported, ""),
+    cell("JavaScript", "react-router", ClientRoutes, Supported, ""),
     cell("JavaScript", "fetch", HttpClientCalls, Supported, ""),
+    cell("JavaScript", "chrome-messaging", EventSites, Supported, ""),
+    cell("JavaScript", "indexeddb", DataModel, Supported, ""),
     cell(
         "Python",
         CORE,
@@ -267,8 +272,16 @@ mod tests {
                 }
                 None => assert!(!cell.note.is_empty(), "{} needs a note", cell.id()),
             }
-            if cell.support == Support::Partial {
-                assert!(!cell.note.is_empty(), "{} needs a note", cell.id());
+            match cell.support {
+                Support::Supported => {
+                    assert!(
+                        cell.note.is_empty(),
+                        "{} is limited: mark it partial",
+                        cell.id()
+                    )
+                }
+                Support::Partial => assert!(!cell.note.is_empty(), "{} needs a note", cell.id()),
+                Support::Unsupported => {}
             }
         }
     }

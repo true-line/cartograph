@@ -21,7 +21,7 @@ export function CoverageMatrix({ language, cells }: { language: string; cells: C
         {cells.map((cell) => (
           <li key={`${cell.framework}.${cell.capability}`}>
             <span className={`gate-chip support-${cell.support}`}>{SUPPORT_LABEL[cell.support]}</span>{' '}
-            {cellLabel(cell)}
+            <span>{cellLabel(cell)}</span>
             {cell.note && <span className="muted"> — {cell.note}</span>}
           </li>
         ))}

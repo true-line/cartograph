@@ -1,0 +1,12 @@
+{
+  "nodes": [
+    {
+      "label": "DataEntity",
+      "id": "data:local/p@idb:orders",
+      "props": {
+        "storage": "indexeddb",
+        "store": "orders"
+      }
+    }
+  ]
+}

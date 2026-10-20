@@ -25,6 +25,60 @@ fn subset(want: &Value, got: &Value) -> bool {
     }
 }
 
+/// Required and optional keys of each expectation entry, by section.
+const SECTIONS: &[(&str, &[&str], &[&str])] = &[
+    ("nodes", &["label", "id"], &["props"]),
+    ("edges", &["label", "src", "dst"], &[]),
+    ("event_sites", &["kind", "role", "identity"], &[]),
+    ("fetch_sites", &["method", "url"], &[]),
+];
+
+/// An `expect.json` must assert something real: known sections only, each a
+/// nonempty array of entries with every required key as a nonempty string
+/// and no unknown keys; `props`, when present, is a nonempty object.
+fn validate_expect(want: &Value) -> Result<(), String> {
+    let object = want.as_object().ok_or("expect.json is not an object")?;
+    if object.is_empty() {
+        return Err("expect.json asserts nothing".into());
+    }
+    for (key, entries) in object {
+        let (_, required, optional) = SECTIONS
+            .iter()
+            .find(|(name, _, _)| name == key)
+            .ok_or_else(|| format!("unknown section {key}"))?;
+        let entries = entries
+            .as_array()
+            .filter(|entries| !entries.is_empty())
+            .ok_or_else(|| format!("{key} must be a nonempty array"))?;
+        for entry in entries {
+            let fields = entry
+                .as_object()
+                .ok_or_else(|| format!("{key} entry is not an object"))?;
+            for field in *required {
+                if fields
+                    .get(*field)
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                {
+                    return Err(format!("{key} entry lacks {field}"));
+                }
+            }
+            for (field, value) in fields {
+                if required.contains(&field.as_str()) {
+                    continue;
+                }
+                if !optional.contains(&field.as_str()) {
+                    return Err(format!("{key} entry has unknown key {field}"));
+                }
+                if value.as_object().is_none_or(serde_json::Map::is_empty) {
+                    return Err(format!("{key} entry {field} must be a nonempty object"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn missing(want: &Value, key: &str, got: &[Value]) -> Vec<String> {
     want[key]
         .as_array()
@@ -47,6 +101,10 @@ fn every_claimed_cell_passes_its_conformance_fixture() {
         let want: Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("expect.json")).unwrap())
                 .unwrap();
+        if let Err(error) = validate_expect(&want) {
+            failures.push(format!("{fixture}: {error}"));
+            continue;
+        }
         let (x, _) = crate::extract_tree_with_summary(
             &dir.join("src"),
             REPO,
@@ -88,10 +146,37 @@ fn every_claimed_cell_passes_its_conformance_fixture() {
         gaps.extend(missing(&want, "edges", &edges));
         gaps.extend(missing(&want, "event_sites", &events));
         gaps.extend(missing(&want, "fetch_sites", &fetches));
-        if gaps.is_empty() && want.as_object().is_none_or(|o| o.is_empty()) {
-            gaps.push("expect.json asserts nothing".into());
-        }
         failures.extend(gaps.into_iter().map(|g| format!("{fixture}: {g}")));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn vacuous_or_malformed_expectations_are_refused() {
+    use serde_json::json;
+    let edge = json!({"label": "CALLS", "src": "a", "dst": "b"});
+    assert!(validate_expect(&json!({"edges": [edge]})).is_ok());
+    assert!(
+        validate_expect(
+            &json!({"nodes": [{"label": "Endpoint", "id": "e", "props": {"method": "GET"}}]})
+        )
+        .is_ok()
+    );
+    for bad in [
+        json!([]),
+        json!({}),
+        json!({"nodes": []}),
+        json!({"nodez": [{"label": "Endpoint", "id": "e"}]}),
+        json!({"nodes": "bad"}),
+        json!({"nodes": [{}]}),
+        json!({"nodes": ["Endpoint"]}),
+        json!({"nodes": [{"label": "Endpoint"}]}),
+        json!({"nodes": [{"label": "", "id": "e"}]}),
+        json!({"nodes": [{"label": "Endpoint", "id": 7}]}),
+        json!({"nodes": [{"label": "Endpoint", "id": "e", "props": {}}]}),
+        json!({"nodes": [{"label": "Endpoint", "id": "e", "prop": {"a": 1}}]}),
+        json!({"edges": [edge], "fetch_sites": []}),
+    ] {
+        assert!(validate_expect(&bad).is_err(), "accepted {bad}");
+    }
 }

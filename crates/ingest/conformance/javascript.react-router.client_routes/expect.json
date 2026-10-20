@@ -1,0 +1,18 @@
+{
+  "nodes": [
+    {
+      "label": "Screen",
+      "id": "screen:local/p@/users",
+      "props": {
+        "router": "react-router"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "RENDERS",
+      "src": "screen:local/p@/users",
+      "dst": "sym:local/p@App.jsx#Users"
+    }
+  ]
+}
