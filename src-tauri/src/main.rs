@@ -6061,6 +6061,7 @@ export function queue() {
                 &mut |_| {},
                 None,
                 &mut Vec::new(),
+                &mut crate::ProducerReads::default(),
             )
             .unwrap();
             published.record_load(
@@ -9854,6 +9855,7 @@ export function App() {
             "workdir",
             &[],
             &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
             None,
             None,
             &[],
