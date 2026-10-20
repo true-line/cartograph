@@ -48,6 +48,7 @@ fn fixture() -> Fixture {
             &mut |_| {},
             input.capture.as_ref(),
             &mut receipts,
+            &mut crate::ProducerReads::default(),
         )
         .unwrap()
         .0
@@ -64,6 +65,7 @@ fn fixture() -> Fixture {
         source.root(),
         "workdir",
         &bindings,
+        None,
     )
     .unwrap();
     drop(input);
