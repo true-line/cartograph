@@ -473,6 +473,7 @@ function installFakeCore(options: {
             },
           ],
           planned: [{ language: 'Swift', extensions: ['swift'] }],
+          matrix: [],
           detector: 'preflight@1',
         };
       case 'export_topology':

@@ -1,0 +1,19 @@
+{
+  "nodes": [
+    {
+      "label": "Endpoint",
+      "id": "ep:local/p@GET:/users/:id",
+      "props": {
+        "method": "GET",
+        "path": "/users/:id"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "HANDLES",
+      "src": "ep:local/p@GET:/users/:id",
+      "dst": "sym:local/p@server.ts#anon@76"
+    }
+  ]
+}

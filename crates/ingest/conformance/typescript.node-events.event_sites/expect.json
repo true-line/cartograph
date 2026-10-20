@@ -1,0 +1,16 @@
+{
+  "event_sites": [
+    {
+      "kind": "inproc-event",
+      "role": "Produces",
+      "identity": "order-created"
+    }
+  ],
+  "edges": [
+    {
+      "label": "PUBLISHES",
+      "src": "sym:local/p@bus.ts#notify",
+      "dst": "chan:inproc-event:order-created"
+    }
+  ]
+}

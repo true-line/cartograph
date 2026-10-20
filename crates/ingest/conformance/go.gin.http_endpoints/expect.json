@@ -1,0 +1,18 @@
+{
+  "nodes": [
+    {
+      "label": "Endpoint",
+      "id": "ep:local/p@GET:/users",
+      "props": {
+        "framework": "gin"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "HANDLES",
+      "src": "ep:local/p@GET:/users",
+      "dst": "sym:local/p@main.go#users"
+    }
+  ]
+}

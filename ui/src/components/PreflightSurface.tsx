@@ -1,3 +1,4 @@
+import { CoverageMatrix } from './CoverageMatrix';
 import type { IngestSource, PatternFinding, PreflightProgress, PreflightReport } from '../store';
 
 export interface PreflightSurfaceProps {
@@ -162,6 +163,7 @@ export function PreflightSurface({
                       <em>no adapter — surfaces under Unsupported patterns</em>
                     )}{' '}
                     <span className="muted">({lang.files} files)</span>
+                    <CoverageMatrix language={lang.language} cells={lang.coverage ?? []} />
                   </li>
                 ))}
               </ul>

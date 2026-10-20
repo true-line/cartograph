@@ -1,0 +1,9 @@
+{
+  "edges": [
+    {
+      "label": "CALLS",
+      "src": "sym:local/p@a.ts#run",
+      "dst": "sym:local/p@a.ts#helper"
+    }
+  ]
+}

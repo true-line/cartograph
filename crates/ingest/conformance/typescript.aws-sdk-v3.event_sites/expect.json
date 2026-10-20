@@ -1,0 +1,16 @@
+{
+  "event_sites": [
+    {
+      "kind": "sqs-queue",
+      "role": "Produces",
+      "identity": "orders"
+    }
+  ],
+  "edges": [
+    {
+      "label": "PUBLISHES",
+      "src": "sym:local/p@publish.ts#send",
+      "dst": "chan:sqs-queue:orders"
+    }
+  ]
+}

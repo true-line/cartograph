@@ -2911,6 +2911,34 @@ button.status-live-link:hover {
   margin: 0.25rem 0 0;
 }
 
+/* Language × framework × capability cells (AC-0253). */
+.coverage-matrix {
+  font-size: 0.8rem;
+  margin-top: 0.3rem;
+}
+
+.coverage-matrix ul {
+  display: grid;
+  gap: 0.25rem;
+  list-style: none;
+  margin: 0.35rem 0 0;
+  padding: 0;
+}
+
+.gate-chip.support-supported {
+  border-color: var(--tier-confirmed);
+  color: var(--tier-confirmed);
+}
+
+.gate-chip.support-partial {
+  border-style: dashed;
+}
+
+.gate-chip.support-unsupported {
+  border-color: var(--tier-gap);
+  color: var(--tier-gap);
+}
+
 .tier-cards {
   margin: 0;
   padding: 0;

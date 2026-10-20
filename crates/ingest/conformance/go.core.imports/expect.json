@@ -1,0 +1,14 @@
+{
+  "edges": [
+    {
+      "label": "IMPORTS",
+      "src": "file:local/p@main.go",
+      "dst": "mod:example.com/demo/util"
+    },
+    {
+      "label": "CALLS",
+      "src": "sym:local/p@main.go#main",
+      "dst": "sym:local/p@util/util.go#Run"
+    }
+  ]
+}

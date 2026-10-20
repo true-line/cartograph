@@ -570,9 +570,10 @@
 - **Actor:** Adapter author or engineer
 - **As a** adapter author **I want** coverage stated as a language × framework × capability matrix backed by conformance fixtures, and registries I can extend without editing Rust **so that** holes are visible and can be filled by an update or a plugin.
 - **Priority:** Should · **Status:** Draft
-- **AC-0253** Given the installed adapters and plugins, when preflight or Settings reports coverage, then each language × framework × capability cell is supported, partial or unsupported, and every supported claim is backed by a passing conformance fixture.
+- **AC-0253** Given the compiled-in adapters, when preflight or Settings reports coverage, then each language × framework × capability cell is supported, partial or unsupported, partial and unsupported cells name what they miss, and every supported or partial claim is backed by a passing conformance fixture.
+- **AC-0263** Given a gated plugin adapter that declares coverage cells with its own fixtures, when preflight or Settings reports coverage, then its cells appear under the plugin id, and a supported or partial claim counts only once the plugin's conformance gate passes that fixture; an unproven claim reports unsupported.
 - **AC-0254** Given a Gap or omission, when it is shown, then it names its class (unsupported extractor, missing input, unresolved relationship, contradictory or stale, genuine gap) and the seam that would fill it.
 - **AC-0255** Given the event SDK and channel backing registries, when a versioned data file adds an entry, then ingest uses it with the file's identity recorded in provenance, and an invalid file fails closed without changing recovered facts.
 - **Security:** Registry files are data, never code; plugins keep the existing WASM sandbox.
 - **Performance:** Matrix and registry loading happen once per ingest.
-- **Trace:** P1 (ROADMAP W9) · `ingest`, `adapters-fw`, `dynamic`, `adapters-plugin-host`, `app`, `ui` · — · T-0253..0255
+- **Trace:** P1 (ROADMAP W9) · `ingest`, `adapters-fw`, `dynamic`, `adapters-plugin-host`, `app`, `ui` · — · T-0253..0255, T-0263

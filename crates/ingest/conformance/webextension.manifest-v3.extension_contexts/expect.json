@@ -1,0 +1,23 @@
+{
+  "nodes": [
+    {
+      "label": "ExtensionContext",
+      "id": "extctx:local/p@.:service-worker:bg.js",
+      "props": {
+        "kind": "service-worker"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "ENTRY",
+      "src": "extctx:local/p@.:service-worker:bg.js",
+      "dst": "file:local/p@bg.js"
+    },
+    {
+      "label": "GRANTS",
+      "src": "ext:local/p@.",
+      "dst": "perm:local/p@.:storage"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "event_sites": [
+    {
+      "kind": "kafka-topic",
+      "role": "Produces",
+      "identity": "orders"
+    }
+  ],
+  "edges": [
+    {
+      "label": "PUBLISHES",
+      "src": "sym:local/p@produce.ts#send",
+      "dst": "chan:kafka-topic:orders"
+    }
+  ]
+}

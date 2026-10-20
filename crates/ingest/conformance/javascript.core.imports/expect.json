@@ -1,0 +1,9 @@
+{
+  "edges": [
+    {
+      "label": "IMPORTS",
+      "src": "file:local/p@a.js",
+      "dst": "file:local/p@b.js"
+    }
+  ]
+}

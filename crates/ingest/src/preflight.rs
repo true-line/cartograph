@@ -13,6 +13,7 @@
 //! Detectors are a versioned registry ([`DETECTOR_ID`]): provenance on every
 //! finding records which detector produced it, so re-runs are attributable.
 
+use crate::matrix::{CoverageCell, cells_for};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -49,6 +50,9 @@ pub struct LanguageDetection {
     /// Covering adapter id, or `None` when no adapter exists — in which case
     /// the whole language surfaces as an unsupported pattern.
     pub adapter: Option<String>,
+    /// Coverage-matrix cells for a compiled-in adapter (AC-0253); empty for
+    /// a plugin or an uncovered language.
+    pub coverage: Vec<CoverageCell>,
 }
 
 /// One classified construct: where it is and why it was flagged.
@@ -108,14 +112,14 @@ pub const INSTALLED_ADAPTERS: &[AdapterInfo] = &[
         id: "t0.adapter-ts",
         language: "TypeScript",
         extensions: &["ts", "tsx"],
-        covers: "imports, call graph, endpoints (Express/Next/React Router), \
+        covers: "imports, call graph, Express endpoints, Next/React Router screens, \
                  chrome messaging channels, IndexedDB",
     },
     AdapterInfo {
         id: "t0.adapter-ts",
         language: "JavaScript",
         extensions: &["js", "jsx", "mjs", "cjs"],
-        covers: "imports, call graph, endpoints (Express/Next/React Router), \
+        covers: "imports, call graph, Express endpoints, Next/React Router screens, \
                  chrome messaging channels, IndexedDB — the TypeScript \
                  crate's own grammar parses plain JS/JSX directly",
     },
@@ -528,6 +532,7 @@ fn detect_language(
                 language: language.to_string(),
                 files: 0,
                 adapter: Some(adapter.to_string()),
+                coverage: cells_for(language).cloned().collect(),
             });
         entry.files += 1;
     } else if let Some(plugin) = plugin_claim {
@@ -542,6 +547,7 @@ fn detect_language(
                 language,
                 files: 0,
                 adapter: Some(plugin.plugin_id.clone()),
+                coverage: Vec::new(),
             });
         entry.files += 1;
     } else if let Some(language) = uncovered_language(extension) {
@@ -551,6 +557,7 @@ fn detect_language(
                 language: language.to_string(),
                 files: 0,
                 adapter: None,
+                coverage: Vec::new(),
             });
         entry.files += 1;
         if entry.files == 1 {
@@ -713,6 +720,40 @@ mod tests {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn detected_languages_report_their_coverage_cells() {
+        // AC-0253: preflight names supported, partial and unsupported cells.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "main.go", "package main\n");
+        write(dir.path(), "lib.rs", "fn main() {}\n");
+        let report = preflight(dir.path()).unwrap();
+        let go = report
+            .languages
+            .iter()
+            .find(|l| l.language == "Go")
+            .unwrap();
+        assert!(go.coverage.iter().all(|cell| cell.language == "Go"));
+        assert!(
+            go.coverage
+                .iter()
+                .any(|cell| cell.id() == "go.gin.http_endpoints"
+                    && cell.support == crate::matrix::Support::Supported)
+        );
+        assert!(
+            go.coverage
+                .iter()
+                .any(|cell| cell.id() == "go.core.http_client_calls"
+                    && cell.support == crate::matrix::Support::Unsupported
+                    && !cell.note.is_empty())
+        );
+        let rust = report
+            .languages
+            .iter()
+            .find(|l| l.language == "Rust")
+            .unwrap();
+        assert!(rust.adapter.is_none() && rust.coverage.is_empty());
     }
 
     #[test]

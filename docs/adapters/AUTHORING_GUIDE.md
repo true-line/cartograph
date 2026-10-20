@@ -264,6 +264,21 @@ Wiring it in (`src-tauri/src/main.rs`):
    uses something unique instead (`SettingsSurface.tsx` keys its adapter list
    by `language`, not `id`, for exactly this reason).
 
+3. State coverage as cells in `COVERAGE_MATRIX` (`crates/ingest/src/matrix.rs`,
+   AC-0253): one language × framework × capability entry per thing the
+   adapter does or deliberately does not do. A `Supported` or `Partial` cell
+   needs a conformance fixture at `crates/ingest/conformance/<cell-id>/`, where
+   the cell id is `<language>.<framework>.<capability>` (`core` for the
+   framework of language-level cells). The fixture is `src/` plus an
+   `expect.json` listing the facts it must yield: `nodes` (label, id and
+   optionally a props subset), `edges` (label, src, dst), `event_sites`
+   (kind, role, identity) and `fetch_sites` (method, url), with ids under
+   repo `local/p`. `app::every_claimed_cell_passes_its_conformance_fixture`
+   runs every fixture through the full T0 pipeline. Partial and unsupported
+   cells carry a `note` naming what is missed; that note is what Preflight and
+   Settings show. Ingest tests fail on a claim with no fixture, a fixture
+   with no claim, or an installed language with no cells.
+
 ## Traceability — required either way
 
 Per `AGENTS.md`'s SDLC, any new user-visible capability gets an AC in

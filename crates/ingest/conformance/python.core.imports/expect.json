@@ -1,0 +1,9 @@
+{
+  "edges": [
+    {
+      "label": "IMPORTS",
+      "src": "file:local/p@app.py",
+      "dst": "mod:helpers"
+    }
+  ]
+}

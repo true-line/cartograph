@@ -1,0 +1,11 @@
+{
+  "nodes": [
+    {
+      "label": "Symbol",
+      "id": "sym:local/p@Users.java#Users",
+      "props": {
+        "kind": "class"
+      }
+    }
+  ]
+}

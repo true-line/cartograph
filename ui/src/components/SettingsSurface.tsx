@@ -1,4 +1,5 @@
 import { lazy, Suspense, useState } from 'react';
+import { CoverageMatrix } from './CoverageMatrix';
 import type {
   AdapterInventory,
   CloudDisclosure,
@@ -394,12 +395,17 @@ export function SettingsSurface({
                 <p className="muted">
                   {adapter.covers}. Files: {adapter.extensions.map((ext) => `.${ext}`).join(' ')}
                 </p>
+                <CoverageMatrix
+                  language={adapter.language}
+                  cells={adapters.matrix.filter((cell) => cell.language === adapter.language)}
+                />
               </li>
             ))}
           </ul>
           <p className="muted">
             This list is the same registry Preflight consults (detector{' '}
-            <code>{adapters.detector}</code>) — coverage and inventory cannot disagree.
+            <code>{adapters.detector}</code>) — coverage and inventory cannot disagree. Every
+            supported or partial cell is backed by a conformance fixture the build runs.
           </p>
           <h4 className="settings-subsection-title">Known adapter types, not yet installed</h4>
           <ul className="adapter-list planned" aria-label="Planned adapters">
