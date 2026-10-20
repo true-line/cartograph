@@ -4,6 +4,8 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(test)]
+mod conformance_tests;
 mod context;
 mod drop_intake;
 mod egress;
@@ -624,6 +626,8 @@ fn set_plugin_enabled(
 struct AdapterInventory {
     installed: &'static [ingest::preflight::AdapterInfo],
     planned: &'static [ingest::preflight::PlannedAdapter],
+    /// Language × framework × capability cells (AC-0253).
+    matrix: &'static [ingest::matrix::CoverageCell],
     detector: &'static str,
 }
 
@@ -632,6 +636,7 @@ fn adapter_inventory() -> AdapterInventory {
     AdapterInventory {
         installed: ingest::preflight::INSTALLED_ADAPTERS,
         planned: ingest::preflight::PLANNED_ADAPTERS,
+        matrix: ingest::matrix::COVERAGE_MATRIX,
         detector: ingest::preflight::DETECTOR_ID,
     }
 }

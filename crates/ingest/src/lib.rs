@@ -11,6 +11,7 @@
 pub mod coverage;
 pub mod managed;
 pub mod manifest;
+pub mod matrix;
 pub mod preflight;
 pub mod toolchain;
 

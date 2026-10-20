@@ -114,6 +114,9 @@ const KNOWN_JS_TOOLS: &[(&str, &str, &str)] = &[
 
 /// Dependencies whose presence is also a Preflight framework chip. The
 /// labels are the exact strings the chips have always shown.
+/// Framework chip for a `manifest.json` carrying `manifest_version`.
+pub const WEBEXTENSION_LABEL: &str = "WebExtension (Manifest V2/V3)";
+
 const FRAMEWORK_LABELS: &[(&str, &str)] = &[
     ("react", "React"),
     ("express", "Express"),
@@ -289,9 +292,7 @@ pub fn detect_in_file(name: &str, rel: &str, path: &Path) -> Detection {
             if std::fs::read_to_string(path)
                 .is_ok_and(|text| text.contains("\"manifest_version\"")) =>
         {
-            detection
-                .framework_labels
-                .push("WebExtension (Manifest V2/V3)".into());
+            detection.framework_labels.push(WEBEXTENSION_LABEL.into());
         }
         _ => {}
     }

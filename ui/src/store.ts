@@ -155,12 +155,25 @@ export interface LayerSummary {
 /** Where the Connect step points Cartograph (handoff §Connect). */
 export type IngestSource = 'github' | 'local' | 'manifest';
 
+/** One language × framework × capability cell (`ingest::matrix`,
+ * AC-0253). Supported and partial cells are backed by a passing
+ * conformance fixture; `note` names what partial/unsupported cells miss. */
+export interface CoverageCell {
+  language: string;
+  framework: string;
+  capability: string;
+  support: 'supported' | 'partial' | 'unsupported';
+  note: string;
+}
+
 /** One detected language with adapter coverage (`ingest::preflight`). */
 export interface LanguageDetection {
   language: string;
   files: number;
   /** Covering adapter id; null means the whole language is unsupported. */
   adapter: string | null;
+  /** Matrix cells of a compiled-in adapter; absent in older reports. */
+  coverage?: CoverageCell[];
 }
 
 /** One classified construct from local detection (`ingest::preflight`). */
@@ -280,6 +293,7 @@ export interface ClassEscalationOutcome {
 export interface AdapterInventory {
   installed: AdapterInfo[];
   planned: PlannedAdapter[];
+  matrix: CoverageCell[];
   detector: string;
 }
 

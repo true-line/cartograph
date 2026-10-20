@@ -1,0 +1,15 @@
+{
+  "fetch_sites": [
+    {
+      "method": "GET",
+      "url": "/api/users"
+    }
+  ],
+  "edges": [
+    {
+      "label": "FETCHES",
+      "src": "sym:local/p@Users.tsx#Users",
+      "dst": "gap:fetch:local/p@Users.tsx@26"
+    }
+  ]
+}

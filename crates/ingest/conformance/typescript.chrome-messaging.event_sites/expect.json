@@ -1,0 +1,16 @@
+{
+  "event_sites": [
+    {
+      "kind": "chrome-message",
+      "role": "Produces",
+      "identity": "ping"
+    }
+  ],
+  "edges": [
+    {
+      "label": "PUBLISHES",
+      "src": "file:local/p@bg.ts",
+      "dst": "chan:chrome-message:ping"
+    }
+  ]
+}

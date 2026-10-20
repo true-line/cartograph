@@ -1,0 +1,18 @@
+{
+  "nodes": [
+    {
+      "label": "Screen",
+      "id": "screen:local/p@/users/[id]",
+      "props": {
+        "router": "next-pages"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "RENDERS",
+      "src": "screen:local/p@/users/[id]",
+      "dst": "sym:local/p@pages/users/[id].js#UserDetail"
+    }
+  ]
+}

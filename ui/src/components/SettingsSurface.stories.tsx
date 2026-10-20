@@ -49,6 +49,22 @@ const INVENTORY: AdapterInventory = {
     { language: 'Swift', extensions: ['swift'] },
     { language: 'Objective-C', extensions: ['m', 'mm'] },
   ],
+  matrix: [
+    {
+      language: 'Java',
+      framework: 'spring-web',
+      capability: 'http_endpoints',
+      support: 'supported',
+      note: '',
+    },
+    {
+      language: 'Java',
+      framework: 'jpa',
+      capability: 'data_model',
+      support: 'unsupported',
+      note: 'JPA entities are not extracted (#239)',
+    },
+  ],
   detector: 'preflight@1',
 };
 
@@ -229,7 +245,7 @@ export const AdapterInventoryExplainsAndRecommends: Story = {
     await expect(canvas.getByText(/a JDK bump never needs a new adapter/)).toBeInTheDocument();
 
     const installed = canvas.getByRole('list', { name: 'Installed adapters' });
-    await expect(within(installed).getAllByRole('listitem')).toHaveLength(6);
+    await expect(installed.children).toHaveLength(6);
     await expect(within(installed).getByText('TypeScript')).toBeInTheDocument();
     // JavaScript shares the TypeScript crate's extractor id (#209) — two
     // rows, one id, keyed by language so React never collides on it.
@@ -241,6 +257,12 @@ export const AdapterInventoryExplainsAndRecommends: Story = {
     await expect(within(installed).getByText(/\.ts \.tsx/)).toBeInTheDocument();
     await expect(within(installed).getByText(/\.js \.jsx \.mjs \.cjs/)).toBeInTheDocument();
     await expect(within(installed).getByText(/\.kt \.kts/)).toBeInTheDocument();
+    // AC-0253: each adapter folds its matrix cells to counts; opening one
+    // names the unsupported cell and what it misses.
+    await userEvent.click(within(installed).getByText('1 supported · 0 partial · 1 unsupported'));
+    const javaCells = canvas.getByRole('list', { name: 'Java coverage cells' });
+    await expect(within(javaCells).getByText('Unsupported')).toBeInTheDocument();
+    await expect(within(javaCells).getByText(/JPA entities are not extracted/)).toBeInTheDocument();
     // Provably the Preflight registry: the shared detector id is stated.
     await expect(canvas.getByText('preflight@1')).toBeInTheDocument();
 

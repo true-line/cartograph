@@ -1,0 +1,18 @@
+{
+  "nodes": [
+    {
+      "label": "Endpoint",
+      "id": "ep:local/p@ANY:/users",
+      "props": {
+        "framework": "net/http"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "HANDLES",
+      "src": "ep:local/p@ANY:/users",
+      "dst": "sym:local/p@main.go#users"
+    }
+  ]
+}

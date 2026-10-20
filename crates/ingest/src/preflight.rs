@@ -13,6 +13,7 @@
 //! Detectors are a versioned registry ([`DETECTOR_ID`]): provenance on every
 //! finding records which detector produced it, so re-runs are attributable.
 
+use crate::matrix::{CoverageCell, cells_for};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -49,6 +50,9 @@ pub struct LanguageDetection {
     /// Covering adapter id, or `None` when no adapter exists — in which case
     /// the whole language surfaces as an unsupported pattern.
     pub adapter: Option<String>,
+    /// Coverage-matrix cells for a compiled-in adapter (AC-0253); empty for
+    /// a plugin or an uncovered language.
+    pub coverage: Vec<CoverageCell>,
 }
 
 /// One classified construct: where it is and why it was flagged.
@@ -108,14 +112,14 @@ pub const INSTALLED_ADAPTERS: &[AdapterInfo] = &[
         id: "t0.adapter-ts",
         language: "TypeScript",
         extensions: &["ts", "tsx"],
-        covers: "imports, call graph, endpoints (Express/Next/React Router), \
+        covers: "imports, call graph, Express endpoints, Next/React Router screens, \
                  chrome messaging channels, IndexedDB",
     },
     AdapterInfo {
         id: "t0.adapter-ts",
         language: "JavaScript",
         extensions: &["js", "jsx", "mjs", "cjs"],
-        covers: "imports, call graph, endpoints (Express/Next/React Router), \
+        covers: "imports, call graph, Express endpoints, Next/React Router screens, \
                  chrome messaging channels, IndexedDB — the TypeScript \
                  crate's own grammar parses plain JS/JSX directly",
     },
@@ -431,6 +435,15 @@ pub fn preflight_scan(
         // toolchain registry (#215) — the same detection that produces
         // the graph's Tool facts, so the two surfaces cannot disagree.
         let detection = crate::toolchain::detect_in_file(&name, &rel, &path);
+        if detection
+            .framework_labels
+            .iter()
+            .any(|label| label == crate::toolchain::WEBEXTENSION_LABEL)
+        {
+            // The WebExtension adapter claims manifests, not an extension,
+            // so it is detected here and carries its matrix cells (AC-0253).
+            detect_manifest_adapter("WebExtension", &mut languages);
+        }
         frameworks.extend(detection.framework_labels);
         for tool in &detection.tools {
             if tool.settings_behind_code {
@@ -508,6 +521,23 @@ pub fn preflight_scan(
     }))
 }
 
+/// Count one manifest for a compiled-in adapter that claims manifests rather
+/// than source extensions (WebExtension).
+fn detect_manifest_adapter(language: &str, languages: &mut BTreeMap<String, LanguageDetection>) {
+    let Some(adapter) = INSTALLED_ADAPTERS.iter().find(|a| a.language == language) else {
+        return;
+    };
+    languages
+        .entry(language.to_string())
+        .or_insert(LanguageDetection {
+            language: language.to_string(),
+            files: 0,
+            adapter: Some(adapter.id.to_string()),
+            coverage: cells_for(language).cloned().collect(),
+        })
+        .files += 1;
+}
+
 /// Counts one source file toward its language — covered by a built-in
 /// adapter, by a gated plugin, or named-only with an `uncovered-language`
 /// finding on its first file.
@@ -528,6 +558,7 @@ fn detect_language(
                 language: language.to_string(),
                 files: 0,
                 adapter: Some(adapter.to_string()),
+                coverage: cells_for(language).cloned().collect(),
             });
         entry.files += 1;
     } else if let Some(plugin) = plugin_claim {
@@ -542,6 +573,7 @@ fn detect_language(
                 language,
                 files: 0,
                 adapter: Some(plugin.plugin_id.clone()),
+                coverage: Vec::new(),
             });
         entry.files += 1;
     } else if let Some(language) = uncovered_language(extension) {
@@ -551,6 +583,7 @@ fn detect_language(
                 language: language.to_string(),
                 files: 0,
                 adapter: None,
+                coverage: Vec::new(),
             });
         entry.files += 1;
         if entry.files == 1 {
@@ -713,6 +746,40 @@ mod tests {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn detected_languages_report_their_coverage_cells() {
+        // AC-0253: preflight names supported, partial and unsupported cells.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "main.go", "package main\n");
+        write(dir.path(), "lib.rs", "fn main() {}\n");
+        let report = preflight(dir.path()).unwrap();
+        let go = report
+            .languages
+            .iter()
+            .find(|l| l.language == "Go")
+            .unwrap();
+        assert!(go.coverage.iter().all(|cell| cell.language == "Go"));
+        assert!(
+            go.coverage
+                .iter()
+                .any(|cell| cell.id() == "go.gin.http_endpoints"
+                    && cell.support == crate::matrix::Support::Supported)
+        );
+        assert!(
+            go.coverage
+                .iter()
+                .any(|cell| cell.id() == "go.core.http_client_calls"
+                    && cell.support == crate::matrix::Support::Unsupported
+                    && !cell.note.is_empty())
+        );
+        let rust = report
+            .languages
+            .iter()
+            .find(|l| l.language == "Rust")
+            .unwrap();
+        assert!(rust.adapter.is_none() && rust.coverage.is_empty());
     }
 
     #[test]
@@ -967,6 +1034,10 @@ mod tests {
                 .any(|f| f.kind == "uncovered-language" && f.message.contains("Ruby"))
         );
         assert!(report.frameworks.iter().any(|f| f.contains("WebExtension")));
+        // The manifest-claimed adapter carries its matrix cells too (AC-0253).
+        let webextension = &by_language["WebExtension"];
+        assert_eq!(webextension.adapter.as_deref(), Some("t0.webextension"));
+        assert_eq!((webextension.files, webextension.coverage.len()), (1, 1));
         assert!(report.frameworks.contains(&"React".to_string()));
         // node_modules is skipped: no eval finding from the dependency.
         assert!(

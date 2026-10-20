@@ -1,0 +1,19 @@
+{
+  "nodes": [
+    {
+      "label": "Endpoint",
+      "id": "ep:local/p@GET:/users/{id}",
+      "props": {
+        "framework": "spring",
+        "language": "kotlin"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "HANDLES",
+      "src": "ep:local/p@GET:/users/{id}",
+      "dst": "sym:local/p@Users.kt#Users.get"
+    }
+  ]
+}

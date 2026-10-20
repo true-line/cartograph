@@ -1,0 +1,18 @@
+{
+  "nodes": [
+    {
+      "label": "Resource",
+      "id": "res:local/p@aws_sqs_queue.orders",
+      "props": {
+        "type": "aws_sqs_queue"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "TRIGGERS",
+      "src": "res:local/p@aws_sqs_queue.orders",
+      "dst": "res:local/p@aws_lambda_function.worker"
+    }
+  ]
+}
