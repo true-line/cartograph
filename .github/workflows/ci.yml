@@ -159,7 +159,7 @@ jobs:
     # libraries with root and builds with cargo; the organisation's Linux
     # runner has neither passwordless sudo nor a Rust toolchain. It moves when
     # the runner is provisioned with both.
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64"]') }}
+    runs-on: ubuntu-latest
     # A hung mirror must fail the job in minutes, never hold its runner
     # slot to the 6-hour kill (#343; cold cargo builds finish well inside).
     timeout-minutes: 59
