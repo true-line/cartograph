@@ -140,10 +140,10 @@ pub struct DiscoveryCandidate {
 pub struct DiscoveryCoverage {
     /// Nodes the policy examined after the label filter.
     pub nodes_examined: usize,
-    /// Fields the policy compared, in order.
+    /// Fields this query mode compared, in order.
     pub fields: Vec<String>,
-    /// Examined nodes with no name field, so only their identity was
-    /// compared.
+    /// Examined nodes with none of the name fields: a name query compared
+    /// nothing of theirs, a text query only their identity.
     pub nodes_without_name_fields: usize,
 }
 
@@ -235,13 +235,43 @@ fn omissions() -> Vec<DiscoveryOmission> {
     ]
 }
 
+impl DiscoveryQuery {
+    /// Fields this mode compares, in report order.
+    fn fields(&self) -> Vec<&'static str> {
+        match self {
+            Self::Identifier { .. } => vec!["id"],
+            Self::Name { .. } => NAME_FIELDS.to_vec(),
+            Self::Text { .. } => std::iter::once("id")
+                .chain(NAME_FIELDS.iter().copied())
+                .collect(),
+        }
+    }
+}
+
+/// A match borrowed from the snapshot; nothing is copied until the
+/// candidate is admitted to a page.
+#[derive(Clone, Copy)]
+struct Matched<'a> {
+    kind: MatchKind,
+    field: &'static str,
+    value: &'a str,
+}
+
+/// Whether `haystack` contains `needle` (already lowercased) after Unicode
+/// lowercasing, compared at character boundaries without allocating.
+fn contains_lowercase(haystack: &str, needle: &str) -> bool {
+    haystack.char_indices().any(|(at, _)| {
+        let mut rest = haystack[at..].chars().flat_map(char::to_lowercase);
+        needle.chars().all(|wanted| rest.next() == Some(wanted))
+    })
+}
+
 /// The first policy match for `fact`, if any.
-fn match_fact(query: &DiscoveryQuery, fact: &ContextFact, id: &str) -> Option<MatchReason> {
-    let reason = |kind, field: &str, value: &str| MatchReason {
-        kind,
-        field: field.to_string(),
-        value: value.to_string(),
-    };
+fn match_fact<'a>(
+    query: &DiscoveryQuery,
+    fact: &'a ContextFact,
+    id: &'a str,
+) -> Option<Matched<'a>> {
     let names = || {
         NAME_FIELDS.iter().filter_map(|field| {
             fact.properties[*field]
@@ -249,17 +279,18 @@ fn match_fact(query: &DiscoveryQuery, fact: &ContextFact, id: &str) -> Option<Ma
                 .map(|value| (*field, value))
         })
     };
+    let matched = |kind, (field, value)| Matched { kind, field, value };
     match query {
         DiscoveryQuery::Identifier { id: wanted } => {
-            (id == wanted).then(|| reason(MatchKind::ExactIdentifier, "id", id))
+            (id == wanted).then(|| matched(MatchKind::ExactIdentifier, ("id", id)))
         }
         DiscoveryQuery::Name { name } => names()
             .find(|(_, value)| value == name)
-            .map(|(field, value)| reason(MatchKind::ExactName, field, value)),
+            .map(|found| matched(MatchKind::ExactName, found)),
         DiscoveryQuery::Text { text } => std::iter::once(("id", id))
             .chain(names())
-            .find(|(_, value)| value.to_lowercase().contains(text.as_str()))
-            .map(|(field, value)| reason(MatchKind::TextSubstring, field, value)),
+            .find(|(_, value)| contains_lowercase(value, text))
+            .map(|found| matched(MatchKind::TextSubstring, found)),
     }
 }
 
@@ -310,10 +341,7 @@ impl ContextSnapshot {
         }
         let mut coverage = DiscoveryCoverage {
             nodes_examined: 0,
-            fields: std::iter::once("id")
-                .chain(NAME_FIELDS.iter().copied())
-                .map(String::from)
-                .collect(),
+            fields: query.fields().into_iter().map(String::from).collect(),
             nodes_without_name_fields: 0,
         };
         let mut matched = Vec::new();
@@ -331,8 +359,8 @@ impl ContextSnapshot {
             {
                 coverage.nodes_without_name_fields += 1;
             }
-            if let Some(match_reason) = match_fact(&query, fact, id) {
-                matched.push((match_reason.kind, id.as_str(), fact, match_reason));
+            if let Some(found) = match_fact(&query, fact, id) {
+                matched.push((found.kind, id.as_str(), fact, found));
             }
         }
         matched.sort_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)));
@@ -362,8 +390,19 @@ impl ContextSnapshot {
             omissions: omissions(),
             next_cursor: cursor_at(offset),
         };
-        for (_, id, fact, match_reason) in matched.iter().skip(offset).take(request.max_candidates)
-        {
+        for (_, id, fact, found) in matched.iter().skip(offset).take(request.max_candidates) {
+            // The id and matched value are copied into the page; one that
+            // alone exceeds the budget is refused before it is copied.
+            let floor = id.len() + found.value.len();
+            if floor > request.max_bytes {
+                if response.candidates.is_empty() {
+                    return Err(ContextError::ResponseBudgetExceeded {
+                        max_bytes: request.max_bytes,
+                        required_bytes: floor,
+                    });
+                }
+                return Ok(response);
+            }
             let evidence = fact
                 .provenance
                 .as_ref()
@@ -377,7 +416,11 @@ impl ContextSnapshot {
                     path: evidence.map(|evidence| evidence.path.clone()),
                     commit_sha: evidence.map(|evidence| evidence.commit_sha.clone()),
                 },
-                match_reason: match_reason.clone(),
+                match_reason: MatchReason {
+                    kind: found.kind,
+                    field: found.field.to_string(),
+                    value: found.value.to_string(),
+                },
                 outgoing_edges,
                 incoming_edges,
                 confidence_tier: fact.confidence_tier,

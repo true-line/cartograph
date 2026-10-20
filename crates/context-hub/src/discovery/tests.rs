@@ -175,8 +175,14 @@ fn discovery_returns_bounded_candidates_with_reasons_coverage_and_omissions() {
     assert_eq!(none.total_candidates, 0);
     assert_eq!(none.coverage.nodes_examined, 4);
     assert_eq!(none.coverage.nodes_without_name_fields, 1);
+    // Coverage names only the fields this mode compared.
     assert_eq!(
         none.coverage.fields,
+        ["name", "route", "path", "identity", "title"]
+    );
+    assert_eq!(by_id.coverage.fields, ["id"]);
+    assert_eq!(
+        by_text.coverage.fields,
         ["id", "name", "route", "path", "identity", "title"]
     );
     assert_eq!(
@@ -280,4 +286,50 @@ fn discovery_cursor_binds_snapshot_query_and_policy_and_never_skips() {
         snapshot.discover(tiny),
         Err(ContextError::ResponseBudgetExceeded { max_bytes: 64, .. })
     ));
+}
+
+// AC-0233: a matched value larger than the budget is refused before it is
+// copied into a page; a smaller earlier candidate still pages normally.
+// (T-0233)
+#[test]
+fn discovery_refuses_an_oversized_match_without_skipping_it() {
+    let huge = format!("checkout-{}", "x".repeat(64 * 1024));
+    let snapshot = ContextSnapshot::new(
+        vec![
+            node("sym:shop/a", "Symbol", json!({"name": "checkout"})),
+            node("sym:shop/b", "Symbol", json!({ "title": huge })),
+        ],
+        Vec::new(),
+    )
+    .unwrap();
+    let mut only_huge = request(DiscoveryQuery::Text {
+        text: "checkout-x".into(),
+    });
+    only_huge.max_bytes = 1024;
+    assert!(matches!(
+        snapshot.discover(only_huge),
+        Err(ContextError::ResponseBudgetExceeded { max_bytes: 1024, required_bytes })
+            if required_bytes > 64 * 1024
+    ));
+
+    let mut both = request(DiscoveryQuery::Text {
+        text: "checkout".into(),
+    });
+    both.max_bytes = 4096;
+    let page = snapshot.discover(both.clone()).unwrap();
+    assert_eq!(ids(&page), ["sym:shop/a"]);
+    let mut next = both;
+    next.cursor = page.next_cursor;
+    assert!(matches!(
+        snapshot.discover(next),
+        Err(ContextError::ResponseBudgetExceeded { .. })
+    ));
+}
+
+#[test]
+fn text_matching_lowercases_without_widening() {
+    assert!(contains_lowercase("Ünïcode CHECKOUT", "checkout"));
+    assert!(contains_lowercase("ÜNÏ", "ünï"));
+    assert!(!contains_lowercase("check out", "checkout"));
+    assert!(!contains_lowercase("", "a"));
 }
