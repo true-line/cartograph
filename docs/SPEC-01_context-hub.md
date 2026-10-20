@@ -102,6 +102,9 @@ facts. Graph clearing removes every inventory. The record binds the registered
 source, the ingest job, the plugin basis (`coverage-config-v1`, the sorted pinned
 plugin ids) and the inventory's content hash. Records are validated on write and
 hash-checked on read. The `coverage_*` tables must be exactly as created.
+`read_snapshot_with_coverage_bounded` admits the graph as `read_snapshot_bounded`
+does. It also counts the inventories and measures their stored bytes, both before
+any of them is copied (at most 4096 records and 16 MiB).
 
 `query_qualified_context` takes `{"request": {"request": <query request>,
 "context_id": null}}`. It reads the graph and every inventory in one

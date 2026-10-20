@@ -157,3 +157,93 @@ fn coverage_schema_is_exact_and_refuses_foreign_objects() {
         .unwrap();
     assert!(store.coverage_records().is_err());
 }
+
+// AC-0239: a bounded read counts and measures the inventories before copying
+// them, admits the graph under its own limits and returns exactly the
+// unbounded read when both fit. (T-0239)
+#[test]
+fn bounded_coverage_read_admits_inventories_before_copying_them() {
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    for repo in ["acme/api", "acme/web"] {
+        let body = json!({"inventory": "coverage@1", "repo": repo});
+        assert!(publish(
+            &mut store,
+            repo,
+            &[&format!("mod:{repo}")],
+            Some(&record(repo, body))
+        ));
+    }
+    let unbounded = store.read_snapshot_with_coverage().unwrap();
+    let graph = SnapshotReadLimits::default();
+    assert_eq!(
+        store
+            .read_snapshot_with_coverage_bounded(graph, CoverageReadLimits::default())
+            .unwrap(),
+        unbounded
+    );
+    let stored: usize = unbounded
+        .1
+        .iter()
+        .map(|stored| {
+            let record = &stored.record;
+            record.repo_key.len()
+                + record.registered_source_id.as_ref().map_or(0, String::len)
+                + record.ingest_id.len()
+                + record.config_hash.len()
+                + stored.inventory_hash.len()
+                + record.inventory_json.len()
+        })
+        .sum();
+    let exact = CoverageReadLimits {
+        max_records: 2,
+        max_bytes: stored,
+    };
+    assert!(
+        store
+            .read_snapshot_with_coverage_bounded(graph, exact)
+            .is_ok()
+    );
+    for (limits, error) in [
+        (
+            CoverageReadLimits {
+                max_records: 1,
+                ..exact
+            },
+            SnapshotBoundsError::CoverageRecordLimit,
+        ),
+        (
+            CoverageReadLimits {
+                max_bytes: stored - 1,
+                ..exact
+            },
+            SnapshotBoundsError::CoverageByteLimit,
+        ),
+        (
+            CoverageReadLimits {
+                max_records: 0,
+                ..exact
+            },
+            SnapshotBoundsError::InvalidLimits,
+        ),
+        (
+            CoverageReadLimits {
+                max_bytes: CoverageReadLimits::MAX_BYTES + 1,
+                ..exact
+            },
+            SnapshotBoundsError::InvalidLimits,
+        ),
+    ] {
+        assert!(matches!(
+            store.read_snapshot_with_coverage_bounded(graph, limits),
+            Err(GraphError::SnapshotBounds(actual)) if actual == error
+        ));
+    }
+    let tight_graph = SnapshotReadLimits {
+        max_rows: 1,
+        ..graph
+    };
+    assert!(matches!(
+        store.read_snapshot_with_coverage_bounded(tight_graph, exact),
+        Err(GraphError::SnapshotBounds(SnapshotBoundsError::RowLimit))
+    ));
+}

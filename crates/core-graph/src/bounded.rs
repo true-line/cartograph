@@ -93,6 +93,12 @@ pub enum SnapshotBoundsError {
     /// A property body was not one complete valid JSON value.
     #[error("invalid graph property JSON")]
     InvalidJson,
+    /// Recorded coverage inventories exceeded the record limit.
+    #[error("coverage record limit exceeded")]
+    CoverageRecordLimit,
+    /// Recorded coverage inventories exceeded the aggregate byte limit.
+    #[error("coverage byte limit exceeded")]
+    CoverageByteLimit,
 }
 
 impl SqliteGraphStore {

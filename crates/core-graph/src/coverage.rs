@@ -5,7 +5,7 @@
 //! store keeps its exact bytes and their content hash, and grants no claim that
 //! the inventory is complete or still matches the repo's registration.
 
-use crate::{Edge, GraphError, Node, SqliteGraphStore};
+use crate::{Edge, GraphError, Node, SnapshotBoundsError, SnapshotReadLimits, SqliteGraphStore};
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -206,6 +206,61 @@ fn read_all(connection: &Connection) -> Result<Vec<StoredCoverage>, GraphError> 
 /// A graph copy with the inventories recorded alongside it.
 pub type CoveredSnapshot = ((Vec<Node>, Vec<Edge>), Vec<StoredCoverage>);
 
+/// Narrowable admission limits for the inventories read beside a bounded graph.
+/// Each body is separately capped at [`MAX_INVENTORY_BYTES`] by the schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoverageReadLimits {
+    /// Maximum recorded inventories.
+    pub max_records: usize,
+    /// Maximum stored bytes across every field of every inventory.
+    pub max_bytes: usize,
+}
+
+impl CoverageReadLimits {
+    /// Hard maximum recorded inventories.
+    pub const MAX_RECORDS: usize = 4096;
+    /// Hard maximum aggregate inventory bytes.
+    pub const MAX_BYTES: usize = 16 * 1024 * 1024;
+
+    fn validate(self) -> Result<(), GraphError> {
+        if self.max_records == 0
+            || self.max_records > Self::MAX_RECORDS
+            || self.max_bytes == 0
+            || self.max_bytes > Self::MAX_BYTES
+        {
+            return Err(SnapshotBoundsError::InvalidLimits.into());
+        }
+        Ok(())
+    }
+}
+
+impl Default for CoverageReadLimits {
+    fn default() -> Self {
+        Self {
+            max_records: Self::MAX_RECORDS,
+            max_bytes: Self::MAX_BYTES,
+        }
+    }
+}
+
+/// Count and measure the stored inventories without copying any body. The
+/// exact STRICT schema is checked first, so these are ordinary stored columns.
+fn preflight(connection: &Connection, limits: CoverageReadLimits) -> Result<(), GraphError> {
+    check_schema(connection)?;
+    let (records, bytes): (i64, i64) = connection.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(CAST(repo_key AS BLOB)) + COALESCE(length(CAST(registered_source_id AS BLOB)), 0) + length(CAST(ingest_id AS BLOB)) + length(CAST(config_hash AS BLOB)) + length(CAST(inventory_hash AS BLOB)) + length(CAST(inventory_json AS BLOB))), 0) FROM coverage_inventories",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if usize::try_from(records).map_or(true, |records| records > limits.max_records) {
+        return Err(SnapshotBoundsError::CoverageRecordLimit.into());
+    }
+    if usize::try_from(bytes).map_or(true, |bytes| bytes > limits.max_bytes) {
+        return Err(SnapshotBoundsError::CoverageByteLimit.into());
+    }
+    Ok(())
+}
+
 impl SqliteGraphStore {
     /// Copy the complete graph and every recorded inventory from one read
     /// transaction, so a qualification never describes a different revision
@@ -216,6 +271,24 @@ impl SqliteGraphStore {
         let coverage = read_all(&self.conn)?;
         transaction.commit()?;
         Ok((graph, coverage))
+    }
+
+    /// [`Self::read_snapshot_with_coverage`] under admission limits: the
+    /// inventories are counted and measured, and the graph is admitted as by
+    /// [`Self::read_snapshot_bounded`], before either is materialized.
+    pub fn read_snapshot_with_coverage_bounded(
+        &self,
+        graph: SnapshotReadLimits,
+        coverage: CoverageReadLimits,
+    ) -> Result<CoveredSnapshot, GraphError> {
+        graph.validate()?;
+        coverage.validate()?;
+        let transaction = self.conn.unchecked_transaction()?;
+        preflight(&self.conn, coverage)?;
+        let facts = self.read_snapshot_rows_bounded(graph)?;
+        let recorded = read_all(&self.conn)?;
+        transaction.commit()?;
+        Ok((facts, recorded))
     }
 
     /// Every recorded inventory, by repo.
