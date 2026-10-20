@@ -4,7 +4,7 @@
 use super::*;
 
 // Every legacy fixture also establishes byte-for-byte bounded/unbounded
-// equivalence at the exact count and serialized-byte boundaries (AC-0248).
+// equivalence at the exact count and serialized-byte boundaries (AC-0257).
 fn trace(nodes: &[Node], edges: &[Edge]) -> Vec<Flow> {
     let ordinary = super::trace(nodes, edges);
     let expected = serde_json::to_vec(&ordinary).unwrap();
@@ -907,7 +907,7 @@ fn assert_no_materialization() {
         .with(|counter| assert_eq!(counter.get(), 0, "no owned flow before admission"));
 }
 
-// AC-0248: limit failures are explicit; they never return a partial trace.
+// AC-0257: limit failures are explicit; they never return a partial trace.
 #[test]
 fn bounded_trace_admits_exact_boundaries_and_rejects_the_next_byte_or_item() {
     let (nodes, edges) = event_chain();
@@ -1001,7 +1001,7 @@ fn bounded_trace_admits_exact_boundaries_and_rejects_the_next_byte_or_item() {
     );
 }
 
-// AC-0248: all flows share count and byte admission, including array commas.
+// AC-0257: all flows share count and byte admission, including array commas.
 #[test]
 fn bounded_trace_charges_hops_and_bytes_across_multiple_anchors() {
     let mut nodes = vec![
@@ -1054,7 +1054,7 @@ fn bounded_trace_charges_hops_and_bytes_across_multiple_anchors() {
     }
 }
 
-// AC-0248: large repeated display names and provenance stay borrowed until
+// AC-0257: large repeated display names and provenance stay borrowed until
 // the complete flow fits; fan-out candidates never construct owned Hops.
 #[test]
 fn bounded_trace_rejects_large_fields_and_fanout_before_owning_hops() {
@@ -1111,7 +1111,7 @@ fn bounded_trace_rejects_large_fields_and_fanout_before_owning_hops() {
     assert_no_materialization();
 }
 
-// AC-0248: borrowing and fallback hashing preserve the pre-existing wire
+// AC-0257: borrowing and fallback hashing preserve the pre-existing wire
 // contract, including ignored fields, malformed provenance and duplicates.
 #[test]
 fn bounded_trace_preserves_provenance_validation_and_duplicate_hop_order() {
@@ -1153,7 +1153,7 @@ fn bounded_trace_preserves_provenance_validation_and_duplicate_hop_order() {
     assert_eq!(actual[0].hops[0].provenance, expected);
 }
 
-// AC-0244 / AC-0248: borrowed admission preserves recorded methods and the
+// AC-0244 / AC-0257: borrowed admission preserves recorded methods and the
 // exact legacy absent serialization, without inferring labels from tier.
 #[test]
 fn bounded_trace_preserves_all_producing_methods_and_legacy_bytes() {
@@ -1201,7 +1201,7 @@ fn bounded_trace_preserves_all_producing_methods_and_legacy_bytes() {
     }
 }
 
-// AC-0248: every source-authored method field is accounted before ownership.
+// AC-0257: every source-authored method field is accounted before ownership.
 #[test]
 fn bounded_trace_rejects_large_method_labels_before_owning_output() {
     let (nodes, mut edges) = event_chain();
