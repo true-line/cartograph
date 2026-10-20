@@ -1,3 +1,4 @@
+import { CoverageInventory } from './CoverageInventory';
 import { HelpTip } from './HelpTip';
 import { createRepositoryLabeler } from '../repositoryLabels';
 import type {
@@ -121,6 +122,8 @@ export function WorkspaceSurface({
           {recovered ? 'Re-ingest' : 'Connect a target'}
         </button>
       </header>
+
+      {summary?.coverage && <CoverageInventory coverage={summary.coverage} />}
 
       {onInvestigate && <div className="workspace-investigation-entry">
         <div><h3>Investigate this system</h3><p className="muted">Ask the Domain analyst or Evidence auditor a scoped question. Inspect their tools, citations and limitations.</p></div>

@@ -419,3 +419,86 @@ export const MissingArtifactIsVisible: Story = {
     await expect(args.onOpenArtifact).toHaveBeenCalled();
   },
 };
+
+const COVERAGE = [
+  {
+    inventory: "coverage@1",
+    repo: "acme/api",
+    commit: "0123456789abcdef",
+    layer_hints: ["server"],
+    producers: [
+      {
+        id: "t0.adapter-go",
+        kind: "deterministic" as const,
+        covers: "Go",
+        state: "ran" as const,
+        files: 7,
+        nodes: 21,
+        edges: 14,
+        inputs: [],
+        stopping_reason:
+          "completed over 7 files of acme/api@0123456789abcdef for layers server",
+      },
+      {
+        id: "t0.iac-terraform",
+        kind: "deterministic" as const,
+        covers: "Terraform",
+        state: "not_selected" as const,
+        files: 0,
+        nodes: 0,
+        edges: 0,
+        inputs: [],
+        stopping_reason:
+          "not selected: layer hints [server] exclude infra and cloud",
+      },
+      {
+        id: "t0.adapter-python",
+        kind: "deterministic" as const,
+        covers: "Python",
+        state: "not_applicable" as const,
+        files: 0,
+        nodes: 0,
+        edges: 0,
+        inputs: [],
+        stopping_reason: "no Python files in acme/api@0123456789abcdef",
+      },
+    ],
+    missing_inputs: [],
+    unsupported: [
+      {
+        capability: "Ruby",
+        occurrences: 2,
+        first_site: "lib/a.rb:1",
+        reason:
+          "no installed producer covers Ruby: a tool limitation, not a system gap",
+      },
+    ],
+    limited: true,
+  },
+];
+
+export const CoverageInventoryBeforeInterpretation: Story = {
+  // AC-0238: each repo's producers, exclusions and unsupported capabilities
+  // are listed with their stopping reasons ahead of the investigation entry.
+  args: {
+    onInvestigate: fn(),
+    summary: { ...meta.args.summary, coverage: COVERAGE },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const inventory = canvas.getByTestId("coverage-inventory");
+    await expect(inventory).toHaveTextContent(
+      "Limited coverage · 1 producer ran · 1 excluded by layer hints · 1 unsupported capability",
+    );
+    await expect(inventory).toHaveTextContent(
+      "not selected: layer hints [server] exclude infra and cloud",
+    );
+    await expect(inventory).toHaveTextContent("Nothing to read for: Python.");
+    await expect(inventory).toHaveTextContent("Ruby ×2, first at lib/a.rb:1");
+    const entry = canvas.getByRole("button", { name: "Open investigations" });
+    await expect(
+      inventory.compareDocumentPosition(entry) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  },
+};

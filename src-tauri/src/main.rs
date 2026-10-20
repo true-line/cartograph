@@ -786,6 +786,9 @@ struct IngestSummary {
     /// Where that report stands in the register order (#458); `None` when a
     /// newer preflight's findings were already there, so it wrote nothing.
     preflight_register: Option<RegisterStamp>,
+    /// What this recovery's producers covered and where they stopped
+    /// (AC-0238), shown before any interpretation.
+    coverage: Vec<ingest::coverage::RepoCoverage>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -801,6 +804,86 @@ impl DeltaSummary {
         self.reused_files += reused_files;
         self.deleted_files += deleted_files;
     }
+}
+
+/// Observational inputs a manifest declared for one repo, as written there.
+#[derive(Debug, Default)]
+struct DeclaredInputs {
+    state_json: Option<String>,
+    pulumi_json: Option<String>,
+    otel_jsonl: Vec<String>,
+}
+
+/// One repo's coverage inventory from what its extraction recorded
+/// (AC-0238); unsupported capabilities come from the reconciled preflight.
+#[allow(clippy::too_many_arguments)]
+fn repo_coverage(
+    repo: &str,
+    commit: &str,
+    hints: &[String],
+    layers: &LayerBreakdown,
+    extraction: &adapters_lang_ts::Extraction,
+    declared: &DeclaredInputs,
+    plugins: &[ActivePlugin],
+) -> ingest::coverage::RepoCoverage {
+    use ingest::coverage::{CoverageFacts, Observation, ProducerCount, RepoCoverage};
+    let count = |layer: &LayerSummary| ProducerCount {
+        files: layer.files,
+        nodes: layer.nodes,
+        edges: layer.edges,
+    };
+    let counted = |predicate: &dyn Fn(&core_graph::Node) -> bool| {
+        extraction
+            .nodes
+            .iter()
+            .filter(|node| predicate(node))
+            .count() as u64
+    };
+    RepoCoverage::from_facts(&CoverageFacts {
+        repo,
+        commit,
+        layer_hints: hints,
+        deterministic: vec![
+            ("t0.adapter-ts", count(&layers.ts)),
+            ("t0.webextension", count(&layers.webext)),
+            ("t0.adapter-python", count(&layers.python)),
+            ("t0.adapter-go", count(&layers.go)),
+            ("t0.adapter-java", count(&layers.java)),
+            ("t0.adapter-kotlin", count(&layers.kotlin)),
+            ("t0.iac-terraform", count(&layers.tf)),
+            (
+                ingest::toolchain::TOOLCHAIN_EXTRACTOR_ID,
+                count(&layers.tools),
+            ),
+        ],
+        plugins: plugins
+            .iter()
+            .map(|plugin| plugin.plugin_id.clone())
+            .collect(),
+        observations: vec![
+            Observation {
+                producer: dynamic::EXTRACTOR_ID,
+                input: "state_json",
+                enriches: "Terraform",
+                declared: declared.state_json.iter().cloned().collect(),
+                targets: layers.tf.nodes,
+            },
+            Observation {
+                producer: dynamic::PULUMI_EXTRACTOR_ID,
+                input: "pulumi_json",
+                enriches: "Pulumi resource",
+                declared: declared.pulumi_json.iter().cloned().collect(),
+                targets: counted(&|node| node.props["source"].as_str() == Some("pulumi")),
+            },
+            Observation {
+                producer: dynamic::OTEL_EXTRACTOR_ID,
+                input: "otel_jsonl",
+                enriches: "endpoint and channel",
+                declared: declared.otel_jsonl.clone(),
+                targets: counted(&|node| node.label == "Endpoint" || node.label == "Channel"),
+            },
+        ],
+    })
 }
 
 /// The cross-layer T0 pipeline over one tree: TypeScript, Python, Go, Terraform,
@@ -889,11 +972,11 @@ fn extract_tree_with_primary(
     // Layer hints gate extractors (AC-0002): empty means everything; the
     // The TS pass covers server/events/client plus Pulumi infra/cloud; the HCL
     // pass covers Terraform infra/cloud.
-    let wants =
-        |names: &[&str]| layers.is_empty() || names.iter().any(|n| layers.iter().any(|l| l == n));
-    let wants_application = wants(&["server", "events", "client"]);
-    let wants_server = wants(&["server"]);
-    let wants_infra = wants(&["infra", "cloud"]);
+    // The coverage inventory reads the same gates (AC-0238).
+    use ingest::coverage::{APPLICATION_LAYERS, INFRA_LAYERS, SERVER_LAYERS, wants};
+    let wants_application = wants(layers, APPLICATION_LAYERS);
+    let wants_server = wants(layers, SERVER_LAYERS);
+    let wants_infra = wants(layers, INFRA_LAYERS);
     let ts_id = adapters_lang_ts::SourceId { repo, commit };
     let mut layers = LayerBreakdown::default();
     let mut delta = DeltaSummary::default();
@@ -3395,6 +3478,16 @@ fn run_ingest<R: tauri::Runtime>(
         &extraction.eval_sites,
     )
     .map_err(&fail)?;
+    let coverage = repo_coverage(
+        &repo,
+        "workdir",
+        &[],
+        &layers,
+        &extraction,
+        &DeclaredInputs::default(),
+        &active_plugins,
+    )
+    .with_unsupported(&preflight);
 
     // Ordered before `done` is published (#497), so a preflight the user
     // starts once they see it is newer than this reconciliation.
@@ -3430,6 +3523,7 @@ fn run_ingest<R: tauri::Runtime>(
         delta,
         preflight,
         preflight_register,
+        coverage: vec![coverage],
     })
 }
 
@@ -3653,6 +3747,8 @@ struct AddRepoSummary {
     preflight: ingest::preflight::PreflightReport,
     /// As `IngestSummary::preflight_register` (#458).
     preflight_register: Option<RegisterStamp>,
+    /// As `IngestSummary::coverage`.
+    coverage: Vec<ingest::coverage::RepoCoverage>,
 }
 
 /// Clone a GitHub repo (read-only, shallow) and ingest it with its real
@@ -3775,6 +3871,16 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &extraction.eval_sites,
     )
     .map_err(&fail)?;
+    let coverage = repo_coverage(
+        &source.repo_key,
+        &cloned.commit_sha,
+        &[],
+        &layers,
+        &extraction,
+        &DeclaredInputs::default(),
+        &active_plugins,
+    )
+    .with_unsupported(&preflight);
     // Reserved before `done` is published (#497).
     let fence = app.state::<PreflightRuns>().reserve_reconcile()?;
     finish_source_operation(&state, &app, &execution, &mut operation)?;
@@ -3797,6 +3903,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         delta,
         preflight,
         preflight_register,
+        coverage: vec![coverage],
     })
 }
 
@@ -3827,6 +3934,8 @@ struct AddSystemSummary {
     /// (AC-0209, #446). Not `preflight`: the Preflight surface shows one
     /// repo's report, and a system has several.
     preflights: Vec<RepoPreflight>,
+    /// Each repo's coverage inventory, in manifest order (AC-0238).
+    coverage: Vec<ingest::coverage::RepoCoverage>,
 }
 
 /// One repo's reconciled preflight report within a system recovery.
@@ -4006,11 +4115,25 @@ fn add_system_blocking<R: tauri::Runtime>(
         let sha12: String = commit.chars().take(12).collect();
         repos.push(format!("{repo}@{sha12}"));
         if repo_identities.insert(repo.clone()) {
+            let coverage = repo_coverage(
+                &repo,
+                &commit,
+                &entry.layers,
+                &repo_layers,
+                &extraction,
+                &DeclaredInputs {
+                    state_json: entry.state_json.clone(),
+                    pulumi_json: entry.pulumi_json.clone(),
+                    otel_jsonl: entry.otel_jsonl.clone(),
+                },
+                &active_plugins,
+            );
             proofs.push((
                 repo,
                 primary,
                 plugin_coverage(&active_plugins),
                 extraction.eval_sites,
+                coverage,
             ));
         }
     }
@@ -4038,16 +4161,19 @@ fn add_system_blocking<R: tauri::Runtime>(
     )
     .map_err(&fail)?;
     // AC-0200, AC-0209: each repo reconciles exactly as a local recovery.
-    let preflights = proofs
+    let (preflights, coverage): (Vec<_>, Vec<_>) = proofs
         .into_iter()
-        .map(|(repo, primary, plugins, eval_sites)| {
+        .map(|(repo, primary, plugins, eval_sites, coverage)| {
             let root = operation.root(&repo)?;
             let report =
                 reconciled_preflight_report(root, primary.capture.as_ref(), &plugins, &eval_sites)?;
-            Ok(RepoPreflight { repo, report })
+            let coverage = coverage.with_unsupported(&report);
+            Ok((RepoPreflight { repo, report }, coverage))
         })
         .collect::<Result<Vec<_>, String>>()
-        .map_err(&fail)?;
+        .map_err(&fail)?
+        .into_iter()
+        .unzip();
     // Reserved before `done` is published (#497).
     let runs = app.state::<PreflightRuns>();
     let fence = runs.reserve_reconcile()?;
@@ -4069,6 +4195,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         layers,
         delta,
         preflights,
+        coverage,
     })
 }
 
@@ -8580,6 +8707,91 @@ export function App() {
         assert_eq!(reports[1].1, vec![1], "the local repo's dynamic Function");
         assert_eq!(preflight_register(&state, reports[0].0), vec![(2, false)]);
         assert_eq!(preflight_register(&state, reports[1].0), vec![(1, false)]);
+    }
+
+    #[test]
+    fn system_recovery_reports_each_repos_coverage_inventory() {
+        // AC-0238 (#588): each recovered repo lists which producers ran,
+        // which its layer hints excluded, which inputs were missing and
+        // which capabilities are unsupported, with scoped reasons.
+        use ingest::coverage::ProducerState;
+        use tauri::Manager;
+        let dir = tempfile::tempdir().unwrap();
+        let api = dir.path().join("api");
+        std::fs::create_dir_all(&api).unwrap();
+        std::fs::write(api.join("main.go"), "package main\n\nfunc main() {}\n").unwrap();
+        std::fs::write(api.join("task.rb"), "puts 1\n").unwrap();
+        let infra = dir.path().join("infra");
+        std::fs::create_dir_all(&infra).unwrap();
+        std::fs::write(
+            infra.join("main.tf"),
+            "resource \"aws_sqs_queue\" \"jobs\" {\n  name = \"jobs\"\n}\n",
+        )
+        .unwrap();
+        let manifest = dir.path().join("cartograph.system.toml");
+        std::fs::write(
+            &manifest,
+            "[[repos]]\nurl = \"api\"\nlayers = [\"server\"]\n\n\
+             [[repos]]\nurl = \"infra\"\nlayers = [\"infra\"]\n",
+        )
+        .unwrap();
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let _state = app.state::<super::AppState>();
+
+        let summary =
+            super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+                .unwrap();
+
+        assert_eq!(summary.coverage.len(), 2, "one inventory per repo");
+        let state_of = |coverage: &ingest::coverage::RepoCoverage, id: &str| {
+            let producer = coverage
+                .producers
+                .iter()
+                .find(|producer| producer.id == id)
+                .unwrap();
+            (producer.state, producer.stopping_reason.clone())
+        };
+        let api = &summary.coverage[0];
+        assert_eq!(api.layer_hints, ["server"]);
+        assert_eq!(state_of(api, "t0.adapter-go").0, ProducerState::Ran);
+        assert_eq!(
+            state_of(api, "t0.iac-terraform"),
+            (
+                ProducerState::NotSelected,
+                "not selected: layer hints [server] exclude infra and cloud".to_string()
+            )
+        );
+        assert_eq!(
+            api.unsupported
+                .iter()
+                .map(|unsupported| unsupported.capability.as_str())
+                .collect::<Vec<_>>(),
+            ["Ruby"]
+        );
+        assert!(api.limited);
+
+        let infra = &summary.coverage[1];
+        let (tf_state, tf_reason) = state_of(infra, "t0.iac-terraform");
+        assert_eq!(tf_state, ProducerState::Ran);
+        assert!(
+            tf_reason.starts_with("completed over 1 files of "),
+            "{tf_reason}"
+        );
+        assert!(tf_reason.ends_with("for layers infra"), "{tf_reason}");
+        assert_eq!(
+            state_of(infra, dynamic::EXTRACTOR_ID).0,
+            ProducerState::MissingInput
+        );
+        assert_eq!(
+            infra
+                .missing_inputs
+                .iter()
+                .map(|missing| missing.input.as_str())
+                .collect::<Vec<_>>(),
+            ["state_json"]
+        );
+        assert!(infra.limited);
     }
 
     #[test]
