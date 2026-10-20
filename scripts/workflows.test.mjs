@@ -299,7 +299,11 @@ test('Advanced CodeQL is governed, immutable, and preserves Rust coverage', () =
   const dependabot = readFileSync(path.join(root, '.github/dependabot.yml'), 'utf8');
   assert.match(workflow, /^\s{2}workflow_call:/mu);
   assert.doesNotMatch(workflow, /^\s{2}(push|pull_request|schedule):/mu);
-  assert.match(workflow, /language: \[actions, javascript-typescript, rust\]/u);
+  // #634: Rust analysis runs on pushes to main only; pull requests keep the rest.
+  assert.match(
+    workflow,
+    /language: \$\{\{ fromJSON\(github\.event_name == 'push' && '\["actions", "javascript-typescript", "rust"\]' \|\| '\["actions", "javascript-typescript"\]'\) \}\}/u,
+  );
   assert.match(
     workflow,
     /github\/codeql-action\/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd/u,

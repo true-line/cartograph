@@ -23,7 +23,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [actions, javascript-typescript, rust]
+        # Rust runs only after merge to main until the org runners stop losing
+        # long jobs' working directories (#634); pull requests keep the rest.
+        language: ${{ fromJSON(github.event_name == 'push' && '["actions", "javascript-typescript", "rust"]' || '["actions", "javascript-typescript"]') }}
     steps:
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
