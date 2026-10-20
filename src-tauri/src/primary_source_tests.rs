@@ -58,6 +58,7 @@ fn parse(state: &AppState, source: &RegisteredSource, after_capture: impl FnOnce
             "workdir",
             &layers,
             &BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
             None,
             None,
             &[],

@@ -928,3 +928,421 @@ fn eventbridge_same_path_in_two_repos_is_not_unique_attribution() {
     assert_eq!(report.channel_gaps_resolved, 0);
     assert_eq!(report.channel_gaps_unresolved, 2);
 }
+
+// --- Cross-repo HTTP binding (#589) ---------------------------------------
+
+/// Fetch Gaps a `web` repo with no endpoints of its own produces.
+fn web_gaps(sites: &[FetchSite], cfg: &ConfigIndex) -> (Vec<Node>, Vec<Edge>) {
+    let id = SourceId {
+        repo: "web",
+        commit: "deadbeef",
+    };
+    let out = stitch_fetches(sites, &[], cfg, &id);
+    let gaps = out.nodes.into_iter().filter(|n| n.label == "Gap").collect();
+    let edges = out
+        .edges
+        .into_iter()
+        .filter(|e| e.label == "FETCHES")
+        .collect();
+    (gaps, edges)
+}
+
+fn service(name: &str, repo: &str, base_url: &str) -> HttpBinding {
+    HttpBinding {
+        service: name.into(),
+        repo: repo.into(),
+        base_url: base_url.into(),
+        kind: BindingKind::DeclaredService,
+        declared_in: "cartograph.system.toml".into(),
+    }
+}
+
+fn route(name: &str, repo: &str, base_url: &str, prefix: &str, strip: bool) -> HttpBinding {
+    HttpBinding {
+        kind: BindingKind::GatewayRoute {
+            prefix: prefix.into(),
+            strip_prefix: strip,
+        },
+        ..service(name, repo, base_url)
+    }
+}
+
+// AC-0240: a declared service's base URL joins the call to the one endpoint
+// it reaches in the serving repo, citing the binding. (T-0240)
+#[test]
+fn declared_service_binding_joins_a_cross_repo_fetch() {
+    let (gaps, edges) = web_gaps(
+        &[fetch_site(
+            "GET",
+            IdentityExpr::Literal("https://Orders.example.com/v1/orders/7?full=1".into()),
+        )],
+        &ConfigIndex::default(),
+    );
+    let out = stitch_cross_repo(
+        &gaps,
+        &edges,
+        &eps(&["ep:api@GET:/v1/orders/:id", "ep:api@POST:/v1/orders"]),
+        &[service("orders", "api", "https://orders.example.com/")],
+    );
+    assert!(out.kept_nodes.is_empty() && out.kept_edges.is_empty());
+    let [joined] = out.joined.as_slice() else {
+        panic!("one join: {:?}", out.joined)
+    };
+    assert_eq!(joined.gap_id, gaps[0].id);
+    assert_eq!(joined.edge.src, "sym:test@app.tsx#Orders");
+    assert_eq!(joined.edge.dst, "ep:api@GET:/v1/orders/:id");
+    assert_eq!(confidence(&joined.edge.props), "Confirmed");
+    assert_eq!(joined.edge.props["prov"]["tier"], "Deterministic");
+    assert_eq!(
+        joined.edge.props["prov"]["extractor_id"],
+        http_binding::EXTRACTOR_ID
+    );
+    assert_eq!(joined.edge.props["resolver"], "literal");
+    assert_eq!(
+        joined.edge.props["binding"],
+        serde_json::json!([{
+            "kind": "declared-service",
+            "service": "orders",
+            "repo": "api",
+            "base_url": "https://orders.example.com/",
+            "declared_in": "cartograph.system.toml",
+        }])
+    );
+    // The source citation survives from the call site.
+    assert_eq!(joined.edge.props["prov"]["evidence"][0]["path"], "app.tsx");
+}
+
+// AC-0240: a base URL read from config binds the same way and keeps the
+// config file as the resolver. (T-0240)
+#[test]
+fn config_base_url_binding_cites_its_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env"),
+        "ORDERS_URL=https://orders.example.com/v1/orders\n",
+    )
+    .unwrap();
+    let cfg = ConfigIndex::from_dir(dir.path()).unwrap();
+    let (gaps, edges) = web_gaps(
+        &[fetch_site(
+            "POST",
+            IdentityExpr::EnvRef("ORDERS_URL".into()),
+        )],
+        &cfg,
+    );
+    assert_eq!(gaps[0].props["request"]["url_source"], "config:.env");
+    let out = stitch_cross_repo(
+        &gaps,
+        &edges,
+        &eps(&["ep:api@POST:/v1/orders"]),
+        &[service("orders", "api", "https://orders.example.com")],
+    );
+    assert_eq!(out.joined.len(), 1);
+    assert_eq!(out.joined[0].edge.dst, "ep:api@POST:/v1/orders");
+    assert_eq!(out.joined[0].edge.props["resolver"], "config:.env");
+}
+
+// AC-0240: a gateway route forwards its prefix, stripped or kept, and never
+// matches a longer segment that merely starts with it. (T-0240)
+#[test]
+fn gateway_routes_forward_on_whole_prefix_segments() {
+    let (gaps, edges) = web_gaps(
+        &[
+            fetch_site(
+                "GET",
+                IdentityExpr::Literal("https://gw.example.com/orders/v1/orders/7".into()),
+            ),
+            FetchSite {
+                byte_start: 50,
+                ..fetch_site(
+                    "GET",
+                    IdentityExpr::Literal("https://gw.example.com/api/items".into()),
+                )
+            },
+            FetchSite {
+                byte_start: 90,
+                ..fetch_site(
+                    "GET",
+                    IdentityExpr::Literal("https://gw.example.com/ordersx/v1/orders/7".into()),
+                )
+            },
+        ],
+        &ConfigIndex::default(),
+    );
+    let out = stitch_cross_repo(
+        &gaps,
+        &edges,
+        &eps(&["ep:api@GET:/v1/orders/:id", "ep:catalog@GET:/api/items"]),
+        &[
+            route("orders", "api", "https://gw.example.com", "/orders", true),
+            route(
+                "catalog",
+                "catalog",
+                "https://gw.example.com",
+                "api/",
+                false,
+            ),
+        ],
+    );
+    let joined: Vec<&str> = out.joined.iter().map(|j| j.edge.dst.as_str()).collect();
+    assert_eq!(
+        joined,
+        ["ep:api@GET:/v1/orders/:id", "ep:catalog@GET:/api/items"]
+    );
+    assert_eq!(
+        out.joined[0].edge.props["binding"][0]["kind"],
+        "gateway-route"
+    );
+    assert_eq!(out.joined[0].edge.props["binding"][0]["strip_prefix"], true);
+    let [kept] = out.kept_nodes.as_slice() else {
+        panic!("one kept gap: {:?}", out.kept_nodes)
+    };
+    assert_eq!(
+        kept.props["reason"],
+        "no binding evidence: no declared service or gateway route covers https://gw.example.com/ordersx/v1/orders/7"
+    );
+}
+
+// AC-0240 (#606 review): a root gateway prefix forwards every path under
+// its base URL, stripped or kept, including the root itself. (T-0240)
+#[test]
+fn root_gateway_prefix_forwards_child_and_root_paths() {
+    let (gaps, edges) = web_gaps(
+        &[
+            fetch_site(
+                "GET",
+                IdentityExpr::Literal("https://gw.example.com/users".into()),
+            ),
+            FetchSite {
+                byte_start: 50,
+                ..fetch_site(
+                    "GET",
+                    IdentityExpr::Literal("https://gw.example.com".into()),
+                )
+            },
+        ],
+        &ConfigIndex::default(),
+    );
+    let endpoints = eps(&["ep:api@GET:/users", "ep:api@GET:/"]);
+    for (prefix, strip) in [("/", true), ("/", false), ("", true)] {
+        let out = stitch_cross_repo(
+            &gaps,
+            &edges,
+            &endpoints,
+            &[route("api", "api", "https://gw.example.com", prefix, strip)],
+        );
+        let joined: Vec<&str> = out.joined.iter().map(|j| j.edge.dst.as_str()).collect();
+        assert_eq!(
+            joined,
+            ["ep:api@GET:/users", "ep:api@GET:/"],
+            "prefix {prefix:?}, strip {strip}"
+        );
+    }
+}
+
+// AC-0240 (#606 review): an origin the manifest binds is deferred by the
+// per-repo pass, so a same-repo route that merely shares the path never
+// confirms the call; the system pass then binds it to the declared service.
+// Undeclared origins still match in-repo as before. (T-0240)
+#[test]
+fn bound_origins_defer_same_repo_path_coincidences_to_the_binding() {
+    let mut cfg = ConfigIndex::default();
+    cfg.defer_origins(&["https://orders.example.com".to_string()].into());
+    let id = SourceId {
+        repo: "web",
+        commit: "deadbeef",
+    };
+    let own = eps(&["ep:web@GET:/v1/orders"]);
+    let out = stitch_fetches(
+        &[
+            fetch_site(
+                "GET",
+                IdentityExpr::Literal("https://ORDERS.example.com/v1/orders".into()),
+            ),
+            FetchSite {
+                byte_start: 50,
+                ..fetch_site(
+                    "GET",
+                    IdentityExpr::Literal("https://bff.example.com/v1/orders".into()),
+                )
+            },
+        ],
+        &own,
+        &cfg,
+        &id,
+    );
+    let local: Vec<&str> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "FETCHES" && e.dst.starts_with("ep:"))
+        .map(|e| e.dst.as_str())
+        .collect();
+    assert_eq!(
+        local,
+        ["ep:web@GET:/v1/orders"],
+        "only the undeclared origin"
+    );
+    let gaps: Vec<Node> = out.nodes.into_iter().filter(|n| n.label == "Gap").collect();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(
+        gaps[0].props["reason"],
+        "deferred to system binding: https://orders.example.com is bound in the system manifest"
+    );
+    let edges: Vec<Edge> = out
+        .edges
+        .into_iter()
+        .filter(|e| e.dst.starts_with("gap:"))
+        .collect();
+    let mut endpoints = own.clone();
+    endpoints.push("ep:api@GET:/v1/orders".into());
+    let bound = stitch_cross_repo(
+        &gaps,
+        &edges,
+        &endpoints,
+        &[service("orders", "api", "https://orders.example.com")],
+    );
+    assert_eq!(bound.joined.len(), 1);
+    assert_eq!(bound.joined[0].edge.dst, "ep:api@GET:/v1/orders");
+}
+
+// AC-0240/AC-0241 (#606 review): a declared base URL with a path offers both
+// the full path and the path relative to the base. One match joins; matches
+// under both readings that differ stay an ambiguous Gap. (T-0240, T-0241)
+#[test]
+fn declared_base_path_offers_both_readings_and_never_guesses_between_them() {
+    let (gaps, edges) = web_gaps(
+        &[fetch_site(
+            "GET",
+            IdentityExpr::Literal("https://example.com/api/orders".into()),
+        )],
+        &ConfigIndex::default(),
+    );
+    let bindings = [service("orders", "api", "https://example.com/api")];
+    for routes in [["ep:api@GET:/orders"], ["ep:api@GET:/api/orders"]] {
+        let out = stitch_cross_repo(&gaps, &edges, &eps(&routes), &bindings);
+        assert_eq!(out.joined.len(), 1, "{routes:?}");
+        assert_eq!(out.joined[0].edge.dst, routes[0]);
+    }
+    let out = stitch_cross_repo(
+        &gaps,
+        &edges,
+        &eps(&["ep:api@GET:/orders", "ep:api@GET:/api/orders"]),
+        &bindings,
+    );
+    assert!(out.joined.is_empty());
+    assert_eq!(
+        out.kept_nodes[0].props["reason"],
+        "ambiguous cross-repo binding for GET https://example.com/api/orders: 2 equally supported targets"
+    );
+}
+
+// AC-0241: without binding evidence the call stays a Gap whose reason says
+// so, and the original same-repo reason is kept beside it. (T-0241)
+#[test]
+fn fetch_without_binding_evidence_stays_a_gap_with_its_reason() {
+    let (gaps, edges) = web_gaps(
+        &[fetch_site(
+            "GET",
+            IdentityExpr::Literal("https://unknown.example.com/x".into()),
+        )],
+        &ConfigIndex::default(),
+    );
+    let bindings = [service("orders", "api", "https://orders.example.com")];
+    let endpoints = eps(&["ep:api@GET:/x"]);
+    let out = stitch_cross_repo(&gaps, &edges, &endpoints, &bindings);
+    assert!(out.joined.is_empty());
+    assert_eq!(out.kept_nodes.len(), 1);
+    let node = &out.kept_nodes[0];
+    let edge = &out.kept_edges[0];
+    for props in [&node.props, &edge.props] {
+        assert_eq!(
+            props["reason"],
+            "no binding evidence: no declared service or gateway route covers https://unknown.example.com/x"
+        );
+        assert_eq!(props["t0_reason"], "no recovered endpoint matches GET /x");
+    }
+    assert_eq!(confidence(&edge.props), "Gap");
+    // A second pass over its own output keeps the first reason, unchanged.
+    let again = stitch_cross_repo(&out.kept_nodes, &out.kept_edges, &endpoints, &bindings);
+    assert_eq!(again.kept_nodes[0].props, node.props);
+    // No bindings at all, a relative URL or a computed URL: untouched.
+    assert!(
+        stitch_cross_repo(&gaps, &edges, &endpoints, &[])
+            .kept_nodes
+            .is_empty()
+    );
+    let (local, local_edges) = web_gaps(
+        &[
+            fetch_site("GET", IdentityExpr::Literal("/x".into())),
+            FetchSite {
+                byte_start: 50,
+                ..fetch_site("GET", IdentityExpr::Computed("build()".into()))
+            },
+        ],
+        &ConfigIndex::default(),
+    );
+    let out = stitch_cross_repo(&local, &local_edges, &endpoints, &bindings);
+    assert!(out.joined.is_empty() && out.kept_nodes.is_empty());
+}
+
+// AC-0241: binding evidence that names a service with no matching endpoint
+// keeps the Gap and names the service. (T-0241)
+#[test]
+fn binding_without_a_matching_endpoint_names_the_service() {
+    let (gaps, edges) = web_gaps(
+        &[fetch_site(
+            "DELETE",
+            IdentityExpr::Literal("https://orders.example.com/v1/orders/7".into()),
+        )],
+        &ConfigIndex::default(),
+    );
+    let out = stitch_cross_repo(
+        &gaps,
+        &edges,
+        &eps(&["ep:api@GET:/v1/orders/:id"]),
+        &[service("orders", "api", "https://orders.example.com")],
+    );
+    assert!(out.joined.is_empty());
+    assert_eq!(
+        out.kept_nodes[0].props["reason"],
+        "binding evidence names orders (api), but no recovered endpoint there matches DELETE /v1/orders/7"
+    );
+}
+
+// AC-0241: two equally supported targets are never picked between; the Gap
+// lists both with their bindings. (T-0241)
+#[test]
+fn equally_supported_targets_stay_an_ambiguous_gap() {
+    let (gaps, edges) = web_gaps(
+        &[fetch_site(
+            "GET",
+            IdentityExpr::Literal("https://orders.example.com/v1/orders/7".into()),
+        )],
+        &ConfigIndex::default(),
+    );
+    let out = stitch_cross_repo(
+        &gaps,
+        &edges,
+        &eps(&["ep:api@GET:/v1/orders/:id", "ep:api2@GET:/v1/orders/:id"]),
+        &[
+            service("orders", "api", "https://orders.example.com"),
+            service("orders-next", "api2", "https://orders.example.com"),
+        ],
+    );
+    assert!(out.joined.is_empty());
+    let node = &out.kept_nodes[0];
+    assert_eq!(
+        node.props["reason"],
+        "ambiguous cross-repo binding for GET https://orders.example.com/v1/orders/7: 2 equally supported targets"
+    );
+    let candidates: Vec<&str> = node.props["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["endpoint"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        candidates,
+        ["ep:api2@GET:/v1/orders/:id", "ep:api@GET:/v1/orders/:id"]
+    );
+}

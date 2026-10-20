@@ -18,6 +18,12 @@ use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+pub mod http_binding;
+pub use http_binding::{
+    BindingKind, CrossRepoStitch, DEFERRED_REASON_PREFIX, HttpBinding, JoinedFetch,
+    binding_origins, stitch_cross_repo,
+};
+
 /// Stitching errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StitchError {
@@ -52,6 +58,9 @@ const EXTRACTOR_ID: &str = "t0.events";
 pub struct ConfigIndex {
     /// key → (value, repo-relative source file)
     env: BTreeMap<String, (String, String)>,
+    /// Origins the system manifest binds; absolute calls to them wait for
+    /// the system pass (#589).
+    deferred_origins: std::collections::BTreeSet<String>,
 }
 
 impl ConfigIndex {
@@ -91,6 +100,13 @@ impl ConfigIndex {
     /// Resolve an env key to `(value, source file)`.
     pub fn resolve(&self, key: &str) -> Option<(&str, &str)> {
         self.env.get(key).map(|(v, f)| (v.as_str(), f.as_str()))
+    }
+
+    /// Defer absolute-URL calls to these origins (`scheme://host`) to the
+    /// system-wide binding pass instead of matching them by path in this
+    /// repo (#589): the manifest's declaration outranks a path coincidence.
+    pub fn defer_origins(&mut self, origins: &std::collections::BTreeSet<String>) {
+        self.deferred_origins.extend(origins.iter().cloned());
     }
 
     /// Apply author-declared identities from the topology manifest
@@ -334,15 +350,31 @@ pub fn stitch_fetches(
             )
         };
 
-        let resolved: Option<(String, String)> = match &site.url {
-            IdentityExpr::Literal(u) => Some((url_path(u), "literal".into())),
-            IdentityExpr::EnvRef(key) => cfg
-                .resolve(key)
-                .map(|(value, file)| (url_path(value), format!("config:{file}"))),
+        let resolved_url: Option<String> = match &site.url {
+            IdentityExpr::Literal(u) => Some(u.clone()),
+            IdentityExpr::EnvRef(key) => cfg.resolve(key).map(|(value, _)| value.to_string()),
             IdentityExpr::Computed(_) => None,
         };
+        let url_source: Option<String> = match &site.url {
+            IdentityExpr::Literal(_) => Some("literal".into()),
+            IdentityExpr::EnvRef(key) => cfg.resolve(key).map(|(_, file)| format!("config:{file}")),
+            IdentityExpr::Computed(_) => None,
+        };
+        let resolved: Option<(String, String)> = resolved_url
+            .as_deref()
+            .zip(url_source.clone())
+            .map(|(url, source)| (url_path(url), source));
 
+        let deferred = resolved_url
+            .as_deref()
+            .and_then(http_binding::url_origin)
+            .filter(|origin| cfg.deferred_origins.contains(origin));
         let outcome: Result<(&str, String), String> = match (&resolved, site.method.as_str()) {
+            (Some(_), method) if method != "?" && deferred.is_some() => Err(format!(
+                "{} {} is bound in the system manifest",
+                http_binding::DEFERRED_REASON_PREFIX,
+                deferred.as_deref().unwrap_or_default()
+            )),
             (None, _) => Err(match &site.url {
                 IdentityExpr::EnvRef(key) => {
                     format!("env key {key} not found in any env file in the repo")
@@ -385,14 +417,23 @@ pub fn stitch_fetches(
             }
             Err(reason) => {
                 let gap_id = format!("gap:fetch:{}@{}@{}", id.repo, site.path, site.byte_start);
+                let mut props = serde_json::json!({
+                    "reason": &reason,
+                    "attempted_tiers": ["T0"],
+                    "prov": fetch_prov(ConfidenceTier::Gap, &format!("Gap {gap_id}")),
+                });
+                // The resolved request, for system-wide binding (#589).
+                if let (Some(url), Some(source)) = (resolved_url.as_ref(), url_source.as_ref()) {
+                    props["request"] = serde_json::json!({
+                        "method": site.method,
+                        "url": url,
+                        "url_source": source,
+                    });
+                }
                 out.nodes.push(Node {
                     id: gap_id.clone(),
                     label: "Gap".into(),
-                    props: serde_json::json!({
-                        "reason": &reason,
-                        "attempted_tiers": ["T0"],
-                        "prov": fetch_prov(ConfidenceTier::Gap, &format!("Gap {gap_id}")),
-                    }),
+                    props,
                 });
                 out.edges.push(Edge {
                     src,

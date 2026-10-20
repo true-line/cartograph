@@ -23,6 +23,29 @@ pub enum ManifestError {
     /// A repo entry names a layer outside the five-layer model.
     #[error("unknown layer \"{0}\" (expected infra, cloud, server, events, client)")]
     UnknownLayer(String),
+    /// A service names a repo that no `[[repos]]` entry declares.
+    #[error("service \"{service}\" names repo \"{repo}\", which no [[repos]] entry declares")]
+    UnknownServiceRepo {
+        /// The service name.
+        service: String,
+        /// The undeclared repo url.
+        repo: String,
+    },
+    /// A gateway route names a service no `[[services]]` entry declares.
+    #[error("gateway route {prefix} names undeclared service \"{service}\"")]
+    UnknownService {
+        /// The route prefix.
+        prefix: String,
+        /// The undeclared service name.
+        service: String,
+    },
+    /// Two `[[services]]` entries share a name, so a gateway route naming
+    /// it could not say which repo it reaches.
+    #[error("service \"{0}\" is declared more than once")]
+    DuplicateService(String),
+    /// A base URL is not an absolute `http(s)://host[/path]` URL.
+    #[error("base URL \"{0}\" must be absolute http(s)://host[/path], without query or fragment")]
+    InvalidBaseUrl(String),
 }
 
 /// The five layers of SPEC-00 §3; hints gate which extractors run.
@@ -53,6 +76,49 @@ pub struct ManifestRepo {
     pub otel_jsonl: Vec<String>,
 }
 
+/// A service another repo's clients call over HTTP (#589, AC-0240): the
+/// author declares which repo serves which base URLs. A client call binds
+/// to that repo's endpoints only through such a declaration.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ManifestService {
+    /// Service name, cited on bound edges.
+    pub name: String,
+    /// The `[[repos]]` url of the repo that serves it.
+    pub repo: String,
+    /// Absolute base URLs the service is reachable at, e.g.
+    /// `https://app.example.com` or `http://localhost:7777`.
+    #[serde(default)]
+    pub base_urls: Vec<String>,
+}
+
+/// A gateway route forwarding a path prefix under a base URL to a declared
+/// service (#589, AC-0240).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ManifestGatewayRoute {
+    /// The gateway's absolute base URL.
+    pub base_url: String,
+    /// Path prefix routed, e.g. `/api`.
+    pub prefix: String,
+    /// The `[[services]]` name it forwards to.
+    pub service: String,
+    /// Whether the gateway removes `prefix` before forwarding.
+    #[serde(default)]
+    pub strip_prefix: bool,
+}
+
+/// True for an absolute `http(s)://host[/path]` URL with no query or
+/// fragment.
+pub fn is_base_url(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let host = rest.split('/').next().unwrap_or_default();
+    !host.is_empty() && !url.contains(['?', '#', ' '])
+}
+
 /// The parsed manifest.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct SystemManifest {
@@ -64,6 +130,12 @@ pub struct SystemManifest {
     /// from an env var no checked-in file defines).
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Declared HTTP services (#589).
+    #[serde(default)]
+    pub services: Vec<ManifestService>,
+    /// Declared gateway routes (#589).
+    #[serde(default)]
+    pub gateway_routes: Vec<ManifestGatewayRoute>,
 }
 
 impl SystemManifest {
@@ -84,6 +156,43 @@ impl SystemManifest {
                 }
             }
         }
+        manifest.validate_bindings()?;
         Ok(manifest)
+    }
+
+    /// Check that service names are unique, services name declared repos,
+    /// gateway routes name declared services, and every base URL is absolute.
+    pub fn validate_bindings(&self) -> Result<(), ManifestError> {
+        let mut names = std::collections::BTreeSet::new();
+        for service in &self.services {
+            if !names.insert(service.name.as_str()) {
+                return Err(ManifestError::DuplicateService(service.name.clone()));
+            }
+            if !self.repos.iter().any(|repo| repo.url == service.repo) {
+                return Err(ManifestError::UnknownServiceRepo {
+                    service: service.name.clone(),
+                    repo: service.repo.clone(),
+                });
+            }
+            if let Some(bad) = service.base_urls.iter().find(|url| !is_base_url(url)) {
+                return Err(ManifestError::InvalidBaseUrl(bad.clone()));
+            }
+        }
+        for route in &self.gateway_routes {
+            if !self
+                .services
+                .iter()
+                .any(|service| service.name == route.service)
+            {
+                return Err(ManifestError::UnknownService {
+                    prefix: route.prefix.clone(),
+                    service: route.service.clone(),
+                });
+            }
+            if !is_base_url(&route.base_url) {
+                return Err(ManifestError::InvalidBaseUrl(route.base_url.clone()));
+            }
+        }
+        Ok(())
     }
 }
