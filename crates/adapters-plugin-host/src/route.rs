@@ -83,10 +83,25 @@ pub fn extract_claimed(
     source_id: &SourceId,
     limits: PluginLimits,
 ) -> Result<PluginExtraction, RouteError> {
+    extract_claimed_counted(host, plugin, root, extensions, source_id, limits)
+        .map(|(merged, _)| merged)
+}
+
+/// [`extract_claimed`], also returning how many claimed files it read,
+/// including files that produced no facts.
+pub fn extract_claimed_counted(
+    host: &PluginHost,
+    plugin: &LoadedPlugin,
+    root: &Path,
+    extensions: &[String],
+    source_id: &SourceId,
+    limits: PluginLimits,
+) -> Result<(PluginExtraction, u64), RouteError> {
     let mut merged = PluginExtraction {
         nodes: Vec::new(),
         edges: Vec::new(),
     };
+    let mut files_read = 0u64;
     for rel in claimed_files(root, extensions)? {
         let source = std::fs::read(root.join(&rel))?;
         let rel = rel.to_string_lossy().into_owned();
@@ -95,6 +110,7 @@ pub fn extract_claimed(
             .map_err(|error| RouteError::Host { path: rel, error })?;
         merged.nodes.extend(extraction.nodes);
         merged.edges.extend(extraction.edges);
+        files_read += 1;
     }
-    Ok(merged)
+    Ok((merged, files_read))
 }

@@ -816,6 +816,17 @@ struct DeclaredInputs {
 
 /// One repo's coverage inventory from what its extraction recorded
 /// (AC-0238); unsupported capabilities come from the reconciled preflight.
+/// What producers read during one extraction, for the coverage inventory
+/// (AC-0238): inputs that the retained output alone cannot show.
+#[derive(Debug, Default)]
+struct ProducerReads {
+    /// TypeScript files the adapter read, before any infra-only projection.
+    ts_files: u64,
+    /// Gated plugins that ran: pinned extractor id and what each read and
+    /// published.
+    plugins: Vec<(String, ingest::coverage::ProducerCount)>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn repo_coverage(
     repo: &str,
@@ -824,7 +835,7 @@ fn repo_coverage(
     layers: &LayerBreakdown,
     extraction: &adapters_lang_ts::Extraction,
     declared: &DeclaredInputs,
-    plugins: &[ActivePlugin],
+    reads: &ProducerReads,
 ) -> ingest::coverage::RepoCoverage {
     use ingest::coverage::{CoverageFacts, Observation, ProducerCount, RepoCoverage};
     let count = |layer: &LayerSummary| ProducerCount {
@@ -841,35 +852,18 @@ fn repo_coverage(
     };
     // State and Pulumi inputs are read only inside the infrastructure layer.
     let infra = ingest::coverage::wants(hints, ingest::coverage::INFRA_LAYERS);
-    let resource_prefix = format!("res:{repo}@");
-    let plugin_count = |plugin: &ActivePlugin| {
-        let ours = |props: &serde_json::Value| props["plugin_artifact_hash"] == plugin.content_hash;
-        let nodes: Vec<&core_graph::Node> = extraction
-            .nodes
-            .iter()
-            .filter(|node| ours(&node.props))
-            .collect();
-        let files = nodes
-            .iter()
-            .filter_map(|node| node.props["prov"]["evidence"][0]["path"].as_str())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len() as u64;
-        ProducerCount {
-            files,
-            nodes: nodes.len() as u64,
-            edges: extraction
-                .edges
-                .iter()
-                .filter(|edge| ours(&edge.props))
-                .count() as u64,
-        }
-    };
     RepoCoverage::from_facts(&CoverageFacts {
         repo,
         commit,
         layer_hints: hints,
         deterministic: vec![
-            ("t0.adapter-ts", count(&layers.ts)),
+            (
+                "t0.adapter-ts",
+                ProducerCount {
+                    files: reads.ts_files,
+                    ..count(&layers.ts)
+                },
+            ),
             ("t0.webextension", count(&layers.webext)),
             ("t0.adapter-python", count(&layers.python)),
             ("t0.adapter-go", count(&layers.go)),
@@ -881,19 +875,18 @@ fn repo_coverage(
                 count(&layers.tools),
             ),
         ],
-        plugins: plugins
-            .iter()
-            .map(|plugin| (plugin.plugin_id.clone(), plugin_count(plugin)))
-            .collect(),
+        plugins: reads.plugins.clone(),
         observations: vec![
             Observation {
                 producer: dynamic::EXTRACTOR_ID,
                 input: "state_json",
                 enriches: "Terraform",
                 declared: declared.state_json.iter().cloned().collect(),
-                // Only Terraform resources take observed state.
+                // Only Terraform-extracted resources take observed state;
+                // Pulumi resources share the `res:` id space.
                 targets: counted(&|node| {
-                    node.label == "Resource" && node.id.starts_with(&resource_prefix)
+                    node.label == "Resource"
+                        && node.props["prov"]["extractor_id"] == "t0.iac-terraform"
                 }),
                 selected: infra,
             },
@@ -979,6 +972,7 @@ fn extract_tree_incremental(
         on_file,
         None,
         &mut Vec::new(),
+        &mut ProducerReads::default(),
     )
 }
 
@@ -999,6 +993,7 @@ fn extract_tree_with_primary(
     on_file: &mut dyn FnMut(&str),
     primary: Option<&source_capture::Capture>,
     receipts: &mut Vec<adapters_lang_ts::captured::Receipt>,
+    reads: &mut ProducerReads,
 ) -> Result<(adapters_lang_ts::Extraction, LayerBreakdown, DeltaSummary), String> {
     // Layer hints gate extractors (AC-0002): empty means everything; the
     // The TS pass covers server/events/client plus Pulumi infra/cloud; the HCL
@@ -1045,6 +1040,11 @@ fn extract_tree_with_primary(
             stats.reused_files,
             stats.deleted_files,
         );
+        reads.ts_files = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "File" && node.props.get("placeholder").is_none())
+            .count() as u64;
         if !wants_application {
             extraction.retain_only_pulumi();
         }
@@ -1356,7 +1356,7 @@ fn extract_tree_with_primary(
             let loaded = host
                 .load(&wasm_bytes, &plugin.plugin_id)
                 .map_err(|e| e.to_string())?;
-            let facts = adapters_plugin_host::route::extract_claimed(
+            let (facts, files_read) = adapters_plugin_host::route::extract_claimed_counted(
                 &host,
                 &loaded,
                 root,
@@ -1365,6 +1365,14 @@ fn extract_tree_with_primary(
                 adapters_plugin_host::PluginLimits::default(),
             )
             .map_err(|e| e.to_string())?;
+            reads.plugins.push((
+                adapters_plugin_host::pinned_extractor_id(&plugin.plugin_id, &plugin.content_hash),
+                ingest::coverage::ProducerCount {
+                    files: files_read,
+                    nodes: distinct_node_count(&facts.nodes),
+                    edges: distinct_edge_count(&facts.edges),
+                },
+            ));
             extraction.nodes.extend(facts.nodes);
             extraction.edges.extend(facts.edges);
         }
@@ -3431,6 +3439,7 @@ fn run_ingest<R: tauri::Runtime>(
         .prepare(source, root, &[])
         .map_err(&fail)?;
     let mut receipts = Vec::new();
+    let mut reads = ProducerReads::default();
     let (extraction, layers, delta) = {
         let mut caches = state
             .extraction_caches
@@ -3453,6 +3462,7 @@ fn run_ingest<R: tauri::Runtime>(
             &mut on_file,
             primary.capture.as_ref(),
             &mut receipts,
+            &mut reads,
         )
         .map_err(fail)?
     };
@@ -3516,7 +3526,7 @@ fn run_ingest<R: tauri::Runtime>(
         &layers,
         &extraction,
         &DeclaredInputs::default(),
-        &active_plugins,
+        &reads,
     )
     .with_unsupported(&preflight);
 
@@ -3828,6 +3838,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         .prepare(&source, root, &[])
         .map_err(&fail)?;
     let mut receipts = Vec::new();
+    let mut reads = ProducerReads::default();
     let (extraction, layers, delta) = {
         let mut caches = state
             .extraction_caches
@@ -3850,6 +3861,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
             &mut on_file,
             primary.capture.as_ref(),
             &mut receipts,
+            &mut reads,
         )
         .map_err(&fail)?
     };
@@ -3909,7 +3921,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &layers,
         &extraction,
         &DeclaredInputs::default(),
-        &active_plugins,
+        &reads,
     )
     .with_unsupported(&preflight);
     // Reserved before `done` is published (#497).
@@ -4089,6 +4101,7 @@ fn add_system_blocking<R: tauri::Runtime>(
             .prepare(source, root, &entry.layers)
             .map_err(&fail)?;
         let mut receipts = Vec::new();
+        let mut reads = ProducerReads::default();
         let (extraction, repo_layers, repo_delta) = {
             let mut caches = state
                 .extraction_caches
@@ -4111,6 +4124,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 &mut on_file,
                 primary.capture.as_ref(),
                 &mut receipts,
+                &mut reads,
             )
             .map_err(&fail)?
         };
@@ -4157,7 +4171,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                     pulumi_json: entry.pulumi_json.clone(),
                     otel_jsonl: entry.otel_jsonl.clone(),
                 },
-                &active_plugins,
+                &reads,
             );
             proofs.push((
                 repo,
@@ -8759,6 +8773,15 @@ export function App() {
             "resource \"aws_sqs_queue\" \"jobs\" {\n  name = \"jobs\"\n}\n",
         )
         .unwrap();
+        // Pulumi only: its `res:` resources take no Terraform state.
+        let stack = dir.path().join("stack");
+        std::fs::create_dir_all(&stack).unwrap();
+        std::fs::write(
+            stack.join("index.ts"),
+            "import * as aws from '@pulumi/aws';\nexport const queue = new aws.sqs.Queue('orders', {});\n\
+             export function handler() { return 1; }\n",
+        )
+        .unwrap();
         // Terraform with no resource: observed state has nothing to enrich.
         let vars = dir.path().join("vars");
         std::fs::create_dir_all(&vars).unwrap();
@@ -8771,7 +8794,8 @@ export function App() {
             &manifest,
             "[[repos]]\nurl = \"api\"\nlayers = [\"server\"]\nstate_json = \"api/api.tfstate.json\"\n\n\
              [[repos]]\nurl = \"infra\"\nlayers = [\"infra\"]\n\n\
-             [[repos]]\nurl = \"vars\"\nlayers = [\"infra\"]\n",
+             [[repos]]\nurl = \"vars\"\nlayers = [\"infra\"]\n\n\
+             [[repos]]\nurl = \"stack\"\nlayers = [\"infra\"]\n",
         )
         .unwrap();
         let app = preflight_test_app(dir.path());
@@ -8782,7 +8806,7 @@ export function App() {
             super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
                 .unwrap();
 
-        assert_eq!(summary.coverage.len(), 3, "one inventory per repo");
+        assert_eq!(summary.coverage.len(), 4, "one inventory per repo");
         let state_of = |coverage: &ingest::coverage::RepoCoverage, id: &str| {
             let producer = coverage
                 .producers
@@ -8848,6 +8872,29 @@ export function App() {
             ProducerState::NotApplicable
         );
         assert!(vars.missing_inputs.is_empty());
+
+        // Infra-only TS still reports the files it read, though projection
+        // kept only the Pulumi facts; Pulumi resources need no state_json.
+        let stack = &summary.coverage[3];
+        let (ts_state, ts_reason) = state_of(stack, "t0.adapter-ts");
+        assert_eq!(ts_state, ProducerState::Ran);
+        assert!(
+            ts_reason.starts_with("completed over 1 files of ")
+                && ts_reason.ends_with(
+                    "for Pulumi infrastructure bindings only: application layers were not selected"
+                ),
+            "{ts_reason}"
+        );
+        assert_eq!(
+            state_of(stack, dynamic::EXTRACTOR_ID).0,
+            ProducerState::NotApplicable
+        );
+        assert!(
+            stack
+                .missing_inputs
+                .iter()
+                .all(|missing| missing.input != "state_json")
+        );
     }
 
     #[test]
@@ -9797,6 +9844,47 @@ export function App() {
             serde_json::to_string(&first.edges).unwrap(),
             serde_json::to_string(&second.edges).unwrap()
         );
+
+        // AC-0238: the inventory names the gated artifact, not the bare
+        // plugin id, and counts the claimed files it actually read.
+        let mut reads = super::ProducerReads::default();
+        let (extraction, layers, _) = super::extract_tree_with_primary(
+            &root,
+            &repo,
+            "workdir",
+            &[],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+            &mut super::RepoExtractionCache::default(),
+            &active,
+            &mut |_| {},
+            None,
+            &mut Vec::new(),
+            &mut reads,
+        )
+        .unwrap();
+        let pinned = format!("t0.plugin-fixture@{}", &hash[..12]);
+        assert_eq!(reads.plugins.len(), 1);
+        assert_eq!(reads.plugins[0].0, pinned);
+        assert_eq!(reads.plugins[0].1.files, 1, "one claimed file read");
+        let coverage = super::repo_coverage(
+            &repo,
+            "workdir",
+            &[],
+            &layers,
+            &extraction,
+            &super::DeclaredInputs::default(),
+            &reads,
+        );
+        let row = coverage
+            .producers
+            .iter()
+            .find(|producer| producer.id == pinned)
+            .expect("pinned plugin row");
+        assert_eq!(row.files, 1);
+        assert!(row.nodes >= 1);
     }
 
     #[test]

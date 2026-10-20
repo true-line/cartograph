@@ -67,6 +67,7 @@ fn parse(state: &AppState, source: &RegisteredSource, after_capture: impl FnOnce
             &mut |_| {},
             input.capture.as_ref(),
             &mut receipts,
+            &mut crate::ProducerReads::default(),
         )
         .unwrap()
     };
