@@ -1,3 +1,11 @@
+import {
+  BUSY_REASON,
+  dropSetStatus,
+  summaryRepos,
+  toDropItems,
+  type DropCandidate,
+  type DropItem,
+} from './dropIntake';
 import { create } from 'zustand';
 import type { FactKey } from './primarySourceStore';
 import { invokeOr } from './tauri';
@@ -127,7 +135,8 @@ export interface IngestSummary {
     reused_files: number;
     deleted_files: number;
   };
-  /** Set for GitHub adds: the cloned repo listed with its SHA (AC-0001). */
+  /** The recovered repo's identity: a clone with its SHA (AC-0001), or a
+   *  local tree, whose commit is always `workdir` (AC-0237). */
   repo?: string;
   commit_sha?: string;
   /** Set for system-manifest adds: `identity@sha12` per repo (AC-0002). */
@@ -770,6 +779,9 @@ export interface AppStore {
   ingestSource: IngestSource;
   /** Connect-step target: repo URL, local path, or manifest path. */
   ingestTarget: string;
+  /** Folders dropped on Connect and each one's outcome (#587); kept until
+   *  the next drop or a dismiss, so completed and unresolved stay visible. */
+  dropIntake: DropItem[] | null;
   /** Local detection result; null for remote targets (detected on clone). */
   preflight: PreflightReport | null;
   preflightBusy: boolean;
@@ -855,6 +867,11 @@ export interface AppStore {
   applyJobDetail: (id: number, detail: string) => void;
   setIngestSource: (source: IngestSource) => void;
   setIngestTarget: (target: string) => void;
+  /** Classify dropped paths, then ingest each accepted one in turn through
+   *  the same `ingest` path a typed target takes (#587, AC-0237). */
+  ingestDropped: (paths: string[]) => Promise<void>;
+  /** Clear a finished drop's outcomes; an unresolved drop stays. */
+  dismissDropIntake: () => void;
   /** Navigate to Preflight and run local detection (#116). Local targets get
    *  a real report; remote/manifest targets are detected during recovery. */
   runPreflight: () => Promise<void>;
@@ -974,6 +991,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   ingestError: null,
   ingestSource: 'github',
   ingestTarget: '',
+  dropIntake: null,
   preflight: null,
   preflightBusy: false,
   preflightError: null,
@@ -1322,6 +1340,55 @@ export const useAppStore = create<AppStore>((set, get) => ({
     // persist findings for a target the user has left (#434 review).
     if (ingestSource !== 'local' && get().preflightBusy) void get().cancelPreflight();
     set({ ingestSource });
+  },
+
+  ingestDropped: async (paths) => {
+    if (paths.length === 0) return;
+    const current = get().dropIntake;
+    if (get().ingestBusy || (current && dropSetStatus(current).unresolved > 0)) {
+      // Never silently dropped: each path gets an explicit outcome.
+      const busy = paths.map((path) => ({
+        path,
+        source: null,
+        status: 'rejected' as const,
+        reason: BUSY_REASON,
+        repos: [],
+      }));
+      set({ dropIntake: [...(current ?? []), ...busy] });
+      return;
+    }
+    let candidates: DropCandidate[] | null;
+    try {
+      candidates = await invokeOr<DropCandidate[] | null>('classify_drop', null, { paths });
+    } catch (e) {
+      candidates = paths.map((path) => ({ path, source: null, reason: String(e) }));
+    }
+    if (!candidates) return;
+    set({ dropIntake: toDropItems(candidates) });
+    const update = (index: number, patch: Partial<DropItem>) =>
+      set((state) => ({
+        dropIntake:
+          state.dropIntake?.map((item, at) => (at === index ? { ...item, ...patch } : item)) ??
+          null,
+      }));
+    for (const [index, item] of toDropItems(candidates).entries()) {
+      if (item.status !== 'queued' || !item.source) continue;
+      update(index, { status: 'ingesting' });
+      await get().ingest(item.path, item.source);
+      const { ingestError, ingestSummary } = get();
+      update(
+        index,
+        ingestError
+          ? { status: 'failed', reason: ingestError }
+          : { status: 'ingested', repos: summaryRepos(ingestSummary) },
+      );
+    }
+  },
+
+  dismissDropIntake: () => {
+    const current = get().dropIntake;
+    if (current && dropSetStatus(current).unresolved > 0) return;
+    set({ dropIntake: null });
   },
 
   setIngestTarget: (ingestTarget) => {

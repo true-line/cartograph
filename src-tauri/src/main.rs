@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod context;
+mod drop_intake;
 mod egress;
 mod escalation;
 mod evidence;
@@ -770,6 +771,9 @@ fn list_assertion_decisions(
 #[derive(Serialize)]
 struct IngestSummary {
     job_id: i64,
+    /// The recovered repo's identity; a local tree's commit is always
+    /// `workdir` (AC-0237: a dropped folder is listed with both).
+    repo: String,
     files: u64,
     nodes: u64,
     edges: u64,
@@ -3284,6 +3288,7 @@ fn run_ingest<R: tauri::Runtime>(
             })?;
     Ok(IngestSummary {
         job_id,
+        repo,
         files: layers.files(),
         nodes: published.nodes(),
         edges: published.edges(),
@@ -3316,6 +3321,13 @@ async fn off_ui_thread_for_job<T: Send + 'static>(
     work: impl FnOnce(&JobExecution) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     off_ui_thread(move || work(&execution)).await
+}
+
+/// Classify dropped paths before intake (#587, AC-0237): each gets an
+/// explicit accepted route or rejection reason, and nothing is ingested yet.
+#[tauri::command]
+async fn classify_drop(paths: Vec<String>) -> Result<Vec<drop_intake::DropCandidate>, String> {
+    off_ui_thread(move || Ok(drop_intake::classify(&paths))).await
 }
 
 #[tauri::command]
@@ -4439,6 +4451,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            classify_drop,
             investigations::commands::investigation_specialists,
             investigations::commands::start_investigation,
             investigations::commands::list_investigations,
@@ -7970,6 +7983,8 @@ export function App() {
         let (_, execution) = super::start_job(&state, &source.ingest_job_kind()).unwrap();
         let summary = super::run_ingest(&source, &operation, &execution, &handle, &state).unwrap();
         drop(operation);
+        // AC-0237: a local recovery names its repo; its commit is `workdir`.
+        assert_eq!(summary.repo, source.repo_key);
         assert_eq!(register_eval_lines(), vec![5, 7]);
         // The summary carries the reconciled report for the Preflight
         // surface, including the potential-Gap lane the register never

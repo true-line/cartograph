@@ -163,6 +163,9 @@ export default function App() {
     applyJobDetail,
     setIngestSource,
     setIngestTarget,
+    dropIntake,
+    ingestDropped,
+    dismissDropIntake,
     runPreflight,
     applyPreflightProgress,
     cancelPreflight,
@@ -194,6 +197,7 @@ export default function App() {
   const [helpTopic, setHelpTopic] = useState('concepts');
   const [legendOpen, setLegendOpen] = useState(false);
   const [atlasLayer, setAtlasLayer] = useState('All layers');
+  const [dropActive, setDropActive] = useState(false);
 
   useEffect(() => {
     void refresh();
@@ -205,6 +209,30 @@ export default function App() {
       void useInvestigationStore.getState().loadHistory();
     }
   }, [view]);
+
+  // Folder drop intake (#587): the webview reports dropped paths only while
+  // Connect is open; elsewhere a drop does nothing.
+  useEffect(() => {
+    if (view !== 'connect') return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void (async () => {
+      try {
+        const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+        const stop = await getCurrentWebview().onDragDropEvent((event) => {
+          const payload = event.payload;
+          if (payload.type === 'enter' || payload.type === 'over') setDropActive(true);
+          else if (payload.type === 'leave') setDropActive(false);
+          else {
+            setDropActive(false);
+            void ingestDropped(payload.paths);
+          }
+        });
+        if (disposed) stop(); else unlisten = stop;
+      } catch { /* Browser previews have no webview bridge. */ }
+    })();
+    return () => { disposed = true; unlisten?.(); setDropActive(false); };
+  }, [view, ingestDropped]);
 
   // Pushes are invalidations only. Reconnect/polling reads the durable journal;
   // no client timer fabricates a step or completion percentage.
@@ -637,6 +665,9 @@ export default function App() {
             onTargetChange={setIngestTarget}
             onBack={() => navigate('workspace')}
             onPreflight={() => void runPreflight()}
+            drop={dropIntake}
+            dropActive={dropActive}
+            onDismissDrop={dismissDropIntake}
           />
         );
       case 'preflight':
