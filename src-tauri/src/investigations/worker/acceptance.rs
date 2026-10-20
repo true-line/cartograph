@@ -174,7 +174,46 @@ fn task_evidence(fixture: &Fixture, id: &str, needs_history: bool) -> (Value, bo
     )
 }
 
-fn auditor(fixture: &Fixture, provider: Arc<dyn LlmProvider>) -> (String, u128) {
+#[derive(Clone, Copy)]
+struct AcceptanceSpecialists {
+    analyst: SpecialistId,
+    auditor: SpecialistId,
+}
+
+impl AcceptanceSpecialists {
+    const V2: Self = Self {
+        analyst: SpecialistId::DomainAnalyst,
+        auditor: SpecialistId::EvidenceAuditor,
+    };
+    const COMPACT_V3: Self = Self {
+        analyst: SpecialistId::DomainAnalystV3,
+        auditor: SpecialistId::EvidenceAuditorV3,
+    };
+
+    // Explicit immutable definitions, recorded even if the first call fails and
+    // the auditor is never started. No capability lookup selects a latest role.
+    fn intended_definitions(self) -> Value {
+        json!({
+            "analyst": self.analyst.definition().unwrap(),
+            "auditor": self.auditor.definition().unwrap(),
+        })
+    }
+
+    fn analyst_fixture(self, provider: &dyn LlmProvider, directory: tempfile::TempDir) -> Fixture {
+        Fixture::with_specialist(
+            provider,
+            directory,
+            "Inspect the available guard evidence and its limits. Query context, inspect retained source, and explain only behavior supported by citations.",
+            self.analyst,
+        )
+    }
+}
+
+fn auditor(
+    fixture: &Fixture,
+    provider: Arc<dyn LlmProvider>,
+    specialists: AcceptanceSpecialists,
+) -> (String, u128) {
     let state = fixture.app.state::<AppState>();
     let parent = state
         .jobs
@@ -184,7 +223,7 @@ fn auditor(fixture: &Fixture, provider: Arc<dyn LlmProvider>) -> (String, u128) 
         .unwrap();
     let request = StartInvestigationRequest {
         request_nonce: "local-acceptance-auditor".into(),
-        specialist_id: SpecialistId::EvidenceAuditor,
+        specialist_id: specialists.auditor,
         question: "Audit the selected parent's findings against available context and retained evidence. Query context, inspect source, and explain unsupported claims and scope limits.".into(),
         conversation_id: Some(parent.summary.conversation_id),
         parent_id: Some(fixture.id.clone()),
@@ -237,6 +276,16 @@ fn auditor(fixture: &Fixture, provider: Arc<dyn LlmProvider>) -> (String, u128) 
 #[test]
 #[ignore = "MT-H4-02: requires an installed local model and explicit fresh artifact directory"]
 fn investigation_local_provider_acceptance() {
+    local_provider_acceptance(AcceptanceSpecialists::V2);
+}
+
+#[test]
+#[ignore = "MT-H4-02: requires an installed local model and explicit fresh artifact directory"]
+fn investigation_compact_local_provider_acceptance() {
+    local_provider_acceptance(AcceptanceSpecialists::COMPACT_V3);
+}
+
+fn local_provider_acceptance(specialists: AcceptanceSpecialists) {
     // AC-0191: a real provider chooses every action through the production loop.
     // Compiling this test or passing its mechanical checks does not pass H4/H5.
     let url = required("CARTOGRAPH_ACCEPTANCE_URL");
@@ -257,6 +306,7 @@ fn investigation_local_provider_acceptance() {
         "application_version": env!("CARGO_PKG_VERSION"),
         "source_revision": source_revision,
         "phase": "preparation",
+        "intended_specialists": specialists.intended_definitions(),
         "mechanical_pass": false,
         "operator_supplied_identity": {
             "endpoint": url, "requested_model": model, "model_digest": digest, "runtime": runtime,
@@ -277,11 +327,7 @@ fn investigation_local_provider_acceptance() {
     directory.disable_cleanup(true);
     report["retained_fixture_directory"] = json!(directory.path());
     write_report(&output, &report);
-    let fixture = Fixture::with_question(
-        provider.as_ref(),
-        directory,
-        "Inspect the available guard evidence and its limits. Query context, inspect retained source, and explain only behavior supported by citations.",
-    );
+    let fixture = specialists.analyst_fixture(provider.as_ref(), directory);
     std::fs::write(output.join("rule.ts"), ORIGINAL).unwrap();
     report["analyst_id"] = json!(fixture.id);
     report["analyst_coordinator_start_milliseconds"] = json!(fixture.start_milliseconds);
@@ -296,7 +342,7 @@ fn investigation_local_provider_acceptance() {
     if analyst_pass {
         report["phase"] = json!("auditor_running");
         write_report(&output, &report);
-        let (id, start_milliseconds) = auditor(&fixture, provider);
+        let (id, start_milliseconds) = auditor(&fixture, provider, specialists);
         let (evidence, passed) = task_evidence(&fixture, &id, true);
         report["auditor_id"] = json!(id);
         report["auditor_coordinator_start_milliseconds"] = json!(start_milliseconds);
@@ -344,4 +390,76 @@ fn investigation_acceptance_report_preserves_failed_and_unknown_outcomes() {
                 .unwrap();
         assert_eq!(saved, report);
     }
+}
+
+#[test]
+fn investigation_acceptance_explicit_specialists_match_prepared_report_and_durable_tasks() {
+    // Dispatch calibration only: real-provider and independent acceptance gates
+    // remain unchanged. Exercise both actual coordinator paths and saved reports.
+    let mut fingerprints = Vec::new();
+    for (specialists, expected_analyst, expected_auditor, version) in [
+        (
+            AcceptanceSpecialists::V2,
+            "domain-analyst@2",
+            "evidence-auditor@2",
+            2,
+        ),
+        (
+            AcceptanceSpecialists::COMPACT_V3,
+            "domain-analyst@3",
+            "evidence-auditor@3",
+            3,
+        ),
+    ] {
+        let provider = Arc::new(Scripted::new(Mode::Finish));
+        let artifacts = tempfile::tempdir().unwrap();
+        let preparation = json!({
+            "phase": "preparation",
+            "intended_specialists": specialists.intended_definitions(),
+        });
+        write_report(artifacts.path(), &preparation);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(artifacts.path().join("run.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved, preparation);
+        let intended = &saved["intended_specialists"];
+        assert_eq!(intended["analyst"]["id"], expected_analyst);
+        assert_eq!(intended["auditor"]["id"], expected_auditor);
+        assert_eq!(intended["analyst"]["version"], version);
+        assert_eq!(intended["auditor"]["version"], version);
+        let fixture = specialists.analyst_fixture(provider.as_ref(), tempfile::tempdir().unwrap());
+        fixture.run(provider.clone());
+        let (analyst, passed) = task_evidence(&fixture, &fixture.id, false);
+        assert!(passed);
+        assert_eq!(analyst["detail"]["specialist"], intended["analyst"]);
+        assert_eq!(
+            analyst["detail"]["limits"],
+            json!(InvestigationLimits::default())
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+        // A separate failing scripted provider checks auditor dispatch and
+        // history/report provenance even when no usable response is admitted.
+        let auditor_provider = Arc::new(Scripted::new(Mode::Malformed));
+        let (id, _) = auditor(&fixture, auditor_provider.clone(), specialists);
+        let (auditor, passed) = task_evidence(&fixture, &id, true);
+        assert!(!passed);
+        assert_eq!(
+            auditor["detail"]["status"],
+            json!(InvestigationStatus::Failed)
+        );
+        assert_eq!(
+            auditor["checks"]["parent_history_supplied_when_required"],
+            true
+        );
+        assert_eq!(auditor["detail"]["specialist"], intended["auditor"]);
+        assert_eq!(auditor["detail"]["limits"], analyst["detail"]["limits"]);
+        assert_eq!(auditor_provider.calls.load(Ordering::SeqCst), 1);
+        fingerprints.push((
+            intended["analyst"]["prompt_fingerprint"].clone(),
+            intended["auditor"]["prompt_fingerprint"].clone(),
+        ));
+    }
+    assert_ne!(fingerprints[0].0, fingerprints[1].0);
+    assert_ne!(fingerprints[0].1, fingerprints[1].1);
 }
