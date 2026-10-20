@@ -684,25 +684,25 @@ Used by:
 ## Apache License 2.0
 
 Used by:
-- cranelift-bforest 0.136.3 — https://github.com/bytecodealliance/wasmtime
-- cranelift-codegen-shared 0.136.3 — https://github.com/bytecodealliance/wasmtime
-- cranelift-codegen 0.136.3 — https://github.com/bytecodealliance/wasmtime
-- cranelift-control 0.136.3 — https://github.com/bytecodealliance/wasmtime
-- cranelift-entity 0.136.3 — https://github.com/bytecodealliance/wasmtime
-- cranelift-frontend 0.136.3 — https://github.com/bytecodealliance/wasmtime
-- cranelift-native 0.136.3 — https://github.com/bytecodealliance/wasmtime
+- cranelift-bforest 0.136.4 — https://github.com/bytecodealliance/wasmtime
+- cranelift-codegen-shared 0.136.4 — https://github.com/bytecodealliance/wasmtime
+- cranelift-codegen 0.136.4 — https://github.com/bytecodealliance/wasmtime
+- cranelift-control 0.136.4 — https://github.com/bytecodealliance/wasmtime
+- cranelift-entity 0.136.4 — https://github.com/bytecodealliance/wasmtime
+- cranelift-frontend 0.136.4 — https://github.com/bytecodealliance/wasmtime
+- cranelift-native 0.136.4 — https://github.com/bytecodealliance/wasmtime
 - regalloc2 0.15.2 — https://github.com/bytecodealliance/regalloc2
 - target-lexicon 0.13.5 — https://github.com/bytecodealliance/target-lexicon
-- wasmtime-environ 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-cache 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-cranelift 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-fiber 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-unwinder 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-wasi 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wasmtime 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wiggle-generate 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wiggle-macro 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wiggle 49.0.3 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-environ 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-cache 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-cranelift 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-fiber 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-unwinder 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-wasi 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wiggle-generate 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wiggle-macro 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wiggle 49.0.4 — https://github.com/bytecodealliance/wasmtime
 
 ```
 
@@ -6309,8 +6309,8 @@ Used by:
 - aws-lc-sys 0.45.0 — https://github.com/aws/aws-lc-rs
 - blake3 1.8.7 — https://github.com/BLAKE3-team/BLAKE3
 - constant_time_eq 0.4.2 — https://github.com/cesarb/constant_time_eq
-- cranelift-assembler-x64 0.136.3
-- cranelift-bitset 0.136.3 — https://github.com/bytecodealliance/wasmtime
+- cranelift-assembler-x64 0.136.4
+- cranelift-bitset 0.136.4 — https://github.com/bytecodealliance/wasmtime
 - cxx 1.0.197 — https://github.com/dtolnay/cxx
 - cxxbridge-macro 1.0.197 — https://github.com/dtolnay/cxx
 - directories-next 2.0.0 — https://github.com/xdg-rs/dirs/tree/master/directories
@@ -6340,8 +6340,8 @@ Used by:
 - objc2-web-kit 0.3.2 — https://github.com/madsmtm/objc2
 - pin-project-lite 0.2.17 — https://github.com/taiki-e/pin-project-lite
 - proc-macro2 1.0.106 — https://github.com/dtolnay/proc-macro2
-- pulley-interpreter 49.0.3 — https://github.com/bytecodealliance/wasmtime/tree/main/pulley
-- pulley-macros 49.0.3 — https://github.com/bytecodealliance/wasmtime/tree/main/pulley/macros
+- pulley-interpreter 49.0.4 — https://github.com/bytecodealliance/wasmtime/tree/main/pulley
+- pulley-macros 49.0.4 — https://github.com/bytecodealliance/wasmtime/tree/main/pulley/macros
 - quote 1.0.46 — https://github.com/dtolnay/quote
 - rand 0.10.2 — https://github.com/rust-random/rand
 - raw-window-handle 0.6.2 — https://github.com/rust-windowing/raw-window-handle
@@ -6377,14 +6377,14 @@ Used by:
 - usearch 2.26.4 — https://github.com/unum-cloud/USearch
 - utf-8 0.7.6 — https://github.com/SimonSapin/rust-utf8
 - vecmap-rs 0.2.5 — https://github.com/martinohmann/vecmap-rs
-- wasmtime-internal-component-macro 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-component-util 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-core 49.0.3
-- wasmtime-internal-jit-debug 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-jit-icache-coherence 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-versioned-export-macros 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-wit-bindgen 49.0.3 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-wasi-io 49.0.3 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-component-macro 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-component-util 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-core 49.0.4
+- wasmtime-internal-jit-debug 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-jit-icache-coherence 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-versioned-export-macros 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-wit-bindgen 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-wasi-io 49.0.4 — https://github.com/bytecodealliance/wasmtime
 - wast 35.0.2 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wast
 - witx 0.9.1 — https://github.com/WebAssembly/WASI
 - zstd-safe 7.2.4 — https://github.com/gyscos/zstd-rs
