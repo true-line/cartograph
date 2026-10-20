@@ -128,7 +128,7 @@
 - **AC-0257** Given a caller-admitted graph and explicit limits for flow count, cumulative hop count and compact UTF-8 JSON output bytes, when bounded tracing runs, then each owned flow and hop is admitted before construction; success is byte-identical to ordinary tracing with unchanged anchors, traversal and deduplication order, reversed-edge identity, depth status, provenance, producing methods and score summation, while a limit returns an explicit resource/maximum error without a partial result. The caller separately bounds graph admission and linear borrowed traversal workspace.
 - **Security:** —
 - **Performance:** Path queries bounded; long flows stream incrementally to UI.
-- **Trace:** M3–M5 · `flowtracer` · F-* · T-0015..0017, T-0083, T-0219,T-0257
+- **Trace:** M3–M5 · `flowtracer` · F-* · T-0015..0017, T-0083, T-0219, T-0257
 
 ### US-0007 — Provenance and confidence on every fact
 - **Actor:** Engine

@@ -183,7 +183,8 @@ pub fn trace(nodes: &[Node], edges: &[Edge]) -> Vec<Flow> {
 /// Trace complete flows under cumulative output limits, failing explicitly
 /// instead of returning a truncated result. Bytes are the exact compact
 /// UTF-8 JSON serialization of the returned `Vec<Flow>`, including brackets
-/// and commas. Counts cover all triggers and deduplicated hops across flows.
+/// and commas. Counts cover all triggers and sum the deduplicated hops of each
+/// flow; a hop shared by multiple flows counts once in each returned flow.
 ///
 /// The caller must separately admit the input graph. Borrowed adjacency,
 /// traversal descriptors and provenance views use linear input workspace;
