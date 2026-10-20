@@ -336,6 +336,26 @@ jobs:
           attempts: '2'
           retry-delay-seconds: '5'
 
+      # The organisation's Linux runner has no Rust toolchain; rustup from apt
+      # resolves the exact one from rust-toolchain.toml, as in the Rust lane.
+      - name: Refresh apt metadata
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        with:
+          task: Refresh rustup apt metadata
+          executable: sudo
+          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
+          timeout-seconds: '240'
+          attempts: '2'
+          retry-delay-seconds: '5'
+
+      - name: Install rustup
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        with:
+          task: Install rustup
+          executable: sudo
+          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","rustup"]'
+          timeout-seconds: '300'
+
       - name: Install cargo-about
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
