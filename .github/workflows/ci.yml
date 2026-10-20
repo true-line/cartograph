@@ -176,6 +176,13 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
+      # The bounded-command action runs under node, which the organisation's
+      # Linux runner does not carry on its default PATH.
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
       - name: Refresh apt metadata
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
         with:
@@ -344,7 +351,7 @@ jobs:
           task: Refresh rustup apt metadata
           executable: sudo
           arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
-          timeout-seconds: '240'
+          timeout-seconds: '120'
           attempts: '2'
           retry-delay-seconds: '5'
 
@@ -354,7 +361,7 @@ jobs:
           task: Install rustup
           executable: sudo
           arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","rustup"]'
-          timeout-seconds: '300'
+          timeout-seconds: '180'
 
       - name: Install cargo-about
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
