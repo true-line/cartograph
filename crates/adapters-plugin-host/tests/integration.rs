@@ -304,6 +304,7 @@ fn conformance_gate_passes_golden_corpus_and_fails_closed() {
                 props: serde_json::json!({}),
             }],
         }],
+        coverage: vec![],
     };
 
     let report = run_gate(
@@ -343,6 +344,7 @@ fn conformance_gate_passes_golden_corpus_and_fails_closed() {
     let empty = GoldenCorpus {
         extensions: vec![],
         cases: vec![],
+        coverage: vec![],
     };
     let report = run_gate(
         &host,
@@ -382,6 +384,120 @@ fn conformance_gate_passes_golden_corpus_and_fails_closed() {
             .iter()
             .any(|c| c.name == "contract:src/lib.rs" && !c.passed)
     );
+}
+
+#[test]
+fn coverage_declarations_count_only_when_their_cases_pass() {
+    // AC-0263: a declared cell names the golden cases proving it; the gate
+    // refuses an unproven, unnoted or malformed claim, and a verdict is keyed
+    // to the exact corpus bytes so later claim edits are ungated.
+    use adapters_plugin_host::gate::{
+        DeclaredCell, DeclaredSupport, ExpectedNode, GoldenCase, GoldenCorpus, gate_key, run_gate,
+    };
+    let host = PluginHost::new().expect("engine");
+    let cell = |support, note: &str, cases: &[&str]| DeclaredCell {
+        language: "Rust".to_string(),
+        framework: "core".to_string(),
+        capability: "types".to_string(),
+        support,
+        note: note.to_string(),
+        cases: cases.iter().map(|c| c.to_string()).collect(),
+    };
+    let corpus = |coverage| GoldenCorpus {
+        extensions: vec!["rs".to_string()],
+        cases: vec![GoldenCase {
+            path: "src/lib.rs".to_string(),
+            source: "hello world".to_string(),
+            nodes: vec![ExpectedNode {
+                id: "owner/repo:src/lib.rs".to_string(),
+                label: "TestNode".to_string(),
+                props: serde_json::json!({ "len": 11 }),
+            }],
+            edges: vec![adapters_plugin_host::gate::ExpectedEdge {
+                src: "owner/repo:src/lib.rs".to_string(),
+                dst: "owner/repo:src/lib.rs".to_string(),
+                label: "SELF".to_string(),
+                props: serde_json::json!({}),
+            }],
+        }],
+        coverage,
+    };
+    let gate = |corpus: &GoldenCorpus| {
+        let report = run_gate(
+            &host,
+            "t0.plugin-fixture",
+            OK_ADAPTER,
+            corpus,
+            PluginLimits::default(),
+            &source_id(),
+        );
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "coverage-declarations")
+            .expect("coverage check runs")
+            .clone();
+        (report.passed, check.detail)
+    };
+
+    let proven = corpus(vec![
+        cell(DeclaredSupport::Supported, "", &["src/lib.rs"]),
+        DeclaredCell {
+            capability: "http_endpoints".to_string(),
+            ..cell(DeclaredSupport::Unsupported, "no routing yet", &[])
+        },
+    ]);
+    assert_eq!(gate(&proven), (true, "2 declared cell(s)".to_string()));
+
+    for (bad, why) in [
+        (
+            cell(DeclaredSupport::Supported, "", &[]),
+            "names no golden case",
+        ),
+        (
+            cell(DeclaredSupport::Supported, "", &["src/missing.rs"]),
+            "names unknown case",
+        ),
+        (
+            cell(DeclaredSupport::Supported, "misses macros", &["src/lib.rs"]),
+            "must be partial",
+        ),
+        (
+            cell(DeclaredSupport::Partial, "", &["src/lib.rs"]),
+            "needs a note",
+        ),
+        (
+            cell(DeclaredSupport::Unsupported, "none", &["src/lib.rs"]),
+            "names no cases",
+        ),
+        (
+            DeclaredCell {
+                capability: "Types".to_string(),
+                ..cell(DeclaredSupport::Supported, "", &["src/lib.rs"])
+            },
+            "snake_case",
+        ),
+    ] {
+        let (passed, detail) = gate(&corpus(vec![bad]));
+        assert!(!passed && detail.contains(why), "{why}: {detail}");
+    }
+    let twice = cell(DeclaredSupport::Supported, "", &["src/lib.rs"]);
+    let (passed, detail) = gate(&corpus(vec![twice.clone(), twice]));
+    assert!(!passed && detail.contains("declared twice"), "{detail}");
+
+    // The verdict key binds the artifact to the exact corpus bytes.
+    let text = serde_json::to_vec(&proven).unwrap();
+    let mut edited = proven.clone();
+    edited.coverage[0].support = DeclaredSupport::Partial;
+    edited.coverage[0].note = "edited after gating".to_string();
+    let key = gate_key("artifact", Some(&text));
+    assert_eq!(key, gate_key("artifact", Some(&text)));
+    assert_ne!(
+        key,
+        gate_key("artifact", Some(&serde_json::to_vec(&edited).unwrap()))
+    );
+    assert_ne!(key, gate_key("other-artifact", Some(&text)));
+    assert_ne!(gate_key("artifact", None), gate_key("artifact", Some(b"")));
 }
 
 #[test]

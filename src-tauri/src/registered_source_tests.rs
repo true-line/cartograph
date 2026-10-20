@@ -1151,7 +1151,13 @@ fn managed_plugin_gate_retains_source_guards_through_verdict() {
             .settings
             .lock()
             .unwrap()
-            .plugin_gate(PLUGIN, &hash)
+            .plugin_gate(
+                PLUGIN,
+                &adapters_plugin_host::gate::gate_key(
+                    &hash,
+                    std::fs::read(&corpus_path).ok().as_deref(),
+                ),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(stored.0, corpus_present);

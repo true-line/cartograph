@@ -2,8 +2,9 @@
 //! after proving, against its own generator-supplied golden corpus, that
 //! it (1) honors the SPI contract under the standard bounds, (2) emits
 //! exactly the expected facts with exact evidence spans, and (3) is
-//! deterministic across a double run. Anything less and the adapter stays
-//! in the proposed state — discovery and enablement never bypass this.
+//! deterministic across a double run, with (4) every declared coverage cell
+//! backed by a golden case it names (AC-0263). Anything less and the adapter
+//! stays in the proposed state — discovery and enablement never bypass this.
 
 use crate::{HostError, PluginExtraction, PluginHost, PluginLimits, SourceId};
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,110 @@ pub struct GoldenCorpus {
     pub extensions: Vec<String>,
     /// The golden cases; an empty corpus fails the gate closed.
     pub cases: Vec<GoldenCase>,
+    /// Coverage-matrix cells the plugin claims (AC-0263). Each supported or
+    /// partial cell names the golden cases that prove it, so it counts only
+    /// when the gate passes those cases.
+    #[serde(default)]
+    pub coverage: Vec<DeclaredCell>,
+}
+
+/// How far a declared cell is covered — the same scale as compiled-in
+/// adapters' matrix cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclaredSupport {
+    /// Recognized; the named cases prove the canonical shape.
+    Supported,
+    /// Recognized for some shapes; `note` names what is missed.
+    Partial,
+    /// Not recognized; `note` names the gap. Names no cases.
+    Unsupported,
+}
+
+/// One language × framework × capability cell a plugin declares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredCell {
+    /// Language the plugin adapts.
+    pub language: String,
+    /// Framework or library, or `core` for language-level capabilities.
+    pub framework: String,
+    /// Capability in snake_case; plugins may name capabilities the core
+    /// does not, which is how new kinds of facts become visible.
+    pub capability: String,
+    /// Declared support level.
+    pub support: DeclaredSupport,
+    /// Shortfall; required for partial and unsupported, empty otherwise.
+    #[serde(default)]
+    pub note: String,
+    /// Paths of the golden cases proving a supported or partial cell.
+    #[serde(default)]
+    pub cases: Vec<String>,
+}
+
+/// Key a gate verdict binds to: the artifact hash *and* the exact corpus
+/// bytes. The corpus carries the extension and coverage claims, so editing it
+/// after gating leaves the plugin ungated rather than trusting new claims.
+pub fn gate_key(content_hash: &str, corpus: Option<&[u8]>) -> String {
+    let mut bytes = b"cartograph:plugin-gate:v2\0".to_vec();
+    bytes.extend_from_slice(content_hash.as_bytes());
+    bytes.push(0);
+    match corpus {
+        Some(corpus) => {
+            bytes.push(1);
+            bytes.extend_from_slice(corpus);
+        }
+        None => bytes.push(0),
+    }
+    core_prov::content_hash(&bytes)
+}
+
+/// First problem with the coverage declarations, if any.
+fn declaration_problem(corpus: &GoldenCorpus) -> Option<String> {
+    let paths: std::collections::BTreeSet<&str> =
+        corpus.cases.iter().map(|case| case.path.as_str()).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for cell in &corpus.coverage {
+        let id = format!("{}.{}.{}", cell.language, cell.framework, cell.capability);
+        let snake = !cell.capability.is_empty()
+            && cell
+                .capability
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        if cell.language.trim().is_empty() || cell.framework.trim().is_empty() || !snake {
+            return Some(format!(
+                "{id}: language, framework and snake_case capability required"
+            ));
+        }
+        if !seen.insert((&cell.language, &cell.framework, &cell.capability)) {
+            return Some(format!("{id}: declared twice"));
+        }
+        let noted = !cell.note.trim().is_empty();
+        let problem = match cell.support {
+            DeclaredSupport::Supported if noted => Some("a limited cell must be partial"),
+            DeclaredSupport::Partial | DeclaredSupport::Unsupported if !noted => {
+                Some("needs a note naming what is missed")
+            }
+            DeclaredSupport::Unsupported if !cell.cases.is_empty() => {
+                Some("an unsupported cell names no cases")
+            }
+            DeclaredSupport::Supported | DeclaredSupport::Partial if cell.cases.is_empty() => {
+                Some("names no golden case proving it")
+            }
+            _ => None,
+        };
+        if let Some(problem) = problem {
+            return Some(format!("{id}: {problem}"));
+        }
+        if let Some(missing) = cell
+            .cases
+            .iter()
+            .find(|path| !paths.contains(path.as_str()))
+        {
+            return Some(format!("{id}: names unknown case {missing}"));
+        }
+    }
+    None
 }
 
 /// One named gate check with its verdict and a human-readable detail.
@@ -186,6 +291,16 @@ pub fn run_gate(
             checks,
         };
     }
+
+    // Coverage claims must each be backed by a case this gate runs; since
+    // every case must pass for the gate to pass, a gated plugin's supported
+    // and partial cells are proven (AC-0263).
+    let problem = declaration_problem(corpus);
+    check(
+        "coverage-declarations",
+        problem.is_none(),
+        problem.unwrap_or_else(|| format!("{} declared cell(s)", corpus.coverage.len())),
+    );
 
     let mut first_runs: Vec<Option<PluginExtraction>> = Vec::new();
     for case in &corpus.cases {

@@ -13,7 +13,7 @@
 //! Detectors are a versioned registry ([`DETECTOR_ID`]): provenance on every
 //! finding records which detector produced it, so re-runs are attributable.
 
-use crate::matrix::{CoverageCell, cells_for};
+use crate::matrix::{ReportedCell, cells_for};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -50,9 +50,10 @@ pub struct LanguageDetection {
     /// Covering adapter id, or `None` when no adapter exists — in which case
     /// the whole language surfaces as an unsupported pattern.
     pub adapter: Option<String>,
-    /// Coverage-matrix cells for a compiled-in adapter (AC-0253); empty for
-    /// a plugin or an uncovered language.
-    pub coverage: Vec<CoverageCell>,
+    /// Coverage-matrix cells of the covering adapter: compiled-in cells
+    /// (AC-0253) or a gated plugin's declared cells (AC-0263); empty for an
+    /// uncovered language.
+    pub coverage: Vec<ReportedCell>,
 }
 
 /// One classified construct: where it is and why it was flagged.
@@ -241,6 +242,8 @@ pub struct PluginCoverage {
     pub plugin_id: String,
     /// Extensions the corpus declares, without the leading dot.
     pub extensions: Vec<String>,
+    /// Coverage cells the gated corpus declares (AC-0263).
+    pub cells: Vec<ReportedCell>,
 }
 
 /// The TS adapter's AST-level classification of one `eval(` site (#214).
@@ -533,7 +536,7 @@ fn detect_manifest_adapter(language: &str, languages: &mut BTreeMap<String, Lang
             language: language.to_string(),
             files: 0,
             adapter: Some(adapter.id.to_string()),
-            coverage: cells_for(language).cloned().collect(),
+            coverage: cells_for(language).map(ReportedCell::from).collect(),
         })
         .files += 1;
 }
@@ -558,7 +561,7 @@ fn detect_language(
                 language: language.to_string(),
                 files: 0,
                 adapter: Some(adapter.to_string()),
-                coverage: cells_for(language).cloned().collect(),
+                coverage: cells_for(language).map(ReportedCell::from).collect(),
             });
         entry.files += 1;
     } else if let Some(plugin) = plugin_claim {
@@ -573,7 +576,7 @@ fn detect_language(
                 language,
                 files: 0,
                 adapter: Some(plugin.plugin_id.clone()),
-                coverage: Vec::new(),
+                coverage: plugin.cells.clone(),
             });
         entry.files += 1;
     } else if let Some(language) = uncovered_language(extension) {
@@ -764,13 +767,15 @@ mod tests {
         assert!(
             go.coverage
                 .iter()
-                .any(|cell| cell.id() == "go.gin.http_endpoints"
+                .any(|cell| (cell.framework.as_str(), cell.capability.as_str())
+                    == ("gin", "http_endpoints")
                     && cell.support == crate::matrix::Support::Supported)
         );
         assert!(
             go.coverage
                 .iter()
-                .any(|cell| cell.id() == "go.core.http_client_calls"
+                .any(|cell| (cell.framework.as_str(), cell.capability.as_str())
+                    == ("core", "http_client_calls")
                     && cell.support == crate::matrix::Support::Unsupported
                     && !cell.note.is_empty())
         );
@@ -1167,9 +1172,17 @@ mod tests {
             .expect("Ruby surfaces as uncovered");
         assert_eq!(finding.request_adapter.as_deref(), Some("Ruby"));
 
+        let cell = ReportedCell {
+            language: "Ruby".into(),
+            framework: "rails".into(),
+            capability: "http_endpoints".into(),
+            support: crate::matrix::Support::Supported,
+            note: String::new(),
+        };
         let plugins = [PluginCoverage {
             plugin_id: "t0.plugin-ruby".into(),
             extensions: vec!["rb".into()],
+            cells: vec![cell.clone()],
         }];
         let after = preflight_with_plugins(dir.path(), &plugins).unwrap();
         let ruby = after
@@ -1178,6 +1191,8 @@ mod tests {
             .find(|l| l.language == "Ruby")
             .expect("Ruby still detected");
         assert_eq!(ruby.adapter.as_deref(), Some("t0.plugin-ruby"));
+        // The gated plugin's declared cells are reported with it (AC-0263).
+        assert_eq!(ruby.coverage, vec![cell]);
         assert!(
             !after
                 .unsupported
@@ -1191,6 +1206,7 @@ mod tests {
         let contested = [PluginCoverage {
             plugin_id: "t0.plugin-rogue".into(),
             extensions: vec!["ts".into()],
+            cells: vec![],
         }];
         let report = preflight_with_plugins(dir.path(), &contested).unwrap();
         let ts = report

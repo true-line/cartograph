@@ -272,10 +272,51 @@ struct PluginStatus {
     /// Explicit per-project opt-in; absent rows are disabled (fail closed).
     enabled: bool,
     /// `passed`, `failed`, or `ungated` — the proposed state every artifact
-    /// starts in. Keyed by content hash: replaced bytes are `ungated` again.
+    /// starts in. Keyed by artifact and corpus bytes: replacing either one
+    /// leaves the plugin `ungated` again.
     gate: &'static str,
     /// First failing check as `name: detail` when the gate failed.
     gate_detail: Option<String>,
+    /// Coverage cells the gated corpus declares; empty unless `passed`.
+    coverage: Vec<ingest::matrix::ReportedCell>,
+}
+
+/// The corpus next to a plugin artifact, read once: its exact bytes key the
+/// gate verdict, and a parsed copy supplies the claims that verdict covers.
+struct PluginCorpus {
+    gate_key: String,
+    corpus: Option<adapters_plugin_host::gate::GoldenCorpus>,
+}
+
+impl PluginCorpus {
+    fn read(plugin: &adapters_plugin_host::discovery::DiscoveredPlugin) -> Self {
+        let bytes = std::fs::read(plugin.path.with_extension("golden.json")).ok();
+        Self {
+            gate_key: adapters_plugin_host::gate::gate_key(&plugin.content_hash, bytes.as_deref()),
+            corpus: bytes.and_then(|bytes| serde_json::from_slice(&bytes).ok()),
+        }
+    }
+
+    /// Declared cells in the reported shape (AC-0263).
+    fn cells(&self) -> Vec<ingest::matrix::ReportedCell> {
+        use adapters_plugin_host::gate::DeclaredSupport;
+        use ingest::matrix::Support;
+        self.corpus
+            .iter()
+            .flat_map(|corpus| &corpus.coverage)
+            .map(|cell| ingest::matrix::ReportedCell {
+                language: cell.language.clone(),
+                framework: cell.framework.clone(),
+                capability: cell.capability.clone(),
+                support: match cell.support {
+                    DeclaredSupport::Supported => Support::Supported,
+                    DeclaredSupport::Partial => Support::Partial,
+                    DeclaredSupport::Unsupported => Support::Unsupported,
+                },
+                note: cell.note.clone(),
+            })
+            .collect()
+    }
 }
 
 /// The lifecycle key for a plugin's enablement rows: the resolved project
@@ -346,6 +387,8 @@ struct ActivePlugin {
     /// match before running them (fail closed on a swap).
     content_hash: String,
     extensions: Vec<String>,
+    /// Coverage cells the gated corpus declares (AC-0263).
+    cells: Vec<ingest::matrix::ReportedCell>,
 }
 
 /// The plugins allowed to extract for `root` right now. Everything about
@@ -393,31 +436,32 @@ fn active_plugins_in(
         if !enabled {
             continue;
         }
+        // The verdict covers these exact corpus bytes: an edited corpus
+        // (new extension or coverage claims) is ungated, never trusted.
+        let corpus = PluginCorpus::read(&plugin);
         let gate_passed = matches!(
             settings_store
-                .plugin_gate(&plugin.id, &plugin.content_hash)
+                .plugin_gate(&plugin.id, &corpus.gate_key)
                 .map_err(|e| e.to_string())?,
             Some((true, _))
         );
         if !gate_passed {
             continue;
         }
-        let corpus_path = plugin.path.with_extension("golden.json");
-        let Ok(text) = std::fs::read_to_string(&corpus_path) else {
-            continue;
-        };
-        let Ok(corpus) = serde_json::from_str::<adapters_plugin_host::gate::GoldenCorpus>(&text)
+        let cells = corpus.cells();
+        let Some(extensions) = corpus
+            .corpus
+            .map(|corpus| corpus.extensions)
+            .filter(|extensions| !extensions.is_empty())
         else {
             continue;
         };
-        if corpus.extensions.is_empty() {
-            continue;
-        }
         active.push(ActivePlugin {
             plugin_id: plugin.id,
             path: plugin.path,
             content_hash: plugin.content_hash,
-            extensions: corpus.extensions,
+            extensions,
+            cells,
         });
     }
     Ok(active)
@@ -437,18 +481,25 @@ fn list_plugins(
             .map_err(|e| e.to_string())?
             .iter()
             .any(|(id, hash)| *id == plugin.id && *hash == plugin.content_hash);
+        let corpus = PluginCorpus::read(&plugin);
         let (gate, gate_detail) = match settings_store
-            .plugin_gate(&plugin.id, &plugin.content_hash)
+            .plugin_gate(&plugin.id, &corpus.gate_key)
             .map_err(|e| e.to_string())?
         {
             Some((true, _)) => ("passed", None),
             Some((false, report_json)) => ("failed", first_failing_check(&report_json)),
             None => ("ungated", None),
         };
+        let coverage = if gate == "passed" {
+            corpus.cells()
+        } else {
+            Vec::new()
+        };
         statuses.push(PluginStatus {
             enabled,
             gate,
             gate_detail,
+            coverage,
             plugin,
         });
     }
@@ -486,7 +537,7 @@ fn gate_source_id() -> adapters_plugin_host::SourceId {
 /// (#200, AC-0068): SPI contract under the standard bounds, the
 /// generator-supplied golden corpus (`{plugin-id}.golden.json` next to the
 /// artifact), and a double-run determinism check. The verdict persists per
-/// (plugin id, content hash) — a missing or unreadable corpus records a
+/// (plugin id, artifact and corpus bytes) — a missing or unreadable corpus records a
 /// failed gate, never a skipped one, and the plugin stays proposed until a
 /// recorded pass for these exact bytes.
 #[tauri::command]
@@ -541,12 +592,14 @@ fn plugin_gate_blocking<R: tauri::Runtime>(
 
     report_progress(app, &state, execution, "gate", 30.0).map_err(&fail)?;
     let corpus_path = plugin.path.with_extension("golden.json");
-    let report = match std::fs::read_to_string(&corpus_path)
-        .map_err(|e| e.to_string())
-        .and_then(|text| {
-            serde_json::from_str::<adapters_plugin_host::gate::GoldenCorpus>(&text)
-                .map_err(|e| e.to_string())
-        }) {
+    // The verdict binds to the artifact and corpus bytes actually gated.
+    let corpus_bytes = std::fs::read(&corpus_path);
+    let gate_key =
+        adapters_plugin_host::gate::gate_key(&content_hash, corpus_bytes.as_deref().ok());
+    let report = match corpus_bytes.map_err(|e| e.to_string()).and_then(|bytes| {
+        serde_json::from_slice::<adapters_plugin_host::gate::GoldenCorpus>(&bytes)
+            .map_err(|e| e.to_string())
+    }) {
         Ok(corpus) => {
             ensure_running_job(&state, execution)?;
             let host = adapters_plugin_host::PluginHost::new().map_err(|e| fail(e.to_string()))?;
@@ -586,7 +639,7 @@ fn plugin_gate_blocking<R: tauri::Runtime>(
         settings_store
             .record_plugin_gate(
                 plugin_id,
-                &content_hash,
+                &gate_key,
                 report.passed,
                 &report_json.to_string(),
             )
@@ -2516,6 +2569,7 @@ fn plugin_coverage(plugins: &[ActivePlugin]) -> Vec<ingest::preflight::PluginCov
         .map(|plugin| ingest::preflight::PluginCoverage {
             plugin_id: plugin.plugin_id.clone(),
             extensions: plugin.extensions.clone(),
+            cells: plugin.cells.clone(),
         })
         .collect()
 }
@@ -8388,7 +8442,12 @@ export function App() {
         });
         let handle = app.handle().clone();
         let state = app.state::<super::AppState>();
-        let hash = core_prov::content_hash(OK_ADAPTER);
+        let hash = adapters_plugin_host::gate::gate_key(
+            &core_prov::content_hash(OK_ADAPTER),
+            std::fs::read(adapters.join("t0.plugin-fixture.golden.json"))
+                .ok()
+                .as_deref(),
+        );
 
         // Enqueue a gate job, then cancel before the pipeline runs.
         let (job, execution) = super::start_job(&state, "plugin-gate:t0.plugin-fixture").unwrap();
@@ -9786,6 +9845,13 @@ export function App() {
                         "props": {}
                     }],
                 }],
+                "coverage": [{
+                    "language": "Ruby",
+                    "framework": "core",
+                    "capability": "types",
+                    "support": "supported",
+                    "cases": ["src/lib.rs"]
+                }],
             })
             .to_string(),
         )
@@ -9880,6 +9946,17 @@ export function App() {
             .find(|l| l.language == "Ruby")
             .expect("Ruby still detected");
         assert_eq!(ruby.adapter.as_deref(), Some("t0.plugin-fixture"));
+        // AC-0263: the gated corpus's declared cell is reported with it.
+        assert_eq!(
+            serde_json::to_value(&ruby.coverage).unwrap(),
+            serde_json::json!([{
+                "language": "Ruby",
+                "framework": "core",
+                "capability": "types",
+                "support": "supported",
+                "note": ""
+            }])
+        );
         assert!(
             !after
                 .unsupported
@@ -9989,6 +10066,27 @@ export function App() {
             .expect("pinned plugin row");
         assert_eq!(row.files, 1);
         assert!(row.nodes >= 1);
+
+        // AC-0263: the verdict covers the exact corpus bytes. Editing the
+        // claims after gating leaves the plugin ungated, so neither its
+        // extensions nor its cells count until the gate reruns.
+        let corpus_path = adapters.join("t0.plugin-fixture.golden.json");
+        let mut corpus: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&corpus_path).unwrap()).unwrap();
+        corpus["coverage"][0]["capability"] = serde_json::json!("http_endpoints");
+        std::fs::write(&corpus_path, corpus.to_string()).unwrap();
+        assert!(
+            super::active_plugins_for_root(&handle, &state, &root)
+                .unwrap()
+                .is_empty()
+        );
+        let edited = super::preflight_uncancelled(&path_arg, &handle, &state).unwrap();
+        let ruby = edited
+            .languages
+            .iter()
+            .find(|l| l.language == "Ruby")
+            .expect("Ruby still detected");
+        assert_eq!((ruby.adapter.as_deref(), ruby.coverage.len()), (None, 0));
     }
 
     #[test]
@@ -10055,7 +10153,17 @@ export function App() {
         {
             let mut settings = state.settings.lock().unwrap();
             settings
-                .record_plugin_gate("t0.plugin-fixture", &user_hash, true, "{}")
+                .record_plugin_gate(
+                    "t0.plugin-fixture",
+                    &adapters_plugin_host::gate::gate_key(
+                        &user_hash,
+                        std::fs::read(user_dir.join("t0.plugin-fixture.golden.json"))
+                            .ok()
+                            .as_deref(),
+                    ),
+                    true,
+                    "{}",
+                )
                 .unwrap();
             settings
                 .set_plugin_enabled("user", "t0.plugin-fixture", &user_hash, true)

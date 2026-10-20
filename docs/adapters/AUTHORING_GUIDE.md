@@ -147,6 +147,12 @@ Next to your compiled artifact, `{your-plugin-id}.golden.json`:
       ],
       "edges": []
     }
+  ],
+  "coverage": [
+    { "language": "Ruby", "framework": "core", "capability": "types",
+      "support": "supported", "cases": ["src/lib.rb"] },
+    { "language": "Ruby", "framework": "rails", "capability": "http_endpoints",
+      "support": "unsupported", "note": "routes.rb is not read yet" }
   ]
 }
 ```
@@ -169,6 +175,15 @@ Next to your compiled artifact, `{your-plugin-id}.golden.json`:
 - An empty corpus fails the gate closed. Cover the constructs you actually
   claim to extract; each golden case's `path` is also the file the routing
   layer would hand you at that extension, so pick realistic paths.
+- `coverage` states your language × framework × capability cells (AC-0263),
+  shown in Preflight and Settings alongside the compiled-in matrix. A
+  `supported` or `partial` cell names the golden `cases` that prove it, and
+  since every case must pass, a gated plugin's claims are proven. `partial`
+  and `unsupported` need a `note` saying what is missed, `supported` must
+  have none, and `unsupported` names no cases. `capability` is snake_case and
+  may be one the core does not know (`graphql_operations`), which is how a
+  plugin makes a new kind of fact visible. A malformed declaration fails the
+  `coverage-declarations` check.
 
 ### 7. Drop it in and gate it
 
@@ -179,8 +194,10 @@ every project — project copies win on id conflict). Open **Settings →
 Adapters**: your plugin appears under "Plugin adapters (discovered)" with a
 content hash and a **Run conformance gate** button. Run it — every check
 (`spi-compiles`, `corpus-nonempty`, one `contract:{path}` + `golden:{path}`
-pair per case, `determinism-double-run`) needs to pass; a failure names the
-specific check and why.
+pair per case, `coverage-declarations`, `determinism-double-run`) needs to
+pass; a failure names the specific check and why. The verdict binds to the
+artifact *and* the exact corpus bytes: editing `extensions` or `coverage`
+after gating leaves the plugin ungated until you run the gate again.
 
 ### 8. Enable it
 

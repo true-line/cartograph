@@ -313,6 +313,9 @@ export interface PluginStatus {
   gate: 'passed' | 'failed' | 'ungated';
   /** First failing check as `name: detail` when the gate failed. */
   gate_detail: string | null;
+  /** Coverage cells the gated corpus declares (AC-0263); empty unless
+   * the gate passed for these exact artifact and corpus bytes. */
+  coverage: CoverageCell[];
 }
 
 export type SpecExportMode = 'verified-only' | 'best-effort';

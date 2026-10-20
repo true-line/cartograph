@@ -484,6 +484,7 @@ export function SettingsSurface({
               {plugin.gate === 'failed' && plugin.gate_detail && (
                 <p className="error-text">{plugin.gate_detail}</p>
               )}
+              <CoverageMatrix language={plugin.id} cells={plugin.coverage} />
             </li>
           ))}
         </ul>
