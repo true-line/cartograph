@@ -688,3 +688,37 @@ fn nested_omissions_reject_unknown_fields_without_changing_the_wire_shape() {
     encoded["omission"]["future_requirement"] = json!(true);
     assert!(serde_json::from_value::<EvidenceLimitation>(encoded).is_err());
 }
+
+// AC-0252: reopen refuses drift rather than repairing immutable-store guards.
+#[test]
+fn ac0252_reopen_rejects_incompatible_schema_without_repair() {
+    for mutation in [
+        "DROP TRIGGER work_packet_body_immutable_update",
+        "ALTER TABLE work_packet_reviews ADD COLUMN unexpected TEXT",
+        "DROP TABLE work_packet_meta",
+        "DELETE FROM work_packet_meta",
+        "CREATE TRIGGER other_name AFTER INSERT ON work_packet_events BEGIN SELECT 1; END",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("packets.sqlite");
+        let mut store = PacketStore::open(&path).unwrap();
+        let id = store.put(body(), &[], "now").unwrap().packet_id;
+        drop(store);
+        PacketStore::open(&path).unwrap().get(&id).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(mutation).unwrap();
+        assert!(
+            matches!(
+                PacketStore::open(&path),
+                Err(PacketError::InvalidInput(
+                    "incompatible packet store schema"
+                ))
+            ),
+            "{mutation}"
+        );
+        if mutation.starts_with("DROP TRIGGER") {
+            let count: i64 = connection.query_row("SELECT count(*) FROM sqlite_schema WHERE name='work_packet_body_immutable_update'", [], |r| r.get(0)).unwrap();
+            assert_eq!(count, 0, "reopen must not recreate a missing guard");
+        }
+    }
+}

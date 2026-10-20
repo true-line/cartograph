@@ -10,7 +10,7 @@ Execution: unoffered. Capability requests confer no authority.
 
     1
 
-## Lineage
+## Lineage (outside reviewed body; additions do not change review revision)
 
     {
       "predecessor_ids": []

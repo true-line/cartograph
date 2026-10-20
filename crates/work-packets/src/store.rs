@@ -98,6 +98,105 @@ pub struct PacketSummary {
     pub execution: ExecutionState,
 }
 
+const SCHEMA: &[(&str, &str, &str)] = &[
+    (
+        "table",
+        "work_packet_meta",
+        "CREATE TABLE work_packet_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1))",
+    ),
+    (
+        "table",
+        "work_packet_bodies",
+        "CREATE TABLE work_packet_bodies(packet_id TEXT PRIMARY KEY, body BLOB NOT NULL)",
+    ),
+    (
+        "table",
+        "work_packet_reviews",
+        "CREATE TABLE work_packet_reviews(packet_id TEXT PRIMARY KEY REFERENCES work_packet_bodies(packet_id), revision INTEGER NOT NULL, status TEXT NOT NULL, note TEXT)",
+    ),
+    (
+        "table",
+        "work_packet_lineage",
+        "CREATE TABLE work_packet_lineage(packet_id TEXT NOT NULL REFERENCES work_packet_bodies(packet_id), predecessor_id TEXT NOT NULL REFERENCES work_packet_bodies(packet_id), PRIMARY KEY(packet_id,predecessor_id), CHECK(packet_id<>predecessor_id))",
+    ),
+    (
+        "table",
+        "work_packet_events",
+        "CREATE TABLE work_packet_events(event_id INTEGER PRIMARY KEY,packet_id TEXT NOT NULL REFERENCES work_packet_bodies(packet_id),kind TEXT NOT NULL,at TEXT NOT NULL,revision INTEGER,note TEXT)",
+    ),
+    (
+        "table",
+        "work_packet_assessments",
+        "CREATE TABLE work_packet_assessments(packet_id TEXT PRIMARY KEY REFERENCES work_packet_bodies(packet_id), assessment BLOB NOT NULL)",
+    ),
+    (
+        "trigger",
+        "work_packet_body_immutable_update",
+        "CREATE TRIGGER work_packet_body_immutable_update BEFORE UPDATE ON work_packet_bodies BEGIN SELECT RAISE(ABORT,'immutable packet body'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_body_immutable_delete",
+        "CREATE TRIGGER work_packet_body_immutable_delete BEFORE DELETE ON work_packet_bodies BEGIN SELECT RAISE(ABORT,'immutable packet body'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_lineage_immutable_update",
+        "CREATE TRIGGER work_packet_lineage_immutable_update BEFORE UPDATE ON work_packet_lineage BEGIN SELECT RAISE(ABORT,'immutable packet lineage'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_lineage_immutable_delete",
+        "CREATE TRIGGER work_packet_lineage_immutable_delete BEFORE DELETE ON work_packet_lineage BEGIN SELECT RAISE(ABORT,'immutable packet lineage'); END",
+    ),
+];
+
+fn admit_schema(connection: &mut Connection) -> PacketResult<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Include extra triggers/indexes on owned tables, regardless of their names.
+    let predicate =
+        "name GLOB 'work_packet_*' OR (tbl_name GLOB 'work_packet_*' AND name NOT GLOB 'sqlite_*')";
+    let (count, bounded): (i64, bool) = transaction.query_row(
+        &format!("SELECT count(*), coalesce(min(typeof(name)='text' AND length(CAST(name AS BLOB))<=256 AND typeof(type)='text' AND length(CAST(type AS BLOB))<=16 AND typeof(sql)='text' AND length(CAST(sql AS BLOB))<=4096), 1) FROM sqlite_schema WHERE {predicate}"),
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let incompatible = || PacketError::InvalidInput("incompatible packet store schema");
+    if count != 0 && (usize::try_from(count).ok() != Some(SCHEMA.len()) || !bounded) {
+        return Err(incompatible());
+    }
+    if count == 0 {
+        for (_, _, sql) in SCHEMA {
+            transaction.execute_batch(sql)?;
+        }
+        transaction.execute("INSERT INTO work_packet_meta VALUES(1,1)", [])?;
+    }
+    let mut statement = transaction.prepare(&format!(
+        "SELECT name, type, sql FROM sqlite_schema WHERE {predicate}"
+    ))?;
+    let actual = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1)?, row.get::<_, String>(2)?),
+            ))
+        })?
+        .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+    drop(statement);
+    if actual.len() != SCHEMA.len()
+        || SCHEMA.iter().any(|(kind, name, sql)| {
+            actual.get(*name).map(|(k, s)| (k.as_str(), s.as_str())) != Some((*kind, *sql))
+        })
+    {
+        return Err(incompatible());
+    }
+    let valid_version: bool = transaction.query_row("SELECT count(*)=1 AND coalesce(min(typeof(singleton)='integer' AND singleton=1 AND typeof(version)='integer' AND version=1),0) FROM work_packet_meta", [], |row| row.get(0))?;
+    if !valid_version {
+        return Err(incompatible());
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 pub struct PacketStore {
     connection: Connection,
 }
@@ -109,18 +208,10 @@ impl PacketStore {
     pub fn in_memory() -> PacketResult<Self> {
         Self::initialize(Connection::open_in_memory()?)
     }
-    fn initialize(connection: Connection) -> PacketResult<Self> {
+    fn initialize(mut connection: Connection) -> PacketResult<Self> {
         connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch("PRAGMA foreign_keys=ON;
-            CREATE TABLE IF NOT EXISTS work_packet_bodies(packet_id TEXT PRIMARY KEY, body BLOB NOT NULL);
-            CREATE TABLE IF NOT EXISTS work_packet_reviews(packet_id TEXT PRIMARY KEY REFERENCES work_packet_bodies(packet_id), revision INTEGER NOT NULL, status TEXT NOT NULL, note TEXT);
-            CREATE TABLE IF NOT EXISTS work_packet_lineage(packet_id TEXT NOT NULL REFERENCES work_packet_bodies(packet_id), predecessor_id TEXT NOT NULL REFERENCES work_packet_bodies(packet_id), PRIMARY KEY(packet_id,predecessor_id), CHECK(packet_id<>predecessor_id));
-            CREATE TABLE IF NOT EXISTS work_packet_events(event_id INTEGER PRIMARY KEY,packet_id TEXT NOT NULL REFERENCES work_packet_bodies(packet_id),kind TEXT NOT NULL,at TEXT NOT NULL,revision INTEGER,note TEXT);
-            CREATE TABLE IF NOT EXISTS work_packet_assessments(packet_id TEXT PRIMARY KEY REFERENCES work_packet_bodies(packet_id), assessment BLOB NOT NULL);
-            CREATE TRIGGER IF NOT EXISTS work_packet_body_immutable_update BEFORE UPDATE ON work_packet_bodies BEGIN SELECT RAISE(ABORT,'immutable packet body'); END;
-            CREATE TRIGGER IF NOT EXISTS work_packet_body_immutable_delete BEFORE DELETE ON work_packet_bodies BEGIN SELECT RAISE(ABORT,'immutable packet body'); END;
-            CREATE TRIGGER IF NOT EXISTS work_packet_lineage_immutable_update BEFORE UPDATE ON work_packet_lineage BEGIN SELECT RAISE(ABORT,'immutable packet lineage'); END;
-            CREATE TRIGGER IF NOT EXISTS work_packet_lineage_immutable_delete BEFORE DELETE ON work_packet_lineage BEGIN SELECT RAISE(ABORT,'immutable packet lineage'); END;")?;
+        connection.execute_batch("PRAGMA foreign_keys=ON;")?;
+        admit_schema(&mut connection)?;
         Ok(Self { connection })
     }
     /// Admit the entire get envelope before committing any body or metadata.

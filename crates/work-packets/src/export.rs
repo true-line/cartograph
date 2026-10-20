@@ -17,7 +17,11 @@ pub fn export_markdown(detail: &PacketDetail) -> PacketResult<String> {
         "Body schema version",
         &detail.body.schema_version,
     )?;
-    section(&mut output, "Lineage", &detail.lineage)?;
+    section(
+        &mut output,
+        "Lineage (outside reviewed body; additions do not change review revision)",
+        &detail.lineage,
+    )?;
     section(&mut output, "Review (independent metadata)", &detail.review)?;
     section(
         &mut output,
