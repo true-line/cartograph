@@ -181,8 +181,11 @@ Next to your compiled artifact, `{your-plugin-id}.golden.json`:
   least one of which asserts nodes or edges (an empty-output negative case
   may accompany it but cannot prove a claim alone). Since every case must
   pass, a gated plugin's claims are proven. Cells are reported per language,
-  so a plugin covering several languages lists each one's cells; a new
-  language the core cannot name shows its cells under its extension (`.foo`). `partial`
+  so a plugin covering several languages lists each one's cells. For an
+  extension the core cannot name, `languages` gives its language
+  (`"languages": {"foo": "Foo"}`, keys must be claimed extensions); without
+  one it shows as `.foo` with no cells. Language names compare
+  case-insensitively, so `Ruby` and `ruby` are one cell. `partial`
   and `unsupported` need a `note` saying what is missed, `supported` must
   have none, and `unsupported` names no cases. `capability` is snake_case and
   may be one the core does not know (`graphql_operations`), which is how a

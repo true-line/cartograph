@@ -65,6 +65,11 @@ pub struct GoldenCorpus {
     /// when the gate passes those cases.
     #[serde(default)]
     pub coverage: Vec<DeclaredCell>,
+    /// Language names for claimed extensions the core cannot name (AC-0263),
+    /// e.g. `{"foo": "Foo"}`; cells are reported under the language their
+    /// file's extension names.
+    #[serde(default)]
+    pub languages: std::collections::BTreeMap<String, String>,
 }
 
 /// How far a declared cell is covered — the same scale as compiled-in
@@ -130,6 +135,13 @@ fn declaration_problem(corpus: &GoldenCorpus) -> Option<String> {
             (case.path.as_str(), any)
         })
         .collect();
+    if let Some((extension, _)) = corpus.languages.iter().find(|(extension, language)| {
+        !corpus.extensions.contains(extension) || language.trim().is_empty()
+    }) {
+        return Some(format!(
+            "languages.{extension}: names a claimed extension and a language"
+        ));
+    }
     let mut seen = std::collections::BTreeSet::new();
     for cell in &corpus.coverage {
         let id = format!("{}.{}.{}", cell.language, cell.framework, cell.capability);
@@ -143,7 +155,10 @@ fn declaration_problem(corpus: &GoldenCorpus) -> Option<String> {
                 "{id}: language, framework and snake_case capability required"
             ));
         }
-        if !seen.insert((&cell.language, &cell.framework, &cell.capability)) {
+        // Languages match case-insensitively downstream, so `Ruby` and
+        // `ruby` are the same cell.
+        let language = cell.language.to_ascii_lowercase();
+        if !seen.insert((language, &cell.framework, &cell.capability)) {
             return Some(format!("{id}: declared twice"));
         }
         let noted = !cell.note.trim().is_empty();

@@ -305,6 +305,7 @@ fn conformance_gate_passes_golden_corpus_and_fails_closed() {
             }],
         }],
         coverage: vec![],
+        languages: Default::default(),
     };
 
     let report = run_gate(
@@ -345,6 +346,7 @@ fn conformance_gate_passes_golden_corpus_and_fails_closed() {
         extensions: vec![],
         cases: vec![],
         coverage: vec![],
+        languages: Default::default(),
     };
     let report = run_gate(
         &host,
@@ -421,6 +423,7 @@ fn coverage_declarations_count_only_when_their_cases_pass() {
             }],
         }],
         coverage,
+        languages: Default::default(),
     };
     let gate = |corpus: &GoldenCorpus| {
         let report = run_gate(
@@ -508,6 +511,29 @@ fn coverage_declarations_count_only_when_their_cases_pass() {
         &["src/lib.rs", "src/empty.rs"],
     )]));
     assert_eq!(detail, "1 declared cell(s)");
+
+    // Languages match case-insensitively downstream: `Ruby` twice is a
+    // duplicate however it is spelled.
+    let lower = DeclaredCell {
+        language: cell(DeclaredSupport::Supported, "", &[])
+            .language
+            .to_lowercase(),
+        ..cell(DeclaredSupport::Supported, "", &["src/lib.rs"])
+    };
+    let upper = DeclaredCell {
+        language: lower.language.to_uppercase(),
+        ..lower.clone()
+    };
+    let (passed, detail) = gate(&corpus(vec![lower, upper]));
+    assert!(!passed && detail.contains("declared twice"), "{detail}");
+
+    // A language name must belong to a claimed extension.
+    let mut named = corpus(vec![]);
+    named.languages.insert("foo".to_string(), "Foo".to_string());
+    let (passed, detail) = gate(&named);
+    assert!(!passed && detail.contains("languages.foo"), "{detail}");
+    named.extensions.push("foo".to_string());
+    assert_eq!(gate(&named).1, "0 declared cell(s)");
 
     let twice = cell(DeclaredSupport::Supported, "", &["src/lib.rs"]);
     let (passed, detail) = gate(&corpus(vec![twice.clone(), twice]));

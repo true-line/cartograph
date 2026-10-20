@@ -244,6 +244,8 @@ pub struct PluginCoverage {
     pub extensions: Vec<String>,
     /// Coverage cells the gated corpus declares (AC-0263).
     pub cells: Vec<ReportedCell>,
+    /// Language names the corpus gives extensions the core cannot name.
+    pub languages: std::collections::BTreeMap<String, String>,
 }
 
 /// The TS adapter's AST-level classification of one `eval(` site (#214).
@@ -567,28 +569,18 @@ fn detect_language(
     } else if let Some(plugin) = plugin_claim {
         // A gated plugin covers this extension (#201): report it as
         // covered under the plugin id — no unsupported finding.
-        let known = uncovered_language(extension);
-        let language = known
+        // A new language the core cannot name takes the name the corpus
+        // gives its extension, else the bare extension.
+        let language = uncovered_language(extension)
             .map(str::to_string)
+            .or_else(|| plugin.languages.get(extension).cloned())
             .unwrap_or_else(|| format!(".{extension}"));
         // Only this language's cells: one plugin may declare several
-        // languages with differing support. An extension with no known
-        // language (a plugin's new language) keeps the cells no known
-        // language of the plugin's extensions claims.
-        let claimed: Vec<&str> = plugin
-            .extensions
-            .iter()
-            .filter_map(|e| uncovered_language(e))
-            .collect();
+        // languages with differing support.
         let coverage = plugin
             .cells
             .iter()
-            .filter(|cell| match known {
-                Some(known) => cell.language.eq_ignore_ascii_case(known),
-                None => !claimed
-                    .iter()
-                    .any(|c| cell.language.eq_ignore_ascii_case(c)),
-            })
+            .filter(|cell| cell.language.eq_ignore_ascii_case(&language))
             .cloned()
             .collect();
         let entry = languages
@@ -1204,6 +1196,7 @@ mod tests {
             plugin_id: "t0.plugin-ruby".into(),
             extensions: vec!["rb".into()],
             cells: vec![cell.clone()],
+            languages: Default::default(),
         }];
         let after = preflight_with_plugins(dir.path(), &plugins).unwrap();
         let ruby = after
@@ -1228,6 +1221,7 @@ mod tests {
             plugin_id: "t0.plugin-rogue".into(),
             extensions: vec!["ts".into()],
             cells: vec![],
+            languages: Default::default(),
         }];
         let report = preflight_with_plugins(dir.path(), &contested).unwrap();
         let ts = report
@@ -1263,6 +1257,7 @@ mod tests {
             plugin_id: "t0.plugin-scripts".into(),
             extensions: vec!["rb".into(), "php".into()],
             cells: vec![ruby_cell.clone(), php_cell.clone()],
+            languages: Default::default(),
         }];
         let report = preflight_with_plugins(dir.path(), &plugins).unwrap();
         let coverage = |language: &str| {
@@ -1276,14 +1271,19 @@ mod tests {
         assert_eq!(coverage("Ruby"), vec![ruby_cell.clone()]);
         assert_eq!(coverage("PHP"), vec![php_cell]);
 
-        // A new language the core cannot name keeps its own labeled cells,
-        // and still never the plugin's known-language claims.
+        // New languages the core cannot name take the corpus's names for
+        // their extensions, so two of them never share each other's cells.
         write(dir.path(), "main.foo", "say hi\n");
+        write(dir.path(), "main.bar", "say hi\n");
         let foo_cell = cell("Foo", crate::matrix::Support::Supported, "");
+        let bar_cell = cell("Bar", crate::matrix::Support::Partial, "no routes");
         let plugins = [PluginCoverage {
             plugin_id: "t0.plugin-foo".into(),
-            extensions: vec!["foo".into(), "rb".into()],
-            cells: vec![foo_cell.clone(), ruby_cell.clone()],
+            extensions: vec!["foo".into(), "bar".into(), "rb".into()],
+            cells: vec![foo_cell.clone(), bar_cell.clone(), ruby_cell.clone()],
+            languages: [("foo", "Foo"), ("bar", "Bar")]
+                .map(|(e, l)| (e.to_string(), l.to_string()))
+                .into(),
         }];
         let report = preflight_with_plugins(dir.path(), &plugins).unwrap();
         let coverage = |language: &str| {
@@ -1294,7 +1294,8 @@ mod tests {
                 .map(|l| l.coverage.clone())
                 .expect("language detected")
         };
-        assert_eq!(coverage(".foo"), vec![foo_cell]);
+        assert_eq!(coverage("Foo"), vec![foo_cell]);
+        assert_eq!(coverage("Bar"), vec![bar_cell]);
         assert_eq!(coverage("Ruby"), vec![ruby_cell]);
     }
 

@@ -389,6 +389,11 @@ struct ActivePlugin {
     extensions: Vec<String>,
     /// Coverage cells the gated corpus declares (AC-0263).
     cells: Vec<ingest::matrix::ReportedCell>,
+    /// The corpus's names for extensions the core cannot name.
+    languages: std::collections::BTreeMap<String, String>,
+    /// The gate key over the artifact and its exact corpus bytes; it enters
+    /// the coverage basis, so a corpus edit stales recorded inventories.
+    gate_key: String,
 }
 
 /// The plugins allowed to extract for `root` right now. Everything about
@@ -449,10 +454,11 @@ fn active_plugins_in(
             continue;
         }
         let cells = corpus.cells();
-        let Some(extensions) = corpus
+        let gate_key = corpus.gate_key;
+        let Some((extensions, languages)) = corpus
             .corpus
-            .map(|corpus| corpus.extensions)
-            .filter(|extensions| !extensions.is_empty())
+            .map(|corpus| (corpus.extensions, corpus.languages))
+            .filter(|(extensions, _)| !extensions.is_empty())
         else {
             continue;
         };
@@ -462,6 +468,8 @@ fn active_plugins_in(
             content_hash: plugin.content_hash,
             extensions,
             cells,
+            languages,
+            gate_key,
         });
     }
     Ok(active)
@@ -893,7 +901,11 @@ pub(crate) fn coverage_config_hash(plugins: &[ActivePlugin]) -> String {
     let mut pinned: Vec<String> = plugins
         .iter()
         .map(|plugin| {
-            adapters_plugin_host::pinned_extractor_id(&plugin.plugin_id, &plugin.content_hash)
+            // The gate key binds the corpus: edited routing or coverage
+            // claims change the basis even when the artifact did not.
+            let pinned =
+                adapters_plugin_host::pinned_extractor_id(&plugin.plugin_id, &plugin.content_hash);
+            format!("{pinned}#{}", plugin.gate_key)
         })
         .collect();
     pinned.sort();
@@ -2570,6 +2582,7 @@ fn plugin_coverage(plugins: &[ActivePlugin]) -> Vec<ingest::preflight::PluginCov
             plugin_id: plugin.plugin_id.clone(),
             extensions: plugin.extensions.clone(),
             cells: plugin.cells.clone(),
+            languages: plugin.languages.clone(),
         })
         .collect()
 }
@@ -8863,6 +8876,31 @@ export function App() {
         assert_eq!(reports[1].1, vec![1], "the local repo's dynamic Function");
         assert_eq!(preflight_register(&state, reports[0].0), vec![(2, false)]);
         assert_eq!(preflight_register(&state, reports[1].0), vec![(1, false)]);
+    }
+
+    #[test]
+    fn coverage_basis_binds_each_plugins_corpus() {
+        // AC-0263: a corpus edit that is re-gated with the same artifact
+        // changes routing/coverage claims, so it must change the basis that
+        // recorded inventories are compared against; no plugins keeps the
+        // pre-existing basis.
+        let plugin = |gate_key: &str| super::ActivePlugin {
+            plugin_id: "t0.adapter-ruby".into(),
+            path: std::path::PathBuf::from("/plugins/t0.adapter-ruby.wasm"),
+            content_hash: "a".repeat(64),
+            extensions: vec!["rb".into()],
+            cells: vec![],
+            languages: Default::default(),
+            gate_key: gate_key.into(),
+        };
+        let first = super::coverage_config_hash(&[plugin("gate-1")]);
+        assert_eq!(first, super::coverage_config_hash(&[plugin("gate-1")]));
+        assert_ne!(first, super::coverage_config_hash(&[plugin("gate-2")]));
+        let none = serde_json::json!({"basis": "coverage-config-v1", "plugins": []});
+        assert_eq!(
+            super::coverage_config_hash(&[]),
+            core_prov::content_hash(none.to_string().as_bytes())
+        );
     }
 
     #[test]
