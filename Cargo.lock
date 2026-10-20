@@ -1518,6 +1518,7 @@ dependencies = [
 name = "flowtracer"
 version = "0.15.5"
 dependencies = [
+ "blake3",
  "core-graph",
  "core-prov",
  "serde",

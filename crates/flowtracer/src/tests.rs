@@ -3,6 +3,25 @@
 
 use super::*;
 
+// Every legacy fixture also establishes byte-for-byte bounded/unbounded
+// equivalence at the exact count and serialized-byte boundaries (AC-0257).
+fn trace(nodes: &[Node], edges: &[Edge]) -> Vec<Flow> {
+    let ordinary = super::trace(nodes, edges);
+    let expected = serde_json::to_vec(&ordinary).unwrap();
+    let bounded = trace_bounded(
+        nodes,
+        edges,
+        TraceLimits {
+            max_flows: ordinary.len(),
+            max_hops: ordinary.iter().map(|flow| flow.hops.len()).sum(),
+            max_output_bytes: expected.len(),
+        },
+    )
+    .unwrap();
+    assert_eq!(serde_json::to_vec(&bounded).unwrap(), expected);
+    ordinary
+}
+
 fn node(id: &str, label: &str, props: serde_json::Value) -> Node {
     Node {
         id: id.into(),
@@ -866,4 +885,341 @@ fn rule_evidence_and_ordering_dependencies_leave_the_flow_verified() {
     assert_eq!(flow.status, FlowStatus::Verified);
     assert!(flow.hops.iter().all(|h| h.label != "DEPENDS_ON"));
     assert_eq!(flow.hops.len(), 2);
+}
+
+fn unrestricted_counts(bytes: usize) -> TraceLimits {
+    TraceLimits {
+        max_flows: usize::MAX,
+        max_hops: usize::MAX,
+        max_output_bytes: bytes,
+    }
+}
+
+fn reset_materialization() {
+    bounded::OWNED_HOPS.with(|counter| counter.set(0));
+    bounded::OWNED_FLOWS.with(|counter| counter.set(0));
+}
+
+fn assert_no_materialization() {
+    bounded::OWNED_HOPS
+        .with(|counter| assert_eq!(counter.get(), 0, "no owned hop before admission"));
+    bounded::OWNED_FLOWS
+        .with(|counter| assert_eq!(counter.get(), 0, "no owned flow before admission"));
+}
+
+// AC-0257: limit failures are explicit; they never return a partial trace.
+#[test]
+fn bounded_trace_admits_exact_boundaries_and_rejects_the_next_byte_or_item() {
+    let (nodes, edges) = event_chain();
+    let full = super::trace(&nodes, &edges);
+    let bytes = serde_json::to_vec(&full).unwrap().len();
+    let limits = TraceLimits {
+        max_flows: 1,
+        max_hops: 4,
+        max_output_bytes: bytes,
+    };
+    for bytes_limit in [bytes, bytes + 1] {
+        let actual = trace_bounded(
+            &nodes,
+            &edges,
+            TraceLimits {
+                max_output_bytes: bytes_limit,
+                ..limits
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&full).unwrap()
+        );
+    }
+    for (limited, expected) in [
+        (
+            TraceLimits {
+                max_flows: 0,
+                ..limits
+            },
+            TraceLimit::Flows,
+        ),
+        (
+            TraceLimits {
+                max_hops: 3,
+                ..limits
+            },
+            TraceLimit::Hops,
+        ),
+        (
+            TraceLimits {
+                max_output_bytes: bytes - 1,
+                ..limits
+            },
+            TraceLimit::OutputBytes,
+        ),
+    ] {
+        reset_materialization();
+        assert_eq!(
+            trace_bounded(&nodes, &edges, limited).unwrap_err().limit,
+            expected
+        );
+        assert_no_materialization();
+    }
+    for bytes_limit in [0, 1] {
+        assert_eq!(
+            trace_bounded(&[], &[], unrestricted_counts(bytes_limit))
+                .unwrap_err()
+                .limit,
+            TraceLimit::OutputBytes
+        );
+    }
+    assert!(
+        trace_bounded(
+            &[],
+            &[],
+            TraceLimits {
+                max_flows: 0,
+                max_hops: 0,
+                max_output_bytes: 2
+            }
+        )
+        .unwrap()
+        .is_empty()
+    );
+    let trigger = [node("empty", "Screen", serde_json::json!({}))];
+    let full = super::trace(&trigger, &[]);
+    let bytes = serde_json::to_vec(&full).unwrap().len();
+    assert!(
+        trace_bounded(
+            &trigger,
+            &[],
+            TraceLimits {
+                max_flows: 1,
+                max_hops: 0,
+                max_output_bytes: bytes
+            }
+        )
+        .is_ok()
+    );
+}
+
+// AC-0257: all flows share count and byte admission, including array commas.
+#[test]
+fn bounded_trace_charges_hops_and_bytes_across_multiple_anchors() {
+    let mut nodes = vec![
+        node("a", "Screen", serde_json::json!({})),
+        node("b", "Command", serde_json::json!({})),
+    ];
+    nodes.push(node(
+        "target",
+        "Symbol",
+        serde_json::json!({"name": "quoted \"\n\t\\ é"}),
+    ));
+    let edges = vec![
+        edge("a", "target", "CALLS", "Confirmed"),
+        edge("b", "target", "CALLS", "InferredStrong"),
+    ];
+    let full = trace(&nodes, &edges);
+    let bytes = serde_json::to_vec(&full).unwrap().len();
+    let limits = TraceLimits {
+        max_flows: 2,
+        max_hops: 2,
+        max_output_bytes: bytes,
+    };
+    for (limited, expected) in [
+        (
+            TraceLimits {
+                max_flows: 1,
+                ..limits
+            },
+            TraceLimit::Flows,
+        ),
+        (
+            TraceLimits {
+                max_hops: 1,
+                ..limits
+            },
+            TraceLimit::Hops,
+        ),
+        (
+            TraceLimits {
+                max_output_bytes: bytes - 1,
+                ..limits
+            },
+            TraceLimit::OutputBytes,
+        ),
+    ] {
+        assert_eq!(
+            trace_bounded(&nodes, &edges, limited).unwrap_err().limit,
+            expected
+        );
+    }
+}
+
+// AC-0257: large repeated display names and provenance stay borrowed until
+// the complete flow fits; fan-out candidates never construct owned Hops.
+#[test]
+fn bounded_trace_rejects_large_fields_and_fanout_before_owning_hops() {
+    for large_provenance in [false, true] {
+        let mut nodes = vec![
+            node("start", "Endpoint", serde_json::json!({})),
+            node("target", "Symbol", serde_json::json!({})),
+        ];
+        let mut edges = vec![edge("start", "target", "HANDLES", "Confirmed")];
+        let huge = "quoted \"\n é".repeat(100_000);
+        if large_provenance {
+            edges[0].props["prov"]["evidence"][0]["path"] = huge.into();
+        } else {
+            nodes[1].props["name"] = huge.into();
+        }
+        reset_materialization();
+        assert_eq!(
+            trace_bounded(&nodes, &edges, unrestricted_counts(1024))
+                .unwrap_err()
+                .limit,
+            TraceLimit::OutputBytes
+        );
+        assert_no_materialization();
+    }
+    let mut nodes = vec![node(
+        "start",
+        "Endpoint",
+        serde_json::json!({"path": "large".repeat(100_000), "method": "GET"}),
+    )];
+    let mut edges = Vec::new();
+    for index in 0..1000 {
+        let id = format!("s{index:04}");
+        nodes.push(node(&id, "Symbol", serde_json::json!({})));
+        edges.push(edge("start", &id, "CALLS", "Confirmed"));
+    }
+    reset_materialization();
+    let limits = TraceLimits {
+        max_flows: 1,
+        max_hops: 7,
+        max_output_bytes: usize::MAX,
+    };
+    assert_eq!(
+        trace_bounded(&nodes, &edges, limits).unwrap_err().limit,
+        TraceLimit::Hops
+    );
+    assert_no_materialization();
+    reset_materialization();
+    assert_eq!(
+        trace_bounded(&nodes, &edges, unrestricted_counts(1024))
+            .unwrap_err()
+            .limit,
+        TraceLimit::OutputBytes
+    );
+    assert_no_materialization();
+}
+
+// AC-0257: borrowing and fallback hashing preserve the pre-existing wire
+// contract, including ignored fields, malformed provenance and duplicates.
+#[test]
+fn bounded_trace_preserves_provenance_validation_and_duplicate_hop_order() {
+    let (nodes, mut edges) = event_chain();
+    let mut duplicate = edges[0].clone();
+    duplicate.props["prov"]["confidence_tier"] = "Gap".into();
+    edges.insert(1, duplicate);
+    let actual = trace(&nodes, &edges);
+    assert_eq!(actual[0].hops.len(), 4);
+    assert_eq!(actual[0].hops[0].confidence, "Confirmed");
+    for invalid in [
+        serde_json::Value::Null,
+        serde_json::json!({"tier": "Agentic", "confidence_tier": "Confirmed", "evidence": [], "extractor_id": "bad", "content_hash": "x"}),
+    ] {
+        edges[0].props["prov"] = invalid;
+        let actual = trace(&nodes, &edges);
+        let hop = &actual[0].hops[0];
+        let canonical =
+            serde_json::to_vec(&(&edges[0].src, &edges[0].label, &edges[0].dst)).unwrap();
+        let expected = Provenance::new(
+            core_prov::Tier::Deterministic,
+            core_prov::ConfidenceTier::Gap,
+            vec![],
+            "flowtracer.invalid-provenance",
+            &canonical,
+        )
+        .unwrap();
+        assert_eq!(hop.provenance, expected);
+    }
+    edges[0] = edge(
+        "ep:POST:/orders",
+        "sym:app.ts#create",
+        "HANDLES",
+        "Confirmed",
+    );
+    edges[0].props["prov"]["unknown"] = "ignored".repeat(1000).into();
+    let actual = trace(&nodes, &edges);
+    let expected: Provenance = serde_json::from_value(edges[0].props["prov"].clone()).unwrap();
+    assert_eq!(actual[0].hops[0].provenance, expected);
+}
+
+// AC-0244 / AC-0257: borrowed admission preserves recorded methods and the
+// exact legacy absent serialization, without inferring labels from tier.
+#[test]
+fn bounded_trace_preserves_all_producing_methods_and_legacy_bytes() {
+    let (nodes, mut edges) = event_chain();
+    let legacy = serde_json::to_vec(&super::trace(&nodes, &edges)).unwrap();
+    for method in [
+        serde_json::json!({"kind":"rule", "rule":"rule \" é", "version":"v1\n"}),
+        serde_json::json!({"kind":"model", "model":"provider/model"}),
+        serde_json::json!({"kind":"human", "actor":"recorded actor"}),
+        serde_json::json!({"kind":"unrecorded"}),
+        // The current authoritative contract allows these labels verbatim.
+        serde_json::json!({"kind":"rule", "rule":"", "version":" "}),
+        serde_json::json!({"kind":"model", "model":""}),
+        serde_json::json!({"kind":"human", "actor":" "}),
+    ] {
+        edges[0].props["prov"]["method"] = method.clone();
+        let expected: Provenance = serde_json::from_value(edges[0].props["prov"].clone()).unwrap();
+        assert!(expected.validate().is_ok());
+        let flows = trace(&nodes, &edges);
+        assert_eq!(flows[0].hops[0].provenance, expected);
+        let output = serde_json::to_vec(&flows).unwrap();
+        if method["kind"] == "unrecorded" {
+            assert_eq!(output, legacy, "explicit unrecorded keeps legacy bytes");
+        } else {
+            assert_ne!(output, legacy, "recorded producing methods are bound");
+        }
+    }
+    for malformed in [
+        serde_json::Value::Null,
+        serde_json::json!({"kind":"unknown"}),
+        serde_json::json!({"kind":"rule", "rule":"missing version"}),
+        serde_json::json!({"kind":"model", "model":3}),
+    ] {
+        edges[0].props["prov"]["method"] = malformed;
+        assert!(serde_json::from_value::<Provenance>(edges[0].props["prov"].clone()).is_err());
+        let flows = trace(&nodes, &edges);
+        assert_eq!(
+            flows[0].hops[0].provenance.confidence_tier,
+            core_prov::ConfidenceTier::Gap
+        );
+        assert_eq!(
+            flows[0].hops[0].provenance.method,
+            core_prov::ProducingMethod::Unrecorded
+        );
+    }
+}
+
+// AC-0257: every source-authored method field is accounted before ownership.
+#[test]
+fn bounded_trace_rejects_large_method_labels_before_owning_output() {
+    let (nodes, mut edges) = event_chain();
+    let huge = "method \"\n é".repeat(100_000);
+    for method in [
+        serde_json::json!({"kind":"rule", "rule":huge, "version":"v1"}),
+        serde_json::json!({"kind":"rule", "rule":"rule", "version":huge}),
+        serde_json::json!({"kind":"model", "model":huge}),
+        serde_json::json!({"kind":"human", "actor":huge}),
+    ] {
+        edges[0].props["prov"]["method"] = method;
+        reset_materialization();
+        assert_eq!(
+            trace_bounded(&nodes, &edges, unrestricted_counts(1024))
+                .unwrap_err()
+                .limit,
+            TraceLimit::OutputBytes
+        );
+        assert_no_materialization();
+    }
 }

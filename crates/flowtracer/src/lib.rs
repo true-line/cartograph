@@ -20,9 +20,13 @@
 //! ladder at M6–M8.
 
 use core_graph::{Edge, Node};
-use core_prov::{ConfidenceTier, Provenance, Tier};
+use core_prov::Provenance;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
+
+mod bounded;
+use bounded::{Candidate, FlowView, HopView, TraceBudget};
+pub use bounded::{TraceLimit, TraceLimitExceeded, TraceLimits};
 
 /// Edge labels the tracer walks — callers use this to query exactly the
 /// edges a trace needs.
@@ -145,85 +149,13 @@ pub struct Flow {
     pub depth_limited: bool,
 }
 
-fn display_name(node: &Node) -> String {
-    let p = &node.props;
-    match node.label.as_str() {
-        "Screen" => p["route"]
-            .as_str()
-            .map(|r| format!("Screen {r}"))
-            .unwrap_or_else(|| node.id.clone()),
-        "Endpoint" => match (p["method"].as_str(), p["path"].as_str()) {
-            (Some(m), Some(path)) => format!("{m} {path}"),
-            _ => node.id.clone(),
-        },
-        "Symbol" | "Component" => p["name"].as_str().map(String::from).unwrap_or_else(|| {
-            node.id
-                .split('#')
-                .next_back()
-                .unwrap_or(&node.id)
-                .to_string()
-        }),
-        "Channel" => match (p["kind"].as_str(), p["identity"].as_str()) {
-            (Some(k), Some(i)) => format!("{k}:{i}"),
-            _ => node.id.clone(),
-        },
-        "ExtensionContext" => {
-            let kind = p["kind"].as_str().unwrap_or("context");
-            let detail = p["entries"]
-                .as_array()
-                .and_then(|entries| entries.first())
-                .and_then(|entry| entry.as_str())
-                .or_else(|| p["title"].as_str().filter(|title| !title.is_empty()));
-            match detail {
-                Some(detail) => format!("{kind} · {detail}"),
-                None => kind.to_string(),
-            }
-        }
-        "Command" => p["name"]
-            .as_str()
-            .map(|name| format!("Command {name}"))
-            .unwrap_or_else(|| node.id.clone()),
-        "Gap" => format!("GAP: {}", p["reason"].as_str().unwrap_or("unresolved")),
-        "File" => p["path"]
-            .as_str()
-            .map(String::from)
-            .unwrap_or_else(|| node.id.clone()),
-        _ => node.id.clone(),
-    }
-}
-
 fn hop_weight(confidence: &str) -> f64 {
     match confidence {
         "Confirmed" => 1.0,
         "InferredStrong" => 0.6,
         "InferredWeak" => 0.3,
-        _ => 0.0, // Gap and anything unknown counts for nothing.
+        _ => 0.0,
     }
-}
-
-fn edge_prov(edge: &Edge) -> (String, String, Option<String>, Provenance) {
-    let provenance = serde_json::from_value::<Provenance>(edge.props["prov"].clone())
-        .ok()
-        .filter(|provenance| provenance.validate().is_ok())
-        .unwrap_or_else(|| {
-            let canonical = serde_json::to_vec(&(&edge.src, &edge.label, &edge.dst))
-                .expect("edge identity serializes");
-            Provenance::new(
-                Tier::Deterministic,
-                ConfidenceTier::Gap,
-                vec![],
-                "flowtracer.invalid-provenance",
-                &canonical,
-            )
-            .expect("Gap is within the deterministic confidence ceiling")
-        });
-    let tier = format!("{:?}", provenance.tier);
-    let confidence = format!("{:?}", provenance.confidence_tier);
-    let evidence = provenance
-        .evidence
-        .first()
-        .map(|ev| format!("{} bytes {}..{}", ev.path, ev.byte_start, ev.byte_end,));
-    (tier, confidence, evidence, provenance)
 }
 
 /// True when `edge` is a `DEPENDS_ON` from its owner into a Gap that stands
@@ -242,23 +174,35 @@ fn owns_execution_gap(edge: &Edge, by_id: &BTreeMap<&str, &Node>) -> bool {
     is_gap && !rule_scoped(&edge.props) && !node.is_some_and(|node| rule_scoped(&node.props))
 }
 
-fn gap_context(node: Option<&&Node>) -> (Option<String>, Vec<String>) {
-    let Some(node) = node.filter(|node| node.label == "Gap") else {
-        return (None, Vec::new());
-    };
-    let reason = node.props["reason"].as_str().map(String::from);
-    let attempted_tiers = node.props["attempted_tiers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|tier| tier.as_str().map(String::from))
-        .collect();
-    (reason, attempted_tiers)
-}
-
 /// Trace every flow in the graph slice. Deterministic: triggers in sorted
 /// id order, hops in traversal order with sorted expansion (US-0014).
 pub fn trace(nodes: &[Node], edges: &[Edge]) -> Vec<Flow> {
+    trace_impl(nodes, edges, None).expect("unlimited tracing")
+}
+
+/// Trace complete flows under cumulative output limits, failing explicitly
+/// instead of returning a truncated result. Bytes are the exact compact
+/// UTF-8 JSON serialization of the returned `Vec<Flow>`, including brackets
+/// and commas. Counts cover all triggers and sum the deduplicated hops of each
+/// flow; a hop shared by multiple flows counts once in each returned flow.
+///
+/// The caller must separately admit the input graph. Borrowed adjacency,
+/// traversal descriptors and provenance views use linear input workspace;
+/// owned flow/hop strings and provenance are created only after admission.
+pub fn trace_bounded(
+    nodes: &[Node],
+    edges: &[Edge],
+    limits: TraceLimits,
+) -> Result<Vec<Flow>, TraceLimitExceeded> {
+    trace_impl(nodes, edges, Some(limits))
+}
+
+fn trace_impl(
+    nodes: &[Node],
+    edges: &[Edge],
+    limits: Option<TraceLimits>,
+) -> Result<Vec<Flow>, TraceLimitExceeded> {
+    let mut budget = TraceBudget::new(limits)?;
     let by_id: BTreeMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
     // Adjacency, sorted for deterministic expansion. SUBSCRIBES is stored
@@ -316,10 +260,17 @@ pub fn trace(nodes: &[Node], edges: &[Edge]) -> Vec<Flow> {
         .filter(|n| matches!(n.label.as_str(), "Screen" | "ExtensionContext" | "Command"))
         .collect();
     anchors.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut flows: Vec<Flow> = anchors
-        .iter()
-        .map(|t| trace_one(t, &by_id, &out_edges, &chan_consumers, &file_symbols))
-        .collect();
+    let mut flows = Vec::new();
+    for trigger in anchors {
+        flows.push(trace_one(
+            trigger,
+            &by_id,
+            &out_edges,
+            &chan_consumers,
+            &file_symbols,
+            &mut budget,
+        )?);
+    }
     let covered: HashSet<&str> = flows
         .iter()
         .flat_map(|f| f.hops.iter())
@@ -338,12 +289,18 @@ pub fn trace(nodes: &[Node], edges: &[Edge]) -> Vec<Flow> {
     }));
     rest.sort_by(|a, b| a.id.cmp(&b.id));
     rest.dedup_by(|a, b| a.id == b.id);
-    flows.extend(
-        rest.iter()
-            .map(|t| trace_one(t, &by_id, &out_edges, &chan_consumers, &file_symbols)),
-    );
+    for trigger in rest {
+        flows.push(trace_one(
+            trigger,
+            &by_id,
+            &out_edges,
+            &chan_consumers,
+            &file_symbols,
+            &mut budget,
+        )?);
+    }
     flows.sort_by(|a, b| a.trigger.cmp(&b.trigger));
-    flows
+    Ok(flows)
 }
 
 /// One anchor kind the tracer sought and how many the slice actually holds
@@ -405,123 +362,86 @@ pub fn anchor_probes(nodes: &[Node], edges: &[Edge]) -> Vec<AnchorProbe> {
     ]
 }
 
-fn trace_one(
-    trigger: &Node,
-    by_id: &BTreeMap<&str, &Node>,
-    out_edges: &BTreeMap<&str, Vec<&Edge>>,
-    chan_consumers: &BTreeMap<&str, Vec<&Edge>>,
-    file_symbols: &BTreeMap<&str, Vec<&Edge>>,
-) -> Flow {
-    let mut hops: Vec<Hop> = Vec::new();
-    let mut seen_hops: HashSet<(String, String, String)> = HashSet::new();
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut stack: Vec<(String, usize)> = vec![(trigger.id.clone(), 0)];
+fn trace_one<'a>(
+    trigger: &'a Node,
+    by_id: &BTreeMap<&'a str, &'a Node>,
+    out_edges: &BTreeMap<&'a str, Vec<&'a Edge>>,
+    chan_consumers: &BTreeMap<&'a str, Vec<&'a Edge>>,
+    file_symbols: &BTreeMap<&'a str, Vec<&'a Edge>>,
+    budget: &mut TraceBudget,
+) -> Result<Flow, TraceLimitExceeded> {
+    budget.start_flow()?;
+    let mut hops = Vec::new();
+    let mut seen_hops = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut stack = vec![(trigger.id.as_str(), 0)];
     let mut depth_limited = false;
+    let mut has_gap = false;
+    let mut all_confirmed = true;
+    let mut weight = 0.0;
 
     while let Some((id, depth)) = stack.pop() {
         if depth >= MAX_DEPTH {
-            // The bound cut the walk while this node still had somewhere to
-            // go — that is a truncation, not a completion.
-            if out_edges.contains_key(id.as_str())
-                || chan_consumers.contains_key(id.as_str())
-                || file_symbols.contains_key(id.as_str())
+            if out_edges.contains_key(id)
+                || chan_consumers.contains_key(id)
+                || file_symbols.contains_key(id)
             {
                 depth_limited = true;
             }
             continue;
         }
-        if !visited.insert(id.clone()) {
+        if !visited.insert(id) {
             continue;
         }
-        let label = by_id.get(id.as_str()).map(|n| n.label.as_str());
-        // A Gap node truncates its branch: it is a terminal by definition
-        // (AC-0016) — nothing is walked past it.
-        if label == Some("Gap") {
+        if by_id.get(id).is_some_and(|node| node.label == "Gap") {
             continue;
         }
 
-        let name_of = |nid: &str| -> String {
-            by_id
-                .get(nid)
-                .map(|n| display_name(n))
-                .unwrap_or_else(|| nid.to_string())
-        };
-
-        // Forward edges (HANDLES/CALLS/PUBLISHES from this node), then
-        // consumer fan-out when this node is a channel. Expansion order is
-        // deterministic; the stack is LIFO so push in reverse.
-        let mut next: Vec<(Hop, String)> = Vec::new();
-        if let Some(outs) = out_edges.get(id.as_str()) {
-            for edge in outs {
-                let (tier, confidence, evidence, provenance) = edge_prov(edge);
-                let (gap_reason, attempted_tiers) = gap_context(by_id.get(edge.dst.as_str()));
-                next.push((
-                    Hop {
-                        label: edge.label.clone(),
-                        src: edge.src.clone(),
-                        dst: edge.dst.clone(),
-                        src_name: name_of(&edge.src),
-                        dst_name: name_of(&edge.dst),
-                        tier,
-                        confidence,
-                        evidence,
-                        provenance,
-                        gap_reason,
-                        attempted_tiers,
-                    },
-                    edge.dst.clone(),
-                ));
+        // Only graph references enter this transient fan-out. No candidate
+        // owns names, provenance, identities or destination strings.
+        let next: Vec<_> = out_edges
+            .get(id)
+            .into_iter()
+            .flatten()
+            .map(|edge| Candidate {
+                edge,
+                reversed: false,
+            })
+            .chain(
+                chan_consumers
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .chain(file_symbols.get(id).into_iter().flatten())
+                    .map(|edge| Candidate {
+                        edge,
+                        reversed: true,
+                    }),
+            )
+            .collect();
+        for candidate in &next {
+            let key = (
+                candidate.edge.label.as_str(),
+                candidate.src(),
+                candidate.dst(),
+            );
+            if seen_hops.insert(key) {
+                budget.admit_hop()?;
+                let view = HopView::new(*candidate, by_id);
+                has_gap |= view.confidence == "Gap"
+                    || by_id
+                        .get(candidate.dst())
+                        .is_some_and(|node| node.label == "Gap");
+                all_confirmed &= view.confidence == "Confirmed";
+                weight += hop_weight(view.confidence);
+                hops.push(*candidate);
             }
         }
-        // Reversed edges: SUBSCRIBES walks channel → consumer, DEFINED_IN
-        // walks entry file → the symbols it defines (#165).
-        for reversed in [
-            chan_consumers.get(id.as_str()),
-            file_symbols.get(id.as_str()),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            for edge in reversed {
-                let (tier, confidence, evidence, provenance) = edge_prov(edge);
-                let (gap_reason, attempted_tiers) = gap_context(by_id.get(edge.src.as_str()));
-                next.push((
-                    Hop {
-                        label: edge.label.clone(),
-                        src: edge.dst.clone(),
-                        dst: edge.src.clone(),
-                        src_name: name_of(&edge.dst),
-                        dst_name: name_of(&edge.src),
-                        tier,
-                        confidence,
-                        evidence,
-                        provenance,
-                        gap_reason,
-                        attempted_tiers,
-                    },
-                    edge.src.clone(),
-                ));
-            }
-        }
-
-        // Record hops in sorted expansion order (the dossier's narrative
-        // order); the stack gets them reversed so LIFO pops match.
-        let mut dsts = Vec::with_capacity(next.len());
-        for (hop, dst) in next {
-            if seen_hops.insert((hop.label.clone(), hop.src.clone(), hop.dst.clone())) {
-                hops.push(hop);
-            }
-            dsts.push(dst);
-        }
-        for dst in dsts.into_iter().rev() {
-            stack.push((dst, depth + 1));
+        for candidate in next.into_iter().rev() {
+            stack.push((candidate.dst(), depth + 1));
         }
     }
 
-    let has_gap = hops.iter().any(|h| {
-        h.confidence == "Gap" || by_id.get(h.dst.as_str()).is_some_and(|n| n.label == "Gap")
-    });
-    let all_confirmed = !hops.is_empty() && hops.iter().all(|h| h.confidence == "Confirmed");
     let status = if has_gap || hops.is_empty() || depth_limited {
         FlowStatus::Partial
     } else if all_confirmed {
@@ -532,18 +452,11 @@ fn trace_one(
     let score = if hops.is_empty() {
         0.0
     } else {
-        hops.iter().map(|h| hop_weight(&h.confidence)).sum::<f64>() / hops.len() as f64
+        weight / hops.len() as f64
     };
-
-    Flow {
-        trigger: trigger.id.clone(),
-        trigger_kind: trigger.label.clone(),
-        trigger_name: display_name(trigger),
-        hops,
-        status,
-        score,
-        depth_limited,
-    }
+    let view = FlowView::new(trigger, &hops, by_id, status, score, depth_limited);
+    budget.admit_flow(&view)?;
+    Ok(view.into_owned())
 }
 
 #[cfg(test)]
