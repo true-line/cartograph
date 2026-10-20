@@ -694,6 +694,8 @@ fn nested_omissions_reject_unknown_fields_without_changing_the_wire_shape() {
 fn ac0252_reopen_rejects_incompatible_schema_without_repair() {
     for mutation in [
         "DROP TRIGGER work_packet_body_immutable_update",
+        "DROP TRIGGER work_packet_event_immutable_update",
+        "DROP TRIGGER work_packet_event_immutable_delete",
         "ALTER TABLE work_packet_reviews ADD COLUMN unexpected TEXT",
         "DROP TABLE work_packet_meta",
         "DELETE FROM work_packet_meta",
@@ -716,9 +718,58 @@ fn ac0252_reopen_rejects_incompatible_schema_without_repair() {
             ),
             "{mutation}"
         );
-        if mutation.starts_with("DROP TRIGGER") {
-            let count: i64 = connection.query_row("SELECT count(*) FROM sqlite_schema WHERE name='work_packet_body_immutable_update'", [], |r| r.get(0)).unwrap();
+        if let Some(trigger) = mutation.strip_prefix("DROP TRIGGER ") {
+            let count: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE name=?1",
+                    [trigger],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(count, 0, "reopen must not recreate a missing guard");
         }
     }
+}
+
+// AC-0252: persisted audit events remain immutable across reopen.
+#[test]
+fn ac0252_audit_events_reject_update_and_delete() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("packets.sqlite");
+    let mut store = PacketStore::open(&path).unwrap();
+    let detail = store.put(body(), &[], "generation-time").unwrap();
+    drop(store);
+    let connection = Connection::open(&path).unwrap();
+    for mutation in [
+        "UPDATE work_packet_events SET kind='rewritten'",
+        "DELETE FROM work_packet_events",
+    ] {
+        let error = connection.execute(mutation, []).unwrap_err();
+        assert!(
+            matches!(error, rusqlite::Error::SqliteFailure(_, Some(ref message)) if message == "immutable packet event")
+        );
+    }
+    let event: (String, String, String) = connection
+        .query_row(
+            "SELECT packet_id, kind, at FROM work_packet_events",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        event,
+        (
+            detail.packet_id.clone(),
+            "generated".into(),
+            "generation-time".into()
+        )
+    );
+    drop(connection);
+    assert_eq!(
+        PacketStore::open(&path)
+            .unwrap()
+            .get(&detail.packet_id)
+            .unwrap(),
+        detail
+    );
 }

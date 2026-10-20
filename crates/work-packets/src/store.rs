@@ -149,6 +149,16 @@ const SCHEMA: &[(&str, &str, &str)] = &[
         "work_packet_lineage_immutable_delete",
         "CREATE TRIGGER work_packet_lineage_immutable_delete BEFORE DELETE ON work_packet_lineage BEGIN SELECT RAISE(ABORT,'immutable packet lineage'); END",
     ),
+    (
+        "trigger",
+        "work_packet_event_immutable_update",
+        "CREATE TRIGGER work_packet_event_immutable_update BEFORE UPDATE ON work_packet_events BEGIN SELECT RAISE(ABORT,'immutable packet event'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_event_immutable_delete",
+        "CREATE TRIGGER work_packet_event_immutable_delete BEFORE DELETE ON work_packet_events BEGIN SELECT RAISE(ABORT,'immutable packet event'); END",
+    ),
 ];
 
 fn admit_schema(connection: &mut Connection) -> PacketResult<()> {
