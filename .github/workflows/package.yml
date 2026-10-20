@@ -45,7 +45,7 @@ jobs:
   policy:
     name: Action Policy
     if: github.event_name != 'workflow_call'
-    runs-on: ${{ (github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || vars.LINUX_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Authorize direct workflow event
@@ -57,7 +57,7 @@ jobs:
     name: Verify exact CI evidence
     needs: policy
     if: always() && (github.event_name == 'workflow_call' || needs.policy.result == 'success')
-    runs-on: ${{ (github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || vars.LINUX_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       sha: ${{ steps.commit.outputs.sha }}
@@ -103,7 +103,7 @@ jobs:
   package:
     name: macOS universal bundle
     needs: evidence
-    runs-on: ${{ (github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && 'macos-latest' || vars.MACOS_RUNNER || 'macos-latest' }}
+    runs-on: macos-latest
     timeout-minutes: 90
     outputs:
       signing_mode: ${{ steps.signing.outputs.mode }}

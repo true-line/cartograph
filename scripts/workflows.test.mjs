@@ -429,12 +429,22 @@ test('release publication is reviewed, exact-evidence-only, and idempotent', () 
   assert.doesNotMatch(publish, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
 });
 
-test('every job routes through a runner variable so self-hosted runners take it', () => {
+// Credential-bearing workflows never share a persistent self-hosted runner
+// with pull-request builds, which run repository-controlled scripts (#619).
+const HOSTED_ONLY = new Set(['help-wiki-sync.yml', 'package.yml', 'release.yml', 'version-cut.yml']);
+
+test('PR-path jobs route through a runner variable and secret-bearing jobs stay hosted', () => {
   const dir = path.join(root, '.github/workflows');
   for (const name of readdirSync(dir).filter((file) => file.endsWith('.yml'))) {
     const workflow = readFileSync(path.join(dir, name), 'utf8');
+    const hostedOnly = HOSTED_ONLY.has(name);
+    assert.equal(/secrets\.[A-Z]/u.test(workflow), hostedOnly, `${name}: secrets must match HOSTED_ONLY`);
     for (const [line] of workflow.matchAll(/^\s*runs-on:.*$/gmu)) {
-      assert.match(line, /vars\.(LINUX|WINDOWS|MACOS)_RUNNER/u, `${name}: ${line.trim()}`);
+      if (hostedOnly) {
+        assert.match(line, /runs-on: (ubuntu|macos|windows)-[\w.]+$/u, `${name}: ${line.trim()}`);
+      } else {
+        assert.match(line, /vars\.(LINUX|WINDOWS)_RUNNER/u, `${name}: ${line.trim()}`);
+      }
     }
   }
 });
