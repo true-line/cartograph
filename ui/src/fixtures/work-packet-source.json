@@ -1,0 +1,25 @@
+{
+  "kind": "node",
+  "value": {
+    "id": "fixture-symbol",
+    "label": "Capability",
+    "props": {
+      "method": "GET",
+      "name": "fixture-symbol",
+      "path": "/fixture",
+      "prov": {
+        "confidence_tier": "Confirmed",
+        "content_hash": "4df38eddb9b2309bdbaef1c5a20c052949f9ebbbc9022fd1ce1980434b2acaf3",
+        "evidence": [],
+        "extractor_id": "fixture-rule",
+        "method": {
+          "kind": "rule",
+          "rule": "fixture",
+          "version": "1"
+        },
+        "tier": "Deterministic"
+      },
+      "upstream_timestamp": "2001-01-01T00:00:00Z"
+    }
+  }
+}

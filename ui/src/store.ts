@@ -954,6 +954,8 @@ async function loadEndpoints(): Promise<GraphNode[]> {
 
 let evidenceRequestVersion = 0;
 let basisAssessmentGeneration = 0;
+// A later mode/curation request owns the visible spec result, error, and busy state.
+let specRequestVersion = 0;
 let jobActionVersion = 0;
 /** Only the latest preflight may publish its result: a superseded or
  *  cancelled scan settles late and must not overwrite the current one. */
@@ -1080,6 +1082,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       });
       return;
     }
+    const specVersion = specRequestVersion;
+    const mode = get().specMode;
     const [stats, jobs, endpoints, atlas, topology, flows, flowList, flowAnchors, systemContents, adapters, plugins, specBundle, curation, findings, registerFindings, ingestHistory, coverage, evals, tierSettings, egress, ingestParallelism, disclosureT2, disclosureT3, escalationEdgeLabels] = await Promise.all([
       invokeOr<GraphStats>('graph_stats', { nodes: 0, edges: 0 }),
       invokeOr<Job[]>('list_jobs', []),
@@ -1092,7 +1096,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       invokeOr<SystemRepo[]>('system_contents', []),
       invokeOr<AdapterInventory | null>('adapter_inventory', null),
       invokeOr<PluginStatus[]>('list_plugins', []),
-      invokeOr<SpecBundle | null>('export_spec', null, { mode: get().specMode }),
+      invokeOr<SpecBundle | null>('export_spec', null, { mode }),
       invokeOr<AssertionDecisionRecord[]>('list_assertion_decisions', []),
       invokeOr<FindingsSummary | null>('findings_summary', null),
       invokeOr<RegisterFinding[]>('list_findings', []),
@@ -1125,7 +1129,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       systemContents,
       adapters,
       plugins,
-      specBundle,
+      ...(specVersion === specRequestVersion && mode === get().specMode ? { specBundle } : {}),
       curation,
       findings,
       registerFindings,
@@ -1219,14 +1223,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   setSpecMode: async (mode: SpecExportMode) => {
+    const request = ++specRequestVersion;
     set({ specMode: mode, specBusy: true, specError: null });
     try {
       const specBundle = await invokeOr<SpecBundle | null>('export_spec', null, { mode });
-      set({ specBundle });
+      if (request === specRequestVersion) set({ specBundle });
     } catch (error) {
-      set({ specError: String(error) });
+      if (request === specRequestVersion) set({ specError: String(error) });
     } finally {
-      set({ specBusy: false });
+      if (request === specRequestVersion) set({ specBusy: false });
     }
   },
 
@@ -1247,6 +1252,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     decision: AssertionDecision,
     note?: string,
   ) => {
+    let request = ++specRequestVersion;
     set({ specBusy: true, specError: null });
     try {
       await invokeOr<AssertionDecisionRecord | null>('record_assertion_decision', null, {
@@ -1258,15 +1264,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
         decision,
         note: note?.trim() || null,
       });
+      // Recompile the currently requested mode after the decision is stored.
+      request = ++specRequestVersion;
+      const mode = get().specMode;
       const [specBundle, curation] = await Promise.all([
-        invokeOr<SpecBundle | null>('export_spec', null, { mode: get().specMode }),
+        invokeOr<SpecBundle | null>('export_spec', null, { mode }),
         invokeOr<AssertionDecisionRecord[]>('list_assertion_decisions', []),
       ]);
-      set({ specBundle, curation });
+      set({ curation, ...(request === specRequestVersion ? { specBundle } : {}) });
     } catch (error) {
-      set({ specError: String(error) });
+      if (request === specRequestVersion) set({ specError: String(error) });
     } finally {
-      set({ specBusy: false });
+      if (request === specRequestVersion) set({ specBusy: false });
     }
   },
 

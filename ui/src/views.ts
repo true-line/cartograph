@@ -17,6 +17,7 @@ export type SurfaceView =
   | 'recover'
   | 'investigations'
   // In-app Help (#154): reachable from menu, palette, header, and '?'.
+  | 'packets'
   | 'help';
 
 export interface SurfaceDef {
@@ -62,6 +63,7 @@ const INGEST_LABELS: Partial<Record<SurfaceView, string>> = {
 };
 
 export function surfaceLabel(view: SurfaceView): string {
+  if (view === 'packets') return 'Agent work packets';
   if (view === 'help') return 'Help';
   if (view === 'investigations') return 'Investigations';
   return (
@@ -71,5 +73,5 @@ export function surfaceLabel(view: SurfaceView): string {
 
 /** The rail surface to highlight for a view (ingest flow lights Workspace). */
 export function railSurface(view: SurfaceView): SurfaceView {
-  return view in INGEST_LABELS || view === 'investigations' ? 'workspace' : view;
+  return view in INGEST_LABELS || view === 'investigations' ? 'workspace' : view === 'packets' ? 'spec' : view;
 }

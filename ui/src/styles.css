@@ -4074,3 +4074,33 @@ details.investigation-section { display: block; }
 .coverage-missing_input .coverage-state {
   color: var(--finding-unsupported);
 }
+
+/* Local agent handoff packets; source-authored content stays inert text. */
+.packet-tray { margin: 0 0 16px; padding: 16px; border: 1px solid var(--border, #374151); border-radius: 8px; background: var(--surface, #151b25); }
+.packet-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.packet-heading > div:first-child { flex: 1; }
+.packet-tray ul, .packet-layout nav ul { padding-left: 0; list-style: none; }
+.packet-tray li { display: flex; align-items: start; gap: 12px; margin: 8px 0; }
+.packet-tray li > span { flex: 1; overflow-wrap: anywhere; }
+.packet-tray code, .packet-detail code { overflow-wrap: anywhere; }
+.packet-layout { display: grid; grid-template-columns: minmax(180px, 260px) minmax(0, 1fr); gap: 24px; }
+.packet-layout nav button { width: 100%; text-align: left; margin-bottom: 8px; overflow-wrap: anywhere; }
+.packet-layout nav button small { display: block; }
+.work-packets details { margin: 12px 0; }
+.work-packets summary { cursor: pointer; padding: 8px 0; font-weight: 600; }
+.work-packets fieldset { border: 0; padding: 0; min-width: 0; }
+.packet-request-field { margin: 12px 0; padding: 12px; border: 1px solid var(--border, #374151); border-radius: 6px; }
+.packet-request-field > label:first-child { display: block; font-weight: 600; }
+.packet-unknown { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.work-packets textarea, .work-packets input:not([type=checkbox]) { display: block; box-sizing: border-box; width: 100%; padding: 8px; margin-top: 8px; color: inherit; background: var(--surface, #151b25); border: 1px solid var(--border, #374151); border-radius: 4px; }
+.packet-detail > section { padding: 12px 0; border-top: 1px solid var(--border, #374151); }
+.packet-fields { margin: 8px 0; }
+.packet-fields > div { margin: 8px 0; }
+.packet-fields dt { font-weight: 600; color: var(--text-muted, #aeb9c8); }
+.packet-fields dd { margin: 4px 0 4px 16px; overflow-wrap: anywhere; }
+.packet-source-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.packet-omission { padding: 8px 12px; border-left: 3px solid var(--text-muted, #aeb9c8); }
+.packet-omission p { margin: 4px 0; }
+.packet-values { padding-left: 20px; }
+.packet-review { margin-top: 24px; padding-top: 12px; border-top: 1px solid var(--border, #374151); }
+@media (max-width: 800px) { .packet-layout { grid-template-columns: 1fr; } }

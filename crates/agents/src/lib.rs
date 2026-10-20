@@ -17,6 +17,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+mod decision_selection;
+pub use decision_selection::{
+    CurationObservation, DecisionSelectionError, MAX_CURATION_BYTES, MAX_CURATION_ROWS,
+    MAX_SELECTED_ASSERTION_BYTES, MAX_SELECTED_ASSERTION_KEYS, MAX_SELECTED_ASSERTION_ROW_BYTES,
+    SelectedAssertionDecision,
+};
 pub mod investigation;
 pub mod prepared;
 pub mod source_basis;

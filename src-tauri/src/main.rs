@@ -29,6 +29,7 @@ mod settings;
 mod source_access;
 mod sources;
 mod task_evidence;
+mod work_packets;
 
 use core_graph::{Edge, GraphStore, Node, SqliteGraphStore};
 use findings::{Finding, FindingStore, NewFinding};
@@ -4769,6 +4770,7 @@ fn main() {
             std::fs::create_dir_all(&data_dir)?;
             let graph = SqliteGraphStore::open(data_dir.join("graph.db"))?;
             let state_path = data_dir.join("state.db");
+            app.manage(work_packets::PacketRuntime::open(&state_path)?);
             let jobs = JobStore::open(&state_path)?;
             let job_execution_locks =
                 JobExecutionLocks::open(&data_dir, jobs.execution_namespace())?;
@@ -4808,6 +4810,13 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             classify_drop,
+            work_packets::generate_work_packet,
+            work_packets::assess_work_packet,
+            work_packets::prepare_work_packet_selection,
+            work_packets::list_work_packets,
+            work_packets::get_work_packet,
+            work_packets::review_work_packet,
+            work_packets::export_work_packet,
             investigations::commands::investigation_specialists,
             investigations::commands::start_investigation,
             investigations::commands::list_investigations,
