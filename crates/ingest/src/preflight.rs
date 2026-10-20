@@ -567,15 +567,28 @@ fn detect_language(
     } else if let Some(plugin) = plugin_claim {
         // A gated plugin covers this extension (#201): report it as
         // covered under the plugin id — no unsupported finding.
-        let language = uncovered_language(extension)
+        let known = uncovered_language(extension);
+        let language = known
             .map(str::to_string)
             .unwrap_or_else(|| format!(".{extension}"));
         // Only this language's cells: one plugin may declare several
-        // languages with differing support.
+        // languages with differing support. An extension with no known
+        // language (a plugin's new language) keeps the cells no known
+        // language of the plugin's extensions claims.
+        let claimed: Vec<&str> = plugin
+            .extensions
+            .iter()
+            .filter_map(|e| uncovered_language(e))
+            .collect();
         let coverage = plugin
             .cells
             .iter()
-            .filter(|cell| cell.language.eq_ignore_ascii_case(&language))
+            .filter(|cell| match known {
+                Some(known) => cell.language.eq_ignore_ascii_case(known),
+                None => !claimed
+                    .iter()
+                    .any(|c| cell.language.eq_ignore_ascii_case(c)),
+            })
             .cloned()
             .collect();
         let entry = languages
@@ -1260,8 +1273,29 @@ mod tests {
                 .map(|l| l.coverage.clone())
                 .expect("language detected")
         };
-        assert_eq!(coverage("Ruby"), vec![ruby_cell]);
+        assert_eq!(coverage("Ruby"), vec![ruby_cell.clone()]);
         assert_eq!(coverage("PHP"), vec![php_cell]);
+
+        // A new language the core cannot name keeps its own labeled cells,
+        // and still never the plugin's known-language claims.
+        write(dir.path(), "main.foo", "say hi\n");
+        let foo_cell = cell("Foo", crate::matrix::Support::Supported, "");
+        let plugins = [PluginCoverage {
+            plugin_id: "t0.plugin-foo".into(),
+            extensions: vec!["foo".into(), "rb".into()],
+            cells: vec![foo_cell.clone(), ruby_cell.clone()],
+        }];
+        let report = preflight_with_plugins(dir.path(), &plugins).unwrap();
+        let coverage = |language: &str| {
+            report
+                .languages
+                .iter()
+                .find(|l| l.language == language)
+                .map(|l| l.coverage.clone())
+                .expect("language detected")
+        };
+        assert_eq!(coverage(".foo"), vec![foo_cell]);
+        assert_eq!(coverage("Ruby"), vec![ruby_cell]);
     }
 
     #[test]
