@@ -839,6 +839,31 @@ fn repo_coverage(
             .filter(|node| predicate(node))
             .count() as u64
     };
+    // State and Pulumi inputs are read only inside the infrastructure layer.
+    let infra = ingest::coverage::wants(hints, ingest::coverage::INFRA_LAYERS);
+    let resource_prefix = format!("res:{repo}@");
+    let plugin_count = |plugin: &ActivePlugin| {
+        let ours = |props: &serde_json::Value| props["plugin_artifact_hash"] == plugin.content_hash;
+        let nodes: Vec<&core_graph::Node> = extraction
+            .nodes
+            .iter()
+            .filter(|node| ours(&node.props))
+            .collect();
+        let files = nodes
+            .iter()
+            .filter_map(|node| node.props["prov"]["evidence"][0]["path"].as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as u64;
+        ProducerCount {
+            files,
+            nodes: nodes.len() as u64,
+            edges: extraction
+                .edges
+                .iter()
+                .filter(|edge| ours(&edge.props))
+                .count() as u64,
+        }
+    };
     RepoCoverage::from_facts(&CoverageFacts {
         repo,
         commit,
@@ -858,7 +883,7 @@ fn repo_coverage(
         ],
         plugins: plugins
             .iter()
-            .map(|plugin| plugin.plugin_id.clone())
+            .map(|plugin| (plugin.plugin_id.clone(), plugin_count(plugin)))
             .collect(),
         observations: vec![
             Observation {
@@ -866,7 +891,11 @@ fn repo_coverage(
                 input: "state_json",
                 enriches: "Terraform",
                 declared: declared.state_json.iter().cloned().collect(),
-                targets: layers.tf.nodes,
+                // Only Terraform resources take observed state.
+                targets: counted(&|node| {
+                    node.label == "Resource" && node.id.starts_with(&resource_prefix)
+                }),
+                selected: infra,
             },
             Observation {
                 producer: dynamic::PULUMI_EXTRACTOR_ID,
@@ -874,6 +903,7 @@ fn repo_coverage(
                 enriches: "Pulumi resource",
                 declared: declared.pulumi_json.iter().cloned().collect(),
                 targets: counted(&|node| node.props["source"].as_str() == Some("pulumi")),
+                selected: infra,
             },
             Observation {
                 producer: dynamic::OTEL_EXTRACTOR_ID,
@@ -881,6 +911,7 @@ fn repo_coverage(
                 enriches: "endpoint and channel",
                 declared: declared.otel_jsonl.clone(),
                 targets: counted(&|node| node.label == "Endpoint" || node.label == "Channel"),
+                selected: true,
             },
         ],
     })
@@ -8728,11 +8759,19 @@ export function App() {
             "resource \"aws_sqs_queue\" \"jobs\" {\n  name = \"jobs\"\n}\n",
         )
         .unwrap();
+        // Terraform with no resource: observed state has nothing to enrich.
+        let vars = dir.path().join("vars");
+        std::fs::create_dir_all(&vars).unwrap();
+        std::fs::write(vars.join("variables.tf"), "variable \"region\" {}\n").unwrap();
         let manifest = dir.path().join("cartograph.system.toml");
+        // The api's state file is unparseable: its layer hints exclude
+        // infrastructure, so it must never be read.
+        std::fs::write(api.join("api.tfstate.json"), "not json").unwrap();
         std::fs::write(
             &manifest,
-            "[[repos]]\nurl = \"api\"\nlayers = [\"server\"]\n\n\
-             [[repos]]\nurl = \"infra\"\nlayers = [\"infra\"]\n",
+            "[[repos]]\nurl = \"api\"\nlayers = [\"server\"]\nstate_json = \"api/api.tfstate.json\"\n\n\
+             [[repos]]\nurl = \"infra\"\nlayers = [\"infra\"]\n\n\
+             [[repos]]\nurl = \"vars\"\nlayers = [\"infra\"]\n",
         )
         .unwrap();
         let app = preflight_test_app(dir.path());
@@ -8743,7 +8782,7 @@ export function App() {
             super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
                 .unwrap();
 
-        assert_eq!(summary.coverage.len(), 2, "one inventory per repo");
+        assert_eq!(summary.coverage.len(), 3, "one inventory per repo");
         let state_of = |coverage: &ingest::coverage::RepoCoverage, id: &str| {
             let producer = coverage
                 .producers
@@ -8769,6 +8808,15 @@ export function App() {
                 .collect::<Vec<_>>(),
             ["Ruby"]
         );
+        assert_eq!(
+            state_of(api, dynamic::EXTRACTOR_ID),
+            (
+                ProducerState::NotSelected,
+                "not selected: layer hints [server] exclude infra and cloud; \
+                 declared state_json was not read"
+                    .to_string()
+            )
+        );
         assert!(api.limited);
 
         let infra = &summary.coverage[1];
@@ -8792,6 +8840,14 @@ export function App() {
             ["state_json"]
         );
         assert!(infra.limited);
+
+        let vars = &summary.coverage[2];
+        assert_eq!(state_of(vars, "t0.iac-terraform").0, ProducerState::Ran);
+        assert_eq!(
+            state_of(vars, dynamic::EXTRACTOR_ID).0,
+            ProducerState::NotApplicable
+        );
+        assert!(vars.missing_inputs.is_empty());
     }
 
     #[test]

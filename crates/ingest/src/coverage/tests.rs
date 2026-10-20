@@ -21,6 +21,7 @@ fn observation(
         enriches: "Terraform resource",
         declared: declared.iter().map(|path| path.to_string()).collect(),
         targets,
+        selected: true,
     }
 }
 
@@ -60,7 +61,14 @@ fn inventory_reports_each_producer_input_and_capability_with_a_scoped_reason() {
             ("t0.iac-terraform", count(2)),
             (crate::toolchain::TOOLCHAIN_EXTRACTOR_ID, count(1)),
         ],
-        plugins: vec!["plugin.zig@1".into()],
+        plugins: vec![(
+            "plugin.zig@1".into(),
+            ProducerCount {
+                files: 2,
+                nodes: 5,
+                edges: 3,
+            },
+        )],
         observations: vec![
             observation("t1.terraform-state", "state_json", &[], 5),
             observation("t1.pulumi-deployment", "pulumi_json", &[], 0),
@@ -105,6 +113,12 @@ fn inventory_reports_each_producer_input_and_capability_with_a_scoped_reason() {
         )
     );
     assert_eq!(state_of(&coverage, "plugin.zig@1").0, &ProducerState::Ran);
+    let plugin = coverage
+        .producers
+        .iter()
+        .find(|producer| producer.id == "plugin.zig@1")
+        .unwrap();
+    assert_eq!((plugin.files, plugin.nodes, plugin.edges), (2, 5, 3));
 
     // Observational producers: missing, not applicable and applied.
     assert_eq!(
@@ -197,4 +211,31 @@ fn inventory_is_limited_only_by_recorded_exclusions_missing_inputs_or_unsupporte
         ..facts
     };
     assert!(RepoCoverage::from_facts(&excluded).limited);
+}
+
+// AC-0238: an input whose layer the hints exclude is reported as not
+// selected, never as applied, even when the manifest declares it. (T-0238)
+#[test]
+fn excluded_observation_reports_a_declared_input_as_unread() {
+    let hints = vec!["server".to_string()];
+    let mut state = observation("t1.terraform-state", "state_json", &["s.json"], 4);
+    state.selected = false;
+    let facts = CoverageFacts {
+        repo: "acme/api",
+        commit: "0123abc",
+        layer_hints: &hints,
+        observations: vec![state],
+        ..CoverageFacts::default()
+    };
+    let coverage = RepoCoverage::from_facts(&facts);
+    assert_eq!(
+        state_of(&coverage, "t1.terraform-state"),
+        (
+            &ProducerState::NotSelected,
+            "not selected: layer hints [server] exclude infra and cloud; declared state_json \
+             was not read"
+        )
+    );
+    assert!(coverage.missing_inputs.is_empty());
+    assert!(coverage.limited);
 }

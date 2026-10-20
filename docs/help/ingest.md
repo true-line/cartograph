@@ -40,7 +40,8 @@ observational producers (Terraform state, Pulumi deployments, OpenTelemetry
 traces) ran. Each producer has a stopping reason scoped to that repo,
 revision and layer hints. The inventory also lists:
 
-- producers the manifest's layer hints excluded;
+- producers the manifest's layer hints excluded, including a declared state
+  or Pulumi file that was therefore never read;
 - inputs that were not declared but would have enriched facts here, with the
   `cartograph.system.toml` field to add;
 - capabilities no installed producer covers. These are tool limitations, not

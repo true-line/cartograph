@@ -146,6 +146,9 @@ pub struct Observation {
     pub declared: Vec<String>,
     /// Facts in this repo it could enrich.
     pub targets: u64,
+    /// False when the layer hints exclude the layers that read this input,
+    /// so a declared input was never read.
+    pub selected: bool,
 }
 
 /// Everything the inventory reads, all recorded by the ingest itself.
@@ -160,8 +163,8 @@ pub struct CoverageFacts<'a> {
     /// Facts each deterministic producer published, by extractor id. A
     /// producer the catalog names but this map lacks published nothing.
     pub deterministic: Vec<(&'static str, ProducerCount)>,
-    /// Gated plugin ids that ran.
-    pub plugins: Vec<String>,
+    /// Gated plugins that ran, by id, with the facts each published.
+    pub plugins: Vec<(String, ProducerCount)>,
     /// Observational producers with their declared inputs.
     pub observations: Vec<Observation>,
 }
@@ -262,15 +265,15 @@ impl RepoCoverage {
                 stopping_reason,
             });
         }
-        for plugin in &facts.plugins {
+        for (plugin, count) in &facts.plugins {
             producers.push(ProducerCoverage {
                 id: plugin.clone(),
                 kind: ProducerKind::Deterministic,
                 covers: "gated plugin".into(),
                 state: ProducerState::Ran,
-                files: 0,
-                nodes: 0,
-                edges: 0,
+                files: count.files,
+                nodes: count.nodes,
+                edges: count.edges,
                 inputs: Vec::new(),
                 stopping_reason: format!(
                     "completed over the files its extensions claim in {scope}"
@@ -279,7 +282,20 @@ impl RepoCoverage {
         }
         let mut missing_inputs = Vec::new();
         for observation in &facts.observations {
-            let (state, stopping_reason) = if !observation.declared.is_empty() {
+            let (state, stopping_reason) = if !observation.selected {
+                let unread = if observation.declared.is_empty() {
+                    String::new()
+                } else {
+                    format!("; declared {} was not read", observation.input)
+                };
+                (
+                    ProducerState::NotSelected,
+                    format!(
+                        "not selected: layer hints [{hints}] exclude {}{unread}",
+                        INFRA_LAYERS.join(" and ")
+                    ),
+                )
+            } else if !observation.declared.is_empty() {
                 (
                     ProducerState::Ran,
                     format!(
