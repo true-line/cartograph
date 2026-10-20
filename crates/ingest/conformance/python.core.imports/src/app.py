@@ -1,3 +1,3 @@
 import helpers
 
-helpers.X
+VALUE = helpers.X
