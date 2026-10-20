@@ -309,7 +309,7 @@ fn discovery_refuses_an_oversized_match_without_skipping_it() {
     assert!(matches!(
         snapshot.discover(only_huge),
         Err(ContextError::ResponseBudgetExceeded { max_bytes: 1024, required_bytes })
-            if required_bytes > 64 * 1024
+            if required_bytes > 1024
     ));
 
     let mut both = request(DiscoveryQuery::Text {
@@ -332,4 +332,49 @@ fn text_matching_lowercases_without_widening() {
     assert!(contains_lowercase("ÜNÏ", "ünï"));
     assert!(!contains_lowercase("check out", "checkout"));
     assert!(!contains_lowercase("", "a"));
+}
+
+// AC-0233: a short match whose provenance is oversized is refused before any
+// of its strings are copied, and the borrowed size check serializes exactly
+// like the owned candidate. (T-0233)
+#[test]
+fn discovery_bounds_the_whole_candidate_before_copying_it() {
+    let mut big = node("sym:shop/c", "Symbol", json!({"name": "c"}));
+    big.props["prov"] = prov("acme/shop", &format!("src/{}.ts", "p".repeat(64 * 1024)));
+    let snapshot = ContextSnapshot::new(vec![big], Vec::new()).unwrap();
+    let mut tiny = request(DiscoveryQuery::Name { name: "c".into() });
+    tiny.max_bytes = 2048;
+    assert!(matches!(
+        snapshot.discover(tiny),
+        Err(ContextError::ResponseBudgetExceeded { max_bytes: 2048, required_bytes })
+            if required_bytes > 2048
+    ));
+
+    let owned = snapshot
+        .discover(request(DiscoveryQuery::Name { name: "c".into() }))
+        .unwrap()
+        .candidates
+        .remove(0);
+    let view = CandidateView {
+        reference: &owned.reference,
+        label: &owned.label,
+        source: SourceView {
+            repo: owned.source.repo.as_deref(),
+            path: owned.source.path.as_deref(),
+            commit_sha: owned.source.commit_sha.as_deref(),
+        },
+        match_reason: ReasonView {
+            kind: owned.match_reason.kind,
+            field: &owned.match_reason.field,
+            value: &owned.match_reason.value,
+        },
+        outgoing_edges: owned.outgoing_edges,
+        incoming_edges: owned.incoming_edges,
+        confidence_tier: owned.confidence_tier,
+    };
+    let exact = serde_json::to_vec(&owned).unwrap();
+    assert_eq!(serde_json::to_vec(&view).unwrap(), exact);
+    assert_eq!(view.to_owned(), owned);
+    assert_eq!(bounded_len(&view, exact.len()), Ok(exact.len()));
+    assert!(bounded_len(&view, exact.len() - 1).is_err());
 }

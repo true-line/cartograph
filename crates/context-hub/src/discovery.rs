@@ -294,10 +294,93 @@ fn match_fact<'a>(
     }
 }
 
+/// A candidate borrowed from the snapshot, serialized exactly like
+/// [`DiscoveryCandidate`] so its size can be bounded before anything is
+/// copied.
+#[derive(Serialize)]
+struct CandidateView<'a> {
+    reference: &'a FactReference,
+    label: &'a str,
+    source: SourceView<'a>,
+    match_reason: ReasonView<'a>,
+    outgoing_edges: usize,
+    incoming_edges: usize,
+    confidence_tier: ConfidenceTier,
+}
+
+#[derive(Serialize)]
+struct SourceView<'a> {
+    repo: Option<&'a str>,
+    path: Option<&'a str>,
+    commit_sha: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct ReasonView<'a> {
+    kind: MatchKind,
+    field: &'a str,
+    value: &'a str,
+}
+
+impl CandidateView<'_> {
+    fn to_owned(&self) -> DiscoveryCandidate {
+        DiscoveryCandidate {
+            reference: self.reference.clone(),
+            label: self.label.to_string(),
+            source: CandidateSource {
+                repo: self.source.repo.map(String::from),
+                path: self.source.path.map(String::from),
+                commit_sha: self.source.commit_sha.map(String::from),
+            },
+            match_reason: MatchReason {
+                kind: self.match_reason.kind,
+                field: self.match_reason.field.to_string(),
+                value: self.match_reason.value.to_string(),
+            },
+            outgoing_edges: self.outgoing_edges,
+            incoming_edges: self.incoming_edges,
+            confidence_tier: self.confidence_tier,
+        }
+    }
+}
+
+/// Counts serialized bytes and stops the serializer once `limit` is passed.
+struct Counter {
+    written: usize,
+    limit: usize,
+}
+
+impl std::io::Write for Counter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.written += buf.len();
+        if self.written > self.limit {
+            return Err(std::io::Error::other("over budget"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The compact JSON length of `value` when it is at most `limit` bytes, or
+/// `Err` with the bytes counted when serialization stopped past the limit.
+/// The output itself is never built.
+fn bounded_len<T: Serialize>(value: &T, limit: usize) -> Result<usize, usize> {
+    let mut counter = Counter { written: 0, limit };
+    match serde_json::to_writer(&mut counter, value) {
+        Ok(()) => Ok(counter.written),
+        Err(_) => Err(counter.written),
+    }
+}
+
 impl ContextSnapshot {
     /// Find candidate nodes under [`DISCOVERY_POLICY`], one bounded page at a
     /// time. A candidate that cannot fit the byte budget fails explicitly;
-    /// it is never skipped to fit later ones.
+    /// it is never skipped to fit later ones. Sizes are counted without
+    /// building the output, so `required_bytes` on such a failure is the
+    /// count reached when it passed the budget: a lower bound.
     pub fn discover(&self, request: DiscoveryRequest) -> Result<DiscoveryResponse, ContextError> {
         validate_limit("max_candidates", request.max_candidates, MAX_CANDIDATES)?;
         validate_limit("max_bytes", request.max_bytes, MAX_RESPONSE_BYTES)?;
@@ -391,43 +474,42 @@ impl ContextSnapshot {
             next_cursor: cursor_at(offset),
         };
         for (_, id, fact, found) in matched.iter().skip(offset).take(request.max_candidates) {
-            // The id and matched value are copied into the page; one that
-            // alone exceeds the budget is refused before it is copied.
-            let floor = id.len() + found.value.len();
-            if floor > request.max_bytes {
-                if response.candidates.is_empty() {
-                    return Err(ContextError::ResponseBudgetExceeded {
-                        max_bytes: request.max_bytes,
-                        required_bytes: floor,
-                    });
-                }
-                return Ok(response);
-            }
             let evidence = fact
                 .provenance
                 .as_ref()
                 .and_then(|provenance| provenance.evidence.first());
             let (outgoing_edges, incoming_edges) = degree.get(id).copied().unwrap_or_default();
-            response.candidates.push(DiscoveryCandidate {
-                reference: fact.reference.clone(),
-                label: fact.label.clone(),
-                source: CandidateSource {
-                    repo: evidence.map(|evidence| evidence.repo.clone()),
-                    path: evidence.map(|evidence| evidence.path.clone()),
-                    commit_sha: evidence.map(|evidence| evidence.commit_sha.clone()),
+            let view = CandidateView {
+                reference: &fact.reference,
+                label: &fact.label,
+                source: SourceView {
+                    repo: evidence.map(|evidence| evidence.repo.as_str()),
+                    path: evidence.map(|evidence| evidence.path.as_str()),
+                    commit_sha: evidence.map(|evidence| evidence.commit_sha.as_str()),
                 },
-                match_reason: MatchReason {
+                match_reason: ReasonView {
                     kind: found.kind,
-                    field: found.field.to_string(),
-                    value: found.value.to_string(),
+                    field: found.field,
+                    value: found.value,
                 },
                 outgoing_edges,
                 incoming_edges,
                 confidence_tier: fact.confidence_tier,
-            });
+            };
+            // Nothing is copied until the candidate, escaping included, is
+            // known to fit the budget on its own.
+            if let Err(required_bytes) = bounded_len(&view, request.max_bytes) {
+                if response.candidates.is_empty() {
+                    return Err(ContextError::ResponseBudgetExceeded {
+                        max_bytes: request.max_bytes,
+                        required_bytes,
+                    });
+                }
+                return Ok(response);
+            }
+            response.candidates.push(view.to_owned());
             response.next_cursor = cursor_at(offset + response.candidates.len());
-            let bytes = serde_json::to_vec(&response)?.len();
-            if bytes > request.max_bytes {
+            if let Err(bytes) = bounded_len(&response, request.max_bytes) {
                 response.candidates.pop();
                 if response.candidates.is_empty() {
                     return Err(ContextError::ResponseBudgetExceeded {
