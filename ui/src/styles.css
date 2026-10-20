@@ -4042,3 +4042,35 @@ details.investigation-section { display: block; }
 @media (max-width: 650px) {
   .investigation-specialists, .investigation-history > ul { grid-template-columns: 1fr; }
 }
+
+/* Coverage inventory (AC-0238): one disclosure per repo. */
+.coverage-inventory {
+  margin: 0.5rem 0 1rem;
+}
+
+.coverage-repo {
+  margin: 0.25rem 0;
+  font-size: 0.85rem;
+}
+
+.coverage-repo summary {
+  cursor: pointer;
+}
+
+.coverage-limited {
+  color: var(--finding-unsupported);
+}
+
+.coverage-producers {
+  margin: 0.25rem 0;
+  padding-left: 1.25rem;
+}
+
+.coverage-state {
+  font-weight: 600;
+}
+
+.coverage-not_selected .coverage-state,
+.coverage-missing_input .coverage-state {
+  color: var(--finding-unsupported);
+}

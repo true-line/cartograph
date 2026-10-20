@@ -786,6 +786,9 @@ struct IngestSummary {
     /// Where that report stands in the register order (#458); `None` when a
     /// newer preflight's findings were already there, so it wrote nothing.
     preflight_register: Option<RegisterStamp>,
+    /// What this recovery's producers covered and where they stopped
+    /// (AC-0238), shown before any interpretation.
+    coverage: Vec<ingest::coverage::RepoCoverage>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -801,6 +804,110 @@ impl DeltaSummary {
         self.reused_files += reused_files;
         self.deleted_files += deleted_files;
     }
+}
+
+/// Observational inputs a manifest declared for one repo, as written there.
+#[derive(Debug, Default)]
+struct DeclaredInputs {
+    state_json: Option<String>,
+    pulumi_json: Option<String>,
+    otel_jsonl: Vec<String>,
+}
+
+/// One repo's coverage inventory from what its extraction recorded
+/// (AC-0238); unsupported capabilities come from the reconciled preflight.
+/// What producers read during one extraction, for the coverage inventory
+/// (AC-0238): inputs that the retained output alone cannot show.
+#[derive(Debug, Default)]
+struct ProducerReads {
+    /// TypeScript files the adapter read, before any infra-only projection.
+    ts_files: u64,
+    /// Gated plugins that ran: pinned extractor id and what each read and
+    /// published.
+    plugins: Vec<(String, ingest::coverage::ProducerCount)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn repo_coverage(
+    repo: &str,
+    commit: &str,
+    hints: &[String],
+    layers: &LayerBreakdown,
+    extraction: &adapters_lang_ts::Extraction,
+    declared: &DeclaredInputs,
+    reads: &ProducerReads,
+) -> ingest::coverage::RepoCoverage {
+    use ingest::coverage::{CoverageFacts, Observation, ProducerCount, RepoCoverage};
+    let count = |layer: &LayerSummary| ProducerCount {
+        files: layer.files,
+        nodes: layer.nodes,
+        edges: layer.edges,
+    };
+    let counted = |predicate: &dyn Fn(&core_graph::Node) -> bool| {
+        extraction
+            .nodes
+            .iter()
+            .filter(|node| predicate(node))
+            .count() as u64
+    };
+    // State and Pulumi inputs are read only inside the infrastructure layer.
+    let infra = ingest::coverage::wants(hints, ingest::coverage::INFRA_LAYERS);
+    RepoCoverage::from_facts(&CoverageFacts {
+        repo,
+        commit,
+        layer_hints: hints,
+        deterministic: vec![
+            (
+                "t0.adapter-ts",
+                ProducerCount {
+                    files: reads.ts_files,
+                    ..count(&layers.ts)
+                },
+            ),
+            ("t0.webextension", count(&layers.webext)),
+            ("t0.adapter-python", count(&layers.python)),
+            ("t0.adapter-go", count(&layers.go)),
+            ("t0.adapter-java", count(&layers.java)),
+            ("t0.adapter-kotlin", count(&layers.kotlin)),
+            ("t0.iac-terraform", count(&layers.tf)),
+            (
+                ingest::toolchain::TOOLCHAIN_EXTRACTOR_ID,
+                count(&layers.tools),
+            ),
+        ],
+        plugins: reads.plugins.clone(),
+        observations: vec![
+            Observation {
+                producer: dynamic::EXTRACTOR_ID,
+                input: "state_json",
+                enriches: "Terraform",
+                declared: declared.state_json.iter().cloned().collect(),
+                // Only Terraform-extracted resources take observed state;
+                // Pulumi resources share the `res:` id space.
+                targets: counted(&|node| {
+                    node.label == "Resource"
+                        && node.props["prov"]["extractor_id"] == "t0.iac-terraform"
+                }),
+                selected: infra,
+            },
+            Observation {
+                producer: dynamic::PULUMI_EXTRACTOR_ID,
+                input: "pulumi_json",
+                enriches: "Pulumi resource",
+                declared: declared.pulumi_json.iter().cloned().collect(),
+                targets: counted(&|node| node.props["source"].as_str() == Some("pulumi")),
+                selected: infra,
+            },
+            Observation {
+                producer: dynamic::OTEL_EXTRACTOR_ID,
+                input: "otel_jsonl",
+                enriches: "endpoint and channel",
+                declared: declared.otel_jsonl.clone(),
+                targets: counted(&|node| node.label == "Endpoint" || node.label == "Channel"),
+                selected: true,
+            },
+        ],
+    })
 }
 
 /// The cross-layer T0 pipeline over one tree: TypeScript, Python, Go, Terraform,
@@ -865,6 +972,7 @@ fn extract_tree_incremental(
         on_file,
         None,
         &mut Vec::new(),
+        &mut ProducerReads::default(),
     )
 }
 
@@ -885,15 +993,16 @@ fn extract_tree_with_primary(
     on_file: &mut dyn FnMut(&str),
     primary: Option<&source_capture::Capture>,
     receipts: &mut Vec<adapters_lang_ts::captured::Receipt>,
+    reads: &mut ProducerReads,
 ) -> Result<(adapters_lang_ts::Extraction, LayerBreakdown, DeltaSummary), String> {
     // Layer hints gate extractors (AC-0002): empty means everything; the
     // The TS pass covers server/events/client plus Pulumi infra/cloud; the HCL
     // pass covers Terraform infra/cloud.
-    let wants =
-        |names: &[&str]| layers.is_empty() || names.iter().any(|n| layers.iter().any(|l| l == n));
-    let wants_application = wants(&["server", "events", "client"]);
-    let wants_server = wants(&["server"]);
-    let wants_infra = wants(&["infra", "cloud"]);
+    // The coverage inventory reads the same gates (AC-0238).
+    use ingest::coverage::{APPLICATION_LAYERS, INFRA_LAYERS, SERVER_LAYERS, wants};
+    let wants_application = wants(layers, APPLICATION_LAYERS);
+    let wants_server = wants(layers, SERVER_LAYERS);
+    let wants_infra = wants(layers, INFRA_LAYERS);
     let ts_id = adapters_lang_ts::SourceId { repo, commit };
     let mut layers = LayerBreakdown::default();
     let mut delta = DeltaSummary::default();
@@ -931,6 +1040,11 @@ fn extract_tree_with_primary(
             stats.reused_files,
             stats.deleted_files,
         );
+        reads.ts_files = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "File" && node.props.get("placeholder").is_none())
+            .count() as u64;
         if !wants_application {
             extraction.retain_only_pulumi();
         }
@@ -1242,7 +1356,7 @@ fn extract_tree_with_primary(
             let loaded = host
                 .load(&wasm_bytes, &plugin.plugin_id)
                 .map_err(|e| e.to_string())?;
-            let facts = adapters_plugin_host::route::extract_claimed(
+            let (facts, files_read) = adapters_plugin_host::route::extract_claimed_counted(
                 &host,
                 &loaded,
                 root,
@@ -1251,6 +1365,14 @@ fn extract_tree_with_primary(
                 adapters_plugin_host::PluginLimits::default(),
             )
             .map_err(|e| e.to_string())?;
+            reads.plugins.push((
+                adapters_plugin_host::pinned_extractor_id(&plugin.plugin_id, &plugin.content_hash),
+                ingest::coverage::ProducerCount {
+                    files: files_read,
+                    nodes: distinct_node_count(&facts.nodes),
+                    edges: distinct_edge_count(&facts.edges),
+                },
+            ));
             extraction.nodes.extend(facts.nodes);
             extraction.edges.extend(facts.edges);
         }
@@ -3317,6 +3439,7 @@ fn run_ingest<R: tauri::Runtime>(
         .prepare(source, root, &[])
         .map_err(&fail)?;
     let mut receipts = Vec::new();
+    let mut reads = ProducerReads::default();
     let (extraction, layers, delta) = {
         let mut caches = state
             .extraction_caches
@@ -3339,6 +3462,7 @@ fn run_ingest<R: tauri::Runtime>(
             &mut on_file,
             primary.capture.as_ref(),
             &mut receipts,
+            &mut reads,
         )
         .map_err(fail)?
     };
@@ -3395,6 +3519,16 @@ fn run_ingest<R: tauri::Runtime>(
         &extraction.eval_sites,
     )
     .map_err(&fail)?;
+    let coverage = repo_coverage(
+        &repo,
+        "workdir",
+        &[],
+        &layers,
+        &extraction,
+        &DeclaredInputs::default(),
+        &reads,
+    )
+    .with_unsupported(&preflight);
 
     // Ordered before `done` is published (#497), so a preflight the user
     // starts once they see it is newer than this reconciliation.
@@ -3430,6 +3564,7 @@ fn run_ingest<R: tauri::Runtime>(
         delta,
         preflight,
         preflight_register,
+        coverage: vec![coverage],
     })
 }
 
@@ -3653,6 +3788,8 @@ struct AddRepoSummary {
     preflight: ingest::preflight::PreflightReport,
     /// As `IngestSummary::preflight_register` (#458).
     preflight_register: Option<RegisterStamp>,
+    /// As `IngestSummary::coverage`.
+    coverage: Vec<ingest::coverage::RepoCoverage>,
 }
 
 /// Clone a GitHub repo (read-only, shallow) and ingest it with its real
@@ -3701,6 +3838,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         .prepare(&source, root, &[])
         .map_err(&fail)?;
     let mut receipts = Vec::new();
+    let mut reads = ProducerReads::default();
     let (extraction, layers, delta) = {
         let mut caches = state
             .extraction_caches
@@ -3723,6 +3861,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
             &mut on_file,
             primary.capture.as_ref(),
             &mut receipts,
+            &mut reads,
         )
         .map_err(&fail)?
     };
@@ -3775,6 +3914,16 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &extraction.eval_sites,
     )
     .map_err(&fail)?;
+    let coverage = repo_coverage(
+        &source.repo_key,
+        &cloned.commit_sha,
+        &[],
+        &layers,
+        &extraction,
+        &DeclaredInputs::default(),
+        &reads,
+    )
+    .with_unsupported(&preflight);
     // Reserved before `done` is published (#497).
     let fence = app.state::<PreflightRuns>().reserve_reconcile()?;
     finish_source_operation(&state, &app, &execution, &mut operation)?;
@@ -3797,6 +3946,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         delta,
         preflight,
         preflight_register,
+        coverage: vec![coverage],
     })
 }
 
@@ -3827,6 +3977,8 @@ struct AddSystemSummary {
     /// (AC-0209, #446). Not `preflight`: the Preflight surface shows one
     /// repo's report, and a system has several.
     preflights: Vec<RepoPreflight>,
+    /// Each repo's coverage inventory, in manifest order (AC-0238).
+    coverage: Vec<ingest::coverage::RepoCoverage>,
 }
 
 /// One repo's reconciled preflight report within a system recovery.
@@ -3949,6 +4101,7 @@ fn add_system_blocking<R: tauri::Runtime>(
             .prepare(source, root, &entry.layers)
             .map_err(&fail)?;
         let mut receipts = Vec::new();
+        let mut reads = ProducerReads::default();
         let (extraction, repo_layers, repo_delta) = {
             let mut caches = state
                 .extraction_caches
@@ -3971,6 +4124,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 &mut on_file,
                 primary.capture.as_ref(),
                 &mut receipts,
+                &mut reads,
             )
             .map_err(&fail)?
         };
@@ -4006,11 +4160,25 @@ fn add_system_blocking<R: tauri::Runtime>(
         let sha12: String = commit.chars().take(12).collect();
         repos.push(format!("{repo}@{sha12}"));
         if repo_identities.insert(repo.clone()) {
+            let coverage = repo_coverage(
+                &repo,
+                &commit,
+                &entry.layers,
+                &repo_layers,
+                &extraction,
+                &DeclaredInputs {
+                    state_json: entry.state_json.clone(),
+                    pulumi_json: entry.pulumi_json.clone(),
+                    otel_jsonl: entry.otel_jsonl.clone(),
+                },
+                &reads,
+            );
             proofs.push((
                 repo,
                 primary,
                 plugin_coverage(&active_plugins),
                 extraction.eval_sites,
+                coverage,
             ));
         }
     }
@@ -4038,16 +4206,19 @@ fn add_system_blocking<R: tauri::Runtime>(
     )
     .map_err(&fail)?;
     // AC-0200, AC-0209: each repo reconciles exactly as a local recovery.
-    let preflights = proofs
+    let (preflights, coverage): (Vec<_>, Vec<_>) = proofs
         .into_iter()
-        .map(|(repo, primary, plugins, eval_sites)| {
+        .map(|(repo, primary, plugins, eval_sites, coverage)| {
             let root = operation.root(&repo)?;
             let report =
                 reconciled_preflight_report(root, primary.capture.as_ref(), &plugins, &eval_sites)?;
-            Ok(RepoPreflight { repo, report })
+            let coverage = coverage.with_unsupported(&report);
+            Ok((RepoPreflight { repo, report }, coverage))
         })
         .collect::<Result<Vec<_>, String>>()
-        .map_err(&fail)?;
+        .map_err(&fail)?
+        .into_iter()
+        .unzip();
     // Reserved before `done` is published (#497).
     let runs = app.state::<PreflightRuns>();
     let fence = runs.reserve_reconcile()?;
@@ -4069,6 +4240,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         layers,
         delta,
         preflights,
+        coverage,
     })
 }
 
@@ -5889,6 +6061,7 @@ export function queue() {
                 &mut |_| {},
                 None,
                 &mut Vec::new(),
+                &mut crate::ProducerReads::default(),
             )
             .unwrap();
             published.record_load(
@@ -8583,6 +8756,149 @@ export function App() {
     }
 
     #[test]
+    fn system_recovery_reports_each_repos_coverage_inventory() {
+        // AC-0238 (#588): each recovered repo lists which producers ran,
+        // which its layer hints excluded, which inputs were missing and
+        // which capabilities are unsupported, with scoped reasons.
+        use ingest::coverage::ProducerState;
+        use tauri::Manager;
+        let dir = tempfile::tempdir().unwrap();
+        let api = dir.path().join("api");
+        std::fs::create_dir_all(&api).unwrap();
+        std::fs::write(api.join("main.go"), "package main\n\nfunc main() {}\n").unwrap();
+        std::fs::write(api.join("task.rb"), "puts 1\n").unwrap();
+        let infra = dir.path().join("infra");
+        std::fs::create_dir_all(&infra).unwrap();
+        std::fs::write(
+            infra.join("main.tf"),
+            "resource \"aws_sqs_queue\" \"jobs\" {\n  name = \"jobs\"\n}\n",
+        )
+        .unwrap();
+        // Pulumi only: its `res:` resources take no Terraform state.
+        let stack = dir.path().join("stack");
+        std::fs::create_dir_all(&stack).unwrap();
+        std::fs::write(
+            stack.join("index.ts"),
+            "import * as aws from '@pulumi/aws';\nexport const queue = new aws.sqs.Queue('orders', {});\n\
+             export function handler() { return 1; }\n",
+        )
+        .unwrap();
+        // Terraform with no resource: observed state has nothing to enrich.
+        let vars = dir.path().join("vars");
+        std::fs::create_dir_all(&vars).unwrap();
+        std::fs::write(vars.join("variables.tf"), "variable \"region\" {}\n").unwrap();
+        let manifest = dir.path().join("cartograph.system.toml");
+        // The api's state file is unparseable: its layer hints exclude
+        // infrastructure, so it must never be read.
+        std::fs::write(api.join("api.tfstate.json"), "not json").unwrap();
+        std::fs::write(
+            &manifest,
+            "[[repos]]\nurl = \"api\"\nlayers = [\"server\"]\nstate_json = \"api/api.tfstate.json\"\n\n\
+             [[repos]]\nurl = \"infra\"\nlayers = [\"infra\"]\n\n\
+             [[repos]]\nurl = \"vars\"\nlayers = [\"infra\"]\n\n\
+             [[repos]]\nurl = \"stack\"\nlayers = [\"infra\"]\n",
+        )
+        .unwrap();
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let _state = app.state::<super::AppState>();
+
+        let summary =
+            super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+                .unwrap();
+
+        assert_eq!(summary.coverage.len(), 4, "one inventory per repo");
+        let state_of = |coverage: &ingest::coverage::RepoCoverage, id: &str| {
+            let producer = coverage
+                .producers
+                .iter()
+                .find(|producer| producer.id == id)
+                .unwrap();
+            (producer.state, producer.stopping_reason.clone())
+        };
+        let api = &summary.coverage[0];
+        assert_eq!(api.layer_hints, ["server"]);
+        assert_eq!(state_of(api, "t0.adapter-go").0, ProducerState::Ran);
+        assert_eq!(
+            state_of(api, "t0.iac-terraform"),
+            (
+                ProducerState::NotSelected,
+                "not selected: layer hints [server] exclude infra and cloud".to_string()
+            )
+        );
+        assert_eq!(
+            api.unsupported
+                .iter()
+                .map(|unsupported| unsupported.capability.as_str())
+                .collect::<Vec<_>>(),
+            ["Ruby"]
+        );
+        assert_eq!(
+            state_of(api, dynamic::EXTRACTOR_ID),
+            (
+                ProducerState::NotSelected,
+                "not selected: layer hints [server] exclude infra and cloud; \
+                 declared state_json was not read"
+                    .to_string()
+            )
+        );
+        assert!(api.limited);
+
+        let infra = &summary.coverage[1];
+        let (tf_state, tf_reason) = state_of(infra, "t0.iac-terraform");
+        assert_eq!(tf_state, ProducerState::Ran);
+        assert!(
+            tf_reason.starts_with("completed over 1 files of "),
+            "{tf_reason}"
+        );
+        assert!(tf_reason.ends_with("for layers infra"), "{tf_reason}");
+        assert_eq!(
+            state_of(infra, dynamic::EXTRACTOR_ID).0,
+            ProducerState::MissingInput
+        );
+        assert_eq!(
+            infra
+                .missing_inputs
+                .iter()
+                .map(|missing| missing.input.as_str())
+                .collect::<Vec<_>>(),
+            ["state_json"]
+        );
+        assert!(infra.limited);
+
+        let vars = &summary.coverage[2];
+        assert_eq!(state_of(vars, "t0.iac-terraform").0, ProducerState::Ran);
+        assert_eq!(
+            state_of(vars, dynamic::EXTRACTOR_ID).0,
+            ProducerState::NotApplicable
+        );
+        assert!(vars.missing_inputs.is_empty());
+
+        // Infra-only TS still reports the files it read, though projection
+        // kept only the Pulumi facts; Pulumi resources need no state_json.
+        let stack = &summary.coverage[3];
+        let (ts_state, ts_reason) = state_of(stack, "t0.adapter-ts");
+        assert_eq!(ts_state, ProducerState::Ran);
+        assert!(
+            ts_reason.starts_with("completed over 1 files of ")
+                && ts_reason.ends_with(
+                    "for Pulumi infrastructure bindings only: application layers were not selected"
+                ),
+            "{ts_reason}"
+        );
+        assert_eq!(
+            state_of(stack, dynamic::EXTRACTOR_ID).0,
+            ProducerState::NotApplicable
+        );
+        assert!(
+            stack
+                .missing_inputs
+                .iter()
+                .all(|missing| missing.input != "state_json")
+        );
+    }
+
+    #[test]
     fn a_failed_system_recovery_writes_no_preflight_findings() {
         // AC-0209 (#446): the first repo recovers, the second fails (its
         // declared state file is missing), so the system recovery fails and
@@ -9529,6 +9845,48 @@ export function App() {
             serde_json::to_string(&first.edges).unwrap(),
             serde_json::to_string(&second.edges).unwrap()
         );
+
+        // AC-0238: the inventory names the gated artifact, not the bare
+        // plugin id, and counts the claimed files it actually read.
+        let mut reads = super::ProducerReads::default();
+        let (extraction, layers, _) = super::extract_tree_with_primary(
+            &root,
+            &repo,
+            "workdir",
+            &[],
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
+            None,
+            None,
+            &[],
+            &mut super::RepoExtractionCache::default(),
+            &active,
+            &mut |_| {},
+            None,
+            &mut Vec::new(),
+            &mut reads,
+        )
+        .unwrap();
+        let pinned = format!("t0.plugin-fixture@{}", &hash[..12]);
+        assert_eq!(reads.plugins.len(), 1);
+        assert_eq!(reads.plugins[0].0, pinned);
+        assert_eq!(reads.plugins[0].1.files, 1, "one claimed file read");
+        let coverage = super::repo_coverage(
+            &repo,
+            "workdir",
+            &[],
+            &layers,
+            &extraction,
+            &super::DeclaredInputs::default(),
+            &reads,
+        );
+        let row = coverage
+            .producers
+            .iter()
+            .find(|producer| producer.id == pinned)
+            .expect("pinned plugin row");
+        assert_eq!(row.files, 1);
+        assert!(row.nodes >= 1);
     }
 
     #[test]

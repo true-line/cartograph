@@ -30,3 +30,22 @@ stays on Connect until you dismiss it, and it cannot be dismissed while a
 folder is still queued or ingesting. A later drop is listed below the
 earlier outcomes. A drop that arrives while intake is running is rejected,
 not lost.
+
+## Coverage inventory
+
+After a recovery, the Workspace lists each repo's coverage inventory before
+it offers any investigation. The inventory says which deterministic producers
+(language adapters, Terraform, toolchain configuration, gated plugins) and
+observational producers (Terraform state, Pulumi deployments, OpenTelemetry
+traces) ran. Each producer has a stopping reason scoped to that repo,
+revision and layer hints. The inventory also lists:
+
+- producers the manifest's layer hints excluded, including a declared state
+  or Pulumi file that was therefore never read;
+- inputs that were not declared but would have enriched facts here, with the
+  `cartograph.system.toml` field to add;
+- capabilities no installed producer covers. These are tool limitations, not
+  system gaps.
+
+"Complete within the declared scope only" never means global completeness.
+Anything excluded, missing or unsupported marks the repo as limited.

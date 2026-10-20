@@ -64,6 +64,7 @@ pub(super) fn capture(state: &AppState, source: &RegisteredSource, publish: bool
             &mut |_| {},
             input.capture.as_ref(),
             &mut receipts,
+            &mut crate::ProducerReads::default(),
         )
         .unwrap()
         .0

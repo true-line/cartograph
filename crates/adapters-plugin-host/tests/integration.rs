@@ -389,7 +389,7 @@ fn routing_extracts_only_claimed_files_and_is_deterministic() {
     // #201 (AC-0069 extension): a gated plugin covers exactly the files
     // its corpus claims, in sorted order, skipping vendored dirs; the
     // merged facts are pinned and identical across runs.
-    use adapters_plugin_host::route::{claimed_files, extract_claimed};
+    use adapters_plugin_host::route::{claimed_files, extract_claimed, extract_claimed_counted};
 
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -462,6 +462,24 @@ fn routing_extracts_only_claimed_files_and_is_deterministic() {
         assert_eq!(prov["evidence"][0]["repo"], serde_json::json!("owner/repo"));
         assert!(prov["content_hash"].is_string());
     }
+
+    // The counted route reports every claimed file read, under the same
+    // pinned identity the facts carry.
+    let (counted, files_read) = extract_claimed_counted(
+        &host,
+        &plugin,
+        root,
+        &claims,
+        &source_id(),
+        PluginLimits::default(),
+    )
+    .expect("counted routing succeeds");
+    assert_eq!(files_read, 2);
+    assert_eq!(counted.nodes, first.nodes);
+    assert_eq!(
+        adapters_plugin_host::pinned_extractor_id("t0.plugin-fixture", &hash),
+        format!("t0.plugin-fixture@{short}")
+    );
 
     let second = extract_claimed(
         &host,

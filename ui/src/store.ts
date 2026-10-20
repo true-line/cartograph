@@ -7,6 +7,7 @@ import {
   type DropItem,
 } from './dropIntake';
 import { create } from 'zustand';
+import type { RepoCoverage } from './coverage';
 import type { FactKey } from './primarySourceStore';
 import { invokeOr } from './tauri';
 import type { SurfaceView } from './views';
@@ -141,6 +142,8 @@ export interface IngestSummary {
   commit_sha?: string;
   /** Set for system-manifest adds: `identity@sha12` per repo (AC-0002). */
   repos?: string[];
+  /** Each recovered repo's coverage inventory (AC-0238). */
+  coverage?: RepoCoverage[];
 }
 
 export interface LayerSummary {

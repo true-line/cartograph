@@ -455,6 +455,12 @@ impl wasmtime::ResourceLimiter for HostState {
     }
 }
 
+/// The extractor identity a gated artifact's facts carry: `{plugin_id}@{hash12}`.
+pub fn pinned_extractor_id(plugin_id: &str, artifact_hash: &str) -> String {
+    let short = &artifact_hash[..artifact_hash.len().min(12)];
+    format!("{plugin_id}@{short}")
+}
+
 /// Pin a plugin extraction's provenance to the exact artifact that produced
 /// it (#199, AC-0069). Host-authoritative: whatever `extractor_id` the
 /// guest wrote is overwritten with `{plugin_id}@{hash12}` — a plugin cannot
@@ -462,8 +468,7 @@ impl wasmtime::ResourceLimiter for HostState {
 /// bytes, different hash) is a different extractor identity. The full
 /// artifact hash rides on every fact as `plugin_artifact_hash`.
 pub fn pin_extraction(extraction: &mut PluginExtraction, plugin_id: &str, artifact_hash: &str) {
-    let short = &artifact_hash[..artifact_hash.len().min(12)];
-    let pinned_id = format!("{plugin_id}@{short}");
+    let pinned_id = pinned_extractor_id(plugin_id, artifact_hash);
     let props = extraction
         .nodes
         .iter_mut()
