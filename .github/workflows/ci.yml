@@ -169,6 +169,10 @@ jobs:
     concurrency:
       group: ${{ github.event_name == 'pull_request' && 'ci-lane-rust' || format('ci-lane-rust-{0}', github.run_id) }}
       cancel-in-progress: false
+    # Several runners share one host's memory; cargo's default of one rustc
+    # per CPU exhausts it while compiling the workspace.
+    env:
+      CARGO_BUILD_JOBS: 6
     steps:
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
