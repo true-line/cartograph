@@ -23,7 +23,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [actions, javascript-typescript, rust]
+        # Rust runs only after merge to main until the org runners stop losing
+        # long jobs' working directories (#634); pull requests keep the rest.
+        language: ${{ fromJSON(github.event_name == 'push' && '["actions", "javascript-typescript", "rust"]' || '["actions", "javascript-typescript"]') }}
     steps:
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,13 +40,43 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+
+      # Rust extraction loads the workspace through cargo, which the
+      # organisation's Linux runner lacks; rustup from apt resolves the exact
+      # toolchain from rust-toolchain.toml, as in the CI Rust lane.
+      - name: Refresh apt metadata
+        if: matrix.language == 'rust'
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        with:
+          task: Refresh rustup apt metadata
+          executable: sudo
+          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
+          timeout-seconds: '120'
+          attempts: '2'
+          retry-delay-seconds: '5'
+
+      - name: Install rustup
+        if: matrix.language == 'rust'
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        with:
+          task: Install rustup
+          executable: sudo
+          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","rustup"]'
+          timeout-seconds: '180'
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           languages: ${{ matrix.language }}
           build-mode: none
+          # Several runners share one host's memory; CodeQL otherwise sizes
+          # itself to the whole machine and fails finalizing the Rust database.
+          ram: 6144
+          threads: 4
 
       - name: Analyze
         uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           category: /language:${{ matrix.language }}
+          ram: 6144
+          threads: 4

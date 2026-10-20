@@ -4,6 +4,8 @@ import path from 'node:path';
 import test from 'node:test';
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+// A workflow's top-level `on:` block, which alone decides what triggers it.
+const triggers = (workflow) => workflow.match(/^on:\n((?: .*\n|\n)*)/mu)?.[1] ?? '';
 const PLAYBOOK_RUNTIME_PIN = '87c6b301057992f79a723f63c64624bf40c9d06a';
 
 test('version-cut preserves review, evidence, and immutable-tag gates', () => {
@@ -122,7 +124,7 @@ test('the help wiki follows main post-merge and never gates a PR (#470)', () => 
 
   const sync = readFileSync(path.join(root, '.github/workflows/help-wiki-sync.yml'), 'utf8');
   assert.match(sync, /on:\n  push:\n    branches:\n      - main\n/u);
-  assert.doesNotMatch(sync, /pull_request/u);
+  assert.doesNotMatch(triggers(sync), /pull_request/u);
   assert.match(sync, /if: github\.ref == 'refs\/heads\/main'/u);
   assert.match(sync, /cancel-in-progress: false/u);
   // Least privilege: the repository token only reads; the wiki write uses
@@ -181,7 +183,12 @@ test('Windows ownership tests are required by the same exact-SHA complete-suite 
   const windows = job('windows-job-ownership');
   const rust = job('rust');
   const complete = job('complete');
-  const condition = (contents) => contents.match(/    if: >-\n([\s\S]*?)    runs-on:/u)?.[1].trim();
+  // Comments between a job's condition and its runner are not part of it.
+  const condition = (contents) =>
+    contents
+      .match(/    if: >-\n([\s\S]*?)    runs-on:/u)?.[1]
+      .replace(/^ *#.*\n/gmu, '')
+      .trim();
   assert.ok(condition(rust));
   assert.equal(condition(windows), condition(rust));
   assert.equal(condition(complete), condition(rust));
@@ -292,7 +299,11 @@ test('Advanced CodeQL is governed, immutable, and preserves Rust coverage', () =
   const dependabot = readFileSync(path.join(root, '.github/dependabot.yml'), 'utf8');
   assert.match(workflow, /^\s{2}workflow_call:/mu);
   assert.doesNotMatch(workflow, /^\s{2}(push|pull_request|schedule):/mu);
-  assert.match(workflow, /language: \[actions, javascript-typescript, rust\]/u);
+  // #634: Rust analysis runs on pushes to main only; pull requests keep the rest.
+  assert.match(
+    workflow,
+    /language: \$\{\{ fromJSON\(github\.event_name == 'push' && '\["actions", "javascript-typescript", "rust"\]' \|\| '\["actions", "javascript-typescript"\]'\) \}\}/u,
+  );
   assert.match(
     workflow,
     /github\/codeql-action\/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd/u,
@@ -431,19 +442,24 @@ test('release publication is reviewed, exact-evidence-only, and idempotent', () 
 
 // Credential-bearing workflows never share a persistent self-hosted runner
 // with pull-request builds, which run repository-controlled scripts (#619).
-const HOSTED_ONLY = new Set(['help-wiki-sync.yml', 'package.yml', 'release.yml', 'version-cut.yml']);
 
-test('PR-path jobs route through a runner variable and secret-bearing jobs stay hosted', () => {
+test('fork pull requests and merge-queue runs never reach organisation runners', () => {
+  // #630: jobs may run on the organisation's runners, but a fork's pull
+  // request or a merge-queue run always falls back to a hosted runner, and a
+  // workflow that reads secrets never runs pull-request code (#631).
   const dir = path.join(root, '.github/workflows');
+  const fallback =
+    /\(github\.event_name == 'merge_group' \|\| github\.event\.pull_request\.head\.repo\.fork\) && '(\["(ubuntu|macos)-latest"\]|windows-2022)' \|\|/u;
   for (const name of readdirSync(dir).filter((file) => file.endsWith('.yml'))) {
     const workflow = readFileSync(path.join(dir, name), 'utf8');
-    const hostedOnly = HOSTED_ONLY.has(name);
-    assert.equal(/secrets\.[A-Z]/u.test(workflow), hostedOnly, `${name}: secrets must match HOSTED_ONLY`);
+    if (/secrets\.[A-Z]/u.test(workflow)) {
+      assert.doesNotMatch(triggers(workflow), /pull_request/u, `${name}: secrets with a PR trigger`);
+    }
     for (const [line] of workflow.matchAll(/^\s*runs-on:.*$/gmu)) {
-      if (hostedOnly) {
-        assert.match(line, /runs-on: (ubuntu|macos|windows)-[\w.]+$/u, `${name}: ${line.trim()}`);
+      if (/self-hosted|vars\.(LINUX|WINDOWS)_RUNNER/u.test(line)) {
+        assert.match(line, fallback, `${name}: ${line.trim()}`);
       } else {
-        assert.match(line, /vars\.(LINUX|WINDOWS)_RUNNER/u, `${name}: ${line.trim()}`);
+        assert.match(line, /runs-on: (ubuntu|macos|windows)-[\w.]+$/u, `${name}: ${line.trim()}`);
       }
     }
   }
