@@ -324,6 +324,13 @@ export const DiscoveredPluginsToggle: Story = {
             support: 'unsupported',
             note: 'route builders are not recognized yet',
           },
+          {
+            language: 'Objective-C',
+            framework: 'core',
+            capability: 'types',
+            support: 'partial',
+            note: 'categories are not merged into their class',
+          },
         ],
       },
       {
@@ -373,9 +380,11 @@ export const DiscoveredPluginsToggle: Story = {
     ).toBeInTheDocument();
 
     // AC-0263: a gated plugin reports the cells its corpus declares.
-    await userEvent.click(list.getByText('1 supported · 0 partial · 1 unsupported'));
+    await userEvent.click(list.getByText('1 supported · 1 partial · 1 unsupported'));
     const swiftCells = canvas.getByRole('list', { name: 't0.adapter-swift coverage cells' });
-    await expect(within(swiftCells).getByText('vapor · HTTP endpoints')).toBeInTheDocument();
+    // Cells spanning two languages name each one.
+    await expect(within(swiftCells).getByText('Swift · vapor · HTTP endpoints')).toBeInTheDocument();
+    await expect(within(swiftCells).getByText('Objective-C · language · types')).toBeInTheDocument();
     await expect(within(swiftCells).getByText(/route builders are not recognized/)).toBeInTheDocument();
 
     await userEvent.click(

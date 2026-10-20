@@ -570,13 +570,21 @@ fn detect_language(
         let language = uncovered_language(extension)
             .map(str::to_string)
             .unwrap_or_else(|| format!(".{extension}"));
+        // Only this language's cells: one plugin may declare several
+        // languages with differing support.
+        let coverage = plugin
+            .cells
+            .iter()
+            .filter(|cell| cell.language.eq_ignore_ascii_case(&language))
+            .cloned()
+            .collect();
         let entry = languages
             .entry(language.clone())
             .or_insert(LanguageDetection {
                 language,
                 files: 0,
                 adapter: Some(plugin.plugin_id.clone()),
-                coverage: plugin.cells.clone(),
+                coverage,
             });
         entry.files += 1;
     } else if let Some(language) = uncovered_language(extension) {
@@ -1215,6 +1223,45 @@ mod tests {
             .find(|l| l.language == "TypeScript")
             .expect("TypeScript detected");
         assert_eq!(ts.adapter.as_deref(), Some("t0.adapter-ts"));
+    }
+
+    #[test]
+    fn a_multi_language_plugin_reports_each_language_only_its_own_cells() {
+        // AC-0263: one plugin declaring the same capability for two
+        // languages at differing support reports each language its own
+        // cells, never the other language's claim.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app.rb", "puts 'hi'\n");
+        write(dir.path(), "index.php", "<?php echo 'hi';\n");
+        let cell = |language: &str, support, note: &str| ReportedCell {
+            language: language.into(),
+            framework: "core".into(),
+            capability: "http_endpoints".into(),
+            support,
+            note: note.into(),
+        };
+        let ruby_cell = cell("ruby", crate::matrix::Support::Supported, "");
+        let php_cell = cell(
+            "PHP",
+            crate::matrix::Support::Partial,
+            "attribute routes only",
+        );
+        let plugins = [PluginCoverage {
+            plugin_id: "t0.plugin-scripts".into(),
+            extensions: vec!["rb".into(), "php".into()],
+            cells: vec![ruby_cell.clone(), php_cell.clone()],
+        }];
+        let report = preflight_with_plugins(dir.path(), &plugins).unwrap();
+        let coverage = |language: &str| {
+            report
+                .languages
+                .iter()
+                .find(|l| l.language == language)
+                .map(|l| l.coverage.clone())
+                .expect("language detected")
+        };
+        assert_eq!(coverage("Ruby"), vec![ruby_cell]);
+        assert_eq!(coverage("PHP"), vec![php_cell]);
     }
 
     #[test]

@@ -120,8 +120,16 @@ pub fn gate_key(content_hash: &str, corpus: Option<&[u8]>) -> String {
 
 /// First problem with the coverage declarations, if any.
 fn declaration_problem(corpus: &GoldenCorpus) -> Option<String> {
-    let paths: std::collections::BTreeSet<&str> =
-        corpus.cases.iter().map(|case| case.path.as_str()).collect();
+    // Path → whether the case asserts any fact; an empty-output case is a
+    // negative case and cannot on its own prove a claim.
+    let asserts: std::collections::BTreeMap<&str, bool> = corpus
+        .cases
+        .iter()
+        .map(|case| {
+            let any = !case.nodes.is_empty() || !case.edges.is_empty();
+            (case.path.as_str(), any)
+        })
+        .collect();
     let mut seen = std::collections::BTreeSet::new();
     for cell in &corpus.coverage {
         let id = format!("{}.{}.{}", cell.language, cell.framework, cell.capability);
@@ -158,9 +166,15 @@ fn declaration_problem(corpus: &GoldenCorpus) -> Option<String> {
         if let Some(missing) = cell
             .cases
             .iter()
-            .find(|path| !paths.contains(path.as_str()))
+            .find(|path| !asserts.contains_key(path.as_str()))
         {
             return Some(format!("{id}: names unknown case {missing}"));
+        }
+        let proven = cell.cases.iter().any(|path| asserts[path.as_str()]);
+        if !cell.cases.is_empty() && !proven {
+            return Some(format!(
+                "{id}: names only cases that assert no nodes or edges"
+            ));
         }
     }
     None

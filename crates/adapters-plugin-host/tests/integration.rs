@@ -481,6 +481,34 @@ fn coverage_declarations_count_only_when_their_cases_pass() {
         let (passed, detail) = gate(&corpus(vec![bad]));
         assert!(!passed && detail.contains(why), "{why}: {detail}");
     }
+    // A negative (empty-output) case cannot on its own prove a claim, but
+    // may accompany a case that asserts facts.
+    let with_negative = |coverage| {
+        let mut corpus = corpus(coverage);
+        corpus.cases.push(GoldenCase {
+            path: "src/empty.rs".to_string(),
+            source: String::new(),
+            nodes: vec![],
+            edges: vec![],
+        });
+        corpus
+    };
+    let (passed, detail) = gate(&with_negative(vec![cell(
+        DeclaredSupport::Supported,
+        "",
+        &["src/empty.rs"],
+    )]));
+    assert!(
+        !passed && detail.contains("assert no nodes or edges"),
+        "{detail}"
+    );
+    let (_, detail) = gate(&with_negative(vec![cell(
+        DeclaredSupport::Supported,
+        "",
+        &["src/lib.rs", "src/empty.rs"],
+    )]));
+    assert_eq!(detail, "1 declared cell(s)");
+
     let twice = cell(DeclaredSupport::Supported, "", &["src/lib.rs"]);
     let (passed, detail) = gate(&corpus(vec![twice.clone(), twice]));
     assert!(!passed && detail.contains("declared twice"), "{detail}");

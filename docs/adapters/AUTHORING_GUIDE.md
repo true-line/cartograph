@@ -177,8 +177,11 @@ Next to your compiled artifact, `{your-plugin-id}.golden.json`:
   layer would hand you at that extension, so pick realistic paths.
 - `coverage` states your language × framework × capability cells (AC-0263),
   shown in Preflight and Settings alongside the compiled-in matrix. A
-  `supported` or `partial` cell names the golden `cases` that prove it, and
-  since every case must pass, a gated plugin's claims are proven. `partial`
+  `supported` or `partial` cell names the golden `cases` that prove it, at
+  least one of which asserts nodes or edges (an empty-output negative case
+  may accompany it but cannot prove a claim alone). Since every case must
+  pass, a gated plugin's claims are proven. Cells are reported per language,
+  so a plugin covering several languages lists each one's cells. `partial`
   and `unsupported` need a `note` saying what is missed, `supported` must
   have none, and `unsupported` names no cases. `capability` is snake_case and
   may be one the core does not know (`graphql_operations`), which is how a

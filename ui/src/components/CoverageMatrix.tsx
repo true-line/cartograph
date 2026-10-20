@@ -1,4 +1,4 @@
-import { cellLabel, supportCounts } from '../coverageMatrix';
+import { cellLabel, spansLanguages, supportCounts } from '../coverageMatrix';
 import type { CoverageCell } from '../store';
 
 const SUPPORT_LABEL: Record<CoverageCell['support'], string> = {
@@ -12,6 +12,7 @@ const SUPPORT_LABEL: Record<CoverageCell['support'], string> = {
 export function CoverageMatrix({ language, cells }: { language: string; cells: CoverageCell[] }) {
   if (cells.length === 0) return null;
   const counts = supportCounts(cells);
+  const withLanguage = spansLanguages(cells);
   return (
     <details className="coverage-matrix">
       <summary>
@@ -19,9 +20,9 @@ export function CoverageMatrix({ language, cells }: { language: string; cells: C
       </summary>
       <ul aria-label={`${language} coverage cells`}>
         {cells.map((cell) => (
-          <li key={`${cell.framework}.${cell.capability}`}>
+          <li key={`${cell.language}.${cell.framework}.${cell.capability}`}>
             <span className={`gate-chip support-${cell.support}`}>{SUPPORT_LABEL[cell.support]}</span>{' '}
-            <span>{cellLabel(cell)}</span>
+            <span>{cellLabel(cell, withLanguage)}</span>
             {cell.note && <span className="muted"> — {cell.note}</span>}
           </li>
         ))}
