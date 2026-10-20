@@ -7,8 +7,6 @@
 
 use core_graph::{Edge, Node};
 use flowtracer::Flow;
-use std::collections::BTreeMap;
-use std::fmt::Write;
 
 mod adr;
 
@@ -27,10 +25,15 @@ pub(crate) fn spec_rule(rule: &str) -> core_prov::ProducingMethod {
 mod rules;
 mod security;
 mod workbench;
-pub use adr::{AdrFacts, derive_adr_facts, extract_found_adrs};
+pub use adr::{
+    AdrFacts, AdrLimit, AdrLimitExceeded, AdrLimits, derive_adr_facts, derive_adr_facts_bounded,
+    extract_found_adrs,
+};
 pub use workbench::{
-    ExportMode, SpecArtifact, SpecAssertion, SpecBundle, compile_spec, count_gap_findings,
-    is_drift_edge, is_drift_node, is_gap_edge, is_gap_node, provenance,
+    ArtifactSelectionError, ExportMode, SelectedArtifactLimit, SelectedArtifactOutcome,
+    SelectedCompileLimits, SpecArtifact, SpecAssertion, SpecBundle, compile_spec,
+    compile_spec_selected, count_gap_findings, is_drift_edge, is_drift_node, is_gap_edge,
+    is_gap_node, provenance,
 };
 
 /// Edge labels that appear on the topology map — callers use this to query
@@ -76,82 +79,8 @@ fn mermaid_id(id: &str) -> String {
 /// channel it backs) and render as cylinders. Deterministic output: same
 /// graph, same text (US-0014).
 pub fn topology_mermaid(nodes: &[Node], edges: &[Edge]) -> String {
-    let resources: BTreeMap<&str, &Node> = nodes
-        .iter()
-        .filter(|n| n.label == "Resource")
-        .map(|n| (n.id.as_str(), n))
-        .collect();
-    let channels: BTreeMap<&str, &Node> = nodes
-        .iter()
-        .filter(|n| n.label == "Channel")
-        .map(|n| (n.id.as_str(), n))
-        .collect();
-    let backed: std::collections::BTreeSet<&str> = edges
-        .iter()
-        .filter(|e| {
-            e.label == "BACKS"
-                && resources.contains_key(e.src.as_str())
-                && channels.contains_key(e.dst.as_str())
-        })
-        .map(|e| e.dst.as_str())
-        .collect();
-
-    let mut out = String::from("flowchart LR\n");
-    for (id, node) in &resources {
-        let display = node
-            .props
-            .get("logical_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or(id.strip_prefix("res:").unwrap_or(id));
-        let placeholder = node.props.get("placeholder").is_some();
-        let (open, close) = if placeholder {
-            ("([", "])")
-        } else {
-            ("[", "]")
-        };
-        let suffix = if placeholder { " ?" } else { "" };
-        writeln!(
-            out,
-            "    {}{}\"{}{}\"{}",
-            mermaid_id(id),
-            open,
-            display,
-            suffix,
-            close
-        )
-        .expect("write to string");
-    }
-
-    for id in &backed {
-        let display = id.strip_prefix("chan:").unwrap_or(id);
-        writeln!(out, "    {}[(\"{}\")]", mermaid_id(id), display).expect("write to string");
-    }
-
-    let mut lines = Vec::new();
-    for edge in edges {
-        let Some((_, arrow)) = TOPOLOGY_EDGES.iter().find(|(l, _)| *l == edge.label) else {
-            continue;
-        };
-        let endpoints_known = resources.contains_key(edge.src.as_str())
-            && (resources.contains_key(edge.dst.as_str())
-                || (edge.label == "BACKS" && backed.contains(edge.dst.as_str())));
-        if !endpoints_known {
-            continue;
-        }
-        lines.push(format!(
-            "    {} {}|{}| {}",
-            mermaid_id(&edge.src),
-            arrow,
-            edge.label,
-            mermaid_id(&edge.dst)
-        ));
-    }
-    lines.sort();
-    lines.dedup();
-    for line in lines {
-        out.push_str(&line);
-        out.push('\n');
-    }
+    let mut out = String::new();
+    workbench::diagrams::topology(&mut out, nodes, edges).expect("write to string");
     out
 }
 
@@ -160,108 +89,8 @@ pub fn topology_mermaid(nodes: &[Node], edges: &[Edge]) -> String {
 /// (US-0014); statuses and tiers are always visible (R-INT-2), Gap hops
 /// render with a distinct broken arrow (R-INT-4).
 pub fn flow_dossier(flows: &[Flow]) -> String {
-    let mut out = String::from("# Flow dossier\n");
-    for flow in flows {
-        writeln!(
-            out,
-            "\n## {} — {} (score {:.2})\n",
-            flow.trigger_name,
-            flow.status.as_str(),
-            flow.score
-        )
-        .expect("write to string");
-        writeln!(out, "Trigger: {} `{}`", flow.trigger_kind, flow.trigger)
-            .expect("write to string");
-        if flow.depth_limited {
-            out.push_str(
-                "\n**Truncated at the traversal depth bound** — downstream hops exist that are not shown.\n",
-            );
-        }
-
-        if flow.hops.is_empty() {
-            out.push_str("\nNo hops resolved from this trigger.\n");
-            continue;
-        }
-
-        // Mermaid sequence: participants in first-appearance order, one
-        // arrow per hop; Gap hops get the broken arrow.
-        let mut participants: Vec<(String, String)> = Vec::new(); // (id, name)
-        let alias = |participants: &mut Vec<(String, String)>, id: &str, name: &str| -> String {
-            if let Some(i) = participants.iter().position(|(pid, _)| pid == id) {
-                format!("p{i}")
-            } else {
-                participants.push((id.to_string(), name.to_string()));
-                format!("p{}", participants.len() - 1)
-            }
-        };
-        let mut arrows = String::new();
-        for hop in &flow.hops {
-            let a = alias(&mut participants, &hop.src, &hop.src_name);
-            let b = alias(&mut participants, &hop.dst, &hop.dst_name);
-            let arrow = if hop.confidence == "Gap" {
-                "--x"
-            } else {
-                "->>"
-            };
-            writeln!(
-                arrows,
-                "    {}{}{}: {} [{}]",
-                a, arrow, b, hop.label, hop.confidence
-            )
-            .expect("write to string");
-        }
-        out.push_str("\n```mermaid\nsequenceDiagram\n");
-        for (i, (_, name)) in participants.iter().enumerate() {
-            writeln!(out, "    participant p{i} as {}", name.replace('\n', " "))
-                .expect("write to string");
-        }
-        out.push_str(&arrows);
-        out.push_str("```\n");
-
-        // Provenance table (R-INT-2: tier + confidence on every hop).
-        out.push_str(
-            "\n| # | Hop | Tier | Confidence | Method | Evidence | Extractor | Content hash |\n",
-        );
-        out.push_str(
-            "|---|-----|------|------------|--------|----------|-----------|--------------|\n",
-        );
-        for (i, hop) in flow.hops.iter().enumerate() {
-            let evidence = if hop.provenance.evidence.is_empty() {
-                "—".into()
-            } else {
-                hop.provenance
-                    .evidence
-                    .iter()
-                    .map(|evidence| {
-                        format!(
-                            "{}:{} bytes {}..{} @ {}",
-                            evidence.repo,
-                            evidence.path,
-                            evidence.byte_start,
-                            evidence.byte_end,
-                            evidence.commit_sha
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            };
-            writeln!(
-                out,
-                "| {} | {} `{}` → `{}` | {} | {} | {} | {} | `{}` | `{}` |",
-                i + 1,
-                hop.label,
-                hop.src,
-                hop.dst,
-                hop.tier,
-                hop.confidence,
-                workbench::markdown_safe(&hop.provenance.method.label()),
-                evidence,
-                hop.provenance.extractor_id,
-                hop.provenance.content_hash,
-            )
-            .expect("write to string");
-        }
-    }
+    let mut out = String::new();
+    workbench::diagrams::flows(&mut out, flows).expect("write to string");
     out
 }
 

@@ -3,69 +3,63 @@
 //! No source loader is accepted here: all displays came through the producer's
 //! sanitizer before persistence. Parsing checks the typed payload, not secrecy.
 
-use crate::workbench::{append_assertions, largest_groups};
+use crate::workbench::largest_groups;
 use crate::{ExportMode, SpecAssertion, provenance};
 use core_graph::rules::{
     BranchPolarity, DefinitionExpressionKind, DependencyResolution, GuardedExitEvidence,
     KnownLiteral, LiteralEvidence, LocalExit, SourceExpression,
 };
 use core_graph::{Edge, Node};
-use core_prov::EvidenceRef;
+use core_prov::{EvidenceRef, Provenance};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write;
+use std::fmt;
 
-// Stored source is data, including Markdown/HTML-looking syntax. Escape it
-// instead of allowing an expression to create headings, links or table rows.
-fn text(value: &str) -> String {
-    let mut safe = String::new();
-    for character in value.chars() {
-        match character {
-            '&' => safe.push_str("&amp;"),
-            '<' => safe.push_str("&lt;"),
-            '>' => safe.push_str("&gt;"),
-            '\r' => {}
-            '\n' => safe.push_str(" ⏎ "),
-            '\\' | '`' | '*' | '_' | '[' | ']' | '|' | '#' | '!' => {
-                safe.push('\\');
-                safe.push(character);
-            }
-            other => safe.push(other),
-        }
-    }
-    safe
+mod render;
+use render::{
+    Counter, DisplayString, Escaped, EvidenceText, Formatted, MethodLabel, NestedHeadings,
+    TableSafe,
+};
+
+// Source-authored strings are escaped while writing; formatting them never
+// creates an unadmitted intermediate output string.
+fn text(value: impl fmt::Display) -> impl fmt::Display {
+    Escaped(value)
 }
 
-fn source(reference: &EvidenceRef) -> String {
-    text(&format!(
-        "{}:{} bytes {}..{} @ {}",
-        reference.repo,
-        reference.path,
-        reference.byte_start,
-        reference.byte_end,
-        reference.commit_sha
-    ))
+fn source(reference: &EvidenceRef) -> impl fmt::Display + '_ {
+    text(Formatted(move |f: &mut fmt::Formatter<'_>| {
+        write!(
+            f,
+            "{}:{} bytes {}..{} @ {}",
+            reference.repo,
+            reference.path,
+            reference.byte_start,
+            reference.byte_end,
+            reference.commit_sha
+        )
+    }))
 }
 
-fn literal(value: &Option<LiteralEvidence>) -> String {
-    match value {
-        None => "Not a captured scalar literal".into(),
+fn literal(value: &Option<LiteralEvidence>) -> impl fmt::Display + '_ {
+    Formatted(move |f: &mut fmt::Formatter<'_>| match value {
+        None => f.write_str("Not a captured scalar literal"),
         Some(LiteralEvidence::Known { value }) => match value {
-            KnownLiteral::Boolean(value) => format!("boolean {value}"),
-            KnownLiteral::String(value) => format!(
-                "string {}",
-                text(&serde_json::to_string(value).expect("string serializes"))
-            ),
-            KnownLiteral::Number(value) => format!("number {value}"),
-            KnownLiteral::Null => "null".into(),
+            KnownLiteral::Boolean(value) => write!(f, "boolean {value}"),
+            KnownLiteral::String(value) => {
+                f.write_str("string ")?;
+                render::escaped_json_string(f, value)
+            }
+            KnownLiteral::Number(value) => write!(f, "number {value}"),
+            KnownLiteral::Null => f.write_str("null"),
         },
         Some(LiteralEvidence::Withheld { kind, reasons }) => {
-            format!("Withheld {kind:?}: {reasons:?}")
+            write!(f, "Withheld {kind:?}: {reasons:?}")
         }
-    }
+    })
 }
 
-fn expression(output: &mut String, value: &SourceExpression) {
+fn expression(output: &mut impl fmt::Write, value: &SourceExpression) -> fmt::Result {
     writeln!(
         output,
         "- Stored expression: {}\n- Capture: {:?} ({})\n- Literal: {}\n- Expression source: {}\n",
@@ -74,96 +68,110 @@ fn expression(output: &mut String, value: &SourceExpression) {
         text(&value.syntax_kind),
         literal(&value.literal),
         source(&value.source)
-    )
-    .expect("write to string");
+    )?;
+    Ok(())
 }
 
-fn reference(id: &str, visible: &BTreeMap<&str, &Node>) -> String {
-    if let Some(node) = visible.get(id) {
-        if node.props["computed_name"] == true {
-            format!(
-                "{} (computed source name omitted; runtime key unresolved)",
-                text(id)
-            )
-        } else if node.props["name_capture"] == "nonidentifier_key_omitted" {
-            format!("{} (source name omitted)", text(id))
+fn reference<'a>(id: &'a str, visible: &'a BTreeMap<&str, &Node>) -> impl fmt::Display + 'a {
+    Formatted(move |f: &mut fmt::Formatter<'_>| {
+        if let Some(node) = visible.get(id) {
+            write!(f, "{}", text(id))?;
+            if node.props["computed_name"] == true {
+                f.write_str(" (computed source name omitted; runtime key unresolved)")
+            } else if node.props["name_capture"] == "nonidentifier_key_omitted" {
+                f.write_str(" (source name omitted)")
+            } else {
+                Ok(())
+            }
         } else {
-            text(id)
+            f.write_str("Unavailable in this export")
         }
-    } else {
-        "Unavailable in this export".into()
-    }
+    })
 }
 
-fn resolution(value: &DependencyResolution, visible: &BTreeMap<&str, &Node>) -> String {
-    match value {
+fn resolution<'a>(
+    value: &'a DependencyResolution,
+    visible: &'a BTreeMap<&str, &Node>,
+) -> impl fmt::Display + 'a {
+    Formatted(move |f: &mut fmt::Formatter<'_>| match value {
         DependencyResolution::Binding {
             binding_id,
             declaration,
-        } => format!(
+        } => write!(
+            f,
             "Binding {} declared at {}",
             text(binding_id),
             source(declaration)
         ),
         DependencyResolution::Target { node_id } => {
-            format!("Target {}", reference(node_id, visible))
+            write!(f, "Target {}", reference(node_id, visible))
         }
         DependencyResolution::Unresolved { gap_id } => {
-            format!("Unresolved: {}", reference(gap_id, visible))
+            write!(f, "Unresolved: {}", reference(gap_id, visible))
         }
-    }
+    })
 }
 
-fn definition_shape(value: &DefinitionExpressionKind, visible: &BTreeMap<&str, &Node>) -> String {
-    match value {
-        DefinitionExpressionKind::Literal => "Literal syntax".into(),
-        DefinitionExpressionKind::Identifier { dependency } => {
-            format!("Identifier read; dependency {dependency}; runtime value unresolved")
-        }
-        DefinitionExpressionKind::PropertyName => "Property-name syntax".into(),
+fn definition_shape<'a>(
+    value: &'a DefinitionExpressionKind,
+    visible: &'a BTreeMap<&str, &Node>,
+) -> impl fmt::Display + 'a {
+    Formatted(move |f: &mut fmt::Formatter<'_>| match value {
+        DefinitionExpressionKind::Literal => f.write_str("Literal syntax"),
+        DefinitionExpressionKind::Identifier { dependency } => write!(
+            f,
+            "Identifier read; dependency {dependency}; runtime value unresolved"
+        ),
+        DefinitionExpressionKind::PropertyName => f.write_str("Property-name syntax"),
         DefinitionExpressionKind::Member {
             object,
             property,
             computed,
             optional,
             dependency,
-        } => format!(
+        } => write!(
+            f,
             "Member read; object {object}; property {property}; computed {computed}; optional {optional}; dependency {dependency}; runtime value unresolved"
         ),
-        DefinitionExpressionKind::Parenthesized { value } => format!("Parentheses around {value}"),
+        DefinitionExpressionKind::Parenthesized { value } => {
+            write!(f, "Parentheses around {value}")
+        }
         DefinitionExpressionKind::Unary { operator, operand } => {
-            format!("Unary {operator:?}; operand {operand}")
+            write!(f, "Unary {operator:?}; operand {operand}")
         }
         DefinitionExpressionKind::Binary {
             operator,
             left,
             right,
-        } => format!("Binary {operator:?}; left {left}; right {right}"),
+        } => write!(f, "Binary {operator:?}; left {left}; right {right}"),
         DefinitionExpressionKind::Logical {
             operator,
             left,
             right,
-        } => format!("Logical {operator:?}; left {left}; right {right}; short-circuit syntax"),
+        } => write!(
+            f,
+            "Logical {operator:?}; left {left}; right {right}; short-circuit syntax"
+        ),
         DefinitionExpressionKind::Unsupported { gap_id } => {
-            format!("Unsupported: {}", reference(gap_id, visible))
+            write!(f, "Unsupported: {}", reference(gap_id, visible))
         }
-    }
+    })
 }
 
 fn local_definitions(
-    output: &mut String,
+    output: &mut impl fmt::Write,
     rule: &GuardedExitEvidence,
     visible: &BTreeMap<&str, &Node>,
-) {
-    output.push_str("\n### Local const initializers\n\nInitializer as written; value at use and business meaning are not established.\n\n");
+) -> fmt::Result {
+    output.write_str("\n### Local const initializers\n\nInitializer as written; value at use and business meaning are not established.\n\n")?;
     let Some(definitions) = &rule.local_definitions else {
-        output.push_str(
+        output.write_str(
             "Local-definition evidence was not collected in this version 1 observation.\n\n",
-        );
-        return;
+        )?;
+        return Ok(());
     };
     if definitions.is_empty() {
-        output.push_str("No local const initializer evidence was captured; completeness is not established.\n\n");
+        output.write_str("No local const initializer evidence was captured; completeness is not established.\n\n")?;
     }
     for (index, definition) in definitions.iter().enumerate() {
         writeln!(
@@ -171,14 +179,17 @@ fn local_definitions(
             "#### Definition {index}\n\nBinding: {}\n\nDeclaration source: {}\n\nUse sources:\n",
             text(&definition.binding_id),
             source(&definition.declaration)
-        )
-        .expect("write to string");
+        )?;
         for usage in &definition.uses {
-            writeln!(output, "- {}", source(usage)).expect("write to string");
+            writeln!(output, "- {}", source(usage))?;
         }
-        output.push_str("\nStored initializer:\n\n");
-        expression(output, &definition.initializer);
-        writeln!(output, "Structured expression evidence (root {}):\n\n| Node | Shape | Stored expression | Capture | Literal | Source |\n|---|---|---|---|---|---|", definition.expression.root).expect("write to string");
+        output.write_str("\nStored initializer:\n\n")?;
+        expression(output, &definition.initializer)?;
+        writeln!(
+            output,
+            "Structured expression evidence (root {}):\n\n| Node | Shape | Stored expression | Capture | Literal | Source |\n|---|---|---|---|---|---|",
+            definition.expression.root
+        )?;
         for (node_index, node) in definition.expression.nodes.iter().enumerate() {
             writeln!(
                 output,
@@ -189,12 +200,11 @@ fn local_definitions(
                 node.expression.capture,
                 literal(&node.expression.literal),
                 source(&node.expression.source)
-            )
-            .expect("write to string");
+            )?;
         }
-        output.push_str(
+        output.write_str(
             "\nInitializer dependencies:\n\n| Index | Resolution | Source |\n|---|---|---|\n",
-        );
+        )?;
         for (dependency_index, dependency) in definition.dependencies.iter().enumerate() {
             writeln!(
                 output,
@@ -202,14 +212,14 @@ fn local_definitions(
                 dependency_index,
                 resolution(&dependency.resolution, visible),
                 source(&dependency.source)
-            )
-            .expect("write to string");
+            )?;
         }
         if definition.dependencies.is_empty() {
-            output.push_str("| — | No initializer dependencies captured; runtime value remains unestablished | — |\n");
+            output.write_str("| — | No initializer dependencies captured; runtime value remains unestablished | — |\n")?;
         }
-        output.push('\n');
+        output.write_char('\n')?;
     }
+    Ok(())
 }
 
 /// Inventories at or below this many observations render every observation
@@ -244,9 +254,9 @@ struct RuleFileIndex<'a> {
     observations: usize,
     /// Observation assertion ids; each carries its full provenance in the
     /// bundle.
-    members: Vec<&'a str>,
+    members: Vec<DisplayString<AssertionText<'a>>>,
     /// Relationship assertion ids asserted by these observations.
-    relationships: Vec<&'a str>,
+    relationships: Vec<DisplayString<AssertionText<'a>>>,
 }
 
 /// One observation with its parsed payload and its assertions: the
@@ -254,7 +264,7 @@ struct RuleFileIndex<'a> {
 struct Observation<'a> {
     node: &'a Node,
     rule: Option<GuardedExitEvidence>,
-    assertions: Vec<SpecAssertion>,
+    assertions: Vec<Assertion<'a>>,
 }
 
 fn relationships<'a>(
@@ -276,24 +286,26 @@ fn relationships<'a>(
 }
 
 fn render_observation(
-    output: &mut String,
+    output: &mut impl fmt::Write,
     observation: &Observation<'_>,
     edges: &[&Edge],
     visible: &BTreeMap<&str, &Node>,
-) {
+) -> fmt::Result {
     let node = observation.node;
-    let producing = &observation.assertions[0].provenance;
+    let producing = observation.assertions[0]
+        .provenance
+        .as_ref()
+        .expect("Markdown provenance parsed");
     writeln!(
         output,
         "## Observation {}\n\nProducing tier: {:?} · Confidence: {:?}\n",
         text(&node.id),
         producing.tier,
         producing.confidence_tier
-    )
-    .expect("write to string");
+    )?;
     let Some(rule) = &observation.rule else {
-        output.push_str("Source-rule payload unavailable: malformed or unsupported schema. No source expressions were rendered.\n\n");
-        return;
+        output.write_str("Source-rule payload unavailable: malformed or unsupported schema. No source expressions were rendered.\n\n")?;
+        return Ok(());
     };
     writeln!(
         output,
@@ -302,11 +314,10 @@ fn render_observation(
         reference(&rule.owner_id, visible),
         source(&rule.exit_source),
         rule.source_order
-    )
-    .expect("write to string");
-    output.push_str("### Same-callable branch conditions\n\n| Order | Polarity | Stored expression | Capture | Branch source | Expression source |\n|---|---|---|---|---|---|\n");
+    )?;
+    output.write_str("### Same-callable branch conditions\n\n| Order | Polarity | Stored expression | Capture | Branch source | Expression source |\n|---|---|---|---|---|---|\n")?;
     if rule.conditions.is_empty() {
-        output.push_str("| — | — | No branch conditions captured | — | — | — |\n");
+        output.write_str("| — | — | No branch conditions captured | — | — | — |\n")?;
     }
     for (index, condition) in rule.conditions.iter().enumerate() {
         let polarity = match condition.polarity {
@@ -322,26 +333,25 @@ fn render_observation(
             condition.expression.capture,
             source(&condition.branch_source),
             source(&condition.expression.source)
-        )
-        .expect("write to string");
+        )?;
     }
-    output.push_str("\n### Local effect\n\n");
+    output.write_str("\n### Local effect\n\n")?;
     match &rule.effect {
         LocalExit::Return { value } => {
-            output.push_str("Return from this callable.\n\n");
+            output.write_str("Return from this callable.\n\n")?;
             match value {
-                Some(value) => expression(output, value),
-                None => output.push_str("Bare return: no value expression.\n\n"),
+                Some(value) => expression(output, value)?,
+                None => output.write_str("Bare return: no value expression.\n\n")?,
             }
         }
         LocalExit::Throw { value } => {
-            output.push_str(
+            output.write_str(
                 "Throw from this source location; exception handling is not established.\n\n",
-            );
-            expression(output, value);
+            )?;
+            expression(output, value)?;
         }
     }
-    output.push_str("### Dependencies\n\n| Role | Resolution | Source |\n|---|---|---|\n");
+    output.write_str("### Dependencies\n\n| Role | Resolution | Source |\n|---|---|---|\n")?;
     for dependency in &rule.dependencies {
         writeln!(
             output,
@@ -349,25 +359,25 @@ fn render_observation(
             dependency.role,
             resolution(&dependency.resolution, visible),
             source(&dependency.source)
-        )
-        .expect("write to string");
+        )?;
     }
     if rule.dependencies.is_empty() {
-        output.push_str("| — | No dependencies captured; completeness is not established | — |\n");
+        output
+            .write_str("| — | No dependencies captured; completeness is not established | — |\n")?;
     }
-    local_definitions(output, rule, visible);
-    output.push_str("\nInterpretation gaps:\n\n");
+    local_definitions(output, rule, visible)?;
+    output.write_str("\nInterpretation gaps:\n\n")?;
     if rule.interpretation.gap_ids.is_empty() {
-        output.push_str(
+        output.write_str(
             "- No gap references supplied; behavioral interpretation remains not established.\n",
-        );
+        )?;
     }
     for gap in &rule.interpretation.gap_ids {
-        writeln!(output, "- {}", reference(gap, visible)).expect("write to string");
+        writeln!(output, "- {}", reference(gap, visible))?;
     }
-    output.push_str("\n### Redactions\n\n");
+    output.write_str("\n### Redactions\n\n")?;
     if rule.redactions.is_empty() {
-        output.push_str("No redactions recorded in this payload.\n");
+        output.write_str("No redactions recorded in this payload.\n")?;
     }
     for redaction in &rule.redactions {
         writeln!(
@@ -375,13 +385,12 @@ fn render_observation(
             "- {:?}: {}",
             redaction.reason,
             source(&redaction.source)
-        )
-        .expect("write to string");
+        )?;
     }
-    output.push_str("\n### Visible graph relationships\n\n| Relation | Target | Tier | Confidence |\n|---|---|---|---|\n");
+    output.write_str("\n### Visible graph relationships\n\n| Relation | Target | Tier | Confidence |\n|---|---|---|---|\n")?;
     let relationships = relationships(node, edges, visible);
     if relationships.is_empty() {
-        output.push_str("| — | No relationships available in this export | — | — |\n");
+        output.write_str("| — | No relationships available in this export | — | — |\n")?;
     }
     for edge in relationships {
         let identity = format!("{} {} {}", edge.src, edge.label, edge.dst);
@@ -393,59 +402,183 @@ fn render_observation(
             reference(&edge.dst, visible),
             producing.tier,
             producing.confidence_tier
-        )
-        .expect("write to string");
+        )?;
     }
-    output.push('\n');
+    output.write_char('\n')?;
+    Ok(())
 }
 
-/// Parse every observation and collect its assertions, each relationship
-/// asserted once across the inventory.
+#[derive(Clone, Copy)]
+enum AssertionSource<'a> {
+    Node { node: &'a Node, parsed: bool },
+    Edge(&'a Edge),
+}
+
+#[derive(Clone, Copy)]
+enum AssertionField {
+    Id,
+    Subject,
+    Summary,
+}
+#[derive(Clone, Copy)]
+struct AssertionText<'a> {
+    source: AssertionSource<'a>,
+    field: AssertionField,
+}
+impl fmt::Display for AssertionText<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.source, self.field) {
+            (AssertionSource::Node { node, .. }, AssertionField::Id) => {
+                write!(f, "node:{}", node.id)
+            }
+            (AssertionSource::Node { node, .. }, AssertionField::Subject) => f.write_str(&node.id),
+            (AssertionSource::Node { parsed, .. }, AssertionField::Summary) => {
+                f.write_str(if parsed {
+                    "Guarded local exit observation; behavioral interpretation not established"
+                } else {
+                    "Source-rule payload unavailable: malformed or unsupported schema"
+                })
+            }
+            (AssertionSource::Edge(edge), AssertionField::Id) => {
+                write!(f, "edge:{} {} {}", edge.src, edge.label, edge.dst)
+            }
+            (AssertionSource::Edge(edge), AssertionField::Subject) => {
+                write!(f, "{} {} {}", edge.src, edge.label, edge.dst)
+            }
+            (AssertionSource::Edge(edge), AssertionField::Summary) => {
+                write!(f, "Source-rule {} relationship", edge.label)
+            }
+        }
+    }
+}
+
+// Provenance is parsed once per asserted fact, as linear admitted-input
+// scratch. Output identities/summaries are borrowed formatting descriptors;
+// returned assertion strings are created only after cumulative admission.
+struct Assertion<'a> {
+    source: AssertionSource<'a>,
+    provenance: Option<Provenance>,
+    omission: Option<core_graph::omission::Omission>,
+}
+#[derive(Serialize)]
+struct AssertionView<'a, 'b> {
+    id: DisplayString<AssertionText<'a>>,
+    subject_id: DisplayString<AssertionText<'a>>,
+    subject_kind: &'a str,
+    summary: DisplayString<AssertionText<'a>>,
+    provenance: &'b Provenance,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edge_label: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    omission: Option<&'b core_graph::omission::Omission>,
+}
+impl<'a> Assertion<'a> {
+    fn text(&self, field: AssertionField) -> AssertionText<'a> {
+        AssertionText {
+            source: self.source,
+            field,
+        }
+    }
+    fn view(&self) -> AssertionView<'a, '_> {
+        let (subject_kind, edge_label) = match self.source {
+            AssertionSource::Node { .. } => ("BusinessRule", None),
+            AssertionSource::Edge(edge) => (edge.label.as_str(), Some(edge.label.as_str())),
+        };
+        AssertionView {
+            id: DisplayString(self.text(AssertionField::Id)),
+            subject_id: DisplayString(self.text(AssertionField::Subject)),
+            subject_kind,
+            summary: DisplayString(self.text(AssertionField::Summary)),
+            provenance: self
+                .provenance
+                .as_ref()
+                .expect("Markdown provenance parsed"),
+            edge_label,
+            omission: self.omission.as_ref(),
+        }
+    }
+    fn into_owned(self) -> SpecAssertion {
+        #[cfg(test)]
+        OWNED_ASSERTIONS.with(|counter| counter.set(counter.get() + 1));
+        let view = self.view();
+        SpecAssertion {
+            id: view.id.0.to_string(),
+            subject_id: view.subject_id.0.to_string(),
+            subject_kind: view.subject_kind.into(),
+            summary: view.summary.0.to_string(),
+            edge_label: view.edge_label.map(String::from),
+            omission: self.omission,
+            provenance: self.provenance.expect("Markdown provenance parsed"),
+        }
+    }
+}
+
+struct AssertionSequence<'a, 'b> {
+    observations: &'b [Observation<'a>],
+    included: bool,
+}
+impl Serialize for AssertionSequence<'_, '_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.included {
+            serializer.collect_seq(
+                self.observations
+                    .iter()
+                    .flat_map(|observation| &observation.assertions)
+                    .map(Assertion::view),
+            )
+        } else {
+            serializer.collect_seq(std::iter::empty::<()>())
+        }
+    }
+}
+
 fn observations<'a>(
     rules: &[&'a Node],
-    edges: &[&Edge],
+    edges: &[&'a Edge],
     visible: &BTreeMap<&str, &Node>,
+    include_provenance: bool,
 ) -> Vec<Observation<'a>> {
     let mut asserted_edges = BTreeSet::new();
     rules
         .iter()
         .map(|node| {
             let parsed = GuardedExitEvidence::from_value(node.props["rule"].clone()).ok();
-            let mut assertions = vec![SpecAssertion {
-                id: format!("node:{}", node.id),
-                subject_id: node.id.clone(),
-                subject_kind: "BusinessRule".into(),
-                summary: if parsed.is_some() {
-                    "Guarded local exit observation; behavioral interpretation not established"
-                } else {
-                    "Source-rule payload unavailable: malformed or unsupported schema"
-                }
-                .into(),
-                provenance: provenance(&node.props, &node.id),
-                edge_label: None,
-                omission: crate::workbench::gap_omission(
-                    &provenance(&node.props, &node.id),
-                    &node.props,
-                    "source-rule payload unavailable",
-                ),
+            let mut assertions = vec![Assertion {
+                source: AssertionSource::Node {
+                    node,
+                    parsed: parsed.is_some(),
+                },
+                provenance: include_provenance.then(|| provenance(&node.props, &node.id)),
+                omission: include_provenance
+                    .then(|| {
+                        crate::workbench::gap_omission(
+                            &provenance(&node.props, &node.id),
+                            &node.props,
+                            "source-rule payload unavailable",
+                        )
+                    })
+                    .flatten(),
             }];
-            // A malformed payload renders no relationships, so it asserts none.
             if parsed.is_some() {
                 for edge in relationships(node, edges, visible) {
+                    // Keep the existing native concatenated-identity deduplication,
+                    // including its legacy collision behavior. Keys are linear
+                    // in the admitted edge input, not rendered output expansion.
                     let identity = format!("{} {} {}", edge.src, edge.label, edge.dst);
                     if asserted_edges.insert(identity.clone()) {
-                        assertions.push(SpecAssertion {
-                            id: format!("edge:{identity}"),
-                            subject_id: identity.clone(),
-                            subject_kind: edge.label.clone(),
-                            summary: format!("Source-rule {} relationship", edge.label),
-                            provenance: provenance(&edge.props, &identity),
-                            edge_label: Some(edge.label.clone()),
-                            omission: crate::workbench::gap_omission(
-                                &provenance(&edge.props, &identity),
-                                &edge.props,
-                                "unresolved source-rule relationship",
-                            ),
+                        assertions.push(Assertion {
+                            source: AssertionSource::Edge(edge),
+                            provenance: include_provenance
+                                .then(|| provenance(&edge.props, &identity)),
+                            omission: include_provenance
+                                .then(|| {
+                                    crate::workbench::gap_omission(
+                                        &provenance(&edge.props, &identity),
+                                        &edge.props,
+                                        "unresolved source-rule relationship",
+                                    )
+                                })
+                                .flatten(),
                         });
                     }
                 }
@@ -463,11 +596,51 @@ fn file_id(index: usize) -> String {
     format!("R-{:02}", index + 1)
 }
 
-fn file_label(key: &Option<(&str, &str)>) -> String {
-    match key {
-        Some((repo, path)) => text(&format!("{repo}:{path}")),
-        None => "Source-rule payload unavailable".into(),
+fn file_label<'a>(key: &'a Option<(&str, &str)>) -> impl fmt::Display + 'a {
+    Formatted(move |f: &mut fmt::Formatter<'_>| match key {
+        Some((repo, path)) => write!(
+            f,
+            "{}",
+            text(Formatted(|f: &mut fmt::Formatter<'_>| write!(
+                f,
+                "{repo}:{path}"
+            )))
+        ),
+        None => f.write_str("Source-rule payload unavailable"),
+    })
+}
+
+fn append_rule_assertions<'a, 'b>(
+    output: &mut impl fmt::Write,
+    assertions: impl Iterator<Item = &'b Assertion<'a>>,
+) -> fmt::Result
+where
+    'a: 'b,
+{
+    output.write_str("\n## Assertions and inline provenance\n\n")?;
+    let mut assertions = assertions.peekable();
+    if assertions.peek().is_none() {
+        return output.write_str("No graph-backed assertions were recovered for this artifact.\n");
     }
+    output.write_str("| Assertion | Tier | Confidence | Method | Evidence | Extractor | Content hash |\n|---|---|---|---|---|---|---|\n")?;
+    for assertion in assertions {
+        let p = assertion
+            .provenance
+            .as_ref()
+            .expect("Markdown provenance parsed");
+        writeln!(
+            output,
+            "| {} | {:?} | {:?} | {} | {} | `{}` | `{}` |",
+            TableSafe(assertion.text(AssertionField::Summary)),
+            p.tier,
+            p.confidence_tier,
+            TableSafe(MethodLabel(&p.method)),
+            TableSafe(EvidenceText(p)),
+            TableSafe(&p.extractor_id),
+            TableSafe(&p.content_hash)
+        )?;
+    }
+    Ok(())
 }
 
 /// The source-rule inventory, its JSON index, and its complete assertions
@@ -476,11 +649,73 @@ fn file_label(key: &Option<(&str, &str)>) -> String {
 /// observations in full for each of at most [`RULE_EVIDENCE_MAX_FILES`] files,
 /// and states every omission as a counted line; the index lists every
 /// observation and relationship by file.
+#[cfg(test)]
 pub(crate) fn inventory(
     nodes: &[&Node],
     edges: &[&Edge],
     mode: ExportMode,
 ) -> (String, String, Vec<SpecAssertion>) {
+    let output = inventory_selected(
+        nodes,
+        edges,
+        mode,
+        InventorySelection {
+            markdown: true,
+            index: true,
+        },
+        None,
+    )
+    .expect("unlimited rule inventory");
+    (
+        output.markdown.unwrap(),
+        output.index.unwrap(),
+        output.assertions,
+    )
+}
+
+/// Which native rule artifacts to construct from the complete projection.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InventorySelection {
+    pub markdown: bool,
+    pub index: bool,
+}
+#[derive(Debug)]
+pub(crate) struct InventoryOutput {
+    pub markdown: Option<String>,
+    pub index: Option<String>,
+    pub assertions: Vec<SpecAssertion>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RuleInventoryLimitExceeded {
+    pub maximum: usize,
+}
+impl fmt::Display for RuleInventoryLimitExceeded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "rule inventory byte limit exceeded (maximum {})",
+            self.maximum
+        )
+    }
+}
+impl std::error::Error for RuleInventoryLimitExceeded {}
+
+type FileGroups<'a, 'b> = Vec<(Option<(&'b str, &'b str)>, Vec<&'b Observation<'a>>)>;
+
+/// Count selected UTF-8 content plus the exact JSON array of returned
+/// assertions before constructing any output strings or assertion identities.
+/// Index-only selection returns an empty assertion array (charged as `[]`).
+/// Selecting both siblings charges this return value's shared assertion array
+/// once; a caller wrapping both into separate artifacts must additionally
+/// charge the index artifact's empty array. Single-artifact calls are exact.
+/// Parsing and grouping are linear workspace over an already admitted graph.
+pub(crate) fn inventory_selected(
+    nodes: &[&Node],
+    edges: &[&Edge],
+    mode: ExportMode,
+    selection: InventorySelection,
+    max_bytes: Option<usize>,
+) -> Result<InventoryOutput, RuleInventoryLimitExceeded> {
     let visible: BTreeMap<_, _> = nodes.iter().map(|node| (node.id.as_str(), *node)).collect();
     let mut rules: Vec<_> = nodes
         .iter()
@@ -488,7 +723,7 @@ pub(crate) fn inventory(
         .filter(|node| node.label == "BusinessRule")
         .collect();
     rules.sort_by(|left, right| left.id.cmp(&right.id));
-    let observations = observations(&rules, edges, &visible);
+    let observations = observations(&rules, edges, &visible, selection.markdown);
     let assertion_count: usize = observations
         .iter()
         .map(|observation| observation.assertions.len())
@@ -501,19 +736,104 @@ pub(crate) fn inventory(
             )
         })
     });
-    let mut output = String::from(PREAMBLE);
+    let mut markdown_bytes = 0;
+    let mut index_bytes = 0;
+    if let Some(maximum) = max_bytes {
+        let mut counter = Counter { bytes: 0, maximum };
+        let measured = (|| -> fmt::Result {
+            if selection.markdown {
+                render_markdown(
+                    &mut counter,
+                    &observations,
+                    &files,
+                    assertion_count,
+                    edges,
+                    &visible,
+                )?;
+                markdown_bytes = counter.bytes;
+            }
+            if selection.index {
+                let before = counter.bytes;
+                render_index(&mut counter, &observations, &files, assertion_count, mode)?;
+                index_bytes = counter.bytes - before;
+            }
+            render::json(
+                &mut counter,
+                &AssertionSequence {
+                    observations: &observations,
+                    included: selection.markdown,
+                },
+            )
+        })();
+        measured.map_err(|_| RuleInventoryLimitExceeded { maximum })?;
+    }
+    let markdown = if selection.markdown {
+        #[cfg(test)]
+        OWNED_CONTENT.with(|counter| counter.set(counter.get() + 1));
+        let mut output = String::with_capacity(markdown_bytes);
+        render_markdown(
+            &mut output,
+            &observations,
+            &files,
+            assertion_count,
+            edges,
+            &visible,
+        )
+        .expect("admitted rule Markdown");
+        Some(output)
+    } else {
+        None
+    };
+    let index = if selection.index {
+        #[cfg(test)]
+        OWNED_CONTENT.with(|counter| counter.set(counter.get() + 1));
+        let mut output = String::with_capacity(index_bytes);
+        render_index(&mut output, &observations, &files, assertion_count, mode)
+            .expect("admitted rule index");
+        Some(output)
+    } else {
+        None
+    };
+    let assertions = if selection.markdown {
+        observations
+            .into_iter()
+            .flat_map(|observation| observation.assertions)
+            .map(Assertion::into_owned)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(InventoryOutput {
+        markdown,
+        index,
+        assertions,
+    })
+}
+
+fn render_markdown(
+    output: &mut impl fmt::Write,
+    observations: &[Observation<'_>],
+    files: &FileGroups<'_, '_>,
+    assertion_count: usize,
+    edges: &[&Edge],
+    visible: &BTreeMap<&str, &Node>,
+) -> fmt::Result {
+    #[cfg(test)]
+    MARKDOWN_RENDERS.with(|counter| counter.set(counter.get() + 1));
+    output.write_str(PREAMBLE)?;
     if observations.is_empty() {
-        output.push_str("No source-rule observations are available in this export.\n");
+        output.write_str("No source-rule observations are available in this export.\n")?;
     }
     if observations.len() <= RULE_EVIDENCE_FLAT_LIMIT {
-        for observation in &observations {
-            render_observation(&mut output, observation, edges, &visible);
+        for observation in observations {
+            render_observation(output, observation, edges, visible)?;
         }
-        let assertions: Vec<SpecAssertion> = observations
-            .iter()
-            .flat_map(|observation| observation.assertions.iter().cloned())
-            .collect();
-        append_assertions(&mut output, &assertions);
+        append_rule_assertions(
+            output,
+            observations
+                .iter()
+                .flat_map(|observation| &observation.assertions),
+        )?;
     } else {
         let shown = &files[..files.len().min(RULE_EVIDENCE_MAX_FILES)];
         writeln!(
@@ -524,9 +844,8 @@ pub(crate) fn inventory(
              each keeps its inline provenance in the bundle's assertions.\n",
             observations.len(),
             files.len(),
-        )
-        .expect("write to string");
-        output.push_str("| File | Source file | Observations |\n|---|---|---|\n");
+        )?;
+        output.write_str("| File | Source file | Observations |\n|---|---|---|\n")?;
         for (index, (key, members)) in shown.iter().enumerate() {
             writeln!(
                 output,
@@ -534,8 +853,7 @@ pub(crate) fn inventory(
                 file_id(index),
                 file_label(key),
                 members.len()
-            )
-            .expect("write to string");
+            )?;
         }
         let hidden = &files[shown.len()..];
         if !hidden.is_empty() {
@@ -547,10 +865,9 @@ pub(crate) fn inventory(
                     .iter()
                     .map(|(_, members)| members.len())
                     .sum::<usize>(),
-            )
-            .expect("write to string");
+            )?;
         }
-        let mut representatives: Vec<SpecAssertion> = Vec::new();
+        let mut representatives: Vec<&Assertion> = Vec::new();
         for (index, (key, members)) in shown.iter().enumerate() {
             writeln!(
                 output,
@@ -558,21 +875,21 @@ pub(crate) fn inventory(
                 file_id(index),
                 file_label(key),
                 members.len()
-            )
-            .expect("write to string");
+            )?;
             for observation in members.iter().take(RULE_EVIDENCE_REPRESENTATIVES) {
                 // Nest the observation's headings under its file heading.
                 // Stored text is escaped by `text`, so only headings start
                 // a line with `#`.
-                let mut rendered = String::new();
-                render_observation(&mut rendered, observation, edges, &visible);
-                for line in rendered.split_inclusive('\n') {
-                    if line.starts_with('#') {
-                        output.push('#');
-                    }
-                    output.push_str(line);
-                }
-                representatives.extend(observation.assertions.iter().cloned());
+                render_observation(
+                    &mut NestedHeadings {
+                        output,
+                        line_start: true,
+                    },
+                    observation,
+                    edges,
+                    visible,
+                )?;
+                representatives.extend(&observation.assertions);
             }
             let more = members.len().saturating_sub(RULE_EVIDENCE_REPRESENTATIVES);
             if more > 0 {
@@ -580,20 +897,30 @@ pub(crate) fn inventory(
                     output,
                     "… {more} more observations from this file — listed in `rule-evidence.json` under `{}`.",
                     file_id(index),
-                )
-                .expect("write to string");
+                )?;
             }
         }
-        append_assertions(&mut output, &representatives);
+        append_rule_assertions(output, representatives.iter().copied())?;
         writeln!(
             output,
             "\nInline provenance is shown for the {} assertions of the representative \
              observations above; the other {} carry theirs in the bundle's structured assertions.",
             representatives.len(),
             assertion_count - representatives.len(),
-        )
-        .expect("write to string");
+        )?;
     }
+    Ok(())
+}
+
+fn render_index(
+    output: &mut impl fmt::Write,
+    observations: &[Observation<'_>],
+    files: &FileGroups<'_, '_>,
+    assertion_count: usize,
+    mode: ExportMode,
+) -> fmt::Result {
+    #[cfg(test)]
+    INDEX_RENDERS.with(|counter| counter.set(counter.get() + 1));
     let index = RuleEvidenceIndex {
         schema: "cartograph.rule-evidence-index/v1",
         mode,
@@ -609,23 +936,29 @@ pub(crate) fn inventory(
                 observations: members.len(),
                 members: members
                     .iter()
-                    .map(|observation| observation.assertions[0].id.as_str())
+                    .map(|observation| {
+                        DisplayString(observation.assertions[0].text(AssertionField::Id))
+                    })
                     .collect(),
                 relationships: members
                     .iter()
                     .flat_map(|observation| observation.assertions[1..].iter())
-                    .map(|assertion| assertion.id.as_str())
+                    .map(|assertion| DisplayString(assertion.text(AssertionField::Id)))
                     .collect(),
             })
             .collect(),
     };
-    let mut sidecar = serde_json::to_string(&index).expect("serialize rule evidence index");
-    sidecar.push('\n');
-    let assertions = observations
-        .into_iter()
-        .flat_map(|observation| observation.assertions)
-        .collect();
-    (output, sidecar, assertions)
+    render::json(output, &index)?;
+    output.write_char('\n')?;
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static OWNED_ASSERTIONS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};
+    static OWNED_CONTENT:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};
+    static MARKDOWN_RENDERS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};
+    static INDEX_RENDERS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};
 }
 
 #[cfg(test)]
@@ -1293,5 +1626,300 @@ mod tests {
             large.len(),
             small.len()
         );
+    }
+    fn frozen_fixtures() -> Vec<(Vec<Node>, Vec<Edge>)> {
+        let mut fixtures = vec![
+            scaled_rules(2, 0),
+            scaled_rules(10, RULE_EVIDENCE_MAX_FILES + 5),
+        ];
+        let (mut nodes, edges) = scaled_rules(2, 0);
+        nodes
+            .iter_mut()
+            .filter(|node| node.label == "BusinessRule")
+            .for_each(|node| {
+                if node.props["rule"]["schema_version"] == 1 {
+                    node.props["rule"]["conditions"][0]["expression"]["display"] =
+                        json!("<&|\\\"\n é 😀");
+                    node.props["rule"]["exit_source"]["path"] = json!("source|<é>.ts");
+                }
+            });
+        fixtures.push((nodes, edges));
+        fixtures
+    }
+
+    // AC-0248: captured from the original renderer before this refactor;
+    // no second implementation is retained in the production or test tree.
+    #[test]
+    fn selected_rule_inventory_matches_prechange_frozen_bytes() {
+        let digests = [
+            [
+                "dda5f1331408b0bd8c0560eb6220908ca3b3b2936b10a5aa8efee86e8c61d781",
+                "4bfd8ed1a3ec3ac5cb04f78b31b3d6bbe7f41ee881b07238f9f3b16c7ebc53c0",
+            ],
+            [
+                "6d1c608fa97062322df8776d34188f251fcaa4a70a493477fb637b4ce06ee704",
+                "cf4bc556dbf3e6b74a37536db24f9b62dfa3d1c58fdb9596649f48c13ee2551b",
+            ],
+            [
+                "7949deb647f00eabdba7489fc0e9a66b55fee313bfcc9e0a15c1ee11ac79a56a",
+                "65f7c28c4d80badd09452e6e77818e84b4ba8751e30c4af8bc3db16ae43e5834",
+            ],
+        ];
+        for (fixture, (nodes, edges)) in frozen_fixtures().iter().enumerate() {
+            let nodes: Vec<_> = nodes.iter().collect();
+            let edges: Vec<_> = edges.iter().collect();
+            for (projection, mode) in [ExportMode::VerifiedOnly, ExportMode::BestEffort]
+                .into_iter()
+                .enumerate()
+            {
+                let result = inventory(&nodes, &edges, mode);
+                assert_eq!(
+                    blake3::hash(&serde_json::to_vec(&result).unwrap())
+                        .to_hex()
+                        .as_str(),
+                    digests[fixture][projection]
+                );
+            }
+        }
+    }
+
+    fn reset_inventory_instrumentation() {
+        OWNED_ASSERTIONS.with(|c| c.set(0));
+        OWNED_CONTENT.with(|c| c.set(0));
+        MARKDOWN_RENDERS.with(|c| c.set(0));
+        INDEX_RENDERS.with(|c| c.set(0));
+    }
+    fn assert_no_inventory_output_owned() {
+        OWNED_ASSERTIONS.with(|c| assert_eq!(c.get(), 0));
+        OWNED_CONTENT.with(|c| assert_eq!(c.get(), 0));
+    }
+
+    // AC-0248: selected siblings are charged exactly, including the complete
+    // assertion tail and the empty array of an index-only native artifact.
+    #[test]
+    fn selected_rule_inventory_enforces_exact_combined_boundaries() {
+        for (nodes, edges) in frozen_fixtures() {
+            let nodes: Vec<_> = nodes.iter().collect();
+            let edges: Vec<_> = edges.iter().collect();
+            for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
+                let (markdown, index, assertions) = inventory(&nodes, &edges, mode);
+                for selection in [
+                    InventorySelection {
+                        markdown: true,
+                        index: true,
+                    },
+                    InventorySelection {
+                        markdown: true,
+                        index: false,
+                    },
+                    InventorySelection {
+                        markdown: false,
+                        index: true,
+                    },
+                    InventorySelection {
+                        markdown: false,
+                        index: false,
+                    },
+                ] {
+                    let expected_assertions = if selection.markdown {
+                        assertions.as_slice()
+                    } else {
+                        &[]
+                    };
+                    let exact = usize::from(selection.markdown) * markdown.len()
+                        + usize::from(selection.index) * index.len()
+                        + serde_json::to_vec(expected_assertions).unwrap().len();
+                    for bound in [exact, exact + 1] {
+                        let actual =
+                            inventory_selected(&nodes, &edges, mode, selection, Some(bound))
+                                .unwrap();
+                        assert_eq!(
+                            actual.markdown.as_ref(),
+                            selection.markdown.then_some(&markdown)
+                        );
+                        assert_eq!(actual.index.as_ref(), selection.index.then_some(&index));
+                        assert_eq!(actual.assertions, expected_assertions);
+                    }
+                    reset_inventory_instrumentation();
+                    assert_eq!(
+                        inventory_selected(&nodes, &edges, mode, selection, Some(exact - 1))
+                            .unwrap_err(),
+                        RuleInventoryLimitExceeded { maximum: exact - 1 }
+                    );
+                    assert_no_inventory_output_owned();
+                    reset_inventory_instrumentation();
+                    inventory_selected(&nodes, &edges, mode, selection, Some(exact)).unwrap();
+                    if !selection.markdown {
+                        MARKDOWN_RENDERS.with(|c| assert_eq!(c.get(), 0));
+                        OWNED_ASSERTIONS.with(|c| assert_eq!(c.get(), 0));
+                    }
+                    if !selection.index {
+                        INDEX_RENDERS.with(|c| assert_eq!(c.get(), 0));
+                    }
+                }
+            }
+        }
+    }
+
+    // AC-0248: escaping, JSON scalar formatting and provenance metadata never
+    // allocate oversized output while the budget is still being measured.
+    #[test]
+    fn selected_rule_inventory_rejects_large_output_before_owning_it() {
+        for field in ["display", "literal", "source", "method", "assertion_id"] {
+            let mut nodes = base();
+            let mut rule = rule_node("rule:large", Tier::Deterministic, ConfidenceTier::Confirmed);
+            let mut value = payload();
+            let huge = "<&|\\\"\n é".repeat(50_000);
+            match field {
+                "display" => {
+                    value.conditions[0].expression.display = SanitizedDisplay::from_sanitized(huge)
+                }
+                "literal" => {
+                    if let LocalExit::Return {
+                        value: Some(expression),
+                    } = &mut value.effect
+                    {
+                        expression.literal = Some(LiteralEvidence::Known {
+                            value: KnownLiteral::String(huge),
+                        });
+                    }
+                }
+                "source" => value.exit_source.path = huge,
+                "method" => rule.props["prov"]["method"] = json!({"kind":"human","actor":huge}),
+                "assertion_id" => rule.id = huge,
+                _ => unreachable!(),
+            }
+            rule.props["rule"] = serde_json::to_value(value).unwrap();
+            nodes.push(rule);
+            let nodes: Vec<_> = nodes.iter().collect();
+            reset_inventory_instrumentation();
+            assert!(
+                inventory_selected(
+                    &nodes,
+                    &[],
+                    ExportMode::VerifiedOnly,
+                    InventorySelection {
+                        markdown: true,
+                        index: false
+                    },
+                    Some(4096)
+                )
+                .is_err(),
+                "{field}"
+            );
+            assert_no_inventory_output_owned();
+            INDEX_RENDERS.with(|c| assert_eq!(c.get(), 0));
+            if ["display", "literal", "method"].contains(&field) {
+                let expected = inventory_selected(
+                    &nodes,
+                    &[],
+                    ExportMode::VerifiedOnly,
+                    InventorySelection {
+                        markdown: false,
+                        index: true,
+                    },
+                    None,
+                )
+                .unwrap();
+                let bytes = expected.index.as_ref().unwrap().len() + 2;
+                reset_inventory_instrumentation();
+                let actual = inventory_selected(
+                    &nodes,
+                    &[],
+                    ExportMode::VerifiedOnly,
+                    InventorySelection {
+                        markdown: false,
+                        index: true,
+                    },
+                    Some(bytes),
+                )
+                .unwrap();
+                assert_eq!(actual.index, expected.index);
+                assert!(actual.assertions.is_empty());
+                MARKDOWN_RENDERS.with(|c| assert_eq!(c.get(), 0));
+            }
+        }
+    }
+
+    // AC-0248: projection policy remains the caller's complete input, and
+    // selecting a native artifact preserves the ordinary compiler's bytes.
+    #[test]
+    fn selected_rule_inventory_matches_export_policy_and_rejected_inputs() {
+        let mut nodes = base();
+        nodes.extend([
+            rule_node(
+                "rule:confirmed",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+            rule_node(
+                "rule:strong",
+                Tier::Semantic,
+                ConfidenceTier::InferredStrong,
+            ),
+            rule_node("rule:weak", Tier::Agentic, ConfidenceTier::InferredWeak),
+        ]);
+        let edges: Vec<_> = nodes
+            .iter()
+            .filter(|node| node.label == "BusinessRule")
+            .map(|node| {
+                edge(
+                    &node.id,
+                    "sym:owner",
+                    "GOVERNS",
+                    Tier::Deterministic,
+                    ConfidenceTier::Confirmed,
+                )
+            })
+            .collect();
+        let rejected_hash = nodes
+            .iter()
+            .find(|node| node.id == "rule:strong")
+            .unwrap()
+            .props["prov"]["content_hash"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
+            for rejected in [BTreeSet::new(), BTreeSet::from([rejected_hash.clone()])] {
+                let bundle = compile_spec(&nodes, &edges, &[], mode, &rejected);
+                let projected: Vec<_> = nodes
+                    .iter()
+                    .filter(|node| {
+                        let p = provenance(&node.props, &node.id);
+                        !(p.confidence_tier == ConfidenceTier::InferredWeak
+                            && mode == ExportMode::VerifiedOnly
+                            || rejected.contains(&p.content_hash))
+                    })
+                    .collect();
+                let projected_edges: Vec<_> = edges
+                    .iter()
+                    .filter(|edge| projected.iter().any(|node| node.id == edge.src))
+                    .collect();
+                let expected = artifact(&bundle);
+                let index = bundle
+                    .artifacts
+                    .iter()
+                    .find(|a| a.id == "rule-evidence-index")
+                    .unwrap();
+                let bytes = expected.content.len()
+                    + index.content.len()
+                    + serde_json::to_vec(&expected.assertions).unwrap().len();
+                let actual = inventory_selected(
+                    &projected,
+                    &projected_edges,
+                    mode,
+                    InventorySelection {
+                        markdown: true,
+                        index: true,
+                    },
+                    Some(bytes),
+                )
+                .unwrap();
+                assert_eq!(actual.markdown.as_deref(), Some(expected.content.as_str()));
+                assert_eq!(actual.index.as_deref(), Some(index.content.as_str()));
+                assert_eq!(actual.assertions, expected.assertions);
+            }
+        }
     }
 }
