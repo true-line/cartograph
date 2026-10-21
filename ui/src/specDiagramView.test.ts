@@ -446,9 +446,8 @@ describe('SpecDiagramView identity and structured projection (AC-0246, AC-0247)'
     const mermaid = 'flowchart LR\n    res_orders["aws_sqs_queue.orders"]\n';
     const topologyHtml = renderToStaticMarkup(
       createElement(TopologyCard, {
-        mermaid,
         view: null,
-        artifact: sampleArtifact,
+        artifact: { ...sampleArtifact, content: mermaid },
       }),
     );
     expect(topologyHtml).not.toContain('data-testid="spec-diagram-canvas"');
@@ -469,13 +468,13 @@ describe('SpecDiagramView identity and structured projection (AC-0246, AC-0247)'
     const flowsHtml = renderToStaticMarkup(
       createElement(FlowsCard, {
         flows: [sampleFlow],
-        dossier: projectedDossier([sampleFlow], 'best-effort'),
         view: null,
         artifact: {
           ...sampleArtifact,
           id: 'flow-dossiers',
           file_name: 'flow_dossiers.md',
           schema: 'cartograph.spec/flow-dossiers@1',
+          content: projectedDossier([sampleFlow], 'best-effort'),
         },
       }),
     );
@@ -511,6 +510,71 @@ describe('SpecDiagramView identity and structured projection (AC-0246, AC-0247)'
     expect(workbenchHtml).toContain('data-testid="diagram-view-unavailable"');
     expect(workbenchHtml).toContain(STRUCTURED_VIEW_UNAVAILABLE_NOTICE);
     expect(workbenchHtml).toContain('data-testid="spec-artifact-source"');
+  });
+
+  it('uses official artifact content for copyable source, shows truncation notice when preview is capped, and shows no copyable source when the artifact is missing', () => {
+    const sampleFlow: Flow = {
+      trigger: 'ep:POST:/orders',
+      trigger_kind: 'Endpoint',
+      trigger_name: 'POST /orders',
+      status: 'Verified',
+      score: 1,
+      depth_limited: false,
+      hops: [],
+    };
+
+    const truncatedTopologyHtml = renderToStaticMarkup(
+      createElement(TopologyCard, {
+        view: null,
+        artifact: {
+          ...sampleArtifact,
+          content: 'flowchart LR\n    res_orders["aws_sqs_queue.orders"]\n',
+          content_truncated: true,
+          content_byte_len: 600_000,
+        },
+      }),
+    );
+    expect(truncatedTopologyHtml).toContain('data-testid="spec-artifact-truncated-note"');
+    expect(truncatedTopologyHtml).toContain('600,000 bytes');
+
+    const missingTopologyHtml = renderToStaticMarkup(
+      createElement(TopologyCard, {
+        view: null,
+        artifact: null,
+      }),
+    );
+    expect(missingTopologyHtml).toContain('No resources recovered yet');
+    expect(missingTopologyHtml).not.toContain('data-testid="topology-mermaid"');
+
+    const truncatedFlowsHtml = renderToStaticMarkup(
+      createElement(FlowsCard, {
+        flows: [sampleFlow],
+        view: null,
+        artifact: {
+          ...sampleArtifact,
+          id: 'flow-dossiers',
+          file_name: 'flow_dossiers.md',
+          schema: 'cartograph.spec/flow-dossiers@1',
+          content: '# Flow dossiers\n\n## Official projection\n',
+          content_truncated: true,
+          content_byte_len: 750_000,
+        },
+      }),
+    );
+    expect(truncatedFlowsHtml).toContain('data-testid="flows-dossier"');
+    expect(truncatedFlowsHtml).toContain('Official projection');
+    expect(truncatedFlowsHtml).toContain('data-testid="spec-artifact-truncated-note"');
+    expect(truncatedFlowsHtml).toContain('750,000 bytes');
+
+    const missingFlowsHtml = renderToStaticMarkup(
+      createElement(FlowsCard, {
+        flows: [sampleFlow],
+        view: null,
+        artifact: null,
+      }),
+    );
+    expect(missingFlowsHtml).toContain('data-testid="diagram-view-unavailable"');
+    expect(missingFlowsHtml).not.toContain('data-testid="flows-dossier"');
   });
 
   it('keeps the deployed resources the host joined to a flow in its subset', () => {

@@ -5019,11 +5019,11 @@ fn build_spec_bundle(
     ))
 }
 
-fn build_spec_views(
+fn build_spec_with_views(
     graph: &impl GraphStore,
     decisions: &agents::DecisionLog,
     mode: spec::ExportMode,
-) -> Result<spec::SpecViewBundle, String> {
+) -> Result<(spec::SpecBundle, spec::SpecViewBundle), String> {
     let (nodes, edges) = graph.read_snapshot().map_err(|error| error.to_string())?;
     let flows = flowtracer::trace(&nodes, &edges);
     let rejected_hashes = decisions
@@ -5033,13 +5033,21 @@ fn build_spec_views(
         .filter(|record| record.decision == agents::AssertionDecision::Rejected)
         .map(|record| record.assertion.provenance.content_hash)
         .collect();
-    Ok(spec::compile_spec_views(
+    Ok(spec::compile_spec_with_views(
         &nodes,
         &edges,
         &flows,
         mode,
         &rejected_hashes,
     ))
+}
+
+fn build_spec_views(
+    graph: &impl GraphStore,
+    decisions: &agents::DecisionLog,
+    mode: spec::ExportMode,
+) -> Result<spec::SpecViewBundle, String> {
+    Ok(build_spec_with_views(graph, decisions, mode)?.1)
 }
 
 /// Per-artifact content cap applied before a spec bundle crosses IPC (#488):
@@ -5141,6 +5149,14 @@ fn preview_spec_bundle(bundle: spec::SpecBundle) -> SpecBundlePreview {
     }
 }
 
+/// `SpecBundlePreview` paired with `spec::SpecViewBundle` from a single
+/// projection pass (US-0036, AC-0246, AC-0247).
+#[derive(Debug, Serialize)]
+struct SpecWithViewsPreview {
+    bundle: SpecBundlePreview,
+    views: spec::SpecViewBundle,
+}
+
 /// Compile the full official spec set under one R-INT-5 export policy,
 /// capped per artifact before it crosses IPC (#488).
 #[tauri::command]
@@ -5165,6 +5181,23 @@ fn export_spec_views(
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
     build_spec_views(&*graph, &decisions, mode)
+}
+
+/// Compile the capped official spec bundle and its structured diagram views
+/// from one snapshot read, flow trace, and projection pass (US-0036, AC-0246,
+/// AC-0247).
+#[tauri::command]
+fn export_spec_with_views(
+    mode: spec::ExportMode,
+    state: State<'_, AppState>,
+) -> Result<SpecWithViewsPreview, String> {
+    let graph = state.graph.lock().map_err(|error| error.to_string())?;
+    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+    let (bundle, views) = build_spec_with_views(&*graph, &decisions, mode)?;
+    Ok(SpecWithViewsPreview {
+        bundle: preview_spec_bundle(bundle),
+        views,
+    })
 }
 
 /// `spec::SpecArtifact` reported as never truncated, so `read_spec_artifact`
@@ -5509,6 +5542,7 @@ fn main() {
             list_flow_anchors,
             export_spec,
             export_spec_views,
+            export_spec_with_views,
             read_spec_artifact,
             semantic_preview,
             add_repo,
@@ -5704,10 +5738,22 @@ mod tests {
             })
             .unwrap();
 
-        let bundle =
-            super::build_spec_bundle(&graph, &decisions, spec::ExportMode::BestEffort).unwrap();
-        let views =
-            super::build_spec_views(&graph, &decisions, spec::ExportMode::BestEffort).unwrap();
+        let (bundle, views) =
+            super::build_spec_with_views(&graph, &decisions, spec::ExportMode::BestEffort).unwrap();
+        assert_eq!(
+            serde_json::to_value(&bundle).unwrap(),
+            serde_json::to_value(
+                super::build_spec_bundle(&graph, &decisions, spec::ExportMode::BestEffort).unwrap()
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&views).unwrap(),
+            serde_json::to_value(
+                super::build_spec_views(&graph, &decisions, spec::ExportMode::BestEffort).unwrap()
+            )
+            .unwrap()
+        );
         let topology_art = bundle
             .artifacts
             .iter()

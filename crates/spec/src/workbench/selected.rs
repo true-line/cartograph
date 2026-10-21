@@ -278,20 +278,6 @@ fn produce(
         a.id, a.file, a.title, a.format, content, assertions,
     ))
 }
-pub(crate) fn produce_by_id(
-    id: &str,
-    nodes: &[&Node],
-    edges: &[&Edge],
-    flows: &[Flow],
-    gaps: usize,
-    mode: ExportMode,
-) -> SpecArtifact {
-    let artifact = ARTIFACTS
-        .iter()
-        .find(|item| item.id == id)
-        .expect("known official artifact id");
-    produce(artifact, nodes, edges, flows, gaps, mode, None).expect("unbounded native artifact")
-}
 fn bytes(artifact: &SpecArtifact) -> usize {
     struct Count(usize);
     impl io::Write for Count {
@@ -391,6 +377,14 @@ pub(super) fn all(
         project(nodes, edges, flows, mode, rejected, None).expect("unbounded ADR derivation");
     let nodes = filter_nodes(&projection.nodes, mode, rejected);
     let edges = filter_edges(&projection.edges, mode, rejected);
+    bundle_from_filtered(&nodes, &edges, &projection.flows, mode)
+}
+pub(crate) fn bundle_from_filtered(
+    nodes: &[&Node],
+    edges: &[&Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+) -> SpecBundle {
     let gap_count = count_gap_findings(nodes.iter().copied(), edges.iter().copied());
     let drift_count = nodes.iter().filter(|n| is_drift_node(n)).count();
     let security_count = nodes
@@ -400,7 +394,7 @@ pub(super) fn all(
     let artifacts: Vec<_> = ARTIFACTS
         .iter()
         .map(|a| {
-            produce(a, &nodes, &edges, &projection.flows, gap_count, mode, None)
+            produce(a, nodes, edges, flows, gap_count, mode, None)
                 .expect("unbounded native artifact")
         })
         .collect();

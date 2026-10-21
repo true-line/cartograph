@@ -25,11 +25,13 @@ export interface FlowsCardProps {
   /** Anchor kinds the tracer sought, with counts found (#165) — the empty
    * state names them instead of guessing at a generic hint. */
   anchors?: AnchorProbe[];
-  /** Flow-dossier Markdown from the spec compiler, or null with no backend. */
-  dossier: string | null;
+  /** Active R-INT-5 projection mode; controlled by the shared spec mode when provided. */
+  mode?: FlowExportMode;
+  /** Switch the shared R-INT-5 projection mode so the host refreshes specBundle and specViews. */
+  onModeChange?: (mode: FlowExportMode) => void;
   /** Compiled flow-dossiers diagram view (US-0036, AC-0246). */
   view?: SpecDiagramView | null;
-  /** Exported flow-dossiers artifact for content-identity verification (AC-0246). */
+  /** Exported flow-dossiers artifact for content-identity verification and copyable source (AC-0246). */
   artifact?: SpecArtifact | null;
   pageSize?: number;
   /** Open the evidence drawer for a node in the flow/infrastructure diagram. */
@@ -273,7 +275,8 @@ function HopCard({ hop, index, excluded, onSelectHop, onOpenResolution }: HopCar
 export function FlowsCard({
   flows,
   anchors,
-  dossier,
+  mode: modeProp,
+  onModeChange,
   view,
   artifact,
   pageSize,
@@ -282,7 +285,10 @@ export function FlowsCard({
   onOpenResolution,
 }: FlowsCardProps) {
   const [selectedTrigger, setSelectedTrigger] = useState(flows[0]?.trigger ?? '');
-  const [mode, setMode] = useState<FlowExportMode>('best-effort');
+  const [localMode, setLocalMode] = useState<FlowExportMode>(
+    modeProp ?? view?.mode ?? 'best-effort',
+  );
+  const mode = modeProp ?? localMode;
   const [zoom, setZoom] = useState(1);
   const [copied, setCopied] = useState(false);
   const rowRef = useRef<HTMLOListElement>(null);
@@ -307,8 +313,12 @@ export function FlowsCard({
       verifyDiagramViewIdentity(view, artifact) &&
       !view.flows?.some((flow) => flow.trigger === selected.trigger),
   );
-  const dossierText =
-    mode === 'best-effort' && dossier?.includes('## ') ? dossier : projectedDossier(flows, mode);
+  const matchingArtifact =
+    artifact &&
+    (artifact.id === 'flow-dossiers' || artifact.file_name === 'flow_dossiers.md') &&
+    (!view || (view.mode === mode && verifyDiagramViewIdentity(view, artifact)))
+      ? artifact
+      : null;
 
   const fit = () => {
     const row = rowRef.current;
@@ -361,7 +371,12 @@ export function FlowsCard({
                 type="button"
                 className={mode === item ? 'active' : ''}
                 aria-pressed={mode === item}
-                onClick={() => setMode(item)}
+                onClick={() => {
+                  if (modeProp === undefined) {
+                    setLocalMode(item);
+                  }
+                  onModeChange?.(item);
+                }}
               >
                 {item}
               </button>
@@ -505,25 +520,41 @@ export function FlowsCard({
             })}
           </ol>
 
-          <details className="flow-dossier-details">
-            <summary>Mermaid + provenance dossier ({mode})</summary>
-            <pre className="evidence-source flows-dossier" data-testid="flows-dossier">
-              {dossierText}
-            </pre>
-          </details>
-          <p className="flow-copy-action">
-            <button
-              type="button"
-              onClick={() => {
-                void Promise.resolve(navigator.clipboard?.writeText(dossierText)).then(() => {
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1500);
-                });
-              }}
-            >
-              {copied ? 'Copied' : `Copy ${mode} dossier`}
-            </button>
-          </p>
+          {matchingArtifact && (
+            <>
+              <details className="flow-dossier-details">
+                <summary>Mermaid + provenance dossier ({mode})</summary>
+                <pre className="evidence-source flows-dossier" data-testid="flows-dossier">
+                  {matchingArtifact.content}
+                </pre>
+              </details>
+              {matchingArtifact.content_truncated && (
+                <p
+                  className="muted spec-artifact-truncated-note"
+                  data-testid="spec-artifact-truncated-note"
+                >
+                  Showing a preview — the complete artifact is{' '}
+                  {matchingArtifact.content_byte_len.toLocaleString()} bytes. Use Copy artifact or
+                  Export bundle for the complete text.
+                </p>
+              )}
+              <p className="flow-copy-action">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void Promise.resolve(
+                      navigator.clipboard?.writeText(matchingArtifact.content),
+                    ).then(() => {
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 1500);
+                    });
+                  }}
+                >
+                  {copied ? 'Copied' : `Copy ${mode} dossier`}
+                </button>
+              </p>
+            </>
+          )}
         </>
       )}
     </section>

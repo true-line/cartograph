@@ -422,6 +422,17 @@ export interface SpecViewBundle {
   data_model: SpecDiagramView;
 }
 
+export interface SpecWithViews {
+  bundle: SpecBundle;
+  views: SpecViewBundle;
+}
+
+function unpackSpecWithViews(
+  payload: SpecWithViews | null,
+): { specBundle: SpecBundle | null; specViews: SpecViewBundle | null } {
+  return { specBundle: payload?.bundle ?? null, specViews: payload?.views ?? null };
+}
+
 export type AssertionDecision = 'accepted' | 'rejected' | 'annotated';
 
 export interface CuratableAssertion {
@@ -846,10 +857,6 @@ export interface AppStore {
   endpoints: GraphNode[];
   /** Complete deterministic graph projection for the read-only Atlas. */
   atlas: AtlasSnapshot;
-  /** Topology map artifact (Mermaid text); null with no backend. */
-  topology: string | null;
-  /** Flow-dossier artifact (Markdown); null with no backend. */
-  flows: string | null;
   /** Traced flows as data (status/score per R-INT-2). */
   flowList: Flow[];
   /** Anchor kinds sought/found by the tracer — honest zero-flow state. */
@@ -1082,8 +1089,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
   jobs: [],
   endpoints: [],
   atlas: { nodes: [], edges: [] },
-  topology: null,
-  flows: null,
   flowList: [],
   flowAnchors: [],
   systemContents: [],
@@ -1135,8 +1140,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
         jobs: [],
         endpoints: [],
         atlas: { nodes: [], edges: [] },
-        topology: null,
-        flows: null,
         flowList: [],
         flowAnchors: [],
         systemContents: [],
@@ -1163,20 +1166,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
     const specVersion = specRequestVersion;
     const mode = get().specMode;
-    const [stats, jobs, endpoints, atlas, topology, flows, flowList, flowAnchors, systemContents, adapters, plugins, specBundle, specViews, curation, findings, registerFindings, ingestHistory, coverage, evals, tierSettings, egress, ingestParallelism, disclosureT2, disclosureT3, escalationEdgeLabels] = await Promise.all([
+    const [stats, jobs, endpoints, atlas, flowList, flowAnchors, systemContents, adapters, plugins, specWithViews, curation, findings, registerFindings, ingestHistory, coverage, evals, tierSettings, egress, ingestParallelism, disclosureT2, disclosureT3, escalationEdgeLabels] = await Promise.all([
       invokeOr<GraphStats>('graph_stats', { nodes: 0, edges: 0 }),
       invokeOr<Job[]>('list_jobs', []),
       loadEndpoints(),
       invokeOr<AtlasSnapshot>('atlas_snapshot', { nodes: [], edges: [] }),
-      invokeOr<string | null>('export_topology', null),
-      invokeOr<string | null>('export_flows', null),
       invokeOr<Flow[]>('list_flows', []),
       invokeOr<AnchorProbe[]>('list_flow_anchors', []),
       invokeOr<SystemRepo[]>('system_contents', []),
       invokeOr<AdapterInventory | null>('adapter_inventory', null),
       invokeOr<PluginStatus[]>('list_plugins', []),
-      invokeOr<SpecBundle | null>('export_spec', null, { mode }),
-      invokeOr<SpecViewBundle | null>('export_spec_views', null, { mode }).catch(() => null),
+      invokeOr<SpecWithViews | null>('export_spec_with_views', null, { mode }),
       invokeOr<AssertionDecisionRecord[]>('list_assertion_decisions', []),
       invokeOr<FindingsSummary | null>('findings_summary', null),
       invokeOr<RegisterFinding[]>('list_findings', []),
@@ -1202,14 +1202,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
       jobs,
       endpoints,
       atlas,
-      topology,
-      flows,
       flowList,
       flowAnchors,
       systemContents,
       adapters,
       plugins,
-      ...(specVersion === specRequestVersion && mode === get().specMode ? { specBundle, specViews } : {}),
+      ...(specVersion === specRequestVersion && mode === get().specMode
+        ? unpackSpecWithViews(specWithViews)
+        : {}),
       curation,
       findings,
       registerFindings,
@@ -1306,11 +1306,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
     const request = ++specRequestVersion;
     set({ specMode: mode, specBusy: true, specError: null });
     try {
-      const [specBundle, specViews] = await Promise.all([
-        invokeOr<SpecBundle | null>('export_spec', null, { mode }),
-        invokeOr<SpecViewBundle | null>('export_spec_views', null, { mode }).catch(() => null),
-      ]);
-      if (request === specRequestVersion) set({ specBundle, specViews });
+      const specWithViews = await invokeOr<SpecWithViews | null>(
+        'export_spec_with_views',
+        null,
+        { mode },
+      );
+      if (request === specRequestVersion) set(unpackSpecWithViews(specWithViews));
     } catch (error) {
       if (request === specRequestVersion) set({ specError: String(error) });
     } finally {
@@ -1350,12 +1351,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
       // Recompile the currently requested mode after the decision is stored.
       request = ++specRequestVersion;
       const mode = get().specMode;
-      const [specBundle, specViews, curation] = await Promise.all([
-        invokeOr<SpecBundle | null>('export_spec', null, { mode }),
-        invokeOr<SpecViewBundle | null>('export_spec_views', null, { mode }).catch(() => null),
+      const [specWithViews, curation] = await Promise.all([
+        invokeOr<SpecWithViews | null>('export_spec_with_views', null, { mode }),
         invokeOr<AssertionDecisionRecord[]>('list_assertion_decisions', []),
       ]);
-      set({ curation, ...(request === specRequestVersion ? { specBundle, specViews } : {}) });
+      set({
+        curation,
+        ...(request === specRequestVersion ? unpackSpecWithViews(specWithViews) : {}),
+      });
     } catch (error) {
       if (request === specRequestVersion) set({ specError: String(error) });
     } finally {

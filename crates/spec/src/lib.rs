@@ -39,7 +39,7 @@ pub use adr::{
 };
 pub use views::{
     DeploymentRole, SPEC_VIEW_MAX_EDGES, SPEC_VIEW_MAX_FLOWS, SPEC_VIEW_MAX_NODES, SpecDiagramView,
-    SpecViewBundle, compile_spec_views,
+    SpecViewBundle, compile_spec_views, compile_spec_with_views,
 };
 pub use workbench::{
     ArtifactSelectionError, ExportMode, SelectedArtifactLimit, SelectedArtifactOutcome,

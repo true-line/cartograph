@@ -2,7 +2,7 @@
 //! (US-0036, AC-0246, AC-0247).
 
 use crate::{
-    ExportMode, SpecArtifact, TOPOLOGY_EDGE_LABELS, count_gap_findings,
+    ExportMode, SpecArtifact, SpecBundle, TOPOLOGY_EDGE_LABELS,
     workbench::{DATA_EDGE_LABELS, filter_edges, filter_nodes, selected},
 };
 use core_graph::{Edge, Node};
@@ -178,7 +178,7 @@ fn synthetic_participant_node(id: &str, name: &str, hop: &Hop) -> Node {
 }
 
 fn bounded_diagram_view(
-    artifact: SpecArtifact,
+    artifact: &SpecArtifact,
     mode: ExportMode,
     mut nodes: Vec<Node>,
     mut edges: Vec<Edge>,
@@ -211,9 +211,9 @@ fn bounded_diagram_view(
         nodes.len() < nodes_total || edges.len() < edges_total || flows.len() < flows_total;
 
     SpecDiagramView {
-        artifact_id: artifact.id,
-        schema: artifact.schema,
-        content_id: artifact.content_id,
+        artifact_id: artifact.id.clone(),
+        schema: artifact.schema.clone(),
+        content_id: artifact.content_id.clone(),
         mode,
         nodes,
         nodes_total,
@@ -226,49 +226,34 @@ fn bounded_diagram_view(
     }
 }
 
-/// Compile structured diagram views for `topology`, `flow-dossiers`, and
-/// `data-model` from the exact same R-INT-5 and curation projection as
-/// [`crate::compile_spec`] (US-0036, AC-0246, AC-0247).
-pub fn compile_spec_views(
+/// Compile both the official [`SpecBundle`] and its [`SpecViewBundle`] from a
+/// single R-INT-5 and curation projection and a single production of each
+/// artifact, binding view `content_id`s to the bundle artifacts by
+/// construction (US-0036, AC-0246, AC-0247).
+pub fn compile_spec_with_views(
     nodes: &[Node],
     edges: &[Edge],
     flows: &[Flow],
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
-) -> SpecViewBundle {
+) -> (SpecBundle, SpecViewBundle) {
     let projection = selected::project(nodes, edges, flows, mode, rejected_hashes, None)
         .expect("unbounded ADR derivation");
     let filtered_nodes = filter_nodes(&projection.nodes, mode, rejected_hashes);
     let filtered_edges = filter_edges(&projection.edges, mode, rejected_hashes);
-    let gap_count = count_gap_findings(
-        filtered_nodes.iter().copied(),
-        filtered_edges.iter().copied(),
-    );
+    let bundle =
+        selected::bundle_from_filtered(&filtered_nodes, &filtered_edges, &projection.flows, mode);
 
-    let topology_artifact = selected::produce_by_id(
-        "topology",
-        &filtered_nodes,
-        &filtered_edges,
-        &projection.flows,
-        gap_count,
-        mode,
-    );
-    let flow_artifact = selected::produce_by_id(
-        "flow-dossiers",
-        &filtered_nodes,
-        &filtered_edges,
-        &projection.flows,
-        gap_count,
-        mode,
-    );
-    let data_artifact = selected::produce_by_id(
-        "data-model",
-        &filtered_nodes,
-        &filtered_edges,
-        &projection.flows,
-        gap_count,
-        mode,
-    );
+    let artifact_for = |id: &str| -> &SpecArtifact {
+        bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == id)
+            .expect("known official artifact id")
+    };
+    let topology_artifact = artifact_for("topology");
+    let flow_artifact = artifact_for("flow-dossiers");
+    let data_artifact = artifact_for("data-model");
 
     let by_id: BTreeMap<&str, &Node> = filtered_nodes
         .iter()
@@ -437,7 +422,7 @@ pub fn compile_spec_views(
         .filter_map(|id| by_id.get(id).copied().cloned())
         .collect();
 
-    SpecViewBundle {
+    let views = SpecViewBundle {
         mode,
         topology: bounded_diagram_view(
             topology_artifact,
@@ -463,7 +448,21 @@ pub fn compile_spec_views(
             Vec::new(),
             false,
         ),
-    }
+    };
+    (bundle, views)
+}
+
+/// Compile structured diagram views for `topology`, `flow-dossiers`, and
+/// `data-model` from the exact same R-INT-5 and curation projection as
+/// [`crate::compile_spec`] (US-0036, AC-0246, AC-0247).
+pub fn compile_spec_views(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+) -> SpecViewBundle {
+    compile_spec_with_views(nodes, edges, flows, mode, rejected_hashes).1
 }
 
 #[cfg(test)]
@@ -1060,6 +1059,55 @@ mod tests {
                 .find(|node| node.id == id)
                 .expect("synthetic participant node");
             assert_eq!(node.label, "Unknown");
+        }
+    }
+
+    // AC-0246 (T-0246): compile_spec_with_views produces both the SpecBundle and
+    // SpecViewBundle from one projection, with view content_ids matching the
+    // bundle artifacts' content_ids and output matching compile_spec_views.
+    #[test]
+    fn compile_spec_with_views_reuses_bundle_content_ids_and_matches_compile_spec_views() {
+        let (nodes, edges, flows) = fixture();
+        let rejected = BTreeSet::from([prov(
+            Tier::Agentic,
+            ConfidenceTier::InferredWeak,
+            "t3.agent",
+            "edge:weak-reads",
+        )
+        .content_hash]);
+
+        for mode in [ExportMode::BestEffort, ExportMode::VerifiedOnly] {
+            for rejected_set in [BTreeSet::new(), rejected.clone()] {
+                let (bundle, views) =
+                    compile_spec_with_views(&nodes, &edges, &flows, mode, &rejected_set);
+                let expected_bundle = compile_spec(&nodes, &edges, &flows, mode, &rejected_set);
+                let expected_views =
+                    compile_spec_views(&nodes, &edges, &flows, mode, &rejected_set);
+
+                assert_eq!(
+                    serde_json::to_value(&bundle).unwrap(),
+                    serde_json::to_value(&expected_bundle).unwrap(),
+                );
+                assert_eq!(
+                    serde_json::to_value(&views).unwrap(),
+                    serde_json::to_value(&expected_views).unwrap(),
+                );
+
+                for (artifact_id, view) in [
+                    ("topology", &views.topology),
+                    ("flow-dossiers", &views.flows),
+                    ("data-model", &views.data_model),
+                ] {
+                    let artifact = bundle
+                        .artifacts
+                        .iter()
+                        .find(|item| item.id == artifact_id)
+                        .expect("official artifact in bundle");
+                    assert_eq!(view.content_id, artifact.content_id);
+                    assert_eq!(view.schema, artifact.schema);
+                    assert!(view.matches_artifact(artifact));
+                }
+            }
         }
     }
 }

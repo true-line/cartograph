@@ -1,7 +1,8 @@
+import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, within } from 'storybook/test';
 import type { Flow, FlowHop, SpecArtifact, SpecDiagramView, Tier } from '../store';
-import { FlowsCard, hopKind, projectedDossier, statusBadge } from './FlowsCard';
+import { FlowsCard, type FlowExportMode, hopKind, projectedDossier, statusBadge } from './FlowsCard';
 import { STRUCTURED_VIEW_UNAVAILABLE_NOTICE } from './SpecDiagramView';
 
 function hop(
@@ -89,7 +90,6 @@ const PARTIAL: Flow = {
 };
 
 const FLOWS = [VERIFIED, PARTIAL];
-const SAMPLE = projectedDossier(FLOWS, 'best-effort');
 const BRANCHED: Flow = {
   trigger: 'ep:POST:/branch',
   trigger_kind: 'Endpoint',
@@ -124,23 +124,44 @@ const meta = {
   component: FlowsCard,
   args: {
     flows: FLOWS,
-    dossier: SAMPLE,
-    artifact: {
-      id: 'flow-dossiers',
-      file_name: 'flow_dossiers.md',
-      title: 'Flow dossiers',
-      format: 'markdown',
-      schema: 'cartograph.spec/flow-dossiers@1',
-      content_id: 'spec-artifact-v1:flow-dossiers-digest-abcdef123456',
-      content: SAMPLE,
-      content_truncated: false,
-      content_byte_len: SAMPLE.length,
-      assertions: [],
-      assertions_truncated: false,
-      assertions_total: 0,
-    },
+    onModeChange: fn(),
     onSelectHop: fn(),
     onOpenResolution: fn(),
+  },
+  render: function RenderFlowsCard(args) {
+    const [mode, setMode] = useState<FlowExportMode>(
+      args.mode ?? args.view?.mode ?? 'best-effort',
+    );
+    const activeMode = args.mode ?? mode;
+    const content = projectedDossier(args.flows, activeMode);
+    const artifact: SpecArtifact | null =
+      args.artifact === undefined
+        ? {
+            id: 'flow-dossiers',
+            file_name: 'flow_dossiers.md',
+            title: 'Flow dossiers',
+            format: 'markdown',
+            schema: 'cartograph.spec/flow-dossiers@1',
+            content_id: `spec-artifact-v1:flow-dossiers-${activeMode}`,
+            content,
+            content_truncated: false,
+            content_byte_len: content.length,
+            assertions: [],
+            assertions_truncated: false,
+            assertions_total: 0,
+          }
+        : args.artifact;
+    return (
+      <FlowsCard
+        {...args}
+        mode={activeMode}
+        onModeChange={(next) => {
+          setMode(next);
+          args.onModeChange?.(next);
+        }}
+        artifact={artifact}
+      />
+    );
   },
 } satisfies Meta<typeof FlowsCard>;
 
@@ -148,7 +169,7 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Empty: Story = {
-  args: { flows: [], dossier: '# Flow dossier\n' },
+  args: { flows: [] },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(canvas.getByText(/no flows traced/i)).toBeInTheDocument();
@@ -162,7 +183,6 @@ export const EmptyNamesEveryAnchorKindSought: Story = {
   // for and what it found — never the generic "ingest a repo" shrug.
   args: {
     flows: [],
-    dossier: '# Flow dossier\n',
     anchors: [
       { kind: 'screens (routes/pages)', found: 0 },
       { kind: 'extension contexts (popup, background, content scripts)', found: 0 },
@@ -221,7 +241,7 @@ const COMMAND_FLOW: Flow = {
 export const ExtensionCommandAnchorsAFlow: Story = {
   // AC-0083 (#165): a manifest command is a user-action anchor whose hops
   // carry provenance like any other flow.
-  args: { flows: [COMMAND_FLOW], dossier: projectedDossier([COMMAND_FLOW], 'best-effort') },
+  args: { flows: [COMMAND_FLOW] },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(canvas.getByRole('heading', { level: 2 })).toHaveTextContent(
@@ -267,7 +287,7 @@ export const SequenceAndTriggerSelection: Story = {
 };
 
 export const ExplicitGap: Story = {
-  args: { flows: [PARTIAL], dossier: projectedDossier([PARTIAL], 'best-effort') },
+  args: { flows: [PARTIAL] },
   play: async ({ canvasElement }) => {
     const sequence = within(canvasElement).getByLabelText('Flow sequence');
     const gap = within(sequence)
@@ -281,7 +301,7 @@ export const ExplicitGap: Story = {
 };
 
 export const BranchedTraceUsesRecordedEndpoints: Story = {
-  args: { flows: [BRANCHED], dossier: projectedDossier([BRANCHED], 'best-effort') },
+  args: { flows: [BRANCHED] },
   play: async ({ canvasElement }) => {
     // Every card and dossier arrow uses the hop's recorded src/dst ids —
     // sequence is never inferred from array position.
@@ -298,7 +318,7 @@ export const BranchedTraceUsesRecordedEndpoints: Story = {
 };
 
 export const VerifiedOnlyProjection: Story = {
-  args: { flows: [PARTIAL], dossier: projectedDossier([PARTIAL], 'best-effort') },
+  args: { flows: [PARTIAL] },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     // Best-effort names its weak hops instead of hiding the difference.
@@ -340,7 +360,7 @@ export const VerifiedOnlyProjection: Story = {
 };
 
 export const GapHopOpensResolutionStrategy: Story = {
-  args: { flows: [PARTIAL], dossier: projectedDossier([PARTIAL], 'best-effort') },
+  args: { flows: [PARTIAL] },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
     // Gap hop → Resolution Strategy with the Gap node id; a confirmed hop →
@@ -375,9 +395,16 @@ export const FitAndZoomNeverScrollHorizontally: Story = {
 };
 
 export const UnknownConfidenceFailsClosed: Story = {
-  args: { flows: [UNKNOWN_CONFIDENCE], dossier: null },
+  args: {
+    flows: [UNKNOWN_CONFIDENCE],
+    artifact: null,
+  },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('diagram-view-unavailable')).toHaveTextContent(
+      STRUCTURED_VIEW_UNAVAILABLE_NOTICE,
+    );
+    await expect(canvas.queryByTestId('flows-dossier')).not.toBeInTheDocument();
     const sequence = canvas.getByLabelText('Flow sequence');
     const card = within(sequence).getByRole('button', { name: /Unresolved hop/ });
     await expect(card).toHaveClass('unresolved');
@@ -575,18 +602,59 @@ const FLOW_DOSSIERS_HOST_VIEW: SpecDiagramView = {
   truncated: false,
 };
 
+const FLOW_DOSSIERS_VERIFIED_ARTIFACT: SpecArtifact = {
+  ...FLOW_DOSSIERS_ARTIFACT,
+  content_id: 'spec-artifact-v1:flow-dossiers-verified-7890abcdef',
+  content: projectedDossier([VERIFIED, DEPLOYED_FLOW], 'verified-only'),
+};
+
+const FLOW_DOSSIERS_VERIFIED_HOST_VIEW: SpecDiagramView = {
+  ...FLOW_DOSSIERS_HOST_VIEW,
+  content_id: FLOW_DOSSIERS_VERIFIED_ARTIFACT.content_id,
+  mode: 'verified-only',
+  nodes: FLOW_DOSSIERS_HOST_VIEW.nodes.filter((node) => node.id !== 'sym:notify#guess'),
+  nodes_total: 7,
+  edges: FLOW_DOSSIERS_HOST_VIEW.edges.filter((edge) => edge.dst !== 'sym:notify#guess'),
+  edges_total: 5,
+  flows: [
+    VERIFIED,
+    {
+      ...DEPLOYED_FLOW,
+      hops: DEPLOYED_FLOW.hops.filter((item) => item.confidence !== 'InferredWeak'),
+    },
+  ],
+};
+
 export const RenderedFlowAndDeploymentViewMatchesProjection: Story = {
   // AC-0246, AC-0247 (T-0246, T-0247): flow and deployment views render as a
   // per-flow subset of the host projection bound to its content identity;
-  // selecting a node or hop opens its evidence, tier, and confidence, and
-  // missing host projections fall back to Mermaid text without fabricating a
-  // client-derived diagram.
+  // toggling mode drives the shared spec mode so the diagram and copyable
+  // dossier come from the host projection for the selected mode.
   args: {
     flows: [DEPLOYED_FLOW, VERIFIED],
-    dossier: projectedDossier([DEPLOYED_FLOW, VERIFIED], 'best-effort'),
     view: FLOW_DOSSIERS_HOST_VIEW,
     artifact: FLOW_DOSSIERS_ARTIFACT,
+    onModeChange: fn(),
     onSelectNode: fn(),
+  },
+  render: function RenderWithHostModeSwitch(args) {
+    const [mode, setMode] = useState<FlowExportMode>(args.mode ?? 'best-effort');
+    const view =
+      mode === 'verified-only' ? FLOW_DOSSIERS_VERIFIED_HOST_VIEW : FLOW_DOSSIERS_HOST_VIEW;
+    const artifact =
+      mode === 'verified-only' ? FLOW_DOSSIERS_VERIFIED_ARTIFACT : FLOW_DOSSIERS_ARTIFACT;
+    return (
+      <FlowsCard
+        {...args}
+        mode={mode}
+        onModeChange={(next) => {
+          setMode(next);
+          args.onModeChange?.(next);
+        }}
+        view={view}
+        artifact={artifact}
+      />
+    );
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
@@ -626,14 +694,43 @@ export const RenderedFlowAndDeploymentViewMatchesProjection: Story = {
     await expect(evidence).toHaveTextContent('Gap');
     await expect(args.onOpenResolution).toHaveBeenCalledWith('gap:channel:notify');
 
-    // Switching to verified-only when the host view is best-effort does not
-    // fabricate a client-derived diagram; it shows the unavailable notice and
-    // keeps the verified-only Mermaid dossier fallback.
+    // Switching to verified-only drives the shared spec mode and renders the
+    // verified-only host view and official artifact.
     await userEvent.click(canvas.getByRole('button', { name: 'verified-only' }));
-    await expect(canvas.queryByTestId('spec-diagram-canvas')).not.toBeInTheDocument();
-    await expect(canvas.getByTestId('diagram-view-unavailable')).toHaveTextContent(
-      STRUCTURED_VIEW_UNAVAILABLE_NOTICE,
+    await expect(args.onModeChange).toHaveBeenCalledWith('verified-only');
+    const verifiedDiagram = within(canvas.getByTestId('spec-diagram-flow-dossiers'));
+    await expect(verifiedDiagram.getByTestId('spec-diagram-canvas')).toBeInTheDocument();
+    await expect(verifiedDiagram.getByTestId('diagram-content-identity')).toHaveAttribute(
+      'data-content-id',
+      FLOW_DOSSIERS_VERIFIED_ARTIFACT.content_id,
     );
+    await expect(verifiedDiagram.getByLabelText('Diagram nodes')).not.toHaveTextContent(
+      'guessedTarget',
+    );
+    await expect(canvas.getByTestId('flows-dossier')).not.toHaveTextContent('guessedTarget');
+  },
+};
+
+export const StartsInVerifiedOnlyWithHostView: Story = {
+  args: {
+    flows: [DEPLOYED_FLOW, VERIFIED],
+    mode: 'verified-only',
+    view: FLOW_DOSSIERS_VERIFIED_HOST_VIEW,
+    artifact: FLOW_DOSSIERS_VERIFIED_ARTIFACT,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('button', { name: 'verified-only' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    const diagram = within(canvas.getByTestId('spec-diagram-flow-dossiers'));
+    await expect(diagram.getByTestId('spec-diagram-canvas')).toBeInTheDocument();
+    await expect(diagram.getByTestId('diagram-content-identity')).toHaveAttribute(
+      'data-content-id',
+      FLOW_DOSSIERS_VERIFIED_ARTIFACT.content_id,
+    );
+    await expect(diagram.getByLabelText('Diagram nodes')).not.toHaveTextContent('guessedTarget');
   },
 };
 

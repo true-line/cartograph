@@ -594,6 +594,13 @@ function installFakeCore(options: {
         return { ...FAKE_SPEC, mode: (args as { mode: SpecBundle['mode'] }).mode };
       case 'export_spec_views':
         return fakeSpecViews((args as { mode: SpecBundle['mode'] }).mode);
+      case 'export_spec_with_views': {
+        const mode = (args as { mode: SpecBundle['mode'] }).mode;
+        return {
+          bundle: { ...FAKE_SPEC, mode },
+          views: fakeSpecViews(mode),
+        };
+      }
       case 'read_spec_artifact':
         return (
           FAKE_SPEC.artifacts.find(
@@ -927,8 +934,6 @@ const meta = {
       endpoints: [],
       atlas: { nodes: [], edges: [] },
       systemContents: [],
-      topology: null,
-      flows: null,
       flowList: [],
       specBundle: null,
       specViews: null,

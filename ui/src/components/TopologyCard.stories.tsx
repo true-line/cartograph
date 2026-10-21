@@ -253,7 +253,12 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Empty: Story = {
-  args: { mermaid: 'flowchart LR\n' },
+  args: {
+    artifact: {
+      ...TOPOLOGY_ARTIFACT,
+      content: '# Resource topology\n\n```mermaid\nflowchart LR\n```\n',
+    },
+  },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(canvas.getByText(/no resources recovered yet/i)).toBeInTheDocument();
@@ -261,11 +266,18 @@ export const Empty: Story = {
 };
 
 export const NoBackend: Story = {
-  args: { mermaid: null },
+  args: {
+    artifact: null,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText(/no resources recovered yet/i)).toBeInTheDocument();
+    await expect(canvas.queryByTestId('topology-mermaid')).not.toBeInTheDocument();
+  },
 };
 
 export const Populated: Story = {
-  args: { mermaid: SAMPLE },
+  args: { artifact: TOPOLOGY_ARTIFACT },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(canvas.queryByTestId('spec-diagram-canvas')).not.toBeInTheDocument();
@@ -282,11 +294,14 @@ export const Populated: Story = {
 export const RenderedTopologyAndDeploymentMatchesIdentity: Story = {
   // AC-0246 (T-0246): topology and deployment views render from structured
   // graph data (never by parsing Mermaid text) and match the exported
-  // projection's schema and content_id.
+  // projection's schema and content_id; copyable source comes from the matching
+  // official `topology` artifact content.
   args: {
-    mermaid: 'flowchart LR\n    mermaid_only_sentinel["never parsed into diagram"]\n',
     view: TOPOLOGY_VIEW,
-    artifact: TOPOLOGY_ARTIFACT,
+    artifact: {
+      ...TOPOLOGY_ARTIFACT,
+      content: 'flowchart LR\n    mermaid_only_sentinel["never parsed into diagram"]\n',
+    },
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
@@ -310,7 +325,7 @@ export const RenderedTopologyAndDeploymentMatchesIdentity: Story = {
     await expect(nodeIndex).toHaveTextContent('aws_lambda_function.fulfill');
     await expect(nodeIndex).not.toHaveTextContent('mermaid_only_sentinel');
 
-    // Copyable Mermaid remains available as a secondary action.
+    // Copyable Mermaid comes from the official artifact.
     await expect(canvas.getByRole('button', { name: /copy mermaid/i })).toBeEnabled();
     await expect(canvas.getByTestId('topology-mermaid')).toHaveTextContent(
       'mermaid_only_sentinel',
@@ -323,7 +338,6 @@ export const SelectionOpensEvidenceAndHighlightsGaps: Story = {
   // evidence, tier, and confidence, and Gap or partial hops are visibly and
   // textually distinct from confirmed ones (never color alone).
   args: {
-    mermaid: SAMPLE,
     view: TOPOLOGY_VIEW,
     artifact: TOPOLOGY_ARTIFACT,
   },
@@ -374,7 +388,6 @@ export const LargeTopologyPagesAndExpandsWithHiddenCounts: Story = {
   // AC-0246 (T-0246): large systems page or collapse with a visible count of
   // hidden items instead of truncating silently.
   args: {
-    mermaid: SAMPLE,
     view: LARGE_TOPOLOGY_VIEW,
     artifact: TOPOLOGY_ARTIFACT,
     pageSize: 6,

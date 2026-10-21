@@ -113,8 +113,6 @@ export default function App() {
     jobs,
     endpoints,
     atlas,
-    topology,
-    flows,
     flowList,
     flowAnchors,
     systemContents,
@@ -529,7 +527,6 @@ export default function App() {
             <div className="card-grid artifacts">
               <EndpointsCard endpoints={endpoints} onSelect={(node) => void select(node)} />
               <TopologyCard
-                mermaid={topology}
                 view={specViews?.topology ?? null}
                 artifact={
                   specBundle?.artifacts.find(
@@ -563,7 +560,8 @@ export default function App() {
             <FlowsCard
               flows={flowList}
               anchors={flowAnchors}
-              dossier={flows}
+              mode={specMode}
+              onModeChange={(mode) => void setSpecMode(mode)}
               view={specViews?.flows ?? null}
               artifact={
                 specBundle?.artifacts.find(
