@@ -231,3 +231,35 @@ fn source_validation_charge_faults_rollback_or_preserve_committed_unknown_ack() 
         assert!(saved.disposition.is_none());
     }
 }
+
+#[test]
+fn source_validation_archive_identity_classifies_missing_and_corrupt_rows() {
+    // AC-0287: retained identity defects must not look like uncertain storage I/O.
+    let (f, reservation) = fixture();
+    assert_eq!(
+        retained_archive_hash(&f.store.conn, &f.basis.task_id).unwrap(),
+        reservation.binding.archive_hash
+    );
+    assert!(matches!(
+        retained_archive_hash(&f.store.conn, "absent-task"),
+        Err(InvestigationStoreError::Missing)
+    ));
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    tx.execute_batch("DROP TRIGGER investigation_coverage_archives_no_update; PRAGMA ignore_check_constraints=ON;").unwrap();
+    for bad in ["short".to_owned(), "G".repeat(64)] {
+        tx.execute(
+            "UPDATE investigation_coverage_archives SET body_hash=?2 WHERE task_id=?1",
+            params![f.basis.task_id, bad],
+        )
+        .unwrap();
+        assert!(matches!(
+            retained_archive_hash(&tx, &f.basis.task_id),
+            Err(InvestigationStoreError::Invalid)
+        ));
+    }
+    tx.rollback().unwrap();
+    assert_eq!(
+        retained_archive_hash(&f.store.conn, &f.basis.task_id).unwrap(),
+        reservation.binding.archive_hash
+    );
+}

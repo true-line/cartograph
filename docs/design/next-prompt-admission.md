@@ -106,6 +106,9 @@ captured text. A lost commit acknowledgement yields no usable receipt and no
 read; a committed charge remains durable. This boundary consumes an existing
 reservation. It does not yet implement production reservation admission,
 settlement, storage claims or recovery.
+Reservation-phase task loading currently revalidates the pending source slot,
+including a full read-namespace preflight. This is an interim runtime cost; any
+optimization must preserve the same transaction-scoped integrity checks.
 
 The new acquisition-attempt writer takes the exact saved call and appends only
 the suffix derived from its saved response, candidate ledger and completed-tool

@@ -81,6 +81,22 @@ pub(super) fn owner_basis_hash(task: &StoredTask) -> Result<String, Investigatio
     Ok(core_prov::content_hash(&bytes))
 }
 
+/// Classify absent/corrupt retained identity separately from SQLite I/O errors.
+fn retained_archive_hash(
+    connection: &Connection,
+    task_id: &str,
+) -> Result<String, InvestigationStoreError> {
+    let row: Option<Option<String>> = connection.query_row(
+        "SELECT CASE WHEN typeof(body_hash)='text' AND length(CAST(body_hash AS BLOB))=64 THEN body_hash END FROM investigation_coverage_archives WHERE task_id=?1",
+        [task_id], |row| row.get(0),
+    ).optional()?;
+    let hash = row
+        .ok_or(InvestigationStoreError::Missing)?
+        .filter(|hash| hash_valid(hash))
+        .ok_or(InvestigationStoreError::Invalid)?;
+    Ok(hash)
+}
+
 /// Recheck all saved authority for the pending source slot in the caller's Tx.
 /// Guards/source bytes and continuation certification remain host authorities.
 pub(super) fn validate_saved_pending(
@@ -125,9 +141,7 @@ pub(super) fn validate_saved_pending(
         .coverage
         .as_ref()
         .ok_or(InvestigationStoreError::Invalid)?;
-    let archive_hash:String=connection.query_row(
-        "SELECT CASE WHEN typeof(body_hash)='text' AND length(CAST(body_hash AS BLOB))=64 THEN body_hash END FROM investigation_coverage_archives WHERE task_id=?1",
-        [&b.task_id],|row|row.get(0))?;
+    let archive_hash = retained_archive_hash(connection, &b.task_id)?;
     let response: InvestigationResponseMeta = read_body(
         connection,
         "investigation_responses",
