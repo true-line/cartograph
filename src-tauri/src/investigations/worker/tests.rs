@@ -286,7 +286,7 @@ impl Fixture {
                 repo_key: source.repo_key.clone(),
                 registered_source_id: Some(source.source_id.clone()),
                 ingest_id: "worker-fixture-ingest".into(),
-                config_hash: crate::coverage_config_hash(&[]),
+                config_hash: crate::coverage_config_hash(&[], crate::Registries::builtin()),
                 inventory_json: json!({"inventory":"coverage@1","repo":source.repo_key,
                 "commit":"workdir","layer_hints":[],"producers":[{"state":"missing_input"}],
                 "unsupported":[],"limited":true})

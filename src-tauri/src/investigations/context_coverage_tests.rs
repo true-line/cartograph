@@ -25,7 +25,7 @@ impl Fixture {
             scope.push(ScopedRepo {
                 repo_key: source.repo_key,
                 registered_source_id: Some(source.source_id),
-                config_hash: crate::coverage_config_hash(&[]),
+                config_hash: crate::coverage_config_hash(&[], crate::Registries::builtin()),
                 layer_hints: None,
             });
         }

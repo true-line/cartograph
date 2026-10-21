@@ -146,7 +146,7 @@ fn qualified_worker_refuses_inventory_capacity_before_model_dispatch() {
             repo_key: source.repo_key.clone(),
             registered_source_id: Some(source.source_id.clone()),
             ingest_id: format!("large-ingest-{index}"),
-            config_hash: crate::coverage_config_hash(&[]),
+            config_hash: crate::coverage_config_hash(&[], crate::Registries::builtin()),
             inventory_json: json!({"inventory":"coverage@1","repo":source.repo_key,
                 "commit":"workdir","layer_hints":[],"producers":[],"unsupported":[],
                 "limited":false,"detail":"x".repeat(1_000_000)})
