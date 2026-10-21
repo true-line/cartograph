@@ -55,3 +55,59 @@ fn finish_reserve_rejects_terminal_or_invalid_metadata() {
         assert!(value.finish_call_reserve_with_policy(policy).is_err());
     }
 }
+
+#[test]
+fn finish_reserve_selects_mode_at_independent_call_and_token_boundaries() {
+    // AC-0287: an unrestricted call cannot spend a required finishing slot.
+    for policy in [&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY] {
+        let limits = policy.limits();
+        for refusal in [0, 1] {
+            let value = metadata(refusal);
+            let required = value.finish_call_reserve_with_policy(policy).unwrap();
+            for calls_left in 0..=required.model_invocations + 2 {
+                for token_calls_left in 0..=required.model_invocations + 2 {
+                    let usage = InvestigationUsage {
+                        model_invocations: limits.model_invocations - calls_left,
+                        generated_token_reservations: limits.generated_token_reservations
+                            - token_calls_left * limits.generated_tokens_per_invocation,
+                        ..Default::default()
+                    };
+                    let before = usage.clone();
+                    let expected = if calls_left < required.model_invocations
+                        || token_calls_left < required.model_invocations
+                    {
+                        Err(InvestigationError::LimitExceeded)
+                    } else if calls_left == required.model_invocations
+                        || token_calls_left == required.model_invocations
+                    {
+                        Ok(CompletionCallMode::FinishOnly)
+                    } else {
+                        Ok(CompletionCallMode::Choice)
+                    };
+                    assert_eq!(value.next_call_mode_with_policy(&usage, policy), expected);
+                    assert_eq!(usage, before);
+                }
+            }
+            let mut usage = InvestigationUsage {
+                model_invocations: limits.model_invocations - required.model_invocations - 1,
+                generated_token_reservations: limits.generated_token_reservations
+                    - required.generated_token_reservations,
+                ..Default::default()
+            };
+            assert_eq!(
+                value.next_call_mode_with_policy(&usage, policy),
+                Ok(CompletionCallMode::FinishOnly)
+            );
+            usage.generated_token_reservations += 1;
+            assert_eq!(
+                value.next_call_mode_with_policy(&usage, policy),
+                Err(InvestigationError::LimitExceeded)
+            );
+            usage.model_invocations = u32::MAX;
+            assert_eq!(
+                value.next_call_mode_with_policy(&usage, policy),
+                Err(InvestigationError::LimitExceeded)
+            );
+        }
+    }
+}

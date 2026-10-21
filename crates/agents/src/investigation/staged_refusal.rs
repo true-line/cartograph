@@ -216,6 +216,14 @@ pub struct FinishCallReserve {
     pub generated_token_reservations: u32,
 }
 
+/// Resource-only next-turn decision. Neither variant authorizes dispatch or
+/// proves byte capacity; the host must also certify that mode's exact input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionCallMode {
+    Choice,
+    FinishOnly,
+}
+
 impl ProtectedCompletionMetadata {
     /// A future admission controller must retain these finish opportunities
     /// before spending another unrestricted call. Each finish can still be
@@ -235,6 +243,42 @@ impl ProtectedCompletionMetadata {
         Ok(FinishCallReserve {
             model_invocations,
             generated_token_reservations,
+        })
+    }
+
+    /// Preserve the remaining repair/finish opportunities before allowing an
+    /// unrestricted choice. Count and generated-token capacity are independent.
+    /// This pure projection charges nothing and cannot attest saved usage.
+    pub fn next_call_mode_with_policy(
+        &self,
+        usage: &InvestigationUsage,
+        policy: &InvestigationPolicy,
+    ) -> Result<CompletionCallMode, InvestigationError> {
+        let reserve = self.finish_call_reserve_with_policy(policy)?;
+        let limits = policy.limits();
+        let calls = limits
+            .model_invocations
+            .checked_sub(usage.model_invocations)
+            .ok_or(InvestigationError::LimitExceeded)?;
+        let tokens = limits
+            .generated_token_reservations
+            .checked_sub(usage.generated_token_reservations)
+            .ok_or(InvestigationError::LimitExceeded)?;
+        if calls < reserve.model_invocations || tokens < reserve.generated_token_reservations {
+            return Err(InvestigationError::LimitExceeded);
+        }
+        let choice_calls = reserve
+            .model_invocations
+            .checked_add(1)
+            .ok_or(InvestigationError::LimitExceeded)?;
+        let choice_tokens = reserve
+            .generated_token_reservations
+            .checked_add(limits.generated_tokens_per_invocation)
+            .ok_or(InvestigationError::LimitExceeded)?;
+        Ok(if calls >= choice_calls && tokens >= choice_tokens {
+            CompletionCallMode::Choice
+        } else {
+            CompletionCallMode::FinishOnly
         })
     }
 
