@@ -1,5 +1,5 @@
-//! Internal first-context publication, separate from task creation and calls.
-//! The public new-family routes remain closed.
+//! Owner-authenticated first-context publication, separate from task creation
+//! and calls. Public starts cannot bypass these durable boundaries.
 use super::*;
 
 impl JobStore {

@@ -1,3 +1,4 @@
+import { completionFamily, isCompletionDisclosure, isCompletionResultId } from './investigationFamilies';
 import type { InvestigationCompletionDetail, InvestigationCompletionResult, InvestigationDetail,
   InvestigationObligationObservation, InvestigationResult, InvestigationSummary, InvestigationPolicy } from './investigationTypes';
 import { validObligationEnvelope } from './investigationObligations';
@@ -5,8 +6,6 @@ import { validObligationEnvelope } from './investigationObligations';
 const hash = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
 const step = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_:-]{1,128}$/.test(v);
 const ledger = hash;
-const disclosure = (v: unknown, progressive: boolean) => typeof v === 'string' &&
-  (progressive ? /^investigation-disclosure-v5:[0-9a-f]{64}$/ : /^investigation-disclosure-v4:[0-9a-f]{64}$/).test(v);
 const fields = (v: object, required: string[], optional: string[] = []) => required.every((key) => key in v) &&
   Object.keys(v).every((key) => required.includes(key) || optional.includes(key));
 const observations = (rows: InvestigationObligationObservation[], maximum = 12) => Array.isArray(rows) && rows.length <= maximum &&
@@ -20,7 +19,7 @@ const observations = (rows: InvestigationObligationObservation[], maximum = 12) 
       ['acquired', 'unavailable', 'firewall_refused'].includes(row.last_attempt_outcome)));
 
 export function validCompletionResult(value: InvestigationCompletionResult | undefined, result: InvestigationResult, maximum = 12): boolean {
-  if (![5, 6].includes(result.schema_version) || !(result.schema_version === 6 ? /^investigation-result-v6:[0-9a-f]{64}$/ : /^investigation-result-v5:[0-9a-f]{64}$/).test(result.result_id) || !disclosure(result.disclosure_hash, result.schema_version === 6) || !hash(result.input_ledger_hash) ||
+  if (![5, 6, 7].includes(result.schema_version) || !isCompletionResultId(result.result_id, result.schema_version) || !isCompletionDisclosure(result.disclosure_hash, result.schema_version) || !hash(result.input_ledger_hash) ||
       !/^context-v1:[0-9a-f]{64}$/.test(result.graph_snapshot_id) || !fields(result, ['schema_version', 'completion', 'coverage', 'investigation_id', 'result_id', 'input_ledger_hash', 'graph_snapshot_id', 'invocation_step_id', 'disclosure_hash', 'findings', 'knowledge_completeness', 'limitations', 'observed_response_model', 'created_at'], ['inspection_assessment']) ||
       !value || !fields(value, ['schema_version', 'outcome', 'request_hash', 'obligations_hash', 'finishing_attempts_hash', 'assessment']) ||
       value.schema_version !== 1 || !hash(value.request_hash) || !hash(value.obligations_hash) || !hash(value.finishing_attempts_hash) ||
@@ -43,10 +42,11 @@ export function validCompletionResult(value: InvestigationCompletionResult | und
 
 /** Completion axes never infer a result from a terminal execution state. */
 export function validCompletionSummary(value: InvestigationSummary): boolean {
+  const family = completionFamily(value.schema_version);
   if (!fields(value, ['schema_version', 'investigation_id', 'conversation_id', 'parent_id', 'job_id', 'specialist_id', 'question', 'scope', 'provider_mode', 'status', 'revision', 'cancel_requested', 'invocation_pending', 'actions', 'graph_snapshot_id', 'last_event_sequence', 'has_result', 'created_at', 'updated_at', 'obligation_status'],
       ['completion_outcome', 'completion', 'coverage_context', 'context_owner', 'origin', 'specialist', 'provider', 'scope_snapshot_id', 'limits', 'usage', 'citations', 'error']) ||
       !['queued', 'preparing', 'running', 'awaiting_consent', 'completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(value.status) ||
-      !(value.schema_version === 4 ? ['domain-analyst@7', 'evidence-auditor@7'] : value.schema_version === 5 ? ['domain-analyst@8', 'evidence-auditor@8'] : value.schema_version === 6 ? ['domain-analyst@9', 'evidence-auditor@9'] : []).includes(value.specialist_id) ||
+      (!family || ![`domain-analyst@${family.roleVersion}`, `evidence-auditor@${family.roleVersion}`].includes(value.specialist_id)) ||
       !['not_assessed', 'satisfied', 'unmet'].includes(value.obligation_status ?? '') ||
       ['inspection_status', 'inspection_requirement_count', 'inspection_requirements', 'inspection_assessment'].some((key) => key in value)) return false;
   if (value.completion_outcome === undefined) return !value.has_result && value.status !== 'completed';
@@ -56,9 +56,10 @@ export function validCompletionSummary(value: InvestigationSummary): boolean {
 }
 export function validCompletionDetail(value: InvestigationCompletionDetail | undefined, detail: InvestigationDetail,
   result: InvestigationResult | null): boolean {
-  const progressive = detail.schema_version === 6;
-  const modern = detail.schema_version === 5 || progressive;
-  const policy: InvestigationPolicy | undefined = modern ? { limits: detail.limits, request_schema_version: progressive ? 6 : 5, envelope_schema_version: 2, envelope_contract: 'investigation-completion-obligations@2', max_completion_obligations: 56, request_bytes: 65536, envelope_bytes: 65536, specialist_ids: [detail.specialist_id] } : undefined;
+  const family = completionFamily(detail.schema_version);
+  if (!family) return false;
+  const modern = family.expanded;
+  const policy: InvestigationPolicy | undefined = modern ? { limits: detail.limits, request_schema_version: family.requestVersion, envelope_schema_version: 2, envelope_contract: 'investigation-completion-obligations@2', max_completion_obligations: 56, request_bytes: 65536, envelope_bytes: 65536, specialist_ids: [detail.specialist_id] } : undefined;
   if (modern && detail.limits.profile !== 'investigation-v2' || !modern && detail.limits.profile !== 'investigation-v1') return false;
   if (!['completion', 'context_owner', 'origin', 'specialist', 'provider', 'scope_snapshot_id', 'limits', 'usage', 'citations', 'error'].every((key) => key in detail) ||
       !value || !fields(value, ['schema_version', 'request_hash', 'obligations_hash', 'obligations', 'refusal_count', 'assessment_basis', 'assessment']) ||
@@ -82,13 +83,13 @@ export function validCompletionDetail(value: InvestigationCompletionDetail | und
   if (value.assessment.length !== value.obligations.obligations.length || value.assessment.some((row, i) =>
       row.obligation_id !== value.obligations.obligations[i].obligation_id || row.kind !== value.obligations.obligations[i].kind)) return false;
   if (basis.kind === 'finishing_disclosure' && result === null) return     fields(basis, ['kind', 'step_id', 'input_ledger_hash', 'disclosure_hash', 'finishing_attempts_hash']) &&
-    step(basis.step_id) && ledger(basis.input_ledger_hash) && disclosure(basis.disclosure_hash, progressive) && hash(basis.finishing_attempts_hash) &&
+    step(basis.step_id) && ledger(basis.input_ledger_hash) && isCompletionDisclosure(basis.disclosure_hash, family.resultVersion) && hash(basis.finishing_attempts_hash) &&
     !detail.has_result && detail.completion_outcome === undefined &&
     ['queued', 'preparing', 'running', 'awaiting_consent'].includes(detail.status) &&
     value.refusal_count === 1 && detail.obligation_status === 'unmet' && value.assessment.some((row) => row.unmet !== null);
   if (basis.kind === 'finishing_disclosure') return fields(basis, ['kind', 'step_id', 'input_ledger_hash', 'disclosure_hash', 'finishing_attempts_hash']) &&
-    step(basis.step_id) && ledger(basis.input_ledger_hash) && disclosure(basis.disclosure_hash, progressive) && hash(basis.finishing_attempts_hash) &&
-    Boolean(result && result.completion && result.schema_version === (progressive ? 6 : 5) && validCompletionResult(result.completion, result, modern ? 56 : 12) &&
+    step(basis.step_id) && ledger(basis.input_ledger_hash) && isCompletionDisclosure(basis.disclosure_hash, family.resultVersion) && hash(basis.finishing_attempts_hash) &&
+    Boolean(result && result.completion && result.schema_version === family.resultVersion && validCompletionResult(result.completion, result, modern ? 56 : 12) &&
       result.completion?.outcome === detail.completion_outcome && result.completion.request_hash === value.request_hash &&
       result.completion.obligations_hash === value.obligations_hash && result.completion.finishing_attempts_hash === basis.finishing_attempts_hash &&
       result.invocation_step_id === basis.step_id && result.input_ledger_hash === basis.input_ledger_hash && result.disclosure_hash === basis.disclosure_hash &&
@@ -101,7 +102,7 @@ export function validCompletionDetail(value: InvestigationCompletionDetail | und
   } else {
     const refusal = basis.last_refusal_basis;
     if (!hash(basis.last_refusal_id) || !refusal || !fields(refusal, ['step_id', 'input_ledger_hash', 'disclosure_hash', 'finish_hash']) ||
-        !step(refusal.step_id) || !ledger(refusal.input_ledger_hash) || !disclosure(refusal.disclosure_hash, progressive) || !hash(refusal.finish_hash) || value.refusal_count === 0) return false;
+        !step(refusal.step_id) || !ledger(refusal.input_ledger_hash) || !isCompletionDisclosure(refusal.disclosure_hash, family.resultVersion) || !hash(refusal.finish_hash) || value.refusal_count === 0) return false;
   }
   if (detail.completion_outcome === 'obligations_unmet') return value.refusal_count === 2 && value.assessment.some((row) => row.unmet !== null);
   return detail.completion_outcome === undefined && value.refusal_count < 2;

@@ -111,6 +111,14 @@ fn next_prompt_recovery_ready_and_consent_interrupt_without_new_call_or_usage() 
         assert_eq!(detail.summary.status, InvestigationStatus::Interrupted);
         assert_eq!(detail.usage, before);
         let reopened = JobStore::open(directory.path().join("state.db")).unwrap();
+        // Public read boundaries dispatch through the same full family validator.
+        assert_eq!(reopened.investigation(&id).unwrap(), detail);
+        assert_eq!(
+            reopened.investigation_ledger(&id).unwrap(),
+            Some(ledger.clone())
+        );
+        assert!(reopened.investigation_result(&id).unwrap().is_none());
+        assert!(reopened.investigation_pending_step(&id).unwrap().is_none());
         let tx = reopened.conn.unchecked_transaction().unwrap();
         let task = load_next_prompt_task(&tx, &id).unwrap();
         assert_eq!(task.phase, Phase::Terminal);

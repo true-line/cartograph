@@ -236,8 +236,7 @@ impl JobStore {
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         self.start_completion_family(request, provider, false)
     }
-    /// Internal factory only; public IPC/catalog remain closed for this family.
-    #[allow(dead_code)]
+    /// Factory for the exact next-prompt request family.
     pub(crate) fn start_next_prompt_investigation(
         &mut self,
         request: &StagedObligationRequest,
@@ -293,8 +292,18 @@ impl JobStore {
             )
             .optional()?;
         let detail = if let Some(id) = id {
-            let task = load_task(&tx, &id)?;
-            if task.schema_version != 2 || task.intent_hash != hash {
+            let task = load_execution_task(&tx, &id)?;
+            let expected = CompletionIntent::new(request)?;
+            let schema = if expected.specialist.uses_next_prompt_admission() {
+                3
+            } else {
+                2
+            };
+            if task.schema_version != schema
+                || task.intent_hash != hash
+                || encode(&task.completion_intent, MAX_MANIFEST_BYTES)?
+                    != encode(&Some(expected), MAX_MANIFEST_BYTES)?
+            {
                 return Err(InvestigationStoreError::Conflict);
             }
             Some(task.detail)

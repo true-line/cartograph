@@ -967,3 +967,5 @@ fn completion_v2_worker_accepts_selected_policy_and_reopens_exactly() {
         );
     }
 }
+
+pub(in crate::investigations) use next_prompt_tests::with_public_start_fixture;

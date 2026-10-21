@@ -226,9 +226,14 @@ The genuine call-budget regression reaches FinishOnly through 62 real saved
 invocation/refusal transitions and then rejects a tool proposal on the 63rd call.
 It preserves the charged invocation and measured response usage while adding no
 tool, evidence, citation, attempt or capacity-feedback effect, and validates the
-terminal record after reopening. This local test passed in 723.69 seconds;
-repeated historical validation remains a performance concern, not a demonstrated
-optimization. No synthetic history or provider calls were used.
+terminal record after reopening. The baseline passed in 723.69 seconds. Reusing
+validated history within each read-only replay reduced this to 62.20 seconds
+(11.6 times faster), while preserving exact ordinal cutoffs, every historical
+binding, and immutable-chain validation. Differential and mutation/rollback/DDL
+checks passed; no cache survives a timeline or transaction boundary. No synthetic
+history or provider calls were used. The full proof remains enabled in the default suite by agreement with the
+reviewer. A three-refusal test cannot reproduce this fixed-policy boundary;
+62 seconds still exceeds the original 30-second per-test target.
 
 Five host cleanup tests pass, including cancellation on either side of the
 validation boundary, lost validation acknowledgement, foreign reservation
@@ -249,10 +254,9 @@ complete saved parent representation (including live/failed optional results),
 reject malformed family/context identity, and reject oversized history before
 creating a child instead of truncating it.
 
-Remaining delivery work includes reducing repeated same-transaction history
-validation cost, public family-aware history/activation, and
-whole-repository/current-head CI gates. The long full-budget test remains enabled
-while the measured optimization is developed; no faster partial run substitutes
-for that acceptance evidence.
-Public @10 remains closed. These component checks do not establish native
-Windows behavior or #598 real-provider acceptance.
+Public family-aware reads, catalog/start/consent routing, request decoding and UI
+activation are now under integration. Component passes do not establish complete
+public runtime readiness: cross-layer fixtures, legacy recovery, receipt retention,
+full local gates and current-head CI must pass before publication. No faster
+partial run substitutes for the full-budget acceptance proof. These checks do not
+establish native Windows behavior or #598 real-provider acceptance.

@@ -913,3 +913,5 @@ mod coverage_tests;
 
 #[path = "completion_tests.rs"]
 mod completion_tests;
+
+pub(in crate::investigations) use completion_tests::with_public_start_fixture;

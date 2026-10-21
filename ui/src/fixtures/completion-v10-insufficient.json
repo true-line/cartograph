@@ -1,0 +1,460 @@
+{
+  "detail": {
+    "actions": {
+      "can_cancel": false,
+      "can_follow_up": true
+    },
+    "cancel_requested": false,
+    "citations": [
+      {
+        "citation_id": "fact-1",
+        "fact": {
+          "id": "rule:local/src_847be7169fb097576636754153093af6@rule.ts#exit@132",
+          "kind": "node"
+        },
+        "fact_digest": "node-v1:90daa6966d915d26b6df89f8b8f0d3964fd5ddcc3c82e6d5755b0dceb022139a",
+        "index": null,
+        "origin": {
+          "kind": "graph_metadata"
+        },
+        "role": null,
+        "source": null,
+        "text_hash": null
+      }
+    ],
+    "completion": {
+      "assessment": [
+        {
+          "acquired": false,
+          "attempted": true,
+          "exactly_supplied": false,
+          "kind": "source",
+          "last_attempt_outcome": "unavailable",
+          "obligation_id": "7dc35314679f3ce1a5dcb9090e3b94e500b8f3b305afb37d176aa43958387791",
+          "unmet": null
+        }
+      ],
+      "assessment_basis": {
+        "disclosure_hash": "investigation-disclosure-v6:9c66acf43568a4e683e9b10474f87bb309b05f5898834684218a912f41696d72",
+        "finishing_attempts_hash": "d8232ddb45dc10d0b267528fe5bcc5b78ae336057d3ce8f75dc48d2de50c3c1d",
+        "input_ledger_hash": "faa0c2b9b1c25f29c87aa2dedf9ad8761f29888ecc4bc9d56f88aa8af1c983dc",
+        "kind": "finishing_disclosure",
+        "step_id": "step-3"
+      },
+      "obligations": {
+        "contract": "investigation-completion-obligations@2",
+        "obligations": [
+          {
+            "kind": "source",
+            "obligation_id": "7dc35314679f3ce1a5dcb9090e3b94e500b8f3b305afb37d176aa43958387791",
+            "target": {
+              "captured": {
+                "byte_end": 117,
+                "byte_start": 105,
+                "file": {
+                  "byte_len": 148,
+                  "capture_id": "capture-v1:617ef2e43a72dcab56e6dc88239d5587716e7b51d2283827360db6b112057065",
+                  "digest": "3be4a496336cb115472ca22ba2aa7c7f16c8813b2c6c429083a2b65d94bd1357",
+                  "path": "rule.ts",
+                  "source_id": "src_847be7169fb097576636754153093af6"
+                }
+              },
+              "fact": {
+                "id": "rule:local/src_847be7169fb097576636754153093af6@rule.ts#exit@132",
+                "kind": "node"
+              },
+              "fact_digest": "node-v1:90daa6966d915d26b6df89f8b8f0d3964fd5ddcc3c82e6d5755b0dceb022139a",
+              "graph_snapshot_id": "context-v1:ac7afdc57df8091975f2f8971c34155da0ed36aec69a85bf9d25fa9b536c31ab",
+              "index": 0,
+              "receipt_id": "ts-primary-v2:bde2e30bfae42022150b8280f83b2852606acb348cb53027517bf10e2602bd37",
+              "receipt_inventory_index": 12,
+              "registered_source_id": "src_847be7169fb097576636754153093af6",
+              "role": "definition_initializer",
+              "schema_version": 1,
+              "source": {
+                "byte_end": 117,
+                "byte_start": 105,
+                "commit_sha": "workdir",
+                "path": "rule.ts",
+                "repo": "local/src_847be7169fb097576636754153093af6"
+              },
+              "target_id": "2dcb26ea146163dfe33fb7c116712a4582ce175c63aae9654b24251e626449a1"
+            }
+          }
+        ],
+        "schema_version": 2
+      },
+      "obligations_hash": "1ae276e4251c2a60c1172742b058bf5608b4ff1edb90417159a723ab3a4eb885",
+      "refusal_count": 0,
+      "request_hash": "1e65a13991239b3df0d191d2a61774cab0ccdf0493eb59a9934a31b5a0b0068d",
+      "schema_version": 1
+    },
+    "completion_outcome": "insufficient_evidence",
+    "context_owner": "7f1ff986b7e8a9864beebaa3f8ae8ef2",
+    "conversation_id": "conversation:34729163e5bbe393b75bdcd10504127f",
+    "coverage_context": {
+      "context_id": "context-v2:62e0c09a22f923e42fec14b06bfd6e16de73ae136a6208acc9bfdf837ebe4170",
+      "coverage": {
+        "contract": "coverage-qualification@1",
+        "coverage_id": "coverage-context-v1:2bad127d107653775469c9eee93a78813e675451fb542a6e187bd747383e7053",
+        "exhaustive": false,
+        "repos": [
+          {
+            "commit": "workdir",
+            "compared": [
+              "registration",
+              "plugins"
+            ],
+            "counts": {
+              "missing_input": 1,
+              "not_applicable": 0,
+              "not_selected": 0,
+              "unsupported": 0
+            },
+            "inventory_hash": "9f9b1105278b1fe2bdc23f51e55a29c7178acc90debbe3ca0a959b2cb527f79e",
+            "layer_hints": [],
+            "limited": true,
+            "repo": "local/src_847be7169fb097576636754153093af6",
+            "status": "recorded"
+          }
+        ]
+      }
+    },
+    "created_at": "2026-10-21T20:38:39Z",
+    "error": null,
+    "graph_snapshot_id": "context-v1:ac7afdc57df8091975f2f8971c34155da0ed36aec69a85bf9d25fa9b536c31ab",
+    "has_result": true,
+    "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+    "invocation_pending": false,
+    "job_id": 3,
+    "last_event_sequence": 17,
+    "limits": {
+      "active_seconds": 600,
+      "captured_validation_bytes": 134217728,
+      "consent_wait_seconds": 900,
+      "evidence_bytes": 65536,
+      "evidence_items": 56,
+      "evidence_requests": 64,
+      "generated_token_reservations": 131072,
+      "generated_tokens_per_invocation": 2048,
+      "model_invocations": 64,
+      "profile": "investigation-v2",
+      "selected_facts": 64,
+      "tool_actions": 56,
+      "wall_seconds": 3600
+    },
+    "obligation_status": "satisfied",
+    "origin": "app",
+    "parent_id": null,
+    "provider": {
+      "available": true,
+      "deployment": null,
+      "endpoint": "http://127.0.0.1:11434/api/chat",
+      "mode": "local",
+      "model": "scripted-model",
+      "protocol_version": "bounded-json-completion@2",
+      "provider_id": "local-scripted",
+      "unavailable_reason": null
+    },
+    "provider_mode": "local",
+    "question": "Inspect selected source and recorded analysis limits.",
+    "revision": 12,
+    "schema_version": 7,
+    "scope": {
+      "type": "all"
+    },
+    "scope_snapshot_id": "context-v1:ac7afdc57df8091975f2f8971c34155da0ed36aec69a85bf9d25fa9b536c31ab",
+    "specialist": {
+      "confidence_tier": "InferredWeak",
+      "id": "domain-analyst@10",
+      "name": "Domain analyst",
+      "operations": [
+        "query_context",
+        "replay_query",
+        "read_evidence",
+        "read_coverage_inventory",
+        "finish"
+      ],
+      "prompt_fingerprint": "e5be78acb8b65b9f1e8e69595570a47ceabfc83580aae08b35d087aa02187f54",
+      "purpose": "Investigate scoped business behavior, features and design evidence.",
+      "tier": "Agentic",
+      "version": 10
+    },
+    "specialist_id": "domain-analyst@10",
+    "status": "completed",
+    "updated_at": "2026-10-21T20:38:43Z",
+    "usage": {
+      "active_milliseconds": 2933,
+      "captured_validation_bytes": 148,
+      "evidence_bytes": 0,
+      "evidence_items": 0,
+      "evidence_requests": 1,
+      "generated_token_reservations": 6144,
+      "model_invocations": 3,
+      "reported_input_tokens": 300,
+      "reported_output_tokens": 120,
+      "selected_facts": 1,
+      "tool_actions": 2
+    }
+  },
+  "events": [
+    {
+      "created_at": "2026-10-21T20:38:39Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "created",
+      "revision": 0,
+      "sequence": 1,
+      "step_id": null,
+      "summary": "Investigation created.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:39Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "preparation_started",
+      "revision": 1,
+      "sequence": 2,
+      "step_id": null,
+      "summary": "Execution ownership attached atomically; preparation started.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:40Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "context_prepared",
+      "revision": 2,
+      "sequence": 3,
+      "step_id": null,
+      "summary": "Frozen context and original input metadata committed.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:40Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "model_started",
+      "revision": 3,
+      "sequence": 4,
+      "step_id": "step-1",
+      "summary": "Next-family invocation boundary committed; the provider outcome is pending.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:40Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "model_completed",
+      "revision": 4,
+      "sequence": 5,
+      "step_id": "step-1",
+      "summary": "A complete provider response was recorded.",
+      "tool": "query_context"
+    },
+    {
+      "created_at": "2026-10-21T20:38:40Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "action_admitted",
+      "revision": 4,
+      "sequence": 6,
+      "step_id": "step-1",
+      "summary": "The exact metadata acquisition passed continuation admission.",
+      "tool": "query_context"
+    },
+    {
+      "created_at": "2026-10-21T20:38:40Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "tool_started",
+      "revision": 4,
+      "sequence": 7,
+      "step_id": "step-1",
+      "summary": "The prepared metadata acquisition was admitted.",
+      "tool": "query_context"
+    },
+    {
+      "created_at": "2026-10-21T20:38:40Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "tool_completed",
+      "revision": 5,
+      "sequence": 8,
+      "step_id": "step-1",
+      "summary": "Exact metadata, receipt references and completion observations committed together.",
+      "tool": "query_context"
+    },
+    {
+      "created_at": "2026-10-21T20:38:40Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "model_started",
+      "revision": 6,
+      "sequence": 9,
+      "step_id": "step-2",
+      "summary": "Next-family invocation boundary committed; the provider outcome is pending.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:41Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "model_completed",
+      "revision": 7,
+      "sequence": 10,
+      "step_id": "step-2",
+      "summary": "A complete source-read response was recorded.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:41Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "action_admitted",
+      "revision": 7,
+      "sequence": 11,
+      "step_id": "step-2",
+      "summary": "The exact source read passed continuation admission; access is still uncharged.",
+      "tool": "read_evidence"
+    },
+    {
+      "created_at": "2026-10-21T20:38:41Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "evidence_validation_reserved",
+      "revision": 8,
+      "sequence": 12,
+      "step_id": "step-2",
+      "summary": "Exact captured-file validation charge committed before source access.",
+      "tool": "read_evidence"
+    },
+    {
+      "created_at": "2026-10-21T20:38:42Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "tool_started",
+      "revision": 9,
+      "sequence": 13,
+      "step_id": "step-2",
+      "summary": "A reserved captured-source read executed.",
+      "tool": "read_evidence"
+    },
+    {
+      "created_at": "2026-10-21T20:38:42Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "read_unavailable",
+      "revision": 9,
+      "sequence": 14,
+      "step_id": "step-2",
+      "summary": "Pinned completion target was unavailable.",
+      "tool": "read_evidence"
+    },
+    {
+      "created_at": "2026-10-21T20:38:42Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "model_started",
+      "revision": 10,
+      "sequence": 15,
+      "step_id": "step-3",
+      "summary": "Next-family invocation boundary committed; the provider outcome is pending.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:43Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "model_completed",
+      "revision": 11,
+      "sequence": 16,
+      "step_id": "step-3",
+      "summary": "A complete provider response was admitted and its identity persisted.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:43Z",
+      "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+      "kind": "result_persisted",
+      "revision": 12,
+      "sequence": 17,
+      "step_id": "step-3",
+      "summary": "Cited findings were persisted against the original input ledger.",
+      "tool": null
+    }
+  ],
+  "result": {
+    "completion": {
+      "assessment": [
+        {
+          "acquired": false,
+          "attempted": true,
+          "exactly_supplied": false,
+          "kind": "source",
+          "last_attempt_outcome": "unavailable",
+          "obligation_id": "7dc35314679f3ce1a5dcb9090e3b94e500b8f3b305afb37d176aa43958387791",
+          "unmet": null
+        }
+      ],
+      "finishing_attempts_hash": "d8232ddb45dc10d0b267528fe5bcc5b78ae336057d3ce8f75dc48d2de50c3c1d",
+      "obligations_hash": "1ae276e4251c2a60c1172742b058bf5608b4ff1edb90417159a723ab3a4eb885",
+      "outcome": "insufficient_evidence",
+      "request_hash": "1e65a13991239b3df0d191d2a61774cab0ccdf0493eb59a9934a31b5a0b0068d",
+      "schema_version": 1
+    },
+    "coverage": {
+      "context_id": "context-v2:62e0c09a22f923e42fec14b06bfd6e16de73ae136a6208acc9bfdf837ebe4170",
+      "coverage_id": "coverage-context-v1:2bad127d107653775469c9eee93a78813e675451fb542a6e187bd747383e7053",
+      "representation_hash": "e5c87e2ef478d11fa8f0c66860621f72bc1e57937768394c14ce3db4c8de890b"
+    },
+    "created_at": "2026-10-21T20:38:43Z",
+    "disclosure_hash": "investigation-disclosure-v6:9c66acf43568a4e683e9b10474f87bb309b05f5898834684218a912f41696d72",
+    "findings": [],
+    "graph_snapshot_id": "context-v1:ac7afdc57df8091975f2f8971c34155da0ed36aec69a85bf9d25fa9b536c31ab",
+    "input_ledger_hash": "faa0c2b9b1c25f29c87aa2dedf9ad8761f29888ecc4bc9d56f88aa8af1c983dc",
+    "inspection_assessment": {
+      "disclosure_hash": "investigation-disclosure-v6:9c66acf43568a4e683e9b10474f87bb309b05f5898834684218a912f41696d72",
+      "finishing_step_id": "step-3",
+      "input_ledger_hash": "faa0c2b9b1c25f29c87aa2dedf9ad8761f29888ecc4bc9d56f88aa8af1c983dc",
+      "requirements": [
+        {
+          "acquired": false,
+          "cited": false,
+          "status": "unmet",
+          "supplied": false,
+          "target": {
+            "captured": {
+              "byte_end": 117,
+              "byte_start": 105,
+              "file": {
+                "byte_len": 148,
+                "capture_id": "capture-v1:617ef2e43a72dcab56e6dc88239d5587716e7b51d2283827360db6b112057065",
+                "digest": "3be4a496336cb115472ca22ba2aa7c7f16c8813b2c6c429083a2b65d94bd1357",
+                "path": "rule.ts",
+                "source_id": "src_847be7169fb097576636754153093af6"
+              }
+            },
+            "fact": {
+              "id": "rule:local/src_847be7169fb097576636754153093af6@rule.ts#exit@132",
+              "kind": "node"
+            },
+            "fact_digest": "node-v1:90daa6966d915d26b6df89f8b8f0d3964fd5ddcc3c82e6d5755b0dceb022139a",
+            "graph_snapshot_id": "context-v1:ac7afdc57df8091975f2f8971c34155da0ed36aec69a85bf9d25fa9b536c31ab",
+            "index": 0,
+            "receipt_id": "ts-primary-v2:bde2e30bfae42022150b8280f83b2852606acb348cb53027517bf10e2602bd37",
+            "receipt_inventory_index": 12,
+            "registered_source_id": "src_847be7169fb097576636754153093af6",
+            "role": "definition_initializer",
+            "schema_version": 1,
+            "source": {
+              "byte_end": 117,
+              "byte_start": 105,
+              "commit_sha": "workdir",
+              "path": "rule.ts",
+              "repo": "local/src_847be7169fb097576636754153093af6"
+            },
+            "target_id": "2dcb26ea146163dfe33fb7c116712a4582ce175c63aae9654b24251e626449a1"
+          },
+          "target_id": "2dcb26ea146163dfe33fb7c116712a4582ce175c63aae9654b24251e626449a1"
+        }
+      ],
+      "requirements_hash": "26fc42decc2c39a0afbe5ce56d3d6b3a070ec84650aed738ec828fdc388d02e4",
+      "schema_version": 1
+    },
+    "investigation_id": "investigation:8b9b84ecfb74834e99d814424330f600",
+    "invocation_step_id": "step-3",
+    "knowledge_completeness": "insufficient_evidence",
+    "limitations": [
+      "The actual retained source read was unavailable."
+    ],
+    "observed_response_model": "scripted-model-observed",
+    "result_id": "investigation-result-v7:8f3c8fdfc117caf234871ed858c8e141b2ef661580b4886e620cfeedc6809d22",
+    "schema_version": 7
+  }
+}

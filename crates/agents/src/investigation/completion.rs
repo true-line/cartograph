@@ -144,7 +144,7 @@ impl InvestigationStartRequest {
             Some(4) => Ok(Self::Completion(
                 super::obligations::StagedObligationRequest::decode(raw)?,
             )),
-            Some(5 | 6) => {
+            Some(5..=7) => {
                 let policy = value["limit_profile"]
                     .as_str()
                     .and_then(InvestigationPolicy::for_profile)
@@ -179,7 +179,7 @@ impl<'de> Deserialize<'de> for InvestigationStartRequest {
             Some(1..=3) => serde_json::from_str(raw.get())
                 .map(Self::Legacy)
                 .map_err(serde::de::Error::custom),
-            Some(4..=6) => serde_json::from_str(raw.get())
+            Some(4..=7) => serde_json::from_str(raw.get())
                 .map(Self::Completion)
                 .map_err(serde::de::Error::custom),
             _ => Err(serde::de::Error::custom(

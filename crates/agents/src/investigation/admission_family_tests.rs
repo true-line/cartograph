@@ -37,7 +37,7 @@ fn request(role: &str) -> StagedObligationRequest {
 
 #[test]
 fn admission_family_internal_request_seven_has_distinct_hash_and_unchanged_envelope() {
-    // AC-0287 / T-0287: constructing the future family grants no larger budget.
+    // AC-0287 / T-0287: the registered family grants no larger budget.
     let policy = &INVESTIGATION_V2_POLICY;
     for name in ["domain-analyst", "evidence-auditor"] {
         let future = request(&format!("{name}@10"));
@@ -75,47 +75,131 @@ fn admission_family_internal_request_seven_has_distinct_hash_and_unchanged_envel
 }
 
 #[test]
-fn admission_family_public_raw_and_ipc_entries_reject_request_seven() {
-    // AC-0287 / T-0287: internal identity scaffolding cannot activate IPC.
+fn admission_family_public_raw_and_ipc_accept_exact_request_seven_tuple() {
+    // AC-0287 / T-0287: activation changes only the exact family discriminator.
+    let policy = &INVESTIGATION_V2_POLICY;
     for role in ["domain-analyst@10", "evidence-auditor@10"] {
-        let future = request(role);
-        future
-            .normalized_with_policy(&INVESTIGATION_V2_POLICY)
-            .unwrap();
-        let raw = serde_json::to_string(&future).unwrap();
-        assert!(StagedObligationRequest::decode(&raw).is_err());
-        assert!(
-            StagedObligationRequest::decode_with_policy(&raw, &INVESTIGATION_V2_POLICY).is_err()
+        let current = request(role);
+        let raw = serde_json::to_string(&current).unwrap();
+        assert!(StagedObligationRequest::decode(&raw).is_err()); // v1 default
+        assert_eq!(
+            serde_json::to_string(
+                &StagedObligationRequest::decode_with_policy(&raw, policy).unwrap()
+            )
+            .unwrap(),
+            raw
         );
-        assert!(InvestigationStartRequest::decode(&raw).is_err());
-        assert!(serde_json::from_str::<InvestigationStartRequest>(&raw).is_err());
-        // Re-labelling the generation cannot smuggle an internal role through
-        // an otherwise available public completion request family.
-        for schema in 4..=6 {
-            let mut mismatch = future.clone();
-            mismatch.schema_version = schema;
-            let raw = serde_json::to_string(&mismatch).unwrap();
-            assert!(InvestigationStartRequest::decode(&raw).is_err());
-            assert!(
-                StagedObligationRequest::decode_with_policy(&raw, &INVESTIGATION_V2_POLICY)
-                    .is_err()
-            );
-        }
-        // The shared identity DTO must reopen internal saved data, but it does
-        // not grant an old-style request the new specialist's authority.
-        let mut legacy = serde_json::to_value(&future).unwrap();
+        assert_eq!(
+            serde_json::to_string(&InvestigationStartRequest::decode(&raw).unwrap()).unwrap(),
+            raw
+        );
+        let ipc: InvestigationStartRequest = serde_json::from_str(&raw).unwrap();
+        let InvestigationStartRequest::Completion(ipc) = ipc else {
+            panic!("request7 decoded as legacy")
+        };
+        assert_eq!(
+            serde_json::to_string(&ipc.normalized_with_policy(policy).unwrap()).unwrap(),
+            raw
+        );
+        // A future role never enters the legacy StartInvestigationRequest arm.
+        let mut legacy = serde_json::to_value(&current).unwrap();
         legacy.as_object_mut().unwrap().remove("obligations");
         for schema in 1..=3 {
             legacy["schema_version"] = schema.into();
             let value: StartInvestigationRequest = serde_json::from_value(legacy.clone()).unwrap();
             assert!(value.validate().is_err());
+            assert!(InvestigationStartRequest::decode(&legacy.to_string()).is_err());
         }
     }
 }
 
 #[test]
+fn admission_family_public_decoder_rejects_mixed_tuples_and_unknown_authority() {
+    // IPC decodes recognized closed shapes; semantic rejection remains at the
+    // host's normalization boundary so it can report structured invalid_input.
+    for role in ["domain-analyst@10", "evidence-auditor@10"] {
+        let value = serde_json::to_value(request(role)).unwrap();
+        let mut mismatches = Vec::new();
+        for schema in 4..=6 {
+            let mut wrong = value.clone();
+            wrong["schema_version"] = schema.into();
+            mismatches.push(wrong);
+        }
+        for role in [
+            "domain-analyst@7",
+            "evidence-auditor@8",
+            "domain-analyst@9",
+            "evidence-auditor@11",
+        ] {
+            let mut wrong = value.clone();
+            wrong["specialist_id"] = role.into();
+            mismatches.push(wrong);
+        }
+        let mut wrong = value.clone();
+        wrong["limit_profile"] = "investigation-v1".into();
+        mismatches.push(wrong);
+        let mut wrong = value.clone();
+        wrong["obligations"]["schema_version"] = 1.into();
+        mismatches.push(wrong);
+        let mut wrong = value.clone();
+        wrong["obligations"]["contract"] = CONTRACT.into();
+        mismatches.push(wrong);
+        for wrong in mismatches {
+            let raw = wrong.to_string();
+            assert!(InvestigationStartRequest::decode(&raw).is_err(), "{raw}");
+            assert!(
+                StagedObligationRequest::decode_with_policy(&raw, &INVESTIGATION_V2_POLICY)
+                    .is_err()
+            );
+            let ipc: InvestigationStartRequest = serde_json::from_value(wrong).unwrap();
+            let InvestigationStartRequest::Completion(ipc) = ipc else {
+                panic!("wrong IPC family")
+            };
+            for policy in [&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY] {
+                assert!(ipc.normalized_with_policy(policy).is_err());
+            }
+        }
+        for field in ["policy_limits", "query_history", "prompt_schema"] {
+            let mut wrong = value.clone();
+            wrong[field] = serde_json::json!({"tool_actions":999});
+            assert!(InvestigationStartRequest::decode(&wrong.to_string()).is_err());
+            assert!(serde_json::from_value::<InvestigationStartRequest>(wrong).is_err());
+        }
+        for schema in [0, 8, 99] {
+            let mut wrong = value.clone();
+            wrong["schema_version"] = schema.into();
+            assert!(InvestigationStartRequest::decode(&wrong.to_string()).is_err());
+            assert!(serde_json::from_value::<InvestigationStartRequest>(wrong).is_err());
+        }
+    }
+}
+
+#[test]
+fn admission_family_public_raw_preflight_preserves_duplicate_and_byte_bounds() {
+    let policy = &INVESTIGATION_V2_POLICY;
+    for role in ["domain-analyst@10", "evidence-auditor@10"] {
+        let raw = serde_json::to_string(&request(role)).unwrap();
+        for extra in [
+            "\"schema_version\":7,",
+            "\"specialist_id\":\"domain-analyst@10\",",
+        ] {
+            let duplicate = format!("{{{extra}{}", &raw[1..]);
+            assert!(InvestigationStartRequest::decode(&duplicate).is_err());
+            assert!(StagedObligationRequest::decode_with_policy(&duplicate, policy).is_err());
+        }
+        let at_cap = format!("{raw}{}", " ".repeat(policy.request_bytes() - raw.len()));
+        assert!(InvestigationStartRequest::decode(&at_cap).is_ok());
+        assert!(StagedObligationRequest::decode_with_policy(&at_cap, policy).is_ok());
+        assert!(matches!(
+            InvestigationStartRequest::decode(&(at_cap + " ")),
+            Err(InvestigationError::LimitExceeded)
+        ));
+    }
+}
+
+#[test]
 fn admission_family_public_decoder_preserves_existing_completion_wires() {
-    // AC-0287 / T-0287: the internal family never changes published request bytes.
+    // AC-0287 / T-0287: activation never changes published older request bytes.
     for (schema, version, profile) in [
         (4, 7, "investigation-v1"),
         (5, 8, "investigation-v2"),

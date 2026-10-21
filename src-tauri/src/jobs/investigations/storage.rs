@@ -681,8 +681,8 @@ pub(super) fn load_task(
     Ok(task)
 }
 
-/// Internal execution routing only. The bounded, checksummed discriminator
-/// chooses a full validator; it never grants authority or opens public history.
+/// Family routing for execution and public reads. The bounded, checksummed
+/// discriminator chooses a full validator; it never grants mutation authority.
 pub(super) fn load_execution_task(
     connection: &Connection,
     id: &str,

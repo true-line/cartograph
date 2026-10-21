@@ -341,9 +341,19 @@ fn next_prompt_initial_factory_nonce_recovery_and_public_gate() {
         store.start_next_prompt_investigation(&changed, None),
         Err(InvestigationStoreError::Conflict)
     ));
+    assert_eq!(
+        store
+            .investigation(&first.detail.summary.investigation_id)
+            .unwrap(),
+        first.detail
+    );
+    assert_eq!(
+        store.existing_investigation_completion(&f.request).unwrap(),
+        Some(first.detail.clone())
+    );
     assert!(matches!(
-        store.investigation(&first.detail.summary.investigation_id),
-        Err(InvestigationStoreError::Invalid)
+        store.existing_investigation_completion(&changed),
+        Err(InvestigationStoreError::Conflict)
     ));
     let mut reopened = JobStore::open(directory.path().join("state.db")).unwrap();
     assert!(
@@ -456,7 +466,7 @@ fn next_prompt_initial_terminal_writer_preserves_charges_and_rejects_stale_retri
 }
 
 #[test]
-fn next_prompt_initial_owned_detail_reads_internal_family_without_opening_public_history() {
+fn next_prompt_initial_owned_detail_requires_owner_alongside_public_history() {
     // AC-0287: runtime reads authenticate the held execution, not only a task id.
     let mut f = fixture();
     let id = f.task.detail.summary.investigation_id.clone();
@@ -466,7 +476,7 @@ fn next_prompt_initial_owned_detail_reads_internal_family_without_opening_public
             .unwrap(),
         f.task.detail
     );
-    assert!(f.store.investigation(&id).is_err());
+    assert_eq!(f.store.investigation(&id).unwrap(), f.task.detail);
     let foreign = fixture();
     assert!(matches!(
         f.store.investigation_owned_detail(&foreign.execution, &id),

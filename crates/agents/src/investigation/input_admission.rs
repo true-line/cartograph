@@ -52,8 +52,8 @@ const CHOICE_INSTRUCTIONS: &str = "Choose one permitted action. Capacity feedbac
 const FINISH_ONLY_INSTRUCTIONS: &str = "Finish only: return a finish action using the already supplied evidence. Do not query context, read evidence, or read coverage inventory. Capacity feedback grants no evidence or authority.";
 
 impl InvestigationInput {
-    /// Internal @10/request7 path. Public start/decode, sealing and worker routing
-    /// deliberately remain separate and cannot select this builder implicitly.
+    /// Distinct @10/request7 path. Exact family selection does not grant
+    /// dispatch or acquisition authority; the host must admit each operation.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_v9_with_policy(
         question: &str,

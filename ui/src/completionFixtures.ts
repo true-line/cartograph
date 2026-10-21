@@ -73,3 +73,28 @@ export function queryHistoryResult(id = 'inv-query-history'): InvestigationResul
   return completionResult(id, { schema_version: 6, result_id: `investigation-result-v6:${'7'.repeat(64)}`,
     disclosure_hash: `investigation-disclosure-v5:${'d'.repeat(64)}` });
 }
+
+
+/** New starts explicitly advertise @10; old fixture catalogs remain immutable. */
+export const admissionCatalog: InvestigationCatalog = {
+  ...queryHistoryCatalog,
+  specialists: queryHistoryCatalog.specialists.map((item) => item.version === 9 ? {
+    ...item, id: item.id.replace('@9', '@10') as import('./investigationTypes').SpecialistId,
+    version: 10, prompt_fingerprint: `fixture-${item.id.replace('@9', '@10')}`,
+  } : item),
+  policies: queryHistoryCatalog.policies!.map((policy) => ({ ...policy, request_schema_version: 7,
+    specialist_ids: ['domain-analyst@10', 'evidence-auditor@10'] })),
+};
+export function admissionDetail(id = 'inv-admission'): InvestigationDetail {
+  const detail = queryHistoryDetail(id);
+  detail.schema_version = 7; detail.specialist_id = 'domain-analyst@10';
+  detail.specialist = admissionCatalog.specialists.find((item) => item.id === 'domain-analyst@10')!;
+  if (detail.completion!.assessment_basis.kind === 'finishing_disclosure') {
+    detail.completion!.assessment_basis.disclosure_hash = `investigation-disclosure-v6:${'d'.repeat(64)}`;
+  }
+  return detail;
+}
+export function admissionResult(id = 'inv-admission'): InvestigationResult {
+  return { ...queryHistoryResult(id), schema_version: 7, result_id: `investigation-result-v7:${'7'.repeat(64)}`,
+    disclosure_hash: `investigation-disclosure-v6:${'d'.repeat(64)}` };
+}

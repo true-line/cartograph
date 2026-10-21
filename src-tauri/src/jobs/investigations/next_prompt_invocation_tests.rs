@@ -287,7 +287,10 @@ fn next_prompt_invocation_local_commits_exact_call_and_reopens_refusal_or_query_
             Err(InvestigationStoreError::Stale)
         );
         assert_eq!(f.snapshot(), before);
-        assert!(reopened.investigation(&f.saved.basis.task_id).is_err());
+        assert_eq!(
+            reopened.investigation(&f.saved.basis.task_id).unwrap(),
+            saved.detail
+        );
     }
 }
 

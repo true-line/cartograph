@@ -9,7 +9,7 @@ use crate::{
 use agents::TaskCaptureSpanRef;
 use agents::investigation::{
     InvestigationCitation, InvestigationCitationRead, InvestigationCitationStatus,
-    InvestigationEvidenceOrigin, InvestigationInputLedger,
+    InvestigationEvidenceOrigin, InvestigationInputLedger, InvestigationPolicy,
 };
 
 /// The caller must load `ledger` by this investigation ID through the validated
@@ -21,10 +21,18 @@ pub(super) fn read(
     ledger: &InvestigationInputLedger,
     citation_id: &str,
 ) -> Result<InvestigationCitationRead, HostError> {
+    let detail = state
+        .jobs
+        .lock()
+        .map_err(|_| HostError::Operational)?
+        .investigation(investigation_id)
+        .map_err(|_| HostError::InvalidInput)?;
+    let policy = InvestigationPolicy::for_limits(&detail.limits).ok_or(HostError::InvalidInput)?;
     read_saved(
         &state.primary_sources,
         investigation_id,
         ledger,
+        policy,
         citation_id,
     )
 }
@@ -33,12 +41,13 @@ fn read_saved(
     store: &PrimarySourceStore,
     investigation_id: &str,
     ledger: &InvestigationInputLedger,
+    policy: &InvestigationPolicy,
     citation_id: &str,
 ) -> Result<InvestigationCitationRead, HostError> {
     if !valid_id(investigation_id) || !valid_id(citation_id) {
         return Err(HostError::InvalidInput);
     }
-    ledger.validate()?;
+    ledger.validate_with_policy(policy)?;
     let citation = ledger
         .citations
         .iter()
@@ -346,7 +355,46 @@ mod tests {
         ledger: &InvestigationInputLedger,
         citation: &str,
     ) -> InvestigationCitationRead {
-        read_saved(&fixture.store, INVESTIGATION, ledger, citation).unwrap()
+        read_saved(
+            &fixture.store,
+            INVESTIGATION,
+            ledger,
+            &agents::investigation::INVESTIGATION_V1_POLICY,
+            citation,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn investigation_historical_citations_use_saved_expanded_policy() {
+        // AC-0287: retained source reads accept the saved closed policy, never a
+        // legacy fallback or a wider allowance inferred from ledger contents.
+        let fixture = fixture();
+        let mut ledger = fixture.ledger.clone();
+        let standard = &agents::investigation::INVESTIGATION_V1_POLICY;
+        let expanded = InvestigationPolicy::for_profile("investigation-v2").unwrap();
+        ledger.queries =
+            vec![ledger.queries[0].clone(); standard.limits().tool_actions as usize + 1];
+        assert!(
+            read_saved(
+                &fixture.store,
+                INVESTIGATION,
+                &ledger,
+                standard,
+                "evidence-1"
+            )
+            .is_err()
+        );
+        let read = read_saved(
+            &fixture.store,
+            INVESTIGATION,
+            &ledger,
+            expanded,
+            "evidence-1",
+        )
+        .unwrap();
+        assert_eq!(read.status, InvestigationCitationStatus::Available);
+        assert_eq!(read.text.as_deref(), Some(fixture.text.as_str()));
     }
 
     // AC-0189: actual TS v2 producer/receipt/capture bytes survive checkout
@@ -377,7 +425,14 @@ mod tests {
         drop(store);
         let reopened = PrimarySourceStore::open(&app_data).unwrap();
         let saved: InvestigationInputLedger = decode_record(&serialized).unwrap();
-        let observed = read_saved(&reopened, INVESTIGATION, &saved, "evidence-1").unwrap();
+        let observed = read_saved(
+            &reopened,
+            INVESTIGATION,
+            &saved,
+            &agents::investigation::INVESTIGATION_V1_POLICY,
+            "evidence-1",
+        )
+        .unwrap();
         assert_eq!(observed.status, InvestigationCitationStatus::Available);
         assert_eq!(observed.text, Some(text));
         assert_eq!(observed.citation, saved.citations[1]);
@@ -442,7 +497,14 @@ mod tests {
             assert!(observed.text.is_none());
         }
         assert_eq!(
-            read_saved(&fixture.store, INVESTIGATION, &fixture.ledger, "unknown").unwrap_err(),
+            read_saved(
+                &fixture.store,
+                INVESTIGATION,
+                &fixture.ledger,
+                &agents::investigation::INVESTIGATION_V1_POLICY,
+                "unknown"
+            )
+            .unwrap_err(),
             HostError::InvalidInput
         );
     }

@@ -14,6 +14,15 @@ pub(crate) struct InvestigationRuntime {
 }
 
 impl InvestigationRuntime {
+    #[cfg(test)]
+    pub(super) fn set_test_provider(
+        &self,
+        mode: InvestigationProviderMode,
+        provider: Arc<dyn LlmProvider>,
+    ) {
+        self.providers.lock().unwrap().insert(mode, provider);
+    }
+
     pub(super) fn provider(
         &self,
         mode: InvestigationProviderMode,

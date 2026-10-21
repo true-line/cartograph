@@ -582,13 +582,12 @@ impl JobStore {
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
-        let task = load_task(&tx, id)?;
+        let task = load_execution_task(&tx, id)?;
         tx.commit()?;
         Ok(task.detail)
     }
 
-    /// Worker-only family-aware read. A live owner is required; this does not
-    /// change the closed public history/catalog routes for the next family.
+    /// Worker counterpart of the family-aware public read, requiring a live owner.
     pub(crate) fn investigation_owned_detail(
         &self,
         execution: &JobExecution,
@@ -612,7 +611,7 @@ impl JobStore {
     ) -> Result<Option<InvestigationInputLedger>, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
-        let task = load_task(&tx, id)?;
+        let task = load_execution_task(&tx, id)?;
         let ledger = load_ledger(&tx, &task)?;
         tx.commit()?;
         Ok(ledger)
@@ -624,7 +623,7 @@ impl JobStore {
     ) -> Result<Option<InvestigationResult>, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
-        let task = load_task(&tx, id)?;
+        let task = load_execution_task(&tx, id)?;
         let result = load_result(&tx, &task)?;
         tx.commit()?;
         Ok(result)
@@ -660,7 +659,7 @@ impl JobStore {
     ) -> Result<Option<(u64, PendingInvestigationStep, bool)>, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
-        let task = load_task(&tx, id)?;
+        let task = load_execution_task(&tx, id)?;
         let pending = if task.phase == Phase::Consent && !task.detail.summary.cancel_requested {
             task.pending
                 .map(|step| (task.detail.summary.revision, step, task.approved))

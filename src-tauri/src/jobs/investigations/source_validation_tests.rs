@@ -38,10 +38,10 @@ fn source_validation_charge_commits_exact_witness_usage_and_reopens() {
         Some(ValidationCharge::for_reservation(&r).unwrap())
     );
     assert!(saved(&f).disposition.is_none());
-    assert!(matches!(
-        f.store.investigation(&f.basis.task_id),
-        Err(InvestigationStoreError::Invalid)
-    ));
+    assert_eq!(
+        &f.store.investigation(&f.basis.task_id).unwrap(),
+        receipt.detail()
+    );
     let reopened = JobStore::open(f.directory.path().join("state.db")).unwrap();
     reopened
         .verify_source_validation_access(&f._execution_guard, &receipt)

@@ -1,5 +1,5 @@
-//! Owner-authenticated internal next-family pre-call boundaries. Public start,
-//! approval, history and worker routing remain independently closed.
+//! Owner-authenticated next-family pre-call boundaries. Public consent alone
+//! never substitutes for the exact sealed step and execution owner.
 use super::*;
 use admission_contract::SavedCallBasis;
 use llm::bounded::{AuthorizedBoundedCompletion, CompletionLimits, PreparedBoundedCompletion};

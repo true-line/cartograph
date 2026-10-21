@@ -614,3 +614,63 @@ fn next_prompt_worker_queried_source_outside_obligations_can_acquire_and_finish(
 
 #[path = "next_prompt_history_tests.rs"]
 mod history_tests;
+
+#[path = "next_prompt_wire_export_tests.rs"]
+mod wire_export;
+
+// Retain the genuine parser capture and app for public command tests without
+// exporting fixture internals or creating an already-admitted next-family task.
+pub(in crate::investigations) fn with_public_start_fixture(
+    provider: Arc<dyn LlmProvider>,
+    legacy_completed: bool,
+    test: impl FnOnce(
+        &tauri::AppHandle<tauri::test::MockRuntime>,
+        StagedObligationRequest,
+        &std::path::Path,
+    ),
+) {
+    let fixture = CompletionFixture::new(
+        provider.as_ref(),
+        SpecialistId::DomainAnalystV9,
+        true,
+        false,
+        false,
+    );
+    let mut request = fixture.request.clone();
+    if legacy_completed {
+        fixture.run(provider);
+        assert_eq!(
+            fixture
+                .base
+                .app
+                .state::<AppState>()
+                .jobs
+                .lock()
+                .unwrap()
+                .investigation(&fixture.id)
+                .unwrap()
+                .summary
+                .status,
+            InvestigationStatus::Completed
+        );
+    } else {
+        let state = fixture.base.app.state::<AppState>();
+        let mut jobs = state.jobs.lock().unwrap();
+        jobs.cancel_investigation(&fixture.id).unwrap();
+        let revision = jobs.investigation(&fixture.id).unwrap().summary.revision;
+        jobs.advance_investigation(
+            &fixture.execution,
+            revision,
+            InvestigationTransition::StopWithElapsed {
+                reason: InvestigationStopReason::Cancelled,
+                active_milliseconds: 0,
+            },
+        )
+        .unwrap();
+        state.investigations.remove(&fixture.id);
+        request.schema_version = 7;
+        request.specialist_id = "domain-analyst@10".into();
+        request.request_nonce = "public-command-activation-fixture".into();
+    }
+    test(fixture.base.app.handle(), request, &fixture.base.app_data);
+}

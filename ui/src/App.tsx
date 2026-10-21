@@ -1,3 +1,4 @@
+import { isCompletionSpecialist } from './investigationFamilies';
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { tierDistribution, useAppStore } from './store';
 import { railSurface, SURFACES, surfaceLabel, type SurfaceView } from './views';
@@ -794,7 +795,7 @@ export default function App() {
                 void primarySource.resolveInspectionTarget(index).then(async (target) => {
                   if (!target) return;
                   const state = useInvestigationStore.getState();
-                  const added = state.composer.specialistId.endsWith('@7') ? await state.addSourceObligation(target) : state.addInspectionRequirement(target);
+                  const added = isCompletionSpecialist(state.composer.specialistId) ? await state.addSourceObligation(target) : state.addInspectionRequirement(target);
                   if (added) {
                     clearSelection();
                     navigate('investigations');

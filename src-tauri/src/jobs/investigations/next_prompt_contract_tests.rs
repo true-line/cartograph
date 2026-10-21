@@ -2,7 +2,8 @@ use super::*;
 use crate::jobs::investigations::admission_contract::{self, SavedCallBasis, StoredAdmissionState};
 use agents::investigation::staged_refusal::CompletionCallMode;
 
-/// Private test construction only. Public starts/history still reject @10.
+/// Private construction for structural family validation; public reads still
+/// require the complete saved journal to validate.
 /// Uses a real existing job/ledger/archive fixture, then explicitly writes the
 /// new internal DTO/invocation as test data; this is not a production migration.
 pub(in crate::jobs::investigations) struct InternalFixture {
@@ -216,7 +217,7 @@ pub(in crate::jobs::investigations) fn internal_fixture_with_step_preparer(
 }
 
 #[test]
-fn next_prompt_contract_exact_task3_intent4_pairing_keeps_public_history_closed() {
+fn next_prompt_contract_exact_task3_intent4_pairing_validates_public_history() {
     // AC-0287: explicit new private DTO family; no old row/default migration.
     let fixture = internal_fixture();
     validate_next_prompt_task(&fixture.task).unwrap();
@@ -248,9 +249,12 @@ fn next_prompt_contract_exact_task3_intent4_pairing_keeps_public_history_closed(
         Some(7)
     );
     let id = &fixture.task.detail.summary.investigation_id;
-    assert!(fixture.store.investigation(id).is_err());
+    assert_eq!(
+        fixture.store.investigation(id).unwrap(),
+        fixture.task.detail
+    );
     let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
-    assert!(reopened.investigation(id).is_err());
+    assert_eq!(reopened.investigation(id).unwrap(), fixture.task.detail);
     for change in [
         |t: &mut StoredTask| t.schema_version = 2,
         |t: &mut StoredTask| t.detail.summary.schema_version = 6,

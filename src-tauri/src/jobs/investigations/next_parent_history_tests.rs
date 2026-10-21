@@ -1,5 +1,5 @@
 //! AC-0287: genuine completed/internal parent, full saved authority and exact
-//! mandatory history. No provider dispatch, public history activation or migration.
+//! mandatory history through public reads. No provider dispatch or migration.
 use super::*;
 use completion::FinishFixture;
 
@@ -55,8 +55,14 @@ fn next_parent_history_completed_parent_starts_internal_child_with_exact_saved_c
         started.detail.summary.conversation_id,
         parent.detail.summary.conversation_id
     );
-    assert!(f.base.f.store.investigation(f.base.id()).is_err());
-    assert!(f.base.f.store.investigation_result(f.base.id()).is_err());
+    assert_eq!(
+        f.base.f.store.investigation(f.base.id()).unwrap(),
+        parent.detail
+    );
+    assert_eq!(
+        serde_json::to_value(f.base.f.store.investigation_result(f.base.id()).unwrap()).unwrap(),
+        value["saved_result"]
+    );
     let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
     assert_eq!(
         reopened

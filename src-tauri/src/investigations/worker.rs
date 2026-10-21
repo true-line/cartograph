@@ -1226,3 +1226,6 @@ fn stop<R: tauri::Runtime>(
 #[cfg(test)]
 #[path = "worker/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(super) use tests::with_public_start_fixture;

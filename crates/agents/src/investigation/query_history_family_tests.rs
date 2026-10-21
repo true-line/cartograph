@@ -65,15 +65,17 @@ fn query_history_request_family_requires_exact_schema_role_and_policy_tuple() {
                     let raw = serde_json::to_string(&value).unwrap();
                     assert_eq!(
                         StagedObligationRequest::decode_with_policy(&raw, policy).is_ok(),
-                        expected && schema <= 6
+                        expected
                     );
                     assert_eq!(value.intent_hash_with_policy(policy).is_ok(), expected);
-                    if schema == 7 {
-                        // AC-0287: every internal/invalid role-policy tuple is
-                        // still rejected by both public start entrypoints.
-                        assert!(InvestigationStartRequest::decode(&raw).is_err());
-                        assert!(serde_json::from_str::<InvestigationStartRequest>(&raw).is_err());
-                    }
+                    assert_eq!(InvestigationStartRequest::decode(&raw).is_ok(), expected);
+                    // IPC preserves structured semantic errors: recognized
+                    // generations decode their closed shape, then normalize.
+                    let ipc: InvestigationStartRequest = serde_json::from_str(&raw).unwrap();
+                    let InvestigationStartRequest::Completion(ipc) = ipc else {
+                        panic!("completion family decoded as legacy")
+                    };
+                    assert_eq!(ipc.normalized_with_policy(policy).is_ok(), expected);
                 }
             }
         }
@@ -238,6 +240,7 @@ fn query_history_ipc_deserializer_accepts_current_and_historical_completion_fami
         (4, 7, "investigation-v1"),
         (5, 8, "investigation-v2"),
         (6, 9, "investigation-v2"),
+        (7, 10, "investigation-v2"),
     ] {
         for name in ["domain-analyst", "evidence-auditor"] {
             let expected = request(schema, &format!("{name}@{version}"), profile);
@@ -254,5 +257,14 @@ fn query_history_ipc_deserializer_accepts_current_and_historical_completion_fami
     let mut future =
         serde_json::to_value(request(6, "domain-analyst@9", "investigation-v2")).unwrap();
     future["schema_version"] = serde_json::json!(7);
-    assert!(serde_json::from_value::<InvestigationStartRequest>(future).is_err());
+    let decoded: InvestigationStartRequest = serde_json::from_value(future.clone()).unwrap();
+    let InvestigationStartRequest::Completion(decoded) = decoded else {
+        panic!("wrong IPC family")
+    };
+    assert!(
+        decoded
+            .normalized_with_policy(&INVESTIGATION_V2_POLICY)
+            .is_err()
+    );
+    assert!(InvestigationStartRequest::decode(&future.to_string()).is_err());
 }

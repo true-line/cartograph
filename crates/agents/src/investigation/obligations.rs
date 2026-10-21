@@ -233,10 +233,9 @@ impl StagedObligationRequest {
         super::strict::preflight(raw, policy.request_bytes(), 32, 4096, 4096)?;
         let value: Self =
             serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidRequest)?;
-        // Internal normalized families can precede public activation. Keep this
-        // raw entrypoint closed even when a future identity can be constructed
-        // directly for builder/storage tests.
-        if !matches!(value.schema_version, 4..=6) {
+        // Only registered completion generations enter normalization; schema,
+        // specialist, envelope and immutable policy must still match exactly.
+        if !matches!(value.schema_version, 4..=7) {
             return Err(InvestigationError::InvalidRequest);
         }
         value.normalized_with_policy(policy)

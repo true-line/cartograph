@@ -56,7 +56,7 @@ fn next_prompt_snapshot_ready_reopens_exact_request_and_saved_inputs() {
             .detail(),
         saved.detail()
     );
-    assert!(reopened.investigation(f.id()).is_err());
+    assert_eq!(&reopened.investigation(f.id()).unwrap(), saved.detail());
     let mut changed = f.f.request.clone();
     changed.question.push_str(" changed");
     assert!(matches!(
