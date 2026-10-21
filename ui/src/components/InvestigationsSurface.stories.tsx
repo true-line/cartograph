@@ -158,7 +158,7 @@ export const LateTaskSelectionCannotReplaceCurrent: Story = {
 };
 
 export const LegacyHistoryRequiresExplicitReplacement: Story = {
-  // AC-0260: an unavailable saved version requires explicit replacement.
+  // AC-0190: an unavailable saved version requires explicit replacement.
   args: { state: state({ detail: legacyInvestigationDetail(2, 'inv-fixture'),
     history: [legacyInvestigationDetail(2, 'inv-fixture')], result: legacyInvestigationResult('inv-fixture') }) },
   play: async ({ canvasElement, args }) => {
@@ -397,7 +397,7 @@ export const ActualSavedV6BackendFixture: Story = {
 };
 
 export const CatalogRefreshRequiresExplicitReplacement: Story = {
-  // AC-0260: catalog recovery cannot replace a selection that disappeared.
+  // AC-0190: catalog recovery cannot replace a selection that disappeared.
   beforeEach: () => {
     useInvestigationStore.setState(state({ catalog: turnProgressCatalog }), true);
     return () => useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
