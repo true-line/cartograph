@@ -1,5 +1,15 @@
 # cartograph
 
+## 0.20.0
+
+### Minor Changes
+
+- 86b9684: Use bounded query history in newly selected expanded investigations. Earlier queries remain available through explicit, budgeted replay, while the latest query stays visible. Saved investigations and pending retries retain their original specialist and request versions.
+- 520dafb: Recover a data model from Java JPA code: import-proven `@Entity` classes become cited data entities with their table, fields and `@Id`, `@OneToMany`/`@ManyToOne`/`@OneToOne`/`@ManyToMany` fields become relations with cardinality and `@JoinColumn`, and Spring Data repositories bind to their entity so repository calls (`save`, `findById`, `deleteById`, …) show as reads and writes. Computed table names and relations to non-entities stay explicit gaps. The recovered data model document now lists entity relations alongside access edges.
+- 804abc5: Check whether an expanded investigation's next prompt can fit before acquiring more evidence. Show capacity refusals separately from evidence results, preserve charged work through interruptions, and retain the original versions of saved investigations and pending retries.
+- 3c85d3e: Render topology, flow, deployment, and data-model views as interactive local diagrams from structured graph facts and provenance, bound to the exported projection's schema and content identity (`AC-0246`, `AC-0247`). Selecting a node or edge opens its evidence, tier, and confidence, Gap and partial hops are visibly and textually distinct from confirmed ones, large views page or expand with explicit hidden counts, and copyable Mermaid text remains available as a secondary action.
+- 55abc5b: Exclude interface-dispatch hops from T2 semantic matching: an unresolved call shaped `IFace.method` (for example `IChannel.listen`) is dynamic dispatch that embeddings cannot resolve, so it is now classified out of ANN candidacy — never embedded, never proposed — and stays an open gap tagged `dynamic dispatch - needs type hierarchy` so the register can group it. Conservative look-alikes such as `Item.get`, `IO.read` or `ID.parse` still enter candidacy.
+
 ## 0.19.0
 
 ### Minor Changes
