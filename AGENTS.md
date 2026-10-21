@@ -163,8 +163,11 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 npm --prefix ui run lint && npm --prefix ui run typecheck && npm --prefix ui run test && npm --prefix ui run build
 ```
 
-The complete CI suite also requires native job ownership tests on
-`windows-2022`: `cargo test --locked -p job-execution-tests --test ownership`.
+The complete CI suite also requires native job ownership tests on Windows:
+`cargo test --locked -p job-execution-tests --test ownership`. Internal runs use
+the organisation's self-hosted Windows runner (`vars.WINDOWS_RUNNER`, default
+labels `self-hosted, Windows, X64`); fork and merge-queue runs use hosted
+`windows-2022`. Both are native Windows hosts, never WSL.
 The harness imports the production job modules and their existing tests without
 building Tauri. Local workspace tests run the same harness on the local platform;
 only a successful exact-SHA Windows lane establishes its Windows runtime result.
