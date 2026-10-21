@@ -652,6 +652,52 @@ analyst control. Existing @2–@4 controls and their receipts are unchanged. Thi
 @5 control is a production-module observation, not a native-app run, a Vendure
 acceptance result, or proof that model conclusions follow from the source.
 
+The ignored `investigation_qualified_local_provider_acceptance` entrypoint selects
+@6. In addition to the common environment above, set
+`CARTOGRAPH_ACCEPTANCE_RUBRIC` to the absolute evaluator-only rubric path and
+`CARTOGRAPH_ACCEPTANCE_RUNTIME_EVIDENCE` to the absolute read-only runtime identity
+receipt. Set `CARTOGRAPH_ACCEPTANCE_MAILBOX` to the existing absolute mailbox
+directory where the frozen manifest will be published. The acknowledgement must
+resolve inside that directory; an external copy elsewhere is insufficient.
+Set `CARTOGRAPH_ACCEPTANCE_GATE` to the new output directory's
+`publication.json`; do not create that file until the frozen manifest has been
+published and its exact bytes verified. The bounded publication wait fails closed
+without a provider call if the acknowledgement is absent or invalid. The
+acknowledgement is a strict JSON object with `schema_version: 1`,
+`manifest_hash` equal to the frozen manifest's BLAKE3-256 hash, and
+`mailbox_manifest` naming an absolute external copy of its exact bytes. The
+harness rechecks every frozen artifact after acknowledgement; publishing a changed
+manifest or modifying an input does not authorize dispatch. SHA-256 hashes used
+in review messages are separate from these BLAKE3 artifact identities.
+
+The separately versioned @6 synthetic coverage control additionally requires an
+actual inventory read and the same frozen coverage identity on every invocation.
+Its inventory is explicitly harness-generated and published through the production
+graph-and-coverage transaction using the real active-plugin configuration hash.
+Existing producer fields carry that marker; inventory metadata cannot become a
+source citation or satisfy the independent source-inspection obligation.
+
+Before dispatch, freeze the questions, source and inventory bytes, specialist
+identities, context identity, and evaluator-only rubric in a new artifact directory.
+Publish their hashes before any provider request. Keep the rubric outside captures,
+model inputs, tool responses and parent history. Preparation may preview the
+production context; the persisted request must bind its expected identity, and
+actual worker preparation must reject a changed identity. Publication waiting occurs
+before the worker starts, without pausing or extending its work limits.
+
+Record mechanical and semantic outcomes separately. Check each actual sealed
+invocation against the frozen qualification, and require the auditor's own source
+and inventory observations. Bind the auditor's actual supplied history to the saved
+parent result ID and body hash; nonempty history alone is insufficient. Compare
+source-span hashes with disclosed text hashes
+and inventory-body hashes with disclosed body hashes; full-file and envelope hashes
+are different domains. If redaction changes a supplied representation, review that
+actual representation or mark its claims unreviewable. An initializer-only source
+span cannot establish the containing function's full behavior. Preserve failures,
+skip the auditor after a failed analyst control, and perform no hidden repair or
+retry. This control does not replace prior @5 observations, the Vendure primary
+procedure, native restart, destructive forgetting or independent citation review.
+
 Use a clean checkout and an output directory outside it that does not exist. The
 manifest records the exact source commit and intended analyst/auditor definitions
 before the first provider call. It records runtime/model identity

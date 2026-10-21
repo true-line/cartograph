@@ -198,7 +198,11 @@ fn prepare_auditor(
         );
     }
     let mut request = auditor_request(fixture, specialists);
-    request.schema_version = 2;
+    request.schema_version = if specialists.auditor.uses_coverage_qualification() {
+        3
+    } else {
+        2
+    };
     request.expected_graph_revision = Some(actual.graph_snapshot_id.clone());
     request.inspection_requirements = Some(vec![actual]);
     request
@@ -248,7 +252,7 @@ fn selected_evidence(
         .zip(assessment)
         .zip(ledger.as_ref())
         .is_some_and(|((r, a), l)| {
-            r.schema_version == 3
+            r.schema_version == if l.schema_version == 2 { 4 } else { 3 }
                 && a.requirements_hash
                     == inspection_requirements_hash(std::slice::from_ref(target)).unwrap()
                 && a.input_ledger_hash == r.input_ledger_hash
@@ -315,3 +319,6 @@ fn record_auditor(
 
 #[path = "inspection/tests.rs"]
 mod tests;
+
+#[path = "inspection/qualified.rs"]
+pub(super) mod qualified;

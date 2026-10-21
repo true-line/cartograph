@@ -203,6 +203,11 @@ impl AcceptanceSpecialists {
         auditor: SpecialistId::EvidenceAuditorV5,
     };
 
+    const QUALIFIED_V6: Self = Self {
+        analyst: SpecialistId::DomainAnalystV6,
+        auditor: SpecialistId::EvidenceAuditorV6,
+    };
+
     // Explicit immutable definitions, recorded even if the first call fails and
     // the auditor is never started. No capability lookup selects a latest role.
     fn intended_definitions(self) -> Value {
@@ -333,6 +338,12 @@ fn investigation_turn_progress_local_provider_acceptance() {
 #[ignore = "MT-H4-02: requires an installed local model and explicit fresh artifact directory"]
 fn investigation_source_inspection_local_provider_acceptance() {
     local_provider_acceptance(AcceptanceSpecialists::SOURCE_INSPECTION_V5);
+}
+
+#[test]
+#[ignore = "MT-H4-02 V6: requires clean reviewed code, installed model and exact-hash publication gate"]
+fn investigation_qualified_local_provider_acceptance() {
+    inspection::qualified::local_provider_acceptance();
 }
 
 #[test]
