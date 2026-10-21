@@ -1,0 +1,1 @@
+export const onSettled = handler(process.env.SETTLED_TOPIC_ARN, settle);

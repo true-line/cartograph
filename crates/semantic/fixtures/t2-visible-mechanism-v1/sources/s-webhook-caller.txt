@@ -1,0 +1,1 @@
+export const dispatch = (url, body) => fetch(url, { method: 'POST', body });

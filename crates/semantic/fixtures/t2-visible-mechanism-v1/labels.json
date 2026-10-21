@@ -1,0 +1,236 @@
+{
+  "schema_version": 1,
+  "kind": "labels",
+  "purpose": "visible_mechanism_fixture",
+  "dataset_id": "t2-visible-mechanism-v1",
+  "inputs_hash": "d0ab80d3370c4d1efe837f7477ba6e50c4c9608ecb513edf5268656f80104b2a",
+  "leakage_hash": "a4e98dba73e6e54741d512f7fc0c712dc7afb1b0195e86fb061a581eedc61c22",
+  "labels": [
+    {
+      "case_id": "c-call-empty-universe",
+      "truth": {
+        "kind": "no_match"
+      },
+      "hard_negative_target_ids": [],
+      "origin": {
+        "kind": "scripted_truth",
+        "author": "Claude (trueline-claude-agent[bot])",
+        "reviewer": null,
+        "procedure_version": "visible-fixture-authoring.1",
+        "source_ids": [
+          "s-webhook-caller"
+        ],
+        "rationale": "The frozen eligible universe is empty, so no acceptable target exists in it.",
+        "exclusivity_basis": "The stated universe has zero candidates."
+      }
+    },
+    {
+      "case_id": "c-call-multi-acceptable",
+      "truth": {
+        "kind": "acceptable_targets",
+        "target_ids": [
+          "fn:i18n/currency.ts#formatCurrency",
+          "reexport:i18n/index.ts#formatCurrency"
+        ]
+      },
+      "hard_negative_target_ids": [],
+      "origin": {
+        "kind": "source_proof",
+        "author": "Claude (trueline-claude-agent[bot])",
+        "reviewer": null,
+        "procedure_version": "visible-fixture-authoring.1",
+        "source_ids": [
+          "s-i18n-format",
+          "s-i18n-legacy-format",
+          "s-pricing-caller"
+        ],
+        "rationale": "The caller imports formatCurrency from ../i18n, which re-exports ./currency. Both the barrel binding and the definition are acceptable resolutions of the same callee.",
+        "exclusivity_basis": "Only these two candidates exist and both name the imported binding."
+      }
+    },
+    {
+      "case_id": "c-call-no-match",
+      "truth": {
+        "kind": "no_match"
+      },
+      "hard_negative_target_ids": [],
+      "origin": {
+        "kind": "source_proof",
+        "author": "Claude (trueline-claude-agent[bot])",
+        "reviewer": null,
+        "procedure_version": "visible-fixture-authoring.1",
+        "source_ids": [
+          "s-billing-charge",
+          "s-billing-refund",
+          "s-ledger-caller"
+        ],
+        "rationale": "The callee is ledgerSdk.reconcileLedger from the external-ledger package, which is not in the corpus.",
+        "exclusivity_basis": "The caller imports ledgerSdk from 'external-ledger'. Neither candidate is that package's export, and the complete frozen universe holds only these two billing functions."
+      }
+    },
+    {
+      "case_id": "c-call-same-name",
+      "truth": {
+        "kind": "acceptable_targets",
+        "target_ids": [
+          "fn:channels/email.ts#send"
+        ]
+      },
+      "hard_negative_target_ids": [
+        "fn:channels/sms.ts#send"
+      ],
+      "origin": {
+        "kind": "source_proof",
+        "author": "Claude (trueline-claude-agent[bot])",
+        "reviewer": null,
+        "procedure_version": "visible-fixture-authoring.1",
+        "source_ids": [
+          "s-email-send",
+          "s-notifier-caller",
+          "s-sms-send"
+        ],
+        "rationale": "The caller's file imports send from ../channels/email. The sms send shares the name and is a hard same-name collision. The audit send is a different-arity non-target, but it is not labeled a hard negative.",
+        "exclusivity_basis": "The import in the caller binds send to channels/email.ts only. sms.ts is not imported by the caller file."
+      }
+    },
+    {
+      "case_id": "c-call-unique",
+      "truth": {
+        "kind": "acceptable_targets",
+        "target_ids": [
+          "fn:billing/charge.ts#chargeCard"
+        ]
+      },
+      "hard_negative_target_ids": [],
+      "origin": {
+        "kind": "scripted_truth",
+        "author": "Claude (trueline-claude-agent[bot])",
+        "reviewer": null,
+        "procedure_version": "visible-fixture-authoring.1",
+        "source_ids": [
+          "s-billing-charge",
+          "s-checkout-caller"
+        ],
+        "rationale": "The call text names billing.chargeCard and exactly one candidate defines chargeCard.",
+        "exclusivity_basis": "Scripted for the mechanism; refundCard is not labeled a hard negative because a non-target alone is not proof."
+      }
+    },
+    {
+      "case_id": "c-call-unique-r2",
+      "truth": {
+        "kind": "acceptable_targets",
+        "target_ids": [
+          "fn:billing/charge.ts#chargeCard"
+        ]
+      },
+      "hard_negative_target_ids": [],
+      "origin": {
+        "kind": "scripted_truth",
+        "author": "Claude (trueline-claude-agent[bot])",
+        "reviewer": null,
+        "procedure_version": "visible-fixture-authoring.1",
+        "source_ids": [
+          "s-billing-charge-r2",
+          "s-checkout-caller-r2"
+        ],
+        "rationale": "Same call site at revision r2; the callee is unchanged.",
+        "exclusivity_basis": "Scripted for the mechanism; same basis as c-call-unique."
+      }
+    },
+    {
+      "case_id": "c-call-unknown",
+      "truth": {
+        "kind": "unknown",
+        "reason": "The callee is chosen at runtime by plugin name; nothing in the corpus fixes which plugin runs."
+      },
+      "hard_negative_target_ids": [],
+      "origin": {
+        "kind": "independent_adjudication",
+        "author": "Claude (trueline-claude-agent[bot])",
+        "reviewer": null,
+        "procedure_version": "visible-fixture-authoring.1",
+        "source_ids": [
+          "s-plugin-caller",
+          "s-plugin-export",
+          "s-plugin-import"
+        ],
+        "rationale": "The registry key is caller-supplied; both plugins are plausible and neither is established.",
+        "exclusivity_basis": null
+      }
+    },
+    {
+      "case_id": "c-channel-null-subtype",
+      "truth": {
+        "kind": "acceptable_targets",
+        "target_ids": [
+          "channel:legacy.inventory.changed"
+        ]
+      },
+      "hard_negative_target_ids": [],
+      "origin": {
+        "kind": "scripted_truth",
+        "author": "Claude (trueline-claude-agent[bot])",
+        "reviewer": null,
+        "procedure_version": "visible-fixture-authoring.1",
+        "source_ids": [
+          "s-legacy-bus-publisher",
+          "s-legacy-route-inventory"
+        ],
+        "rationale": "Scripted target for a Channel family with a null subtype. It must be evaluated as its own family, never pooled with sqs-queue or sns-topic.",
+        "exclusivity_basis": "Scripted for the mechanism; no source proof is claimed."
+      }
+    },
+    {
+      "case_id": "c-channel-sns",
+      "truth": {
+        "kind": "acceptable_targets",
+        "target_ids": [
+          "channel:sns-topic:payments-settled"
+        ]
+      },
+      "hard_negative_target_ids": [
+        "channel:sns-topic:refunds-issued"
+      ],
+      "origin": {
+        "kind": "source_proof",
+        "author": "Claude (trueline-claude-agent[bot])",
+        "reviewer": null,
+        "procedure_version": "visible-fixture-authoring.1",
+        "source_ids": [
+          "s-payments-subscriber",
+          "s-tf-refunds-topic",
+          "s-tf-settled-env",
+          "s-tf-settled-topic"
+        ],
+        "rationale": "SETTLED_TOPIC_ARN is bound to aws_sns_topic.payments_settled.arn in infra/service.tf.",
+        "exclusivity_basis": "The env binding names exactly one topic resource. refunds_issued is a distinct resource with no binding to SETTLED_TOPIC_ARN."
+      }
+    },
+    {
+      "case_id": "c-channel-sqs",
+      "truth": {
+        "kind": "acceptable_targets",
+        "target_ids": [
+          "channel:sqs-queue:orders-created"
+        ]
+      },
+      "hard_negative_target_ids": [
+        "channel:sqs-queue:orders-cancelled"
+      ],
+      "origin": {
+        "kind": "source_proof",
+        "author": "Claude (trueline-claude-agent[bot])",
+        "reviewer": null,
+        "procedure_version": "visible-fixture-authoring.1",
+        "source_ids": [
+          "s-orders-publisher",
+          "s-tf-orders-cancelled",
+          "s-tf-orders-created",
+          "s-tf-orders-env"
+        ],
+        "rationale": "ORDERS_QUEUE_URL is bound to aws_sqs_queue.orders_created.url in infra/service.tf.",
+        "exclusivity_basis": "The env binding names exactly one queue resource. orders_cancelled is a distinct resource with no binding to ORDERS_QUEUE_URL."
+      }
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+export async function placeOrder(order) {
+  const receipt = await billing.chargeCard(order);
+  return receipt;
+}
