@@ -60,7 +60,7 @@ jobs:
         with:
           node-version: 24
       - id: policy
-        uses: true-line/trueline-agent-ci/.github/actions/ci-policy@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/ci-policy@64ec289604e2409eb92fd718495df8a10761a20a
 
   merge-evidence:
     name: Verify merged commit evidence
@@ -188,7 +188,7 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Refresh apt metadata
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Refresh Tauri apt metadata
           executable: sudo
@@ -198,7 +198,7 @@ jobs:
           retry-delay-seconds: '5'
 
       - name: Install Tauri system dependencies
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Install Tauri system dependencies
           executable: sudo
@@ -237,7 +237,7 @@ jobs:
 
       - name: Install archive support for explicit local-provider acceptance
         if: github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Install pinned-runtime archive support
           executable: sudo
@@ -246,7 +246,7 @@ jobs:
 
       - name: Run explicit local-provider acceptance
         if: github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Run pinned real-local-provider investigation acceptance
           executable: node
@@ -299,7 +299,7 @@ jobs:
         with:
           node-version: 24
       - name: Install pinned Rust toolchain
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Install pinned Windows Rust toolchain
           executable: rustup.exe
@@ -312,7 +312,7 @@ jobs:
           key: windows-job-ownership
 
       - name: Test production job ownership on Windows
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Test native Windows job ownership and process exit
           executable: cargo.exe
@@ -343,7 +343,7 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install locked UI dependencies
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Install locked UI dependencies
           executable: npm
@@ -356,7 +356,7 @@ jobs:
       # The organisation's Linux runner has no Rust toolchain; rustup from apt
       # resolves the exact one from rust-toolchain.toml, as in the Rust lane.
       - name: Refresh apt metadata
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Refresh rustup apt metadata
           executable: sudo
@@ -366,7 +366,7 @@ jobs:
           retry-delay-seconds: '5'
 
       - name: Install rustup
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Install rustup
           executable: sudo
@@ -464,7 +464,7 @@ jobs:
           cache-dependency-path: ui/package-lock.json
 
       - name: Install dependencies
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Install frontend dependencies
           executable: npm
@@ -475,7 +475,7 @@ jobs:
           retry-delay-seconds: '5'
 
       - name: Install Playwright browser (for story tests)
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Install Playwright Chromium and system dependencies
           executable: npx
@@ -533,7 +533,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: true-line/trueline-agent-ci
-          ref: 87c6b301057992f79a723f63c64624bf40c9d06a
+          ref: 64ec289604e2409eb92fd718495df8a10761a20a
           path: .ci-runtime-policy
           sparse-checkout: tools/ci-runtime
           persist-credentials: false
