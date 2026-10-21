@@ -157,8 +157,8 @@ export const LateTaskSelectionCannotReplaceCurrent: Story = {
   },
 };
 
-export const LegacyHistoryUsesCurrentFollowUp: Story = {
-  // AC-0180/0190: preserve saved identities while new follow-ups use the current role.
+export const LegacyHistoryRequiresExplicitReplacement: Story = {
+  // AC-0190: an unavailable saved version requires explicit replacement.
   args: { state: state({ detail: legacyInvestigationDetail(2, 'inv-fixture'),
     history: [legacyInvestigationDetail(2, 'inv-fixture')], result: legacyInvestigationResult('inv-fixture') }) },
   play: async ({ canvasElement, args }) => {
@@ -166,8 +166,13 @@ export const LegacyHistoryUsesCurrentFollowUp: Story = {
     await expect(canvas.getAllByText('domain-analyst@2')[0]).toBeVisible();
     await expect(canvas.getByText('A local stock guard is present')).toBeVisible();
     await userEvent.click(canvas.getByRole('button', { name: 'Ask a follow-up' }));
-    await expect(canvas.getByRole('radio', { name: /Domain analyst/ })).toBeChecked();
+    await expect(canvas.getByText(/Choose an available specialist explicitly/)).toBeVisible();
+    await expect(canvas.getByRole('radio', { name: /Domain analyst/ })).not.toBeChecked();
     await userEvent.type(canvas.getByLabelText('Follow-up question'), 'Inspect this evidence again.');
+    await expect(canvas.getByRole('button', { name: 'Start follow-up' })).toBeDisabled();
+    await expect(args.state.start).not.toHaveBeenCalled();
+    await userEvent.click(canvas.getByRole('radio', { name: /Domain analyst/ }));
+    await expect(canvas.getAllByText('domain-analyst@2')[0]).toBeVisible();
     await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up' }));
     await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({
       specialist_id: 'domain-analyst@3', parent_id: 'inv-fixture' }));
@@ -388,5 +393,44 @@ export const ActualSavedV6BackendFixture: Story = {
     await userEvent.click(canvas.getByText('Exact saved coverage identity'));
     await expect(canvas.getByText(backendQualified.detail.coverage_context.context_id)).toBeVisible();
     await expect(canvas.getByText(backendQualified.result.coverage.representation_hash)).toBeVisible();
+  },
+};
+
+export const CatalogRefreshRequiresExplicitReplacement: Story = {
+  // AC-0190: catalog recovery cannot replace a selection that disappeared.
+  beforeEach: () => {
+    useInvestigationStore.setState(state({ catalog: turnProgressCatalog }), true);
+    return () => useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  },
+  render: function RefreshSelectionStory() {
+    return <InvestigationsSurface state={useInvestigationStore()} anchors={[]} canStart />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@4/ }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Inspect retained evidence.');
+    useInvestigationStore.setState({ catalogLoading: true });
+    await waitFor(() => expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled());
+    useInvestigationStore.setState({ catalog: investigationCatalog, catalogLoading: false });
+    await waitFor(() => expect(canvas.getByText(/Choose an available specialist explicitly/)).toBeVisible());
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).not.toBeChecked();
+    await expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@4');
+    await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled();
+    useInvestigationStore.setState({ catalog: null, catalogError: 'Catalog unavailable.' });
+    await waitFor(() => expect(canvas.getByRole('alert')).toHaveTextContent('Catalog unavailable.'));
+    useInvestigationStore.setState({ catalog: investigationCatalog, catalogError: null });
+    await waitFor(() => expect(canvas.getByText(/Choose an available specialist explicitly/)).toBeVisible());
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).not.toBeChecked();
+    await expect(useInvestigationStore.getState().start).not.toHaveBeenCalled();
+    useInvestigationStore.setState({ catalog: turnProgressCatalog });
+    await waitFor(() => expect(canvas.getByRole('radio', { name: /domain-analyst@4/ })).toBeChecked());
+    await expect(canvas.queryByText(/Choose an available specialist explicitly/)).not.toBeInTheDocument();
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).not.toBeChecked();
+    useInvestigationStore.setState({ catalog: investigationCatalog });
+    await waitFor(() => expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled());
+    await userEvent.click(canvas.getByRole('radio', { name: /evidence-auditor@3/ }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(useInvestigationStore.getState().start).toHaveBeenCalledWith(expect.objectContaining({
+      specialist_id: 'evidence-auditor@3' }));
   },
 };

@@ -33,6 +33,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const provider = state.catalog?.providers.find((item) => item.mode === providerMode);
   const summary = state.detail ?? state.history.find((item) => item.investigation_id === state.selectedId);
+  const selectedSpecialistAvailable = Boolean(state.catalog?.specialists.some((item) => item.id === specialistId));
   const questionBytes = new TextEncoder().encode(question).length;
   const locked = state.starting || state.pendingStart !== null;
   const requirements = state.draftInspectionRequirements;
@@ -45,8 +46,8 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
     limit_profile: state.catalog?.limits.profile ?? 'investigation-v1', ...parent,
     ...(supportsRequirements && requirements.length ? { inspection_requirements: requirements,
       expected_graph_revision: requirements[0].graph_snapshot_id } : {}) })).length;
-  const startEnabled = canStart && !locked && Boolean(provider?.available) &&
-    Boolean(state.catalog?.specialists.some((item) => item.id === specialistId)) && question.trim().length > 0 &&
+  const startEnabled = canStart && !locked && !state.catalogLoading && Boolean(provider?.available) &&
+    selectedSpecialistAvailable && question.trim().length > 0 &&
     questionBytes <= 2048 && (scopeType === 'all' || anchor.trim().length > 0) &&
     (inspectionVersion ? requirements.length > 0 : coverageVersion || requirements.length === 0) && requestBytes <= 8192;
   const refresh = () => { void state.loadCatalog(); void state.loadHistory(); };
@@ -70,6 +71,10 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
               <code>{specialist.id} · T3 / InferredWeak</code></span>
           </label>)}</div>
       </fieldset>
+      {state.catalog && !state.catalogLoading && !selectedSpecialistAvailable && <p role="status">
+        Selected specialist <code>{specialistId}</code> is unavailable. Choose an available specialist explicitly to continue.
+        {parent && ' The saved parent keeps its original specialist version.'}
+      </p>}
       {state.catalogLoading && <p role="status">Loading specialists…</p>}
       {state.catalogError && <p className="error-text" role="alert">{state.catalogError}</p>}
       {!state.catalog && !state.catalogLoading && <p className="muted">The app core supplies available specialists and provider limits.</p>}
@@ -169,8 +174,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
                 state.clearInspectionRequirements();
                 setParent({ conversation_id: summary.conversation_id, parent_id: summary.investigation_id });
                 setScopeType(summary.scope.type); if (summary.scope.type === 'neighborhood') { setAnchor(summary.scope.anchor); setHops(summary.scope.hops); }
-                setSpecialistId(state.catalog?.specialists.some((item) => item.id === summary.specialist_id)
-                  ? summary.specialist_id : summary.specialist_id.startsWith('evidence-auditor@') ? 'evidence-auditor@3' : 'domain-analyst@3');
+                setSpecialistId(summary.specialist_id);
                 setProviderMode(summary.provider_mode); setQuestion(''); questionRef.current?.focus();
               }}>Ask a follow-up</button>}
               {state.consent && <button type="button" disabled={state.actionBusy || state.loading} onClick={state.showConsent}>Review next cloud action</button>}
