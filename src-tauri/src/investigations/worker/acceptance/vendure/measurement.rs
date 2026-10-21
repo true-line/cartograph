@@ -42,6 +42,9 @@ struct RangeCost {
 struct Measurement {
     schema_version: u32,
     status: &'static str,
+    code_revision: String,
+    preparation_code_revision: String,
+    code_revision_matches_preparation: bool,
     preparation_sha256: String,
     raw_selection_sha256: String,
     canonical_measurement_request_sha256: String,
@@ -75,13 +78,43 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+#[derive(Clone, Copy)]
+enum InputPolicy {
+    FrozenVendure,
+    #[cfg(test)]
+    OfflineFixture,
+}
+struct CodeBinding {
+    code_revision: String,
+    preparation_code_revision: String,
+}
+fn valid_code_revision(revision: &str) -> bool {
+    revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+impl CodeBinding {
+    fn new(current: &str, preparation: &Value) -> Result<Self, String> {
+        let prepared = preparation["code_revision"]
+            .as_str()
+            .ok_or("missing preparation code revision")?;
+        if !valid_code_revision(current) || !valid_code_revision(prepared) {
+            return Err("invalid measurement or preparation code revision".into());
+        }
+        Ok(Self {
+            code_revision: current.into(),
+            preparation_code_revision: prepared.into(),
+        })
+    }
+}
+
 /// The original bounded preparation receipt is an external binding, not a new
 /// preparation. Status text is never deserialized into trusted static fields.
-fn measure(
+fn measure_bound(
     config: &Path,
     preparation: &Path,
     proposal: &Path,
     output: &Path,
+    code_revision: &str,
+    input_policy: InputPolicy,
 ) -> Result<Vec<Measurement>, String> {
     let saved = input::read_bounded(preparation, 16 * 1024 * 1024)?;
     let expected: Value =
@@ -135,6 +168,10 @@ fn measure(
     }
     let input: input::VerifiedInput = serde_json::from_value(expected["input"].clone())
         .map_err(|_| "invalid preparation input binding")?;
+    let code = CodeBinding::new(code_revision, &expected)?;
+    if matches!(input_policy, InputPolicy::FrozenVendure) {
+        verify_frozen_input(&input)?;
+    }
     let source_id = expected["graph"]["source_id"]
         .as_str()
         .ok_or("missing source binding")?;
@@ -170,6 +207,7 @@ fn measure(
             role,
             &hash(&saved),
             &hash(&raw),
+            &code,
         )?);
     }
     let after = report::collect(&state, &source, &input, profile.data())?;
@@ -194,6 +232,83 @@ fn envelope(obligations: Vec<Obligation>) -> ObligationEnvelope {
     }
 }
 
+/// Pin a fresh external output before reading production stores. Both receipt
+/// paths recheck the same evaluator/configuration boundaries before writing.
+fn run_measurement(
+    config: &Path,
+    preparation: &Path,
+    proposal: &Path,
+    output: &Path,
+    code_revision: &str,
+    input_policy: InputPolicy,
+) -> Result<(), String> {
+    let saved = input::read_bounded(preparation, 16 * 1024 * 1024)?;
+    let expected: Value =
+        serde_json::from_slice(&saved).map_err(|_| "invalid preparation receipt")?;
+    let source = Path::new(
+        expected["source_root"]
+            .as_str()
+            .ok_or("missing source root")?,
+    );
+    let (profile, config_hash) = profile::NativeProfile::read(config)?;
+    validate_paths(source, preparation, proposal, config, &profile, output)?;
+    profile.verify_existing()?;
+    let raw = input::read_bounded(proposal, MAX_SELECTION_BYTES)?;
+    std::fs::create_dir(output).map_err(|_| "measurement output must be new")?;
+    let pinned = OutputDirectory::pin(output)?;
+    let result = measure_bound(
+        config,
+        preparation,
+        proposal,
+        output,
+        code_revision,
+        input_policy,
+    );
+    validate_paths(source, preparation, proposal, config, &profile, output)?;
+    verify_config(config, &config_hash)?;
+    if input::read_bounded(preparation, 16 * 1024 * 1024)? != saved
+        || input::read_bounded(proposal, MAX_SELECTION_BYTES)? != raw
+    {
+        return Err("external measurement bindings changed".into());
+    }
+    match result {
+        Ok(measurements) => pinned.write("measurement.json", &measurements),
+        Err(reason) => {
+            pinned.write(
+                "measurement-failed.json",
+                &serde_json::json!({
+                    "schema_version":1,"status":"measurement_failed","code_revision":Some(code_revision).filter(|revision| valid_code_revision(revision)),
+                    "preparation_code_revision":expected["code_revision"].as_str().filter(|revision| valid_code_revision(revision)),
+                    "code_revision_matches_preparation":expected["code_revision"].as_str() == Some(code_revision),
+                    "preparation_sha256":hash(&saved),"raw_selection_sha256":hash(&raw),
+                    "provider_calls":0,"tasks_created":0,"executable_admission_established":false,
+                    "reason":reason
+                }),
+            )?;
+            Err(reason)
+        }
+    }
+}
+
+/// This fixed wrapper is the sole manual path: fixtures cannot opt out of the
+/// frozen Vendure identity gate through operator environment or selection JSON.
+fn run_frozen_measurement(
+    config: &Path,
+    preparation: &Path,
+    proposal: &Path,
+    output: &Path,
+    code_revision: &str,
+) -> Result<(), String> {
+    run_measurement(
+        config,
+        preparation,
+        proposal,
+        output,
+        code_revision,
+        InputPolicy::FrozenVendure,
+    )
+}
+
 /// Explicit owner-authorized metadata measurement; never dispatches a role.
 #[test]
 #[ignore = "manual prepared Vendure measurement; no task or provider"]
@@ -203,10 +318,8 @@ fn vendure_measure_prepared_selections() {
     let preparation = required("CARTOGRAPH_VENDURE_PREPARATION_RECEIPT");
     let proposal = required("CARTOGRAPH_VENDURE_SELECTIONS");
     let output = required("CARTOGRAPH_VENDURE_MEASUREMENT_OUTPUT");
-    let measurements = measure(&config, &preparation, &proposal, &output).unwrap();
-    std::fs::create_dir(&output).expect("measurement output must be new");
-    let output = OutputDirectory::pin(&output).unwrap();
-    output.write("measurement.json", &measurements).unwrap();
+    let revision = super::super::source_revision();
+    run_frozen_measurement(&config, &preparation, &proposal, &output, &revision).unwrap();
 }
 
 #[cfg(test)]

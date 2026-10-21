@@ -858,8 +858,9 @@ The measurement receipt distinguishes a proposed request from an executable,
 admitted request. It records each role's production-resolved target identities,
 request serialization size, source-range and full-file validation costs,
 inventory response size, and minimum source/inventory actions plus a separate
-finish invocation. It includes the compared profile ID and exact limits and
-reports exceeded limits explicitly. An over-budget proposal is never staged as a
+finish invocation. It includes the measurement and preparation code revisions, their equality
+status, the compared profile ID and exact limits, and reports exceeded limits
+explicitly. An over-budget proposal is never staged as a
 task. These counts are lower bounds: discovery, unsuccessful reads and additional
 model turns require headroom. They do not establish semantic sufficiency.
 
@@ -887,8 +888,12 @@ CARTOGRAPH_VENDURE_MEASUREMENT_OUTPUT='/absolute/new-measurement-directory' \
 cargo test -p app vendure_measure_prepared_selections -- --ignored --nocapture
 ```
 
-Retain `measurement.json` with the selected-target input and original preparation
-receipt. Both roles must be measured independently, even when they select the
+Retain `measurement.json` or `measurement-failed.json` with the selected-target
+input and original preparation receipt. The output directory is reserved and
+pinned before stores are opened. A boundary or binding change can prevent even
+a failure receipt from being written safely. The manual entrypoint rechecks the
+frozen Vendure repository, commit and input-proof identity before measuring;
+offline fixture receipts cannot substitute for a Vendure observation. Both roles must be measured independently, even when they select the
 same source ranges. The receipt's comparisons concern the recorded profile and
 limits, not a proposed expanded profile.
 

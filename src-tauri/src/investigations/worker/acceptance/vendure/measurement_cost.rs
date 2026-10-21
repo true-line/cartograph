@@ -8,6 +8,7 @@ pub(super) fn measure_role<R: tauri::Runtime>(
     role: RoleSelection,
     preparation_hash: &str,
     selection_hash: &str,
+    code: &CodeBinding,
 ) -> Result<Measurement, String> {
     use crate::investigations::{completion_choices, inspection};
     let inventory = completion_choices::control_inventory(app, state, &role.scope)?;
@@ -135,9 +136,12 @@ pub(super) fn measure_role<R: tauri::Runtime>(
     let limits = InvestigationLimits::default();
     let mut violations = Vec::new();
     for (exceeded, name) in [
-        (raw_count > 12, "raw_obligations"),
-        (raw_bytes > 8192, "request_bytes"),
-        (raw_envelope_bytes > 8192, "raw_envelope_bytes"),
+        (raw_count > MAX_COMPLETION_OBLIGATIONS, "raw_obligations"),
+        (raw_bytes > COMPLETION_REQUEST_BYTES, "request_bytes"),
+        (
+            raw_envelope_bytes > COMPLETION_REQUEST_BYTES,
+            "raw_envelope_bytes",
+        ),
         (
             ranges.iter().any(|range| range.range_bytes > 8192),
             "individual_source_bytes",
@@ -169,6 +173,9 @@ pub(super) fn measure_role<R: tauri::Runtime>(
     Ok(Measurement {
         schema_version: 1,
         status: "measurement_only_no_semantic_sufficiency_claim",
+        code_revision: code.code_revision.clone(),
+        preparation_code_revision: code.preparation_code_revision.clone(),
+        code_revision_matches_preparation: code.code_revision == code.preparation_code_revision,
         preparation_sha256: preparation_hash.into(),
         raw_selection_sha256: selection_hash.into(),
         canonical_measurement_request_sha256: hash(&canonical_bytes),
@@ -191,8 +198,8 @@ pub(super) fn measure_role<R: tauri::Runtime>(
         current_limit_violations: violations,
         executable_admission_established: false,
         compared_limits: limits,
-        admission_caps: serde_json::json!({"profile":"investigation-v1","raw_obligations":12,
-            "request_bytes":8192,"envelope_bytes":8192,"individual_source_bytes":8192,
+        admission_caps: serde_json::json!({"profile":"investigation-v1","raw_obligations":MAX_COMPLETION_OBLIGATIONS,
+            "request_bytes":COMPLETION_REQUEST_BYTES,"envelope_bytes":COMPLETION_REQUEST_BYTES,"individual_source_bytes":8192,
             "inventory_response_bytes":MAX_QUERY_BYTES}),
         provider_calls: 0,
         tasks_created: 0,

@@ -1,5 +1,20 @@
 use super::super::tests::Case;
 use super::*;
+fn measure(
+    config: &Path,
+    preparation: &Path,
+    proposal: &Path,
+    output: &Path,
+) -> Result<Vec<Measurement>, String> {
+    measure_bound(
+        config,
+        preparation,
+        proposal,
+        output,
+        &"a".repeat(40),
+        InputPolicy::OfflineFixture,
+    )
+}
 fn selections(prepared: &Preparation, count: usize) -> Vec<RoleSelection> {
     let graph = serde_json::to_value(&prepared.graph).unwrap();
     let sources: Vec<_> = graph["candidates"]
@@ -326,3 +341,6 @@ fn vendure_measurement_rejects_scope_and_missing_store_without_recreation() {
         .contains("drift")
     );
 }
+
+#[path = "measurement_binding_tests.rs"]
+mod binding_tests;

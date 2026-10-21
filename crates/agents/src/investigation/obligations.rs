@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 // Share the existing request/inspection admission bounds without changing old encodings.
-const REQUEST_BYTES: usize = 8 * 1024;
-const MAX_OBLIGATIONS: usize = 12;
+/// Generation-4 whole-request, envelope and individual target encoding cap.
+pub const COMPLETION_REQUEST_BYTES: usize = 8 * 1024;
+/// Raw mixed-obligation admission cap, applied before ordering or deduplication.
+pub const MAX_COMPLETION_OBLIGATIONS: usize = 12;
 const CONTRACT: &str = "investigation-completion-obligations@1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,14 +54,14 @@ impl Obligation {
                 target.validate()?;
                 (
                     b"cartograph:source-obligation:v1\0".as_slice(),
-                    bounded_bytes(target, REQUEST_BYTES)?,
+                    bounded_bytes(target, COMPLETION_REQUEST_BYTES)?,
                 )
             }
             Self::Inventory { target, .. } => {
                 target.validate()?;
                 (
                     b"cartograph:inventory-obligation:v1\0".as_slice(),
-                    bounded_bytes(target, REQUEST_BYTES)?,
+                    bounded_bytes(target, COMPLETION_REQUEST_BYTES)?,
                 )
             }
         };
@@ -84,11 +86,11 @@ impl ObligationEnvelope {
     pub fn normalized(&self) -> Result<Self, InvestigationError> {
         if self.schema_version != 1
             || self.contract != CONTRACT
-            || !(1..=MAX_OBLIGATIONS).contains(&self.obligations.len())
+            || !(1..=MAX_COMPLETION_OBLIGATIONS).contains(&self.obligations.len())
         {
             return Err(InvestigationError::InvalidRequest);
         }
-        bounded_bytes(self, REQUEST_BYTES)?;
+        bounded_bytes(self, COMPLETION_REQUEST_BYTES)?;
         // Admit the complete raw list before any target/partition ownership.
         let mut entries = BTreeMap::new();
         let mut source_keys = BTreeMap::new();
@@ -134,7 +136,7 @@ impl ObligationEnvelope {
     pub fn fingerprint(&self) -> Result<String, InvestigationError> {
         Ok(crate::source_basis::domain_hash(
             b"cartograph:completion-obligations:v1\0",
-            &bounded_bytes(&self.normalized()?, REQUEST_BYTES)?,
+            &bounded_bytes(&self.normalized()?, COMPLETION_REQUEST_BYTES)?,
         ))
     }
     /// Projection is for future authoritative host validation, not another authority.
@@ -184,14 +186,14 @@ fn present_legacy<'de, D: serde::Deserializer<'de>>(
 }
 impl StagedObligationRequest {
     pub fn decode(raw: &str) -> Result<Self, InvestigationError> {
-        super::strict::preflight(raw, REQUEST_BYTES, 32, 4096, 4096)?;
+        super::strict::preflight(raw, COMPLETION_REQUEST_BYTES, 32, 4096, 4096)?;
         let value: Self =
             serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidRequest)?;
         value.normalized()
     }
     pub fn normalized(&self) -> Result<Self, InvestigationError> {
         // Whole request admission must precede envelope partition clones.
-        bounded_bytes(self, REQUEST_BYTES)?;
+        bounded_bytes(self, COMPLETION_REQUEST_BYTES)?;
         if self.schema_version != 4
             || self.inspection_requirements.is_some()
             || !matches!(
@@ -284,7 +286,7 @@ impl StagedObligationRequest {
     pub fn intent_hash(&self) -> Result<String, InvestigationError> {
         Ok(crate::source_basis::domain_hash(
             b"cartograph:investigation-client-intent:v4\0",
-            &bounded_bytes(&self.normalized()?, REQUEST_BYTES)?,
+            &bounded_bytes(&self.normalized()?, COMPLETION_REQUEST_BYTES)?,
         ))
     }
 }

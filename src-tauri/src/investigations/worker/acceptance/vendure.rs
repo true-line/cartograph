@@ -201,6 +201,23 @@ fn verify_config(config: &Path, expected_hash: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn verify_frozen_input(input: &input::VerifiedInput) -> Result<(), String> {
+    if input.repo != "vendurehq/vendure"
+        || input.commit_sha != COMMIT
+        || input.manifest_sha256 != MANIFEST_SHA
+        || input.proof_sha256 != PROOF_SHA
+        || input.files.len() != 17
+        || input
+            .files
+            .values()
+            .try_fold(0_u64, |total, file| total.checked_add(file.byte_len))
+            != Some(270_721)
+    {
+        return Err("frozen Vendure input identity mismatch".into());
+    }
+    Ok(())
+}
+
 fn prepare(
     source: &Path,
     manifest: &Path,
@@ -211,15 +228,8 @@ fn prepare(
     frozen_vendure: bool,
 ) -> Result<Preparation, String> {
     let input = input::verify(source, manifest, proof)?;
-    if frozen_vendure
-        && (input.repo != "vendurehq/vendure"
-            || input.commit_sha != COMMIT
-            || input.manifest_sha256 != MANIFEST_SHA
-            || input.proof_sha256 != PROOF_SHA
-            || input.files.len() != 17
-            || input.files.values().map(|file| file.byte_len).sum::<u64>() != 270_721)
-    {
-        return Err("frozen Vendure input identity mismatch".into());
+    if frozen_vendure {
+        verify_frozen_input(&input)?;
     }
     let (profile, native_config_sha256) = profile::NativeProfile::read(config)?;
     validate_paths(source, manifest, proof, config, &profile, output)?;

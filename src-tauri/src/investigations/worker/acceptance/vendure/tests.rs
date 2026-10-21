@@ -80,7 +80,7 @@ impl Case {
             &self.manifest,
             &self.proof,
             &self.config,
-            "fixture-code-revision".into(),
+            "a".repeat(40),
             &self.root.parent().unwrap().join("report"),
             false,
         )
