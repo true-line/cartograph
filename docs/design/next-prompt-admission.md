@@ -28,7 +28,7 @@ Local component/regression validation: 172 agents tests passed (one existing loc
 
 The bounded LLM firewall and pure measurement now share the production wire preparation path. It reports raw string bytes, original/redacted payload bytes, original-action tuple bytes and egress-fingerprint tuple bytes. This includes actual redaction of system/prompt and span metadata. Measurements do not authorize dispatch and do not certify unknown source content or provider tokenizer/context capacity.
 
-## Subsequent integration (not yet implemented)
+## Remaining integration
 
 A private prepared acquisition binds request/family/policy, execution revision, original response/action, base ledger, prospective metadata and retained source/archive identities. Keep source guards through atomic commit. Source validation must still be durably reserved before source bytes are read. Lost or uncertain publication stops rather than replaying the operation.
 
@@ -87,3 +87,42 @@ for this slice passed 194 agents tests (one existing provider test ignored) and
 strict Clippy; transaction-scoped reservation accounting passed 19 focused native
 tests and strict harness Clippy. These are component results, not full runtime or
 provider acceptance.
+
+## Internal transaction and source-access checkpoint
+
+The internal task3/intent4 storage path now authenticates saved call and
+capacity-refusal journals by immutable invocation ordinal. Owner-authenticated
+refusal commits retain the model charge without changing the input ledger or
+charging a tool. A fault injected after the final successful task write proves
+that a failed transaction rolls back task, journal, response and events together;
+a subsequent retry records the refusal once.
+
+Captured-source access now consumes an opaque validation receipt issued only
+after the owning transaction commits its validation-byte charge, witness, event
+and task revision. The issuer reloads the pending reservation and checks its
+saved response, action, descriptor, ledger and execution binding. The actual
+adapter rechecks cancellation and execution ownership immediately before reading
+captured text. A lost commit acknowledgement yields no usable receipt and no
+read; a committed charge remains durable. This boundary consumes an existing
+reservation. It does not yet implement production reservation admission,
+settlement, storage claims or recovery.
+
+The new acquisition-attempt writer takes the exact saved call and appends only
+the suffix derived from its saved response, candidate ledger and completed-tool
+event. It compares projected records with fresh derivation inside the caller's
+transaction and rejects duplicate invocation publication. The exact metadata
+preview certificate separately binds complete current/candidate prompt inputs,
+actual response bytes, usage, profile, limits and immediate next action ID.
+Neither certificate nor journal records attest that graph/source acquisition
+occurred; the host must retain the actual prepared acquisition and its guards
+through publication.
+
+Checkpoint validation: 156 native ownership tests passed before the final
+attempt and rollback regressions were added; the later focused runs passed
+three acquisition-attempt tests, five refusal-transition tests and three
+ownership tests. Twelve app prepared-source tests passed, including real adapter
+cancellation and lost-acknowledgement cases. Strict app and native harness Clippy
+passed with these changes. These counts describe separate runs, not a claimed
+full-suite run at the combined head. Atomic metadata publication, source
+reservation/settlement and worker integration remain incomplete, and public
+@10 routing remains disabled. No provider execution was performed.
