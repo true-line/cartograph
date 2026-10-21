@@ -588,6 +588,7 @@ mod tests {
             source: source.as_bytes(),
             path: "src/rules.tsx",
             id: &id,
+            registries: adapters_fw::events::Registries::builtin(),
         };
         sanitize_expression(&cx, target)
     }

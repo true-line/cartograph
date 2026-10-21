@@ -12,7 +12,7 @@
 //! R-INT-4). The T1/T2 rungs of the ladder join at M6/M7; cross-repo
 //! matching at M5.
 
-use adapters_fw::events::{ChannelRole, EVENT_SDK_VERSION, EventSite, IdentityExpr};
+use adapters_fw::events::{ChannelRole, EventSite, IdentityExpr, RegistryIdentity};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::BTreeMap;
@@ -179,12 +179,32 @@ fn add_site_qualifiers(props: &mut serde_json::Value, site: &EventSite) {
     }
 }
 
+/// Record the registry files that shaped the site (#594): the recognizing
+/// SDK file's version as `registry`, as before, and every contributing
+/// file's full identity — name, schema, version, content hash — as
+/// `registry_sources`, recognizing file first. Sites no registry entry
+/// produced carry neither.
+fn add_site_registry(props: &mut serde_json::Value, site: &EventSite) {
+    let (Some(map), Some(first)) = (props.as_object_mut(), site.registries.first()) else {
+        return;
+    };
+    map.insert("registry".into(), first.version.as_str().into());
+    map.insert(
+        "registry_sources".into(),
+        serde_json::json!(site.registries),
+    );
+}
+
 /// Stitch event sites into channel facts. Deterministic: channels are
 /// emitted in sorted id order, edges in site order (sites arrive sorted by
 /// file from the extractor).
 pub fn stitch(sites: &[EventSite], cfg: &ConfigIndex, id: &SourceId) -> Extraction {
     let mut out = Extraction::default();
     let mut channels: BTreeMap<String, Node> = BTreeMap::new();
+    // Every registry file that shaped any site of a channel, by name: a
+    // channel several sites resolve to names all of them, in name order.
+    let mut channel_registries: BTreeMap<String, BTreeMap<String, &RegistryIdentity>> =
+        BTreeMap::new();
 
     for site in sites {
         let edge_label = match site.role {
@@ -206,6 +226,10 @@ pub fn stitch(sites: &[EventSite], cfg: &ConfigIndex, id: &SourceId) -> Extracti
         match (resolved, &site.identity) {
             (Some((identity, resolver)), _) => {
                 let chan_id = format!("chan:{}:{}", site.kind, identity);
+                let contributors = channel_registries.entry(chan_id.clone()).or_default();
+                for registry in &site.registries {
+                    contributors.insert(registry.name.clone(), registry);
+                }
                 channels.entry(chan_id.clone()).or_insert_with(|| Node {
                     id: chan_id.clone(),
                     label: "Channel".into(),
@@ -220,13 +244,13 @@ pub fn stitch(sites: &[EventSite], cfg: &ConfigIndex, id: &SourceId) -> Extracti
                 });
                 let mut props = serde_json::json!({
                     "resolver": resolver,
-                    "registry": EVENT_SDK_VERSION,
                     "prov": prov(
                         id, &site.path, (site.byte_start, site.byte_end),
                         ConfidenceTier::Confirmed, &format!("{edge_label} -> {chan_id}"),
                     ),
                 });
                 add_site_qualifiers(&mut props, site);
+                add_site_registry(&mut props, site);
                 out.edges.push(Edge {
                     src,
                     dst: chan_id.clone(),
@@ -261,28 +285,47 @@ pub fn stitch(sites: &[EventSite], cfg: &ConfigIndex, id: &SourceId) -> Extracti
                     ),
                 });
                 add_site_qualifiers(&mut props, site);
+                if let (Some(map), false) = (props.as_object_mut(), site.registries.is_empty()) {
+                    map.insert(
+                        "registry_sources".into(),
+                        serde_json::json!(site.registries),
+                    );
+                }
                 out.nodes.push(Node {
                     id: gap_id.clone(),
                     label: "Gap".into(),
                     props,
                 });
+                let mut props = serde_json::json!({
+                    "reason": reason,
+                    "prov": prov(
+                        id, &site.path, (site.byte_start, site.byte_end),
+                        ConfidenceTier::Gap, &format!("{edge_label} -> {gap_id}"),
+                    ),
+                });
+                add_site_registry(&mut props, site);
                 out.edges.push(Edge {
                     src,
                     dst: gap_id.clone(),
                     label: edge_label.into(),
-                    props: serde_json::json!({
-                        "reason": reason,
-                        "registry": EVENT_SDK_VERSION,
-                        "prov": prov(
-                            id, &site.path, (site.byte_start, site.byte_end),
-                            ConfidenceTier::Gap, &format!("{edge_label} -> {gap_id}"),
-                        ),
-                    }),
+                    props,
                 });
             }
         }
     }
 
+    for (chan_id, contributors) in channel_registries {
+        if contributors.is_empty() {
+            continue;
+        }
+        if let Some(map) = channels
+            .get_mut(&chan_id)
+            .and_then(|node| node.props.as_object_mut())
+        {
+            let sources: Vec<_> = contributors.into_values().collect();
+            map.insert("registry_sources".into(), serde_json::json!(sources));
+        }
+    }
     out.nodes.extend(channels.into_values());
     out
 }

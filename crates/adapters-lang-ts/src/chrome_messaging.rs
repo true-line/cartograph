@@ -177,7 +177,13 @@ fn extract_file(
         .parse(source, None)
         .ok_or_else(|| ExtractError::NoTree(path.into()))?;
     let root = tree.root_node();
-    let cx = FileCx { source, path, id };
+    // Not registry-driven: these sites come from fixed browser APIs.
+    let cx = FileCx {
+        source,
+        path,
+        id,
+        registries: adapters_fw::events::Registries::builtin(),
+    };
 
     let mut chrome_shadowed = collect_imports(&cx, root, &language, &mut index.consts);
     collect_const_objects(&cx, root, &language, &mut index.consts);
@@ -409,6 +415,7 @@ fn site(pending: PendingSite, identity: IdentityExpr) -> EventSite {
         byte_end: pending.byte_end,
         components: Default::default(),
         batch: None,
+        registries: Vec::new(),
     }
 }
 

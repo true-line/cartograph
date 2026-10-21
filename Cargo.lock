@@ -6,6 +6,8 @@ version = 4
 name = "adapters-fw"
 version = "0.15.5"
 dependencies = [
+ "core-prov",
+ "serde",
  "serde_json",
 ]
 
@@ -1362,6 +1364,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 name = "dynamic"
 version = "0.15.5"
 dependencies = [
+ "adapters-fw",
  "core-graph",
  "core-prov",
  "serde_json",

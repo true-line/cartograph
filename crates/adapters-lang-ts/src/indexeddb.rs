@@ -136,7 +136,13 @@ fn extract_file(
         .parse(source, None)
         .ok_or_else(|| ExtractError::NoTree(path.into()))?;
     let root = tree.root_node();
-    let cx = FileCx { source, path, id };
+    // Not registry-driven: these sites come from fixed browser APIs.
+    let cx = FileCx {
+        source,
+        path,
+        id,
+        registries: adapters_fw::events::Registries::builtin(),
+    };
 
     // Imports and const-string maps go through the shared binding-proven
     // index (#149 review) — same rule as chrome messaging.

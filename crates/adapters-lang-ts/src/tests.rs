@@ -415,11 +415,14 @@ fn progress_hook_fires_once_per_file_in_deterministic_order() {
     let dir = fixture_dir();
     let mut cache = IncrementalCache::default();
     let mut seen = Vec::new();
-    let (_, stats) =
-        extract_dir_incremental_with_progress(dir.path(), &id(), &mut cache, &mut |path| {
-            seen.push(path.to_string())
-        })
-        .unwrap();
+    let (_, stats) = extract_dir_incremental_with_progress(
+        dir.path(),
+        &id(),
+        &mut cache,
+        Registries::builtin(),
+        &mut |path| seen.push(path.to_string()),
+    )
+    .unwrap();
     assert_eq!(stats.recomputed_files, 2);
     assert_eq!(
         seen,
@@ -3368,4 +3371,97 @@ fn vue_typescript_casts_and_same_line_blocks_keep_their_facts() {
         panic!("one fetch site, got {:?}", out.fetch_sites);
     };
     assert_eq!(site.byte_start, same_line.find("fetch(").unwrap() as u64);
+}
+
+const NATS_REGISTRY: &str = r#"{"schema":"cartograph-event-sdk-registry@1","version":"nats-1",
+  "sdks":[{"kind":"nats-subject","role":"produces",
+    "pattern":{"method":{"module":"nats","ctor":"Client","method":"publish"}},
+    "identity":"first"}]}"#;
+const NATS_SOURCE: &str = "import { Client } from 'nats';\n\
+const nc = new Client();\n\
+export function notify() { nc.publish('orders.placed', 'x'); }\n";
+
+#[test]
+fn an_extension_registry_entry_produces_sites_that_name_its_file() {
+    let builtin = extract_source(NATS_SOURCE.as_bytes(), "src/nats.ts", &id()).unwrap();
+    assert!(builtin.event_sites.is_empty());
+    let layered = Registries::layered(&[("nats.json".into(), NATS_REGISTRY.as_bytes().to_vec())]);
+    let ex = extract_source_with(NATS_SOURCE.as_bytes(), "src/nats.ts", &id(), &layered).unwrap();
+    assert_eq!(ex.event_sites.len(), 1);
+    let site = &ex.event_sites[0];
+    assert_eq!(site.kind, "nats-subject");
+    assert_eq!(site.identity, IdentityExpr::Literal("orders.placed".into()));
+    assert_eq!(site.registries.len(), 1);
+    let registry = &site.registries[0];
+    assert_eq!(registry.name, "extension:nats.json");
+    assert_eq!(registry.version, "nats-1");
+    // Built-in sites name the built-in file.
+    let sqs = extract_source(
+        b"import { SendMessageCommand } from '@aws-sdk/client-sqs';\nnew SendMessageCommand({ QueueUrl: 'q' });\n",
+        "src/sqs.ts",
+        &id(),
+    )
+    .unwrap();
+    assert_eq!(
+        sqs.event_sites[0].registries[0].name,
+        "builtin:event-sdks.json"
+    );
+}
+
+#[test]
+fn a_rejected_extension_registry_changes_no_fact() {
+    let broken = NATS_REGISTRY.replace("produces", "observes");
+    let layered = Registries::layered(&[("nats.json".into(), broken.into_bytes())]);
+    assert_eq!(layered.rejected.len(), 1);
+    let builtin = extract_source(NATS_SOURCE.as_bytes(), "src/nats.ts", &id()).unwrap();
+    let with = extract_source_with(NATS_SOURCE.as_bytes(), "src/nats.ts", &id(), &layered).unwrap();
+    assert_eq!(format!("{with:?}"), format!("{builtin:?}"));
+}
+
+#[test]
+fn a_registry_change_invalidates_the_incremental_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("nats.ts"), NATS_SOURCE).unwrap();
+    let layered = Registries::layered(&[("nats.json".into(), NATS_REGISTRY.as_bytes().to_vec())]);
+    let mut cache = IncrementalCache::default();
+    let run = |cache: &mut IncrementalCache, registries: &Registries| {
+        extract_dir_incremental_with_progress(dir.path(), &id(), cache, registries, &mut |_| {})
+            .unwrap()
+    };
+    let (first, _) = run(&mut cache, Registries::builtin());
+    assert!(first.event_sites.is_empty());
+    let (same, stats) = run(&mut cache, Registries::builtin());
+    assert_eq!((stats.reused_files, same.event_sites.len()), (1, 0));
+    let (extended, stats) = run(&mut cache, &layered);
+    assert_eq!((stats.recomputed_files, stats.reused_files), (1, 0));
+    assert_eq!(extended.event_sites.len(), 1);
+    let (back, stats) = run(&mut cache, Registries::builtin());
+    assert_eq!((stats.recomputed_files, back.event_sites.len()), (1, 0));
+}
+
+const REGION_QUALIFIER: &str = r#"{"schema":"cartograph-event-sdk-registry@1","version":"region-1",
+  "qualifiers":[{"kind":"sqs-queue","component":"region","key":"Region"}]}"#;
+
+#[test]
+fn a_qualifier_only_extension_is_named_on_the_sites_it_shapes() {
+    let layered =
+        Registries::layered(&[("region.json".into(), REGION_QUALIFIER.as_bytes().to_vec())]);
+    assert!(layered.rejected.is_empty(), "{:?}", layered.rejected);
+    let source = b"import { SendMessageCommand } from '@aws-sdk/client-sqs';\n\
+new SendMessageCommand({ QueueUrl: 'q', Region: 'eu-west-1' });\n\
+new SendMessageCommand({ QueueUrl: 'q' });\n";
+    let ex = extract_source_with(source, "src/sqs.ts", &id(), &layered).unwrap();
+    assert_eq!(ex.event_sites.len(), 2);
+    let shaped = &ex.event_sites[0];
+    assert_eq!(
+        shaped.components.get("region").map(String::as_str),
+        Some("eu-west-1")
+    );
+    let names: Vec<&str> = shaped.registries.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["builtin:event-sdks.json", "extension:region.json"]);
+    // A qualifier that proved nothing contributed nothing.
+    let plain = &ex.event_sites[1];
+    assert!(plain.components.is_empty());
+    let names: Vec<&str> = plain.registries.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["builtin:event-sdks.json"]);
 }

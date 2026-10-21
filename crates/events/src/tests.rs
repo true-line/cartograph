@@ -74,6 +74,12 @@ function handle() {}
     assert_eq!(subscribe.dst, chan.id);
     assert_eq!(confidence(&publish.props), "Confirmed");
     assert_eq!(publish.props["resolver"], "literal");
+    // The registry file that recognized the site is named in full (#594).
+    assert_eq!(publish.props["registry"], "ts-2026.10");
+    let source = &publish.props["registry_sources"][0];
+    assert_eq!(source["name"], "builtin:event-sdks.json");
+    assert_eq!(source["schema"], "cartograph-event-sdk-registry@1");
+    assert_eq!(source["content_hash"].as_str().map(str::len), Some(64));
     // No Gap emitted for resolved sites.
     assert!(out.nodes.iter().all(|n| n.label != "Gap"));
 }
@@ -161,6 +167,10 @@ function channelFor(tenant: string): string { return 'tenant.' + tenant; }
         .expect("edge to the Gap");
     assert_eq!(publish.dst, gap.id);
     assert_eq!(confidence(&publish.props), "Gap");
+    assert_eq!(
+        publish.props["registry_sources"][0]["name"],
+        "builtin:event-sdks.json"
+    );
 }
 
 // AC-0012 (env-ref miss): an env ref with no matching key in any env file
@@ -1344,5 +1354,56 @@ fn equally_supported_targets_stay_an_ambiguous_gap() {
     assert_eq!(
         candidates,
         ["ep:api2@GET:/v1/orders/:id", "ep:api@GET:/v1/orders/:id"]
+    );
+}
+
+// #594: a channel names every registry file that shaped any of its sites,
+// once each, in name order; a Gap names its site's files.
+#[test]
+fn channel_and_gap_nodes_name_every_contributing_registry_file() {
+    use adapters_fw::events::Registries;
+    let qualifier = r#"{"schema":"cartograph-event-sdk-registry@1","version":"region-1",
+      "qualifiers":[{"kind":"sqs-queue","component":"region","key":"Region"}]}"#;
+    let layered = Registries::layered(&[("region.json".into(), qualifier.as_bytes().to_vec())]);
+    let source = r#"
+import { SendMessageCommand } from '@aws-sdk/client-sqs';
+import { Consumer } from 'sqs-consumer';
+export function send() { return new SendMessageCommand({ QueueUrl: 'q', Region: 'eu-west-1' }); }
+export function listen() { return new Consumer({ queueUrl: 'q' }); }
+export function lost(url: string) { return new SendMessageCommand({ QueueUrl: url, Region: 'eu-west-1' }); }
+"#;
+    let ts = adapters_lang_ts::SourceId {
+        repo: "test",
+        commit: "deadbeef",
+    };
+    let sites = adapters_lang_ts::extract_source_with(source.as_bytes(), "q.ts", &ts, &layered)
+        .unwrap()
+        .event_sites;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = ConfigIndex::from_dir(dir.path()).unwrap();
+    let id = SourceId {
+        repo: "test",
+        commit: "deadbeef",
+    };
+    let out = stitch(&sites, &cfg, &id);
+    let names = |props: &serde_json::Value| -> Vec<String> {
+        props["registry_sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let channel = out.nodes.iter().find(|n| n.label == "Channel").unwrap();
+    assert_eq!(
+        names(&channel.props),
+        ["builtin:event-sdks.json", "extension:region.json"]
+    );
+    let consume = out.edges.iter().find(|e| e.label == "SUBSCRIBES").unwrap();
+    assert_eq!(names(&consume.props), ["builtin:event-sdks.json"]);
+    let gap = out.nodes.iter().find(|n| n.label == "Gap").unwrap();
+    assert_eq!(
+        names(&gap.props),
+        ["builtin:event-sdks.json", "extension:region.json"]
     );
 }

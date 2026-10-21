@@ -27,12 +27,15 @@ mod primary_source_tests;
 mod proposals;
 #[cfg(test)]
 mod registered_source_tests;
+#[cfg(test)]
+mod registry_tests;
 mod settings;
 mod source_access;
 mod sources;
 mod task_evidence;
 mod work_packets;
 
+use adapters_fw::events::Registries;
 use core_graph::{Edge, GraphStore, Node, SqliteGraphStore};
 use findings::{Finding, FindingStore, NewFinding};
 use job_execution::{JobExecution, JobExecutionLocks};
@@ -411,6 +414,131 @@ fn active_plugins_for_root<R: tauri::Runtime>(
         .map_err(|e| e.to_string())?
         .join("adapters");
     active_plugins_in(state, root, &user_dir)
+}
+
+/// The effective event registries for one ingest (#594): the built-in
+/// files plus `<app_data>/registries/*.json`. Read once per ingest and
+/// shared by every repository, extraction lane, backing join, and the
+/// coverage identity, so no ingest sees two registry sets.
+fn event_registries_for<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<Registries, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("registries");
+    Ok(event_registries_in(&dir))
+}
+
+/// The scan behind [`event_registries_for`]. Only regular `.json` files
+/// count, in name order (other `.json` entries are rejected without taking
+/// a slot); each is read through a bound of one byte past
+/// the registry limit, so an oversized or still-growing file is rejected
+/// without being read whole, and files past the count bound are rejected
+/// unread. A file that cannot be read is rejected like an invalid one.
+fn event_registries_in(dir: &std::path::Path) -> Registries {
+    use adapters_fw::events::{MAX_EXTENSION_FILES, MAX_REGISTRY_BYTES, RegistryRejection};
+    use std::io::Read;
+    let mut names = Vec::new();
+    let mut unreadable = Vec::new();
+    let directory_error = |error: std::io::Error| RegistryRejection {
+        name: "extension:<directory>".into(),
+        reason: format!("unreadable: {error}"),
+    };
+    match std::fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        let name = match entry.file_name().into_string() {
+                            Ok(name) => name,
+                            Err(raw) => {
+                                // A lossy conversion could alias two files to
+                                // one source name; refuse rather than guess.
+                                let name = raw.to_string_lossy().into_owned();
+                                if name.ends_with(".json") {
+                                    unreadable.push(RegistryRejection {
+                                        name: format!("extension:{name}"),
+                                        reason: "unreadable: file name is not valid UTF-8".into(),
+                                    });
+                                }
+                                continue;
+                            }
+                        };
+                        if !name.ends_with(".json") {
+                            continue;
+                        }
+                        // Classify before counting: only regular files take
+                        // one of the bounded extension slots.
+                        match std::fs::symlink_metadata(entry.path()) {
+                            Ok(metadata) if metadata.file_type().is_file() => {
+                                names.push((name, entry.path()))
+                            }
+                            Ok(_) => unreadable.push(RegistryRejection {
+                                name: format!("extension:{name}"),
+                                reason: "unreadable: not a regular file".into(),
+                            }),
+                            Err(error) => unreadable.push(RegistryRejection {
+                                name: format!("extension:{name}"),
+                                reason: format!("unreadable: {error}"),
+                            }),
+                        }
+                    }
+                    Err(error) => unreadable.push(directory_error(error)),
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => unreadable.push(directory_error(error)),
+    }
+    names.sort();
+    let mut files = Vec::new();
+    for (index, (name, path)) in names.into_iter().enumerate() {
+        if index >= MAX_EXTENSION_FILES {
+            // Rejected by `layered` on count alone; never read.
+            files.push((name, Vec::new()));
+            continue;
+        }
+        let read = (|| {
+            if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
+                return Err(std::io::Error::other("not a regular file"));
+            }
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path)?
+                .take(MAX_REGISTRY_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })();
+        match read {
+            Ok(bytes) => files.push((name, bytes)),
+            Err(error) => unreadable.push(RegistryRejection {
+                name: format!("extension:{name}"),
+                reason: format!("unreadable: {error}"),
+            }),
+        }
+    }
+    let mut registries = Registries::layered(&files);
+    registries.rejected.extend(unreadable);
+    registries.rejected.sort_by(|a, b| a.name.cmp(&b.name));
+    registries
+}
+
+/// What the registry snapshot of an ingest was: the files that applied
+/// and the files rejected whole, with why.
+#[derive(Debug, Clone, Serialize)]
+struct RegistryReport {
+    sources: Vec<adapters_fw::events::RegistryIdentity>,
+    rejected: Vec<adapters_fw::events::RegistryRejection>,
+}
+
+impl From<&Registries> for RegistryReport {
+    fn from(registries: &Registries) -> Self {
+        Self {
+            sources: registries.sources.clone(),
+            rejected: registries.rejected.clone(),
+        }
+    }
 }
 
 /// The scan behind [`active_plugins_for_root`], with the user directory
@@ -856,6 +984,9 @@ struct IngestSummary {
     /// What this recovery's producers covered and where they stopped
     /// (AC-0238), shown before any interpretation.
     coverage: Vec<ingest::coverage::RepoCoverage>,
+    /// The event registry files this recovery applied, and any rejected
+    /// whole with why (#594).
+    registries: RegistryReport,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -894,10 +1025,12 @@ struct ProducerReads {
     plugins: Vec<(String, ingest::coverage::ProducerCount)>,
 }
 
-/// Identity of the plugin basis an inventory was recorded under: the only
-/// part of an ingest's configuration re-derivable at read time. Layer hints
-/// and declared inputs are per-ingest options the inventory records itself.
-pub(crate) fn coverage_config_hash(plugins: &[ActivePlugin]) -> String {
+/// Identity of the plugin and registry basis an inventory was recorded
+/// under: the only parts of an ingest's configuration re-derivable at read
+/// time. Layer hints and declared inputs are per-ingest options the
+/// inventory records itself. The registry identity covers every accepted
+/// file's bytes — SDK entries, qualifiers, batch keys, and backings alike.
+pub(crate) fn coverage_config_hash(plugins: &[ActivePlugin], registries: &Registries) -> String {
     let mut pinned: Vec<String> = plugins
         .iter()
         .map(|plugin| {
@@ -910,7 +1043,11 @@ pub(crate) fn coverage_config_hash(plugins: &[ActivePlugin]) -> String {
         .collect();
     pinned.sort();
     pinned.dedup();
-    let basis = serde_json::json!({"basis": "coverage-config-v1", "plugins": pinned});
+    let basis = serde_json::json!({
+        "basis": "coverage-config-v2",
+        "plugins": pinned,
+        "registries": registries.identity(),
+    });
     core_prov::content_hash(basis.to_string().as_bytes())
 }
 
@@ -920,12 +1057,13 @@ fn coverage_record(
     source: &RegisteredSource,
     job_id: i64,
     plugins: &[ActivePlugin],
+    registries: &Registries,
 ) -> Result<core_graph::coverage::CoverageRecord, String> {
     Ok(core_graph::coverage::CoverageRecord {
         repo_key: coverage.repo.clone(),
         registered_source_id: Some(source.source_id.clone()),
         ingest_id: format!("job:{job_id}"),
-        config_hash: coverage_config_hash(plugins),
+        config_hash: coverage_config_hash(plugins, registries),
         inventory_json: serde_json::to_string(coverage).map_err(|error| error.to_string())?,
     })
 }
@@ -1079,8 +1217,50 @@ fn extract_tree_incremental(
     )
 }
 
+/// [`extract_tree_with_registries`] under the built-in event registries.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn extract_tree_with_primary(
+    root: &std::path::Path,
+    repo: &str,
+    commit: &str,
+    layers: &[String],
+    manifest_env: &std::collections::BTreeMap<String, String>,
+    deferred_origins: &std::collections::BTreeSet<String>,
+    state_json: Option<&std::path::Path>,
+    pulumi_json: Option<&std::path::Path>,
+    otel_jsonl: &[std::path::PathBuf],
+    cache: &mut RepoExtractionCache,
+    plugins: &[ActivePlugin],
+    on_file: &mut dyn FnMut(&str),
+    primary: Option<&source_capture::Capture>,
+    receipts: &mut Vec<adapters_lang_ts::captured::Receipt>,
+    reads: &mut ProducerReads,
+) -> Result<(adapters_lang_ts::Extraction, LayerBreakdown, DeltaSummary), String> {
+    extract_tree_with_registries(
+        root,
+        repo,
+        commit,
+        layers,
+        manifest_env,
+        deferred_origins,
+        state_json,
+        pulumi_json,
+        otel_jsonl,
+        cache,
+        plugins,
+        Registries::builtin(),
+        on_file,
+        primary,
+        receipts,
+        reads,
+    )
+}
+
+/// Extract one tree. Event sites are recognized under `registries`, the
+/// one registry snapshot of the whole ingest (#594).
+#[allow(clippy::too_many_arguments)]
+fn extract_tree_with_registries(
     root: &std::path::Path,
     repo: &str,
     commit: &str,
@@ -1093,6 +1273,7 @@ fn extract_tree_with_primary(
     otel_jsonl: &[std::path::PathBuf],
     cache: &mut RepoExtractionCache,
     plugins: &[ActivePlugin],
+    registries: &Registries,
     on_file: &mut dyn FnMut(&str),
     primary: Option<&source_capture::Capture>,
     receipts: &mut Vec<adapters_lang_ts::captured::Receipt>,
@@ -1124,6 +1305,7 @@ fn extract_tree_with_primary(
                 root,
                 &ts_id,
                 capture,
+                registries,
                 &mut ts_progress,
             )
             .map_err(|e| e.to_string())?;
@@ -1134,6 +1316,7 @@ fn extract_tree_with_primary(
                 root,
                 &ts_id,
                 &mut cache.ts,
+                registries,
                 &mut ts_progress,
             )
             .map_err(|e| e.to_string())?
@@ -1796,12 +1979,13 @@ fn deterministic_graph_hashes(graph: &impl GraphStore) -> Result<Vec<String>, St
 fn stitch_backings(
     graph: &mut SqliteGraphStore,
     facts: &mut OperationFacts,
+    registries: &Registries,
 ) -> Result<u64, String> {
     let resources = graph
         .nodes_with_label("Resource")
         .map_err(|e| e.to_string())?;
     let mut candidates = std::collections::BTreeMap::new();
-    for edge in dynamic::backing_candidates(&resources) {
+    for edge in dynamic::backing_candidates(&resources, registries) {
         let channel_exists = graph
             .get_node(&edge.dst)
             .map_err(|e| e.to_string())?
@@ -3544,6 +3728,7 @@ fn run_ingest<R: tauri::Runtime>(
     cancelled()?;
     report_progress(app, state, execution, "extract", 15.0)?;
     let active_plugins = active_plugins_for_root(app, state, root).map_err(&fail)?;
+    let registries = event_registries_for(app).map_err(&fail)?;
     let mut on_file = detail_throttle(app, job_id);
     let primary = state
         .primary_sources
@@ -3558,7 +3743,7 @@ fn run_ingest<R: tauri::Runtime>(
             .map_err(|e| fail(e.to_string()))?;
         ensure_running_job(state, execution)?;
         let cache = caches.repos.entry(repo.clone()).or_default();
-        extract_tree_with_primary(
+        extract_tree_with_registries(
             root,
             &repo,
             "workdir",
@@ -3570,6 +3755,7 @@ fn run_ingest<R: tauri::Runtime>(
             &[],
             cache,
             &active_plugins,
+            &registries,
             &mut on_file,
             primary.capture.as_ref(),
             &mut receipts,
@@ -3605,7 +3791,8 @@ fn run_ingest<R: tauri::Runtime>(
         &reads,
     )
     .with_unsupported(&preflight);
-    let record = coverage_record(&coverage, source, job_id, &active_plugins).map_err(&fail)?;
+    let record =
+        coverage_record(&coverage, source, job_id, &active_plugins, &registries).map_err(&fail)?;
     report_progress(app, state, execution, "load", 70.0)?;
     let mut published = OperationFacts::default();
     {
@@ -3627,7 +3814,7 @@ fn run_ingest<R: tauri::Runtime>(
         report_progress(app, state, execution, "stitch", 90.0)?;
 
         ensure_running_job(state, execution)?;
-        stitch_backings(&mut graph, &mut published).map_err(&fail)?;
+        stitch_backings(&mut graph, &mut published, &registries).map_err(&fail)?;
     }
 
     relink_found_adrs(state, operation, execution, &mut published).map_err(&fail)?;
@@ -3678,6 +3865,7 @@ fn run_ingest<R: tauri::Runtime>(
         preflight,
         preflight_register,
         coverage: vec![coverage],
+        registries: RegistryReport::from(&registries),
     })
 }
 
@@ -3903,6 +4091,8 @@ struct AddRepoSummary {
     preflight_register: Option<RegisterStamp>,
     /// As `IngestSummary::coverage`.
     coverage: Vec<ingest::coverage::RepoCoverage>,
+    /// As `IngestSummary::registries`.
+    registries: RegistryReport,
 }
 
 /// Clone a GitHub repo (read-only, shallow) and ingest it with its real
@@ -3945,6 +4135,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
     }
     let root = operation.root(&source.repo_key).map_err(&fail)?;
     let active_plugins = active_plugins_for_root(&app, &state, root).map_err(&fail)?;
+    let registries = event_registries_for(&app).map_err(&fail)?;
     let mut on_file = detail_throttle(&app, job_id);
     let primary = state
         .primary_sources
@@ -3959,7 +4150,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
             .map_err(|e| fail(e.to_string()))?;
         ensure_running_job(&state, &execution)?;
         let cache = caches.repos.entry(source.repo_key.clone()).or_default();
-        extract_tree_with_primary(
+        extract_tree_with_registries(
             root,
             &source.repo_key,
             &cloned.commit_sha,
@@ -3971,6 +4162,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
             &[],
             cache,
             &active_plugins,
+            &registries,
             &mut on_file,
             primary.capture.as_ref(),
             &mut receipts,
@@ -4006,7 +4198,8 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &reads,
     )
     .with_unsupported(&preflight);
-    let record = coverage_record(&coverage, &source, job_id, &active_plugins).map_err(&fail)?;
+    let record =
+        coverage_record(&coverage, &source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let mut published = OperationFacts::default();
     {
         let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
@@ -4026,7 +4219,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         );
 
         ensure_running_job(&state, &execution)?;
-        stitch_backings(&mut graph, &mut published).map_err(&fail)?;
+        stitch_backings(&mut graph, &mut published, &registries).map_err(&fail)?;
     }
     relink_found_adrs(&state, &operation, &execution, &mut published).map_err(&fail)?;
     ensure_running_job(&state, &execution)?;
@@ -4062,6 +4255,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         preflight,
         preflight_register,
         coverage: vec![coverage],
+        registries: RegistryReport::from(&registries),
     })
 }
 
@@ -4094,6 +4288,8 @@ struct AddSystemSummary {
     preflights: Vec<RepoPreflight>,
     /// Each repo's coverage inventory, in manifest order (AC-0238).
     coverage: Vec<ingest::coverage::RepoCoverage>,
+    /// As `IngestSummary::registries`; one snapshot for every repo.
+    registries: RegistryReport,
 }
 
 /// One repo's reconciled preflight report within a system recovery.
@@ -4190,6 +4386,8 @@ fn add_system_blocking<R: tauri::Runtime>(
         .collect();
     let http_bindings = manifest_http_bindings(&manifest, &repo_keys);
     let deferred_origins = events::binding_origins(&http_bindings);
+    // One registry snapshot for every repo of the system (#594).
+    let registries = event_registries_for(&app).map_err(&fail)?;
     for (entry, (source, remote)) in manifest.repos.iter().zip(&admitted) {
         if job_cancelled(&state, &execution)? {
             return Err("cancelled".to_string());
@@ -4224,7 +4422,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 .map_err(|e| fail(e.to_string()))?;
             ensure_running_job(&state, &execution)?;
             let cache = caches.repos.entry(repo.clone()).or_default();
-            extract_tree_with_primary(
+            extract_tree_with_registries(
                 root,
                 &repo,
                 &commit,
@@ -4236,6 +4434,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 &trace_paths,
                 cache,
                 &active_plugins,
+                &registries,
                 &mut on_file,
                 primary.capture.as_ref(),
                 &mut receipts,
@@ -4272,7 +4471,8 @@ fn add_system_blocking<R: tauri::Runtime>(
             &reads,
         )
         .with_unsupported(&report);
-        let record = coverage_record(&coverage, source, job_id, &active_plugins).map_err(&fail)?;
+        let record = coverage_record(&coverage, source, job_id, &active_plugins, &registries)
+            .map_err(&fail)?;
         files += repo_layers.files();
         layers.add(repo_layers);
         delta.add(
@@ -4308,7 +4508,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         // published by another.
         let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
         ensure_running_job(&state, &execution)?;
-        stitch_backings(&mut graph, &mut published).map_err(&fail)?;
+        stitch_backings(&mut graph, &mut published, &registries).map_err(&fail)?;
         // AC-0240: declared services and gateway routes join absolute-URL
         // fetches to the owning repo's endpoints.
         stitch_http_bindings(&mut graph, &http_bindings, &mut published).map_err(&fail)?;
@@ -4350,6 +4550,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         delta,
         preflights,
         coverage,
+        registries: RegistryReport::from(&registries),
     })
 }
 
@@ -6100,7 +6301,7 @@ export function queue() {
             per_repo_sum.1 += loaded.edges.len() as u64;
             published.record_load(loaded);
         }
-        crate::stitch_backings(&mut store, &mut published).unwrap();
+        crate::stitch_backings(&mut store, &mut published, crate::Registries::builtin()).unwrap();
 
         assert_eq!(channel_ids.len(), 2, "each repo emits the shared channel");
         assert_eq!(channel_ids[0], channel_ids[1]);
@@ -6355,7 +6556,8 @@ export function queueOrder() {
         let loaded_edges = published.edges();
 
         assert_eq!(
-            crate::stitch_backings(&mut store, &mut published).unwrap(),
+            crate::stitch_backings(&mut store, &mut published, crate::Registries::builtin())
+                .unwrap(),
             1
         );
         assert_eq!(published.edges(), loaded_edges + 1);
@@ -7364,7 +7566,12 @@ export const orders = new aws.sqs.Queue('orders', {});
             })
             .unwrap();
         assert_eq!(
-            crate::stitch_backings(&mut store, &mut crate::OperationFacts::default()).unwrap(),
+            crate::stitch_backings(
+                &mut store,
+                &mut crate::OperationFacts::default(),
+                crate::Registries::builtin()
+            )
+            .unwrap(),
             1
         );
         let backing = store.edges_with_labels(&["BACKS"]).unwrap();
@@ -7394,7 +7601,12 @@ export const orders = new aws.sqs.Queue('orders', {});
         )
         .unwrap();
         assert_eq!(
-            crate::stitch_backings(&mut store, &mut crate::OperationFacts::default()).unwrap(),
+            crate::stitch_backings(
+                &mut store,
+                &mut crate::OperationFacts::default(),
+                crate::Registries::builtin()
+            )
+            .unwrap(),
             0
         );
         assert!(store.edges_with_labels(&["BACKS"]).unwrap().is_empty());
@@ -8156,8 +8368,12 @@ state_json = "shop.state.json"
             .unwrap();
             crate::load_into_graph(&mut store, &ex, "local/shop", &root, "workdir").unwrap();
         }
-        let backed =
-            crate::stitch_backings(&mut store, &mut crate::OperationFacts::default()).unwrap();
+        let backed = crate::stitch_backings(
+            &mut store,
+            &mut crate::OperationFacts::default(),
+            crate::Registries::builtin(),
+        )
+        .unwrap();
         assert_eq!(backed, 1);
 
         let resources = store.nodes_with_label("Resource").unwrap();
@@ -8191,7 +8407,12 @@ state_json = "shop.state.json"
         assert!(mmd.contains("-->|BACKS|"));
         // Re-running the join is idempotent (US-0014 re-ingest).
         assert_eq!(
-            crate::stitch_backings(&mut store, &mut crate::OperationFacts::default()).unwrap(),
+            crate::stitch_backings(
+                &mut store,
+                &mut crate::OperationFacts::default(),
+                crate::Registries::builtin()
+            )
+            .unwrap(),
             1
         );
         assert_eq!(store.edges_with_labels(&["BACKS"]).unwrap().len(), 1);
@@ -8218,7 +8439,12 @@ state_json = "shop.state.json"
         )
         .unwrap();
         assert_eq!(
-            crate::stitch_backings(&mut store, &mut crate::OperationFacts::default()).unwrap(),
+            crate::stitch_backings(
+                &mut store,
+                &mut crate::OperationFacts::default(),
+                crate::Registries::builtin()
+            )
+            .unwrap(),
             0
         );
         assert!(store.edges_with_labels(&["BACKS"]).unwrap().is_empty());
@@ -8895,12 +9121,23 @@ export function App() {
             languages: Default::default(),
             gate_key: gate_key.into(),
         };
-        let first = super::coverage_config_hash(&[plugin("gate-1")]);
-        assert_eq!(first, super::coverage_config_hash(&[plugin("gate-1")]));
-        assert_ne!(first, super::coverage_config_hash(&[plugin("gate-2")]));
-        let none = serde_json::json!({"basis": "coverage-config-v1", "plugins": []});
+        let registries = crate::Registries::builtin();
+        let first = super::coverage_config_hash(&[plugin("gate-1")], registries);
         assert_eq!(
-            super::coverage_config_hash(&[]),
+            first,
+            super::coverage_config_hash(&[plugin("gate-1")], registries)
+        );
+        assert_ne!(
+            first,
+            super::coverage_config_hash(&[plugin("gate-2")], registries)
+        );
+        let none = serde_json::json!({
+            "basis": "coverage-config-v2",
+            "plugins": [],
+            "registries": registries.identity(),
+        });
+        assert_eq!(
+            super::coverage_config_hash(&[], registries),
             core_prov::content_hash(none.to_string().as_bytes())
         );
     }
@@ -9069,7 +9306,10 @@ export function App() {
                 serde_json::to_value(reported).unwrap()
             );
             assert_eq!(record.ingest_id, format!("job:{}", summary.job_id));
-            assert_eq!(record.config_hash, super::coverage_config_hash(&[]));
+            assert_eq!(
+                record.config_hash,
+                super::coverage_config_hash(&[], crate::Registries::builtin())
+            );
             let source = sources
                 .iter()
                 .find(|source| source.repo_key == record.repo_key)

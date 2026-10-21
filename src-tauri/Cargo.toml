@@ -25,6 +25,7 @@ source-walk = { workspace = true }
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 context-hub = { workspace = true }
+adapters-fw = { workspace = true }
 adapters-lang-ts = { workspace = true }
 adapters-plugin-host = { workspace = true }
 adapters-lang-python = { workspace = true }
@@ -47,7 +48,6 @@ work-packets = { workspace = true }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-adapters-fw = { workspace = true }
 core-graph = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 tauri = { version = "2", features = ["test"] }

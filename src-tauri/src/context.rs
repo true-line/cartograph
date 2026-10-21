@@ -54,6 +54,7 @@ pub(crate) fn coverage_scope<R: tauri::Runtime>(
         .lock()
         .map_err(|error| error.to_string())?
         .list()?;
+    let registries = crate::event_registries_for(app)?;
     sources
         .iter()
         .map(|source| {
@@ -61,7 +62,7 @@ pub(crate) fn coverage_scope<R: tauri::Runtime>(
             Ok(ScopedRepo {
                 repo_key: source.repo_key.clone(),
                 registered_source_id: Some(source.source_id.clone()),
-                config_hash: crate::coverage_config_hash(&plugins),
+                config_hash: crate::coverage_config_hash(&plugins, &registries),
                 layer_hints: None,
             })
         })
