@@ -539,3 +539,30 @@ fn independent_catalogue_rule_rejects_supervised_positive_hardnegative_and_evide
         );
     }
 }
+
+// AC-0285: reviewed dataset validation rejects a case whose hop query is
+// interface dispatch (`IFace.method`) — it is classified out of ANN
+// candidacy and could never be planned, embedded or scored — while a
+// conservative look-alike (`Item.get`) is accepted.
+#[test]
+fn reviewed_dataset_rejects_interface_dispatch_case_and_accepts_lookalike() {
+    for (query, accepted) in [("IChannel.listen", false), ("Item.get", true)] {
+        let dir = copy_authored();
+        let (mut i, mut l, mut b) = documents(dir.path());
+        let c = i["cases"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|c| c["case_id"] == "c-call-unique")
+            .unwrap();
+        c["hop"]["query"] = json!(query);
+        c["hop"]["query_hash"] = json!(sha256(query.as_bytes()));
+        catalogue_test_documents(&mut i, &mut l, &mut b);
+        write_documents(dir.path(), &i, &mut l, &mut b);
+        assert_eq!(
+            load_independent_dataset(dir.path()).is_ok(),
+            accepted,
+            "{query}"
+        );
+    }
+}

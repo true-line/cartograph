@@ -279,6 +279,13 @@ const TEMPLATES: &[(&str, OmissionClass, FillSeam)] = &[
         C::UnresolvedRelationship,
         S::Adapter,
     ),
+    // Interface dispatch (`IFace.method`): the relationship is unproven
+    // without a type hierarchy, and a type-resolving adapter would fill it.
+    (
+        "dynamic dispatch - needs type hierarchy",
+        C::UnresolvedRelationship,
+        S::Adapter,
+    ),
     // Behavior extraction found but did not interpret.
     (
         "weak inference excluded by verified-only export",
@@ -459,19 +466,85 @@ impl Omission {
         }
     }
 
-    /// The omission a Gap fact's properties establish: an explicit, valid
-    /// `omission` wins; otherwise the latest recorded stop reason
-    /// (`t1_reason`, then `reason`, then `fallback`) is classified.
+    /// The omission a Gap fact's properties establish (see
+    /// [`Omission::recorded`]), else `fallback` classified.
     pub fn of_gap(props: &serde_json::Value, fallback: &str) -> Self {
-        if let Ok(explicit) = serde_json::from_value::<Self>(props["omission"].clone()) {
-            return explicit;
-        }
-        let reason = props["t1_reason"]
-            .as_str()
-            .or_else(|| props["reason"].as_str())
-            .unwrap_or(fallback);
-        Self::classify(reason)
+        Self::recorded(props).unwrap_or_else(|| Self::classify(fallback))
     }
+
+    /// The omission a Gap fact's own properties establish, if any: an
+    /// explicit, valid `omission`, then `t1_reason`, then an interface
+    /// dispatch hop query (AC-0285: grouped under [`DYNAMIC_DISPATCH`]
+    /// rather than its older generic stop reason), then `reason`.
+    pub fn recorded(props: &serde_json::Value) -> Option<Self> {
+        if let Ok(explicit) = serde_json::from_value::<Self>(props["omission"].clone()) {
+            return Some(explicit);
+        }
+        if let Some(reason) = props["t1_reason"].as_str() {
+            return Some(Self::classify(reason));
+        }
+        if is_interface_dispatch(&gap_query(props)) {
+            return Some(Self::classify(DYNAMIC_DISPATCH));
+        }
+        props["reason"].as_str().map(Self::classify)
+    }
+}
+
+/// Conservative interface-dispatch detector for unresolved hop queries
+/// (#259, AC-0285).
+///
+/// A query is interface dispatch when it has the shape `IFace.member`: the
+/// leading segment is a receiver named in the interface convention — a
+/// capital `I` followed by another capital letter and at least one further
+/// character (`IChannel`, `INodeProcess`) — and a non-empty member access
+/// follows it. The receiver's concrete type is unknown without a type
+/// hierarchy, so no embedding can resolve the hop.
+///
+/// The rule is deliberately conservative: a wrong exclusion silently drops
+/// a resolvable hop, while a wrong inclusion only spends an embedding, so
+/// when in doubt a hop stays in candidacy. In particular:
+///
+/// - `Item.get`, `Icon.render` — `I` followed by a lowercase letter is a
+///   plain capitalized name, not the interface convention.
+/// - `IO.read`, `ID.parse` — a two-letter receiver is an acronym, not the
+///   `IFoo` convention, which needs at least three characters.
+/// - `IFoo` with no member access — a bare type reference is not dispatch.
+/// - `channel.listen` — a lower-case receiver is a value, not a type.
+pub fn is_interface_dispatch(query: &str) -> bool {
+    let mut segments = query.split('.');
+    let receiver = segments.next().unwrap_or_default();
+    // A member access must follow the receiver.
+    let Some(member) = segments.next() else {
+        return false;
+    };
+    if member.is_empty() {
+        return false;
+    }
+    let mut chars = receiver.chars();
+    if chars.next() != Some('I') {
+        return false;
+    }
+    // A capital `I` followed by another capital letter opens the convention.
+    if !chars.next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return false;
+    }
+    // At least one further character: `IO` and `ID` are acronyms, not `IFoo`.
+    chars.next().is_some()
+}
+
+/// Stop reason for a hop held out of candidacy as interface dispatch.
+pub const DYNAMIC_DISPATCH: &str = "dynamic dispatch - needs type hierarchy";
+
+/// The hop query a Gap's properties establish: `raw`, then `callee`, then
+/// `reason`, trimmed.
+pub fn gap_query(props: &serde_json::Value) -> String {
+    props["raw"]
+        .as_str()
+        .or_else(|| props["callee"].as_str())
+        .or_else(|| props["reason"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -509,6 +582,11 @@ mod tests {
             ),
             (
                 "callee not statically resolvable",
+                OmissionClass::UnresolvedRelationship,
+                FillSeam::Adapter,
+            ),
+            (
+                "dynamic dispatch - needs type hierarchy",
                 OmissionClass::UnresolvedRelationship,
                 FillSeam::Adapter,
             ),
@@ -603,6 +681,38 @@ mod tests {
         assert_eq!(
             Omission::classify("").detail,
             "unclassified: no stop reason recorded"
+        );
+    }
+
+    #[test]
+    fn interface_dispatch_gap_groups_under_its_exclusion() {
+        // AC-0285 (#711 review): the register groups an interface dispatch
+        // Gap under the exclusion, not its older generic stop reason.
+        let dispatch =
+            serde_json::json!({"callee": "IChannel.listen", "reason": "unresolved call target"});
+        let omission = Omission::of_gap(&dispatch, "");
+        assert_eq!(omission.detail, DYNAMIC_DISPATCH);
+        assert_eq!(
+            (omission.class, omission.seam),
+            (OmissionClass::UnresolvedRelationship, FillSeam::Adapter)
+        );
+        // An explicit omission and a later tier's reason still win.
+        let mut explicit = dispatch.clone();
+        explicit["omission"] =
+            serde_json::json!({"class": "product_gap", "seam": "requirement", "detail": "kept"});
+        assert_eq!(Omission::of_gap(&explicit, "").detail, "kept");
+        let mut escalated = dispatch.clone();
+        escalated["t1_reason"] = "detail type unobserved".into();
+        assert_eq!(
+            Omission::of_gap(&escalated, "").detail,
+            "detail type unobserved"
+        );
+        // A look-alike keeps its stop reason.
+        let lookalike =
+            serde_json::json!({"callee": "Item.get", "reason": "unresolved call target"});
+        assert_eq!(
+            Omission::of_gap(&lookalike, "").detail,
+            "unresolved call target"
         );
     }
 

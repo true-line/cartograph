@@ -269,6 +269,13 @@ pub(super) fn validate(
             c.hop.query_hash == sha256(c.hop.query.as_bytes()),
             "query hash",
         )?;
+        // AC-0285: an interface-dispatch query (`IFace.method`) is classified
+        // out of ANN candidacy, so a dataset case carrying one could never be
+        // planned, embedded or scored; reject it at validation.
+        ensure(
+            !crate::is_interface_dispatch(&c.hop.query),
+            "interface dispatch hop query in dataset",
+        )?;
         ensure(
             sorted(c.candidates.iter().map(|x| x.node_id.as_str())),
             "duplicate or unsorted candidate IDs",

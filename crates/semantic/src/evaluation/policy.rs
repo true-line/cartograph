@@ -342,7 +342,11 @@ pub fn predict(
             subtype: case.family.subtype().map(str::to_owned),
             query: case.hop.query.clone(),
             evidence: evidence(&case.hop.evidence),
-            exclusion: None,
+            // Defense in depth (#259, AC-0285): dataset validation already
+            // rejects interface-dispatch queries, so this reconstruction
+            // re-derives the exclusion rather than trusting the dataset.
+            exclusion: crate::is_interface_dispatch(&case.hop.query)
+                .then_some(crate::HopExclusion::DynamicDispatch),
         };
         let candidates: Vec<_> = case
             .candidates
