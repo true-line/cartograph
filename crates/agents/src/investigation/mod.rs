@@ -11,14 +11,20 @@ mod disclosure;
 mod input;
 mod inspection;
 // Internal primitives remain unreachable until all three #633 slices are complete.
-#[allow(dead_code)]
-mod obligations;
+#[doc(hidden)]
+pub mod obligations;
 mod privacy;
 mod projection;
 mod protocol;
 mod records;
 mod sealing;
 mod specialists;
+#[doc(hidden)]
+pub mod staged_attempt;
+#[doc(hidden)]
+pub mod staged_finish;
+#[doc(hidden)]
+pub mod staged_refusal;
 mod strict;
 mod turn;
 

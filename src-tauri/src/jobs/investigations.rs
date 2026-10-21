@@ -13,6 +13,9 @@ mod coverage;
 mod coverage_tests;
 #[path = "investigations/reads.rs"]
 mod reads;
+#[allow(dead_code)]
+#[path = "investigations/staged.rs"]
+mod staged;
 #[path = "investigations/storage.rs"]
 mod storage;
 #[cfg(test)]

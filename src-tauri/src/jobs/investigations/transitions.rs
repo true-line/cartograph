@@ -166,50 +166,7 @@ impl JobStore {
                 {
                     return Err(InvestigationStoreError::Invalid);
                 }
-                let pending = task
-                    .pending
-                    .as_ref()
-                    .ok_or(InvestigationStoreError::Invalid)?;
-                if response.step_id != pending.step_id
-                    || !hash_valid(&response.response_hash)
-                    || !hash_valid(&response.action_hash)
-                    || response
-                        .observed_model
-                        .as_ref()
-                        .is_some_and(|v| v.is_empty() || v.len() > 256)
-                    || response.active_milliseconds < task.detail.usage.active_milliseconds
-                {
-                    return Err(InvestigationStoreError::Invalid);
-                }
-                if let Some(model) = &response.observed_model
-                    && redacted_history_text(model, 256)? != *model
-                {
-                    return Err(InvestigationStoreError::Invalid);
-                }
-                let invoked: PendingInvestigationStep = read_body(
-                    &tx,
-                    "investigation_invocations",
-                    "step_id",
-                    &id,
-                    &response.step_id,
-                )?
-                .ok_or(InvestigationStoreError::Invalid)?;
-                if &invoked != pending {
-                    return Err(InvestigationStoreError::Invalid);
-                }
-                let mut usage = task.detail.usage.clone();
-                usage.reported_input_tokens = add_reported(
-                    usage.reported_input_tokens,
-                    response.reported_input_tokens,
-                    usage.model_invocations == 1,
-                )?;
-                usage.reported_output_tokens = add_reported(
-                    usage.reported_output_tokens,
-                    response.reported_output_tokens,
-                    usage.model_invocations == 1,
-                )?;
-                usage.active_milliseconds = response.active_milliseconds;
-                validate_usage(&usage, &task.detail.limits)?;
+                let (invoked, usage) = validate_response(&tx, &task, &response)?;
                 if let Some(result) = &result {
                     let ledger =
                         load_ledger(&tx, &task)?.ok_or(InvestigationStoreError::Invalid)?;
@@ -730,7 +687,7 @@ fn admit_input(
     )
 }
 
-fn check_identity(
+pub(super) fn check_identity(
     task: &StoredTask,
     execution: &JobExecution,
 ) -> Result<(), InvestigationStoreError> {
@@ -748,7 +705,7 @@ fn check_identity(
     Ok(())
 }
 
-fn check_job(
+pub(super) fn check_job(
     connection: &Connection,
     execution: &JobExecution,
     allow_cancelled_or_missing: bool,
@@ -946,4 +903,58 @@ pub(in crate::jobs) fn cancel_for_job(
         save_task(connection, &task, revision, true)?;
     }
     Ok(())
+}
+
+// Shared by normal action admission and the private staged refusal journal.
+pub(super) fn validate_response(
+    connection: &Connection,
+    task: &StoredTask,
+    response: &InvestigationResponseMeta,
+) -> Result<(PendingInvestigationStep, InvestigationUsage), InvestigationStoreError> {
+    let id = &task.detail.summary.investigation_id;
+    let pending = task
+        .pending
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    if response.step_id != pending.step_id
+        || !hash_valid(&response.response_hash)
+        || !hash_valid(&response.action_hash)
+        || response
+            .observed_model
+            .as_ref()
+            .is_some_and(|v| v.is_empty() || v.len() > 256)
+        || response.active_milliseconds < task.detail.usage.active_milliseconds
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if let Some(model) = &response.observed_model
+        && redacted_history_text(model, 256)? != *model
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let invoked: PendingInvestigationStep = read_body(
+        connection,
+        "investigation_invocations",
+        "step_id",
+        id,
+        &response.step_id,
+    )?
+    .ok_or(InvestigationStoreError::Invalid)?;
+    if &invoked != pending {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let mut usage = task.detail.usage.clone();
+    usage.reported_input_tokens = add_reported(
+        usage.reported_input_tokens,
+        response.reported_input_tokens,
+        usage.model_invocations == 1,
+    )?;
+    usage.reported_output_tokens = add_reported(
+        usage.reported_output_tokens,
+        response.reported_output_tokens,
+        usage.model_invocations == 1,
+    )?;
+    usage.active_milliseconds = response.active_milliseconds;
+    validate_usage(&usage, &task.detail.limits)?;
+    Ok((invoked, usage))
 }

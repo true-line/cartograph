@@ -608,7 +608,7 @@ pub(super) fn remaining_store_capacity(
         .ok_or(InvestigationStoreError::Capacity)
 }
 
-fn stored_bytes(
+pub(super) fn stored_bytes(
     connection: &Connection,
     id: Option<&str>,
 ) -> Result<usize, InvestigationStoreError> {
