@@ -546,6 +546,36 @@ impl PrimarySourceStore {
         Ok(guard)
     }
 
+    /// Revalidate the retained OS lock handle without acquiring another lock or
+    /// reading captured source bytes. The prepared-read path keeps this same
+    /// guard alive through its eventual publication acknowledgement.
+    pub(crate) fn verify_task_guard(&self, guard: &RetentionGuard) -> Result<(), PinnedReadError> {
+        if guard.app_path != self.storage.app_path || source_id(&guard.source_id).is_err() {
+            return Err(PinnedReadError::Invalid);
+        }
+        self.storage
+            .verify()
+            .map_err(|_| PinnedReadError::Operational)?;
+        let current = self
+            .storage
+            .locks
+            .symlink_metadata(format!("{}.lock", guard.source_id))
+            .map_err(|_| PinnedReadError::Operational)?;
+        let held = cap_std::fs::Metadata::from_file(&guard._file)
+            .map_err(|_| PinnedReadError::Operational)?;
+        if !current.is_file() || current.nlink() != 1 || !same_entry(&current, &held) {
+            return Err(PinnedReadError::Invalid);
+        }
+        #[cfg(unix)]
+        {
+            use cap_std::fs::PermissionsExt;
+            if held.permissions().mode() & 0o077 != 0 {
+                return Err(PinnedReadError::Invalid);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn prepare(
         &self,
         source: &RegisteredSource,
@@ -1051,6 +1081,57 @@ mod tests {
         .unwrap();
         assert!(!receipts.is_empty());
         (directory, source, capture, extraction, receipts)
+    }
+
+    #[test]
+    fn prepared_source_guard_verifies_identity_without_capture_access() {
+        // AC-0287: no capture or receipt has been persisted for this guard.
+        let (directory, source, _, _, _) = fixture();
+        let store = PrimarySourceStore::open(directory.path()).unwrap();
+        let guard = store.task_guard(&source.source_id).unwrap();
+        store.verify_task_guard(&guard).unwrap();
+        let other_directory = tempfile::tempdir().unwrap();
+        let other = PrimarySourceStore::open(other_directory.path()).unwrap();
+        assert!(matches!(
+            other.verify_task_guard(&guard),
+            Err(PinnedReadError::Invalid)
+        ));
+        store.verify_task_guard(&guard).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_source_guard_rejects_replaced_lock_and_widened_permissions() {
+        // AC-0287: retaining a handle does not prove its pathname still names it.
+        use std::os::unix::fs::PermissionsExt;
+        let (directory, source, _, _, _) = fixture();
+        let store = PrimarySourceStore::open(directory.path()).unwrap();
+        let guard = store.task_guard(&source.source_id).unwrap();
+        guard
+            ._file
+            .set_permissions(std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert!(matches!(
+            store.verify_task_guard(&guard),
+            Err(PinnedReadError::Invalid)
+        ));
+        guard
+            ._file
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        store.verify_task_guard(&guard).unwrap();
+        let name = format!("{}.lock", source.source_id);
+        store
+            .storage
+            .locks
+            .rename(&name, &store.storage.locks, "old-held.lock")
+            .unwrap();
+        let replacement = private_file(&store.storage.locks, name.as_ref(), true).unwrap();
+        assert!(matches!(
+            store.verify_task_guard(&guard),
+            Err(PinnedReadError::Invalid)
+        ));
+        drop(replacement);
     }
 
     fn receipt_count(store: &ReceiptStore) -> i64 {
