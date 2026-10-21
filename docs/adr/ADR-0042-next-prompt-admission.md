@@ -54,6 +54,19 @@ Bytes, provider framing, generated-token reservations and unknown tokenizer or
 provider-context capacity remain separate. Component bounds and early refusal
 are not the full-budget acceptance certificate required by #598.
 
+Storage admission uses a transaction-scoped preflight and one coherent capacity
+snapshot, invalidated after any reservation, validation-charge or disposition
+write. A disposition releases a storage claim only after its saved binding and
+accounting are validated; row presence alone is insufficient. This interim
+approach retains work proportional to historical read records once per fresh
+transaction, bounded by store/record caps. A pending-only index is deferred until
+the new task family's authoritative pending state is integrated and tested.
+
+The storage contract fails closed on corrupt or inconsistent rows. Body hashes,
+bindings and immutable triggers do not detect an internally consistent forgery
+by a local writer able to rewrite the schema and all associated records. No
+in-process watermark or stronger local-writer security claim is introduced.
+
 ## Consequences
 
 Preparation and commit share pure attempt and metadata derivation, reducing the
@@ -61,13 +74,14 @@ risk of checking one representation and persisting another. Evidence integrity
 and truthful resource accounting take priority over accepting every proposed
 read. Conservative refusal can reject a read that exact bytes would have fit.
 
-The current implementation contains component helpers, regressions and a local
-query/inventory preparation-publication split. That split retains source guards
-and rejects a changed in-memory basis before publication; it does not establish
-the new durable admission transaction. Whole-prompt certification, new runtime
-routing, candidate transactions and
-refusal journals remain unimplemented. The design document records that scope;
-this ADR is not a shipped-feature or provider-acceptance claim.
+The current implementation includes a coherent saved completion snapshot,
+internal prompt9 construction and feedback-reserve measurement, and borrowed
+query/inventory preparation views retaining source guards. Source reservations
+have immutable storage records and central capacity accounting. These components
+do not yet establish the complete admission transaction: source-class closure,
+new runtime routing, atomic candidate transitions and refusal journals remain
+required. The design document records that scope; this ADR is not a
+shipped-feature or provider-acceptance claim.
 
 ## Alternatives
 
