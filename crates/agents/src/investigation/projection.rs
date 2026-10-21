@@ -70,10 +70,35 @@ impl CompactInvestigationContext {
                 .remove("evidence_options")
                 .and_then(|v| v.as_array().cloned())
                 .ok_or(InvestigationError::InvalidInput)?;
-            let context = envelope
+            let context_value = envelope
                 .get_mut("context")
-                .and_then(Value::as_object_mut)
                 .ok_or(InvestigationError::InvalidInput)?;
+            let qualification = if let Some(proof) = &ledger.coverage {
+                let qualified = context_value
+                    .as_object_mut()
+                    .ok_or(InvestigationError::InvalidInput)?;
+                if qualified.len() != 3
+                    || qualified.get("context_id").and_then(Value::as_str)
+                        != Some(proof.context_id.as_str())
+                    || qualified.get("coverage")
+                        != Some(
+                            &serde_json::to_value(&proof.qualification)
+                                .map_err(|_| InvestigationError::InvalidInput)?,
+                        )
+                {
+                    return Err(InvestigationError::InvalidInput);
+                }
+                Some(json!({"context_id": proof.context_id, "coverage": proof.qualification}))
+            } else {
+                None
+            };
+            let context = if qualification.is_some() {
+                context_value.get_mut("response")
+            } else {
+                Some(context_value)
+            }
+            .and_then(Value::as_object_mut)
+            .ok_or(InvestigationError::InvalidInput)?;
             if context.contains_key("fact_indexes") {
                 return Err(InvestigationError::InvalidInput);
             }
@@ -110,12 +135,16 @@ impl CompactInvestigationContext {
             // Other context metadata is retained verbatim, including any future
             // coverage annotations. No semantic summary is manufactured here.
             context.insert("fact_indexes".into(), json!(fact_indexes));
-            result.queries.push(json!({
+            let mut compact_query = json!({
                 "query_index": index,
                 "selection": manifest.query,
                 "context": context,
                 "evidence_option_indexes": option_indexes,
-            }));
+            });
+            if let Some(qualification) = qualification {
+                compact_query["qualification"] = qualification;
+            }
+            result.queries.push(compact_query);
         }
         if observed.iter().collect::<BTreeSet<_>>() != selected {
             return Err(InvestigationError::InvalidInput);

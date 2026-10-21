@@ -29,8 +29,16 @@ impl InvestigationInputLedger {
     /// Enforce bounded, complete metadata before publication or use as a saved
     /// historical basis. This does not certify source bytes or current freshness.
     pub fn validate(&self) -> Result<(), InvestigationError> {
-        if self.schema_version != 1
-            || !super::records::context_hash(&self.graph_snapshot_id)
+        match (self.schema_version, &self.coverage) {
+            (1, None) => {}
+            (2, Some(proof)) if proof.snapshot_id == self.scope_snapshot_id => {
+                proof
+                    .validate()
+                    .map_err(|_| InvestigationError::InvalidInput)?;
+            }
+            _ => return Err(InvestigationError::InvalidInput),
+        }
+        if !super::records::context_hash(&self.graph_snapshot_id)
             || !super::records::context_hash(&self.scope_snapshot_id)
             || self.selected_facts.len() > MAX_SELECTED_FACTS
             || self.receipt_references.len() > MAX_SELECTED_FACTS
@@ -45,6 +53,17 @@ impl InvestigationInputLedger {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        if self.queries.len() + self.coverage_reads.len() > MAX_TOOL_ACTIONS as usize {
+            return Err(InvestigationError::LimitExceeded);
+        }
+        if let Some(proof) = &self.coverage {
+            for read in &self.coverage_reads {
+                read.validate(proof)?;
+            }
+        } else if !self.coverage_reads.is_empty() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        InvestigationQueryBudget::from_ledger(self)?;
         let mut selections = BTreeMap::new();
         let mut previous = None;
         for fact in &self.selected_facts {
@@ -319,6 +338,9 @@ impl InvestigationResult {
         created_at: String,
     ) -> Result<Self, InvestigationError> {
         ledger.validate()?;
+        if ledger.schema_version == 2 && binding.is_none() {
+            return Err(InvestigationError::InvalidInput);
+        }
         if binding.is_some_and(|(_, d)| d.inspection_requirements_hash.is_some())
             != inspection_targets.is_some()
         {
@@ -366,13 +388,16 @@ impl InvestigationResult {
             return Err(InvestigationError::InvalidAction);
         };
         let mut result = Self {
-            schema_version: if inspection_targets.is_some() {
+            schema_version: if ledger.schema_version == 2 {
+                4
+            } else if inspection_targets.is_some() {
                 3
             } else if binding.is_some() {
                 2
             } else {
                 1
             },
+            coverage: binding.and_then(|(_, disclosure)| disclosure.coverage.clone()),
             inspection_assessment: None,
             investigation_id: investigation_id.into(),
             result_id: String::new(),
@@ -424,6 +449,10 @@ impl InvestigationResult {
                 "investigation-result-v3",
                 b"cartograph:investigation-result:v3\0",
             ),
+            4 => (
+                "investigation-result-v4",
+                b"cartograph:investigation-result:v4\0",
+            ),
             _ => return Err(InvestigationError::InvalidInput),
         };
         Ok(format!(
@@ -434,6 +463,8 @@ impl InvestigationResult {
 
     pub fn validate(&self, ledger: &InvestigationInputLedger) -> Result<(), InvestigationError> {
         if self.schema_version != 1
+            || ledger.schema_version != 1
+            || self.coverage.is_some()
             || self.inspection_assessment.is_some()
             || self.invocation_step_id.is_some()
             || self.disclosure_hash.is_some()
@@ -448,7 +479,7 @@ impl InvestigationResult {
         self.validate_bound(ledger, &citations)
     }
 
-    /// Validate saved v2 results using the exact saved invocation disclosure.
+    /// Validate saved disclosed results against their exact finishing invocation.
     pub fn validate_with_disclosure(
         &self,
         ledger: &InvestigationInputLedger,
@@ -456,11 +487,14 @@ impl InvestigationResult {
         disclosure: &InvestigationDisclosure,
     ) -> Result<(), InvestigationError> {
         if self.schema_version
-            != if self.inspection_assessment.is_some() {
+            != if ledger.schema_version == 2 {
+                4
+            } else if self.inspection_assessment.is_some() {
                 3
             } else {
                 2
             }
+            || self.coverage != disclosure.coverage
             || self.inspection_assessment.is_some()
                 != disclosure.inspection_requirements_hash.is_some()
             || !super::records::opaque_id(step_id)

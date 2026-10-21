@@ -1,7 +1,7 @@
 use super::*;
 use std::io::Write;
 
-fn schema() -> Vec<(String, String, String)> {
+fn legacy_schema() -> Vec<(String, String, String)> {
     let mut objects = vec![
         ("investigation_meta", "CREATE TABLE investigation_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1), namespace TEXT NOT NULL) STRICT"),
         ("investigation_conversations", "CREATE TABLE investigation_conversations (id TEXT PRIMARY KEY NOT NULL, created_at TEXT NOT NULL) STRICT"),
@@ -30,6 +30,12 @@ fn schema() -> Vec<(String, String, String)> {
     objects
 }
 
+fn schema() -> Vec<(String, String, String)> {
+    let mut objects = legacy_schema();
+    objects.extend(super::coverage::schema());
+    objects
+}
+
 const OWNED: &str =
     "name GLOB 'investigation_*' OR (tbl_name GLOB 'investigation_*' AND name NOT GLOB 'sqlite_*')";
 
@@ -45,13 +51,27 @@ pub(super) fn initialize(
         |r| r.get(0),
     )?;
     if count == 0 {
-        for (_, _, sql) in schema() {
+        for (_, _, sql) in legacy_schema() {
             tx.execute_batch(&sql)?;
         }
         one(tx.execute(
             "INSERT INTO investigation_meta VALUES (1,1,?1)",
             [&namespace.value],
         )?)?;
+    }
+    let count: i64 = tx.query_row(
+        &format!("SELECT count(*) FROM sqlite_schema WHERE {OWNED}"),
+        [],
+        |r| r.get(0),
+    )?;
+    if usize::try_from(count).ok() == Some(legacy_schema().len()) {
+        execution::validate(&tx, namespace)?;
+        validate_layout(&tx, &legacy_schema())?;
+        validate_legacy_metadata(&tx, namespace)?;
+        for (_, _, sql) in super::coverage::schema() {
+            tx.execute_batch(&sql)?;
+        }
+        one(tx.execute("INSERT INTO investigation_coverage_meta VALUES (1,1)", [])?)?;
     }
     validate(&tx, namespace)?;
     tx.commit()?;
@@ -63,7 +83,23 @@ pub(super) fn validate(
     namespace: &ExecutionNamespace,
 ) -> Result<(), InvestigationStoreError> {
     execution::validate(connection, namespace)?;
-    let expected = schema();
+    validate_archive_schema(connection)?;
+    validate_legacy_metadata(connection, namespace)
+}
+
+/// Validate the complete extended SQL layout before archive helpers use it.
+/// Namespace/owner checks remain the caller's existing JobStore admission.
+pub(super) fn validate_archive_schema(
+    connection: &Connection,
+) -> Result<(), InvestigationStoreError> {
+    validate_layout(connection, &schema())?;
+    super::coverage::validate_version(connection)
+}
+
+fn validate_layout(
+    connection: &Connection,
+    expected: &[(String, String, String)],
+) -> Result<(), InvestigationStoreError> {
     let (count, bounded): (i64, bool) = connection.query_row(
         &format!("SELECT count(*), coalesce(min(typeof(name)='text' AND length(CAST(name AS BLOB))<=128 AND typeof(type)='text' AND length(CAST(type AS BLOB))<=16 AND typeof(sql)='text' AND length(CAST(sql AS BLOB))<=4096),0) FROM sqlite_schema WHERE {OWNED}"),
         [], |r| Ok((r.get(0)?, r.get(1)?)),
@@ -86,6 +122,13 @@ pub(super) fn validate(
     if expected.iter().any(|item| !actual.contains(item)) {
         return Err(InvestigationStoreError::Invalid);
     }
+    Ok(())
+}
+
+fn validate_legacy_metadata(
+    connection: &Connection,
+    namespace: &ExecutionNamespace,
+) -> Result<(), InvestigationStoreError> {
     let rows: i64 =
         connection.query_row("SELECT count(*) FROM investigation_meta", [], |r| r.get(0))?;
     let valid: bool = connection.query_row("SELECT coalesce(min(singleton=1 AND version=1 AND typeof(namespace)='text' AND length(CAST(namespace AS BLOB))=32 AND namespace=?1),0) FROM investigation_meta", [&namespace.value], |r| r.get(0))?;
@@ -201,7 +244,9 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     let summary = &detail.summary;
     if task.schema_version != 1
         || summary.schema_version
-            != if summary.specialist_id.uses_inspection_requirements() {
+            != if summary.specialist_id.uses_coverage_qualification() {
+                3
+            } else if summary.specialist_id.uses_inspection_requirements() {
                 2
             } else {
                 1
@@ -227,6 +272,9 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
         || !summary.actions.can_follow_up
         || summary.invocation_pending != (task.phase == Phase::Invocation)
         || task.ledger_hash.is_some() != task.ledger_revision.is_some()
+        || detail.coverage_context.is_some()
+            != (summary.specialist_id.uses_coverage_qualification()
+                && task.ledger_revision.is_some())
         || task.ledger_hash.as_ref().is_some_and(|v| !hash_valid(v))
         || detail.citations.len() > 76
         || summary.created_at.len() > 32
@@ -238,7 +286,10 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     validate_provider(&detail.provider)?;
     validate_usage(&detail.usage, &detail.limits)?;
     match &detail.inspection_requirements {
-        Some(targets) if summary.specialist_id.uses_inspection_requirements() => {
+        Some(targets)
+            if summary.specialist_id.uses_inspection_requirements()
+                || summary.specialist_id.uses_coverage_qualification() =>
+        {
             if normalize_inspection_targets(targets)? != *targets
                 || summary.inspection_requirement_count != Some(targets.len())
                 || detail.inspection_assessment.is_some() != summary.has_result
@@ -391,7 +442,17 @@ pub(super) fn validate_inspection_result(
         &result.inspection_assessment,
     ) {
         (Some(targets), Some(assessment))
-            if result.schema_version == 3
+            if result.schema_version
+                == if task
+                    .detail
+                    .summary
+                    .specialist_id
+                    .uses_coverage_qualification()
+                {
+                    4
+                } else {
+                    3
+                }
                 && assessment.targets()? == *targets
                 && assessment.requirements_hash == inspection_requirements_hash(targets)? =>
         {
@@ -402,7 +463,13 @@ pub(super) fn validate_inspection_result(
                 .detail
                 .summary
                 .specialist_id
-                .uses_inspection_requirements() =>
+                .uses_inspection_requirements()
+                && (!task
+                    .detail
+                    .summary
+                    .specialist_id
+                    .uses_coverage_qualification()
+                    || result.schema_version == 4) =>
         {
             Ok(())
         }
@@ -445,13 +512,17 @@ pub(super) fn load_task(
     if let Some(pending) = &task.pending {
         validate_step_basis(connection, &task, pending)?;
     }
-    if task
+    let qualified = task
         .detail
         .summary
         .specialist_id
-        .uses_inspection_requirements()
-        && task.detail.summary.has_result
-    {
+        .uses_coverage_qualification();
+    if qualified && task.ledger_revision.is_some() && !task.detail.summary.has_result {
+        load_ledger(connection, &task)?.ok_or(InvestigationStoreError::Invalid)?;
+    }
+    // A changed specialist/schema must not disable validation of a completed
+    // result and its ledger. Valid historical result versions use the same path.
+    if task.detail.summary.has_result {
         load_result(connection, &task)?.ok_or(InvestigationStoreError::Invalid)?;
     }
     Ok(task)
@@ -505,13 +576,56 @@ pub(super) fn check_task_capacity(
     id: &str,
     terminal: bool,
 ) -> Result<(), InvestigationStoreError> {
-    // Fixed scalar/index/namespace/conversation allowance is charged in addition
-    // to every stored byte body. SQL BLOB casts prevent malformed TEXT rows from
-    // undercounting multibyte strings. SQLite pages/WAL are deliberately excluded.
-    let mut bytes: usize = 1024;
-    let record: i64 = connection.query_row("SELECT length(CAST(record AS BLOB))+length(CAST(record_hash AS BLOB))+length(CAST(id AS BLOB))+length(CAST(nonce AS BLOB))+length(CAST(conversation_id AS BLOB)) FROM investigation_tasks WHERE id=?1", [id], |r| r.get(0))?;
-    bytes = bytes
-        .checked_add(usize::try_from(record).map_err(|_| InvestigationStoreError::Invalid)?)
+    let maximum = if terminal {
+        TASK_CAPACITY
+    } else {
+        TASK_CAPACITY - TERMINAL_RESERVE
+    };
+    if stored_bytes(connection, Some(id))? > maximum
+        || stored_bytes(connection, None)? > STORE_CAPACITY
+    {
+        return Err(InvestigationStoreError::Capacity);
+    }
+    Ok(())
+}
+
+/// Remaining nonterminal storage, including all existing immutable archives.
+pub(super) fn remaining_task_capacity(
+    connection: &Connection,
+    id: &str,
+) -> Result<usize, InvestigationStoreError> {
+    (TASK_CAPACITY - TERMINAL_RESERVE)
+        .checked_sub(stored_bytes(connection, Some(id))?)
+        .ok_or(InvestigationStoreError::Capacity)
+}
+
+/// Global remaining bytes under the unchanged store ceiling.
+pub(super) fn remaining_store_capacity(
+    connection: &Connection,
+) -> Result<usize, InvestigationStoreError> {
+    STORE_CAPACITY
+        .checked_sub(stored_bytes(connection, None)?)
+        .ok_or(InvestigationStoreError::Capacity)
+}
+
+fn stored_bytes(
+    connection: &Connection,
+    id: Option<&str>,
+) -> Result<usize, InvestigationStoreError> {
+    // Fixed scalar/index/namespace/conversation allowance plus every stored body.
+    // BLOB casts charge UTF-8 bytes even if a malformed row has SQL TEXT type.
+    let (tasks, records): (i64, i64) = connection.query_row(
+        "SELECT count(*), coalesce(sum(length(CAST(record AS BLOB))+length(CAST(record_hash AS BLOB))+length(CAST(id AS BLOB))+length(CAST(nonce AS BLOB))+length(CAST(conversation_id AS BLOB))),0) FROM investigation_tasks WHERE (?1 IS NULL OR id=?1)",
+        [id], |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let mut bytes = usize::try_from(tasks)
+        .ok()
+        .and_then(|tasks| tasks.checked_mul(1024))
+        .and_then(|bytes| {
+            usize::try_from(records)
+                .ok()
+                .and_then(|records| bytes.checked_add(records))
+        })
         .ok_or(InvestigationStoreError::Capacity)?;
     for table in [
         "investigation_events",
@@ -519,25 +633,23 @@ pub(super) fn check_task_capacity(
         "investigation_invocations",
         "investigation_responses",
         "investigation_results",
+        "investigation_coverage_archives",
     ] {
-        let sum:i64=connection.query_row(&format!("SELECT coalesce(sum(length(CAST(body AS BLOB))+length(CAST(body_hash AS BLOB))+256),0) FROM {table} WHERE task_id=?1"), [id], |r| r.get(0))?;
+        let sum: i64 = connection.query_row(
+            &format!("SELECT coalesce(sum(length(CAST(body AS BLOB))+length(CAST(body_hash AS BLOB))+256),0) FROM {table} WHERE (?1 IS NULL OR task_id=?1)"),
+            [id], |r| r.get(0),
+        )?;
         bytes = bytes
             .checked_add(usize::try_from(sum).map_err(|_| InvestigationStoreError::Invalid)?)
             .ok_or(InvestigationStoreError::Capacity)?;
     }
-    let refs:i64=connection.query_row("SELECT coalesce(sum(length(CAST(task_id AS BLOB))+length(CAST(source_id AS BLOB))+length(CAST(repo_key AS BLOB))+length(CAST(receipt_id AS BLOB))+128),0) FROM investigation_refs WHERE task_id=?1", [id], |r| r.get(0))?;
-    bytes = bytes
+    let refs: i64 = connection.query_row(
+        "SELECT coalesce(sum(length(CAST(task_id AS BLOB))+length(CAST(source_id AS BLOB))+length(CAST(repo_key AS BLOB))+length(CAST(receipt_id AS BLOB))+128),0) FROM investigation_refs WHERE (?1 IS NULL OR task_id=?1)",
+        [id], |r| r.get(0),
+    )?;
+    bytes
         .checked_add(usize::try_from(refs).map_err(|_| InvestigationStoreError::Invalid)?)
-        .ok_or(InvestigationStoreError::Capacity)?;
-    let maximum = if terminal {
-        TASK_CAPACITY
-    } else {
-        TASK_CAPACITY - TERMINAL_RESERVE
-    };
-    if bytes > maximum {
-        return Err(InvestigationStoreError::Capacity);
-    }
-    Ok(())
+        .ok_or(InvestigationStoreError::Capacity)
 }
 
 pub(super) fn event(
@@ -647,6 +759,36 @@ pub(super) fn load_ledger(
     )?
     .ok_or(InvestigationStoreError::Invalid)?;
     ledger.validate()?;
+    match (&task.detail.coverage_context, &ledger.coverage) {
+        (None, None) => {}
+        (Some(context), Some(proof))
+            if context.context_id == proof.context_id
+                && context.coverage == proof.qualification => {}
+        _ => return Err(InvestigationStoreError::Invalid),
+    }
+    if ledger.schema_version
+        != if task
+            .detail
+            .summary
+            .specialist_id
+            .uses_coverage_qualification()
+        {
+            2
+        } else {
+            1
+        }
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let archive = super::coverage::load(connection, &task.detail.summary.investigation_id)?;
+    match (&ledger.coverage, archive.as_ref()) {
+        (None, None) => {}
+        (Some(proof), Some(archive)) if proof == archive.proof() => {
+            archive.validate_reads(&ledger.coverage_reads)?;
+        }
+        _ => return Err(InvestigationStoreError::Invalid),
+    }
+
     if Some(ledger.fingerprint()?) != task.ledger_hash
         || ledger.revision != revision
         || Some(&ledger.graph_snapshot_id) != task.detail.summary.graph_snapshot_id.as_ref()
@@ -700,6 +842,10 @@ pub(super) fn load_result(
     }
     Ok(result)
 }
+
+#[cfg(test)]
+#[path = "qualified_storage_tests.rs"]
+mod qualified_storage_tests;
 
 pub(super) fn insert_body(
     connection: &Connection,

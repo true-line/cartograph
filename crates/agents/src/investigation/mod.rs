@@ -5,6 +5,8 @@
 //! store, filesystem, network dispatch or target-code mutation authority.
 
 mod admission;
+mod coverage;
+mod coverage_protocol;
 mod disclosure;
 mod input;
 mod inspection;
@@ -17,6 +19,8 @@ mod specialists;
 mod strict;
 mod turn;
 
+pub use coverage::*;
+pub use coverage_protocol::*;
 pub use disclosure::*;
 pub use input::*;
 pub use inspection::*;

@@ -15,6 +15,7 @@ fn request() -> StartInvestigationRequest {
         provider_mode: InvestigationProviderMode::Local,
         limit_profile: "investigation-v1".into(),
         expected_graph_revision: None,
+        expected_context_id: None,
         conversation_id: None,
         parent_id: None,
     }
@@ -48,7 +49,9 @@ fn ledger() -> InvestigationInputLedger {
     };
     let digest = format!("node-v1:{}", "a".repeat(64));
     InvestigationInputLedger {
+        coverage_reads: vec![],
         schema_version: 1,
+        coverage: None,
         graph_snapshot_id: format!("context-v1:{}", "b".repeat(64)),
         scope_snapshot_id: format!("context-v1:{}", "b".repeat(64)),
         revision: 1,
@@ -467,12 +470,19 @@ fn investigation_detail_roundtrip_closes_flattened_and_nested_unknown_fields() {
             unavailable_reason: None,
         },
         scope_snapshot_id: None,
+        coverage_context: None,
         limits: InvestigationLimits::default(),
         usage: InvestigationUsage::default(),
         citations: vec![],
         error: None,
     };
     let raw = serde_json::to_string(&detail).unwrap();
+    assert!(
+        serde_json::to_value(&detail)
+            .unwrap()
+            .get("coverage_context")
+            .is_none()
+    );
     assert_eq!(decode_record::<InvestigationDetail>(&raw).unwrap(), detail);
     let mut altered = serde_json::to_value(&detail).unwrap();
     altered["unknown"] = json!(true);

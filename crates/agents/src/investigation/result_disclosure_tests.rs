@@ -13,7 +13,9 @@ fn basis() -> (
     let digest = format!("node-v1:{}", "a".repeat(64));
     let snapshot = format!("context-v1:{}", "b".repeat(64));
     let ledger = InvestigationInputLedger {
+        coverage_reads: vec![],
         schema_version: 1,
+        coverage: None,
         graph_snapshot_id: snapshot.clone(),
         scope_snapshot_id: snapshot.clone(),
         revision: 1,
@@ -73,6 +75,8 @@ fn basis() -> (
         representation_hash: content_hash(b"representation"),
     };
     let disclosure = InvestigationDisclosure {
+        coverage_details: vec![],
+        coverage: None,
         inspection_requirements_hash: None,
         schema_version: 1,
         policy: COMPACT_DISCLOSURE_POLICY.into(),
@@ -229,3 +233,6 @@ fn disclosure_admission_retains_full_supplied_text_replay_guard() {
         Err(InvestigationError::SourceReplay)
     ));
 }
+
+#[path = "coverage_result_tests.rs"]
+mod coverage_result_tests;

@@ -14,10 +14,15 @@ pub struct InvestigationQueryBudget {
 }
 impl InvestigationQueryBudget {
     pub fn from_ledger(ledger: &InvestigationInputLedger) -> Result<Self, InvestigationError> {
-        let consumed = ledger.queries.iter().try_fold(0usize, |sum, query| {
-            sum.checked_add(query.response_bytes)
-                .ok_or(InvestigationError::LimitExceeded)
-        })?;
+        let consumed = ledger
+            .queries
+            .iter()
+            .map(|query| query.response_bytes)
+            .chain(ledger.coverage_reads.iter().map(|read| read.response_bytes))
+            .try_fold(0usize, |sum, bytes| {
+                sum.checked_add(bytes)
+                    .ok_or(InvestigationError::LimitExceeded)
+            })?;
         Self::from_consumed(consumed)
     }
     fn from_consumed(consumed_bytes: usize) -> Result<Self, InvestigationError> {
@@ -55,11 +60,18 @@ pub enum InvestigationTurnPhase {
     Initial,
     AfterQuery,
     AfterRead,
+    AfterCoverageRead,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InvestigationCompletedAction {
+    ReadCoverageInventory {
+        read_index: usize,
+        repo: String,
+        inventory_hash: String,
+        response_bytes: usize,
+    },
     QueryContext {
         query_index: usize,
         query: InvestigationQuery,
@@ -103,6 +115,7 @@ impl InvestigationTurnBasis {
         let Some(previous) = &self.previous_ledger else {
             return if current.revision == 0
                 && self.completed_tool.is_none()
+                && current.coverage_reads.is_empty()
                 && current.queries.is_empty()
                 && current.citations.is_empty()
                 && current.selected_facts.is_empty()
@@ -113,11 +126,14 @@ impl InvestigationTurnBasis {
             };
         };
         previous.validate()?;
-        if previous.revision.checked_add(1) != Some(current.revision)
+        if previous.schema_version != current.schema_version
+            || previous.coverage != current.coverage
+            || previous.revision.checked_add(1) != Some(current.revision)
             || previous.graph_snapshot_id != current.graph_snapshot_id
             || previous.scope_snapshot_id != current.scope_snapshot_id
             || previous.supplied_history_hash != current.supplied_history_hash
             || previous.supplied_history_bytes != current.supplied_history_bytes
+            || !current.coverage_reads.starts_with(&previous.coverage_reads)
             || !current.queries.starts_with(&previous.queries)
             || !current.citations.starts_with(&previous.citations)
             || !previous
@@ -134,16 +150,26 @@ impl InvestigationTurnBasis {
         let added = &current.citations[previous.citations.len()..];
         let valid = match self.completed_tool {
             Some(InvestigationTool::QueryContext) => {
-                current.queries.len() == previous.queries.len() + 1
+                current.coverage_reads == previous.coverage_reads
+                    && current.queries.len() == previous.queries.len() + 1
                     && added.iter().all(|citation| {
                         matches!(citation.origin, InvestigationEvidenceOrigin::GraphMetadata)
                     })
             }
             Some(InvestigationTool::ReadEvidence) => {
-                current.queries == previous.queries
+                current.coverage_reads == previous.coverage_reads
+                    && current.queries == previous.queries
                     && current.selected_facts == previous.selected_facts
                     && added.len() == 1
                     && !matches!(added[0].origin, InvestigationEvidenceOrigin::GraphMetadata)
+            }
+            Some(InvestigationTool::ReadCoverageInventory) => {
+                current.schema_version == 2
+                    && current.coverage_reads.len() == previous.coverage_reads.len() + 1
+                    && current.queries == previous.queries
+                    && current.selected_facts == previous.selected_facts
+                    && current.receipt_references == previous.receipt_references
+                    && current.citations == previous.citations
             }
             None => false,
         };
@@ -170,9 +196,30 @@ impl InvestigationTurnBasis {
                 InvestigationTurnPhase::AfterRead,
                 Some(self.read_result(current)?),
             ),
+            Some(InvestigationTool::ReadCoverageInventory) => {
+                let read_index = current
+                    .coverage_reads
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(InvestigationError::InvalidInput)?;
+                let read = &current.coverage_reads[read_index];
+                (
+                    InvestigationTurnPhase::AfterCoverageRead,
+                    Some(InvestigationCompletedAction::ReadCoverageInventory {
+                        read_index,
+                        repo: read.request.repo.clone(),
+                        inventory_hash: read.request.inventory_hash.clone(),
+                        response_bytes: read.response_bytes,
+                    }),
+                )
+            }
         };
         Ok(InvestigationTurnProgress {
-            contract: "investigation-turn-progress@1",
+            contract: if current.schema_version == 2 {
+                "investigation-turn-progress@2"
+            } else {
+                "investigation-turn-progress@1"
+            },
             input_revision: current.revision,
             phase,
             last_completed_action,

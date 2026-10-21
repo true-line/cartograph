@@ -98,6 +98,8 @@ pub struct StartInvestigationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_graph_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_context_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
@@ -114,9 +116,22 @@ impl StartInvestigationRequest {
     /// run after the durable deduplication lookup, not inside this method.
     pub fn validate(&self) -> Result<(), InvestigationError> {
         self.scope.validate()?;
+        let v6 = self.specialist_id.uses_coverage_qualification();
         let v5 = self.specialist_id.uses_inspection_requirements();
-        if (self.schema_version != if v5 { 2 } else { 1 })
-            || self.inspection_requirements.is_some() != v5
+        if (self.schema_version
+            != if v6 {
+                3
+            } else if v5 {
+                2
+            } else {
+                1
+            })
+            || (!v6 && self.inspection_requirements.is_some() != v5)
+            || (!v6 && self.expected_context_id.is_some())
+            || self.expected_context_id.as_deref().is_some_and(|id| {
+                !id.strip_prefix("context-v2:")
+                    .is_some_and(crate::source_basis::hash)
+            })
             || !text(&self.question, MAX_QUESTION_BYTES)
             || !opaque_id(&self.request_nonce)
             || self.limit_profile != "investigation-v1"
@@ -156,6 +171,12 @@ impl StartInvestigationRequest {
     }
     pub fn intent_hash(&self) -> Result<String, InvestigationError> {
         self.validate()?;
+        if self.schema_version == 3 {
+            return Ok(crate::source_basis::domain_hash(
+                b"cartograph:investigation-client-intent:v3\0",
+                &bounded_bytes(&self.normalized()?, 8 * 1024)?,
+            ));
+        }
         if self.schema_version == 2 {
             return Ok(crate::source_basis::domain_hash(
                 b"cartograph:investigation-client-intent:v2\0",
@@ -256,6 +277,9 @@ pub struct InvestigationDetail {
     pub specialist: InvestigationSpecialist,
     pub provider: InvestigationProvider,
     pub scope_snapshot_id: Option<String>,
+    /// Saved public qualification only; never the host's private proof basis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_context: Option<InvestigationCoverageContext>,
     pub limits: InvestigationLimits,
     pub usage: InvestigationUsage,
     pub citations: Vec<InvestigationCitation>,
@@ -264,6 +288,13 @@ pub struct InvestigationDetail {
     pub inspection_requirements: Option<Vec<InvestigationInspectionTarget>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspection_assessment: Option<InvestigationInspectionAssessment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvestigationCoverageContext {
+    pub context_id: String,
+    pub coverage: context_hub::coverage::CoverageQualification,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,6 +360,9 @@ pub struct InvestigationEventPage {
 #[serde(deny_unknown_fields)]
 pub struct InvestigationResult {
     pub schema_version: u32,
+    /// Exact mandatory qualification representation of the finishing invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<DisclosedInvestigationCoverage>,
     pub investigation_id: String,
     pub result_id: String,
     pub input_ledger_hash: String,
@@ -425,6 +459,11 @@ pub struct InvestigationQueryManifest {
 #[serde(deny_unknown_fields)]
 pub struct InvestigationInputLedger {
     pub schema_version: u32,
+    /// Historical preparation-time coverage, mandatory only for ledger v2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<context_hub::coverage::CoverageProof>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage_reads: Vec<InvestigationCoverageReadManifest>,
     pub graph_snapshot_id: String,
     pub scope_snapshot_id: String,
     pub revision: u64,
@@ -448,7 +487,11 @@ impl InvestigationInputLedger {
     pub fn fingerprint(&self) -> Result<String, InvestigationError> {
         self.validate()?;
         Ok(crate::source_basis::domain_hash(
-            b"cartograph:investigation-input-ledger:v1\0",
+            if self.schema_version == 2 {
+                b"cartograph:investigation-input-ledger:v2\0"
+            } else {
+                b"cartograph:investigation-input-ledger:v1\0"
+            },
             &bounded_bytes(self, MAX_MANIFEST_BYTES)?,
         ))
     }

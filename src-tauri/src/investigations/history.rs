@@ -290,7 +290,9 @@ mod tests {
             },
         };
         let ledger = InvestigationInputLedger {
+            coverage_reads: vec![],
             schema_version: 1,
+            coverage: None,
             graph_snapshot_id: snapshot.id().into(),
             scope_snapshot_id: snapshot.id().into(),
             revision: 2,

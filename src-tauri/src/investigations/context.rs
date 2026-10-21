@@ -2,9 +2,14 @@ use super::{AcquisitionSink, HostError, evidence::EvidenceGuards};
 use crate::AppState;
 use agents::investigation::*;
 use agents::{AgentEvidence, TaskFactKey, TaskFactSelection, TaskRangeRole, TaskSourceAssociation};
+use context_hub::coverage::{
+    CoverageContext, CoverageQualification, CoverageStatus, QualifiedRequest, QualifiedResponse,
+    ScopedRepo,
+};
 use context_hub::{
     ContextSnapshot, FactKind, FactReference, QueryCursor, QueryRequest, QueryScope,
 };
+use core_graph::coverage::CoverageReadLimits;
 use core_graph::source::{FactKey, FactSourceSelection, FactSourceState};
 use core_graph::{Edge, Node, SnapshotReadLimits};
 use core_prov::content_hash;
@@ -19,12 +24,31 @@ pub(super) struct FrozenContext {
     pub(super) ledger: InvestigationInputLedger,
     pub(super) query_pages: Vec<String>,
     pub(super) evidence: Vec<AgentEvidence>,
+    pub(super) coverage_archive: Option<InvestigationCoverageArchive>,
+    pub(super) inventory_details: Vec<String>,
+    qualified: Option<CoverageContext>,
 }
 
 #[derive(Serialize)]
 struct InvestigationQueryPage {
-    context: context_hub::QueryResponse,
+    context: InvestigationPageContext,
     evidence_options: Vec<EvidenceOptions>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum InvestigationPageContext {
+    Legacy(context_hub::QueryResponse),
+    Qualified(QualifiedResponse<context_hub::QueryResponse>),
+}
+
+impl InvestigationPageContext {
+    fn page(&self) -> &context_hub::QueryResponse {
+        match self {
+            Self::Legacy(page) => page,
+            Self::Qualified(page) => &page.response,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -41,6 +65,61 @@ pub(super) struct EvidenceOption {
     pub source: core_prov::EvidenceRef,
 }
 
+// Fixed JSON keys/punctuation outside proof and inventory entries. Proof must
+// independently fit the existing manifest cap. Raw stored fields do not include
+// JSON escaping or per-entry keys: their encoded expansion is checked below.
+const ARCHIVE_ENVELOPE_BYTES: usize =
+    b"{\"schema_version\":1,\"proof\":null,\"inventories\":[]}".len() - b"null".len();
+
+fn coverage_preparation_limits(archive_capacity: usize) -> Result<CoverageReadLimits, HostError> {
+    let max_bytes = archive_capacity
+        .min(MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES)
+        .checked_sub(MAX_MANIFEST_BYTES + ARCHIVE_ENVELOPE_BYTES)
+        .filter(|bytes| *bytes != 0)
+        .ok_or(HostError::LimitExceeded)?;
+    Ok(CoverageReadLimits {
+        max_records: CoverageReadLimits::MAX_RECORDS,
+        max_bytes: max_bytes.min(CoverageReadLimits::MAX_BYTES),
+    })
+}
+
+/// Match the immutable archive wire without constructing an owned serialized
+/// body. This runs before Archive::new's larger format-level validation buffer.
+fn admit_archive_size(
+    proof: &context_hub::coverage::CoverageProof,
+    inventories: &[core_graph::coverage::StoredCoverage],
+    maximum: usize,
+) -> Result<(), HostError> {
+    #[derive(Serialize)]
+    struct Archive<'a> {
+        schema_version: u32,
+        proof: &'a context_hub::coverage::CoverageProof,
+        inventories: &'a [core_graph::coverage::StoredCoverage],
+    }
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_sub(bytes.len())
+                .ok_or_else(|| std::io::Error::other("investigation archive byte limit"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(
+        Count(maximum.min(MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES)),
+        &Archive {
+            schema_version: 1,
+            proof,
+            inventories,
+        },
+    )
+    .map_err(|_| HostError::LimitExceeded)
+}
+
 impl FrozenContext {
     pub(super) fn prepare(
         state: &AppState,
@@ -48,12 +127,103 @@ impl FrozenContext {
         history: &[String],
     ) -> Result<Self, HostError> {
         request.validate()?;
+        if request.specialist_id.uses_coverage_qualification() {
+            return Err(HostError::InvalidInput);
+        }
         let graph = state
             .graph
             .lock()
             .map_err(|_| HostError::Operational)?
             .read_snapshot_bounded(SnapshotReadLimits::default())
             .map_err(graph_error)?;
+        Self::from_graph(graph, request, history)
+    }
+
+    /// The app-backed path brackets registration/plugin discovery around one
+    /// bounded graph+inventory read. Legacy preparation keeps its old path.
+    pub(super) fn prepare_with_app<R: tauri::Runtime>(
+        app: &tauri::AppHandle<R>,
+        state: &AppState,
+        request: &StartInvestigationRequest,
+        history: &[String],
+        archive_capacity: Option<usize>,
+    ) -> Result<Self, HostError> {
+        if !request.specialist_id.uses_coverage_qualification() {
+            return Self::prepare(state, request, history);
+        }
+        let archive_capacity = archive_capacity.ok_or(HostError::InvalidInput)?;
+        Self::prepare_qualified_with_scope(state, request, history, archive_capacity, || {
+            crate::context::coverage_scope(app, state).map_err(|_| HostError::Operational)
+        })
+    }
+
+    fn prepare_qualified_with_scope(
+        state: &AppState,
+        request: &StartInvestigationRequest,
+        history: &[String],
+        archive_capacity: usize,
+        mut scope: impl FnMut() -> Result<Vec<ScopedRepo>, HostError>,
+    ) -> Result<Self, HostError> {
+        request.validate()?;
+        if !request.specialist_id.uses_coverage_qualification() {
+            return Err(HostError::InvalidInput);
+        }
+        let coverage_limits = coverage_preparation_limits(archive_capacity)?;
+        let before = scope()?;
+        let (graph, recorded) = state
+            .graph
+            .lock()
+            .map_err(|_| HostError::Operational)?
+            .read_snapshot_with_coverage_bounded(SnapshotReadLimits::default(), coverage_limits)
+            .map_err(graph_error)?;
+        let stable = crate::context::stable_scope(&before, scope()?);
+        let qualification =
+            CoverageQualification::new(&stable, &recorded).map_err(context_error)?;
+        let mut prepared = Self::from_graph(graph, request, history)?;
+        // ContextSnapshot is an owned projection; keep its existing field for
+        // source acquisitions and construct the qualified view from the same
+        // frozen raw graph, never from a second database read.
+        let complete = ContextSnapshot::new(prepared.graph.0.clone(), prepared.graph.1.clone())
+            .map_err(|_| HostError::InvalidInput)?;
+        let qualified_snapshot = Self::scoped_snapshot(&prepared.graph, &request.scope, complete)?;
+        let qualified = qualified_snapshot
+            .with_coverage(qualification)
+            .map_err(context_error)?;
+        let proof = qualified.durable_proof().map_err(context_error)?;
+        bounded_json(&proof, MAX_MANIFEST_BYTES)?;
+        if request
+            .expected_context_id
+            .as_ref()
+            .is_some_and(|expected| expected != &proof.context_id)
+        {
+            return Err(HostError::InputChanged);
+        }
+        let recorded_repos: BTreeSet<_> = proof
+            .qualification
+            .repos
+            .iter()
+            .filter(|repo| repo.status == CoverageStatus::Recorded)
+            .map(|repo| repo.repo.as_str())
+            .collect();
+        let originals: Vec<_> = recorded
+            .into_iter()
+            .filter(|stored| recorded_repos.contains(stored.record.repo_key.as_str()))
+            .collect();
+        admit_archive_size(&proof, &originals, archive_capacity)?;
+        let archive = InvestigationCoverageArchive::new(proof.clone(), originals)?;
+        prepared.ledger.schema_version = 2;
+        prepared.ledger.coverage = Some(proof);
+        prepared.ledger.validate()?;
+        prepared.coverage_archive = Some(archive);
+        prepared.qualified = Some(qualified);
+        Ok(prepared)
+    }
+
+    fn from_graph(
+        graph: (Vec<Node>, Vec<Edge>),
+        request: &StartInvestigationRequest,
+        history: &[String],
+    ) -> Result<Self, HostError> {
         let complete = ContextSnapshot::new(graph.0.clone(), graph.1.clone())
             .map_err(|_| HostError::InvalidInput)?;
         let graph_id = complete.id().to_owned();
@@ -64,7 +234,46 @@ impl FrozenContext {
         {
             return Err(HostError::InputChanged);
         }
-        let snapshot = match &request.scope {
+        let snapshot = Self::scoped_snapshot(&graph, &request.scope, complete)?;
+        let history_bytes = if history.is_empty() {
+            Vec::new()
+        } else {
+            bounded_json(history, 16 * 1024)?
+        };
+        let ledger = InvestigationInputLedger {
+            schema_version: 1,
+            coverage: None,
+            coverage_reads: vec![],
+            graph_snapshot_id: graph_id,
+            scope_snapshot_id: snapshot.id().into(),
+            revision: 0,
+            selected_facts: vec![],
+            receipt_references: vec![],
+            citations: vec![],
+            queries: vec![],
+            supplied_history_hash: (!history_bytes.is_empty())
+                .then(|| content_hash(&history_bytes)),
+            supplied_history_bytes: history_bytes.len(),
+        };
+        ledger.validate()?;
+        Ok(Self {
+            graph,
+            snapshot,
+            ledger,
+            query_pages: vec![],
+            evidence: vec![],
+            coverage_archive: None,
+            inventory_details: vec![],
+            qualified: None,
+        })
+    }
+
+    fn scoped_snapshot(
+        graph: &(Vec<Node>, Vec<Edge>),
+        requested: &InvestigationScope,
+        complete: ContextSnapshot,
+    ) -> Result<ContextSnapshot, HostError> {
+        Ok(match requested {
             InvestigationScope::All => complete,
             InvestigationScope::Neighborhood { .. } => {
                 // Reuse the service's actual scope selection rather than a
@@ -74,7 +283,7 @@ impl FrozenContext {
                 loop {
                     let page = complete
                         .query(QueryRequest {
-                            scope: scope(&request.scope),
+                            scope: scope(requested),
                             kind: None,
                             labels: vec![],
                             max_facts: context_hub::MAX_FACTS,
@@ -108,32 +317,6 @@ impl FrozenContext {
                     .collect();
                 ContextSnapshot::new(nodes, edges).map_err(|_| HostError::InvalidInput)?
             }
-        };
-        let history_bytes = if history.is_empty() {
-            Vec::new()
-        } else {
-            bounded_json(history, 16 * 1024)?
-        };
-        let ledger = InvestigationInputLedger {
-            schema_version: 1,
-            graph_snapshot_id: graph_id,
-            scope_snapshot_id: snapshot.id().into(),
-            revision: 0,
-            selected_facts: vec![],
-            receipt_references: vec![],
-            citations: vec![],
-            queries: vec![],
-            supplied_history_hash: (!history_bytes.is_empty())
-                .then(|| content_hash(&history_bytes)),
-            supplied_history_bytes: history_bytes.len(),
-        };
-        ledger.validate()?;
-        Ok(Self {
-            graph,
-            snapshot,
-            ledger,
-            query_pages: vec![],
-            evidence: vec![],
         })
     }
 
@@ -144,24 +327,49 @@ impl FrozenContext {
         sink: &mut impl AcquisitionSink,
     ) -> Result<(), HostError> {
         query.validate()?;
+        self.ledger.validate()?;
+        match (
+            &self.qualified,
+            &self.ledger.coverage,
+            &self.coverage_archive,
+        ) {
+            (None, None, None) => {}
+            (Some(qualified), Some(proof), Some(archive))
+                if qualified.context_id() == proof.context_id
+                    && qualified.coverage_id() == proof.qualification.coverage_id
+                    && qualified.snapshot_id() == self.snapshot.id()
+                    && proof == archive.proof() => {}
+            _ => return Err(HostError::InvalidInput),
+        }
         let query_page = |max_facts| {
-            self.snapshot
-                .query(QueryRequest {
-                    scope: scope(&query.scope),
-                    kind: query.kind.map(|k| match k {
-                        InvestigationFactKind::Node => FactKind::Node,
-                        InvestigationFactKind::Edge => FactKind::Edge,
-                    }),
-                    labels: query.labels.clone(),
-                    max_facts,
-                    max_bytes: query.max_bytes,
-                    cursor: query.cursor.as_ref().map(|c| QueryCursor {
-                        snapshot_id: c.snapshot_id.clone(),
-                        selection_id: c.selection_id.clone(),
-                        offset: c.offset,
-                    }),
-                })
-                .map_err(context_error)
+            let request = QueryRequest {
+                scope: scope(&query.scope),
+                kind: query.kind.map(|k| match k {
+                    InvestigationFactKind::Node => FactKind::Node,
+                    InvestigationFactKind::Edge => FactKind::Edge,
+                }),
+                labels: query.labels.clone(),
+                max_facts,
+                max_bytes: query.max_bytes,
+                cursor: query.cursor.as_ref().map(|c| QueryCursor {
+                    snapshot_id: c.snapshot_id.clone(),
+                    selection_id: c.selection_id.clone(),
+                    offset: c.offset,
+                }),
+            };
+            match &self.qualified {
+                Some(qualified) => qualified
+                    .query(QualifiedRequest {
+                        request,
+                        context_id: Some(qualified.context_id().to_owned()),
+                    })
+                    .map(InvestigationPageContext::Qualified),
+                None => self
+                    .snapshot
+                    .query(request)
+                    .map(InvestigationPageContext::Legacy),
+            }
+            .map_err(context_error)
         };
         let prior_keys = self
             .ledger
@@ -171,7 +379,12 @@ impl FrozenContext {
             .collect::<BTreeSet<_>>();
         let page = query_page(query.max_facts)?;
         let mut keys = prior_keys.clone();
-        keys.extend(page.facts.iter().map(|f| graph_reference(&f.reference)));
+        keys.extend(
+            page.page()
+                .facts
+                .iter()
+                .map(|f| graph_reference(&f.reference)),
+        );
         if keys.len() > MAX_SELECTED_FACTS {
             return Err(HostError::LimitExceeded);
         }
@@ -183,7 +396,7 @@ impl FrozenContext {
             return Err(HostError::InputChanged);
         }
         let mut options = Vec::new();
-        for fact in &page.facts {
+        for fact in &page.page().facts {
             let selected = authoritative
                 .get(&graph_reference(&fact.reference))
                 .ok_or(HostError::InvalidInput)?;
@@ -196,14 +409,14 @@ impl FrozenContext {
         let raw = loop {
             match bounded_json(&response, query.max_bytes) {
                 Ok(raw) => break raw,
-                Err(HostError::LimitExceeded) if response.context.facts.len() > 1 => {
+                Err(HostError::LimitExceeded) if response.context.page().facts.len() > 1 => {
                     // The core page budget excludes this host's evidence inventory.
                     // Shrink only the ordered suffix and let the frozen service
                     // produce the exact continuation; never skip a large fact.
-                    response.context = query_page(response.context.facts.len() - 1)?;
+                    response.context = query_page(response.context.page().facts.len() - 1)?;
                     response
                         .evidence_options
-                        .truncate(response.context.facts.len());
+                        .truncate(response.context.page().facts.len());
                 }
                 Err(error) => return Err(error),
             }
@@ -212,6 +425,7 @@ impl FrozenContext {
         returned_keys.extend(
             response
                 .context
+                .page()
                 .facts
                 .iter()
                 .map(|f| graph_reference(&f.reference)),
@@ -240,7 +454,7 @@ impl FrozenContext {
                     })
             })
             .collect();
-        for fact in &response.context.facts {
+        for fact in &response.context.page().facts {
             let key = graph_reference(&fact.reference);
             let selected = authoritative.get(&key).ok_or(HostError::InvalidInput)?;
             if !ledger.citations.iter().any(|c| {
@@ -270,9 +484,9 @@ impl FrozenContext {
             query,
             response_hash: content_hash(&raw),
             response_bytes: raw.len(),
-            returned_facts: response.context.facts.len(),
-            total_selected: response.context.total_selected,
-            has_more: response.context.next_cursor.is_some(),
+            returned_facts: response.context.page().facts.len(),
+            total_selected: response.context.page().total_selected,
+            has_more: response.context.page().next_cursor.is_some(),
         });
         ledger.validate()?;
         let mut usage = sink.usage().clone();
@@ -282,6 +496,54 @@ impl FrozenContext {
         self.ledger = ledger;
         self.query_pages
             .push(String::from_utf8(raw).map_err(|_| HostError::InvalidInput)?);
+        Ok(())
+    }
+
+    /// Acquire exact original inventory detail without consulting graph or
+    /// source storage. Its response is untrusted coverage data, never a citation.
+    pub(super) fn read_inventory(
+        &mut self,
+        request: InvestigationCoverageRead,
+        sink: &mut impl AcquisitionSink,
+    ) -> Result<(), HostError> {
+        self.ledger.validate()?;
+        let archive = self
+            .coverage_archive
+            .as_ref()
+            .ok_or(HostError::InvalidInput)?;
+        let proof = self
+            .ledger
+            .coverage
+            .as_ref()
+            .ok_or(HostError::InvalidInput)?;
+        if proof != archive.proof()
+            || self
+                .qualified
+                .as_ref()
+                .is_none_or(|qualified| qualified.context_id() != proof.context_id)
+        {
+            return Err(HostError::InvalidInput);
+        }
+        let detail = archive.read(&request)?;
+        let raw = bounded_json(&detail, request.max_bytes)?;
+        InvestigationQueryBudget::from_ledger(&self.ledger)?.admit(raw.len())?;
+        let mut ledger = self.ledger.clone();
+        ledger.revision = ledger
+            .revision
+            .checked_add(1)
+            .ok_or(HostError::LimitExceeded)?;
+        ledger
+            .coverage_reads
+            .push(InvestigationCoverageReadManifest {
+                request,
+                response_hash: content_hash(&raw),
+                response_bytes: raw.len(),
+            });
+        ledger.validate()?;
+        let raw = String::from_utf8(raw).map_err(|_| HostError::InvalidInput)?;
+        sink.publish_input(&ledger, sink.usage().clone())?;
+        self.ledger = ledger;
+        self.inventory_details.push(raw);
         Ok(())
     }
 
@@ -417,3 +679,7 @@ pub(super) fn bounded_json(
     serde_json::to_writer(&mut writer, value).map_err(|_| HostError::LimitExceeded)?;
     Ok(writer.bytes)
 }
+
+#[cfg(test)]
+#[path = "context_coverage_tests.rs"]
+mod coverage_tests;

@@ -32,6 +32,8 @@ fn supplied(text: &[u8]) -> DisclosureRepresentation {
 
 fn manifest(basis: &InvestigationInputLedger) -> InvestigationDisclosure {
     InvestigationDisclosure {
+        coverage_details: vec![],
+        coverage: None,
         inspection_requirements_hash: None,
         schema_version: 1,
         policy: COMPACT_DISCLOSURE_POLICY.into(),

@@ -6,6 +6,11 @@ use agents::investigation::*;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
+#[path = "investigations/coverage.rs"]
+mod coverage;
+#[cfg(test)]
+#[path = "investigations/coverage_tests.rs"]
+mod coverage_tests;
 #[path = "investigations/reads.rs"]
 mod reads;
 #[path = "investigations/storage.rs"]
@@ -114,6 +119,7 @@ pub(crate) struct InvestigationResponseMeta {
 
 pub(crate) enum InvestigationTransition {
     InputPrepared {
+        coverage_archive: Option<Box<InvestigationCoverageArchive>>,
         ledger: Box<InvestigationInputLedger>,
         usage: InvestigationUsage,
     },
@@ -378,6 +384,7 @@ impl JobStore {
                 specialist: request.specialist_id.definition()?,
                 provider: provider.clone(),
                 scope_snapshot_id: None,
+                coverage_context: None,
                 limits: InvestigationLimits::default(),
                 usage: InvestigationUsage::default(),
                 citations: Vec::new(),

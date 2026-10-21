@@ -6,6 +6,7 @@ import { InvestigationActivity } from './InvestigationActivity';
 import { InvestigationFindings } from './InvestigationFindings';
 import { EgressConsentDialog } from './EgressConsentDialog';
 import { InspectionAssessment } from './InspectionAssessment';
+import { InvestigationCoverage } from './InvestigationCoverage';
 
 export const INVESTIGATION_STATUS: Record<InvestigationStatus, string> = {
   queued: 'Queued', preparing: 'Preparing context', running: 'Running', awaiting_consent: 'Awaiting cloud consent',
@@ -36,16 +37,18 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
   const locked = state.starting || state.pendingStart !== null;
   const requirements = state.draftInspectionRequirements;
   const inspectionVersion = specialistId.endsWith('@5');
+  const coverageVersion = specialistId.endsWith('@6');
+  const supportsRequirements = inspectionVersion || coverageVersion;
   const scope: InvestigationScope = scopeType === 'all' ? { type: 'all' } : { type: 'neighborhood', anchor, hops };
-  const requestBytes = new TextEncoder().encode(JSON.stringify({ schema_version: inspectionVersion ? 2 : 1,
+  const requestBytes = new TextEncoder().encode(JSON.stringify({ schema_version: coverageVersion ? 3 : inspectionVersion ? 2 : 1,
     request_nonce: '0'.repeat(36), specialist_id: specialistId, question, scope, provider_mode: providerMode,
     limit_profile: state.catalog?.limits.profile ?? 'investigation-v1', ...parent,
-    ...(inspectionVersion && requirements.length ? { inspection_requirements: requirements,
+    ...(supportsRequirements && requirements.length ? { inspection_requirements: requirements,
       expected_graph_revision: requirements[0].graph_snapshot_id } : {}) })).length;
   const startEnabled = canStart && !locked && Boolean(provider?.available) &&
     Boolean(state.catalog?.specialists.some((item) => item.id === specialistId)) && question.trim().length > 0 &&
     questionBytes <= 2048 && (scopeType === 'all' || anchor.trim().length > 0) &&
-    (inspectionVersion ? requirements.length > 0 : requirements.length === 0) && requestBytes <= 8192;
+    (inspectionVersion ? requirements.length > 0 : coverageVersion || requirements.length === 0) && requestBytes <= 8192;
   const refresh = () => { void state.loadCatalog(); void state.loadHistory(); };
 
   return <section className="investigations-surface" aria-label="Investigations">
@@ -57,7 +60,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
       event.preventDefault();
       if (startEnabled && state.catalog) void state.start({ specialist_id: specialistId, question,
         scope, provider_mode: providerMode, limit_profile: state.catalog.limits.profile, ...parent,
-        ...(inspectionVersion ? { inspection_requirements: requirements } : {}) });
+        ...(supportsRequirements && requirements.length ? { inspection_requirements: requirements } : {}) });
     }}>
       <fieldset disabled={locked}><legend>Specialist</legend>
         <div className="investigation-specialists">{state.catalog?.specialists.map((specialist) =>
@@ -86,9 +89,10 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
               <p>Target <code>{target.target_id}</code> · digest <code>{target.fact_digest}</code></p>
             </details>
           </li>)}</ul>
-          {!inspectionVersion && <p role="status">Select an explicit V5 specialist to use these source requirements, or remove them to use the selected specialist.</p>}
+          {!supportsRequirements && <p role="status">Select an explicit V5 or V6 specialist to use these source requirements, or remove them to use the selected specialist.</p>}
         </>}
         {inspectionVersion && requirements.length === 0 && <p role="status">V5 requires at least one explicitly selected captured source.</p>}
+        {coverageVersion && <p className="muted">V6 includes saved ingest coverage. Source inspection requirements are optional and stay separate.</p>}
         {state.inspectionDraftError && <p role="alert" className="error-text">{state.inspectionDraftError}</p>}
       </fieldset>
       <div className="investigation-form-row">
@@ -137,6 +141,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
           <button type="button" className={`investigation-history-item${item.investigation_id === state.selectedId ? ' selected' : ''}`}
             aria-pressed={item.investigation_id === state.selectedId} onClick={() => void state.open(item.investigation_id)}>
             <strong>{item.question}</strong><span>{item.specialist_id}</span><span>{INVESTIGATION_STATUS[item.status]}</span>
+            {item.schema_version === 3 && <span>Coverage-qualified · saved basis shown on open</span>}
             <span>Source inspections: {item.inspection_status === 'pending' ? 'Awaiting assessment' : item.inspection_status === 'supplied'
               ? 'Required sources available' : item.inspection_status === 'unmet' ? 'Required sources missing' : 'Not assessed'}
               {item.inspection_requirement_count !== undefined && ` · ${item.inspection_requirement_count} required`}</span>
@@ -175,6 +180,8 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
           {state.error && <p className="error-text" role="alert">{state.error}</p>}
           {state.actionError && <p className="error-text" role="alert">{state.actionError}</p>}
           {state.detail && <>
+            {state.detail.schema_version === 3 && <InvestigationCoverage context={state.detail.coverage_context}
+              attestation={state.result?.coverage} />}
             <InspectionAssessment requirements={state.detail.inspection_requirements ?? []}
               awaitingAssessment={!['completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(state.detail.status) || state.detail.invocation_pending}
               assessment={state.detail.inspection_assessment} location={state.inspectionLocation}

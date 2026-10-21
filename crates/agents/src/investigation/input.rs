@@ -73,7 +73,15 @@ impl InvestigationInput {
         usage: &InvestigationUsage,
     ) -> Result<Self, InvestigationError> {
         ledger.validate()?;
-        if !text(question, MAX_QUESTION_BYTES)
+        // Qualified ledgers require their own preparation path; legacy prompts
+        // must never silently discard mandatory coverage.
+        if ledger.schema_version
+            != if specialist.uses_coverage_qualification() {
+                2
+            } else {
+                1
+            }
+            || !text(question, MAX_QUESTION_BYTES)
             || query_pages.len() != ledger.queries.len()
             || evidence.len() > 12
             || supplied_history.len() > 12
@@ -228,6 +236,29 @@ impl InvestigationInput {
                 "coverage": "This is a bounded recovered-context investigation. Captured source attests only its primary source; full producer input closure is not established. Unknown evidence is not proof of absence. All generated findings remain T3/InferredWeak."
             })
         };
+        let mut prompt_value = prompt_value;
+        if specialist.uses_coverage_qualification() {
+            let proof = ledger
+                .coverage
+                .as_ref()
+                .ok_or(InvestigationError::InvalidInput)?;
+            // Admission validates the proof and its exact scoped snapshot. Only
+            // the public block is supplied, never the recorded host-only basis.
+            prompt_value["coverage_qualification"] = serde_json::to_value(&proof.qualification)
+                .map_err(|_| InvestigationError::InvalidInput)?;
+            prompt_value["context_id"] = proof.context_id.clone().into();
+            collect_strings(&prompt_value["coverage_qualification"], &mut graph_strings);
+            if graph_strings.len() + supplied_strings.len() > 16384
+                || graph_strings
+                    .iter()
+                    .chain(&supplied_strings)
+                    .map(String::len)
+                    .sum::<usize>()
+                    > MAX_INPUT_BYTES
+            {
+                return Err(InvestigationError::LimitExceeded);
+            }
+        }
         let prompt = String::from_utf8(bounded_bytes(&prompt_value, MAX_INPUT_BYTES)?)
             .map_err(|_| InvestigationError::InvalidInput)?;
         let payload = CompletionPayload {
@@ -449,3 +480,6 @@ fn collect_strings(value: &Value, out: &mut Vec<String>) {
 
 #[path = "input_versions.rs"]
 mod versions;
+
+#[path = "input_coverage_details.rs"]
+mod coverage_details;

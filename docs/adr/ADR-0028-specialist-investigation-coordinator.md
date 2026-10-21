@@ -87,6 +87,28 @@ and RAM-only inputs constrain restart to explicit interruption/reconciliation.
 H4 cross-ingress acceptance still requires real MCP; H3 activation, H5 ACP/delegation,
 H6 metrics and the market pilot remain separate obligations.
 
+## Coverage retention extension (#588, AC-0239)
+
+Qualified @6 investigations preserve an immutable task-keyed coverage archive
+in the investigation store. This retains original inventory JSON, not raw prompts
+or captured source excerpts. Its host-only proof uses the shared coverage identity
+algorithm; the model sees only the exact public qualification and explicitly
+acquired details. Registration truth remains a preparation-time host comparison.
+
+Migration recognizes the exact legacy schema and metadata before adding a
+separately versioned coverage extension in the same transaction. Existing tables,
+record bytes and namespace are unchanged. Partial, foreign or future layouts fail
+closed. Immutable archive insertion and first-ledger admission share the caller's
+transaction; later input revisions and history reads require the same proof.
+Archive storage counts against the existing 2 MiB task cap, terminal reserve and
+256 MiB store cap. The 16 MiB format limit does not raise those effective limits.
+
+This makes retained inventory detail independent of later ingest replacement or
+graph clearing. It also adds retained source-derived metadata and migration code,
+which require owner review before merge. It does not authorize automatic provider
+replay after restart. A valid record proves historical internal consistency,
+not current freshness, complete extractor coverage or interpretation correctness.
+
 ## Alternatives
 
 1. Reuse edge proposals with synthetic Gap/target records: misrepresents questions

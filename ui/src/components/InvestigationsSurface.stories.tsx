@@ -3,8 +3,9 @@ import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { InvestigationsSurface } from './InvestigationsSurface';
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
-import { inspectionAssessment, inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from '../investigationFixtures';
-import type { InvestigationDetail } from '../investigationTypes';
+import backendQualified from '../fixtures/investigation-coverage-backend.json';
+import { qualifiedCatalog, qualifiedDetail, qualifiedResult, inspectionAssessment, inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from '../investigationFixtures';
+import type { InvestigationDetail, InvestigationResult } from '../investigationTypes';
 
 const state = (overrides: Partial<InvestigationState> = {}): InvestigationState => ({
   ...useInvestigationStore.getInitialState(), catalog: investigationCatalog, history: [investigationDetail()],
@@ -322,5 +323,70 @@ export const TerminalInspectionWithoutResultIsNotAssessed: Story = {
     await expect(canvas.getByText('Source inspections: Assessment unavailable')).toBeVisible();
     await expect(canvas.queryByText(/Requirement met:/)).not.toBeInTheDocument();
     await expect(canvas.queryByText(/Requirement unmet:/)).not.toBeInTheDocument();
+  },
+};
+
+export const CoverageOnlyV6RequiresExplicitSelection: Story = {
+  // AC-0239: adding V6 leaves the app default and legacy request shape unchanged.
+  args: { state: state({ catalog: qualifiedCatalog }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
+    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@6/ }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'What do the recorded limits establish?');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith({ specialist_id: 'domain-analyst@6',
+      question: 'What do the recorded limits establish?', scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1' });
+  },
+};
+
+export const V6TargetsStayExplicitAndIndependent: Story = {
+  args: { state: state({ catalog: qualifiedCatalog, draftInspectionRequirements: [inspectionTarget],
+    selectedId: 'inv-qualified', detail: qualifiedDetail('inv-qualified', {
+      inspection_requirements: [inspectionTarget], inspection_requirement_count: 1, inspection_status: 'unmet',
+      inspection_assessment: { ...inspectionAssessment(), disclosure_hash: qualifiedResult().disclosure_hash! } }),
+    result: qualifiedResult('inv-qualified', { inspection_assessment: { ...inspectionAssessment(), disclosure_hash: qualifiedResult().disclosure_hash! } }) }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('radio', { name: /evidence-auditor@6/ }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Inspect this captured source and its ingest limits.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'evidence-auditor@6',
+      inspection_requirements: [inspectionTarget] }));
+    await expect(canvas.getByText(/saved coverage qualification was available/)).toBeVisible();
+    await expect(canvas.getByText(/Requirement unmet:/)).toBeVisible();
+    await expect(canvas.getByText('A local stock guard is present')).toBeVisible();
+  },
+};
+
+export const SavedV6HistoryUsesOriginalQualification: Story = {
+  args: { state: state({ selectedId: 'inv-qualified', detail: qualifiedDetail(), result: qualifiedResult(),
+    history: [qualifiedDetail()] }) },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Coverage-qualified · saved basis shown on open')).toBeVisible();
+    await expect(canvas.getByRole('region', { name: 'Saved investigation coverage' })).toBeVisible();
+    await expect(canvas.getByText('Stale at preparation', { exact: false })).toBeVisible();
+    await expect(canvas.getByText('Unrecorded at preparation', { exact: false })).toBeVisible();
+    await expect(canvas.getByText('Coverage is not exhaustive.')).toBeVisible();
+    await expect(within(canvas.getByRole('region', { name: 'Source inspection obligations' }))
+      .getByText('Source inspections: Not assessed')).toBeVisible();
+  },
+};
+
+export const ActualSavedV6BackendFixture: Story = {
+  // AC-0239: actual Rust worker/firewall/store DTO, no live provider assertion.
+  args: { state: state({ selectedId: backendQualified.detail.investigation_id,
+    detail: backendQualified.detail as InvestigationDetail, result: backendQualified.result as InvestigationResult,
+    history: [backendQualified.detail as InvestigationDetail] }) },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('status')).toHaveTextContent('Execution completed');
+    await expect(canvas.getByText('Insufficient evidence to support an answer.')).toBeVisible();
+    await expect(canvas.getByText('Limited recorded coverage.')).toBeVisible();
+    await expect(canvas.queryByText(/Requirement met:/)).not.toBeInTheDocument();
+    await userEvent.click(canvas.getByText('Exact saved coverage identity'));
+    await expect(canvas.getByText(backendQualified.detail.coverage_context.context_id)).toBeVisible();
+    await expect(canvas.getByText(backendQualified.result.coverage.representation_hash)).toBeVisible();
   },
 };
