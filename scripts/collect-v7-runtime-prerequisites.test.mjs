@@ -1,5 +1,6 @@
 // AC-0279: all transports/processes are scripted; no HTTP, Ollama or Cargo calls.
 import test from 'node:test';
+import { writeFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, readdir, symlink, rename, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -204,4 +205,38 @@ test('collector retains closed failure diagnostics without raw exception or resp
     await assert.rejects(collect(current, { transport: item.transport, timeoutMs: 10 }));
     assert.equal(await readFile(path.join(current['output-dir'], 'failure.json'), 'utf8'), bytes);
   }
+});
+
+// AC-0279: excluded run roots must fail before observation or preparation.
+test('collector rejects run roots overlapping capture or model-visible roots', async (t) => {
+  const { root, options } = await fixture(t);
+  const rubric = path.join(root, 'external', 'rubric'); await writeFile(rubric, 'withheld');
+  const alias = path.join(root, 'capture-alias'); await symlink(options.captureRoots[0], alias, 'dir');
+  let calls = 0; let preparations = 0;
+  for (const runDir of [options.captureRoots[0], path.join(options.captureRoots[0], 'run'), options.modelVisibleRoots[0], path.join(options.modelVisibleRoots[0], 'run'), path.join(alias, 'run')]) {
+    await assert.rejects(collect({ ...options, prepareOnly: true, rubric, 'run-dir': runDir }, {
+      transport: async () => { calls++; }, prepare: async () => { preparations++; },
+    }), /run_overlaps_visible_root/u);
+  }
+  const parent = path.join(root, 'parent'); await mkdir(parent);
+  await assert.rejects(collect({ ...options, 'run-dir': parent, captureRoots: [path.join(parent, 'capture')] }), /run_overlaps_visible_root/u);
+  assert.equal(calls, 0); assert.equal(preparations, 0);
+  assert.ok(!(await readdir(root)).includes('observation-1'));
+});
+
+test('collector contenders cannot add failure receipts to another attempt', async (t) => {
+  const { options } = await fixture(t); const wire = transport();
+  const results = await Promise.allSettled([collect(options, { transport: wire.fn }), collect(options, { transport: wire.fn })]);
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+  assert.equal(wire.calls.length, 2);
+  assert.deepEqual((await readdir(options['output-dir'])).sort(), ['attempt.json', 'observation.json', 'runtime-receipt.json']);
+  const other = { ...options, 'output-dir': `${options['output-dir']}-occupied-marker` };
+  let inserted = false;
+  await assert.rejects(collect(other, { transport: wire.fn, now: () => {
+    if (!inserted) { writeFileSync(path.join(other['output-dir'], 'attempt.json'), 'other-owner', { flag: 'wx' }); inserted = true; }
+    return '2026-10-21T00:00:00.000Z';
+  } }), /artifacts_retained/u);
+  assert.equal(wire.calls.length, 2);
+  assert.deepEqual(await readdir(other['output-dir']), ['attempt.json']);
+  assert.equal(await readFile(path.join(other['output-dir'], 'attempt.json'), 'utf8'), 'other-owner');
 });

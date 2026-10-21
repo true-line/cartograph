@@ -152,6 +152,7 @@ export async function collect(options, { transport = getLocal, prepare = runPrep
   for (const key of ['checkout', 'output-dir', 'run-dir']) opts[key] = await canonicalFuture(options[key]);
   const roots = await Promise.all([...options.captureRoots, ...options.modelVisibleRoots].map(canonicalFuture));
   check(roots.length >= 2 && roots.every((root) => disjoint(opts['output-dir'], root)), 'output_overlaps_visible_root');
+  check(roots.every((root) => disjoint(opts['run-dir'], root)), 'run_overlaps_visible_root');
   check(disjoint(opts['output-dir'], opts['run-dir']) && disjoint(opts['output-dir'], opts.checkout) && disjoint(opts['run-dir'], opts.checkout), 'overlapping_artifact_roots');
   check(/^[A-Za-z0-9._-]{1,100}$/u.test(path.basename(opts['output-dir'])) && !['.', '..'].includes(path.basename(opts['output-dir'])), 'invalid_run_id');
   let rubricHash;
@@ -172,7 +173,7 @@ export async function collect(options, { transport = getLocal, prepare = runPrep
     const held = await outputDirectory.stat();
     check(current.isDirectory() && !current.isSymbolicLink() && current.dev === pinnedOutput.dev && current.ino === pinnedOutput.ino && held.dev === pinnedOutput.dev && held.ino === pinnedOutput.ino && await realpath(opts['output-dir']) === opts['output-dir'], 'output_directory_changed');
     const currentRoots = await Promise.all([...options.captureRoots, ...options.modelVisibleRoots].map(canonicalFuture));
-    check(currentRoots.every((root, index) => root === roots[index] && disjoint(opts['output-dir'], root)), 'exclusion_root_changed');
+    check(currentRoots.every((root, index) => root === roots[index] && disjoint(opts['output-dir'], root) && disjoint(opts['run-dir'], root)), 'exclusion_root_changed');
     check(await canonicalFuture(options['run-dir']) === opts['run-dir'] && await canonicalFuture(options.checkout) === opts.checkout, 'preparation_path_changed');
     if (pinnedRunParent) {
       const parent = await lstat(runParentPath);
@@ -188,8 +189,10 @@ export async function collect(options, { transport = getLocal, prepare = runPrep
     await verifyPaths();
   };
   const record = { schema_version: 1, kind: 'v7_runtime_prerequisites', target: { host: HOST, asserted_host: opts['target-host'], observation_path: opts['observation-path'], provenance: 'operator_asserted_not_attested' }, endpoint: origin, expected_identity: { model: opts.model, model_digest: digest, runtime_version: opts['expected-runtime-version'] }, observed_identity: { runtime_version: null, model_digest: null }, phase: 'version', started_at: now(), completed_at: null, status: 'observing', observations: [], sampling_status: 'unset_or_unverified_not_observed', frozen_definition_sha256: null, delivery_pass: false };
+  let ownsAttempt = false;
   try {
     await writeOutput('attempt.json', { schema_version: 1, kind: 'prerequisite_observation_attempt', delivery_pass: false });
+    ownsAttempt = true;
     const version = await observedGet(origin, '/api/version', transport, timeoutMs);
     await verifyPaths();
     record.observations.push({ route: '/api/version', sha256: version.hash, byte_len: version.byte_len });
@@ -232,7 +235,7 @@ export async function collect(options, { transport = getLocal, prepare = runPrep
   } catch (error) {
     record.failure_code = failureCode(error);
     record.status = 'failed'; record.completed_at = now();
-    try { await writeOutput('failure.json', record); } catch { /* Preserve original directory and any partial files; never retry. */ }
+    try { if (ownsAttempt) await writeOutput('failure.json', record); } catch { /* Preserve original directory and any partial files; never retry. */ }
     fail('prerequisite_collection_failed_artifacts_retained');
   } finally { await outputDirectory.close(); }
 }
