@@ -567,6 +567,90 @@ need not share one ID. **Fail:** transport-local task copies disagree, required
 metadata is missing, or task identity/results are lost. Retain the request/status
 transcripts, durations, task records, and restart evidence.
 
+## MT-H4-05 — Separately gated V7 completion control (AC-0267, T-0267)
+
+**Issue #652. Procedure: UNEXECUTED. H4/H5 remain PLANNED.**
+
+The frozen [revision 2 protocol](acceptance/v7-completion-control-v2.md) has SHA-256
+`6f584efbfa7f91a002eea4735294096a87979e4e4ffff618d92d00f09ad911e7`.
+Its historical draft header is preserved byte-for-byte. This procedure implements
+that protocol; neither the document nor a successful scripted test authorizes a
+provider invocation. Integrate and review the prerequisite stack before execution.
+Retain all earlier V2–V6 outcomes.
+
+1. Obtain the owner's explicit run authorization and verify the already installed
+   Ollama model/runtime read-only. Freeze a clean implementation commit/tree,
+   runtime/model identity, sampling settings (including explicit unknown/unset),
+   and an independent semantic rubric outside the run and capture directories.
+   Preparation creates a new exclusive run directory, a queued analyst and both
+   independently resolved mixed request envelopes. It makes no provider call.
+   Publish the frozen definition's SHA-256 before any execution.
+2. Select only the analyst stage with that externally recorded definition digest.
+   The stage acquires an exclusive attempt marker before invoking the ordinary
+   worker. Preserve the marker and all evidence even if execution fails. Never
+   delete a marker, edit a frozen definition, or reuse the run directory to retry.
+   The worker's first-refusal continuation uses its ordinary shared budget; it
+   does not authorize a harness retry. The analyst stage seals its receipt and
+   exits without creating an auditor. A post-dispatch recording failure preserves
+   captured observation hashes in a separate invalid-run artifact and produces no
+   eligible receipt. If storage itself cannot accept that artifact, retain the
+   attempt marker and coordinator database and report the write error; never
+   treat missing output as permission to repeat the invocation.
+3. Give Claude the frozen rubric and admissible evidence, without Codex's semantic
+   interpretation. Claude creates a new comment on issue #652 containing exactly
+   one JSON block with schema `cartograph-v7-semantic-review@1`, `protocol_sha256`,
+   `run_id`, `role`, `receipt_sha256`, `rubric_sha256`, `verdict` and `reasons`.
+   Bind `receipt_sha256` to the outer sealed receipt, which also binds the runtime
+   receipt and evidence artifact. A local JSON file cannot prove reviewer identity.
+4. Immediately before an authorized auditor invocation, authenticate and freshly
+   fetch that comment through `scripts/verify-v7-semantic-review.mjs` with
+   `--binding <binding.json> --comment-id <id> --output <new-attestation.json>`.
+   It verifies the Codex bot viewer and Claude App/comment author through REST and
+   GraphQL, exact issue and hash bindings, and that the comment was never edited.
+   The selected verdict must be the latest matching Claude App review for the same
+   run, role and protocol/receipt/rubric hashes, found by bounded paginated listing.
+   Deleted or edited comments cannot gate execution; corrections only append a new
+   comment. Reviewers must never delete verdicts: deletion history is unavailable.
+   Metadata changes that alter the comment timestamp also fail closed.
+   Preserve the immutable attestation separately from the analyst receipt.
+5. Select the auditor stage only after the analyst's mechanical checks and Claude's
+   independent semantic review both pass, with the same frozen definition digest.
+   The harness verifies local content bindings; it does not authenticate arbitrary
+   local attestations or grant the owner's authorization. Revalidate the auditor's
+   independent obligations, execute once, seal its evidence, and obtain a separate
+   authenticated Claude semantic review using the same procedure.
+6. Report first-shot supported and supported after one refusal separately.
+   Insufficient evidence, unmet obligations, failed, cancelled, exhausted, unknown,
+   and unreviewable outcomes cannot pass this control. Record skipped stages.
+   A mechanical pass alone is not a semantic pass; delivery remains false.
+
+The ignored entrypoint is `investigation_v7_completion_control_explicit_stage`.
+Invoke each stage through `cargo test -p app
+investigation_v7_completion_control_explicit_stage -- --ignored --nocapture`,
+never by executing a previously compiled test binary directly. This ensures Cargo
+rebuilds the reviewed source before the checkout identity check. Normal tests
+compile it without invoking Ollama. Select one stage using
+`CARTOGRAPH_V7_STAGE` (`prepare`, `analyst`, or `auditor`) and an absolute
+`CARTOGRAPH_V7_RUN_DIR`. Preparation additionally requires `CARTOGRAPH_V7_RUN_ID`,
+`CARTOGRAPH_V7_RUNTIME_RECEIPT`, and `CARTOGRAPH_V7_RUBRIC`. Each execution stage
+requires `CARTOGRAPH_V7_DEFINITION_SHA256` from the published preflight and
+`CARTOGRAPH_V7_OPERATOR_OPT_IN` equal to that single role. Auditor execution also
+requires `CARTOGRAPH_V7_SEMANTIC_ATTESTATION`. These environment variables select
+behavior; they do not authenticate authorization.
+
+The external runtime receipt is a closed JSON object with `schema_version: 1`,
+`endpoint`, `model`, `model_digest` (64 lowercase hex characters), `runtime_version`,
+`temperature`, `seed`, `context_length`, and `verified_read_only: true`. Record
+sampling fields as explicit null when unset or unverified. The harness preserves
+this external observation without overriding provider sampling or inventing
+runtime defaults. Verify it read-only immediately before the authorized run.
+
+This n=1 synthetic control does not establish a success rate, Vendure acceptance,
+native restart, or disposable-capture forgetting. Coordinator reopen checks do
+not establish those distinct gates. A proved harness defect requires preserved
+evidence and a separately reviewed, authorized replacement definition; a failed
+model result is not a reason to replay.
+
 ## MT-H4-02 — Controlled local specialist investigation (AC-0191, T-0191)
 
 **Increment #404. Procedure: UNEXECUTED. H4/H5 remain PLANNED.**

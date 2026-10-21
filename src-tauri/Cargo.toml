@@ -48,6 +48,7 @@ work-packets = { workspace = true }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+sha2 = "0.10.9"
 core-graph = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 tauri = { version = "2", features = ["test"] }

@@ -213,6 +213,72 @@ impl LlmProvider for Scripted {
     }
 }
 
+// Shared capture-only setup: preparing a control must not create a legacy task.
+fn captured_fixture_state(
+    directory: &std::path::Path,
+    original: &str,
+    qualified: bool,
+) -> (AppState, PathBuf, String) {
+    let app_data = directory.join("private");
+    std::fs::create_dir(&app_data).unwrap();
+    let app_data = crate::paths::canonicalize(app_data).unwrap();
+    let target = directory.join("target");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("rule.ts"), original).unwrap();
+    let state = crate::registered_source_tests::app_state(&app_data);
+    let source = state
+        .sources
+        .lock()
+        .unwrap()
+        .register_local(&target)
+        .unwrap();
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &["client".into()])
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    let (extraction, receipts) = captured::extract_file(
+        capture.file("rule.ts").unwrap(),
+        &adapters_lang_ts::SourceId {
+            repo: &source.repo_key,
+            commit: "workdir",
+        },
+    )
+    .unwrap();
+    state
+        .primary_sources
+        .persist(&input, &source, &receipts)
+        .unwrap();
+    let bindings = crate::primary_source::matching_bindings(&extraction, &receipts);
+    assert!(!bindings.is_empty());
+    let coverage = qualified.then(|| core_graph::coverage::CoverageRecord {
+        repo_key: source.repo_key.clone(),
+        registered_source_id: Some(source.source_id.clone()),
+        ingest_id: "worker-fixture-ingest".into(),
+        config_hash: crate::coverage_config_hash(&[], crate::Registries::builtin()),
+        inventory_json: json!({"inventory":"coverage@1","repo":source.repo_key,
+            "commit":"workdir","layer_hints":[],"producers":[{"state":"missing_input"}],
+            "unsupported":[],"limited":true})
+        .to_string(),
+    });
+    crate::load_into_graph_with_bindings(
+        &mut state.graph.lock().unwrap(),
+        &extraction,
+        &source.repo_key,
+        source.root(),
+        "workdir",
+        &bindings,
+        coverage.as_ref(),
+    )
+    .unwrap();
+    drop(input);
+    // Every later read must use retained parser bytes, not this checkout.
+    std::fs::remove_dir_all(target).unwrap();
+    let graph_before =
+        serde_json::to_string(&state.graph.lock().unwrap().read_snapshot().unwrap()).unwrap();
+    (state, app_data, graph_before)
+}
+
 struct Fixture {
     _directory: tempfile::TempDir,
     app_data: PathBuf,
@@ -349,6 +415,7 @@ impl Fixture {
         std::fs::remove_dir_all(target).unwrap();
         let graph_before =
             serde_json::to_string(&state.graph.lock().unwrap().read_snapshot().unwrap()).unwrap();
+
         let inspection_requirements = required_role.map(|role| {
             let node = state
                 .graph

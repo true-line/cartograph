@@ -184,6 +184,31 @@ fn current_choices<R: tauri::Runtime>(
     choices(graph, coverage, scope)
 }
 
+/// Acceptance preparation reuses the production qualified selection, requiring
+/// exactly one recorded repository rather than selecting an arbitrary entry.
+#[cfg(test)]
+pub(super) fn control_inventory<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    scope: &InvestigationScope,
+) -> Result<Obligation, String> {
+    let choices = current_choices(app, state, scope)?;
+    if choices.inventories.len() != 1 {
+        return Err("Control requires exactly one repository qualification.".into());
+    }
+    let choice = choices
+        .inventories
+        .into_iter()
+        .next()
+        .ok_or("Control inventory is missing.")?;
+    if choice.status != CoverageStatus::Recorded {
+        return Err("Control inventory must be Recorded.".into());
+    }
+    choice
+        .obligation
+        .ok_or_else(|| "Control inventory identity is missing.".into())
+}
+
 pub(super) fn validate_request<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &AppState,

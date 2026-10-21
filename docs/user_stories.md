@@ -512,7 +512,9 @@
 - **AC-0262** Given a captured source range used by an inspection requirement, when structured locations are presented, then byte and computed line/column units remain explicit and are validated against the exact retained source version; receipt inventory ordinals are never mistaken for original role indices, and opaque IDs or current working-tree text never establish source locations.
 - **Security:** Per-tier and per-step cloud consent, host-owned scope/execution, closed read tools, all-input replay admission, transient raw payloads and bounded durable history; no target writes or delegation.
 - **Performance:** SPEC-10 limits model/tool steps, cumulative context/source/file validation, body acquisition, time, events and total admission; start returns durable identity before expensive work on a worker.
+- **AC-0267** Given a frozen V7 synthetic control and independently resolved source/inventory obligations per role, when the explicitly selected acceptance stages run, then immutable bounded receipts separate actual runtime/mechanical outcomes from an authenticated independent semantic review; the analyst stage exits before auditor dispatch, every continuation stays within the ordinary V7 budgets, and no prior control failure or remaining Vendure/native acceptance requirement is reclassified. Deterministic classification, receipt, preparation and review-binding tests never invoke a provider.
 - **Trace:** H4 · `agents`, `llm`, `core-graph`, `context-hub`, `app`, `ui` · — · T-0180..0191,T-0204,T-0234..0236,T-0260..0262
+
 
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
