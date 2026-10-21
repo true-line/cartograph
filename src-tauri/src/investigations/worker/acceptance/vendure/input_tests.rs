@@ -1,3 +1,4 @@
+// AC-0191: deterministic input preparation checks; no provider acceptance claim.
 use super::*;
 use serde_json::json;
 struct Case {
