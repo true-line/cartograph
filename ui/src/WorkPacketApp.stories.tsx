@@ -31,6 +31,7 @@ function installPacketCore() {
       case 'graph_stats': return { nodes: packetGraphFixture.nodes.length, edges: packetGraphFixture.edges.length };
       case 'atlas_snapshot': return packetGraphFixture;
       case 'export_spec': return specExportOverride?.((args as { mode: SpecBundle['mode'] }).mode) ?? packetBundleFixture;
+      case 'export_spec_with_views': return Promise.resolve(specExportOverride?.((args as { mode: SpecBundle['mode'] }).mode) ?? packetBundleFixture).then((bundle) => ({ bundle, views: null }));
       case 'list_assertion_decisions': return packetDecisionFixtures;
       case 'describe_captured_source': return null;
       case 'prepare_work_packet_selection': {

@@ -149,12 +149,12 @@ const ARTIFACTS: &[Artifact] = &[
     },
 ];
 
-pub(super) struct Projection {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    flows: Vec<Flow>,
+pub(crate) struct Projection {
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) edges: Vec<Edge>,
+    pub(crate) flows: Vec<Flow>,
 }
-pub(super) fn project(
+pub(crate) fn project(
     nodes: &[Node],
     edges: &[Edge],
     flows: &[Flow],
@@ -377,6 +377,14 @@ pub(super) fn all(
         project(nodes, edges, flows, mode, rejected, None).expect("unbounded ADR derivation");
     let nodes = filter_nodes(&projection.nodes, mode, rejected);
     let edges = filter_edges(&projection.edges, mode, rejected);
+    bundle_from_filtered(&nodes, &edges, &projection.flows, mode)
+}
+pub(crate) fn bundle_from_filtered(
+    nodes: &[&Node],
+    edges: &[&Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+) -> SpecBundle {
     let gap_count = count_gap_findings(nodes.iter().copied(), edges.iter().copied());
     let drift_count = nodes.iter().filter(|n| is_drift_node(n)).count();
     let security_count = nodes
@@ -386,7 +394,7 @@ pub(super) fn all(
     let artifacts: Vec<_> = ARTIFACTS
         .iter()
         .map(|a| {
-            produce(a, &nodes, &edges, &projection.flows, gap_count, mode, None)
+            produce(a, nodes, edges, flows, gap_count, mode, None)
                 .expect("unbounded native artifact")
         })
         .collect();

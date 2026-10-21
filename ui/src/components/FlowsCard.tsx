@@ -1,6 +1,21 @@
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { HelpTip } from './HelpTip';
-import type { AnchorProbe, Flow, FlowHop, Tier } from '../store';
+import {
+  STRUCTURED_VIEW_UNAVAILABLE_NOTICE,
+  SpecDiagramCanvas,
+  isGapEdgeFact,
+  subsetFlowDiagramView,
+  verifyDiagramViewIdentity,
+} from './SpecDiagramView';
+import type {
+  AnchorProbe,
+  Flow,
+  FlowHop,
+  GraphNode,
+  SpecArtifact,
+  SpecDiagramView,
+  Tier,
+} from '../store';
 
 export type FlowExportMode = 'verified-only' | 'best-effort';
 
@@ -10,8 +25,17 @@ export interface FlowsCardProps {
   /** Anchor kinds the tracer sought, with counts found (#165) — the empty
    * state names them instead of guessing at a generic hint. */
   anchors?: AnchorProbe[];
-  /** Flow-dossier Markdown from the spec compiler, or null with no backend. */
-  dossier: string | null;
+  /** Active R-INT-5 projection mode; controlled by the shared spec mode when provided. */
+  mode?: FlowExportMode;
+  /** Switch the shared R-INT-5 projection mode so the host refreshes specBundle and specViews. */
+  onModeChange?: (mode: FlowExportMode) => void;
+  /** Compiled flow-dossiers diagram view (US-0036, AC-0246). */
+  view?: SpecDiagramView | null;
+  /** Exported flow-dossiers artifact for content-identity verification and copyable source (AC-0246). */
+  artifact?: SpecArtifact | null;
+  pageSize?: number;
+  /** Open the evidence drawer for a node in the flow/infrastructure diagram. */
+  onSelectNode?: (node: GraphNode) => void;
   /** Open the evidence drawer for a hop's own provenance. */
   onSelectHop?: (hop: FlowHop) => void;
   /** Open the Resolution Strategy modal for a gap hop's Gap node. */
@@ -251,12 +275,20 @@ function HopCard({ hop, index, excluded, onSelectHop, onOpenResolution }: HopCar
 export function FlowsCard({
   flows,
   anchors,
-  dossier,
+  mode: modeProp,
+  onModeChange,
+  view,
+  artifact,
+  pageSize,
+  onSelectNode,
   onSelectHop,
   onOpenResolution,
 }: FlowsCardProps) {
   const [selectedTrigger, setSelectedTrigger] = useState(flows[0]?.trigger ?? '');
-  const [mode, setMode] = useState<FlowExportMode>('best-effort');
+  const [localMode, setLocalMode] = useState<FlowExportMode>(
+    modeProp ?? view?.mode ?? 'best-effort',
+  );
+  const mode = modeProp ?? localMode;
   const [zoom, setZoom] = useState(1);
   const [copied, setCopied] = useState(false);
   const rowRef = useRef<HTMLOListElement>(null);
@@ -266,8 +298,27 @@ export function FlowsCard({
   );
   const selected: Flow | undefined = flows[selectedIndex];
   const projected = selected ? projectFlow(selected, mode) : null;
-  const dossierText =
-    mode === 'best-effort' && dossier?.includes('## ') ? dossier : projectedDossier(flows, mode);
+  const diagramView = useMemo<SpecDiagramView | null>(() => {
+    if (!selected || !view) return null;
+    if (!verifyDiagramViewIdentity(view, artifact)) return view;
+    if (view.mode !== mode) return null;
+    return subsetFlowDiagramView(view, selected.trigger);
+  }, [selected, view, mode, artifact]);
+  // A flow past the host view's flow cap has no structured diagram; that is
+  // truncation, not an unavailable core.
+  const flowBeyondHostView = Boolean(
+    selected &&
+      view &&
+      view.mode === mode &&
+      verifyDiagramViewIdentity(view, artifact) &&
+      !view.flows?.some((flow) => flow.trigger === selected.trigger),
+  );
+  const matchingArtifact =
+    artifact &&
+    (artifact.id === 'flow-dossiers' || artifact.file_name === 'flow_dossiers.md') &&
+    (!view || (view.mode === mode && verifyDiagramViewIdentity(view, artifact)))
+      ? artifact
+      : null;
 
   const fit = () => {
     const row = rowRef.current;
@@ -320,7 +371,12 @@ export function FlowsCard({
                 type="button"
                 className={mode === item ? 'active' : ''}
                 aria-pressed={mode === item}
-                onClick={() => setMode(item)}
+                onClick={() => {
+                  if (modeProp === undefined) {
+                    setLocalMode(item);
+                  }
+                  onModeChange?.(item);
+                }}
               >
                 {item}
               </button>
@@ -401,6 +457,39 @@ export function FlowsCard({
                 : 'Best-effort: no InferredWeak hops in this flow — both projections are identical.'}
           </p>
 
+          {diagramView ? (
+            <SpecDiagramCanvas
+              key={`${selected.trigger}:${diagramView.content_id}`}
+              view={diagramView}
+              artifact={artifact}
+              title={`Flow & infrastructure diagram · ${selected.trigger_name}`}
+              pageSize={pageSize}
+              onSelectNode={onSelectNode}
+              onSelectEdge={(edge) => {
+                if (isGapEdgeFact(edge) && edge.dst.startsWith('gap:') && !edge.dst.startsWith('gap:projection:')) {
+                  onOpenResolution?.(edge.dst);
+                  return;
+                }
+                const matched = selected.hops.find(
+                  (hop) =>
+                    hop.src === edge.src &&
+                    (hop.dst === edge.dst ||
+                      (edge.label === 'UNRESOLVED' && edge.dst.startsWith(`gap:projection:${hop.src}:`))),
+                );
+                if (matched) onSelectHop?.(matched);
+              }}
+            />
+          ) : (
+            <p
+              className="muted spec-diagram-unavailable"
+              data-testid="diagram-view-unavailable"
+            >
+              {flowBeyondHostView
+                ? `This flow is beyond the ${view?.flows?.length ?? 0} of ${view?.flows_total ?? 0} flows the core view includes; its hops are listed below.`
+                : STRUCTURED_VIEW_UNAVAILABLE_NOTICE}
+            </p>
+          )}
+
           <ol
             className="flow-hop-row"
             aria-label="Flow sequence"
@@ -431,25 +520,41 @@ export function FlowsCard({
             })}
           </ol>
 
-          <details className="flow-dossier-details">
-            <summary>Mermaid + provenance dossier ({mode})</summary>
-            <pre className="evidence-source flows-dossier" data-testid="flows-dossier">
-              {dossierText}
-            </pre>
-          </details>
-          <p className="flow-copy-action">
-            <button
-              type="button"
-              onClick={() => {
-                void Promise.resolve(navigator.clipboard?.writeText(dossierText)).then(() => {
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1500);
-                });
-              }}
-            >
-              {copied ? 'Copied' : `Copy ${mode} dossier`}
-            </button>
-          </p>
+          {matchingArtifact && (
+            <>
+              <details className="flow-dossier-details">
+                <summary>Mermaid + provenance dossier ({mode})</summary>
+                <pre className="evidence-source flows-dossier" data-testid="flows-dossier">
+                  {matchingArtifact.content}
+                </pre>
+              </details>
+              {matchingArtifact.content_truncated && (
+                <p
+                  className="muted spec-artifact-truncated-note"
+                  data-testid="spec-artifact-truncated-note"
+                >
+                  Showing a preview — the complete artifact is{' '}
+                  {matchingArtifact.content_byte_len.toLocaleString()} bytes. Use Copy artifact or
+                  Export bundle for the complete text.
+                </p>
+              )}
+              <p className="flow-copy-action">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void Promise.resolve(
+                      navigator.clipboard?.writeText(matchingArtifact.content),
+                    ).then(() => {
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 1500);
+                    });
+                  }}
+                >
+                  {copied ? 'Copied' : `Copy ${mode} dossier`}
+                </button>
+              </p>
+            </>
+          )}
         </>
       )}
     </section>

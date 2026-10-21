@@ -31,10 +31,15 @@ pub use rules::use_case::{
     check_use_case_acceptance, project_use_case,
 };
 mod security;
+mod views;
 mod workbench;
 pub use adr::{
     AdrFacts, AdrLimit, AdrLimitExceeded, AdrLimits, derive_adr_facts, derive_adr_facts_bounded,
     extract_found_adrs,
+};
+pub use views::{
+    DeploymentRole, SPEC_VIEW_MAX_EDGES, SPEC_VIEW_MAX_FLOWS, SPEC_VIEW_MAX_NODES, SpecDiagramView,
+    SpecViewBundle, compile_spec_views, compile_spec_with_views,
 };
 pub use workbench::{
     ArtifactSelectionError, ExportMode, SelectedArtifactLimit, SelectedArtifactOutcome,

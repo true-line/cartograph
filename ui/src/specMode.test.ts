@@ -4,6 +4,8 @@ import { useAppStore, type SpecBundle } from './store';
 import { packetBundleFixture } from './workPacketFixtures';
 
 const bundle = (mode: SpecBundle['mode']): SpecBundle => ({ ...packetBundleFixture, mode });
+// `export_spec_with_views` pairs the bundle with its views; these tests observe the bundle.
+const withViews = (pending: Promise<SpecBundle>) => pending.then((specBundle) => ({ bundle: specBundle, views: null }));
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: string) => void;
@@ -16,7 +18,7 @@ afterEach(() => { clearMocks(); vi.unstubAllGlobals(); useAppStore.setState(useA
 describe('visible spec mode request ownership (AC-0248)', () => {
   it('keeps the latest mode busy when a superseded request fails first', async () => {
     const older = deferred<SpecBundle>(), latest = deferred<SpecBundle>();
-    mockIPC((_command, args) => (args as { mode: string }).mode === 'best-effort' ? older.promise : latest.promise);
+    mockIPC((_command, args) => (args as { mode: string }).mode === 'best-effort' ? withViews(older.promise) : withViews(latest.promise));
     const first = useAppStore.getState().setSpecMode('best-effort');
     const second = useAppStore.getState().setSpecMode('verified-only');
     older.reject('obsolete export failure'); await first;
@@ -26,7 +28,7 @@ describe('visible spec mode request ownership (AC-0248)', () => {
   });
   it('ignores an older successful response that arrives after the selected mode', async () => {
     const older = deferred<SpecBundle>(), latest = deferred<SpecBundle>();
-    mockIPC((_command, args) => (args as { mode: string }).mode === 'best-effort' ? older.promise : latest.promise);
+    mockIPC((_command, args) => (args as { mode: string }).mode === 'best-effort' ? withViews(older.promise) : withViews(latest.promise));
     const first = useAppStore.getState().setSpecMode('best-effort');
     const second = useAppStore.getState().setSpecMode('verified-only');
     latest.resolve(bundle('verified-only')); await second;
@@ -40,10 +42,10 @@ describe('visible spec mode request ownership (AC-0248)', () => {
     mockIPC((command, args) => {
       if (command === 'record_assertion_decision') return recorded.promise;
       if (command === 'list_assertion_decisions') return [];
-      if (command === 'export_spec') {
+      if (command === 'export_spec_with_views') {
         expect((args as { mode: string }).mode).toBe('verified-only');
-        if (++exports === 1) return modeResult.promise;
-        compiledAfterCuration.resolve(); return curatedResult.promise;
+        if (++exports === 1) return withViews(modeResult.promise);
+        compiledAfterCuration.resolve(); return withViews(curatedResult.promise);
       }
       throw new Error('Unexpected spec request');
     });
@@ -63,9 +65,9 @@ describe('visible spec mode request ownership (AC-0248)', () => {
     useAppStore.setState({ specMode: 'best-effort' });
     mockIPC((command, args) => {
       if (command === 'ping') return { app: 'cartograph', version: 'test' };
-      if (command === 'export_spec') {
-        if ((args as { mode: string }).mode === 'best-effort') { observed.resolve(); return refreshed.promise; }
-        return requested.promise;
+      if (command === 'export_spec_with_views') {
+        if ((args as { mode: string }).mode === 'best-effort') { observed.resolve(); return withViews(refreshed.promise); }
+        return withViews(requested.promise);
       }
       if (command === 'list_staged_proposals') return { items: [], next_cursor: null };
       return null;

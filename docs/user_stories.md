@@ -571,7 +571,7 @@
 - **AC-0247** Given a node or edge in a rendered view, when it is selected, then its evidence, tier and confidence open, and Gap or partial hops are visibly distinct from confirmed ones.
 - **Security:** Rendering is local; no external diagram service.
 - **Performance:** Views render within existing payload bounds; large systems page or collapse rather than truncate silently.
-- **Trace:** P2 (ROADMAP W4) · `spec`, `ui` · — · T-0246..0247
+- **Trace:** P2 (ROADMAP W4) · `spec`, `app`, `ui` · — · T-0246..0247
 
 ### US-0037 — Generate and review a local work packet for one change
 - **Actor:** Developer or development agent

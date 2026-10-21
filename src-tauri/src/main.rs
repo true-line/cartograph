@@ -5019,6 +5019,37 @@ fn build_spec_bundle(
     ))
 }
 
+fn build_spec_with_views(
+    graph: &impl GraphStore,
+    decisions: &agents::DecisionLog,
+    mode: spec::ExportMode,
+) -> Result<(spec::SpecBundle, spec::SpecViewBundle), String> {
+    let (nodes, edges) = graph.read_snapshot().map_err(|error| error.to_string())?;
+    let flows = flowtracer::trace(&nodes, &edges);
+    let rejected_hashes = decisions
+        .list_assertions()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|record| record.decision == agents::AssertionDecision::Rejected)
+        .map(|record| record.assertion.provenance.content_hash)
+        .collect();
+    Ok(spec::compile_spec_with_views(
+        &nodes,
+        &edges,
+        &flows,
+        mode,
+        &rejected_hashes,
+    ))
+}
+
+fn build_spec_views(
+    graph: &impl GraphStore,
+    decisions: &agents::DecisionLog,
+    mode: spec::ExportMode,
+) -> Result<spec::SpecViewBundle, String> {
+    Ok(build_spec_with_views(graph, decisions, mode)?.1)
+}
+
 /// Per-artifact content cap applied before a spec bundle crosses IPC (#488):
 /// full artifacts were seen up to 605 MB serialized. The complete text stays
 /// reachable one artifact at a time via `read_spec_artifact`.
@@ -5118,6 +5149,14 @@ fn preview_spec_bundle(bundle: spec::SpecBundle) -> SpecBundlePreview {
     }
 }
 
+/// `SpecBundlePreview` paired with `spec::SpecViewBundle` from a single
+/// projection pass (US-0036, AC-0246, AC-0247).
+#[derive(Debug, Serialize)]
+struct SpecWithViewsPreview {
+    bundle: SpecBundlePreview,
+    views: spec::SpecViewBundle,
+}
+
 /// Compile the full official spec set under one R-INT-5 export policy,
 /// capped per artifact before it crosses IPC (#488).
 #[tauri::command]
@@ -5129,6 +5168,36 @@ fn export_spec(
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
     let bundle = build_spec_bundle(&*graph, &decisions, mode)?;
     Ok(preview_spec_bundle(bundle))
+}
+
+/// Compile structured diagram views (`topology`, `flow-dossiers`, `data-model`)
+/// bound to the same projection and artifact content identities as `export_spec`
+/// (US-0036, AC-0246, AC-0247).
+#[tauri::command]
+fn export_spec_views(
+    mode: spec::ExportMode,
+    state: State<'_, AppState>,
+) -> Result<spec::SpecViewBundle, String> {
+    let graph = state.graph.lock().map_err(|error| error.to_string())?;
+    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+    build_spec_views(&*graph, &decisions, mode)
+}
+
+/// Compile the capped official spec bundle and its structured diagram views
+/// from one snapshot read, flow trace, and projection pass (US-0036, AC-0246,
+/// AC-0247).
+#[tauri::command]
+fn export_spec_with_views(
+    mode: spec::ExportMode,
+    state: State<'_, AppState>,
+) -> Result<SpecWithViewsPreview, String> {
+    let graph = state.graph.lock().map_err(|error| error.to_string())?;
+    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+    let (bundle, views) = build_spec_with_views(&*graph, &decisions, mode)?;
+    Ok(SpecWithViewsPreview {
+        bundle: preview_spec_bundle(bundle),
+        views,
+    })
 }
 
 /// `spec::SpecArtifact` reported as never truncated, so `read_spec_artifact`
@@ -5472,6 +5541,8 @@ fn main() {
             list_flows,
             list_flow_anchors,
             export_spec,
+            export_spec_views,
+            export_spec_with_views,
             read_spec_artifact,
             semantic_preview,
             add_repo,
@@ -5603,6 +5674,97 @@ mod tests {
             super::SPEC_ARTIFACT_ASSERTIONS_PREVIEW_COUNT
         );
         assert_eq!(artifact.assertions_total, assertion_total);
+    }
+
+    #[test]
+    fn spec_views_match_host_bundle_and_preserve_curation_and_provenance() {
+        // AC-0246 / AC-0247 (T-0246, T-0247): the host view surface compiles
+        // structured nodes, edges, flows, and deployment roles from the same
+        // graph and curation log as `build_spec_bundle`, matching each
+        // exported artifact's schema and content_id.
+        let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+        let decisions = agents::DecisionLog::open(":memory:").unwrap();
+        let prov = |tier: core_prov::Tier, confidence: core_prov::ConfidenceTier, tag: &str| {
+            core_prov::Provenance::new(
+                tier,
+                confidence,
+                vec![core_prov::EvidenceRef {
+                    repo: "local/shop".into(),
+                    path: "src/orders.ts".into(),
+                    byte_start: 1,
+                    byte_end: 24,
+                    commit_sha: "workdir".into(),
+                }],
+                "app.test",
+                tag.as_bytes(),
+            )
+            .unwrap()
+        };
+        let obs_prov = prov(
+            core_prov::Tier::Dynamic,
+            core_prov::ConfidenceTier::Confirmed,
+            "obs:queue",
+        );
+        graph
+            .put_node(&Node {
+                id: "res:aws_sqs_queue.orders".into(),
+                label: "Resource".into(),
+                props: serde_json::json!({
+                    "logical_id": "aws_sqs_queue.orders",
+                    "observed": { "arn": "arn:aws:sqs:us-east-1:1:orders" },
+                    "observed_prov": obs_prov,
+                    "prov": prov(core_prov::Tier::Deterministic, core_prov::ConfidenceTier::Confirmed, "res:q"),
+                }),
+            })
+            .unwrap();
+        graph
+            .put_node(&Node {
+                id: "chan:sqs:orders".into(),
+                label: "Channel".into(),
+                props: serde_json::json!({
+                    "identity": "sqs:orders",
+                    "prov": prov(core_prov::Tier::Deterministic, core_prov::ConfidenceTier::Confirmed, "chan:q"),
+                }),
+            })
+            .unwrap();
+        graph
+            .put_edge(&Edge {
+                src: "res:aws_sqs_queue.orders".into(),
+                dst: "chan:sqs:orders".into(),
+                label: "BACKS".into(),
+                props: serde_json::json!({
+                    "prov": prov(core_prov::Tier::Dynamic, core_prov::ConfidenceTier::Confirmed, "edge:backs"),
+                }),
+            })
+            .unwrap();
+
+        let (bundle, views) =
+            super::build_spec_with_views(&graph, &decisions, spec::ExportMode::BestEffort).unwrap();
+        assert_eq!(
+            serde_json::to_value(&bundle).unwrap(),
+            serde_json::to_value(
+                super::build_spec_bundle(&graph, &decisions, spec::ExportMode::BestEffort).unwrap()
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&views).unwrap(),
+            serde_json::to_value(
+                super::build_spec_views(&graph, &decisions, spec::ExportMode::BestEffort).unwrap()
+            )
+            .unwrap()
+        );
+        let topology_art = bundle
+            .artifacts
+            .iter()
+            .find(|a| a.id == "topology")
+            .unwrap();
+        assert!(views.topology.matches_artifact(topology_art));
+        assert_eq!(views.topology.deployments.len(), 1);
+        assert_eq!(
+            views.topology.deployments[0].backed_channels,
+            vec!["chan:sqs:orders"]
+        );
     }
 
     #[test]

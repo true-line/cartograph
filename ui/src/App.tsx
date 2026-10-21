@@ -113,8 +113,6 @@ export default function App() {
     jobs,
     endpoints,
     atlas,
-    topology,
-    flows,
     flowList,
     flowAnchors,
     systemContents,
@@ -123,6 +121,7 @@ export default function App() {
     setPluginEnabled,
     runPluginGate,
     specBundle,
+    specViews,
     specMode,
     curation,
     specBusy,
@@ -482,6 +481,21 @@ export default function App() {
         : 'Connecting…';
   // Without a core nothing can egress, so the local-only line stays honest.
   const egressLine = egress?.label ?? 'Local-only · 0 bytes egress';
+  const selectEdgeSubject = (edge: {
+    src: string;
+    label: string;
+    dst: string;
+    props: Record<string, unknown>;
+  }) =>
+    void select(
+      {
+        id: `${edge.src} ${edge.label} ${edge.dst}`,
+        label: edge.label,
+        props: edge.props,
+      },
+      0,
+      { kind: 'edge', source: edge.src, label: edge.label, destination: edge.dst },
+    );
 
   const surface = (() => {
     switch (view) {
@@ -512,7 +526,16 @@ export default function App() {
             </div>
             <div className="card-grid artifacts">
               <EndpointsCard endpoints={endpoints} onSelect={(node) => void select(node)} />
-              <TopologyCard mermaid={topology} />
+              <TopologyCard
+                view={specViews?.topology ?? null}
+                artifact={
+                  specBundle?.artifacts.find(
+                    (item) => item.id === 'topology' || item.file_name === 'topology.md',
+                  ) ?? null
+                }
+                onSelectNode={(node) => void select(node)}
+                onSelectEdge={selectEdgeSubject}
+              />
             </div>
           </>
         );
@@ -524,15 +547,7 @@ export default function App() {
             <AtlasCanvas
               snapshot={atlas}
               onSelect={(node) => void select(node)}
-              onSelectEdge={(edge) =>
-                // Edges are evidence subjects too: the drawer reads the
-                // edge's own provenance via a synthetic subject.
-                void select({
-                  id: `${edge.src} ${edge.label} ${edge.dst}`,
-                  label: edge.label,
-                  props: edge.props,
-                }, 0, { kind: 'edge', source: edge.src, label: edge.label, destination: edge.dst })
-              }
+              onSelectEdge={selectEdgeSubject}
               onLayerChange={setAtlasLayer}
             />
           </Suspense>
@@ -545,7 +560,15 @@ export default function App() {
             <FlowsCard
               flows={flowList}
               anchors={flowAnchors}
-              dossier={flows}
+              mode={specMode}
+              onModeChange={(mode) => void setSpecMode(mode)}
+              view={specViews?.flows ?? null}
+              artifact={
+                specBundle?.artifacts.find(
+                  (item) => item.id === 'flow-dossiers' || item.file_name === 'flow_dossiers.md',
+                ) ?? null
+              }
+              onSelectNode={(node) => void select(node)}
               onSelectHop={(hop) =>
                 // Hops are evidence subjects like edges: the drawer reads the
                 // hop's own provenance via a synthetic subject.
@@ -571,6 +594,7 @@ export default function App() {
           >
             <SpecWorkbench
               bundle={specBundle}
+              views={specViews}
               mode={specMode}
               decisions={curation}
               busy={specBusy}
@@ -589,6 +613,8 @@ export default function App() {
               }
               onCopyArtifact={(artifact) => void copySpecArtifact(artifact, readSpecArtifact, reportSpecError)}
               onExportBundle={(bundle) => void exportSpecBundle(bundle, readSpecArtifact, reportSpecError)}
+              onSelectNode={(node) => void select(node)}
+              onSelectEdge={selectEdgeSubject}
             />
           </Suspense>
         );
