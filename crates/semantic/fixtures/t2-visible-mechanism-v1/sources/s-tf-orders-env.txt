@@ -1,0 +1,1 @@
+  ORDERS_QUEUE_URL = aws_sqs_queue.orders_created.url

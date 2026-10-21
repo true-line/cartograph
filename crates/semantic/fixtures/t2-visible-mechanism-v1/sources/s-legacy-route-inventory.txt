@@ -1,0 +1,1 @@
+export const INVENTORY_ROUTE = 'legacy.inventory.changed';

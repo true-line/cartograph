@@ -1,0 +1,1 @@
+  SETTLED_TOPIC_ARN = aws_sns_topic.payments_settled.arn
