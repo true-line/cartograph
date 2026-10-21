@@ -114,18 +114,12 @@ jobs:
             exit 1
           fi
 
-          # A stalled transport once held this step until the job timeout
-          # (#689). Bound each attempt, retry once, then fail visibly.
-          for attempt in 1 2; do
-            timeout --kill-after=10s 120 git fetch --no-tags origin main && break
-            if [ "$attempt" = 2 ]; then
-              echo "::error::Could not fetch origin/main to verify $TAG."
-              exit 1
-            fi
-            sleep 10
-          done
-          if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
-            echo "::error::$TAG does not resolve to a commit on main."
+          # The checkout keeps no credentials, so a git fetch of this private
+          # repo can only wait on authentication (#694). Ask the API instead:
+          # main must equal or contain the tag commit.
+          ancestry=$(gh api "repos/$GITHUB_REPOSITORY/compare/$tag_commit...main" --jq .status)
+          if [ "$ancestry" != ahead ] && [ "$ancestry" != identical ]; then
+            echo "::error::$TAG does not resolve to a commit on main ($ancestry)."
             exit 1
           fi
 
