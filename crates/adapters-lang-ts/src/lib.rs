@@ -1305,6 +1305,7 @@ fn extract_source_recording(
     id: &SourceId,
     mut direct: Option<&mut captured::DirectFacts>,
 ) -> Result<Extraction, ExtractError> {
+    let is_tsx = vue::component_tsx(source, path).unwrap_or(!path.ends_with(".ts"));
     let view = vue::parse_view(source, path);
     let source: &[u8] = &view;
     // Only bare `.ts` keeps the non-JSX grammar — it's the sole extension
@@ -1316,8 +1317,8 @@ fn extract_source_recording(
     // since real-world `.js` files commonly contain JSX without being
     // renamed `.jsx` (no JS-only adapter is needed at all here, per
     // PLANNED_ADAPTERS in `ingest::preflight` — this crate covers it
-    // directly). The queries below are valid against both grammars.
-    let is_tsx = !path.ends_with(".ts");
+    // directly). The queries below are valid against both grammars. A
+    // `.vue` component follows its script blocks' `lang` the same way.
     let language: tree_sitter::Language = if is_tsx {
         tree_sitter_typescript::LANGUAGE_TSX.into()
     } else {
@@ -2320,145 +2321,151 @@ fn extract_source_recording(
         }
     }
 
-    // --- Client side (US-0005, .tsx only): screens, renders, fetch sites ----
-    if is_tsx {
-        // JSX usage: <Comp/> inside a component body -> RENDERS edge. Only
-        // capitalized names resolved through locals/imports count — plain
-        // HTML tags and unproven names are skipped.
-        let q_jsx = Query::new(
-            &language,
-            r#"
+    // --- Client side (US-0005, .tsx only, and every Vue component): screens,
+    // renders, fetch sites. A Vue component is client code whatever its script
+    // `lang`, so its fetch sites are scanned even under the plain TypeScript
+    // grammar; the JSX queries need the JSX-aware grammar.
+    if is_tsx || adapters_fw::vue::is_component(path) {
+        if is_tsx {
+            // JSX usage: <Comp/> inside a component body -> RENDERS edge. Only
+            // capitalized names resolved through locals/imports count — plain
+            // HTML tags and unproven names are skipped.
+            let q_jsx = Query::new(
+                &language,
+                r#"
             [
                 (jsx_self_closing_element name: (identifier) @tag) @el
                 (jsx_opening_element name: (identifier) @tag) @el
             ]
             "#,
-        )
-        .expect("static query");
-        let mut renders: Vec<(String, String, TsNode)> = Vec::new();
-        let mut route_elements: Vec<TsNode> = Vec::new();
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&q_jsx, root, source);
-        while let Some(m) = matches.next() {
-            let (mut tag, mut el) = (None, None);
-            for c in m.captures() {
-                match q_jsx.capture_names()[c.index as usize] {
-                    "tag" => tag = Some(c.node),
-                    "el" => el = Some(c.node),
-                    _ => {}
+            )
+            .expect("static query");
+            let mut renders: Vec<(String, String, TsNode)> = Vec::new();
+            let mut route_elements: Vec<TsNode> = Vec::new();
+            let mut cursor = QueryCursor::new();
+            let mut matches = cursor.matches(&q_jsx, root, source);
+            while let Some(m) = matches.next() {
+                let (mut tag, mut el) = (None, None);
+                for c in m.captures() {
+                    match q_jsx.capture_names()[c.index as usize] {
+                        "tag" => tag = Some(c.node),
+                        "el" => el = Some(c.node),
+                        _ => {}
+                    }
                 }
-            }
-            let (Some(tag), Some(el)) = (tag, el) else {
-                continue;
-            };
-            let name = cx.text(&tag);
-            if !name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-                continue;
-            }
-            // Router registration is not a render relationship.
-            if name == REACT_ROUTER.route_component
-                && import_modules
-                    .get(name)
-                    .is_some_and(|m| REACT_ROUTER.modules.contains(&m.as_str()))
-            {
-                route_elements.push(el);
-                continue;
-            }
-            let Some(dst) = bindings.local_target(el, name).or_else(|| {
-                bindings
-                    .imported(el, name)
-                    .then(|| imported.get(name).cloned())
-                    .flatten()
-            }) else {
-                continue;
-            };
-            if let Some(src) = enclosing_symbol(&cx, el)
-                && src != dst
-            {
-                renders.push((src, dst, el));
-            }
-        }
-        let mut seen_renders = std::collections::HashSet::new();
-        for (src, dst, el) in renders {
-            if seen_renders.insert((src.clone(), dst.clone())) {
-                out.edges.push(Edge {
-                    src: src.clone(),
-                    dst: dst.clone(),
-                    label: "RENDERS".into(),
-                    props: serde_json::json!({
-                        "prov": cx.prov(&el, &format!("RENDERS {src} -> {dst}")),
-                    }),
-                });
-            }
-        }
-
-        // React Router screens: <Route path="/x" element={<Comp/>}/> with
-        // Route import-proven. The screen renders the routed component.
-        for el in route_elements {
-            let mut route_path = None;
-            let mut element_comp = None;
-            let mut w = el.walk();
-            for attr in el.children(&mut w).filter(|c| c.kind() == "jsx_attribute") {
-                let Some(attr_name) = attr.child(0) else {
+                let (Some(tag), Some(el)) = (tag, el) else {
                     continue;
                 };
-                match cx.text(&attr_name) {
-                    "path" => {
-                        // path="/x" — a string attribute value.
-                        if let Some(v) = attr.child(2)
-                            && v.kind() == "string"
-                        {
-                            route_path = Some(cx.text(&v).trim_matches(['"', '\'']).to_string());
-                        }
-                    }
-                    "element" => {
-                        // element={<Comp/>} — find the JSX name inside.
-                        let mut stack = vec![attr];
-                        while let Some(n) = stack.pop() {
-                            if matches!(
-                                n.kind(),
-                                "jsx_self_closing_element" | "jsx_opening_element"
-                            ) && let Some(name) = n.child_by_field_name("name")
-                            {
-                                element_comp =
-                                    bindings.local_target(n, cx.text(&name)).or_else(|| {
-                                        bindings
-                                            .imported(n, cx.text(&name))
-                                            .then(|| imported.get(cx.text(&name)).cloned())
-                                            .flatten()
-                                    });
-                                break;
-                            }
-                            let mut w2 = n.walk();
-                            let children: Vec<_> = n.children(&mut w2).collect();
-                            stack.extend(children.into_iter().rev());
-                        }
-                    }
-                    _ => {}
+                let name = cx.text(&tag);
+                if !name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                    continue;
+                }
+                // Router registration is not a render relationship.
+                if name == REACT_ROUTER.route_component
+                    && import_modules
+                        .get(name)
+                        .is_some_and(|m| REACT_ROUTER.modules.contains(&m.as_str()))
+                {
+                    route_elements.push(el);
+                    continue;
+                }
+                let Some(dst) = bindings.local_target(el, name).or_else(|| {
+                    bindings
+                        .imported(el, name)
+                        .then(|| imported.get(name).cloned())
+                        .flatten()
+                }) else {
+                    continue;
+                };
+                if let Some(src) = enclosing_symbol(&cx, el)
+                    && src != dst
+                {
+                    renders.push((src, dst, el));
                 }
             }
-            let Some(route) = route_path else {
-                continue;
-            };
-            let screen_id = format!("screen:{}@{route}", id.repo);
-            out.nodes.push(Node {
-                id: screen_id.clone(),
-                label: "Screen".into(),
-                props: serde_json::json!({
-                    "route": route,
-                    "router": "react-router",
-                    "prov": cx.prov(&el, &format!("Screen {route}")),
-                }),
-            });
-            if let Some(comp) = element_comp {
-                out.edges.push(Edge {
-                    src: screen_id.clone(),
-                    dst: comp,
-                    label: "RENDERS".into(),
+            let mut seen_renders = std::collections::HashSet::new();
+            for (src, dst, el) in renders {
+                if seen_renders.insert((src.clone(), dst.clone())) {
+                    out.edges.push(Edge {
+                        src: src.clone(),
+                        dst: dst.clone(),
+                        label: "RENDERS".into(),
+                        props: serde_json::json!({
+                            "prov": cx.prov(&el, &format!("RENDERS {src} -> {dst}")),
+                        }),
+                    });
+                }
+            }
+
+            // React Router screens: <Route path="/x" element={<Comp/>}/> with
+            // Route import-proven. The screen renders the routed component.
+            for el in route_elements {
+                let mut route_path = None;
+                let mut element_comp = None;
+                let mut w = el.walk();
+                for attr in el.children(&mut w).filter(|c| c.kind() == "jsx_attribute") {
+                    let Some(attr_name) = attr.child(0) else {
+                        continue;
+                    };
+                    match cx.text(&attr_name) {
+                        "path" => {
+                            // path="/x" — a string attribute value.
+                            if let Some(v) = attr.child(2)
+                                && v.kind() == "string"
+                            {
+                                route_path =
+                                    Some(cx.text(&v).trim_matches(['"', '\'']).to_string());
+                            }
+                        }
+                        "element" => {
+                            // element={<Comp/>} — find the JSX name inside.
+                            let mut stack = vec![attr];
+                            while let Some(n) = stack.pop() {
+                                if matches!(
+                                    n.kind(),
+                                    "jsx_self_closing_element" | "jsx_opening_element"
+                                ) && let Some(name) = n.child_by_field_name("name")
+                                {
+                                    element_comp =
+                                        bindings.local_target(n, cx.text(&name)).or_else(|| {
+                                            bindings
+                                                .imported(n, cx.text(&name))
+                                                .then(|| imported.get(cx.text(&name)).cloned())
+                                                .flatten()
+                                        });
+                                    break;
+                                }
+                                let mut w2 = n.walk();
+                                let children: Vec<_> = n.children(&mut w2).collect();
+                                stack.extend(children.into_iter().rev());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let Some(route) = route_path else {
+                    continue;
+                };
+                let screen_id = format!("screen:{}@{route}", id.repo);
+                out.nodes.push(Node {
+                    id: screen_id.clone(),
+                    label: "Screen".into(),
                     props: serde_json::json!({
-                        "prov": cx.prov(&el, &format!("RENDERS {screen_id}")),
+                        "route": route,
+                        "router": "react-router",
+                        "prov": cx.prov(&el, &format!("Screen {route}")),
                     }),
                 });
+                if let Some(comp) = element_comp {
+                    out.edges.push(Edge {
+                        src: screen_id.clone(),
+                        dst: comp,
+                        label: "RENDERS".into(),
+                        props: serde_json::json!({
+                            "prov": cx.prov(&el, &format!("RENDERS {screen_id}")),
+                        }),
+                    });
+                }
             }
         }
 

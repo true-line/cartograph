@@ -3342,3 +3342,30 @@ fn vue_script_blocks_are_parsed_with_spans_in_the_component() {
         serde_json::to_string(&again.edges).unwrap()
     );
 }
+
+#[test]
+fn vue_typescript_casts_and_same_line_blocks_keep_their_facts() {
+    // AC-0268 (#655 review): `lang="ts"` keeps the TypeScript grammar, so an
+    // angle-bracket cast cannot swallow the declarations after it; and a
+    // trailing line comment in one block cannot hide the next block.
+    let cast = "<script setup lang=\"ts\">\nconst n = <number>raw;\n\
+                function helper() { return n; }\nfunction run() { return helper(); }\n</script>\n";
+    let out = extract_source(cast.as_bytes(), "Cast.vue", &id()).unwrap();
+    assert!(edge_pairs(&out, "CALLS").contains(&(
+        "sym:qwtm/example@Cast.vue#run",
+        "sym:qwtm/example@Cast.vue#helper"
+    )));
+
+    let same_line = "<script>const a = 1 // normal script</script><script setup>\
+                     function save() { return fetch('/api/notes') }</script>\n";
+    let out = extract_source(same_line.as_bytes(), "Same.vue", &id()).unwrap();
+    assert!(
+        out.nodes
+            .iter()
+            .any(|n| n.id == "sym:qwtm/example@Same.vue#save")
+    );
+    let [site] = out.fetch_sites.as_slice() else {
+        panic!("one fetch site, got {:?}", out.fetch_sites);
+    };
+    assert_eq!(site.byte_start, same_line.find("fetch(").unwrap() as u64);
+}
