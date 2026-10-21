@@ -200,29 +200,25 @@ impl StagedObligationRequest {
                 self.specialist_id.as_str(),
                 "domain-analyst@7" | "evidence-auditor@7"
             )
-            || !self
-                .expected_context_id
-                .strip_prefix("context-v2:")
-                .is_some_and(crate::source_basis::hash)
         {
             return Err(InvestigationError::InvalidRequest);
         }
-        // Reuse immutable field validation without changing any legacy branches.
-        StartInvestigationRequest {
-            schema_version: 3,
-            request_nonce: self.request_nonce.clone(),
-            specialist_id: SpecialistId::DomainAnalystV6,
-            inspection_requirements: None,
-            question: self.question.clone(),
-            scope: self.scope.clone(),
-            provider_mode: self.provider_mode,
-            limit_profile: self.limit_profile.clone(),
-            expected_graph_revision: self.expected_graph_revision.clone(),
-            expected_context_id: Some(self.expected_context_id.clone()),
-            conversation_id: self.conversation_id.clone(),
-            parent_id: self.parent_id.clone(),
+        super::records::CommonRequestFields {
+            request_nonce: &self.request_nonce,
+            question: &self.question,
+            scope: &self.scope,
+            limit_profile: &self.limit_profile,
+            expected_graph_revision: self.expected_graph_revision.as_deref(),
+            expected_context_id: Some(&self.expected_context_id),
+            conversation_id: self.conversation_id.as_deref(),
+            parent_id: self.parent_id.as_deref(),
         }
         .validate()?;
+        // The former V6 projection's 8 KiB bound was redundant: the admitted
+        // whole V7 request retains the same common-field encodings, a role at
+        // least as long as domain-analyst@6, and the additional obligations.
+        // V7 also retains null optional IDs that the projection omitted. No
+        // projection allocation or legacy-family validation is needed here.
         for item in &self.obligations.obligations {
             match item {
                 Obligation::Source { target, .. }

@@ -97,11 +97,56 @@ fn present_inspection_requirements<'de, D: serde::Deserializer<'de>>(
     Vec::<InvestigationInspectionTarget>::deserialize(deserializer).map(Some)
 }
 
+/// Borrowed immutable fields shared across the closed request families. Family
+/// schema, role, inspection authority and whole-request bounds stay with callers.
+pub(super) struct CommonRequestFields<'a> {
+    pub request_nonce: &'a str,
+    pub question: &'a str,
+    pub scope: &'a InvestigationScope,
+    pub limit_profile: &'a str,
+    pub expected_graph_revision: Option<&'a str>,
+    pub expected_context_id: Option<&'a str>,
+    pub conversation_id: Option<&'a str>,
+    pub parent_id: Option<&'a str>,
+}
+
+impl CommonRequestFields<'_> {
+    pub fn validate(&self) -> Result<(), InvestigationError> {
+        self.scope.validate()?;
+        if self.expected_context_id.is_some_and(|id| {
+            !id.strip_prefix("context-v2:")
+                .is_some_and(crate::source_basis::hash)
+        }) || !text(self.question, MAX_QUESTION_BYTES)
+            || !opaque_id(self.request_nonce)
+            || self.limit_profile != "investigation-v1"
+            || self
+                .expected_graph_revision
+                .is_some_and(|v| !context_hash(v))
+            || self.conversation_id.is_some_and(|v| !opaque_id(v))
+            || self.parent_id.is_some_and(|v| !opaque_id(v))
+            || (self.parent_id.is_some() && self.conversation_id.is_none())
+        {
+            return Err(InvestigationError::InvalidRequest);
+        }
+        Ok(())
+    }
+}
+
 impl StartInvestigationRequest {
     /// Cheap immutable validation; mutable availability and capacity checks must
     /// run after the durable deduplication lookup, not inside this method.
     pub fn validate(&self) -> Result<(), InvestigationError> {
-        self.scope.validate()?;
+        CommonRequestFields {
+            request_nonce: &self.request_nonce,
+            question: &self.question,
+            scope: &self.scope,
+            limit_profile: &self.limit_profile,
+            expected_graph_revision: self.expected_graph_revision.as_deref(),
+            expected_context_id: self.expected_context_id.as_deref(),
+            conversation_id: self.conversation_id.as_deref(),
+            parent_id: self.parent_id.as_deref(),
+        }
+        .validate()?;
         if self.specialist_id.uses_completion_obligations() {
             return Err(InvestigationError::InvalidRequest);
         }
@@ -117,20 +162,6 @@ impl StartInvestigationRequest {
             })
             || (!v6 && self.inspection_requirements.is_some() != v5)
             || (!v6 && self.expected_context_id.is_some())
-            || self.expected_context_id.as_deref().is_some_and(|id| {
-                !id.strip_prefix("context-v2:")
-                    .is_some_and(crate::source_basis::hash)
-            })
-            || !text(&self.question, MAX_QUESTION_BYTES)
-            || !opaque_id(&self.request_nonce)
-            || self.limit_profile != "investigation-v1"
-            || self
-                .expected_graph_revision
-                .as_ref()
-                .is_some_and(|v| !context_hash(v))
-            || self.conversation_id.as_ref().is_some_and(|v| !opaque_id(v))
-            || self.parent_id.as_ref().is_some_and(|v| !opaque_id(v))
-            || (self.parent_id.is_some() && self.conversation_id.is_none())
         {
             return Err(InvestigationError::InvalidRequest);
         }
