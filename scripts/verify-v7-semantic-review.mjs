@@ -12,6 +12,9 @@ const ISSUE = 652;
 const API_BYTES = 128 * 1024;
 const BODY_BYTES = 32 * 1024;
 const BINDING_BYTES = 8 * 1024;
+const COMMENTS_PER_PAGE = 20;
+const MAX_COMMENT_PAGES = 20;
+const MAX_LISTING_BYTES = 2 * 1024 * 1024;
 const sha256 = (value) => createHash('sha256').update(value, 'utf8').digest('hex');
 const hash = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
 const keys = (value, names) => value && typeof value === 'object' && !Array.isArray(value) &&
@@ -155,6 +158,55 @@ export function validateSemanticReview({ binding, commentId, viewer, rest, graph
 const VIEWER_QUERY = 'query { viewer { __typename login } }';
 const COMMENT_QUERY = 'query($id: ID!) { node(id: $id) { __typename ... on IssueComment { id databaseId url createdAt body lastEditedAt includesCreatedEdit author { __typename login } issue { number repository { nameWithOwner } } } } }';
 
+function matchesBinding(review, binding) {
+  return ['protocol_sha256', 'run_id', 'role', 'receipt_sha256', 'rubric_sha256'].every((field) => review[field] === binding[field]);
+}
+
+// Corrections append new comments. A later matching verdict supersedes every
+// earlier verdict, including a favorable one; edited candidates cannot revive it.
+export function validateLatestReview({ binding, commentId, rest, comments }) {
+  validateBinding(binding);
+  assert.ok(Array.isArray(comments) && comments.length <= COMMENTS_PER_PAGE * MAX_COMMENT_PAGES, 'Comment listing exceeds count bound');
+  bounded(JSON.stringify(comments), MAX_LISTING_BYTES);
+  const ids = new Set();
+  let selected;
+  let latest;
+  for (const comment of comments) {
+    assert.ok(comment && idValid(comment.id) && !ids.has(comment.id), 'Invalid/duplicate listed comment identity');
+    ids.add(comment.id);
+    if (comment.id === commentId) selected = comment;
+    if (comment.user?.login !== 'trueline-claude-agent[bot]' || comment.user?.type !== 'Bot' ||
+        comment.performed_via_github_app?.slug !== 'trueline-claude-agent') continue;
+    let review;
+    try { review = reviewBlock(comment.body); } catch { continue; }
+    if (!matchesBinding(review, binding)) continue;
+    assert.equal(comment.issue_url, `https://api.github.com/repos/${REPO}/issues/${ISSUE}`, 'Listed review belongs to another issue');
+    assert.ok(typeof comment.created_at === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/u.test(comment.created_at) &&
+      Number.isFinite(Date.parse(comment.created_at)) && new Date(comment.created_at).toISOString().replace('.000Z', 'Z') === comment.created_at, 'Invalid listed review timestamp');
+    if (!latest || comment.created_at > latest.created_at ||
+        (comment.created_at === latest.created_at && comment.id > latest.id)) latest = comment;
+  }
+  assert.ok(selected, 'Selected comment is absent from the complete issue listing');
+  for (const field of ['node_id', 'html_url', 'body', 'created_at', 'updated_at'])
+    assert.equal(selected[field], rest[field], 'Selected comment changed during review verification');
+  assert.equal(latest?.id, commentId, 'Selected semantic review has been superseded');
+}
+
+async function listIssueComments(transport) {
+  const comments = [];
+  let bytes = 0;
+  for (let page = 1; page <= MAX_COMMENT_PAGES; page += 1) {
+    const result = await transport([`repos/${REPO}/issues/${ISSUE}/comments?per_page=${COMMENTS_PER_PAGE}&page=${page}`]);
+    const encoded = JSON.stringify(result);
+    bounded(encoded, API_BYTES); bytes += Buffer.byteLength(encoded, 'utf8');
+    assert.ok(bytes <= MAX_LISTING_BYTES, 'Comment listing exceeds aggregate byte bound');
+    assert.ok(Array.isArray(result) && result.length <= COMMENTS_PER_PAGE, 'Invalid comment listing page');
+    comments.push(...result);
+    if (result.length < COMMENTS_PER_PAGE) return comments;
+  }
+  throw new Error('Comment listing exceeds pagination bound');
+}
+
 export async function verifyReview({ binding, commentId, transport }) {
   binding = structuredClone(validateBinding(binding)); assert.ok(idValid(commentId), 'Invalid comment identity');
   const viewer = await transport(['graphql', '-f', `query=${VIEWER_QUERY}`]);
@@ -164,7 +216,10 @@ export async function verifyReview({ binding, commentId, transport }) {
   bounded(JSON.stringify(rest), API_BYTES);
   assert.ok(typeof rest.node_id === 'string' && rest.node_id.length > 0 && rest.node_id.length <= 256, 'Missing REST node identity');
   const graphql = await transport(['graphql', '-f', `query=${COMMENT_QUERY}`, '-f', `id=${rest.node_id}`]);
-  return validateSemanticReview({ binding, commentId, viewer, rest, graphql });
+  const attestation = validateSemanticReview({ binding, commentId, viewer, rest, graphql });
+  const comments = await listIssueComments(transport);
+  validateLatestReview({ binding, commentId, rest, comments });
+  return attestation;
 }
 
 export function githubTransport(args) {

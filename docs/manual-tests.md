@@ -591,7 +591,11 @@ Retain all earlier V2–V6 outcomes.
    delete a marker, edit a frozen definition, or reuse the run directory to retry.
    The worker's first-refusal continuation uses its ordinary shared budget; it
    does not authorize a harness retry. The analyst stage seals its receipt and
-   exits without creating an auditor.
+   exits without creating an auditor. A post-dispatch recording failure preserves
+   captured observation hashes in a separate invalid-run artifact and produces no
+   eligible receipt. If storage itself cannot accept that artifact, retain the
+   attempt marker and coordinator database and report the write error; never
+   treat missing output as permission to repeat the invocation.
 3. Give Claude the frozen rubric and admissible evidence, without Codex's semantic
    interpretation. Claude creates a new comment on issue #652 containing exactly
    one JSON block with schema `cartograph-v7-semantic-review@1`, `protocol_sha256`,
@@ -603,7 +607,11 @@ Retain all earlier V2–V6 outcomes.
    `--binding <binding.json> --comment-id <id> --output <new-attestation.json>`.
    It verifies the Codex bot viewer and Claude App/comment author through REST and
    GraphQL, exact issue and hash bindings, and that the comment was never edited.
-   Deleted or edited comments cannot gate execution; a replacement is a new comment.
+   The selected verdict must be the latest matching Claude App review for the same
+   run, role and protocol/receipt/rubric hashes, found by bounded paginated listing.
+   Deleted or edited comments cannot gate execution; corrections only append a new
+   comment. Reviewers must never delete verdicts: deletion history is unavailable.
+   Metadata changes that alter the comment timestamp also fail closed.
    Preserve the immutable attestation separately from the analyst receipt.
 5. Select the auditor stage only after the analyst's mechanical checks and Claude's
    independent semantic review both pass, with the same frozen definition digest.
@@ -617,7 +625,11 @@ Retain all earlier V2–V6 outcomes.
    A mechanical pass alone is not a semantic pass; delivery remains false.
 
 The ignored entrypoint is `investigation_v7_completion_control_explicit_stage`.
-Normal tests compile it without invoking Ollama. Select one stage using
+Invoke each stage through `cargo test -p app
+investigation_v7_completion_control_explicit_stage -- --ignored --nocapture`,
+never by executing a previously compiled test binary directly. This ensures Cargo
+rebuilds the reviewed source before the checkout identity check. Normal tests
+compile it without invoking Ollama. Select one stage using
 `CARTOGRAPH_V7_STAGE` (`prepare`, `analyst`, or `auditor`) and an absolute
 `CARTOGRAPH_V7_RUN_DIR`. Preparation additionally requires `CARTOGRAPH_V7_RUN_ID`,
 `CARTOGRAPH_V7_RUNTIME_RECEIPT`, and `CARTOGRAPH_V7_RUBRIC`. Each execution stage

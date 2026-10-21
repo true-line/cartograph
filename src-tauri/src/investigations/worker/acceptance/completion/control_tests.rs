@@ -220,3 +220,51 @@ fn completion_control_actual_scripted_analyst_seal_and_parent_gate_bind_all_evid
     assert!(parent_gate(&run_dir, &digest, &definition, &fresh, &review).is_err());
     assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
 }
+
+// AC-0267: a genuine scripted worker can finish dispatch then fail record
+// validation. Preserve its immutable hashes and defect record, never a receipt.
+#[test]
+fn completion_control_post_dispatch_recording_failure_preserves_run_and_observations() {
+    for extraction_failure in [true, false] {
+        let (_directory, run_dir, _definition, digest) = setup();
+        let (_, prepared) = check_content(&run_dir, &digest).unwrap();
+        let scripted = Arc::new(super::super::super::super::Scripted::new(
+            super::super::super::super::Mode::CompletionSupported,
+        ));
+        let provider: Arc<dyn LlmProvider> = if extraction_failure {
+            execution::recording_failure_provider(&prepared)
+        } else {
+            scripted.clone()
+        };
+        marker(&run_dir, Role::Analyst, &digest).unwrap();
+        let error = execute_stage(&run_dir, &prepared, Role::Analyst, provider)
+            .and_then(|evidence| {
+                std::fs::create_dir(run_dir.join("analyst-evidence.json")).unwrap();
+                seal_stage(&run_dir, Role::Analyst, &digest, &evidence).map(|_| evidence)
+            })
+            .unwrap_err();
+        if extraction_failure {
+            assert_eq!(error, "Invalid acceptance record");
+        }
+        let invalid: serde_json::Value =
+            serde_json::from_slice(&read(&run_dir.join("analyst-invalid-run.json")).unwrap())
+                .unwrap();
+        assert_eq!(invalid["invalid_run"], true);
+        assert_eq!(invalid["stage"], "post_dispatch_recording");
+        assert_eq!(invalid["delivery_pass"], false);
+        assert_eq!(invalid["observations"].as_array().unwrap().len(), 4);
+        let observations: serde_json::Value = serde_json::from_slice(
+            &read(&run_dir.join("analyst-recording-observations.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(observations, invalid["observations"]);
+        assert!(run_dir.join("analyst.attempt").exists());
+        assert!(marker(&run_dir, Role::Analyst, &digest).is_err());
+        assert!(!receipt_path(&run_dir, Role::Analyst).exists());
+        assert!(!run_dir.join("analyst-runtime-receipt.json").exists());
+        if !extraction_failure {
+            assert_eq!(scripted.calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        }
+        assert!(write_new(&run_dir.join("analyst-invalid-run.json"), b"replacement").is_err());
+    }
+}

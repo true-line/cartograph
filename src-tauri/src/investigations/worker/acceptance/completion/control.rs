@@ -484,6 +484,9 @@ fn parent_gate(
     prepared: &prepare::PreparedState,
     attestation_bytes: &[u8],
 ) -> Result<(), String> {
+    if run_dir.join("analyst-invalid-run.json").exists() {
+        return Err("Analyst has a preserved invalid-run record.".into());
+    }
     let outer_bytes = read(&receipt_path(run_dir, Role::Analyst))?;
     let sealed: SealedRole = decode(&outer_bytes)?;
     if sealed.schema_version != 1
@@ -629,6 +632,61 @@ fn validate_gate(
     }
     Ok(())
 }
+/// Preserve captured hash observations even if durable evidence extraction fails.
+fn execute_stage(
+    run_dir: &Path,
+    prepared: &prepare::PreparedState,
+    role: Role,
+    provider: Arc<dyn LlmProvider>,
+) -> Result<execution::RoleEvidence, String> {
+    match execution::run_role(prepared, role, provider) {
+        Ok(evidence) => Ok(evidence),
+        Err(error) => {
+            if error.post_dispatch {
+                recording_failure(run_dir, role, &error.reason, &error.observations)?;
+            }
+            Err(error.reason)
+        }
+    }
+}
+// Best effort only when the destination remains writable. On storage failure
+// the immutable attempt marker and coordinator DB still prevent silent replay.
+fn recording_failure(
+    run_dir: &Path,
+    role: Role,
+    reason: &str,
+    observations: &[execution::InvocationObservation],
+) -> Result<(), String> {
+    let record = json(
+        &serde_json::json!({"invalid_run":true,"stage":"post_dispatch_recording",
+        "failure_origin":"harness_recording","reason":reason,"observations":observations,"delivery_pass":false}),
+    )?;
+    write_new(&run_dir.join(format!("{}-invalid-run.json",role_name(role))),&record)
+        .map_err(|error|format!("Harness recording failed ({reason}); defect record unavailable ({error}); attempt marker and coordinator database retained."))?;
+    write_new(
+        &run_dir.join(format!("{}-recording-observations.json", role_name(role))),
+        &json(&observations)?,
+    )
+    .map_err(|error| {
+        format!(
+            "Defect record retains observations, but separate observation artifact failed: {error}"
+        )
+    })
+}
+fn seal_stage(
+    run_dir: &Path,
+    role: Role,
+    expected: &str,
+    evidence: &execution::RoleEvidence,
+) -> Result<SealedRole, String> {
+    match seal(run_dir, role, expected, evidence) {
+        Ok(sealed) => Ok(sealed),
+        Err(reason) => {
+            recording_failure(run_dir, role, &reason, &evidence.observations)?;
+            Err(reason)
+        }
+    }
+}
 /// External orchestration MUST freshly reverify the never-edited GitHub comment
 /// immediately before selecting auditor. Edited/deleted reviews invalidate that
 /// gate. Local JSON and this explicit opt-in authenticate neither person nor bot.
@@ -672,9 +730,9 @@ pub(super) fn run_stage(
     if let Some(bytes) = review_bytes {
         write_new(&run_dir.join("auditor-preflight-attestation.json"), &bytes)?;
     }
-    let observed = execution::run_role(&prepared, role, provider)?;
+    let observed = execute_stage(&run_dir, &prepared, role, provider)?;
     // Preserve actual observation even if a post-call frozen-input check fails.
-    let sealed = seal(&run_dir, role, expected_definition_sha256, &observed)?;
+    let sealed = seal_stage(&run_dir, role, expected_definition_sha256, &observed)?;
     if let Err(error) = preflight(&run_dir, expected_definition_sha256) {
         write_new(
             &run_dir.join(format!("{}-invalid-run.json", role_name(role))),
@@ -682,7 +740,12 @@ pub(super) fn run_stage(
         )?;
         return Err(error);
     }
-    write_new(&receipt_path(&run_dir, role), &json(&sealed)?)?;
+    if let Err(reason) =
+        json(&sealed).and_then(|bytes| write_new(&receipt_path(&run_dir, role), &bytes))
+    {
+        recording_failure(&run_dir, role, &reason, &observed.observations)?;
+        return Err(reason);
+    }
     Ok(sealed) // Return to orchestration; never dispatch the other role here.
 }
 

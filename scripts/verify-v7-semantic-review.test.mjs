@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { main, strictJson, validateBinding, validateSemanticReview, verifyReview } from './verify-v7-semantic-review.mjs';
+import { main, strictJson, validateBinding, validateSemanticReview, validateLatestReview, verifyReview } from './verify-v7-semantic-review.mjs';
 
 function fixture(verdict = 'pass') {
   const binding = { schema: 'cartograph-v7-semantic-review-binding@1', protocol_sha256: 'a'.repeat(64),
@@ -34,6 +34,7 @@ function transportFor(f, calls = []) {
     if (calls.length === 1) return f.viewer;
     if (calls.length === 2) return f.rest;
     if (calls.length === 3) return f.graphql;
+    if (calls.length === 4) return [f.rest];
     throw new Error('Unexpected additional request');
   };
 }
@@ -114,10 +115,11 @@ test('AC-0267: exactly one strict fenced block, duplicate-key and byte limits ar
 test('AC-0267: transport verifies viewer first then only reads the selected REST and GraphQL node', async () => {
   const f = fixture(); const calls = [];
   const result = await verifyReview({ ...f, transport: transportFor(f, calls) });
-  assert.equal(result.review.verdict, 'pass'); assert.equal(calls.length, 3);
+  assert.equal(result.review.verdict, 'pass'); assert.equal(calls.length, 4);
   assert.equal(calls[0][0], 'graphql'); assert.match(calls[0][2], /viewer/u);
   assert.deepEqual(calls[1], [`repos/true-line/cartograph/issues/comments/${f.commentId}`]);
   assert.equal(calls[2].at(-1), `id=${f.rest.node_id}`);
+  assert.deepEqual(calls[3], ['repos/true-line/cartograph/issues/652/comments?per_page=20&page=1']);
   for (const args of calls) assert.ok(!args.some((arg) => /mutation|--method|PATCH|DELETE/u.test(arg)));
   const bad = fixture(); bad.viewer.data.viewer.login = 'human'; const badCalls = [];
   await assert.rejects(verifyReview({ ...bad, transport: transportFor(bad, badCalls) }));
@@ -159,4 +161,66 @@ test('AC-0267: CLI writes an exclusive fresh attestation and never treats local 
     await assert.rejects(readFile(invalidOutput), /ENOENT/u);
     await assert.rejects(main(['--binding', bindingPath, '--comment-id', '1', '--comment-id', '2']));
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+function laterComment(f, verdict, { sameTime = false, change } = {}) {
+  const later = structuredClone(f);
+  later.rest.id += 1;
+  later.rest.node_id = 'IC_newer';
+  later.rest.html_url = `https://github.com/true-line/cartograph/issues/652#issuecomment-${later.rest.id}`;
+  later.rest.created_at = sameTime ? f.rest.created_at : '2026-10-20T16:31:00Z';
+  later.rest.updated_at = later.rest.created_at;
+  replaceReview(later, (review) => { review.verdict = verdict; change?.(review); });
+  return later.rest;
+}
+
+test('AC-0267: newest matching Claude App verdict supersedes earlier pass or fail', () => {
+  for (const [oldVerdict, newVerdict] of [['pass', 'fail'], ['fail', 'pass'], ['pass', 'unreviewable']]) {
+    const f = fixture(oldVerdict); const later = laterComment(f, newVerdict);
+    assert.throws(() => validateLatestReview({ ...f, comments: [f.rest, later] }), /superseded/u);
+    validateLatestReview({ binding: f.binding, commentId: later.id, rest: later, comments: [f.rest, later] });
+  }
+  const f = fixture(); const sameTime = laterComment(f, 'fail', { sameTime: true });
+  assert.throws(() => validateLatestReview({ ...f, comments: [sameTime, f.rest] }), /superseded/u);
+  const edited = laterComment(f, 'fail'); edited.updated_at = '2026-10-20T16:32:00Z';
+  assert.throws(() => validateLatestReview({ ...f, comments: [f.rest, edited] }), /superseded/u);
+});
+
+test('AC-0267: other runs, roles, hashes and authors do not supersede a matching review', () => {
+  for (const change of [(r) => { r.run_id = 'different-run'; }, (r) => { r.role = 'auditor'; },
+    (r) => { r.protocol_sha256 = 'f'.repeat(64); }, (r) => { r.receipt_sha256 = 'f'.repeat(64); },
+    (r) => { r.rubric_sha256 = 'f'.repeat(64); }]) {
+    const f = fixture(); validateLatestReview({ ...f, comments: [f.rest, laterComment(f, 'fail', { change })] });
+  }
+  const f = fixture(); const other = laterComment(f, 'fail'); other.performed_via_github_app.slug = 'other-app';
+  validateLatestReview({ ...f, comments: [f.rest, other] });
+  other.performed_via_github_app.slug = 'trueline-claude-agent'; other.body = 'Not a valid semantic review';
+  validateLatestReview({ ...f, comments: [f.rest, other] });
+});
+
+test('AC-0267: paginated listings are complete and listing failures or bounds stop attestation', async () => {
+  const f = fixture(); const unrelated = (id) => ({ id, body: 'Ordinary issue discussion', user: { login: 'other' } });
+  const first = [f.rest, ...Array.from({ length: 19 }, (_, i) => unrelated(i + 1))];
+  const calls = []; const base = transportFor(f, calls);
+  const newer = laterComment(f, 'fail');
+  await assert.rejects(verifyReview({ ...f, transport: async (args) => {
+    if (args[0].includes('/652/comments?')) { calls.push(args); return args[0].endsWith('page=1') ? first : [newer]; }
+    return base(args);
+  } }), /superseded/u);
+  assert.ok(calls.at(-1)[0].endsWith('page=2'));
+  for (const listing of [async () => { throw new Error('Listing failed'); }, async () => ({ message: 'Unavailable' }),
+    async () => Array(21).fill(f.rest), async () => [{ ...f.rest, body: 'a'.repeat(128 * 1024) }],
+    async () => []]) {
+    const localCalls = []; const normal = transportFor(f, localCalls);
+    await assert.rejects(verifyReview({ ...f, transport: (args) => args[0].includes('/652/comments?') ? listing() : normal(args) }));
+  }
+  const boundCalls = []; const normal = transportFor(f, boundCalls); let pages = 0;
+  await assert.rejects(verifyReview({ ...f, transport: (args) => {
+    if (!args[0].includes('/652/comments?')) return normal(args);
+    pages += 1; return Array.from({ length: 20 }, (_, i) => unrelated(pages * 20 + i));
+  } }), /pagination bound/u);
+  assert.equal(pages, 20);
+  assert.throws(() => validateLatestReview({ ...f, comments: [f.rest, f.rest] }), /duplicate/u);
+  const changed = structuredClone(f.rest); changed.body += '\n';
+  assert.throws(() => validateLatestReview({ ...f, comments: [changed] }), /changed/u);
 });

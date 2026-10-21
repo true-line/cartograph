@@ -51,6 +51,32 @@ pub(super) struct RoleEvidence {
     pub observations: Vec<InvocationObservation>,
     pub representation_reviewable: bool,
 }
+#[derive(Debug)]
+pub(super) struct RoleRunError {
+    pub post_dispatch: bool,
+    pub reason: String,
+    pub observations: Vec<InvocationObservation>,
+}
+impl From<String> for RoleRunError {
+    fn from(reason: String) -> Self {
+        Self {
+            post_dispatch: false,
+            reason,
+            observations: vec![],
+        }
+    }
+}
+impl From<&str> for RoleRunError {
+    fn from(reason: &str) -> Self {
+        reason.to_owned().into()
+    }
+}
+impl std::fmt::Display for RoleRunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.reason)
+    }
+}
+impl std::error::Error for RoleRunError {}
 struct ObservedProvider {
     inner: Arc<dyn LlmProvider>,
     context_id: String,
@@ -304,7 +330,7 @@ pub(super) fn run_role(
     prepared: &PreparedState,
     role: Role,
     provider: Arc<dyn LlmProvider>,
-) -> Result<RoleEvidence, String> {
+) -> Result<RoleEvidence, RoleRunError> {
     let state = prepared.app.state::<crate::AppState>();
     let request = match role {
         Role::Analyst => &prepared.analyst_request,
@@ -407,18 +433,40 @@ pub(super) fn run_role(
         live,
         Instant::now(),
     );
-    let observations = observed
-        .observations
-        .lock()
-        .map_err(|_| "Invocation observations unavailable.")?
-        .clone();
+    let observations = match observed.observations.lock() {
+        Ok(observations) => observations.clone(),
+        Err(poisoned) => {
+            return Err(RoleRunError {
+                post_dispatch: true,
+                reason: "Invocation observations unavailable.".into(),
+                observations: poisoned.into_inner().clone(),
+            });
+        }
+    };
+    collect_evidence(prepared, role, &id, observations.clone()).map_err(|reason| RoleRunError {
+        post_dispatch: true,
+        reason,
+        observations,
+    })
+}
+fn collect_evidence(
+    prepared: &PreparedState,
+    role: Role,
+    id: &str,
+    observations: Vec<InvocationObservation>,
+) -> Result<RoleEvidence, String> {
+    let state = prepared.app.state::<crate::AppState>();
+    let request = match role {
+        Role::Analyst => &prepared.analyst_request,
+        Role::Auditor => &prepared.auditor_request,
+    };
     let (detail, result, ledger, events) = {
         let jobs = state.jobs.lock().map_err(|_| "Job store unavailable.")?;
-        read_state(&jobs, &id)?
+        read_state(&jobs, id)?
     };
     let fresh =
         JobStore::open(prepared.app_data.join("state.db")).map_err(|error| error.to_string())?;
-    let fresh_state = read_state(&fresh, &id)?;
+    let fresh_state = read_state(&fresh, id)?;
     let mut checks = vec![check(
         "fresh_coordinator_reopen_exact",
         fresh_state
@@ -443,22 +491,22 @@ pub(super) fn run_role(
     let database = prepared.app_data.join("state.db");
     let steps = rows::<PendingInvestigationStep>(
         &database,
-        &id,
+        id,
         "investigation_invocations",
         8,
         256 * 1024,
     )?;
     let ledgers =
-        rows::<InvestigationInputLedger>(&database, &id, "investigation_inputs", 16, 256 * 1024)?;
+        rows::<InvestigationInputLedger>(&database, id, "investigation_inputs", 16, 256 * 1024)?;
     let archives = rows::<InvestigationCoverageArchive>(
         &database,
-        &id,
+        id,
         "investigation_coverage_archives",
         1,
         64 * 1024,
     )?;
     let responses =
-        rows::<InvestigationResponseMeta>(&database, &id, "investigation_responses", 8, 4096)?;
+        rows::<InvestigationResponseMeta>(&database, id, "investigation_responses", 8, 4096)?;
     checks.push(check(
         "known_response_usage_charged_once",
         response_usage_matches(&steps, &responses, &detail.usage),
@@ -820,4 +868,15 @@ fn response_usage_matches(
         output = next;
     }
     input == usage.reported_input_tokens && output == usage.reported_output_tokens
+}
+
+#[cfg(test)]
+pub(super) fn recording_failure_provider(prepared: &PreparedState) -> Arc<dyn LlmProvider> {
+    Arc::new(tests::RecordingFailureProvider {
+        inner: crate::investigations::worker::tests::Scripted::new(
+            crate::investigations::worker::tests::Mode::CompletionSupported,
+        ),
+        database: prepared.app_data.join("state.db"),
+        id: prepared.analyst_id.clone(),
+    })
 }

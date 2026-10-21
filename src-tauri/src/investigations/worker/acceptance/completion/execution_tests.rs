@@ -350,3 +350,84 @@ impl LlmProvider for IndependentAuditor {
         Ok(response)
     }
 }
+
+pub(super) struct RecordingFailureProvider {
+    pub(super) inner: Scripted,
+    pub(super) database: std::path::PathBuf,
+    pub(super) id: String,
+}
+impl LlmProvider for RecordingFailureProvider {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+    fn locality(&self) -> Locality {
+        self.inner.locality()
+    }
+    fn capabilities(&self) -> ProviderCaps {
+        self.inner.capabilities()
+    }
+    fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+        self.inner.embed(texts)
+    }
+    fn bounded_profile(&self) -> Result<ProviderProfile, BoundedCallError> {
+        self.inner.bounded_profile()
+    }
+    fn complete_bounded(
+        &self,
+        request: &AuthorizedBoundedCompletion,
+        control: &CompletionControl<'_>,
+    ) -> Result<BoundedCompletion, BoundedCallError> {
+        let response = self.inner.complete_bounded(request, control)?;
+        if serde_json::from_str::<Value>(&response.text).unwrap()["outcome"] == "supported" {
+            let connection = rusqlite::Connection::open(&self.database).unwrap();
+            let body: Vec<u8> = connection
+                .query_row(
+                    "SELECT record FROM investigation_tasks WHERE id=?1",
+                    [&self.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            // Preserve the production struct's canonical ordering after this
+            // explicit test-only corruption by patching the original error token.
+            let original = String::from_utf8(body).unwrap();
+            let replacement =
+                serde_json::to_string("synthetic recording defect\nmultiline stop cause").unwrap();
+            let canonical = original
+                .replacen("\"error\":null", &format!("\"error\":{replacement}"), 1)
+                .into_bytes();
+            connection
+                .execute(
+                    "UPDATE investigation_tasks SET record=?1,record_hash=?2 WHERE id=?3",
+                    rusqlite::params![canonical, content_hash(&canonical), self.id],
+                )
+                .unwrap();
+        }
+        Ok(response)
+    }
+}
+// AC-0267: a post-worker record validation failure still returns the captured
+// actual invocation hashes; it never turns that run into a resumable attempt.
+#[test]
+fn completion_execution_recording_error_preserves_actual_observation_hashes() {
+    let directory = tempfile::tempdir().unwrap();
+    let baseline = Scripted::new(Mode::CompletionSupported);
+    let prepared = prepared(directory.path(), &baseline);
+    let provider = Arc::new(RecordingFailureProvider {
+        inner: Scripted::new(Mode::CompletionSupported),
+        database: prepared.app_data.join("state.db"),
+        id: prepared.analyst_id.clone(),
+    });
+    let error = run_role(&prepared, Role::Analyst, provider.clone()).unwrap_err();
+    assert!(error.post_dispatch);
+    assert_eq!(error.reason, "Invalid acceptance record");
+    assert_eq!(error.observations.len(), 4);
+    assert!(
+        error
+            .observations
+            .iter()
+            .all(|observed| !observed.payload_hash.is_empty())
+    );
+    assert_eq!(provider.inner.calls.load(Ordering::SeqCst), 4);
+    assert!(run_role(&prepared, Role::Analyst, provider.clone()).is_err());
+    assert_eq!(provider.inner.calls.load(Ordering::SeqCst), 4);
+}
