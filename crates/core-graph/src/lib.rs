@@ -65,6 +65,9 @@ pub enum GraphError {
     /// Underlying storage failure.
     #[error("storage: {0}")]
     Storage(#[from] rusqlite::Error),
+    /// Host derived-state invalidation failed before graph deletion.
+    #[error("derived state: {0}")]
+    DerivedState(String),
     /// Property (de)serialization failure.
     #[error("props: {0}")]
     Props(#[from] serde_json::Error),
@@ -143,6 +146,7 @@ pub const GRAPH_SCHEMA_VERSION: u32 = 6;
 /// SQLite/WAL implementation — node/edge tables + recursive-CTE traversal.
 pub struct SqliteGraphStore {
     conn: Connection,
+    reset_hook: Option<Box<dyn Fn() -> Result<(), String> + Send>>,
     #[cfg(any(test, feature = "test-support"))]
     snapshot_after_nodes: RefCell<Option<SnapshotAfterNodesHook>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -156,6 +160,32 @@ impl SqliteGraphStore {
     /// Open (creating if absent) a graph database at `path`, in WAL mode.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, GraphError> {
         Self::init(Connection::open(path)?)
+    }
+
+    /// Open with a host lifecycle hook, called before destructive schema reset or clear.
+    /// The hook must invalidate disposable derived state or fail before graph deletion.
+    pub fn open_with_reset_hook(
+        path: impl AsRef<Path>,
+        hook: Box<dyn Fn() -> Result<(), String> + Send>,
+    ) -> Result<Self, GraphError> {
+        Self::init_with_hook(Connection::open(path)?, Some(hook))
+    }
+
+    /// Stable instance identity of this database, unrelated to graph fact hashes.
+    pub fn instance_id(&self) -> Result<String, GraphError> {
+        Ok(self.conn.query_row(
+            "SELECT instance FROM graph_instance WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Invalidate disposable host state before retained source deletion.
+    pub fn invalidate_derived_state(&self) -> Result<(), GraphError> {
+        if let Some(hook) = &self.reset_hook {
+            hook().map_err(GraphError::DerivedState)?;
+        }
+        Ok(())
     }
 
     /// Open an in-memory graph (tests, scratch analysis).
@@ -327,6 +357,13 @@ impl SqliteGraphStore {
     }
 
     fn init(conn: Connection) -> Result<Self, GraphError> {
+        Self::init_with_hook(conn, None)
+    }
+
+    fn init_with_hook(
+        conn: Connection,
+        reset_hook: Option<Box<dyn Fn() -> Result<(), String> + Send>>,
+    ) -> Result<Self, GraphError> {
         // WAL is a no-op for in-memory databases; harmless to set anyway.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -351,7 +388,15 @@ impl SqliteGraphStore {
         source::initialize(&conn)?;
         coverage::initialize(&conn)?;
         let version: u32 = conn.query_row("SELECT * FROM pragma_user_version", [], |r| r.get(0))?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS graph_instance (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance TEXT NOT NULL CHECK(length(instance)=32)) STRICT; INSERT INTO graph_instance SELECT 1,lower(hex(randomblob(16))) WHERE NOT EXISTS(SELECT 1 FROM graph_instance);")?;
+        let valid: bool = conn.query_row("SELECT count(*)=1 AND coalesce(min(singleton=1 AND typeof(instance)='text' AND length(instance)=32 AND instance NOT GLOB '*[^0-9a-f]*'),0) FROM graph_instance", [], |r|r.get(0))?;
+        if !valid {
+            return Err(GraphError::Storage(rusqlite::Error::InvalidQuery));
+        }
         if version != GRAPH_SCHEMA_VERSION {
+            if let Some(hook) = &reset_hook {
+                hook().map_err(GraphError::DerivedState)?;
+            }
             // Pre-versioned or older-scheme db: clear the facts, keep the
             // shape. Deletion order respects the edge → node foreign keys.
             conn.execute_batch(
@@ -361,6 +406,7 @@ impl SqliteGraphStore {
         }
         Ok(Self {
             conn,
+            reset_hook,
             #[cfg(any(test, feature = "test-support"))]
             snapshot_after_nodes: RefCell::new(None),
             #[cfg(any(test, feature = "test-support"))]
@@ -524,6 +570,7 @@ impl GraphStore for SqliteGraphStore {
     }
 
     fn clear(&mut self) -> Result<(), GraphError> {
+        self.invalidate_derived_state()?;
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM edges", [])?;
         tx.execute("DELETE FROM nodes", [])?;

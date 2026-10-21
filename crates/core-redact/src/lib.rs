@@ -11,6 +11,9 @@
 //! operations. Moving these helpers is groundwork for AC-0124, not completion
 //! of the source-expression storage boundary.
 
+/// Version of deterministic substitutions used for persistent embedding recipes.
+pub const TEXT_POLICY_VERSION: &str = "redact-text@1";
+
 use regex::Regex;
 use std::sync::OnceLock;
 
