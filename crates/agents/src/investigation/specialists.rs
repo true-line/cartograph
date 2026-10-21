@@ -17,6 +17,10 @@ pub enum SpecialistId {
     DomainAnalystV3,
     #[serde(rename = "evidence-auditor@3")]
     EvidenceAuditorV3,
+    #[serde(rename = "domain-analyst@4")]
+    DomainAnalystV4,
+    #[serde(rename = "evidence-auditor@4")]
+    EvidenceAuditorV4,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,9 +54,22 @@ const DISCOVERY_V2: &str = "This is a multi-step host-executed tool protocol. Yo
 
 const DISCOVERY_V3: &str = "This is a multi-step host-executed tool protocol. Return query_context to discover facts, then read_evidence using an original fact/role/index to acquire exact source. The host invokes you again with the result. Initially compact_context inventories and evidence spans are empty because you have not requested evidence; start with a scoped query_context action. Compact context shares identical complete fact and evidence-option objects. Each query records ordered fact_indexes and evidence_option_indexes into those inventories, with its original selection, counts and next_cursor. Differing representations are retained. Citations name only supplied facts or source spans; an inventory range alone is not supplied source. Use exact citation IDs and original role/index values. Empty initial input is not a completed search. Finish only after relevant discovery or when the remaining budget prevents further work.\n\n";
 
+// V1–V3 instructions stay byte-for-byte immutable.
+const DISCOVERY_V4: &str = "This is a multi-step host-executed protocol. The host-derived turn_progress describes the current turn, not a new session. Only phase initial needs initial discovery. After a completed query, inspect its facts and evidence options: choose a relevant read_evidence action, continue discovery using the exact returned next_cursor and same selection, or finish with honest limits when appropriate. A null input cursor restarts that selection; repeating it does not advance. Repeated-query no_progress means the same query and unchanged result added no facts; inspect the existing result instead of treating it as new discovery. After read_evidence, its citation names bytes actually supplied; decide whether further evidence is needed or finish using supported citations. The host never chooses your next action. Compact context shares only identical complete fact and evidence-option representations; differing representations remain visible. Query citation metadata and available ranges are not acquired source. The raw_query_budget charges every acquired raw page, including repeats, independently of compact prompt size. Consult its remaining bytes and other remaining budgets before another action. Never invent results or claim complete coverage.\n\n";
+
 impl SpecialistId {
     pub fn uses_compact_disclosure(self) -> bool {
-        matches!(self, Self::DomainAnalystV3 | Self::EvidenceAuditorV3)
+        matches!(
+            self,
+            Self::DomainAnalystV3
+                | Self::EvidenceAuditorV3
+                | Self::DomainAnalystV4
+                | Self::EvidenceAuditorV4
+        )
+    }
+
+    pub fn uses_turn_progress(self) -> bool {
+        matches!(self, Self::DomainAnalystV4 | Self::EvidenceAuditorV4)
     }
 
     fn version(self) -> u32 {
@@ -60,19 +77,27 @@ impl SpecialistId {
             Self::DomainAnalystV1 | Self::EvidenceAuditorV1 => 1,
             Self::DomainAnalyst | Self::EvidenceAuditor => 2,
             Self::DomainAnalystV3 | Self::EvidenceAuditorV3 => 3,
+            Self::DomainAnalystV4 | Self::EvidenceAuditorV4 => 4,
         }
     }
 
     pub fn prompt(self) -> String {
         let role = match self {
-            Self::DomainAnalyst | Self::DomainAnalystV1 | Self::DomainAnalystV3 => {
+            Self::DomainAnalyst
+            | Self::DomainAnalystV1
+            | Self::DomainAnalystV3
+            | Self::DomainAnalystV4 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
-            Self::EvidenceAuditor | Self::EvidenceAuditorV1 | Self::EvidenceAuditorV3 => {
+            Self::EvidenceAuditor
+            | Self::EvidenceAuditorV1
+            | Self::EvidenceAuditorV3
+            | Self::EvidenceAuditorV4 => {
                 "Audit the support and limits of existing claims within the question's scope. Identify missing links, unsupported interpretations and unresolved design evidence. Do not mistake missing evidence in a searched subset for proof of absence across the project."
             }
         };
         let discovery = match self.version() {
+            4 => DISCOVERY_V4,
             3 => DISCOVERY_V3,
             2 => DISCOVERY_V2,
             _ => "",
@@ -83,11 +108,17 @@ impl SpecialistId {
     pub fn definition(self) -> Result<InvestigationSpecialist, InvestigationError> {
         let prompt = self.prompt();
         let (name, purpose) = match self {
-            Self::DomainAnalyst | Self::DomainAnalystV1 | Self::DomainAnalystV3 => (
+            Self::DomainAnalyst
+            | Self::DomainAnalystV1
+            | Self::DomainAnalystV3
+            | Self::DomainAnalystV4 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
-            Self::EvidenceAuditor | Self::EvidenceAuditorV1 | Self::EvidenceAuditorV3 => (
+            Self::EvidenceAuditor
+            | Self::EvidenceAuditorV1
+            | Self::EvidenceAuditorV3
+            | Self::EvidenceAuditorV4 => (
                 "Evidence auditor",
                 "Audit claim support, coverage limitations and unresolved evidence.",
             ),

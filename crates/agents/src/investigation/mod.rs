@@ -14,6 +14,7 @@ mod records;
 mod sealing;
 mod specialists;
 mod strict;
+mod turn;
 
 pub use disclosure::*;
 pub use input::*;
@@ -22,6 +23,7 @@ pub use projection::*;
 pub use protocol::*;
 pub use records::*;
 pub use specialists::*;
+pub use turn::*;
 
 #[cfg(test)]
 mod tests;
@@ -32,6 +34,8 @@ pub const MAX_INPUT_BYTES: usize = 128 * 1024;
 pub const MAX_MANIFEST_BYTES: usize = 128 * 1024;
 pub const MAX_RESULT_BYTES: usize = 64 * 1024;
 pub const MAX_RECORD_BYTES: usize = 256 * 1024;
+/// Cumulative raw query acquisitions, including repeated identical pages.
+pub const MAX_TOTAL_QUERY_BYTES: usize = 96 * 1024;
 pub const MAX_QUERY_BYTES: usize = 32 * 1024;
 pub const MAX_QUERY_FACTS: usize = 32;
 pub const MAX_SELECTED_FACTS: usize = 64;

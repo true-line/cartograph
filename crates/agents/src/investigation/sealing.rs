@@ -32,6 +32,12 @@ pub(super) fn seal(
             return Err(InvestigationError::InvalidInput);
         }
     }
+    if before["schema_version"] == 3
+        && (before.get("turn_progress").is_none()
+            || before.get("turn_progress") != after.get("turn_progress"))
+    {
+        return Err(InvestigationError::InvalidInput);
+    }
     if before.get("omitted_sources") != after.get("omitted_sources") {
         return Err(InvestigationError::InvalidInput);
     }

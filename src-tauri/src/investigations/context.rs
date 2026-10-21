@@ -265,16 +265,7 @@ impl FrozenContext {
                 });
             }
         }
-        let total_bytes = ledger
-            .queries
-            .iter()
-            .map(|q| q.response_bytes)
-            .sum::<usize>()
-            .checked_add(raw.len())
-            .ok_or(HostError::LimitExceeded)?;
-        if total_bytes > 96 * 1024 {
-            return Err(HostError::LimitExceeded);
-        }
+        InvestigationQueryBudget::from_ledger(&ledger)?.admit(raw.len())?;
         ledger.queries.push(InvestigationQueryManifest {
             query,
             response_hash: content_hash(&raw),

@@ -15,6 +15,8 @@ mod storage;
 mod tests;
 #[path = "investigations/transitions.rs"]
 mod transitions;
+#[path = "investigations/turn.rs"]
+mod turn;
 
 use storage::*;
 pub(super) use transitions::{attach_execution, cancel_for_job};

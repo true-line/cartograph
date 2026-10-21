@@ -609,8 +609,9 @@ until their actual prerequisites and steps are run.
 
 The ignored native test `investigation_local_provider_acceptance` retains the
 legacy @2 analyst/auditor control. The separate
-`investigation_compact_local_provider_acceptance` selects the compact @3 pair.
-Both run the actual Ollama provider through the production worker and captured-source reader. It uses
+`investigation_compact_local_provider_acceptance` selects the compact @3 pair;
+`investigation_turn_progress_local_provider_acceptance` selects explicit @4 turn
+progress. Each runs the actual Ollama provider through the production worker and captured-source reader. It uses
 a disposable fixture and private coordinator, never the developer's app data.
 Run it from an owner-operated terminal with an already installed local model;
 agents follow the governed remote-heavy-suite policy. No model download, cloud
@@ -626,12 +627,11 @@ CARTOGRAPH_ACCEPTANCE_OUTPUT='/absolute/path/to/a/new-run-directory' \
 cargo test -p app investigation_local_provider_acceptance -- --ignored --nocapture
 ```
 
-For compact @3, use the same environment with the exact test name
-`investigation_compact_local_provider_acceptance` and a different new output
-directory. Choose the specialist version before starting; a new version is a
-separate observation, never a replay or replacement for a failed control. Both
-entrypoints use the same synthetic fixture, limits and acceptance checks; neither
-is the Vendure primary-input procedure.
+For compact @3 or explicit @4 turn progress, use the same environment with the
+corresponding exact test name above and a different new output directory. Choose the specialist version before starting; a new version is a
+separate observation, never a replay or replacement for a failed control. All
+three entrypoints use the same synthetic fixture, limits and acceptance checks;
+none is the Vendure primary-input procedure.
 
 Use a clean checkout and an output directory outside it that does not exist. The
 manifest records the exact source commit and intended analyst/auditor definitions

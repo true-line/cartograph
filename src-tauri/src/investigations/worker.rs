@@ -159,15 +159,34 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             if descriptor(provider, request.provider_mode)? != self.detail.provider {
                 return Err(Failure::Stop(InvestigationStopReason::ProviderFailure));
             }
-            let input = InvestigationInput::prepare(
-                &request.question,
-                request.specialist_id,
-                context.ledger.clone(),
-                &context.query_pages,
-                &context.evidence,
-                &history,
-                &self.detail.usage,
-            )?;
+            let input = if request.specialist_id.uses_turn_progress() {
+                let basis = self
+                    .state
+                    .jobs
+                    .lock()
+                    .map_err(|_| HostError::Operational)?
+                    .investigation_turn_basis(self.id)?;
+                InvestigationInput::prepare_v4(
+                    &request.question,
+                    request.specialist_id,
+                    context.ledger.clone(),
+                    &context.query_pages,
+                    &context.evidence,
+                    &history,
+                    &self.detail.usage,
+                    &basis,
+                )?
+            } else {
+                InvestigationInput::prepare(
+                    &request.question,
+                    request.specialist_id,
+                    context.ledger.clone(),
+                    &context.query_pages,
+                    &context.evidence,
+                    &history,
+                    &self.detail.usage,
+                )?
+            };
             let step_id = format!("step-{}", self.detail.usage.model_invocations + 1);
             let action = input.action(format!("{}:{step_id}", self.id))?;
             let input_bytes = bounded_json(&action.payload, 128 * 1024)?.len();

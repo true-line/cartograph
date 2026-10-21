@@ -7,7 +7,6 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-const MAX_TOTAL_QUERY_BYTES: usize = 96 * 1024;
 const MAX_QUERY_DEPTH: usize = 32;
 const MAX_QUERY_VALUES: usize = 16384;
 const MAX_QUERY_ARRAY_ITEMS: usize = 16384;

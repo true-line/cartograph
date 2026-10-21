@@ -268,6 +268,30 @@ plus 4 KiB of existing step metadata. The enclosing 256 KiB record, 2 MiB task a
 256 MiB global caps remain unchanged. Capacity is checked transactionally before
 dispatch, including a pending disclosure inside the task record.
 
+### Explicit turn progress (@4; #618)
+
+The next specialist version adds a separate model-input schema. Existing @1–@3
+prompts, payload bytes and saved task identities remain immutable. Selection is
+explicit; no saved task is migrated to a newer definition.
+
+Derive progress from the durable ordered action/input basis and verify it against
+the admitted ledger and exact query pages. Describe initial state, the last
+completed query or read, newly discovered typed facts, exact continuation and
+unchanged repeated results. A repeated representation can differ even when the
+fact identity is unchanged; do not call that identical evidence. Reopening must
+preserve the same basis. A follow-up starts its own progress; parent history does
+not become its own tool execution. Invalid or ambiguous bindings fail before a
+provider call rather than inventing an action order.
+
+Expose cumulative acquired query-response bytes separately from compact model
+payload bytes. Both the visible limit and host admission use the same 96 KiB
+constant; every admitted duplicate page still consumes that acquisition budget.
+This information helps the model choose its next action. It does not authorize
+automatic pagination, forced evidence reads, retries, larger caps or synthetic
+completion. All existing disclosure, source-citation and outcome gates remain.
+T-0260 covers durable progress derivation and shared budget admission; a separate
+real-provider run must still establish useful query/read/finish behavior.
+
 ### Evidence required for acceptance
 
 Map T-0234–0236 to production-path tests for exact representation binding, host-only

@@ -164,3 +164,77 @@ export const LegacyHistoryUsesCurrentFollowUp: Story = {
       specialist_id: 'domain-analyst@3', parent_id: 'inv-fixture' }));
   },
 };
+
+const turnProgressSpecialists = [
+  { ...investigationCatalog.specialists[0], id: 'domain-analyst@4' as const, version: 4,
+    prompt_fingerprint: 'prompt:domain-v4', purpose: 'Inspect evidence with explicit turn progress.' },
+  { ...investigationCatalog.specialists[1], id: 'evidence-auditor@4' as const, version: 4,
+    prompt_fingerprint: 'prompt:audit-v4', purpose: 'Audit evidence with explicit turn progress.' },
+];
+const turnProgressCatalog = { ...investigationCatalog,
+  specialists: [...investigationCatalog.specialists, ...turnProgressSpecialists] };
+
+export const TurnProgressRequiresExplicitSelection: Story = {
+  // AC-0260: catalog additions do not silently change the default specialist.
+  args: { state: state({ catalog: turnProgressCatalog }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@4/ })).not.toBeChecked();
+    await userEvent.click(canvas.getByRole('radio', { name: /evidence-auditor@4/ }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Audit the retained evidence.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({
+      specialist_id: 'evidence-auditor@4', question: 'Audit the retained evidence.' }));
+  },
+};
+
+export const TurnProgressFollowUpKeepsSelectedVersion: Story = {
+  // AC-0260: a new follow-up retains an available explicit version, not an old default.
+  args: { state: state({ catalog: turnProgressCatalog,
+    detail: investigationDetail('inv-fixture', { specialist_id: 'domain-analyst@4',
+      specialist: turnProgressSpecialists[0] }) }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Ask a follow-up' }));
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@4/ })).toBeChecked();
+    await userEvent.type(canvas.getByLabelText('Follow-up question'), 'Inspect the missing evidence.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({
+      specialist_id: 'domain-analyst@4', parent_id: 'inv-fixture' }));
+  },
+};
+
+export const TurnProgressFollowUpWaitsForCatalog: Story = {
+  // AC-0260: unavailable/loading catalog must not downgrade a saved explicit V4.
+  beforeEach: () => {
+    useInvestigationStore.setState(state({ catalog: null, catalogLoading: true,
+      detail: investigationDetail('inv-fixture', { specialist_id: 'domain-analyst@4',
+        specialist: turnProgressSpecialists[0] }) }), true);
+    return () => useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  },
+  render: function FollowUpCatalogStory() {
+    const liveState = useInvestigationStore();
+    return <InvestigationsSurface state={liveState} anchors={[]} canStart />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const followUp = canvas.getByRole('button', { name: 'Ask a follow-up' });
+    await expect(followUp).toBeDisabled();
+    await userEvent.click(followUp);
+    await expect(canvas.queryByLabelText('Follow-up question')).not.toBeInTheDocument();
+    useInvestigationStore.setState({ catalogLoading: false, catalogError: 'Catalog unavailable.' });
+    await waitFor(() => expect(canvas.getByRole('alert')).toHaveTextContent('Catalog unavailable.'));
+    await expect(followUp).toBeDisabled();
+    await userEvent.click(followUp);
+    await expect(canvas.queryByLabelText('Follow-up question')).not.toBeInTheDocument();
+    useInvestigationStore.setState({ catalog: turnProgressCatalog, catalogError: null });
+    await waitFor(() => expect(followUp).toBeEnabled());
+    await userEvent.click(followUp);
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@4/ })).toBeChecked();
+    await userEvent.type(canvas.getByLabelText('Follow-up question'), 'Inspect the retained evidence.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up' }));
+    await expect(useInvestigationStore.getState().start).toHaveBeenCalledWith(expect.objectContaining({
+      specialist_id: 'domain-analyst@4', parent_id: 'inv-fixture' }));
+  },
+};

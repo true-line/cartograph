@@ -190,6 +190,11 @@ impl AcceptanceSpecialists {
         auditor: SpecialistId::EvidenceAuditorV3,
     };
 
+    const TURN_V4: Self = Self {
+        analyst: SpecialistId::DomainAnalystV4,
+        auditor: SpecialistId::EvidenceAuditorV4,
+    };
+
     // Explicit immutable definitions, recorded even if the first call fails and
     // the auditor is never started. No capability lookup selects a latest role.
     fn intended_definitions(self) -> Value {
@@ -283,6 +288,12 @@ fn investigation_local_provider_acceptance() {
 #[ignore = "MT-H4-02: requires an installed local model and explicit fresh artifact directory"]
 fn investigation_compact_local_provider_acceptance() {
     local_provider_acceptance(AcceptanceSpecialists::COMPACT_V3);
+}
+
+#[test]
+#[ignore = "MT-H4-02: requires an installed local model and explicit fresh artifact directory"]
+fn investigation_turn_progress_local_provider_acceptance() {
+    local_provider_acceptance(AcceptanceSpecialists::TURN_V4);
 }
 
 fn local_provider_acceptance(specialists: AcceptanceSpecialists) {
@@ -410,6 +421,12 @@ fn investigation_acceptance_explicit_specialists_match_prepared_report_and_durab
             "evidence-auditor@3",
             3,
         ),
+        (
+            AcceptanceSpecialists::TURN_V4,
+            "domain-analyst@4",
+            "evidence-auditor@4",
+            4,
+        ),
     ] {
         let provider = Arc::new(Scripted::new(Mode::Finish));
         let artifacts = tempfile::tempdir().unwrap();
@@ -455,11 +472,25 @@ fn investigation_acceptance_explicit_specialists_match_prepared_report_and_durab
         assert_eq!(auditor["detail"]["specialist"], intended["auditor"]);
         assert_eq!(auditor["detail"]["limits"], analyst["detail"]["limits"]);
         assert_eq!(auditor_provider.calls.load(Ordering::SeqCst), 1);
+        if version == 4 {
+            let prompts = auditor_provider.prompts.lock().unwrap();
+            assert_eq!(prompts[0]["turn_progress"]["phase"], "initial");
+            assert!(
+                !prompts[0]["prior_findings_as_t3_history"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         fingerprints.push((
             intended["analyst"]["prompt_fingerprint"].clone(),
             intended["auditor"]["prompt_fingerprint"].clone(),
         ));
     }
-    assert_ne!(fingerprints[0].0, fingerprints[1].0);
-    assert_ne!(fingerprints[0].1, fingerprints[1].1);
+    for (index, current) in fingerprints.iter().enumerate() {
+        for other in &fingerprints[index + 1..] {
+            assert_ne!(current.0, other.0);
+            assert_ne!(current.1, other.1);
+        }
+    }
 }

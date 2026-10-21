@@ -48,6 +48,66 @@ impl InvestigationInput {
         supplied_history: &[String],
         usage: &InvestigationUsage,
     ) -> Result<Self, InvestigationError> {
+        if specialist.uses_turn_progress() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Self::prepare_base(
+            question,
+            specialist,
+            ledger,
+            query_pages,
+            evidence,
+            supplied_history,
+            usage,
+        )
+    }
+
+    /// V4 requires a coherently read durable turn basis; legacy inputs never
+    /// acquire progress fields or change their serialized representation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_v4(
+        question: &str,
+        specialist: SpecialistId,
+        ledger: InvestigationInputLedger,
+        query_pages: &[String],
+        evidence: &[AgentEvidence],
+        supplied_history: &[String],
+        usage: &InvestigationUsage,
+        basis: &InvestigationTurnBasis,
+    ) -> Result<Self, InvestigationError> {
+        if !specialist.uses_turn_progress() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let mut input = Self::prepare_base(
+            question,
+            specialist,
+            ledger,
+            query_pages,
+            evidence,
+            supplied_history,
+            usage,
+        )?;
+        let mut prompt: Value = serde_json::from_str(&input.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let progress = basis.progress(&input.ledger, &prompt["compact_context"])?;
+        prompt["schema_version"] = 3.into();
+        prompt["turn_progress"] =
+            serde_json::to_value(progress).map_err(|_| InvestigationError::InvalidInput)?;
+        input.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        bounded_bytes(&input.payload, MAX_INPUT_BYTES)?;
+        Ok(input)
+    }
+
+    fn prepare_base(
+        question: &str,
+        specialist: SpecialistId,
+        ledger: InvestigationInputLedger,
+        query_pages: &[String],
+        evidence: &[AgentEvidence],
+        supplied_history: &[String],
+        usage: &InvestigationUsage,
+    ) -> Result<Self, InvestigationError> {
         ledger.validate()?;
         if !text(question, MAX_QUESTION_BYTES)
             || query_pages.len() != ledger.queries.len()
@@ -69,7 +129,7 @@ impl InvestigationInput {
             total_query_bytes = total_query_bytes
                 .checked_add(raw.len())
                 .ok_or(InvestigationError::LimitExceeded)?;
-            if total_query_bytes > 96 * 1024 {
+            if total_query_bytes > MAX_TOTAL_QUERY_BYTES {
                 return Err(InvestigationError::LimitExceeded);
             }
             strict::preflight(raw, MAX_QUERY_BYTES, 32, 16384, 16384)?;
