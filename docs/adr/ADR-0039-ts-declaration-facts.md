@@ -36,8 +36,9 @@ span and a provenance-only v2 receipt:
   - Computed keys and callable values (seen through `as`, `satisfies` and
     parentheses) emit nothing.
   - A section whose span exceeds 8 KiB is flagged `span_exceeds_range_cap`,
-    and its object value is described one level deeper the same way, so each
-    section reaches an inspectable range or remains a named gap.
+    and its object value is described one level deeper the same way, to at
+    most four levels and iteratively, so each section reaches an inspectable
+    range or remains a named gap and hostile nesting cannot exhaust the stack.
   - A repeated name (a legal duplicate `var` or object key) is
     position-qualified as `<name>@N`, so every id stays unique.
 - **`Decorator`** covers each decorator applied to a method, with id

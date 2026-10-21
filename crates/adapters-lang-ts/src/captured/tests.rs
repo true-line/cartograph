@@ -1039,3 +1039,33 @@ export function configure(options: Options) {{
     assert_eq!(by_fact(directory_receipts), receipts);
     assert!(stats.omitted_declaration_receipts.is_empty());
 }
+
+// AC-0282: hostile nesting is described to a fixed depth on an ordinary worker
+// thread, with the deepest oversized section left as a flagged gap.
+#[test]
+fn captured_declaration_nesting_is_bounded() {
+    let depth = 2000;
+    let source = format!(
+        "const config = {}'{}'{};\n",
+        "{a: ".repeat(depth),
+        "x".repeat(9000),
+        "}".repeat(depth)
+    );
+    let facts = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || crate::extract_source(source.as_bytes(), "deep.ts", &parser_id()).unwrap())
+        .unwrap()
+        .join()
+        .expect("bounded nesting never overflows the stack");
+    let properties: Vec<_> = facts
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Declaration" && node.props["kind"] == "Property")
+        .collect();
+    assert_eq!(properties.len(), crate::declarations::MAX_PROPERTY_DEPTH);
+    assert!(
+        properties
+            .iter()
+            .all(|node| node.props["span_exceeds_range_cap"] == true)
+    );
+}

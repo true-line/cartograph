@@ -126,10 +126,15 @@ pub(super) fn emit(
     }
 }
 
+/// Nesting levels described below a top-level declarator. Deeper oversized
+/// sections stay flagged gaps; the walk is iterative, so hostile nesting can
+/// neither exhaust the stack nor multiply work beyond this bound.
+pub const MAX_PROPERTY_DEPTH: usize = 4;
+
 /// First-level properties of an object literal. A property whose own span
 /// exceeds the inspection cap is flagged, and its object value is described
-/// one level deeper, so every config section reaches a citable range or is
-/// a named gap.
+/// one level deeper (to [`MAX_PROPERTY_DEPTH`]), so every config section
+/// reaches a citable range or is a named gap.
 fn properties(
     cx: &FileCx<'_>,
     object: TsNode<'_>,
@@ -138,34 +143,41 @@ fn properties(
     file: &str,
     facts: &mut Vec<(Node, Edge)>,
 ) {
-    let mut cursor = object.walk();
-    let pairs: Vec<_> = object
-        .named_children(&mut cursor)
-        .filter(|child| child.kind() == "pair")
-        .collect();
-    let keys = unique_names(cx, &pairs, |cx, pair| {
-        let key = pair.child_by_field_name("key")?;
-        (key.kind() != "computed_property_name").then(|| callable::property_name(cx, Some(key)))
-    });
-    for (pair, key) in pairs.iter().zip(keys) {
-        let Some(key) = key else { continue };
-        let value = pair.child_by_field_name("value").map(unwrap_value);
-        if value.is_some_and(callable::is_callable) {
-            continue; // Already a Symbol.
+    let mut pending = vec![(object, prefix.to_owned(), parent.to_owned(), 1)];
+    while let Some((object, prefix, parent, depth)) = pending.pop() {
+        let mut cursor = object.walk();
+        let pairs: Vec<_> = object
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "pair")
+            .collect();
+        let keys = unique_names(cx, &pairs, |cx, pair| {
+            let key = pair.child_by_field_name("key")?;
+            (key.kind() != "computed_property_name").then(|| callable::property_name(cx, Some(key)))
+        });
+        let mut nested = Vec::new();
+        for (pair, key) in pairs.iter().zip(keys) {
+            let Some(key) = key else { continue };
+            let value = pair.child_by_field_name("value").map(unwrap_value);
+            if value.is_some_and(callable::is_callable) {
+                continue; // Already a Symbol.
+            }
+            let member = format!("{prefix}.{key}");
+            let id = decl_id(cx, &member);
+            let object = value
+                .filter(|value| value.kind() == "object" && exceeds_cap(*pair))
+                .filter(|_| depth < MAX_PROPERTY_DEPTH);
+            facts.push((
+                declaration(cx, &id, &member, "Property", *pair, |props| {
+                    props["declaration"] = serde_json::json!(parent);
+                }),
+                defined_in(cx, &id, file, *pair),
+            ));
+            if let Some(object) = object {
+                nested.push((object, member, id, depth + 1));
+            }
         }
-        let member = format!("{prefix}.{key}");
-        let id = decl_id(cx, &member);
-        facts.push((
-            declaration(cx, &id, &member, "Property", *pair, |props| {
-                props["declaration"] = serde_json::json!(parent);
-            }),
-            defined_in(cx, &id, file, *pair),
-        ));
-        if exceeds_cap(*pair)
-            && let Some(nested) = value.filter(|value| value.kind() == "object")
-        {
-            properties(cx, nested, &member, &id, file, facts);
-        }
+        // Reverse so the stack visits nested sections in source order.
+        pending.extend(nested.into_iter().rev());
     }
 }
 
