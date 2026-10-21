@@ -839,3 +839,7 @@ mod admission_input;
 pub use admission_input::{
     AdmissionCapacityFeedback, AdmissionReserveMeasurements, CapacityRefusalReason,
 };
+
+#[path = "input_context_preview.rs"]
+mod context_preview;
+pub use context_preview::{ContextPreviewBound, ContextPreviewKind, ContextPreviewMeasurements};

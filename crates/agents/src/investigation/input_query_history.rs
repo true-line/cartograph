@@ -95,31 +95,12 @@ impl InvestigationInput {
         )?;
         let mut prompt: Value = serde_json::from_str(&input.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
-        // The legacy progress derivation only needs the last query's cursor.
-        // Its durable ordering/counter checks remain authoritative. This scratch
-        // structure is never sent, bounded or saved as a legacy projection.
-        let history = &prompt["compact_context"]["query_history"];
-        let mut queries = vec![Value::Null; input.ledger.queries.len()];
-        if let Some(last) = queries.last_mut() {
-            *last = json!({"context": history["latest_query"]["context"]});
-        }
-        let mut progress = serde_json::to_value(basis.progress_with_policy(
+        let progress = Self::progressive_turn_progress(
+            basis,
             &input.ledger,
-            &json!({"queries": queries}),
+            &prompt["compact_context"]["query_history"],
             policy,
-        )?)
-        .map_err(|_| InvestigationError::InvalidInput)?;
-        progress["contract"] = "investigation-turn-progress@3".into();
-        if progress["last_completed_action"]["type"] == "query_context" {
-            let id = history["latest_query"]["reference"]["query_id"]
-                .as_str()
-                .ok_or(InvestigationError::InvalidInput)?;
-            let action = progress["last_completed_action"]
-                .as_object_mut()
-                .ok_or(InvestigationError::InvalidInput)?;
-            action.remove("query");
-            action.insert("query_id".into(), id.into());
-        }
+        )?;
         prompt["schema_version"] = 8.into();
         prompt["policy"] = QUERY_HISTORY_DISCLOSURE_POLICY.into();
         prompt["turn_progress"] = progress;
@@ -140,6 +121,39 @@ impl InvestigationInput {
         prompt["completion_metadata"] =
             serde_json::to_value(metadata).map_err(|_| InvestigationError::InvalidInput)?;
         Ok((input, prompt))
+    }
+
+    pub(super) fn progressive_turn_progress(
+        basis: &InvestigationTurnBasis,
+        ledger: &InvestigationInputLedger,
+        history: &Value,
+        policy: &InvestigationPolicy,
+    ) -> Result<Value, InvestigationError> {
+        // The legacy progress derivation only needs the last query's cursor.
+        // Its durable ordering/counter checks remain authoritative. This scratch
+        // structure is never sent, bounded or saved as a legacy projection.
+        let mut queries = vec![Value::Null; ledger.queries.len()];
+        if let Some(last) = queries.last_mut() {
+            *last = json!({"context": history["latest_query"]["context"]});
+        }
+        let mut progress = serde_json::to_value(basis.progress_with_policy(
+            ledger,
+            &json!({"queries": queries}),
+            policy,
+        )?)
+        .map_err(|_| InvestigationError::InvalidInput)?;
+        progress["contract"] = "investigation-turn-progress@3".into();
+        if progress["last_completed_action"]["type"] == "query_context" {
+            let id = history["latest_query"]["reference"]["query_id"]
+                .as_str()
+                .ok_or(InvestigationError::InvalidInput)?;
+            let action = progress["last_completed_action"]
+                .as_object_mut()
+                .ok_or(InvestigationError::InvalidInput)?;
+            action.remove("query");
+            action.insert("query_id".into(), id.into());
+        }
+        Ok(progress)
     }
 
     pub(super) fn finish_progressive_input<P: AsRef<str>>(

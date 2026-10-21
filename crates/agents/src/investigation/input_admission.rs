@@ -554,7 +554,7 @@ impl InvestigationInput {
         Ok(state)
     }
 
-    fn admission_reserve_basis(
+    pub(super) fn admission_reserve_basis(
         &self,
         policy: &InvestigationPolicy,
     ) -> Result<(Value, InvestigationCompletionContract), InvestigationError> {
@@ -682,7 +682,7 @@ fn maximize_progress_numbers(value: &mut Value) {
 /// The actual builder and a future conservative sizing view use this same
 /// enclosing representation. A Serialize value here is not admission authority;
 /// this helper is private and only the validated DTO reaches the real builder.
-fn apply_admission_progress(
+pub(super) fn apply_admission_progress(
     progress: &mut Value,
     mode: CompletionCallMode,
     count: u32,
