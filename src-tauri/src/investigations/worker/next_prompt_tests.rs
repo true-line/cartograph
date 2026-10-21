@@ -291,10 +291,7 @@ fn next_prompt_worker_real_start_invoke_refusal_feedback_and_terminal_reopen() {
             detail.usage.active_milliseconds >= second_ms + 40,
             "terminal usage dropped elapsed call time"
         );
-        assert!(
-            jobs.investigation(&f.id).is_err(),
-            "public history stays closed"
-        );
+        assert_eq!(jobs.investigation(&f.id).unwrap(), detail);
         drop(jobs);
         let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
         assert_eq!(

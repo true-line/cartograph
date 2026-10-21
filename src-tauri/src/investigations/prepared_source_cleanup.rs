@@ -14,20 +14,24 @@ enum RetainedCleanup {
     Publication(Box<SourcePublicationFailure>),
 }
 pub(in crate::investigations) struct SourceCleanupFailure {
-    retained: RetainedCleanup,
+    // Owns source/registry guards through failure handling, even when the
+    // caller only inspects the error and then drops the retained outcome.
+    _retained: RetainedCleanup,
     error: SourceCleanupError,
 }
 impl SourceCleanupFailure {
     pub(in crate::investigations) fn error(&self) -> &SourceCleanupError {
         &self.error
     }
+    #[cfg(test)]
     pub(in crate::investigations) fn stage(&self) -> SourceAccessStage {
-        self.retained.stage()
+        self._retained.stage()
     }
+    #[cfg(test)]
     pub(in crate::investigations) fn validation_receipt(
         &self,
     ) -> Option<&CommittedSourceValidation> {
-        self.retained.prepared().validation.as_ref()
+        self._retained.prepared().validation.as_ref()
     }
 }
 impl RetainedCleanup {
@@ -92,7 +96,7 @@ impl RetainedCleanup {
         match result {
             Ok(detail) => Ok(detail),
             Err(error) => Err(SourceCleanupFailure {
-                retained: self,
+                _retained: self,
                 error,
             }),
         }

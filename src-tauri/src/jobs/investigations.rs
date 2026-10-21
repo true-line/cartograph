@@ -6,35 +6,24 @@ use agents::investigation::*;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-#[allow(dead_code)]
 #[path = "investigations/admission_contract.rs"]
 mod admission_contract;
-#[allow(dead_code)]
 #[path = "investigations/admission_journal.rs"]
 mod admission_journal;
-#[allow(dead_code)]
 #[path = "investigations/admission_transition.rs"]
 mod admission_transition;
 #[path = "investigations/completion.rs"]
 mod completion;
 pub(crate) use completion::NextPromptFinish;
-#[allow(dead_code)] // Internal atomic metadata writer; public @10 remains closed.
 #[path = "investigations/metadata_admission.rs"]
 mod metadata_admission;
-#[allow(unused_imports)] // Used by the separately integrated internal host adapter.
-pub(crate) use metadata_admission::{
-    MetadataAdmission, MetadataContinuationRead, MetadataContinuationSnapshot,
-};
-#[allow(dead_code)] // Internal explicit user decisions; public consent remains gated.
+pub(crate) use metadata_admission::{MetadataAdmission, MetadataContinuationRead};
 #[path = "investigations/next_prompt_consent.rs"]
 mod next_prompt_consent;
-#[allow(dead_code)] // Internal first-context publication; task creation remains closed.
 #[path = "investigations/next_prompt_initial.rs"]
 mod next_prompt_initial;
-#[allow(dead_code)] // Internal pre-call writer; public @10 routes remain closed.
 #[path = "investigations/next_prompt_invocation.rs"]
 mod next_prompt_invocation;
-#[allow(unused_imports)]
 pub(crate) use next_prompt_invocation::NextPromptInvocation;
 #[path = "investigations/coverage.rs"]
 mod coverage;
@@ -47,27 +36,20 @@ pub(crate) mod metadata_host_fixture;
 #[path = "investigations/reads.rs"]
 mod reads;
 // Internal admission foundation; no historical runtime initializes these tables.
-#[allow(dead_code)]
 #[path = "investigations/read_reservations.rs"]
 mod read_reservations;
-#[allow(dead_code)] // Internal reservation admission; public @10 routes remain closed.
 #[path = "investigations/source_admission.rs"]
 mod source_admission;
-#[allow(dead_code)] // Internal settlement projection; public @10 remains closed.
 #[path = "investigations/source_settlement.rs"]
 mod source_settlement;
 #[cfg(test)]
-#[allow(unused_imports)] // Consumed by the real host lost-ack regression.
 pub(crate) use source_admission::lose_next_commit_ack as lose_next_source_admission_ack;
-#[allow(unused_imports)]
 pub(crate) use source_admission::{CommittedSourceReservation, SourceAdmission};
-#[allow(dead_code)] // Internal issuer; reservation admission/public activation remain closed.
 #[path = "investigations/source_validation.rs"]
 mod source_validation;
 pub(crate) use source_validation::{CommittedSourceValidation, SourceValidationBasis};
 #[cfg(test)]
 pub(crate) use source_validation::{SourceValidationInitialData, captured_source_fixture};
-#[allow(dead_code)]
 #[path = "investigations/staged.rs"]
 mod staged;
 #[path = "investigations/storage.rs"]
@@ -711,12 +693,8 @@ mod captured_source_invocation_fixture;
 #[cfg(test)]
 pub(crate) use captured_source_invocation_fixture::CapturedSourceInvocationFixture;
 
-#[allow(unused_imports)] // Internal source adapter integration; public @10 remains closed.
-pub(crate) use source_settlement::{
-    SourceContinuationOutcome, SourceContinuationSnapshot, SourceContinuationSnapshotInput,
-};
+pub(crate) use source_settlement::{SourceContinuationOutcome, SourceContinuationSnapshotInput};
 
-#[allow(unused_imports)]
 pub(crate) use source_settlement::{KnownSourceDisposition, SourceContinuation};
 
 #[cfg(test)]

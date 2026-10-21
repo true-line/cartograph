@@ -1,5 +1,5 @@
-//! Internal exact-preview user decisions. These methods never create a model
-//! grant, consume a call, or expose the new family through public IPC routes.
+//! Exact-preview user decisions used by public command orchestration. Approval
+//! records consent; the worker separately authorizes and consumes the exact call.
 use super::*;
 
 impl JobStore {

@@ -58,9 +58,11 @@ impl CommittedSourceValidation {
     pub(crate) fn task_id(&self) -> &str {
         &self.task_id
     }
+    #[cfg(test)]
     pub(crate) fn step_id(&self) -> &str {
         &self.step_id
     }
+    #[cfg(test)]
     pub(crate) fn reservation_hash(&self) -> &str {
         &self.reservation_hash
     }
@@ -308,7 +310,6 @@ pub(super) fn project_validation(
 /// Derive validation's allocation from the same production projection the
 /// writer consumes. This is a sizing result, not reservation/owner authority;
 /// source admission must separately certify every settlement alternative.
-#[allow(dead_code)] // Consumed by the structured reservation admission slice.
 pub(super) fn validation_storage_bound(
     connection: &Connection,
     task: &StoredTask,

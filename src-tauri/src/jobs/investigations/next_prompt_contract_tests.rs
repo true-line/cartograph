@@ -2,7 +2,7 @@ use super::*;
 use crate::jobs::investigations::admission_contract::{self, SavedCallBasis, StoredAdmissionState};
 use agents::investigation::staged_refusal::CompletionCallMode;
 
-/// Private construction for structural family validation; public reads still
+/// Private construction for structural family validation; public reads also
 /// require the complete saved journal to validate.
 /// Uses a real existing job/ledger/archive fixture, then explicitly writes the
 /// new internal DTO/invocation as test data; this is not a production migration.

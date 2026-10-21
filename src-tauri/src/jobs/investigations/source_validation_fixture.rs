@@ -308,16 +308,6 @@ impl SourceValidationTestFixture {
     pub(crate) fn execution(&self) -> &JobExecution {
         &self.inner._execution_guard
     }
-    pub(crate) fn cancel_job(&self) {
-        self.inner
-            .store
-            .conn
-            .execute(
-                "UPDATE jobs SET status='cancelled' WHERE id=?1",
-                [self.inner.task.detail.summary.job_id],
-            )
-            .unwrap();
-    }
     pub(crate) fn charged_bytes_after_reopen(&self) -> u64 {
         let reopened = JobStore::open(self.inner.directory.path().join("state.db")).unwrap();
         let tx = reopened.conn.unchecked_transaction().unwrap();

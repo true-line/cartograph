@@ -4,7 +4,7 @@ use context_hub::coverage::{CoverageQualification, ScopedRepo};
 use serde_json::json;
 
 // AC-0287: production adapter, real source/retention stores, real persisted owner,
-// invocation and charge. Only admission into the not-yet-public task3 family is
+// invocation and charge. Only initial construction of the task3 family is
 // explicit test setup; all stamps are built/sealed through production code.
 #[test]
 fn prepared_source_reserved_adapter_reads_only_after_real_charge_commit() {

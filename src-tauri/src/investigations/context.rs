@@ -17,7 +17,6 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-#[allow(dead_code)] // Internal admission path; public family routing remains closed.
 #[path = "context_metadata_admission.rs"]
 pub(super) mod metadata_admission;
 
@@ -95,7 +94,6 @@ pub(super) struct PreparedContextRead {
 /// Borrowed complete prospective context. The preparation and its retention
 /// guards must outlive this view; no raw response or source text is cloned.
 /// This is sizing input, not a durable publication or execution capability.
-#[allow(dead_code)] // Consumed by the guarded admission path once its closure is complete.
 pub(super) struct ProspectiveContextView<'a> {
     pub ledger: &'a InvestigationInputLedger,
     pub query_pages: Vec<&'a str>,
@@ -876,7 +874,6 @@ impl FrozenContext {
         Ok(())
     }
 
-    #[allow(dead_code)] // New-family admission integration is not enabled yet.
     pub(super) fn prospective_context<'a>(
         &'a self,
         prepared: &'a PreparedContextRead,

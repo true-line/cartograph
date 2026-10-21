@@ -253,10 +253,8 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     validate_task_contract(task, false)
 }
 
-/// Internal DTO validation only. Public/history load_task retains the @10
-/// guard until the complete transition pipeline is integrated. Saved calls
-/// additionally require exact journal/step/ledger validation before use.
-#[allow(dead_code)]
+/// Structural task3 validation. Public and owned readers additionally validate
+/// the exact saved call journal, steps and ledgers before exposing task history.
 pub(super) fn validate_next_prompt_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     admission_contract::validate_pairing(task)?;
     validate_task_contract(task, true)
@@ -728,9 +726,9 @@ pub(super) fn load_task_base(
     load_task_base_contract(connection, id, false)
 }
 
-/// Internal task3 reader in the caller's snapshot. Public/history loading keeps
-/// its closed family gate. Row bounds and every SQL scalar parity check are
-/// shared, while saved @10 calls use their exact journal/ordinal contract.
+/// Task3 reader in the caller's snapshot. Row bounds and every SQL scalar
+/// parity check are shared with historical families, while saved @10 calls
+/// use their exact journal/ordinal contract.
 pub(super) fn load_next_prompt_task_base(
     connection: &Connection,
     id: &str,
@@ -861,9 +859,8 @@ pub(super) fn save_task(
     save_validated_task(connection, task, expected_revision, terminal)
 }
 
-/// Internal task3 writer only. Caller authenticates execution/task authority
-/// and owns transaction/commit; ordinary save_task retains the public guard.
-#[allow(dead_code)]
+/// Task3 writer. The caller authenticates execution/task authority and owns
+/// transaction/commit; historical families retain their separate serializer.
 pub(super) fn save_next_prompt_task(
     connection: &Connection,
     task: &StoredTask,

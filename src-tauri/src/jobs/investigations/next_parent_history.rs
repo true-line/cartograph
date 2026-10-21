@@ -11,8 +11,8 @@ impl NextParentHistory {
     }
 }
 
-/// Called by the internal factory in its existing writer transaction and by
-/// the internal worker in a readonly snapshot. All public family gates stay closed.
+/// Shared by task creation in its writer transaction and by the worker in a
+/// readonly snapshot. Public requests use the same saved-family validation.
 pub(super) fn load(
     connection: &Connection,
     parent_id: &str,

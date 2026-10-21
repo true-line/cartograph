@@ -1,5 +1,5 @@
-//! Real captured-source Invocation fixture; only entry into the closed task3
-//! family is test setup. Response admission and source access remain production.
+//! Real captured-source Invocation fixture. Initial task construction is test
+//! setup; response admission and source access use production boundaries.
 use super::*;
 use llm::bounded::{CompletionLimits, PreparedBoundedCompletion};
 use serde_json::{Value, json};

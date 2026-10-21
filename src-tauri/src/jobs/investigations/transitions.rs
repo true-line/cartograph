@@ -421,7 +421,6 @@ impl JobStore {
     /// Internal next-family cancellation uses the existing terminal reserve,
     /// independently of the source stage allocations. No owner lease is needed
     /// to request cancellation; settlement still requires owner or orphan proof.
-    #[allow(dead_code)] // Public routing remains gated until controller integration.
     pub(crate) fn cancel_next_prompt_investigation(
         &mut self,
         id: &str,
@@ -442,7 +441,6 @@ impl JobStore {
 
     /// Internal terminal path for failures outside a pending source read.
     /// Reservations must settle their durable charge and disposition instead.
-    #[allow(dead_code)] // Public next-family worker routing remains closed.
     pub(crate) fn stop_next_prompt_investigation(
         &mut self,
         execution: &JobExecution,

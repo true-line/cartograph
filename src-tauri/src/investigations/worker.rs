@@ -1183,6 +1183,7 @@ fn stop<R: tauri::Runtime>(
     active_milliseconds: u64,
 ) {
     for _ in 0..3 {
+        let mut next_family = false;
         let attempt = (|| {
             let mut jobs = state
                 .jobs
@@ -1192,8 +1193,9 @@ fn stop<R: tauri::Runtime>(
             if terminal(current.summary.status) {
                 return Ok(None);
             }
+            next_family = current.summary.specialist_id.uses_next_prompt_admission();
             let elapsed = active_milliseconds.max(current.usage.active_milliseconds);
-            if current.summary.specialist_id.uses_next_prompt_admission() {
+            if next_family {
                 jobs.stop_next_prompt_investigation(
                     execution,
                     current.summary.revision,
@@ -1217,7 +1219,9 @@ fn stop<R: tauri::Runtime>(
                 super::emit_changed(app, &detail);
                 return;
             }
-            Err(InvestigationStoreError::Stale) => continue,
+            // Preserve legacy cleanup semantics; the new family never refreshes
+            // a lost write basis, even for terminal bookkeeping.
+            Err(InvestigationStoreError::Stale) if !next_family => continue,
             _ => return,
         }
     }

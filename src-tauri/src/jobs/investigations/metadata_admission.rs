@@ -4,11 +4,9 @@ use super::*;
 use llm::bounded::PreparedBoundedCompletion;
 use serde_json::Value;
 
-#[allow(dead_code)] // Internal worker continuation; public @10 remains closed.
 #[path = "metadata_continuation.rs"]
 mod metadata_continuation;
-#[allow(unused_imports)]
-pub(crate) use metadata_continuation::{MetadataContinuationRead, MetadataContinuationSnapshot};
+pub(crate) use metadata_continuation::MetadataContinuationRead;
 
 pub(crate) struct MetadataAdmission<'a> {
     pub response: &'a InvestigationResponseMeta,

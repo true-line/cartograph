@@ -22,7 +22,9 @@ pub(in crate::investigations) struct SourcePublicationInput<'a> {
 
 pub(in crate::investigations) struct PublishedSourceContinuation {
     pub detail: InvestigationDetail,
+    #[cfg(test)]
     pub input: InvestigationInput,
+    #[cfg(test)]
     pub prepared: PreparedBoundedCompletion,
 }
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +59,7 @@ impl SourcePublicationFailure {
             RetainedOutcome::Unavailable(failure) => failure.stage(),
         }
     }
+    #[cfg(test)]
     pub(in crate::investigations) fn validation_receipt(
         &self,
     ) -> Option<&CommittedSourceValidation> {
@@ -328,7 +331,9 @@ impl RetainedOutcome {
         let detail = result?;
         Ok(PublishedSourceContinuation {
             detail,
+            #[cfg(test)]
             input: candidate,
+            #[cfg(test)]
             prepared,
         })
     }

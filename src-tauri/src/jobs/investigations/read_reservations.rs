@@ -1,8 +1,7 @@
-//! Source-read reservation records for the proposed @10 boundary (AC-0287).
+//! Source-read reservation records for the @10 boundary (AC-0287).
 //!
-//! Isolated storage foundation, not runtime admission: no owner-loss proof, source
-//! access, task transition, claim sizing certificate or public-family routing is
-//! supplied here. Callers must authenticate saved task/response/ledger authority
+//! Storage validation alone supplies no owner-loss proof, source access, task
+//! transition, claim sizing certificate or public-family routing. Callers must authenticate saved task/response/ledger authority
 //! and account these rows and outstanding claims in the same writer transaction.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -231,6 +230,7 @@ impl ReadAccounting {
         }
         value
     }
+    #[cfg(test)]
     fn add(&mut self, rhs: &Self) -> Result<(), InvestigationStoreError> {
         macro_rules! add { ($($field:ident),*) => { $(self.$field = self.$field.checked_add(rhs.$field)
             .ok_or(InvestigationStoreError::Capacity)?;)* }; }
@@ -878,13 +878,15 @@ pub(super) fn with_compatibility_scope<T>(
 }
 
 /// Compatibility wrappers create a fresh transaction-bound scope per call.
-/// Future atomic transition callers retain ReadTransaction across operations.
+/// Production atomic transitions retain ReadTransaction across operations.
+#[cfg(test)]
 pub(super) fn insert_reservation(
     connection: &Connection,
     r: &Reservation,
 ) -> Result<(), InvestigationStoreError> {
     ReadTransaction::compatible(connection)?.insert_reservation(r)
 }
+#[cfg(test)]
 pub(super) fn insert_charge(
     connection: &Connection,
     task: &str,
@@ -893,6 +895,7 @@ pub(super) fn insert_charge(
 ) -> Result<(), InvestigationStoreError> {
     ReadTransaction::compatible(connection)?.insert_charge(task, step, charge)
 }
+#[cfg(test)]
 pub(super) fn insert_disposition(
     connection: &Connection,
     task: &str,
@@ -902,6 +905,7 @@ pub(super) fn insert_disposition(
     ReadTransaction::compatible(connection)?.insert_disposition(task, step, disposition)
 }
 /// Actual logical row charges only. Shared storage adds rows and claims once.
+#[cfg(test)]
 pub(super) fn stored_bytes(
     connection: &Connection,
     task: Option<&str>,
@@ -910,6 +914,7 @@ pub(super) fn stored_bytes(
         .capacity_charge(task)?
         .rows)
 }
+#[cfg(test)]
 pub(super) fn pending_storage_claims(
     connection: &Connection,
     task: Option<&str>,
@@ -930,6 +935,7 @@ pub(super) fn pending_event_claims(
 
 /// Audit deltas for one task, including permanently retained unknown debits.
 /// This is not saved task usage reconciliation or an owner-loss proof.
+#[cfg(test)]
 pub(super) fn task_accounting(
     connection: &Connection,
     task: &str,

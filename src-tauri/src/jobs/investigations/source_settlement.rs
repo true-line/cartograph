@@ -63,14 +63,13 @@ impl SettlementPlan {
     pub(super) fn terminal(&self) -> bool {
         self.projection.task.phase == Phase::Terminal
     }
+    #[cfg(test)]
     pub(super) fn additional_bytes(&self) -> usize {
         self.projection.additional_bytes
     }
+    #[cfg(test)]
     pub(super) fn counts(&self) -> SettlementCounts {
         self.projection.counts
-    }
-    pub(super) fn detail(&self) -> &InvestigationDetail {
-        &self.projection.task.detail
     }
 }
 
@@ -394,7 +393,6 @@ mod validation;
 use validation::{continuation_metadata, usage_for, validate_continuation, validate_next_ledger};
 #[path = "source_settlement_envelope.rs"]
 mod envelope_projection;
-#[allow(unused_imports)] // Production source admission is wired in the next integration slice.
 pub(super) use envelope_projection::{SettlementEnvelope, envelope};
 #[path = "source_settlement_storage.rs"]
 mod storage_writer;
@@ -403,9 +401,7 @@ use storage_writer::persist;
 
 #[path = "source_continuation_snapshot.rs"]
 mod source_snapshot;
-pub(crate) use source_snapshot::{
-    SourceContinuationOutcome, SourceContinuationSnapshot, SourceContinuationSnapshotInput,
-};
+pub(crate) use source_snapshot::{SourceContinuationOutcome, SourceContinuationSnapshotInput};
 
 #[cfg(test)]
 pub(crate) fn fail_next_publication(lost_ack: bool) {

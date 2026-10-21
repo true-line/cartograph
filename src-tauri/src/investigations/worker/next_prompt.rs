@@ -1,4 +1,4 @@
-//! Internal next-family worker preparation; public dispatch remains gated.
+//! Owner-bound next-family worker preparation and single-attempt publication.
 use super::*;
 use crate::investigations::evidence::EvidenceGuards;
 use crate::jobs::investigations::NextPromptInvocation;
@@ -49,36 +49,29 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .and_then(|usage| usage.output_tokens),
             active_milliseconds: self.clock.active_milliseconds(),
         };
-        for _ in 0..3 {
-            let result = {
-                let mut jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
-                let current = jobs.investigation_owned_detail(self.execution, self.id)?;
-                if terminal(current.summary.status) {
-                    return Err(Failure::AlreadyTerminal);
-                }
-                jobs.admit_next_prompt_finish(
-                    self.execution,
-                    current.summary.revision,
-                    &crate::jobs::investigations::NextPromptFinish {
-                        request,
-                        response: &response,
-                        original_action: &original,
-                        current: input,
-                        current_prepared: prepared,
-                    },
-                )
-            };
-            match result {
-                Ok(detail) => {
-                    self.detail = detail;
-                    super::super::emit_changed(self.app, &self.detail);
-                    return Ok(true);
-                }
-                Err(InvestigationStoreError::Stale) => continue,
-                Err(error) => return Err(error.into()),
+        // A response is admitted once against its authenticated saved call.
+        // A lost revision or acknowledgement is not permission to resubmit it.
+        let detail = {
+            let mut jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
+            let current = jobs.investigation_owned_detail(self.execution, self.id)?;
+            if terminal(current.summary.status) {
+                return Err(Failure::AlreadyTerminal);
             }
-        }
-        Err(InvestigationStoreError::Stale.into())
+            jobs.admit_next_prompt_finish(
+                self.execution,
+                current.summary.revision,
+                &crate::jobs::investigations::NextPromptFinish {
+                    request,
+                    response: &response,
+                    original_action: &original,
+                    current: input,
+                    current_prepared: prepared,
+                },
+            )?
+        };
+        self.detail = detail;
+        super::super::emit_changed(self.app, &self.detail);
+        Ok(true)
     }
 
     pub(super) fn publish_next_invocation(

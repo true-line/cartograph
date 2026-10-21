@@ -1,4 +1,4 @@
-//! Internal task3/intent4 saved-call contract. No public/start activation.
+//! Task3/intent4 saved-call contract shared by public starts and owned workers.
 //! Validation proves consistency against supplied/saved host witnesses, not a
 //! dispatch permit, source-read authority or resistance to consistent local DB forgery.
 use super::*;

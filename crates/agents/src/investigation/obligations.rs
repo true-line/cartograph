@@ -364,8 +364,8 @@ fn request_family(
     specialist_id: &str,
 ) -> Result<(u32, [&'static str; 2], &'static [u8]), InvestigationError> {
     // Policy alone cannot select an immutable request/prompt family, including
-    // when hashing saved requests. Request7/@10 is internal only: the public
-    // raw decoder and top-level IPC discriminator still reject request7.
+    // when hashing saved requests. Public request7 and historical requests
+    // retain their exact schema, specialist and policy tuple.
     match (policy.profile(), schema_version, specialist_id) {
         ("investigation-v1", 4, "domain-analyst@7" | "evidence-auditor@7") => Ok((
             4,

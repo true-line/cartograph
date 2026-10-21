@@ -23,7 +23,9 @@ pub(crate) struct SourceContinuationSnapshot {
     base_ledger: InvestigationInputLedger,
     ledger: InvestigationInputLedger,
     detail: InvestigationDetail,
+    #[cfg(test)]
     attempts: Vec<AttemptRecord>,
+    #[cfg(test)]
     attempt_ledgers: Vec<InvestigationInputLedger>,
     metadata: ProtectedCompletionMetadata,
     basis: InvestigationTurnBasis,
@@ -47,9 +49,11 @@ impl SourceContinuationSnapshot {
     pub(crate) fn detail(&self) -> &InvestigationDetail {
         &self.detail
     }
+    #[cfg(test)]
     pub(crate) fn attempts(&self) -> &[AttemptRecord] {
         &self.attempts
     }
+    #[cfg(test)]
     pub(crate) fn attempt_ledgers(&self) -> &[InvestigationInputLedger] {
         &self.attempt_ledgers
     }
@@ -152,6 +156,7 @@ impl JobStore {
         let prior_len = entries.len();
         entries.extend(projected.attempts);
         let mut attempts = Vec::with_capacity(entries.len());
+        #[cfg(test)]
         let mut attempt_ledgers = Vec::with_capacity(entries.len());
         for (index, entry) in entries.into_iter().enumerate() {
             let ledger = if index >= prior_len {
@@ -176,6 +181,7 @@ impl JobStore {
                 return Err(InvestigationStoreError::Invalid);
             }
             attempts.push(entry.record);
+            #[cfg(test)]
             attempt_ledgers.push(ledger);
         }
         if attempts
@@ -201,7 +207,9 @@ impl JobStore {
             base_ledger: core.ledger,
             ledger: input.candidate_ledger.clone(),
             detail: projected.task.detail,
+            #[cfg(test)]
             attempts,
+            #[cfg(test)]
             attempt_ledgers,
             metadata,
             basis,

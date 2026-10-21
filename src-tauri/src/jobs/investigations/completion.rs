@@ -6,18 +6,13 @@ use rusqlite::Transaction;
 mod saved_metadata_history;
 pub(super) use saved_metadata_history::SavedMetadataHistory;
 
-#[allow(dead_code)] // Internal worker snapshot; public next-family routes stay closed.
 #[path = "next_prompt_snapshot.rs"]
 mod next_prompt_snapshot;
-#[allow(unused_imports)]
-pub(crate) use next_prompt_snapshot::NextPromptSnapshot;
 
-#[allow(dead_code)] // Internal complete-response writer; public @10 stays closed.
 #[path = "next_prompt_finish.rs"]
 mod next_prompt_finish;
 #[cfg(test)]
 pub(super) use next_prompt_finish::FinishFixture;
-#[allow(unused_imports)]
 pub(crate) use next_prompt_finish::NextPromptFinish;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -773,7 +768,6 @@ pub(super) fn append_attempt_at_step(
 /// expected records confer no authority and must equal fresh pure derivation.
 /// Unlike the legacy append path this never infers an invocation from rowids.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // Internal atomic writer seam; public routing remains closed.
 pub(super) fn append_next_prompt_attempt_at_step(
     tx: &rusqlite::Transaction<'_>,
     task: &StoredTask,

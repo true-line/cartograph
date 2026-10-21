@@ -17,7 +17,6 @@ use core_graph::source::FactKey;
 use core_prov::{EvidenceRef, Provenance, content_hash};
 use std::collections::BTreeMap;
 
-#[allow(dead_code)] // Private preparation foundation; durable guarded routing is separate.
 #[path = "prepared_source.rs"]
 pub(super) mod prepared_source;
 

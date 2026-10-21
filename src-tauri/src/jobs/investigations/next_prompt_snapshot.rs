@@ -22,9 +22,11 @@ impl NextPromptSnapshot {
     pub(crate) fn ledger(&self) -> &InvestigationInputLedger {
         self.saved.ledger()
     }
+    #[cfg(test)]
     pub(crate) fn attempts(&self) -> &[AttemptRecord] {
         self.saved.attempts()
     }
+    #[cfg(test)]
     pub(crate) fn attempt_ledgers(&self) -> &[InvestigationInputLedger] {
         self.saved.attempt_ledgers()
     }

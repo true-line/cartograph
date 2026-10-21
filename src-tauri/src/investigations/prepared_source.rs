@@ -232,6 +232,7 @@ impl PreparedCapturedSource {
     pub(in crate::investigations) fn target(&self) -> &InvestigationInspectionTarget {
         &self.target
     }
+    #[cfg(test)]
     pub(in crate::investigations) fn base_ledger(&self) -> &InvestigationInputLedger {
         &self.base_ledger
     }
@@ -505,6 +506,7 @@ fn source_headroom(
     Ok(bytes)
 }
 impl PreparedSourceFailure {
+    #[cfg(test)]
     pub(in crate::investigations) fn validation_receipt(
         &self,
     ) -> Option<&CommittedSourceValidation> {
@@ -520,9 +522,11 @@ impl PreparedSourceFailure {
             _ => SourceAccessStage::AccessStarted,
         }
     }
+    #[cfg(test)]
     pub(in crate::investigations) fn target(&self) -> &InvestigationInspectionTarget {
         self.prepared.target()
     }
+    #[cfg(test)]
     pub(in crate::investigations) fn revalidate(
         &self,
         context: &FrozenContext,
@@ -532,23 +536,29 @@ impl PreparedSourceFailure {
     }
 }
 impl PreparedSourceCandidate {
+    #[cfg(test)]
     pub(in crate::investigations) fn validation_receipt(
         &self,
     ) -> Option<&CommittedSourceValidation> {
         self.prepared.validation.as_ref()
     }
+    #[cfg(test)]
     pub(in crate::investigations) fn ledger(&self) -> &InvestigationInputLedger {
         &self.ledger
     }
+    #[cfg(test)]
     pub(in crate::investigations) fn evidence(&self) -> &AgentEvidence {
         &self.evidence
     }
+    #[cfg(test)]
     pub(in crate::investigations) fn target(&self) -> &InvestigationInspectionTarget {
         self.prepared.target()
     }
+    #[cfg(test)]
     pub(in crate::investigations) fn base_ledger(&self) -> &InvestigationInputLedger {
         self.prepared.base_ledger()
     }
+    #[cfg(test)]
     pub(in crate::investigations) fn revalidate(
         &self,
         context: &FrozenContext,

@@ -351,6 +351,7 @@ fn saved_ledger(
     )?
     .ok_or(InvestigationStoreError::Invalid)
 }
+#[cfg(test)]
 fn completed_attempts(
     connection: &Connection,
     id: &str,
