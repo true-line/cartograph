@@ -39,7 +39,10 @@ and generation, not an invented system identifier. Corrupt, foreign or unsupport
 cache contents in the host-owned disposable store are replaced when writable;
 replacement creates a new epoch so an old lease can never become current again.
 Actual filesystem/deletion failures remain explicit and are not reported as
-successful erasure. Keep the cache handle separate from long-lived extraction
+successful erasure. A symlinked cache or sidecar, or a file with multiple hard
+links on Unix, is deliberately refused, including at startup: recovery must
+not reset a file shared with another path or claim that unreachable vectors
+were erased. Keep the cache handle separate from long-lived extraction
 locks so previews cannot block graph readers while waiting for an ingest. Graph clear, startup schema reset and retained-source forget
 invalidate the generation and delete associated vector rows under a lifecycle
 guard. A preview leases its generation before reading its graph and checks it
