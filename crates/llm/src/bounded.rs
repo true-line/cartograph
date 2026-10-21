@@ -137,6 +137,40 @@ impl ProviderProfile {
     }
 }
 
+/// Exact sizes from the production bounded-wire gates for a complete action.
+/// These measurements establish neither source authority nor provider context
+/// capacity, egress permission, consent, authorization or dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundedWireMeasurements {
+    pub raw_string_bytes: u64,
+    pub original_payload_bytes: u64,
+    pub redacted_payload_bytes: u64,
+    pub original_action_bytes: u64,
+    pub egress_fingerprint_bytes: u64,
+}
+
+/// Measure complete actual representations through the same ordered serializers
+/// and redactor used by the firewall. No provider or authorization is consulted.
+/// Provider HTTP request encoding and tokenizer/context fit are not measured.
+/// Unknown/prospective source contributions must be established by the caller;
+/// substituting an empty source cannot certify a future nonempty action.
+pub fn measure_bounded_action(
+    profile: &ProviderProfile,
+    action: &CompletionAction,
+    limits: &CompletionLimits,
+) -> Result<BoundedWireMeasurements, BoundedCallError> {
+    profile.validate()?;
+    prepare_wire(profile, action, limits).map(|prepared| prepared.measurements)
+}
+
+struct PreparedWire {
+    payload: CompletionPayload,
+    redaction_count: usize,
+    original_action_hash: String,
+    payload_hash: String,
+    measurements: BoundedWireMeasurements,
+}
+
 /// Exact preview; this includes source text and must stay transient. The embedded
 /// preview reuses the consent renderer and grant shape, with a new hash domain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -313,92 +347,18 @@ impl EgressFirewall {
         let profile = provider.bounded_profile()?;
         validate_provider(provider, &profile)?;
         check_policy(self, &profile, action.tier)?;
-        if !identifier(&action.action_id, 1024)
-            || action.payload.spans.len() > limits.0.max_spans as usize
-        {
-            return Err(not_sent(FailureCode::InvalidInput));
-        }
-        let mut ids = std::collections::BTreeSet::new();
-        for span in &action.payload.spans {
-            if !identifier(&span.id, 1024)
-                || span.byte_start >= span.byte_end
-                || !ids.insert(&span.id)
-            {
-                return Err(not_sent(FailureCode::InvalidInput));
-            }
-        }
-        let strings = [&action.payload.system, &action.payload.prompt]
-            .into_iter()
-            .chain(action.payload.spans.iter().flat_map(|span| {
-                [
-                    &span.id,
-                    &span.repo,
-                    &span.path,
-                    &span.commit_sha,
-                    &span.text,
-                ]
-            }));
-        let mut input_bytes = 0_u64;
-        for value in strings {
-            input_bytes = input_bytes
-                .checked_add(value.len() as u64)
-                .filter(|total| *total <= limits.0.input_bytes)
-                .ok_or_else(|| not_sent(FailureCode::InputTooLarge))?;
-        }
-        // This walk aborts before an unbounded buffer, regex input or clone can
-        // be allocated. Logical JSON includes all metadata, not just span text.
-        encode(
-            &action.payload,
-            limits.0.input_bytes,
-            FailureCode::InputTooLarge,
-        )?;
-        let (mut payload, mut redaction_count) = crate::redact_payload(&action.payload);
-        // Legacy redaction is unchanged. The new protocol covers metadata too.
-        for span in &mut payload.spans {
-            for value in [
-                &mut span.id,
-                &mut span.repo,
-                &mut span.path,
-                &mut span.commit_sha,
-            ] {
-                let (redacted, count) = crate::redact_text(value);
-                *value = redacted;
-                redaction_count += count;
-            }
-        }
-        let mut redacted_ids = std::collections::BTreeSet::new();
-        if payload
-            .spans
-            .iter()
-            .any(|span| !redacted_ids.insert(&span.id))
-        {
-            return Err(not_sent(FailureCode::InvalidInput));
-        }
-        encode(&payload, limits.0.input_bytes, FailureCode::InputTooLarge)?;
-        let hash_input = encode(
-            &(
-                "cartograph-bounded-egress-v1",
-                &profile,
-                limits,
-                action.tier,
-                &action.action_id,
-                &payload,
-            ),
-            512 * 1024,
-            FailureCode::InputTooLarge,
-        )?;
-        let payload_hash = blake3::hash(&hash_input).to_hex().to_string();
+        let wire = prepare_wire(&profile, action, limits)?;
         Ok(PreparedBoundedCompletion {
-            original_action_hash: original_action_hash(action, limits.0.input_bytes)?,
+            original_action_hash: wire.original_action_hash,
             preview: BoundedEgressPreview {
                 egress: EgressPreview {
                     provider_id: profile.provider_id.clone(),
                     locality: profile.locality,
                     tier: action.tier,
                     action_id: action.action_id.clone(),
-                    payload,
-                    payload_hash,
-                    redaction_count,
+                    payload: wire.payload,
+                    payload_hash: wire.payload_hash,
+                    redaction_count: wire.redaction_count,
                 },
                 profile,
                 limits: *limits,
@@ -432,10 +392,115 @@ impl EgressFirewall {
     }
 }
 
+fn prepare_wire(
+    profile: &ProviderProfile,
+    action: &CompletionAction,
+    limits: &CompletionLimits,
+) -> Result<PreparedWire, BoundedCallError> {
+    if !identifier(&action.action_id, 1024)
+        || action.payload.spans.len() > limits.0.max_spans as usize
+    {
+        return Err(not_sent(FailureCode::InvalidInput));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for span in &action.payload.spans {
+        if !identifier(&span.id, 1024) || span.byte_start >= span.byte_end || !ids.insert(&span.id)
+        {
+            return Err(not_sent(FailureCode::InvalidInput));
+        }
+    }
+    let strings = [&action.payload.system, &action.payload.prompt]
+        .into_iter()
+        .chain(action.payload.spans.iter().flat_map(|span| {
+            [
+                &span.id,
+                &span.repo,
+                &span.path,
+                &span.commit_sha,
+                &span.text,
+            ]
+        }));
+    let mut input_bytes = 0_u64;
+    for value in strings {
+        input_bytes = input_bytes
+            .checked_add(value.len() as u64)
+            .filter(|total| *total <= limits.0.input_bytes)
+            .ok_or_else(|| not_sent(FailureCode::InputTooLarge))?;
+    }
+    // This walk aborts before an unbounded buffer, regex input or clone can
+    // be allocated. Logical JSON includes all metadata, not just span text.
+    let original_payload_bytes = encode(
+        &action.payload,
+        limits.0.input_bytes,
+        FailureCode::InputTooLarge,
+    )?
+    .len() as u64;
+    let (mut payload, mut redaction_count) = crate::redact_payload(&action.payload);
+    // Legacy redaction is unchanged. The new protocol covers metadata too.
+    for span in &mut payload.spans {
+        for value in [
+            &mut span.id,
+            &mut span.repo,
+            &mut span.path,
+            &mut span.commit_sha,
+        ] {
+            let (redacted, count) = crate::redact_text(value);
+            *value = redacted;
+            redaction_count += count;
+        }
+    }
+    let mut redacted_ids = std::collections::BTreeSet::new();
+    if payload
+        .spans
+        .iter()
+        .any(|span| !redacted_ids.insert(&span.id))
+    {
+        return Err(not_sent(FailureCode::InvalidInput));
+    }
+    let redacted_payload_bytes =
+        encode(&payload, limits.0.input_bytes, FailureCode::InputTooLarge)?.len() as u64;
+    let hash_input = encode(
+        &(
+            "cartograph-bounded-egress-v1",
+            &profile,
+            limits,
+            action.tier,
+            &action.action_id,
+            &payload,
+        ),
+        512 * 1024,
+        FailureCode::InputTooLarge,
+    )?;
+    let payload_hash = blake3::hash(&hash_input).to_hex().to_string();
+    // Keep the original-action binding last, as in the existing firewall.
+    let (original_action_hash, original_action_bytes) =
+        original_action_wire(action, limits.0.input_bytes)?;
+    Ok(PreparedWire {
+        payload,
+        redaction_count,
+        original_action_hash,
+        payload_hash,
+        measurements: BoundedWireMeasurements {
+            raw_string_bytes: input_bytes,
+            original_payload_bytes,
+            redacted_payload_bytes,
+            original_action_bytes,
+            egress_fingerprint_bytes: hash_input.len() as u64,
+        },
+    })
+}
+
 fn original_action_hash(
     action: &CompletionAction,
     payload_limit: u64,
 ) -> Result<String, BoundedCallError> {
+    original_action_wire(action, payload_limit).map(|(hash, _)| hash)
+}
+
+fn original_action_wire(
+    action: &CompletionAction,
+    payload_limit: u64,
+) -> Result<(String, u64), BoundedCallError> {
     // Payload has its own existing bound; the envelope adds a bounded action ID.
     encode(&action.payload, payload_limit, FailureCode::InputTooLarge)?;
     let bytes = encode(
@@ -443,7 +508,10 @@ fn original_action_hash(
         payload_limit + 4096,
         FailureCode::InputTooLarge,
     )?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
+    Ok((
+        blake3::hash(&bytes).to_hex().to_string(),
+        bytes.len() as u64,
+    ))
 }
 
 fn validate_provider(
@@ -980,3 +1048,6 @@ pub(super) fn complete_anthropic(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod wire_tests;
