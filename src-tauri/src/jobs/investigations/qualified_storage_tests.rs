@@ -3,7 +3,7 @@ use crate::job_execution::JobExecutionLocks;
 use crate::jobs::ClaimMode;
 use context_hub::{
     ContextSnapshot,
-    coverage::{CoverageQualification, ScopedRepo},
+    coverage::{CoverageQualification, INVENTORY_VERSION, ScopedRepo},
 };
 use core_graph::coverage::{CoverageRecord, StoredCoverage};
 use core_prov::content_hash;
@@ -23,7 +23,7 @@ struct Fixture {
 fn archive() -> InvestigationCoverageArchive {
     let record=CoverageRecord {repo_key:"acme/api".into(),registered_source_id:Some("src:fixture".into()),
         ingest_id:"job:original".into(),config_hash:"plugins:fixture".into(),inventory_json:json!({
-        "repo":"acme/api","commit":"a".repeat(40),"layer_hints":[],"producers":[],"unsupported":[],"limited":false}).to_string()};
+        "inventory":INVENTORY_VERSION,"repo":"acme/api","commit":"a".repeat(40),"layer_hints":[],"producers":[],"unsupported":[],"limited":false}).to_string()};
     let stored = StoredCoverage {
         inventory_hash: record.inventory_hash(),
         record,
