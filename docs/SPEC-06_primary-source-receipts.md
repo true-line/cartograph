@@ -7,7 +7,9 @@ SPEC-00 integrity, SPEC-03 immutable staging, SPEC-04 capture and SPEC-05 regist
 
 The app retains the exact selected TypeScript/JavaScript bytes consumed by the
 production parser and supplies captured inspection for direct guarded-exit rule
-observations, their lexical owner nodes and lexical GOVERNS edges. A receipt means
+observations, their lexical owner nodes and lexical GOVERNS edges, and every other
+directly emitted callable declaration (#691). A declaration that owns no rule gets the
+same provenance-only inventory as an owner, so its exact span is citable. A receipt means
 `primary_source_only` with `input_closure_not_established`. It never establishes a
 complete business rule, execution predicate, caller interpretation, configuration
 closure, current revision freshness or curated-context eligibility.
@@ -101,7 +103,11 @@ does not permit model disclosure or egress.
 
 Short SQLite/WAL transactions bound receipt persistence (64 MiB logical metadata,
 100,000 receipts initially); capture storage retains SPEC-04's 2 GiB/10,000-capture
-logical limits. SQLite/WAL overhead is additional. Capacity errors explain that
+logical limits. Within one extraction, rule, owner and GOVERNS receipts are admitted
+first under those ceilings exactly as before; declaration receipts only use the
+remaining budget, in manifest order, so they never turn a capture that fit into a
+limit failure. Every omitted declaration is counted under its file path in the
+adapter's result (surfacing it in coverage is #693). SQLite/WAL overhead is additional. Capacity errors explain that
 the user can forget retained source before recovering again; no automatic eviction.
 Captured inspection validates manifest membership and the selected raw object
 without loading unrelated source objects. Output still obeys the retained span cap.

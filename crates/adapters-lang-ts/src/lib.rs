@@ -155,7 +155,7 @@ pub struct IncrementalCache {
 }
 
 /// Physical source-file work performed by one incremental extraction.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IncrementalStats {
     /// Files parsed because their bytes were new or changed.
     pub recomputed_files: u64,
@@ -163,6 +163,11 @@ pub struct IncrementalStats {
     pub reused_files: u64,
     /// Cached files removed because the source disappeared.
     pub deleted_files: u64,
+    /// Captured declaration receipts left out, by file path, once rule
+    /// receipts and earlier declarations filled the extraction receipt budget
+    /// (#691). Never silent: each named file has declarations that are not
+    /// citable evidence. Bounded by the captured file count.
+    pub omitted_declaration_receipts: std::collections::BTreeMap<String, u64>,
 }
 
 fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {

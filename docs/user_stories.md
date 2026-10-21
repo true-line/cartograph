@@ -433,9 +433,10 @@
 - **AC-0153** Given retained source, when capacity or forgetting is handled, then private bounded stores and source guards preserve immutable receipts/reviews, a refreshed inventory preview authorizes deletion of only that source's unshared bytes, and graph/job cleanup never deletes retained historical source.
 - **AC-0154** Given the evidence and retention UI, when the user changes selection, inspects captured/current source or confirms forgetting, then the UI preserves exact fact/receipt/source identity, labels captured primary source with incomplete input coverage, rejects stale async results and previews affected references before deletion.
 - **AC-0155** Given legacy graph/proposals and unrelated producers, when primary-source recovery and inspection run, then legacy EvidenceRef/staging bytes, producing tier/confidence and review state remain unchanged, raw source stays absent from graph/context/export/proposal payloads and H2/H3 verification is not inferred.
+- **AC-0280** Given a captured TS/JS file, when it is parsed, then every directly emitted callable declaration also receives a provenance-only primary receipt for its exact span, so code that owns no rule is citable; rule receipts keep their original hard bounds and declarations only use the remaining extraction budget in manifest order, with each omitted declaration counted under its file path and never silently dropped (#691).
 - **Security:** Private local retention only; no target writes, implicit network, model disclosure, arbitrary-root reads or confidence upgrades. Deletion is exact-source and preview-bound.
 - **Performance:** SPEC-04 capture limits, bounded enumeration and receipts, selected-object span reads and try-only locks; participating TS cache bypass is explicit.
-- **Trace:** H3 prerequisite #395 · `adapters-lang-ts`, `source-capture`, `core-graph`, `app`, `ui` · — · T-0148..0155
+- **Trace:** H3 prerequisite #395 · `adapters-lang-ts`, `source-capture`, `core-graph`, `app`, `ui` · — · T-0148..0155,T-0280
 
 
 ### US-0029 — Keep job ownership accurate across concurrent processes and retries

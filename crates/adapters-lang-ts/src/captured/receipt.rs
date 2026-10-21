@@ -420,7 +420,7 @@ fn valid_inventory_shape(ranges: &[ReceiptRange], version: u32) -> bool {
     if index == 0 {
         return false;
     }
-    // Owner/relationship receipts contain primary provenance alone. Rule
+    // Owner, declaration and relationship receipts contain primary provenance alone. Rule
     // inventories add the fixed structural traversal without grouping away
     // duplicate source references or substituting arbitrary JSON pointers.
     if take(RangeRole::RuleExit, 0) {

@@ -332,11 +332,15 @@ fn live_config_changes_remain_outside_primary_receipt_closure() {
             .iter()
             .any(|receipt| receipt.fact_key() == &FactKey::from_edge(first_import))
     );
-    assert!(
-        first_receipts
-            .iter()
-            .all(|receipt| receipt.file().path == "main.ts")
-    );
+    // Outside the rule file, only provenance-only declaration receipts for the
+    // directly emitted callables exist (#691); configuration selects neither.
+    assert!(first_receipts.iter().all(|receipt| {
+        receipt.file().path == "main.ts"
+            || receipt
+                .ranges()
+                .iter()
+                .all(|range| range.role == RangeRole::Provenance)
+    }));
 }
 
 #[test]
@@ -625,4 +629,127 @@ fn captured_parser_emits_the_same_const_unproven_eval_gap() {
     assert!(facts.edges.iter().any(|edge| edge.dst == gap.id
         && edge.label == "DEPENDS_ON"
         && edge.src.ends_with("#run")));
+}
+
+fn by_fact(mut receipts: Vec<Receipt>) -> Vec<Receipt> {
+    receipts.sort_by(|a, b| a.fact_key().cmp(b.fact_key()));
+    receipts
+}
+
+// AC-0280: every directly emitted callable becomes citable through a
+// provenance-only receipt, beside the unchanged rule inventory, and the
+// single-file and directory lanes agree on the complete receipt set.
+#[test]
+fn captured_declarations_bind_every_direct_callable() {
+    let source = br#"export function guard(ok: boolean) { if (!ok) return false; return true; }
+export function total(a: number, b: number) { return a + b; }
+export class Stock {
+  level(id: string) { return lookup(id); }
+}
+export const pick = (items: string[]) => items[0];
+"#;
+    let (directory, capture) = fixture(source, "source.ts");
+    let (facts, receipts) = extract_file(capture.file("source.ts").unwrap(), &parser_id()).unwrap();
+    let callables: Vec<_> = facts
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Symbol")
+        .collect();
+    assert!(callables.len() >= 4, "guard, total, level and pick");
+    for node in &callables {
+        let receipt = receipts
+            .iter()
+            .find(|receipt| receipt.fact_key() == &FactKey::from_node(node))
+            .unwrap_or_else(|| panic!("{} is not citable", node.id));
+        assert!(receipt.matches_node(node));
+        assert_eq!(receipt.ranges().len(), 1);
+        assert_eq!(receipt.ranges()[0].role, RangeRole::Provenance);
+        let evidence = &receipt.ranges()[0].evidence;
+        assert_eq!(
+            (evidence.byte_start, evidence.byte_end),
+            (
+                receipt.ranges()[0].captured.byte_start,
+                receipt.ranges()[0].captured.byte_end
+            )
+        );
+    }
+    rule_receipt(&receipts);
+    let (_, directory_receipts, stats) = extract_captured_dir(
+        directory.path(),
+        &parser_id(),
+        &capture,
+        Registries::builtin(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(by_fact(directory_receipts), receipts);
+    assert!(stats.omitted_declaration_receipts.is_empty());
+}
+
+// AC-0280: declarations use only the budget left after every rule receipt, in
+// manifest order; a declaration that loses is named by file, and the rule
+// receipt bound itself still fails exactly as before.
+#[test]
+fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("a.ts"),
+        b"export function guard(ok: boolean) { if (!ok) return false; return true; }\nexport function one() { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("b.ts"),
+        b"export function two() { return 2; }\nexport function three() { return 3; }\n",
+    )
+    .unwrap();
+    let paths = enumerate_paths(directory.path()).unwrap();
+    let capture = capture(directory.path(), &paths);
+    let per_file: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            extract_file_with(
+                capture.file(path).unwrap(),
+                &parser_id(),
+                Registries::builtin(),
+            )
+            .unwrap()
+            .1
+        })
+        .collect();
+    let size = |receipt: &Receipt| receipt.to_json().unwrap().len();
+    let rules: Vec<_> = per_file.iter().flat_map(|file| &file.rules).collect();
+    let rule_bytes: usize = rules.iter().map(|receipt| size(receipt)).sum();
+    let first = &per_file[0].declarations[0];
+    assert_eq!(per_file[0].declarations.len(), 1);
+    assert_eq!(per_file[1].declarations.len(), 2);
+    let run = |bytes, receipts| {
+        extract_captured_dir_bounded(
+            directory.path(),
+            &parser_id(),
+            &capture,
+            Registries::builtin(),
+            &mut |_| {},
+            ReceiptBudget { bytes, receipts },
+        )
+    };
+    // Room for the rules and exactly the first declaration in manifest order.
+    let (_, admitted, stats) = run(rule_bytes + size(first), usize::MAX).unwrap();
+    assert_eq!(admitted.len(), rules.len() + 1);
+    assert!(admitted.contains(first));
+    assert_eq!(
+        stats.omitted_declaration_receipts,
+        BTreeMap::from([("b.ts".to_string(), 2)])
+    );
+    // A receipt-count ceiling equal to the rules admits no declaration.
+    let (_, admitted, stats) = run(usize::MAX, rules.len()).unwrap();
+    assert_eq!(admitted.len(), rules.len());
+    assert_eq!(
+        stats.omitted_declaration_receipts,
+        BTreeMap::from([("a.ts".to_string(), 1), ("b.ts".to_string(), 2)])
+    );
+    // Rule receipts that do not fit still fail; declarations never cause it.
+    assert!(matches!(
+        run(rule_bytes - 1, usize::MAX),
+        Err(CapturedError::Limit("extraction receipt metadata"))
+    ));
 }

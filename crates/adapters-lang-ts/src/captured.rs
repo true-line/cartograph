@@ -210,25 +210,39 @@ fn enumerate_with_limits(
 }
 
 /// Parse precisely this immutable retained buffer, recording only direct lexical
-/// rules, their actual emitted owners, and lexical GOVERNS. No source read or
-/// retrospective attestation of a caller-provided Extraction occurs here.
+/// rules, their actual emitted owners, lexical GOVERNS, and every other directly
+/// emitted callable declaration (#691). No source read or retrospective
+/// attestation of a caller-provided Extraction occurs here.
 /// Unsupported/oversized receipt inventories omit that whole receipt; they do
 /// not truncate ranges or change ordinary recovered facts or interpretation.
 ///
 /// Event sites are recognized under the built-in registries; receipts cover
-/// lexical rules only, so they are identical under any registry set.
+/// lexical rules and declarations only, so they are identical under any
+/// registry set.
 pub fn extract_file(
     file: &CapturedFile,
     id: &SourceId,
 ) -> Result<(Extraction, Vec<Receipt>), CapturedError> {
-    extract_file_with(file, id, Registries::builtin())
+    let (extraction, mut receipts) = extract_file_with(file, id, Registries::builtin())?;
+    receipts.rules.append(&mut receipts.declarations);
+    receipts
+        .rules
+        .sort_by(|a, b| a.fact_key().cmp(b.fact_key()));
+    Ok((extraction, receipts.rules))
+}
+
+/// One file's receipts, split by admission priority. Rule receipts keep their
+/// original hard bounds; declaration receipts only use the remaining budget.
+struct FileReceipts {
+    rules: Vec<Receipt>,
+    declarations: Vec<Receipt>,
 }
 
 fn extract_file_with(
     file: &CapturedFile,
     id: &SourceId,
     registries: &Registries,
-) -> Result<(Extraction, Vec<Receipt>), CapturedError> {
+) -> Result<(Extraction, FileReceipts), CapturedError> {
     if !supported(&file.reference().path) || !valid_path(&file.reference().path) {
         return Err(CapturedError::Invalid("unsupported captured path"));
     }
@@ -255,9 +269,28 @@ fn extract_file_with(
             receipts.insert(receipt.fact_key().clone(), receipt);
         }
     }
-    let mut receipts: Vec<_> = receipts.into_values().collect();
-    retain_matching(&mut receipts, &extraction);
-    Ok((extraction, receipts))
+    // Callables that own no rule are still directly emitted declarations; a
+    // provenance-only owner receipt makes their exact span citable (#691).
+    let mut declarations = BTreeMap::new();
+    for (id_key, node) in &direct.owners {
+        let key = core_graph::source::FactKey::Node { id: id_key.clone() };
+        if !receipts.contains_key(&key)
+            && let Ok(receipt) = Receipt::for_node(file, id, node)
+        {
+            declarations.insert(key, receipt);
+        }
+    }
+    let mut rules: Vec<_> = receipts.into_values().collect();
+    let mut declarations: Vec<_> = declarations.into_values().collect();
+    retain_matching(&mut rules, &extraction);
+    retain_matching(&mut declarations, &extraction);
+    Ok((
+        extraction,
+        FileReceipts {
+            rules,
+            declarations,
+        },
+    ))
 }
 
 /// Parse the selected immutable membership, bypassing the ordinary parse cache,
@@ -284,6 +317,34 @@ pub fn extract_captured_dir(
     registries: &Registries,
     on_file: &mut dyn FnMut(&str),
 ) -> Result<(Extraction, Vec<Receipt>, IncrementalStats), CapturedError> {
+    extract_captured_dir_bounded(
+        root,
+        id,
+        capture,
+        registries,
+        on_file,
+        ReceiptBudget {
+            bytes: MAX_EXTRACTION_RECEIPT_BYTES,
+            receipts: MAX_EXTRACTION_RECEIPTS,
+        },
+    )
+}
+
+/// Extraction receipt ceilings; tests narrow them to exercise admission order.
+#[derive(Clone, Copy)]
+struct ReceiptBudget {
+    bytes: usize,
+    receipts: usize,
+}
+
+fn extract_captured_dir_bounded(
+    root: &Path,
+    id: &SourceId,
+    capture: &Capture,
+    registries: &Registries,
+    on_file: &mut dyn FnMut(&str),
+    budget: ReceiptBudget,
+) -> Result<(Extraction, Vec<Receipt>, IncrementalStats), CapturedError> {
     receipt::validate_source_repo(&capture.manifest().source_id, id.repo)?;
     let paths: Vec<String> = capture
         .manifest()
@@ -294,32 +355,74 @@ pub fn extract_captured_dir(
     let mut extraction = Extraction::default();
     let mut receipts = Vec::new();
     let mut receipt_bytes = 0;
+    // Declarations are admitted after every rule receipt, so they can never
+    // turn a capture that fit before #691 into a limit failure. Retention
+    // stops once they alone could not fit, bounding the extra memory.
+    let mut declarations = Vec::new();
+    let mut declaration_bytes = 0;
     let mut stats = IncrementalStats::default();
     source_walk::parallel::map_ordered(
         &paths,
         |path| extract_file_with(capture.file(path)?, id, registries),
         |path, (facts, file_receipts)| {
             on_file(path);
-            for receipt in &file_receipts {
+            for receipt in &file_receipts.rules {
                 receipt_bytes += receipt.to_json()?.len();
             }
-            if receipt_bytes > MAX_EXTRACTION_RECEIPT_BYTES
-                || receipts.len() + file_receipts.len() > MAX_EXTRACTION_RECEIPTS
+            if receipt_bytes > budget.bytes
+                || receipts.len() + file_receipts.rules.len() > budget.receipts
             {
                 return Err(CapturedError::Limit("extraction receipt metadata"));
             }
+            for receipt in file_receipts.declarations {
+                let bytes = receipt.to_json()?.len();
+                if declaration_bytes + bytes > budget.bytes || declarations.len() == budget.receipts
+                {
+                    *stats
+                        .omitted_declaration_receipts
+                        .entry(path.to_owned())
+                        .or_default() += 1;
+                } else {
+                    declaration_bytes += bytes;
+                    declarations.push((receipt, bytes));
+                }
+            }
             super::append_extraction(&mut extraction, facts);
-            receipts.extend(file_receipts);
+            receipts.extend(file_receipts.rules);
             stats.recomputed_files += 1;
             Ok(())
         },
     )?;
     super::complete_directory(&mut extraction, root, id)?;
-    retain_matching(&mut receipts, &extraction);
+    let matching = matcher(&extraction);
+    receipts.retain(|receipt| matching(receipt));
+    // Only declarations whose complete fact survived directory completion use
+    // budget. Manifest order is deterministic, so the admitted prefix is too.
+    for (receipt, bytes) in declarations {
+        if !matching(&receipt) {
+            continue;
+        }
+        if receipt_bytes + bytes > budget.bytes || receipts.len() == budget.receipts {
+            *stats
+                .omitted_declaration_receipts
+                .entry(receipt.file().path.clone())
+                .or_default() += 1;
+        } else {
+            receipt_bytes += bytes;
+            receipts.push(receipt);
+        }
+    }
+    drop(matching);
     Ok((extraction, receipts, stats))
 }
 
 fn retain_matching(receipts: &mut Vec<Receipt>, extraction: &Extraction) {
+    let matching = matcher(extraction);
+    receipts.retain(|receipt| matching(receipt));
+}
+
+/// Complete-fact equality against the final extraction, never id-only lookup.
+fn matcher(extraction: &Extraction) -> impl Fn(&Receipt) -> bool + '_ {
     let nodes: BTreeMap<_, _> = extraction
         .nodes
         .iter()
@@ -335,7 +438,7 @@ fn retain_matching(receipts: &mut Vec<Receipt>, extraction: &Extraction) {
             )
         })
         .collect();
-    receipts.retain(|receipt| match receipt.fact_key() {
+    move |receipt| match receipt.fact_key() {
         core_graph::source::FactKey::Node { id } => {
             nodes.get(id).is_some_and(|node| receipt.matches_node(node))
         }
@@ -346,7 +449,7 @@ fn retain_matching(receipts: &mut Vec<Receipt>, extraction: &Extraction) {
         } => edges
             .get(&(source.clone(), label.clone(), destination.clone()))
             .is_some_and(|edge| receipt.matches_edge(edge)),
-    });
+    }
 }
 
 #[cfg(test)]

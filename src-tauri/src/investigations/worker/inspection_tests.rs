@@ -324,3 +324,42 @@ fn inspection_historical_location_is_pinned_and_errors_are_sanitized() {
         "Captured inspection target changed or is unavailable; refresh and select the source again."
     );
 }
+
+// AC-0280: a callable that owns no rule resolves through production inspection
+// to its exact retained declaration span, as a valid source obligation target.
+#[test]
+fn inspection_resolves_rule_less_declaration_receipt() {
+    const SOURCE: &str = "export function guard(ok: boolean) { if (!ok) return false; return true; }\nexport function total(a: number, b: number) { return a + b; }\n";
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _app_data, _) = captured_fixture_state(directory.path(), SOURCE, false);
+    let node = state
+        .graph
+        .lock()
+        .unwrap()
+        .nodes_with_label("Symbol")
+        .unwrap()
+        .into_iter()
+        .find(|node| node.props["name"] == "total")
+        .unwrap();
+    let fact = agents::TaskFactKey::Node { id: node.id };
+    let description =
+        crate::primary_source::describe(&state, &crate::task_evidence::graph_fact(&fact)).unwrap();
+    assert_eq!(description.ranges.len(), 1);
+    let (target, _guard) = crate::investigations::inspection::resolve(
+        &state,
+        &fact,
+        &description.graph_snapshot_id,
+        &description.receipt_id,
+        description.ranges[0].index,
+    )
+    .unwrap();
+    assert_eq!((target.role, target.index), (TaskRangeRole::Provenance, 0));
+    let span = &SOURCE[target.captured.byte_start as usize..target.captured.byte_end as usize];
+    assert!(span.starts_with("function total(") && span.ends_with('}'));
+    agents::investigation::Obligation::Source {
+        obligation_id: String::new(),
+        target: Box::new(target),
+    }
+    .content_id()
+    .unwrap();
+}
