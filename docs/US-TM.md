@@ -48,6 +48,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0036 | AC-0246..0247 | spec, ui | P2 (ROADMAP) | F-* | ADR-0036 | T-0246..0247 |
 | US-0037 | AC-0248..0252 | agents, spec, app, ui | P3 (ROADMAP) | — | ADR-0019, ADR-0036 | T-0248..0252 |
 | US-0038 | AC-0253..0255, AC-0263 | ingest, adapters-fw, dynamic, adapters-plugin-host, app, ui | P1 (ROADMAP) | — | ADR-0017, ADR-0036 | T-0253..0255, T-0263 |
+| US-0039 | AC-0270 | semantic, app | P1 (#257) | — | ADR-0036 | T-0270 |
 
 ## Coverage assertions
 - Every Must-priority US is anchored to an original milestone, post-M10 work, or a SPEC-01 delivery gate; a milestone label alone does not establish completion.
