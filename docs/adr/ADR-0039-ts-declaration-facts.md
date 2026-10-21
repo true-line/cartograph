@@ -53,12 +53,19 @@ span and a provenance-only v2 receipt:
     the header does not fit. That flag names the gap instead of hiding it.
   - A `SIGNATURE_OF` edge links it to the Symbol.
   - Nested callables keep their own Symbols.
+  - Its body's direct `const`/`let`/`var` declarators also become Variable
+    facts (#699), with id `decl:<repo>@<path>#<callable>/<name>`,
+    `scope: "local"` and the callable's Symbol id as `symbol`. Their object
+    sections follow the Property rules above. Nested blocks and callables
+    within 8 KiB add nothing, because their spans are already inspectable.
 
 Declaration and Property facts also get a `DEFINED_IN` edge to their File.
 
 These facts never become rule owners: the producer records them separately
 from callable owners. They are minted under #691's per-file and directory
-declaration bounds, and every omission is named per file.
+declaration bounds, and every omission is named per file. Locals of
+oversized callables are minted last, so they take only the budget the file's
+own declarations leave.
 
 Existing Symbol and Component spans, identities and props do not change.
 Label-matching consumers send the new labels to their existing generic
