@@ -460,22 +460,24 @@ mod staged_tests {
     use super::*;
 
     // AC-0266: shape-valid IPC arguments keep semantic errors on the structured
-    // rejection path, preserving the UI draft/retry contract for both generations.
+    // rejection path, preserving the UI draft/retry contract for all generations.
+    // AC-0286: the current schema-6 family must reach the same command boundary.
     #[test]
     fn completion_ipc_semantic_errors_reach_structured_invalid_input() {
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
-        for generation in [3, 4] {
+        for generation in [3, 4, 5, 6] {
             let mut raw = serde_json::json!({
                 "schema_version": generation, "request_nonce": "invalid-semantic",
-                "specialist_id": if generation == 4 { "domain-analyst@7" } else { "domain-analyst@6" },
+                "specialist_id": format!("domain-analyst@{}", generation + 3),
                 "question": "", "scope": {"type": "all"}, "provider_mode": "local",
-                "limit_profile": "investigation-v1", "expected_context_id": format!("context-v2:{}", "a".repeat(64))
+                "limit_profile": if generation >= 5 { "investigation-v2" } else { "investigation-v1" }, "expected_context_id": format!("context-v2:{}", "a".repeat(64))
             });
-            if generation == 4 {
-                raw["obligations"] = serde_json::json!({"schema_version": 1,
-                    "contract": "investigation-completion-obligations@1", "obligations": []});
+            if generation >= 4 {
+                let obligation_version = if generation >= 5 { 2 } else { 1 };
+                raw["obligations"] = serde_json::json!({"schema_version": obligation_version,
+                    "contract": format!("investigation-completion-obligations@{obligation_version}"), "obligations": []});
             }
             // Tauri supplies a parsed Value to this exact command argument type.
             let request = serde_json::from_value::<InvestigationStartRequest>(raw.clone()).unwrap();

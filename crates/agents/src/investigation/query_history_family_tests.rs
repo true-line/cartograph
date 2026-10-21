@@ -223,3 +223,29 @@ fn query_history_specialists_have_separate_immutable_prompts_and_operations() {
         assert!(new.uses_policy_selection());
     }
 }
+
+#[test]
+fn query_history_ipc_deserializer_accepts_current_and_historical_completion_families() {
+    // AC-0286: Tauri's parsed-Value path must accept the catalog's schema6.
+    for (schema, version, profile) in [
+        (4, 7, "investigation-v1"),
+        (5, 8, "investigation-v2"),
+        (6, 9, "investigation-v2"),
+    ] {
+        for name in ["domain-analyst", "evidence-auditor"] {
+            let expected = request(schema, &format!("{name}@{version}"), profile);
+            let raw = serde_json::to_value(&expected).unwrap();
+            let decoded: InvestigationStartRequest = serde_json::from_value(raw.clone()).unwrap();
+            assert!(matches!(decoded, InvestigationStartRequest::Completion(_)));
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), raw);
+            assert!(InvestigationStartRequest::decode(&raw.to_string()).is_ok());
+            let mut extra = raw.clone();
+            extra["unknown_authority"] = serde_json::json!(true);
+            assert!(serde_json::from_value::<InvestigationStartRequest>(extra).is_err());
+        }
+    }
+    let mut future =
+        serde_json::to_value(request(6, "domain-analyst@9", "investigation-v2")).unwrap();
+    future["schema_version"] = serde_json::json!(7);
+    assert!(serde_json::from_value::<InvestigationStartRequest>(future).is_err());
+}

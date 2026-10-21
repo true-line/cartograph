@@ -179,7 +179,7 @@ impl<'de> Deserialize<'de> for InvestigationStartRequest {
             Some(1..=3) => serde_json::from_str(raw.get())
                 .map(Self::Legacy)
                 .map_err(serde::de::Error::custom),
-            Some(4 | 5) => serde_json::from_str(raw.get())
+            Some(4..=6) => serde_json::from_str(raw.get())
                 .map(Self::Completion)
                 .map_err(serde::de::Error::custom),
             _ => Err(serde::de::Error::custom(
