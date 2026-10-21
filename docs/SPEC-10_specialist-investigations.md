@@ -662,3 +662,27 @@ mutation rejection; coverage-only and explicit-target runs; and UI rendering of
 saved stale/unrecorded/limited states without an exhaustive or live-freshness
 claim. These extend T-0239; static shared-read tests alone do not prove the
 investigation path.
+
+
+### Staged completion-obligation primitives (#645, AC-0264)
+
+The internal generation-4 request is preparation for the three-slice #633 contract;
+V7 remains absent from the catalog and refused by direct start. No new public
+specialist enum, prompt, finish behavior or result outcome is introduced here.
+A single `investigation-completion-obligations@1` envelope contains source or
+inventory entries, each with a kind-specific content ID. Source identity retains
+all captured-target fields and the existing fact/role/index conflict rule;
+inventory identity includes exact context, repo and inventory hash. Exact duplicate
+entries normalize in kind/ID order; conflicting identities fail closed.
+
+Raw lists admit 1–12 entries and the entire request admits at most 8 KiB before
+partition clones; twelve targets are a ceiling, never a capacity guarantee.
+Legacy inspection requirements and the new envelope cannot both be supplied.
+Absent legacy requirements stay absent and present-null is rejected. Envelope,
+source, inventory and generation-4 request identities use respectively
+`cartograph:completion-obligations:v1`, `cartograph:source-obligation:v1`,
+`cartograph:inventory-obligation:v1`, and
+`cartograph:investigation-client-intent:v4`, each with a trailing NUL domain
+separator. Existing client-intent v1/v2/v3 and inspection-requirements-v1 remain
+unchanged. These pure identities attest caller intent; authoritative retained
+inventory/source resolution remains required before eventual exposure.

@@ -1,0 +1,71 @@
+{
+  "definitions": [
+    {
+      "id": "domain-analyst@1",
+      "prompt_fingerprint": "ab952c9fe055e1fde7aa5ca3f1d7f60851b402021460fdbd9011a765e20967c3"
+    },
+    {
+      "id": "evidence-auditor@1",
+      "prompt_fingerprint": "b98abf4564bbccbf31e159fa3ecc759d8049f7f00a3d7cec998c9f5b0793d595"
+    },
+    {
+      "id": "domain-analyst@2",
+      "prompt_fingerprint": "9eb83715f67f8b022ec5a144de89c4a4a86e0c3ee86ab71e545677e0fe3e2b37"
+    },
+    {
+      "id": "evidence-auditor@2",
+      "prompt_fingerprint": "11f2d6ddbf7792a788a645f6f2e3827d8f0ff0ca4ff8d83356ea17e50216b1d0"
+    },
+    {
+      "id": "domain-analyst@3",
+      "prompt_fingerprint": "6525d4d18f258b3bbb12963e5e1fc5b26fbedb8bb30d25590a67bb9a539bd6e6"
+    },
+    {
+      "id": "evidence-auditor@3",
+      "prompt_fingerprint": "2c8cd70e4adae125869d7be57a595ef5524eada4c126e03e52ef201e95be0d0f"
+    },
+    {
+      "id": "domain-analyst@4",
+      "prompt_fingerprint": "503b9b28dd1b98cd660b17cdbd74016574cf445a33643b20ec71617956f17077"
+    },
+    {
+      "id": "evidence-auditor@4",
+      "prompt_fingerprint": "97086e3b88035057e6954dca878ea089428e1faf613dd5a0dcb8a726bf36c804"
+    },
+    {
+      "id": "domain-analyst@5",
+      "prompt_fingerprint": "ae67454605a84cc6af1cfd69b1ca7ccd8944ba3df46e02329583bc98412c3836"
+    },
+    {
+      "id": "evidence-auditor@5",
+      "prompt_fingerprint": "9fd4bb01d104d98b848796a172e5001da8ecb90732768cc1473f6b72b19dfe19"
+    },
+    {
+      "id": "domain-analyst@6",
+      "prompt_fingerprint": "235648d22c87b361dc32669531a0d4c00c1fc9e2843e172f08c60f91c42275e3"
+    },
+    {
+      "id": "evidence-auditor@6",
+      "prompt_fingerprint": "a91d5b633354536505aa8f0b951fc9b8c8222a224fcb0b02df334d56c7c07ee7"
+    }
+  ],
+  "disclosure_hash": "investigation-disclosure-v1:ae3d45478e8d70474dd6904067dcb0ee12f0ddec67a6d3dc719fb228140097bc",
+  "input_payload_hash": "67d66b45182822b363c1e700b3666bc9237fcac9875272567ebcae92700a92fc",
+  "ledger_hash": "6d7de439581faea05ec5bf339afbb8b559aad00a18a9707df7aac5c8f3fea327",
+  "requests": [
+    {
+      "intent_hash": "ad6ed68ff960de338356d1f91b55aae2856c41fdaf6624c80ff954d38db4285e",
+      "wire": "{\"schema_version\":1,\"request_nonce\":\"request-1\",\"specialist_id\":\"domain-analyst@2\",\"question\":\"What governs checkout?\",\"scope\":{\"type\":\"all\"},\"provider_mode\":\"local\",\"limit_profile\":\"investigation-v1\"}"
+    },
+    {
+      "intent_hash": "37f2755c97e863e8c0a8bc184e678af35f167e61ba4adb438807375c06a95931",
+      "wire": "{\"schema_version\":2,\"request_nonce\":\"request-1\",\"specialist_id\":\"domain-analyst@5\",\"inspection_requirements\":[{\"schema_version\":1,\"target_id\":\"be5fea079b26ff02f6fdc5d9b26a5507a4b50491828ee87180c66936e0d26851\",\"graph_snapshot_id\":\"context-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"fact\":{\"kind\":\"node\",\"id\":\"node:checkout\"},\"fact_digest\":\"node-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"registered_source_id\":\"src_dddddddddddddddddddddddddddddddd\",\"receipt_id\":\"ts-primary-v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"receipt_inventory_index\":3,\"role\":\"provenance\",\"index\":0,\"source\":{\"repo\":\"fixture/repo\",\"path\":\"guard.ts\",\"byte_start\":0,\"byte_end\":12,\"commit_sha\":\"pinned-revision\"},\"captured\":{\"file\":{\"source_id\":\"src_dddddddddddddddddddddddddddddddd\",\"capture_id\":\"capture-v1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"path\":\"guard.ts\",\"digest\":\"95231f18646420689d3f1e7b4b1868c2b64c78d25c5bb822940ec37b95d92d32\",\"byte_len\":12},\"byte_start\":0,\"byte_end\":12}}],\"question\":\"What governs checkout?\",\"scope\":{\"type\":\"all\"},\"provider_mode\":\"local\",\"limit_profile\":\"investigation-v1\",\"expected_graph_revision\":\"context-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+    },
+    {
+      "intent_hash": "2dda98f228d5fd927dae5d4fcbcb8bbaad4d1c814053eb0b676132ec8a23b65e",
+      "wire": "{\"schema_version\":3,\"request_nonce\":\"request-1\",\"specialist_id\":\"domain-analyst@6\",\"question\":\"What governs checkout?\",\"scope\":{\"type\":\"all\"},\"provider_mode\":\"local\",\"limit_profile\":\"investigation-v1\",\"expected_graph_revision\":\"context-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"expected_context_id\":\"context-v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+    }
+  ],
+  "result_id": "investigation-result-v1:0170c1977a28ba6988c3aaf77ed2dae7cca824b7908e9a9050dad4c494ff1479",
+  "result_wire": "{\"schema_version\":1,\"investigation_id\":\"investigation-1\",\"result_id\":\"investigation-result-v1:0170c1977a28ba6988c3aaf77ed2dae7cca824b7908e9a9050dad4c494ff1479\",\"input_ledger_hash\":\"026609bbf7e8d7d2371b865052fd25c470c637e5a54a41cc4aed5e3bf284a993\",\"graph_snapshot_id\":\"context-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"findings\":[{\"finding_id\":\"finding-1\",\"claim_kind\":\"implemented_behavior\",\"title\":\"Observed guard\",\"statement\":\"The selected transition contains a rejection branch.\",\"citation_ids\":[\"source-1\"],\"limitations\":[\"Other transitions remain unassessed.\"],\"tier\":\"Agentic\",\"confidence_tier\":\"InferredWeak\"}],\"knowledge_completeness\":\"partial\",\"limitations\":[\"Only selected evidence was assessed.\"],\"observed_response_model\":null,\"created_at\":\"2026-10-19T00:00:00Z\"}"
+}

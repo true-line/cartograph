@@ -2,7 +2,7 @@ use super::*;
 use crate::{TaskFactKey, TaskFactSelection, TaskRangeRole};
 use core_prov::{ConfidenceTier, EvidenceRef, Tier, content_hash};
 
-fn basis() -> (
+pub(in crate::investigation) fn basis() -> (
     InvestigationInputLedger,
     InvestigationDisclosure,
     InvestigationAction,

@@ -10,6 +10,9 @@ mod coverage_protocol;
 mod disclosure;
 mod input;
 mod inspection;
+// Internal primitives remain unreachable until all three #633 slices are complete.
+#[allow(dead_code)]
+mod obligations;
 mod privacy;
 mod projection;
 mod protocol;
