@@ -109,3 +109,5 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0040 | Immutable investigation budget and admission policies (proposed) |
 
 | ADR-0041 | Bounded query history with explicit runtime families (proposed) |
+
+| ADR-0042 | Prove continuation capacity before tool admission (proposed) |
