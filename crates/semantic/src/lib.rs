@@ -11,9 +11,9 @@ pub mod context;
 pub mod embedding_cache;
 mod eval_report;
 pub use eval_report::EvalReport;
-pub mod name_unique;
 pub mod evaluation;
 mod family;
+pub mod name_unique;
 pub use family::{FamilyKey, HopKind};
 
 use core_graph::{Edge, Node};
