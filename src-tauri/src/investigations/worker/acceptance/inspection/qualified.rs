@@ -546,6 +546,44 @@ fn records<T: serde::de::DeserializeOwned>(
     })
     .collect()
 }
+// Compare each actual supplied span with its independently sealed body hash;
+// envelope hashes and inventory hashes cannot establish this correspondence.
+fn observed_sources_match(observed: &Value, disclosure: &InvestigationDisclosure) -> bool {
+    let Some(sources) = observed["sources"].as_array() else {
+        return false;
+    };
+    let mut actual = std::collections::BTreeMap::new();
+    for source in sources {
+        let (Some(id), Some(hash)) = (
+            source["citation_id"].as_str(),
+            source["disclosed_text_hash"].as_str(),
+        ) else {
+            return false;
+        };
+        if actual.insert(id, hash).is_some() {
+            return false;
+        }
+    }
+    let mut expected = std::collections::BTreeMap::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for source in &disclosure.sources {
+        if !seen.insert(source.citation_id.as_str()) {
+            return false;
+        }
+        if !source.representation.is_supplied() {
+            if source.disclosed_text_hash.is_some() || source.redacted {
+                return false;
+            }
+            continue;
+        }
+        let Some(hash) = source.disclosed_text_hash.as_deref() else {
+            return false;
+        };
+        expected.insert(source.citation_id.as_str(), hash);
+    }
+    actual == expected
+}
+
 fn evidence(
     fixture: &Fixture,
     id: &str,
@@ -614,16 +652,18 @@ fn evidence(
                 && observed["coverage_qualification"]
                     == serde_json::to_value(&frozen.archive.proof().qualification).unwrap()
                 && step.disclosure.as_ref().is_some_and(|disclosure| {
-                    observed["inventory_details"]
-                        .as_array()
-                        .is_some_and(|details| {
-                            details.len() == disclosure.coverage_details.len()
-                                && details.iter().zip(&disclosure.coverage_details).all(
-                                    |(detail, sealed)| {
-                                        detail["disclosed_body_hash"] == sealed.disclosed_body_hash
-                                    },
-                                )
-                        })
+                    observed_sources_match(observed, disclosure)
+                        && observed["inventory_details"]
+                            .as_array()
+                            .is_some_and(|details| {
+                                details.len() == disclosure.coverage_details.len()
+                                    && details.iter().zip(&disclosure.coverage_details).all(
+                                        |(detail, sealed)| {
+                                            detail["disclosed_body_hash"]
+                                                == sealed.disclosed_body_hash
+                                        },
+                                    )
+                            })
                 })
         });
     let exact_history = if history {
@@ -844,9 +884,36 @@ fn execute(fixture: &Fixture, frozen: &Frozen, provider: Arc<dyn LlmProvider>, r
     } else {
         report["auditor"] = json!({"status":"skipped_after_failed_analyst_mechanical_checks"});
     }
+    // A last in-flight request may outlive the pre-dispatch artifact check.
+    let final_artifacts = validate_files(frozen);
+    report["final_frozen_artifacts"] =
+        json!({"unchanged":final_artifacts.is_ok(),"error":final_artifacts.err()});
     report["phase"] = json!("recorded");
-    report["mechanical_pass"] = json!(passed && auditor_pass);
+    report["mechanical_pass"] =
+        json!(passed && auditor_pass && report["final_frozen_artifacts"]["unchanged"] == true);
     write_report(&frozen.output, report);
+}
+
+fn resolved_output(output: &Path, checkout: &Path) -> Result<PathBuf, String> {
+    if !output.is_absolute() {
+        return Err("Output must be absolute.".into());
+    }
+    let parent = output
+        .parent()
+        .ok_or("Output parent is missing.")?
+        .canonicalize()
+        .map_err(|_| "Output parent is unavailable.")?;
+    let name = output
+        .file_name()
+        .ok_or("Output directory name is missing.")?;
+    let resolved = parent.join(name);
+    let checkout = checkout
+        .canonicalize()
+        .map_err(|_| "Checkout is unavailable.")?;
+    if resolved.starts_with(&checkout) {
+        return Err("Output must be outside the checkout.".into());
+    }
+    Ok(resolved)
 }
 
 pub(crate) fn local_provider_acceptance() {
@@ -859,6 +926,13 @@ pub(crate) fn local_provider_acceptance() {
     let rubric = PathBuf::from(required("CARTOGRAPH_ACCEPTANCE_RUBRIC"));
     let receipt = PathBuf::from(required("CARTOGRAPH_ACCEPTANCE_RUNTIME_EVIDENCE"));
     let mailbox = PathBuf::from(required("CARTOGRAPH_ACCEPTANCE_MAILBOX"));
+    assert_eq!(gate, output.join("publication.json"));
+    let output = resolved_output(
+        &output,
+        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap(),
+    )
+    .expect("Fresh output must resolve outside the checkout");
+    let gate = output.join("publication.json");
     let revision = source_revision();
     let tree = std::process::Command::new("git")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -866,10 +940,6 @@ pub(crate) fn local_provider_acceptance() {
         .output()
         .unwrap();
     assert!(tree.status.success());
-    assert!(
-        output.is_absolute()
-            && !output.starts_with(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
-    );
     assert_eq!(gate, output.join("publication.json"));
     assert!(!gate.exists());
     std::fs::create_dir(&output).expect("Fresh output directory required");

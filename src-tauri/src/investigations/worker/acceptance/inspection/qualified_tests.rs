@@ -4,6 +4,7 @@ struct ControlProvider {
     calls: AtomicUsize,
     skip_inventory: bool,
     unknown: bool,
+    mutate_final_artifact: Option<PathBuf>,
 }
 impl ControlProvider {
     fn new(skip_inventory: bool, unknown: bool) -> Self {
@@ -11,6 +12,7 @@ impl ControlProvider {
             calls: AtomicUsize::new(0),
             skip_inventory,
             unknown,
+            mutate_final_artifact: None,
         }
     }
 }
@@ -78,6 +80,11 @@ impl LlmProvider for ControlProvider {
                     "citation_ids":[citation["citation_id"]],"limitations":[if history {"The audit does not establish deployment behavior."} else {"Only an initializer range was supplied."}]}],"knowledge_completeness":"partial","limitations":[if history {"Parent claims remain attributed history."} else {"Coverage limits do not prove project-wide absence."}]})
             }
         };
+        if total == 7
+            && let Some(path) = &self.mutate_final_artifact
+        {
+            std::fs::write(path, b"changed during final auditor request").unwrap();
+        }
         Ok(BoundedCompletion {
             text: response.to_string(),
             requested_model: "scripted-model".into(),
@@ -221,6 +228,7 @@ fn qualified_acceptance_freeze_requires_exact_mailbox_ack_before_dispatch() {
     }
 }
 
+// AC-0191/0239: the control binds coverage and independently supplied sources.
 #[test]
 fn qualified_acceptance_freezes_typed_synthetic_inventory_and_independent_supplied_pair() {
     let files = Files::new();
@@ -303,6 +311,7 @@ fn secret_inventory(repo: &str) -> String {
         .push_str(" password=synthetic-control-secret ");
     serde_json::to_string(&inventory).unwrap()
 }
+// AC-0191/0239: redacted inventories do not claim original reviewability.
 #[test]
 fn qualified_acceptance_inventory_redaction_keeps_mechanical_and_review_outcomes_separate() {
     let files = Files::new();
@@ -337,6 +346,7 @@ fn qualified_acceptance_inventory_redaction_keeps_mechanical_and_review_outcomes
     }
 }
 
+// AC-0191/0239: failed or incomplete controls retain outcomes without retries.
 #[test]
 fn qualified_acceptance_preserves_failed_unknown_and_missing_inventory_without_auditor_retry() {
     for (skip, unknown, expected) in [(true, false, 3), (false, true, 1)] {
@@ -371,6 +381,7 @@ fn qualified_acceptance_preserves_failed_unknown_and_missing_inventory_without_a
     }
 }
 
+// AC-0191/0239: drift fails before further model dispatch.
 #[test]
 fn qualified_acceptance_pinned_context_and_auditor_revalidation_fail_before_new_calls() {
     let files = Files::new();
@@ -402,4 +413,144 @@ fn qualified_acceptance_pinned_context_and_auditor_revalidation_fail_before_new_
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     assert_eq!(report["analyst"]["detail"]["status"], "failed");
     assert!(audit_request(&fixture, &frozen).is_err());
+}
+
+// AC-0191/0239: a final request cannot hide a concurrent frozen-artifact edit.
+#[test]
+fn qualified_acceptance_final_artifact_mutation_prevents_pass() {
+    let files = Files::new();
+    let mut control = ControlProvider::new(false, false);
+    control.mutate_final_artifact = Some(files.rubric.clone());
+    let provider = Arc::new(control);
+    let (fixture, frozen) = files.prepare(provider.as_ref(), inventory);
+    files.acknowledge(&frozen, &frozen.manifest_hash, None);
+    await_publication(
+        &frozen,
+        &files.output.join("publication.json"),
+        Duration::ZERO,
+    )
+    .unwrap();
+    let mut report = report();
+    execute(&fixture, &frozen, provider.clone(), &mut report);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 8);
+    assert_eq!(report["analyst"]["mechanical_pass"], true);
+    assert_eq!(report["auditor"]["mechanical_pass"], true);
+    assert_eq!(report["final_frozen_artifacts"]["unchanged"], false);
+    assert_eq!(report["mechanical_pass"], false);
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(files.output.join("run.json")).unwrap()).unwrap();
+    assert_eq!(saved["mechanical_pass"], false);
+}
+
+// AC-0191/0239: actual source body hashes bind by citation, not array position.
+#[test]
+fn qualified_acceptance_observed_source_hashes_match_sealed_citations() {
+    let files = Files::new();
+    let provider = Arc::new(ControlProvider::new(false, false));
+    let (fixture, frozen) = files.prepare(provider.as_ref(), inventory);
+    let observer = Arc::new(ObservedProvider::new(provider, &frozen, "analyst"));
+    fixture.run(observer.clone());
+    let (report, passed) = evidence(
+        &fixture,
+        &fixture.id,
+        false,
+        &frozen.plan.analyst,
+        &frozen,
+        &observer,
+    );
+    assert!(passed, "{report:#}");
+    let steps: Vec<PendingInvestigationStep> =
+        serde_json::from_value(report["sealed_invocations"].clone()).unwrap();
+    let observations = observer.observations.lock().unwrap();
+    let (step, observed) = steps
+        .iter()
+        .zip(observations.iter())
+        .find(|(_, observed)| !observed["sources"].as_array().unwrap().is_empty())
+        .unwrap();
+    let disclosure = step.disclosure.as_ref().unwrap();
+    assert!(observed_sources_match(observed, disclosure));
+    // Acquired but omitted sources are not spans actually supplied to this call.
+    let mut with_omission = disclosure.clone();
+    let mut omitted = with_omission.sources[0].clone();
+    omitted.citation_id = "omitted-citation".into();
+    omitted.representation = DisclosureRepresentation::Omitted {
+        reason: DisclosureOmissionReason::WorkingSetBudget,
+    };
+    omitted.disclosed_text_hash = None;
+    omitted.redacted = false;
+    with_omission.sources.push(omitted);
+    assert!(observed_sources_match(observed, &with_omission));
+    let mut claimed_omission = observed.clone();
+    let mut claimed = claimed_omission["sources"][0].clone();
+    claimed["citation_id"] = json!("omitted-citation");
+    claimed_omission["sources"]
+        .as_array_mut()
+        .unwrap()
+        .push(claimed);
+    assert!(!observed_sources_match(&claimed_omission, &with_omission));
+
+    let mut changed = disclosure.clone();
+    changed.sources[0].disclosed_text_hash = Some("0".repeat(64));
+    assert!(!observed_sources_match(observed, &changed));
+    let mut changed = observed.clone();
+    changed["sources"][0]["citation_id"] = json!("another-citation");
+    assert!(!observed_sources_match(&changed, disclosure));
+    let mut changed = observed.clone();
+    let duplicate = changed["sources"][0].clone();
+    changed["sources"].as_array_mut().unwrap().push(duplicate);
+    assert!(!observed_sources_match(&changed, disclosure));
+    changed["sources"] = json!([]);
+    assert!(!observed_sources_match(&changed, disclosure));
+    let mut two = disclosure.clone();
+    let mut second = two.sources[0].clone();
+    second.citation_id = "another-citation".into();
+    two.sources.push(second);
+    let mut reordered = observed.clone();
+    let mut second = reordered["sources"][0].clone();
+    second["citation_id"] = json!("another-citation");
+    reordered["sources"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, second);
+    assert!(observed_sources_match(&reordered, &two));
+    drop(observations);
+    // Exercise the complete audit predicate as well as the keyed comparison.
+    observer.observations.lock().unwrap().last_mut().unwrap()["sources"][0]["disclosed_text_hash"] =
+        json!("0".repeat(64));
+    let (report, passed) = evidence(
+        &fixture,
+        &fixture.id,
+        false,
+        &frozen.plan.analyst,
+        &frozen,
+        &observer,
+    );
+    assert!(!passed);
+    assert_eq!(
+        report["checks"]["all_sealed_invocations_bind_frozen_coverage"],
+        false
+    );
+}
+
+// AC-0191: artifact destinations must resolve outside the checkout before writes.
+#[test]
+fn qualified_acceptance_output_boundary_uses_canonical_parent() {
+    let root = tempfile::tempdir().unwrap();
+    let checkout = root.path().join("checkout");
+    let external = root.path().join("external");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::create_dir(&external).unwrap();
+    assert!(resolved_output(&checkout.join("output"), &checkout).is_err());
+    assert!(resolved_output(Path::new("relative"), &checkout).is_err());
+    assert_eq!(
+        resolved_output(&external.join("output"), &checkout).unwrap(),
+        external.canonicalize().unwrap().join("output")
+    );
+    #[cfg(unix)]
+    {
+        let alias = external.join("checkout-alias");
+        std::os::unix::fs::symlink(&checkout, &alias).unwrap();
+        assert!(resolved_output(&alias.join("output"), &checkout).is_err());
+        assert!(!checkout.join("output").exists());
+    }
 }
