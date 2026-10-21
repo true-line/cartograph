@@ -14,7 +14,7 @@ pub(in crate::jobs::investigations) struct InternalFixture {
     pub step: PendingInvestigationStep,
     pub metadata: ProtectedCompletionMetadata,
     pub basis: SavedCallBasis,
-    _execution_guard: JobExecution,
+    pub(in crate::jobs::investigations) _execution_guard: JobExecution,
 }
 fn clone_task(task: &StoredTask) -> StoredTask {
     serde_json::from_slice(&encode(task, MAX_RECORD_BYTES).unwrap()).unwrap()

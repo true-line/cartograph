@@ -6,6 +6,41 @@ use agents::investigation::staged_refusal::CompletionCallMode;
 use rusqlite::Transaction;
 use serde_json::Value;
 
+impl JobStore {
+    /// Host-only refusal publication. The worker supplies the reason from its
+    /// continuation proof; this method authenticates durable write authority.
+    /// No public start route or provider/tool execution is introduced here.
+    pub(crate) fn refuse_next_prompt_capacity(
+        &mut self,
+        execution: &JobExecution,
+        expected_revision: u64,
+        response: &InvestigationResponseMeta,
+        proposal: &Value,
+        reason: CapacityRefusalReason,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        execution.verify()?;
+        if execution.inner.namespace != self.namespace {
+            return Err(InvestigationStoreError::Ownership);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate(&tx, &self.namespace)?;
+        let id = transitions::task_id_for_job(&tx, execution.id())?
+            .ok_or(InvestigationStoreError::Missing)?;
+        let task = storage::load_next_prompt_task_base(&tx, &id)?;
+        transitions::check_identity(&task, execution)?;
+        if task.detail.summary.revision != expected_revision {
+            return Err(InvestigationStoreError::Stale);
+        }
+        transitions::check_job(&tx, execution, false)?;
+        let next = refuse_capacity(&tx, &task, response, proposal, reason)?;
+        tx.commit()?;
+        // No in-memory acknowledgement is returned before durable commit.
+        Ok(next.detail)
+    }
+}
+
 pub(super) fn refuse_capacity(
     tx: &Transaction<'_>,
     task: &StoredTask,
@@ -89,3 +124,7 @@ pub(super) fn refuse_capacity(
 #[cfg(test)]
 #[path = "admission_transition_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "admission_owner_tests.rs"]
+mod owner_tests;
