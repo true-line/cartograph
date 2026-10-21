@@ -446,7 +446,11 @@ fn ac0251_export_is_deterministic_complete_and_inert() {
 #[test]
 fn ac0252_emit_actual_saved_fixture_for_ui_and_export() {
     let mut store = PacketStore::in_memory().unwrap();
-    let detail = store.put(rich_body(), &[], "fixture-generation").unwrap();
+    // The generator version is hashed into the packet id; pin it so a
+    // release version bump does not invalidate the committed fixtures (#671).
+    let mut body = rich_body();
+    body.identity.generator_version = "0.0.0-fixture".into();
+    let detail = store.put(body, &[], "fixture-generation").unwrap();
     let fact = &detail.body.evidence.facts[0];
     let annotation = &fact.review_annotations[0];
     let request = json!({"expected_snapshot_id":detail.body.identity.recovered_basis.snapshot_id,"facts":[{"reference":fact.reference,"expected_digest":fact.expected_digest}],"artifacts":[detail.body.evidence.artifacts[0].selection],"interpretation_decisions":[{"content_hash":annotation.record.assertion.provenance.content_hash,"expected_record_hash":annotation.record_hash}],"intent":detail.body.intent,"work":detail.body.work,"acceptance":detail.body.acceptance,"handoff":detail.body.handoff,"return":detail.body.returns,"supersedes":[]});

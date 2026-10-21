@@ -4,7 +4,7 @@ Execution: unoffered. Capability requests confer no authority.
 
 ## Packet identity
 
-    "work-packet-v1:cc42a9775bc708dee1c85a1ad9fec954d813432ceda6bd08c50f057fec3587b1"
+    "work-packet-v1:7ad86a09ab05f4d3b9b282c27f89842b47c6b2e5925b07012648e7190c1bc3ef"
 
 ## Body schema version
 
@@ -39,7 +39,7 @@ Execution: unoffered. Capability requests confer no authority.
 ## 1. Identity
 
     {
-      "generator_version": "0.15.5",
+      "generator_version": "0.0.0-fixture",
       "template_version": "work-packet@1",
       "application": {
         "state": "missing",
