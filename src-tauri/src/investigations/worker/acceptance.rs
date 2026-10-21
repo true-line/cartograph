@@ -6,6 +6,8 @@ use super::*;
 mod completion;
 #[path = "acceptance/inspection.rs"]
 mod inspection;
+#[path = "acceptance/vendure.rs"]
+mod vendure;
 use inspection::local_provider_acceptance;
 use std::collections::BTreeSet;
 use std::path::Path;
