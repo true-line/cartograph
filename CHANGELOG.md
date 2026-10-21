@@ -1,5 +1,13 @@
 # cartograph
 
+## 0.18.0
+
+### Minor Changes
+
+- fbcbae6: Make every directly emitted TypeScript/JavaScript callable citable as retained primary-source evidence, not only code that contains a detected rule, so investigations can cite plain functions, methods and strategy classes. Rule receipts keep their existing limits; declarations that do not fit the remaining extraction budget are counted per file instead of failing the capture.
+- a023daa: Make TypeScript/JavaScript configuration citable: top-level variables, each first-level section of a configuration object, method decorators such as permission guards, and the header of a function too large to inspect whole each become their own citable primary-source evidence. Declarations that could not be given evidence are now listed as a limitation in the coverage inventory.
+- 1ec3b1c: Make local settings inside very large functions citable: when a function is too large to inspect whole, the `const`/`let`/`var` declarations directly in its body, and the sections of any configuration object they hold, each become their own citable evidence. Top-level declarations keep priority within each file's evidence budget.
+
 ## 0.17.0
 
 ### Minor Changes
