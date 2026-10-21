@@ -7202,6 +7202,108 @@ export function queueOrder() {
     }
 
     #[test]
+    fn java_jpa_data_model_compiles_into_data_model_artifact() {
+        // AC-0284 (#239): JPA entities, their relations and Spring Data
+        // repository access reach data_model.md with cited assertions, and
+        // the verified-only bundle is identical across repeat ingest.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/main/java/com/demo")).unwrap();
+        for (name, source) in [
+            (
+                "Owner.java",
+                "package com.demo;\n\
+                 import jakarta.persistence.*;\n\
+                 import java.util.List;\n\
+                 @Entity @Table(name = \"owners\")\n\
+                 public class Owner {\n\
+                   @Id private Integer id;\n\
+                   @OneToMany @JoinColumn(name = \"owner_id\") private List<Pet> pets;\n\
+                 }\n",
+            ),
+            (
+                "Pet.java",
+                "package com.demo;\n\
+                 import jakarta.persistence.*;\n\
+                 @Entity\n\
+                 public class Pet {\n\
+                   @Id private Integer id;\n\
+                   @ManyToOne private Owner owner;\n\
+                 }\n",
+            ),
+            (
+                "OwnerRepository.java",
+                "package com.demo;\n\
+                 import org.springframework.data.repository.Repository;\n\
+                 public interface OwnerRepository extends Repository<Owner, Integer> {\n\
+                   Owner save(Owner owner);\n\
+                 }\n",
+            ),
+            (
+                "OwnerService.java",
+                "package com.demo;\n\
+                 public class OwnerService {\n\
+                   private final OwnerRepository owners;\n\
+                   public OwnerService(OwnerRepository owners) { this.owners = owners; }\n\
+                   public void rename(Owner owner) { owners.save(owner); }\n\
+                 }\n",
+            ),
+        ] {
+            std::fs::write(dir.path().join("src/main/java/com/demo").join(name), source).unwrap();
+        }
+        let compile = || {
+            let (extraction, _) = crate::extract_tree_with_summary(
+                dir.path(),
+                "local/petclinic",
+                "workdir",
+                &[],
+                &std::collections::BTreeMap::new(),
+                None,
+                None,
+                &[],
+            )
+            .unwrap();
+            spec::compile_spec(
+                &extraction.nodes,
+                &extraction.edges,
+                &[],
+                spec::ExportMode::VerifiedOnly,
+                &std::collections::BTreeSet::new(),
+            )
+        };
+        let bundle = compile();
+        let data = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.file_name == "data_model.md")
+            .expect("data_model.md");
+        assert!(
+            !data.content.contains("No DataEntity facts"),
+            "{}",
+            data.content
+        );
+        for fact in [
+            "data:local/petclinic@jpa:Owner",
+            "data:local/petclinic@jpa:Pet",
+            "| `data:local/petclinic@jpa:Owner` | REFERENCES | `data:local/petclinic@jpa:Pet` |",
+            "| `data:local/petclinic@jpa:Pet` | REFERENCES | `data:local/petclinic@jpa:Owner` |",
+            "WRITES",
+        ] {
+            assert!(data.content.contains(fact), "{fact}: {}", data.content);
+        }
+        assert!(!data.assertions.is_empty());
+        assert!(
+            data.assertions
+                .iter()
+                .all(|assertion| !assertion.provenance.evidence.is_empty())
+        );
+        assert_eq!(
+            serde_json::to_string(&bundle).unwrap(),
+            serde_json::to_string(&compile()).unwrap(),
+            "verified-only bundle must be identical across repeat ingest"
+        );
+    }
+
+    #[test]
     fn webextension_dogfood_compiles_a_useful_deterministic_spec() {
         // US-0016/AC-0074: a full fixture extension — manifest, messaging,
         // IndexedDB — compiles into artifacts with useful cited assertions,

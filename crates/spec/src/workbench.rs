@@ -429,7 +429,10 @@ fn projection_gap(hop: &Hop, reason: &str) -> Hop {
     }
 }
 
-const DATA_EDGE_LABELS: &[&str] = &["READS", "WRITES", "MAPS_TO"];
+/// `REFERENCES` joins the data model only where it touches a `DataEntity`
+/// (the producer filters on that): JPA relations and repository bindings
+/// (#239). Infra `REFERENCES` between resources never reach this view.
+const DATA_EDGE_LABELS: &[&str] = &["READS", "WRITES", "MAPS_TO", "REFERENCES"];
 
 /// True when `node` is an explicit System Gap. Public so the shell's
 /// findings summary counts with the register's own definition (#116) —
@@ -785,6 +788,90 @@ mod tests {
         assert_eq!(bundle.gap_count, 1);
         assert_eq!(bundle.drift_count, 1);
         assert_eq!(bundle.security_count, 0);
+    }
+
+    #[test]
+    fn data_model_renders_entity_relations_and_repository_access() {
+        // AC-0284 (#239): REFERENCES between entities (JPA relations) and
+        // from a repository Symbol to its entity appear in data_model.md
+        // with READS/WRITES; an infra REFERENCES edge stays out.
+        let nodes = vec![
+            node(
+                "data:owner",
+                "DataEntity",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+            node(
+                "data:pet",
+                "DataEntity",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+            node(
+                "sym:save-pet",
+                "Symbol",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+            node(
+                "res:a",
+                "Resource",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+            node(
+                "res:b",
+                "Resource",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+        ];
+        let edges = vec![
+            edge(
+                "data:owner",
+                "data:pet",
+                "REFERENCES",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+            edge(
+                "sym:save-pet",
+                "data:pet",
+                "WRITES",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+            edge(
+                "res:a",
+                "res:b",
+                "REFERENCES",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+        ];
+        let bundle = compile_spec(
+            &nodes,
+            &edges,
+            &[],
+            ExportMode::VerifiedOnly,
+            &BTreeSet::new(),
+        );
+        let data = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "data-model")
+            .unwrap();
+        assert!(
+            data.content
+                .contains("| `data:owner` | REFERENCES | `data:pet` |")
+        );
+        assert!(
+            data.content
+                .contains("| `sym:save-pet` | WRITES | `data:pet` |")
+        );
+        assert!(!data.content.contains("res:a"), "{}", data.content);
+        assert!(data.assertions.len() >= 5);
     }
 
     #[test]

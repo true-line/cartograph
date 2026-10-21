@@ -1089,3 +1089,451 @@ fn external_imports_from_one_package_share_its_module_id_and_keep_their_specifie
         "one shared Module node, not one per imported type"
     );
 }
+
+/// A small petclinic-like JPA project: Owner/Pet in one package, Visit and
+/// the repositories in others, so relation targets and repository bindings
+/// resolve through named imports, the file's package and wildcards.
+fn petclinic(dir: &Path) {
+    write(
+        dir,
+        "src/main/java/com/demo/owner/Owner.java",
+        r#"package com.demo.owner;
+
+import jakarta.persistence.*;
+import java.util.List;
+
+@Entity
+@Table(name = "owners", schema = "clinic")
+public class Owner {
+    private static final long serialVersionUID = 1L;
+
+    @Id
+    @GeneratedValue
+    private Integer id;
+
+    @Column(name = "last_name")
+    private String lastName;
+
+    @Transient
+    private String scratch;
+
+    @OneToMany(cascade = CascadeType.ALL, fetch = FetchType.EAGER)
+    @JoinColumn(name = "owner_id")
+    private List<Pet> pets;
+}
+"#,
+    );
+    write(
+        dir,
+        "src/main/java/com/demo/owner/Pet.java",
+        r#"package com.demo.owner;
+
+import com.demo.visit.Visit;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.Table;
+import java.util.Set;
+
+@Entity
+@Table(name = "pets")
+public class Pet {
+    @Id
+    private Integer id;
+
+    private String name;
+
+    @ManyToOne
+    @JoinColumn(name = "owner_id")
+    private Owner owner;
+
+    @OneToMany(mappedBy = "pet")
+    private Set<Visit> visits;
+}
+"#,
+    );
+    write(
+        dir,
+        "src/main/java/com/demo/visit/Visit.java",
+        r#"package com.demo.visit;
+
+import com.demo.owner.Pet;
+import jakarta.persistence.*;
+
+@Entity
+public class Visit {
+    @Id
+    private Integer id;
+
+    @ManyToOne
+    @JoinColumn(name = "pet_id")
+    private Pet pet;
+}
+"#,
+    );
+    write(
+        dir,
+        "src/main/java/com/demo/owner/OwnerRepository.java",
+        r#"package com.demo.owner;
+
+import java.util.Optional;
+import org.springframework.data.repository.Repository;
+
+public interface OwnerRepository extends Repository<Owner, Integer> {
+    Optional<Owner> findById(Integer id);
+    void save(Owner owner);
+}
+"#,
+    );
+    write(
+        dir,
+        "src/main/java/com/demo/pet/PetRepository.java",
+        r#"package com.demo.pet;
+
+import com.demo.owner.Pet;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface PetRepository extends JpaRepository<Pet, Integer> {
+}
+"#,
+    );
+    write(
+        dir,
+        "src/main/java/com/demo/owner/OwnerController.java",
+        r#"package com.demo.owner;
+
+import com.demo.pet.PetRepository;
+import java.util.Map;
+
+public class OwnerController {
+    private final OwnerRepository owners;
+    private final PetRepository pets;
+    private final Map<String, String> cache;
+
+    public OwnerController(OwnerRepository owners, PetRepository pets, Map<String, String> cache) {
+        this.owners = owners;
+        this.pets = pets;
+        this.cache = cache;
+    }
+
+    public Owner show(Integer id) {
+        cache.get("k");
+        return this.owners.findById(id).orElseThrow();
+    }
+
+    public void create(Owner owner) {
+        owners.save(owner);
+    }
+
+    public void forget(PetRepository repo, Integer id) {
+        repo.deleteById(id);
+        this.pets.findAll();
+    }
+}
+"#,
+    );
+}
+
+fn extract_petclinic() -> (tempfile::TempDir, Extraction) {
+    let dir = tempfile::tempdir().unwrap();
+    petclinic(dir.path());
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    (dir, out)
+}
+
+/// AC-0284 (#239): import-proven JPA classes become DataEntity nodes with
+/// their entity name, table (explicit, else the entity-name default) and
+/// fields, the `@Id` field marked and static/transient state left out —
+/// each cited to the annotations that prove it.
+#[test]
+fn jpa_entities_carry_table_fields_and_id_with_cited_evidence() {
+    let (dir, out) = extract_petclinic();
+    let entities: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "DataEntity")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(
+        entities,
+        BTreeSet::from([
+            "data:local/demo@jpa:Owner",
+            "data:local/demo@jpa:Pet",
+            "data:local/demo@jpa:Visit",
+        ])
+    );
+
+    let owner = node(&out.nodes, "data:local/demo@jpa:Owner");
+    assert_eq!(owner.props["storage"], "jpa");
+    assert_eq!(owner.props["name"], "Owner");
+    assert_eq!(owner.props["table"], "owners");
+    assert_eq!(owner.props["store"], "owners");
+    assert_eq!(owner.props["table_source"], "explicit");
+    assert_eq!(owner.props["schema"], "clinic");
+    assert_eq!(owner.props["fqn"], "com.demo.owner.Owner");
+    assert_eq!(
+        owner.props["fields"],
+        serde_json::json!([
+            { "name": "id", "type": "Integer", "id": true },
+            { "name": "lastName", "type": "String", "id": false, "column": "last_name" },
+            {
+                "name": "pets",
+                "type": "List<Pet>",
+                "id": false,
+                "relation": "OneToMany"
+            },
+        ])
+    );
+    assert_eq!(owner.props["prov"]["confidence_tier"], "Confirmed");
+    assert_eq!(owner.props["prov"]["tier"], "Deterministic");
+    let source = std::fs::read(dir.path().join("src/main/java/com/demo/owner/Owner.java")).unwrap();
+    assert_eq!(
+        cited(&source, &owner.props["prov"]),
+        ["@Entity", r#"@Table(name = "owners", schema = "clinic")"#]
+    );
+
+    // No @Table: JPA's default table is the entity name.
+    let visit = node(&out.nodes, "data:local/demo@jpa:Visit");
+    assert_eq!(visit.props["table"], "Visit");
+    assert_eq!(visit.props["table_source"], "default");
+}
+
+/// AC-0284 (#239): `@OneToMany`/`@ManyToOne` fields become REFERENCES
+/// edges between the resolved entities, carrying cardinality, owning side
+/// and `@JoinColumn`; targets resolve across packages through imports.
+#[test]
+fn jpa_relations_become_references_edges_with_cardinality() {
+    let (dir, out) = extract_petclinic();
+    let owner = "data:local/demo@jpa:Owner";
+    let pet = "data:local/demo@jpa:Pet";
+    let visit = "data:local/demo@jpa:Visit";
+
+    let pets = edge(&out.edges, owner, pet, "REFERENCES");
+    assert_eq!(pets.props["relation"], "OneToMany");
+    assert_eq!(pets.props["cardinality"], "one-to-many");
+    assert_eq!(pets.props["field"], "pets");
+    assert_eq!(pets.props["owning"], true);
+    assert_eq!(pets.props["join_column"], "owner_id");
+
+    let pet_owner = edge(&out.edges, pet, owner, "REFERENCES");
+    assert_eq!(pet_owner.props["cardinality"], "many-to-one");
+    assert_eq!(pet_owner.props["join_column"], "owner_id");
+
+    let visits = edge(&out.edges, pet, visit, "REFERENCES");
+    assert_eq!(visits.props["cardinality"], "one-to-many");
+    assert_eq!(visits.props["mapped_by"], "pet");
+    assert_eq!(visits.props["owning"], false);
+
+    let visit_pet = edge(&out.edges, visit, pet, "REFERENCES");
+    assert_eq!(visit_pet.props["cardinality"], "many-to-one");
+    assert_eq!(visit_pet.props["join_column"], "pet_id");
+
+    // A relation cites the annotated field declaration.
+    let source = std::fs::read(dir.path().join("src/main/java/com/demo/visit/Visit.java")).unwrap();
+    let cited = cited(&source, &visit_pet.props["prov"]);
+    assert_eq!(cited.len(), 1);
+    assert!(cited[0].starts_with("@ManyToOne") && cited[0].ends_with("Pet pet;"));
+    assert!(
+        out.nodes
+            .iter()
+            .all(|node| node.label != "Gap" || node.props["framework"] != "jpa"),
+        "every relation target here is a recovered entity"
+    );
+}
+
+/// AC-0284 (#239): Spring Data repositories bind to their entity (`Repository`
+/// and `JpaRepository`), and calls on a typed receiver — field, `this.field`
+/// or parameter — become symbol-attributed READS/WRITES on that entity.
+#[test]
+fn spring_data_repositories_bind_entities_and_call_sites_read_and_write() {
+    let (_dir, out) = extract_petclinic();
+    let owner = "data:local/demo@jpa:Owner";
+    let pet = "data:local/demo@jpa:Pet";
+    let owner_repo =
+        "sym:local/demo@src/main/java/com/demo/owner/OwnerRepository.java#OwnerRepository";
+    let pet_repo = "sym:local/demo@src/main/java/com/demo/pet/PetRepository.java#PetRepository";
+
+    let binding = edge(&out.edges, owner_repo, owner, "REFERENCES");
+    assert_eq!(binding.props["relation"], "repository");
+    assert_eq!(binding.props["framework"], "spring-data");
+    assert_eq!(binding.props["prov"]["confidence_tier"], "Confirmed");
+    edge(&out.edges, pet_repo, pet, "REFERENCES");
+
+    let controller =
+        "sym:local/demo@src/main/java/com/demo/owner/OwnerController.java#OwnerController";
+    let show = format!("{controller}.show(Integer)");
+    let create = format!("{controller}.create(Owner)");
+    let forget = format!("{controller}.forget(PetRepository,Integer)");
+    // `this.owners.findById(…)` reads, `owners.save(…)` writes.
+    assert_eq!(
+        edge(&out.edges, &show, owner, "READS").props["method"],
+        "findById"
+    );
+    assert_eq!(
+        edge(&out.edges, &create, owner, "WRITES").props["method"],
+        "save"
+    );
+    // A parameter-typed receiver and `this.pets` resolve to Pet.
+    edge(&out.edges, &forget, pet, "WRITES");
+    edge(&out.edges, &forget, pet, "READS");
+    // `cache.get("k")` is a Map, not a repository: nothing is asserted.
+    assert!(
+        !out.edges
+            .iter()
+            .any(|e| matches!(e.label.as_str(), "READS" | "WRITES")
+                && e.src == show
+                && e.dst != owner),
+        "{:?}",
+        out.edges
+    );
+    let access = out
+        .edges
+        .iter()
+        .filter(|e| matches!(e.label.as_str(), "READS" | "WRITES"))
+        .count();
+    assert_eq!(access, 4);
+}
+
+/// AC-0284 (#239): nothing is asserted without proof. A lookalike `@Entity`
+/// (no JPA import) is not an entity; a computed entity or table name, a
+/// relation to a non-entity and a repository of an unknown type are explicit
+/// Gaps, never a guessed Confirmed fact (R-INT-4).
+#[test]
+fn unproven_jpa_facts_fail_closed_to_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/java/com/demo/Lookalike.java",
+        r#"package com.demo;
+
+import com.other.Entity;
+
+@Entity
+public class Lookalike {
+    private Integer id;
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/Dynamic.java",
+        r#"package com.demo;
+
+import jakarta.persistence.*;
+
+@Entity
+@Table(name = Names.TABLE)
+public class Dynamic {
+    @Id
+    private Integer id;
+
+    @ManyToOne
+    private Elsewhere elsewhere;
+
+    @OneToMany(targetEntity = Dynamic.class)
+    private java.util.List raw;
+}
+
+interface UnknownRepository extends org.springframework.data.repository.CrudRepository<Missing, Integer> {
+}
+
+interface GenericRepository<T> extends org.springframework.data.repository.CrudRepository<T, Integer> {
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let entities: Vec<&Node> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "DataEntity")
+        .collect();
+    assert_eq!(entities.len(), 1, "{entities:?}");
+    let dynamic = entities[0];
+    assert_eq!(dynamic.id, "data:local/demo@jpa:Dynamic");
+    assert_eq!(dynamic.props["table_source"], "unresolved");
+    assert!(dynamic.props.get("table").is_none());
+
+    let reasons: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "jpa")
+        .map(|node| node.props["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        reasons,
+        BTreeSet::from([
+            "JPA relation target is not a recovered entity",
+            "Spring Data repository entity is not a recovered entity",
+            "runtime-computed JPA table name",
+        ])
+    );
+    // The `targetEntity = Dynamic.class` relation resolves to a self edge;
+    // the unknown `Elsewhere` target is the Gap edge, not a Confirmed one.
+    let self_edge = edge(
+        &out.edges,
+        "data:local/demo@jpa:Dynamic",
+        "data:local/demo@jpa:Dynamic",
+        "REFERENCES",
+    );
+    assert_eq!(self_edge.props["field"], "raw");
+    assert!(out.edges.iter().any(|e| e.label == "REFERENCES"
+        && e.dst.starts_with("gap:jpa:")
+        && e.props["prov"]["confidence_tier"] == "Gap"));
+    // A generic base repository names no entity (a type variable).
+    assert!(
+        !out.edges
+            .iter()
+            .any(|e| { e.label == "REFERENCES" && e.src.ends_with("#GenericRepository") })
+    );
+}
+
+/// AC-0284 (#239): re-ingest with the incremental cache reuses parsed files
+/// and still joins entities, relations and repository access identically,
+/// re-targeting evidence to the new commit.
+#[test]
+fn jpa_facts_survive_incremental_reuse_and_retarget_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    petclinic(dir.path());
+    let mut cache = IncrementalCache::default();
+    let first_id = id();
+    let (first, _) = extract_dir_incremental(dir.path(), &first_id, &mut cache).unwrap();
+    let next = SourceId {
+        repo: "local/demo",
+        commit: "abc123",
+    };
+    let (second, stats) = extract_dir_incremental(dir.path(), &next, &mut cache).unwrap();
+    assert_eq!(stats.recomputed_files, 0);
+
+    let shape = |out: &Extraction| {
+        let mut facts: Vec<String> = out
+            .nodes
+            .iter()
+            .filter(|n| n.label == "DataEntity")
+            .map(|n| format!("N {} {}", n.id, n.props["fields"]))
+            .chain(
+                out.edges
+                    .iter()
+                    .filter(|e| matches!(e.label.as_str(), "REFERENCES" | "READS" | "WRITES"))
+                    .map(|e| {
+                        format!(
+                            "E {} {} {} {}",
+                            e.label, e.src, e.dst, e.props["cardinality"]
+                        )
+                    }),
+            )
+            .collect();
+        facts.sort();
+        facts
+    };
+    assert_eq!(shape(&first), shape(&second));
+    // 3 entities, 4 relations, 2 repository bindings, 4 repository accesses.
+    assert_eq!(shape(&second).len(), 13);
+    let access = second
+        .edges
+        .iter()
+        .find(|e| e.label == "WRITES")
+        .expect("repository write");
+    assert_eq!(access.props["prov"]["evidence"][0]["commit_sha"], "abc123");
+}
