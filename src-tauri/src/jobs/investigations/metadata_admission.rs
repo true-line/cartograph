@@ -4,6 +4,12 @@ use super::*;
 use llm::bounded::PreparedBoundedCompletion;
 use serde_json::Value;
 
+#[allow(dead_code)] // Internal worker continuation; public @10 remains closed.
+#[path = "metadata_continuation.rs"]
+mod metadata_continuation;
+#[allow(unused_imports)]
+pub(crate) use metadata_continuation::{MetadataContinuationRead, MetadataContinuationSnapshot};
+
 pub(crate) struct MetadataAdmission<'a> {
     pub response: &'a InvestigationResponseMeta,
     pub original_action: &'a Value,
@@ -60,6 +66,128 @@ impl JobStore {
     }
 }
 
+/// Shared current-call authentication; no writes, capacity permit or dispatch.
+pub(super) struct AuthenticatedResponse {
+    pub call: admission_contract::SavedCallBasis,
+    pub core: admission_contract::SavedCallCore,
+    pub admitted_usage: InvestigationUsage,
+    pub original: Vec<u8>,
+    pub next_action_id: String,
+}
+pub(super) fn authenticate_response(
+    tx: &rusqlite::Transaction<'_>,
+    task: &StoredTask,
+    response: &InvestigationResponseMeta,
+    original_action: &Value,
+    current: &InvestigationInput,
+    prepared: &PreparedBoundedCompletion,
+    active_milliseconds: u64,
+) -> Result<AuthenticatedResponse, InvestigationStoreError> {
+    let authenticated = authenticate_saved_response(
+        tx,
+        task,
+        response,
+        original_action,
+        current,
+        prepared,
+        active_milliseconds,
+    )?;
+    if authenticated.call.mode() != CompletionCallMode::Choice {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if active_milliseconds
+        >= task
+            .detail
+            .limits
+            .active_seconds
+            .checked_mul(1000)
+            .ok_or(InvestigationStoreError::Capacity)?
+    {
+        return Err(InvestigationStoreError::Capacity);
+    }
+    Ok(authenticated)
+}
+
+/// Exact invoked input/response authentication shared by acquisition and finish.
+/// Callers retain their action/mode and new-work deadline rules separately: a
+/// valid late finish does not start another acquisition or provider invocation.
+pub(super) fn authenticate_saved_response(
+    tx: &rusqlite::Transaction<'_>,
+    task: &StoredTask,
+    response: &InvestigationResponseMeta,
+    original_action: &Value,
+    current: &InvestigationInput,
+    prepared: &PreparedBoundedCompletion,
+    active_milliseconds: u64,
+) -> Result<AuthenticatedResponse, InvestigationStoreError> {
+    let policy = &INVESTIGATION_V2_POLICY;
+    let id = &task.detail.summary.investigation_id;
+    // A saved call cannot make malformed earlier finish/refusal history usable
+    // by a later acquisition. This replay uses the journal-independent core and
+    // does not recurse through response authentication.
+    completion::validate_saved(tx, task)?;
+    let call = task
+        .admission_state
+        .as_ref()
+        .and_then(|s| s.current_call.clone())
+        .ok_or(InvestigationStoreError::Invalid)?;
+    call.validate_saved(tx, task)?;
+    let core = admission_contract::load_saved_call_basis_core(tx, task, &call)?;
+    let (step, admitted_usage) = transitions::validate_response(tx, task, response)?;
+    current.validate_response_metadata(response.observed_model.as_deref())?;
+    let profile = prepared.profile();
+    let provider = &task.detail.provider;
+    if profile.provider_id != provider.provider_id
+        || profile.requested_model != provider.model
+        || profile.endpoint_id != provider.endpoint
+        || provider.protocol_version.as_deref() != Some(profile.protocol_version.as_str())
+        || (profile.locality == llm::Locality::Local)
+            != (provider.mode == InvestigationProviderMode::Local)
+        || provider.deployment.is_some()
+        || active_milliseconds < admitted_usage.active_milliseconds
+        || active_milliseconds < task.detail.usage.active_milliseconds
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let original = encode(original_action, MAX_ACTION_BYTES)?;
+    if core_prov::content_hash(&original) != response.action_hash
+        || current.ledger() != &core.ledger
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let current_action_id = format!("{id}:{}", call.step_id);
+    let next_ordinal = admitted_usage
+        .model_invocations
+        .checked_add(1)
+        .ok_or(InvestigationStoreError::Capacity)?;
+    let next_action_id = format!("{id}:step-{next_ordinal}");
+    if !prepared.matches_action(&current.action(current_action_id)?)
+        || prepared.limits().values().max_output_tokens != step.generated_tokens
+        || prepared.preview().egress.payload_hash != step.payload_hash
+        || encode(
+            &current
+                .action(prepared.preview().egress.action_id.clone())?
+                .payload,
+            MAX_INPUT_BYTES,
+        )?
+        .len()
+            != step.input_bytes
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let current_disclosure = current.seal_disclosure_with_policy(prepared, policy)?;
+    if current_disclosure != step.disclosure {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(AuthenticatedResponse {
+        call,
+        core,
+        admitted_usage,
+        original,
+        next_action_id,
+    })
+}
+
 fn publish(
     tx: &rusqlite::Transaction<'_>,
     mut task: StoredTask,
@@ -72,82 +200,43 @@ fn publish(
     let policy = &INVESTIGATION_V2_POLICY;
     let expected_revision = task.detail.summary.revision;
     let id = task.detail.summary.investigation_id.clone();
-    let call = task
-        .admission_state
-        .as_ref()
-        .and_then(|s| s.current_call.clone())
-        .ok_or(InvestigationStoreError::Invalid)?;
-    if call.mode() != CompletionCallMode::Choice {
-        return Err(InvestigationStoreError::Invalid);
-    }
-    call.validate_saved(tx, &task)?;
-    let core = admission_contract::load_saved_call_basis_core(tx, &task, &call)?;
-    let (step, admitted_usage) = transitions::validate_response(tx, &task, input.response)?;
-    input
-        .current
-        .validate_response_metadata(input.response.observed_model.as_deref())?;
-    let profile = input.current_prepared.profile();
-    let provider = &task.detail.provider;
-    if profile.provider_id != provider.provider_id
-        || profile.requested_model != provider.model
-        || profile.endpoint_id != provider.endpoint
-        || provider.protocol_version.as_deref() != Some(profile.protocol_version.as_str())
-        || (profile.locality == llm::Locality::Local)
-            != (provider.mode == InvestigationProviderMode::Local)
-        || provider.deployment.is_some()
-        || input.active_milliseconds < admitted_usage.active_milliseconds
-        || input.active_milliseconds < task.detail.usage.active_milliseconds
-    {
-        return Err(InvestigationStoreError::Invalid);
-    }
-    if input.active_milliseconds
-        >= task
-            .detail
-            .limits
-            .active_seconds
-            .checked_mul(1000)
-            .ok_or(InvestigationStoreError::Capacity)?
-    {
-        return Err(InvestigationStoreError::Capacity);
-    }
-    let original = encode(input.original_action, MAX_ACTION_BYTES)?;
-    if core_prov::content_hash(&original) != input.response.action_hash
-        || input.current.ledger() != &core.ledger
-    {
-        return Err(InvestigationStoreError::Invalid);
-    }
-    let current_action_id = format!("{id}:{}", call.step_id);
-    let next_ordinal = admitted_usage
-        .model_invocations
-        .checked_add(1)
-        .ok_or(InvestigationStoreError::Capacity)?;
-    let next_action_id = format!("{id}:step-{next_ordinal}");
+    let authenticated = authenticate_response(
+        tx,
+        &task,
+        input.response,
+        input.original_action,
+        input.current,
+        input.current_prepared,
+        input.active_milliseconds,
+    )?;
+    let metadata_continuation::DerivedContinuation {
+        snapshot,
+        tool,
+        read,
+        records,
+    } = metadata_continuation::derive(
+        tx,
+        &task,
+        input.response,
+        &authenticated,
+        input.candidate.ledger(),
+        raw_response,
+        input.kind,
+        input.active_milliseconds,
+    )?;
+    let AuthenticatedResponse {
+        call,
+        core,
+        admitted_usage,
+        next_action_id,
+        ..
+    } = authenticated;
     if !input
-        .current_prepared
-        .matches_action(&input.current.action(current_action_id)?)
-        || !input
-            .candidate_prepared
-            .matches_action(&input.candidate.action(next_action_id.clone())?)
+        .candidate_prepared
+        .matches_action(&input.candidate.action(next_action_id.clone())?)
         || input.current_prepared.profile() != input.candidate_prepared.profile()
         || input.current_prepared.limits() != input.candidate_prepared.limits()
-        || input.current_prepared.limits().values().max_output_tokens != step.generated_tokens
-        || input.current_prepared.preview().egress.payload_hash != step.payload_hash
-        || encode(
-            &input
-                .current
-                .action(input.current_prepared.preview().egress.action_id.clone())?
-                .payload,
-            MAX_INPUT_BYTES,
-        )?
-        .len()
-            != step.input_bytes
     {
-        return Err(InvestigationStoreError::Invalid);
-    }
-    let current_disclosure = input
-        .current
-        .seal_disclosure_with_policy(input.current_prepared, policy)?;
-    if current_disclosure != step.disclosure {
         return Err(InvestigationStoreError::Invalid);
     }
     let disclosure = input
@@ -166,76 +255,8 @@ fn publish(
         policy,
     )?;
     let ledger = input.candidate.ledger();
-    let context_id = &core
-        .ledger
-        .coverage
-        .as_ref()
-        .ok_or(InvestigationStoreError::Invalid)?
-        .context_id;
-    let action = ProgressiveInvestigationAction::decode_resolved(
-        std::str::from_utf8(&original).map_err(|_| InvestigationStoreError::Invalid)?,
-        context_id,
-        &call.request_hash,
-        &core.ledger,
-        policy,
-    )?;
-    let (tool, read) = match (input.kind, action) {
-        (
-            ContextPreviewKind::Query,
-            CompletionInvestigationAction::Read(QualifiedInvestigationAction::QueryContext {
-                query,
-                ..
-            }),
-        ) if ledger.queries.last().is_some_and(|m| m.query == query) => {
-            (InvestigationTool::QueryContext, None)
-        }
-        (
-            ContextPreviewKind::Inventory,
-            CompletionInvestigationAction::Read(
-                QualifiedInvestigationAction::ReadCoverageInventory(request),
-            ),
-        ) if ledger
-            .coverage_reads
-            .last()
-            .is_some_and(|m| m.request == request) =>
-        {
-            (
-                InvestigationTool::ReadCoverageInventory,
-                Some(ReadIntent::Inventory {
-                    context_id: request.context_id,
-                    repo: request.repo,
-                    inventory_hash: request.inventory_hash,
-                    max_bytes: request.max_bytes,
-                }),
-            )
-        }
-        _ => return Err(InvestigationStoreError::Invalid),
-    };
-    let records = match &read {
-        Some(read) => completion::derive_attempt_records(
-            &task,
-            &call.step_id,
-            input.response,
-            read,
-            &AttemptOutcome::InventoryAcquired {
-                read_index: core.ledger.coverage_reads.len(),
-            },
-            Some(ledger),
-            core.metadata.completed_attempt_ids.len(),
-        )?,
-        None => vec![],
-    };
-    let mut metadata = core.metadata.clone();
-    metadata
-        .completed_attempt_ids
-        .extend(records.iter().map(|r| r.attempt_id.clone()));
-    let mut usage = admitted_usage;
-    usage.active_milliseconds = input.active_milliseconds;
-    usage.tool_actions = usage
-        .tool_actions
-        .checked_add(1)
-        .ok_or(InvestigationStoreError::Capacity)?;
-    usage.selected_facts = ledger.selected_facts.len();
+    let metadata = snapshot.metadata();
+    let usage = snapshot.usage().clone();
     let stamp = disclosure
         .admission
         .as_ref()
@@ -248,10 +269,12 @@ fn publish(
     {
         return Err(InvestigationStoreError::Invalid);
     }
-    stamp.validate_with_metadata(&metadata, policy)?;
+    if stamp.mode != snapshot.mode() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    stamp.validate_with_metadata(metadata, policy)?;
     task.detail.usage = usage.clone();
     task.action_tool = Some(tool);
-    transitions::validate_input_candidate(tx, &task, ledger, &usage)?;
     // Revalidate retained registry identities and already-held evidence guards
     // through this same state.db snapshot, before the first durable effect.
     // The host callback must not acquire source/registry/jobs locks anew.

@@ -310,3 +310,216 @@ fn next_prompt_initial_rejects_archive_action_and_clock_rebinding_without_public
         assert_eq!(snapshot(&f), before);
     }
 }
+
+#[test]
+fn next_prompt_initial_factory_nonce_recovery_and_public_gate() {
+    let f = fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = JobStore::open(directory.path().join("state.db")).unwrap();
+    assert!(matches!(
+        store.start_completion_investigation(&f.request, Some(&f.task.detail.provider)),
+        Err(InvestigationStoreError::Invalid)
+    ));
+    let count: i64 = store
+        .conn
+        .query_row("SELECT count(*) FROM investigation_tasks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    let first = store
+        .start_next_prompt_investigation(&f.request, Some(&f.task.detail.provider))
+        .unwrap();
+    assert!(first.created);
+    assert_eq!(first.detail.summary.schema_version, 7);
+    let replay = store
+        .start_next_prompt_investigation(&f.request, None)
+        .unwrap();
+    assert!(!replay.created);
+    assert_eq!(first.detail, replay.detail);
+    let mut changed = f.request.clone();
+    changed.question.push_str(" changed");
+    assert!(matches!(
+        store.start_next_prompt_investigation(&changed, None),
+        Err(InvestigationStoreError::Conflict)
+    ));
+    assert!(matches!(
+        store.investigation(&first.detail.summary.investigation_id),
+        Err(InvestigationStoreError::Invalid)
+    ));
+    let mut reopened = JobStore::open(directory.path().join("state.db")).unwrap();
+    assert!(
+        !reopened
+            .start_next_prompt_investigation(&f.request, None)
+            .unwrap()
+            .created
+    );
+}
+
+#[test]
+fn next_prompt_initial_terminal_writer_preserves_charges_and_rejects_stale_retries() {
+    // AC-0287: stopping uses the actual new-family owner and invocation boundary.
+    for invoked in [false, true] {
+        let mut f = fixture();
+        let (input, prepared, authorized, active) = build(&f);
+        let invocation = NextPromptInvocation {
+            input: &input,
+            prepared: &prepared,
+            active_milliseconds: active,
+        };
+        let mut detail = f
+            .store
+            .admit_next_prompt_initial_context(
+                &f.execution,
+                f.task.detail.summary.revision,
+                &invocation,
+                &f.archive,
+                |_| Ok(()),
+            )
+            .unwrap();
+        if invoked {
+            detail = f
+                .store
+                .begin_next_prompt_invocation(
+                    &f.execution,
+                    detail.summary.revision,
+                    &invocation,
+                    &authorized,
+                    |_| Ok(()),
+                )
+                .unwrap();
+        }
+        let before = snapshot(&f);
+        assert!(matches!(
+            f.store.stop_next_prompt_investigation(
+                &f.execution,
+                detail.summary.revision + 1,
+                InvestigationStopReason::Operational,
+                active + 1,
+            ),
+            Err(InvestigationStoreError::Stale)
+        ));
+        assert!(matches!(
+            f.store.stop_next_prompt_investigation(
+                &f.execution,
+                detail.summary.revision,
+                InvestigationStopReason::Operational,
+                active - 1,
+            ),
+            Err(InvestigationStoreError::Invalid)
+        ));
+        assert_eq!(snapshot(&f), before);
+        let reason = if invoked {
+            InvestigationStopReason::OutcomeUnknown
+        } else {
+            InvestigationStopReason::Operational
+        };
+        let stopped = f
+            .store
+            .stop_next_prompt_investigation(
+                &f.execution,
+                detail.summary.revision,
+                reason,
+                active + 1,
+            )
+            .unwrap();
+        assert_eq!(
+            stopped.usage.model_invocations,
+            detail.usage.model_invocations
+        );
+        assert_eq!(
+            stopped.usage.generated_token_reservations,
+            detail.usage.generated_token_reservations
+        );
+        assert_eq!(stopped.usage.tool_actions, 0);
+        assert_eq!(stopped.usage.active_milliseconds, active + 1);
+        assert_eq!(
+            stopped.summary.status,
+            if invoked {
+                InvestigationStatus::OutcomeUnknown
+            } else {
+                InvestigationStatus::Failed
+            }
+        );
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        let saved = load_next_prompt_task_base(&tx, &stopped.summary.investigation_id).unwrap();
+        assert_eq!(saved.phase, Phase::Terminal);
+        drop(tx);
+        assert!(matches!(
+            f.store.stop_next_prompt_investigation(
+                &f.execution,
+                stopped.summary.revision,
+                reason,
+                active + 1,
+            ),
+            Err(InvestigationStoreError::Stale)
+        ));
+    }
+}
+
+#[test]
+fn next_prompt_initial_owned_detail_reads_internal_family_without_opening_public_history() {
+    // AC-0287: runtime reads authenticate the held execution, not only a task id.
+    let mut f = fixture();
+    let id = f.task.detail.summary.investigation_id.clone();
+    assert_eq!(
+        f.store
+            .investigation_owned_detail(&f.execution, &id)
+            .unwrap(),
+        f.task.detail
+    );
+    assert!(f.store.investigation(&id).is_err());
+    let foreign = fixture();
+    assert!(matches!(
+        f.store.investigation_owned_detail(&foreign.execution, &id),
+        Err(InvestigationStoreError::Ownership)
+    ));
+    let cancelled = f.store.cancel_next_prompt_investigation(&id).unwrap();
+    assert!(cancelled.summary.cancel_requested);
+    assert_eq!(
+        f.store
+            .investigation_owned_detail(&f.execution, &id)
+            .unwrap(),
+        cancelled
+    );
+}
+
+#[test]
+fn next_prompt_initial_state_binds_original_request_owner_and_revision() {
+    let mut f = fixture();
+    let revision = f.task.detail.summary.revision;
+    let (detail, metadata) = f
+        .store
+        .investigation_next_prompt_initial_state(&f.execution, revision, &f.request)
+        .unwrap();
+    assert_eq!(detail, f.task.detail);
+    assert_eq!(metadata, f.metadata);
+    let mut changed = f.request.clone();
+    changed.question.push_str(" Different intent.");
+    assert!(matches!(
+        f.store
+            .investigation_next_prompt_initial_state(&f.execution, revision, &changed,),
+        Err(InvestigationStoreError::Conflict)
+    ));
+    assert!(matches!(
+        f.store
+            .investigation_next_prompt_initial_state(&f.execution, revision + 1, &f.request,),
+        Err(InvestigationStoreError::Stale)
+    ));
+    let foreign = fixture();
+    assert!(matches!(
+        f.store
+            .investigation_next_prompt_initial_state(&foreign.execution, revision, &f.request,),
+        Err(InvestigationStoreError::Ownership)
+    ));
+    let cancelled = f
+        .store
+        .cancel_next_prompt_investigation(&detail.summary.investigation_id)
+        .unwrap();
+    assert!(matches!(
+        f.store.investigation_next_prompt_initial_state(
+            &f.execution,
+            cancelled.summary.revision,
+            &f.request,
+        ),
+        Err(InvestigationStoreError::Cancelled)
+    ));
+}

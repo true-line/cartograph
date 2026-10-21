@@ -70,10 +70,65 @@ pub(in crate::jobs::investigations) fn persist(
             return Err(InvestigationStoreError::Capacity);
         }
     }
+    #[cfg(test)]
+    inject_failure(SettlementFailure::AfterTaskSave)?;
     Ok(p.task)
 }
 
 impl JobStore {
+    /// Dispose a known host outcome while retaining the original acknowledged
+    /// reservation identity. Cancellation/charge revision advances are allowed;
+    /// an already published continuation is never overwritten after lost ACK.
+    pub(crate) fn discard_next_prompt_source(
+        &mut self,
+        execution: &JobExecution,
+        reservation: &CommittedSourceReservation,
+        outcome: KnownSourceDisposition,
+        active_milliseconds: u64,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        execution.verify()?;
+        if execution.inner.namespace != self.namespace {
+            return Err(InvestigationStoreError::Ownership);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate(&tx, &self.namespace)?;
+        let id = transitions::task_id_for_job(&tx, execution.id())?
+            .ok_or(InvestigationStoreError::Missing)?;
+        let before = load_next_prompt_task(&tx, &id)?;
+        transitions::check_identity(&before, execution)?;
+        transitions::check_job(&tx, execution, true)?;
+        if before.phase != Phase::Reservation || before.pending_source_read.is_none() {
+            return Err(InvestigationStoreError::Stale);
+        }
+        let saved = source_validation::validate_saved_pending(&tx, &before)?;
+        if !reservation.matches_saved(&saved.reservation)? {
+            return Err(InvestigationStoreError::Conflict);
+        }
+        // A lost charge acknowledgement still leaves its immutable charge here.
+        // A known read cannot have occurred without that durable access fence.
+        if !matches!(outcome, KnownSourceDisposition::ReleasedBeforeRead) && saved.charge.is_none()
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let kind = match outcome {
+            KnownSourceDisposition::ReleasedBeforeRead => DispositionKind::ReleasedBeforeRead,
+            KnownSourceDisposition::KnownReadDiscarded => DispositionKind::KnownReadDiscarded,
+            KnownSourceDisposition::BoundInvariantDefect => DispositionKind::BoundInvariantDefect,
+        };
+        let plan = project(
+            &tx,
+            &before,
+            SourceSettlement::Terminal(kind),
+            active_milliseconds,
+        )?;
+        let task = persist(&tx, &before, plan)?;
+        tx.commit()?;
+        #[cfg(test)]
+        inject_failure(SettlementFailure::AfterCommitAck)?;
+        Ok(task.detail)
+    }
     /// Private live-owner settlement. The adapter supplies truthful access-stage
     /// classification and retains its source guards through acknowledgement.
     /// Unknown outcomes cannot be converted into live-owner retries here.
@@ -122,6 +177,8 @@ impl JobStore {
         }
         let task = persist(&tx, &before, plan)?;
         tx.commit()?;
+        #[cfg(test)]
+        inject_failure(SettlementFailure::AfterCommitAck)?;
         Ok(task.detail)
     }
 
@@ -161,6 +218,32 @@ impl JobStore {
         )?;
         let next = persist(&tx, &task, plan)?;
         tx.commit()?;
+        #[cfg(test)]
+        inject_failure(SettlementFailure::AfterCommitAck)?;
         Ok(next.detail)
     }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SettlementFailure {
+    AfterTaskSave,
+    AfterCommitAck,
+}
+#[cfg(test)]
+thread_local! { static SETTLEMENT_FAILURE:std::cell::Cell<Option<SettlementFailure>>=const {std::cell::Cell::new(None)}; }
+#[cfg(test)]
+pub(super) fn fail_once(at: SettlementFailure) {
+    SETTLEMENT_FAILURE.with(|slot| slot.set(Some(at)));
+}
+#[cfg(test)]
+fn inject_failure(at: SettlementFailure) -> Result<(), InvestigationStoreError> {
+    SETTLEMENT_FAILURE.with(|slot| {
+        if slot.get() == Some(at) {
+            slot.set(None);
+            Err(InvestigationStoreError::Storage)
+        } else {
+            Ok(())
+        }
+    })
 }

@@ -39,6 +39,17 @@ fn invocation_fixture(
         source.target_id = source.content_id().unwrap();
         source.validate().unwrap();
         if source_obligation {
+            let provider = llm::OllamaProvider::new(
+                "http://127.0.0.1:11434",
+                "test-model",
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+            let profile = llm::LlmProvider::bounded_profile(&provider).unwrap();
+            task.detail.provider.provider_id = profile.provider_id;
+            task.detail.provider.endpoint = profile.endpoint_id;
+            task.detail.provider.model = profile.requested_model;
+            task.detail.provider.protocol_version = Some(profile.protocol_version);
             request.expected_graph_revision = Some(source.graph_snapshot_id.clone());
             task.expected_graph_revision = request.expected_graph_revision.clone();
             let mut obligation = Obligation::Source {
@@ -334,8 +345,36 @@ impl SourceValidationTestFixture {
 pub(crate) fn captured_source_fixture(
     initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData,
 ) -> SourceValidationTestFixture {
+    let (f, source, _) = captured_source_invocation(initialize);
+    let (inner, reservation) = reserve_fixture(f, source);
+    let hash = reservation.fingerprint().unwrap();
+    SourceValidationTestFixture {
+        inner,
+        reservation,
+        hash,
+    }
+}
+
+pub(in crate::jobs::investigations) fn captured_source_invocation(
+    initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData,
+) -> (
+    completion::InternalFixture,
+    InvestigationInspectionTarget,
+    String,
+) {
     let mut target = None;
     let mut f = completion::internal_fixture_with_initial_ledger(|store, task, ledger, request| {
+        let provider = llm::OllamaProvider::new(
+            "http://127.0.0.1:11434",
+            "test-model",
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let profile = llm::LlmProvider::bounded_profile(&provider).unwrap();
+        task.detail.provider.provider_id = profile.provider_id;
+        task.detail.provider.endpoint = profile.endpoint_id;
+        task.detail.provider.model = profile.requested_model;
+        task.detail.provider.protocol_version = Some(profile.protocol_version);
         let path = store.namespace.store_path.parent().unwrap();
         let data = initialize(path);
         let acquired = data.ledger;
@@ -401,12 +440,7 @@ pub(crate) fn captured_source_fixture(
     });
     let (source, acquired, mut pages) = target.unwrap();
     assert_eq!(pages.len(), 1);
-    publish_query_and_start_source_call(&mut f, acquired, pages.remove(0));
-    let (inner, reservation) = reserve_fixture(f, source);
-    let hash = reservation.fingerprint().unwrap();
-    SourceValidationTestFixture {
-        inner,
-        reservation,
-        hash,
-    }
+    let raw = pages.remove(0);
+    publish_query_and_start_source_call(&mut f, acquired, raw.clone());
+    (f, source, raw)
 }

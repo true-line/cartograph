@@ -112,6 +112,54 @@ pub(super) fn load(
     connection: &Connection,
     task_id: &str,
 ) -> Result<Option<InvestigationCoverageArchive>, InvestigationStoreError> {
+    load_with_cancellation_reserve(connection, task_id, false)
+}
+
+/// Next-family cancellation can spend terminal reserve while its pending source
+/// remains live. Authenticate that persisted cancellation before allowing the
+/// archive reader to use the full logical ceiling; supplied state is not enough.
+pub(super) fn load_for_task(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<Option<InvestigationCoverageArchive>, InvestigationStoreError> {
+    let id = &task.detail.summary.investigation_id;
+    if !task
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        return load(connection, id);
+    }
+    require_transaction(connection, id)?;
+    admission_contract::validate_pairing(task)?;
+    type SavedTaskRow = (Option<Vec<u8>>, Option<String>, i64, i64);
+    let row: Option<SavedTaskRow> = connection.query_row(
+        "SELECT CASE WHEN typeof(record)='blob' AND length(record)<=262144 THEN record END, CASE WHEN typeof(record_hash)='text' AND length(CAST(record_hash AS BLOB))=64 THEN record_hash END,revision,live FROM investigation_tasks WHERE id=?1",
+        [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    ).optional()?;
+    let (Some(body), Some(hash), revision, live) = row.ok_or(InvestigationStoreError::Missing)?
+    else {
+        return Err(InvestigationStoreError::Invalid);
+    };
+    let saved: StoredTask = decode(&body, &hash)?;
+    validate_next_prompt_task(&saved)?;
+    if saved.detail.summary.investigation_id != *id
+        || signed(saved.detail.summary.revision)? != revision
+        || live != i64::from(saved.phase != Phase::Terminal)
+        || saved.intent_hash != task.intent_hash
+        || saved.detail.context_owner != task.detail.context_owner
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    load_with_cancellation_reserve(connection, id, saved.detail.summary.cancel_requested)
+}
+
+fn load_with_cancellation_reserve(
+    connection: &Connection,
+    task_id: &str,
+    cancelled: bool,
+) -> Result<Option<InvestigationCoverageArchive>, InvestigationStoreError> {
     require_transaction(connection, task_id)?;
     validate_archive_schema(connection)?;
     let terminal: Option<bool> = connection
@@ -122,7 +170,7 @@ pub(super) fn load(
         )
         .optional()?;
     let terminal = terminal.ok_or(InvestigationStoreError::Missing)?;
-    check_task_capacity(connection, task_id, terminal)?;
+    check_task_capacity(connection, task_id, terminal || cancelled)?;
     // CASE runs before rusqlite copies any oversized or incorrectly typed body.
     let row = connection.query_row(
         "SELECT CASE WHEN typeof(body)='blob' AND length(body) BETWEEN 1 AND 16777216 THEN body END, CASE WHEN typeof(body_hash)='text' AND length(CAST(body_hash AS BLOB))=64 THEN body_hash END FROM investigation_coverage_archives WHERE task_id=?1",

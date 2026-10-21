@@ -17,11 +17,17 @@ mod admission_journal;
 mod admission_transition;
 #[path = "investigations/completion.rs"]
 mod completion;
+pub(crate) use completion::NextPromptFinish;
 #[allow(dead_code)] // Internal atomic metadata writer; public @10 remains closed.
 #[path = "investigations/metadata_admission.rs"]
 mod metadata_admission;
 #[allow(unused_imports)] // Used by the separately integrated internal host adapter.
-pub(crate) use metadata_admission::MetadataAdmission;
+pub(crate) use metadata_admission::{
+    MetadataAdmission, MetadataContinuationRead, MetadataContinuationSnapshot,
+};
+#[allow(dead_code)] // Internal explicit user decisions; public consent remains gated.
+#[path = "investigations/next_prompt_consent.rs"]
+mod next_prompt_consent;
 #[allow(dead_code)] // Internal first-context publication; task creation remains closed.
 #[path = "investigations/next_prompt_initial.rs"]
 mod next_prompt_initial;
@@ -44,9 +50,17 @@ mod reads;
 #[allow(dead_code)]
 #[path = "investigations/read_reservations.rs"]
 mod read_reservations;
+#[allow(dead_code)] // Internal reservation admission; public @10 routes remain closed.
+#[path = "investigations/source_admission.rs"]
+mod source_admission;
 #[allow(dead_code)] // Internal settlement projection; public @10 remains closed.
 #[path = "investigations/source_settlement.rs"]
 mod source_settlement;
+#[cfg(test)]
+#[allow(unused_imports)] // Consumed by the real host lost-ack regression.
+pub(crate) use source_admission::lose_next_commit_ack as lose_next_source_admission_ack;
+#[allow(unused_imports)]
+pub(crate) use source_admission::{CommittedSourceReservation, SourceAdmission};
 #[allow(dead_code)] // Internal issuer; reservation admission/public activation remain closed.
 #[path = "investigations/source_validation.rs"]
 mod source_validation;
@@ -341,16 +355,26 @@ impl JobStore {
         provider: Option<&InvestigationProvider>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         let normalized = request.normalized()?;
-        self.start_investigation_internal(&normalized, provider, None)
+        self.start_investigation_internal(&normalized, provider, None, false)
     }
     fn start_investigation_internal(
         &mut self,
         request: &StartInvestigationRequest,
         provider: Option<&InvestigationProvider>,
         completion_intent: Option<completion::CompletionIntent>,
+        next_prompt: bool,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         let policy = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
+        if request.specialist_id.uses_next_prompt_admission() != next_prompt
+            || (next_prompt
+                && (request.schema_version != 7
+                    || completion_intent
+                        .as_ref()
+                        .is_none_or(|intent| intent.schema_version != 4)))
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
         let intent_hash = match &completion_intent {
             Some(intent) => intent.request_hash.clone(),
             None => request.intent_hash()?,
@@ -364,7 +388,11 @@ impl JobStore {
         ).optional()?;
         if let Some(id) = prior {
             let id = id.ok_or(InvestigationStoreError::Invalid)?;
-            let record = load_task(&tx, &id)?;
+            let record = if next_prompt {
+                load_next_prompt_task(&tx, &id)?
+            } else {
+                load_task(&tx, &id)?
+            };
             if record.intent_hash != intent_hash {
                 return Err(InvestigationStoreError::Conflict);
             }
@@ -397,9 +425,13 @@ impl JobStore {
             None => new_id(&tx, "conversation")?,
         };
         if let Some(parent) = &request.parent_id {
-            let parent = load_task(&tx, parent)?;
-            if parent.detail.summary.conversation_id != conversation_id {
-                return Err(InvestigationStoreError::Invalid);
+            if next_prompt {
+                next_parent_history::load(&tx, parent, &conversation_id)?;
+            } else {
+                let parent = load_task(&tx, parent)?;
+                if parent.detail.summary.conversation_id != conversation_id {
+                    return Err(InvestigationStoreError::Invalid);
+                }
             }
         }
         let id = new_id(&tx, "investigation")?;
@@ -420,8 +452,17 @@ impl JobStore {
             [job_id],
         )?)?;
         let record = StoredTask {
-            schema_version: if completion_intent.is_some() { 2 } else { 1 },
-            admission_state: None,
+            schema_version: if next_prompt {
+                3
+            } else if completion_intent.is_some() {
+                2
+            } else {
+                1
+            },
+            admission_state: next_prompt.then_some(admission_contract::StoredAdmissionState {
+                schema_version: 1,
+                current_call: None,
+            }),
             completion_intent: completion_intent.clone(),
             nonce: request.request_nonce.clone(),
             intent_hash,
@@ -495,7 +536,11 @@ impl JobStore {
             approved: false,
             action_tool: None,
         };
-        insert_task(&tx, &record)?;
+        if next_prompt {
+            insert_next_prompt_task(&tx, &record)?;
+        } else {
+            insert_task(&tx, &record)?;
+        }
         if let Some(targets) = &request.inspection_requirements {
             for target in targets {
                 tx.execute(
@@ -518,7 +563,11 @@ impl JobStore {
             None,
             "Investigation created.",
         )?;
-        save_task(&tx, &record, 0, true)?;
+        if next_prompt {
+            save_next_prompt_task(&tx, &record, 0, true)?;
+        } else {
+            save_task(&tx, &record, 0, true)?;
+        }
         check_task_capacity(&tx, &id, false)?;
         tx.commit()?;
         Ok(InvestigationStart {
@@ -534,6 +583,25 @@ impl JobStore {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let task = load_task(&tx, id)?;
+        tx.commit()?;
+        Ok(task.detail)
+    }
+
+    /// Worker-only family-aware read. A live owner is required; this does not
+    /// change the closed public history/catalog routes for the next family.
+    pub(crate) fn investigation_owned_detail(
+        &self,
+        execution: &JobExecution,
+        id: &str,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        execution.verify()?;
+        if execution.inner.namespace != self.namespace {
+            return Err(InvestigationStoreError::Ownership);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let task = load_execution_task(&tx, id)?;
+        transitions::check_identity(&task, execution)?;
         tx.commit()?;
         Ok(task.detail)
     }
@@ -560,6 +628,30 @@ impl JobStore {
         let result = load_result(&tx, &task)?;
         tx.commit()?;
         Ok(result)
+    }
+
+    /// Owned counterpart for the worker, including next-family consent.
+    pub(crate) fn investigation_owned_pending_step(
+        &self,
+        execution: &JobExecution,
+        id: &str,
+    ) -> Result<Option<(u64, PendingInvestigationStep, bool)>, InvestigationStoreError> {
+        execution.verify()?;
+        if execution.inner.namespace != self.namespace {
+            return Err(InvestigationStoreError::Ownership);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let task = load_execution_task(&tx, id)?;
+        transitions::check_identity(&task, execution)?;
+        let pending = if task.phase == Phase::Consent && !task.detail.summary.cancel_requested {
+            task.pending
+                .map(|step| (task.detail.summary.revision, step, task.approved))
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(pending)
     }
 
     pub(crate) fn investigation_pending_step(
@@ -613,3 +705,23 @@ fn one(rows: usize) -> Result<(), InvestigationStoreError> {
         Err(InvestigationStoreError::Storage)
     }
 }
+
+#[cfg(test)]
+#[path = "investigations/captured_source_invocation_fixture.rs"]
+mod captured_source_invocation_fixture;
+#[cfg(test)]
+pub(crate) use captured_source_invocation_fixture::CapturedSourceInvocationFixture;
+
+#[allow(unused_imports)] // Internal source adapter integration; public @10 remains closed.
+pub(crate) use source_settlement::{
+    SourceContinuationOutcome, SourceContinuationSnapshot, SourceContinuationSnapshotInput,
+};
+
+#[allow(unused_imports)]
+pub(crate) use source_settlement::{KnownSourceDisposition, SourceContinuation};
+
+#[cfg(test)]
+pub(crate) use source_settlement::fail_next_publication as fail_next_source_publication;
+
+#[path = "investigations/next_parent_history.rs"]
+mod next_parent_history;

@@ -167,3 +167,92 @@ Combined local checkpoint: all 197 native ownership tests pass, including the
 21 reservation and 10 validation tests, and strict all-target Clippy passes for
 both the app and native harness. Formatting passes. These results do not prove
 Windows runtime behavior, real-provider acceptance, or public runtime readiness.
+
+## Runtime integration in progress
+
+The internal factory now creates task3/intent4 directly and supports exact-nonce
+recovery without opening the public start route. Execution attachment validates
+the saved family. A coherent worker snapshot checks the original request hash
+and returns the saved ledger, historical attempt ledgers, metadata, progress,
+capacity feedback and exact Ready/Consent mode from one database transaction.
+
+Source admission authenticates the original response/action, current sealed
+call, exact target and unread-source proof before reserving validation and
+settlement storage. The host adapter retains the actual source guards and
+revalidates registrations inside that writer transaction. Its acknowledged
+reservation is not a read permit: validation must still commit before the access
+fence allows captured-text access.
+
+Cancellation has a separate terminal reserve. A regression at the ordinary task
+capacity exposed an archive reader that incorrectly rejected the cancelled live
+task after cancellation used that reserve. The reader now authenticates the
+persisted cancellation before allowing the terminal ceiling; an in-memory
+cancel flag cannot widen it. Charged and uncharged pending reads both exercise
+actual cancellation followed by settlement. Generic terminal stopping rejects
+pending source reads so their charge/disposition accounting cannot be bypassed.
+
+The settlement regression suite covers rollback after the final task write,
+lost commit acknowledgement without replay, exact and one-byte-short stage
+allocations, owner loss with real OS lock acquisition, and post-read deadline
+failure recorded as discarded work. Local runs passed all 11 settlement tests,
+five worker snapshot tests, and four host metadata tests. A combined native run
+passed 218 tests before the subsequent consent/finish integration edits; that
+result does not validate those later edits.
+
+The internal worker now uses the genuine initial-context and invocation writers,
+exact-step consent, and authenticated finish/refusal handling. A local app worker
+run passed 93 tests with eight explicitly manual/provider procedures ignored.
+That run precedes the subsequent query/inventory worker integration. Consent
+boundary tests cover decline against the separate terminal reserve. Mocked worker
+calls exercise both specialist roles and advancing elapsed time across refusals.
+
+Metadata continuation snapshots and publication share the same prospective
+usage, ordered attempt metadata, and turn-basis derivation. Three native tests
+cover query replay, inventory attempts, read-only snapshot behavior and rejection
+of mixed or stale inputs; four earlier metadata tests remain passing. Source
+publication has four app tests using real captured text and actual reservation,
+charge and sealing: successful acquisition installs only after acknowledgement,
+unavailability preserves the ledger, and rollback or lost acknowledgement never
+installs a speculative in-memory context.
+
+Known-source failure cleanup is being connected to the same terminal settlement
+kernel. It authenticates the original acknowledged reservation against the exact
+pending slot while allowing charge/cancellation revision advances. The host
+retains the attempted task/step/reservation identity even when a charge commits
+without an acknowledgement. Cleanup must preserve that durable charge and must
+reject an already-published continuation instead of overwriting it.
+
+The genuine call-budget regression reaches FinishOnly through 62 real saved
+invocation/refusal transitions and then rejects a tool proposal on the 63rd call.
+It preserves the charged invocation and measured response usage while adding no
+tool, evidence, citation, attempt or capacity-feedback effect, and validates the
+terminal record after reopening. This local test passed in 723.69 seconds;
+repeated historical validation remains a performance concern, not a demonstrated
+optimization. No synthetic history or provider calls were used.
+
+Five host cleanup tests pass, including cancellation on either side of the
+validation boundary, lost validation acknowledgement, foreign reservation
+rejection, and rejecting cleanup after an acquisition already committed despite
+its lost acknowledgement. The worker now routes selected captured-source reads
+through the same real adapters. Explicitly pinned obligation descriptors remain
+exact; other selected facts use authenticated frozen receipt metadata rather
+than requiring a new live graph snapshot. Worker-level source validation and
+recovery tests are still in progress.
+
+The complete internal worker source/metadata slice passed seven app tests;
+source cleanup passed six, source continuation snapshots four, and agents
+admission boundaries thirty. Five recovery tests use actual OS lock loss and
+genuine writers: Ready/Consent interrupt without new calls, Invocation retains
+unknown usage, and pending source outcomes preserve charged or reserved work.
+Three parent-history native tests and two actual worker tests preserve the
+complete saved parent representation (including live/failed optional results),
+reject malformed family/context identity, and reject oversized history before
+creating a child instead of truncating it.
+
+Remaining delivery work includes reducing repeated same-transaction history
+validation cost, public family-aware history/activation, and
+whole-repository/current-head CI gates. The long full-budget test remains enabled
+while the measured optimization is developed; no faster partial run substitutes
+for that acceptance evidence.
+Public @10 remains closed. These component checks do not establish native
+Windows behavior or #598 real-provider acceptance.

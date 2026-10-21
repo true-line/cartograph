@@ -193,7 +193,7 @@ impl SavedCallBasis {
         if saved != *ledger {
             return Err(InvestigationStoreError::Invalid);
         }
-        let archive = coverage::load(connection, id)?;
+        let archive = coverage::load_for_task(connection, task)?;
         if ledger.coverage.as_ref() != archive.as_ref().map(|archive| archive.proof()) {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -382,7 +382,7 @@ pub(super) fn load_saved_call_basis_core(
         &signed(basis.input_revision)?,
     )?
     .ok_or(InvestigationStoreError::Missing)?;
-    let archive = coverage::load(connection, id)?;
+    let archive = coverage::load_for_task(connection, task)?;
     if ledger.coverage.as_ref() != archive.as_ref().map(|archive| archive.proof()) {
         return Err(InvestigationStoreError::Invalid);
     }

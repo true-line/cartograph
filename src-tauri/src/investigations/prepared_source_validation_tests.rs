@@ -89,6 +89,14 @@ fn adapter(cancel_after_commit: bool, lose_ack: bool) {
         };
         assert_eq!(read_count(), 0);
         assert_eq!(failure.stage(), SourceAccessStage::BeforeAccess);
+        assert_eq!(
+            failure.kind(),
+            SourceReadFailureKind::BeforeStoreAccess(if lose_ack {
+                InvestigationStoreError::Storage
+            } else {
+                InvestigationStoreError::Ownership
+            })
+        );
         assert_eq!(failure.validation_receipt().is_some(), cancel_after_commit);
         assert!(context.evidence.is_empty());
     } else {

@@ -71,6 +71,8 @@ pub(crate) fn seed(
     let metadata = completion::derive_protected_metadata(&task, vec![], &[]).unwrap();
     let step = prepare_step(&task.detail, &request, &metadata);
     let tx = store.conn.transaction().unwrap();
+    // The archive reader authenticates persisted family/intent authority.
+    storage::save_next_prompt_task(&tx, &task, task.detail.summary.revision, false).unwrap();
     let basis = admission_contract::SavedCallBasis::from_pre_call_saved(
         &tx, &task, &step, ledger, &metadata,
     )

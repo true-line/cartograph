@@ -2,6 +2,20 @@
 use super::*;
 use rusqlite::Transaction;
 
+#[allow(dead_code)] // Internal worker snapshot; public next-family routes stay closed.
+#[path = "next_prompt_snapshot.rs"]
+mod next_prompt_snapshot;
+#[allow(unused_imports)]
+pub(crate) use next_prompt_snapshot::NextPromptSnapshot;
+
+#[allow(dead_code)] // Internal complete-response writer; public @10 stays closed.
+#[path = "next_prompt_finish.rs"]
+mod next_prompt_finish;
+#[cfg(test)]
+pub(super) use next_prompt_finish::FinishFixture;
+#[allow(unused_imports)]
+pub(crate) use next_prompt_finish::NextPromptFinish;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CompletionIntent {
@@ -216,6 +230,23 @@ impl JobStore {
         request: &StagedObligationRequest,
         provider: Option<&InvestigationProvider>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
+        self.start_completion_family(request, provider, false)
+    }
+    /// Internal factory only; public IPC/catalog remain closed for this family.
+    #[allow(dead_code)]
+    pub(crate) fn start_next_prompt_investigation(
+        &mut self,
+        request: &StagedObligationRequest,
+        provider: Option<&InvestigationProvider>,
+    ) -> Result<InvestigationStart, InvestigationStoreError> {
+        self.start_completion_family(request, provider, true)
+    }
+    fn start_completion_family(
+        &mut self,
+        request: &StagedObligationRequest,
+        provider: Option<&InvestigationProvider>,
+        next_prompt: bool,
+    ) -> Result<InvestigationStart, InvestigationStoreError> {
         let policy = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
         let request = request.normalized_with_policy(policy)?;
@@ -239,7 +270,7 @@ impl JobStore {
             conversation_id: request.conversation_id.clone(),
             parent_id: request.parent_id.clone(),
         };
-        self.start_investigation_internal(&projected, provider, Some(intent))
+        self.start_investigation_internal(&projected, provider, Some(intent), next_prompt)
     }
     pub(crate) fn existing_investigation_completion(
         &self,
@@ -597,7 +628,7 @@ pub(super) fn attempts(
                     max_bytes,
                 } = &entry.record.read
                 {
-                    let archive = super::coverage::load(connection, id)?
+                    let archive = super::coverage::load_for_task(connection, task)?
                         .ok_or(InvestigationStoreError::Invalid)?;
                     if !matches!(
                         archive.read(&InvestigationCoverageRead {
@@ -964,7 +995,7 @@ pub(super) fn unavailable(
         if reason != UnavailableReason::InventoryExceedsMaxBytes {
             return Err(InvestigationStoreError::Invalid);
         }
-        let archive = super::coverage::load(connection, &task.detail.summary.investigation_id)?
+        let archive = super::coverage::load_for_task(connection, task)?
             .ok_or(InvestigationStoreError::Invalid)?;
         let request = InvestigationCoverageRead {
             context_id: context_id.clone(),
@@ -1233,6 +1264,27 @@ pub(super) fn validate_step_metadata(
     task: &StoredTask,
     step: &PendingInvestigationStep,
 ) -> Result<(), InvestigationStoreError> {
+    if task
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        let call = task
+            .admission_state
+            .as_ref()
+            .and_then(|state| state.current_call.as_ref())
+            .ok_or(InvestigationStoreError::Invalid)?;
+        if call.step_id != step.step_id {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        call.validate_saved(connection, task)?;
+        let core = admission_contract::load_saved_call_basis_core(connection, task, call)?;
+        if core.step != *step {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        return Ok(());
+    }
     let policy = saved_policy(task)?;
     let intent = validated_intent(task)?;
     let disclosure = step
@@ -1567,7 +1619,16 @@ pub(super) fn validate_saved(
     let refusals = if raw.is_empty() {
         vec![]
     } else {
-        staged::load(connection, &task.detail.summary.investigation_id)?
+        if task
+            .detail
+            .summary
+            .specialist_id
+            .uses_next_prompt_admission()
+        {
+            staged::load_for_task(connection, task)?
+        } else {
+            staged::load(connection, &task.detail.summary.investigation_id)?
+        }
     };
     let detail = task
         .detail
@@ -1722,16 +1783,35 @@ pub(super) fn refused(
         .into_iter()
         .map(|entry| entry.record)
         .collect::<Vec<_>>();
-    let disposition = staged::append(
-        tx,
-        namespace,
-        execution,
-        request,
-        input,
-        finish,
-        response.clone(),
-        &attempts,
-    )?;
+    let disposition = if task
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        staged::append_for_task(
+            tx,
+            namespace,
+            execution,
+            task,
+            request,
+            input,
+            finish,
+            response.clone(),
+            &attempts,
+        )?
+    } else {
+        staged::append(
+            tx,
+            namespace,
+            execution,
+            request,
+            input,
+            finish,
+            response.clone(),
+            &attempts,
+        )?
+    };
     let entries = raw_refusals(tx, task)?;
     let entry = entries.last().ok_or(InvestigationStoreError::Invalid)?;
     task.detail.usage = entry.usage.clone();
@@ -1739,6 +1819,9 @@ pub(super) fn refused(
     task.approved = false;
     task.action_tool = None;
     task.phase = Phase::Ready;
+    if let Some(state) = task.admission_state.as_mut() {
+        state.current_call = None;
+    }
     task.detail.summary.status = InvestigationStatus::Running;
     task.detail.summary.completion_outcome = None;
     bump(tx, task)?;
@@ -1814,3 +1897,7 @@ pub(super) use settlement_projection::{
 
 #[cfg(test)]
 pub(super) use tests::next_prompt_initial_fixture::{InitialFixture, initial_fixture};
+
+#[cfg(test)]
+#[path = "next_prompt_recovery_tests.rs"]
+mod next_prompt_recovery_tests;

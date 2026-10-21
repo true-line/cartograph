@@ -157,3 +157,15 @@ fn source_settlement_actual_acquired_and_unavailable_use_same_bounded_rows_as_pr
         }));
     }
 }
+
+#[path = "source_settlement_owner_tests.rs"]
+mod owner_tests;
+
+#[path = "source_settlement_boundary_tests.rs"]
+mod boundary_tests;
+
+#[path = "source_settlement_fault_tests.rs"]
+mod fault_tests;
+
+#[path = "source_continuation_snapshot_tests.rs"]
+mod source_snapshot_tests;

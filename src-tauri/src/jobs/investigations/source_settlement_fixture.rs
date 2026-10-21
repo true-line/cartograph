@@ -156,6 +156,9 @@ impl Fixture {
         let tx = self.f.store.conn.unchecked_transaction().unwrap();
         self.f.task = load_next_prompt_task_base(&tx, &self.f.basis.task_id).unwrap();
     }
+    pub(super) fn raw(&self) -> &str {
+        &self.raw
+    }
     pub(super) fn response(&self) -> InvestigationResponseMeta {
         let tx = self.f.store.conn.unchecked_transaction().unwrap();
         read_body(

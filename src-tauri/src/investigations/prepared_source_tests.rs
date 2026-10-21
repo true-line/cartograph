@@ -389,3 +389,6 @@ fn prepared_source_checks_actual_evidence_headroom_before_read() {
 
 #[path = "prepared_source_validation_tests.rs"]
 mod validation_tests;
+
+#[path = "prepared_source_reservation_tests.rs"]
+mod reservation_tests;

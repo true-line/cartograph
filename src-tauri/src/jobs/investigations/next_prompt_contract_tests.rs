@@ -153,7 +153,14 @@ pub(in crate::jobs::investigations) fn internal_fixture_with_step_preparer(
     let step = prepare_step(&task, &request, &ledger, &metadata, &pages);
     let basis = {
         let tx = fixture.store.conn.unchecked_transaction().unwrap();
-        SavedCallBasis::from_pre_call_saved(&tx, &task, &step, &ledger, &metadata).unwrap()
+        // Explicit test-only family conversion is persisted before any saved
+        // authority reader authenticates it. A supplied task3 DTO cannot stand
+        // in for the still-legacy checksummed record on disk.
+        save_next_prompt_task(&tx, &task, task.detail.summary.revision, false).unwrap();
+        let basis =
+            SavedCallBasis::from_pre_call_saved(&tx, &task, &step, &ledger, &metadata).unwrap();
+        tx.commit().unwrap();
+        basis
     };
     task.admission_state.as_mut().unwrap().current_call = Some(basis.clone());
     task.phase = Phase::Invocation;

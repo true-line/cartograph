@@ -5,7 +5,15 @@ use super::*;
 use llm::bounded::PreparedBoundedCompletion;
 use read_reservations::{Disposition, DispositionKind, SavedRead};
 
-pub(super) struct SourceContinuation<'a> {
+/// Host-classified known outcomes only; owner loss has a separate lock proof.
+#[derive(Clone, Copy)]
+pub(crate) enum KnownSourceDisposition {
+    ReleasedBeforeRead,
+    KnownReadDiscarded,
+    BoundInvariantDefect,
+}
+
+pub(crate) struct SourceContinuation<'a> {
     pub current: &'a InvestigationInput,
     pub current_prepared: &'a PreparedBoundedCompletion,
     pub candidate: &'a InvestigationInput,
@@ -98,9 +106,7 @@ pub(super) fn project(
             reason,
             continuation,
         } => {
-            if reason == UnavailableReason::InventoryExceedsMaxBytes {
-                return Err(InvestigationStoreError::Invalid);
-            }
+            source_unavailable_reason(&reason)?;
             (
                 DispositionKind::ReadUnavailable,
                 Some(reason),
@@ -299,6 +305,26 @@ fn materialize(
     Ok(plan)
 }
 
+// Exhaustive classification: adding an enum variant requires an explicit
+// source-vs-inventory decision and a corresponding sizing-table update. The
+// membership check fails closed if a newly classified source reason is missing
+// from the exact finite serializer envelope.
+const SOURCE_UNAVAILABLE_REASONS: [UnavailableReason; 2] = [
+    UnavailableReason::PinnedTargetAbsent,
+    UnavailableReason::RangeOutOfBounds,
+];
+fn source_unavailable_reason(reason: &UnavailableReason) -> Result<(), InvestigationStoreError> {
+    match reason {
+        UnavailableReason::PinnedTargetAbsent | UnavailableReason::RangeOutOfBounds => {
+            if !SOURCE_UNAVAILABLE_REASONS.contains(reason) {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            Ok(())
+        }
+        UnavailableReason::InventoryExceedsMaxBytes => Err(InvestigationStoreError::Invalid),
+    }
+}
+
 fn terminal_message(kind: DispositionKind) -> Result<&'static str, InvestigationStoreError> {
     Ok(match kind {
         DispositionKind::ReleasedBeforeRead => {
@@ -365,12 +391,27 @@ mod tests;
 
 #[path = "source_settlement_validation.rs"]
 mod validation;
-use validation::{usage_for, validate_continuation};
+use validation::{continuation_metadata, usage_for, validate_continuation, validate_next_ledger};
 #[path = "source_settlement_envelope.rs"]
 mod envelope_projection;
 #[allow(unused_imports)] // Production source admission is wired in the next integration slice.
-pub(super) use envelope_projection::envelope;
+pub(super) use envelope_projection::{SettlementEnvelope, envelope};
 #[path = "source_settlement_storage.rs"]
 mod storage_writer;
 #[cfg(test)]
 use storage_writer::persist;
+
+#[path = "source_continuation_snapshot.rs"]
+mod source_snapshot;
+pub(crate) use source_snapshot::{
+    SourceContinuationOutcome, SourceContinuationSnapshot, SourceContinuationSnapshotInput,
+};
+
+#[cfg(test)]
+pub(crate) fn fail_next_publication(lost_ack: bool) {
+    storage_writer::fail_once(if lost_ack {
+        storage_writer::SettlementFailure::AfterCommitAck
+    } else {
+        storage_writer::SettlementFailure::AfterTaskSave
+    });
+}

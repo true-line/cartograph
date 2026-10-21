@@ -1,8 +1,12 @@
-//! Host-only staged captured reads. No durable authority or publication is created
-//! here. The owning worker must bind the callback to an exact durable validation
-//! charge and keep the returned guards until its commit acknowledgement.
+//! Guarded captured-source preparation and access. Metadata preparation and
+//! candidate construction publish nothing; reservation commits only an allocation.
+//! Text access requires the independent durable validation charge and access fence.
+//! The worker retains source guards through the final publication acknowledgement.
 use super::*;
-use crate::jobs::investigations::{CommittedSourceValidation, SourceValidationBasis};
+use crate::jobs::investigations::{
+    CommittedSourceReservation, CommittedSourceValidation, InvestigationStoreError,
+    SourceAdmission, SourceValidationBasis,
+};
 
 /// Not Clone/Deserialize: preparation owns the actual retained-source leases.
 pub(in crate::investigations) struct PreparedCapturedSource {
@@ -16,11 +20,13 @@ pub(in crate::investigations) struct PreparedCapturedSource {
     receipt: Receipt,
     guards: EvidenceGuards,
     validation: Option<CommittedSourceValidation>,
+    // Attempt provenance only, never a durable charge or access permit.
+    attempted_basis: Option<(String, String, String)>,
 }
 
 /// Borrowed exact charge request, not a charge receipt. An Ok callback is trusted
 /// host-adapter acknowledgement only; it must come from durable charge validation
-/// in the eventual reservation integration, never from model/caller data.
+/// from the reservation's validation writer, never from model/caller data.
 pub(in crate::investigations) struct SourceValidationRequest<'a> {
     pub target: &'a InvestigationInspectionTarget,
     pub base_ledger_hash: &'a str,
@@ -34,8 +40,35 @@ pub(in crate::investigations) enum SourceAccessStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::investigations) enum SourceReadFailureKind {
     BeforeAccess(HostError),
+    /// Includes unknown commit acknowledgement; never implies a safe retry.
+    BeforeStoreAccess(InvestigationStoreError),
     ReadUnavailable,
     KnownReadFailure(HostError),
+}
+#[derive(Debug, thiserror::Error)]
+pub(in crate::investigations) enum SourceReservationError {
+    #[error(transparent)]
+    Host(#[from] HostError),
+    #[error(transparent)]
+    Store(#[from] InvestigationStoreError),
+}
+
+enum SourceReadGateError {
+    Host(HostError),
+    Store(InvestigationStoreError),
+}
+impl From<HostError> for SourceReadGateError {
+    fn from(error: HostError) -> Self {
+        Self::Host(error)
+    }
+}
+impl SourceReadGateError {
+    fn failure_kind(self) -> SourceReadFailureKind {
+        match self {
+            Self::Host(error) => SourceReadFailureKind::BeforeAccess(error),
+            Self::Store(error) => SourceReadFailureKind::BeforeStoreAccess(error),
+        }
+    }
 }
 /// Failure retains the leases. It exposes no prepared descriptor/read retry API.
 pub(in crate::investigations) struct PreparedSourceFailure {
@@ -51,6 +84,47 @@ pub(in crate::investigations) struct PreparedSourceCandidate {
 }
 
 impl FrozenContext {
+    /// Resolve a model-selected range using retained receipt metadata from this
+    /// frozen ledger. A queried fact need not be an original obligation target.
+    pub(in crate::investigations) fn prepare_captured_read(
+        &self,
+        state: &AppState,
+        fact: &TaskFactKey,
+        requested_role: TaskRangeRole,
+        index: u32,
+    ) -> Result<PreparedCapturedSource, HostError> {
+        let selection = self
+            .ledger
+            .selected_facts
+            .iter()
+            .find(|selected| &selected.fact == fact)
+            .ok_or(HostError::InvalidInput)?;
+        let keys = self
+            .ledger
+            .selected_facts
+            .iter()
+            .map(|selected| crate::task_evidence::graph_fact(&selected.fact))
+            .collect::<Vec<_>>();
+        let selected = self.select(state, &keys)?;
+        let guards = EvidenceGuards::acquire(state, &selected)?;
+        let receipt = guards.receipt(state, selection)?;
+        let ordinal = receipt
+            .ranges()
+            .iter()
+            .position(|range| role(range.role) == requested_role && range.index == index)
+            .ok_or(HostError::SourceUnavailable)?;
+        let target = crate::investigations::inspection::descriptor(
+            &receipt,
+            &self.ledger.graph_snapshot_id,
+            ordinal,
+        )
+        .map_err(|_| HostError::InvalidInput)?;
+        // Re-acquire the complete guard set before releasing these preliminary
+        // metadata guards. Preparation rechecks the full exact frozen binding.
+        let prepared = self.prepare_captured_source(state, &target)?;
+        drop(guards);
+        Ok(prepared)
+    }
     /// Metadata only: receipts and capture manifests, never task_text/object bytes.
     pub(in crate::investigations) fn prepare_captured_source(
         &self,
@@ -97,12 +171,64 @@ impl FrozenContext {
             receipt,
             guards,
             validation: None,
+            attempted_basis: None,
         };
         prepared.revalidate(self, state)?;
         Ok(prepared)
     }
 }
 impl PreparedCapturedSource {
+    fn attempted_basis_matches(&self, basis: &SourceValidationBasis<'_>) -> bool {
+        self.attempted_basis
+            .as_ref()
+            .is_some_and(|(task, step, hash)| {
+                task == basis.task_id && step == basis.step_id && hash == basis.reservation_hash
+            })
+    }
+    /// Reserve the exact unread candidate while retaining its actual source
+    /// guards. The resulting capability still requires the separate durable
+    /// validation charge and access fence before reading source text.
+    pub(in crate::investigations) fn reserve(
+        &self,
+        context: &FrozenContext,
+        state: &AppState,
+        execution: &crate::job_execution::JobExecution,
+        revision: u64,
+        clock: &crate::investigations::runtime::RunClock,
+        admission: &SourceAdmission<'_>,
+    ) -> Result<CommittedSourceReservation, SourceReservationError> {
+        self.revalidate(context, state)?;
+        if admission.target != &self.target
+            || admission.current.ledger() != &self.base_ledger
+            || admission.active_milliseconds > clock.active_milliseconds()
+        {
+            return Err(HostError::InputChanged.into());
+        }
+        clock.deadline()?;
+        let mut retained_error = None;
+        let result = state
+            .jobs
+            .lock()
+            .map_err(|_| HostError::Operational)?
+            .admit_next_prompt_source(execution, revision, admission, |view| {
+                let checked = clock
+                    .deadline()
+                    .map(|_| ())
+                    .and_then(|()| self.guards.revalidate_in_view(&state.primary_sources, view));
+                if let Err(error) = checked {
+                    retained_error = Some(error);
+                    return Err(InvestigationStoreError::Invalid);
+                }
+                Ok(())
+            });
+        if let Some(error) = retained_error {
+            return Err(error.into());
+        }
+        // No context installation or source access occurs, including after an
+        // uncertain COMMIT acknowledgement. Callers must stop on store errors.
+        Ok(result?)
+    }
+
     pub(in crate::investigations) fn target(&self) -> &InvestigationInspectionTarget {
         &self.target
     }
@@ -189,12 +315,19 @@ impl PreparedCapturedSource {
     /// The supplied expected identities are rechecked against saved authority;
     /// no receipt from a different task/step/reservation can authorize access.
     pub(in crate::investigations) fn read_reserved(
-        self,
+        mut self,
         context: &FrozenContext,
         state: &AppState,
         execution: &crate::job_execution::JobExecution,
         basis: &SourceValidationBasis<'_>,
     ) -> Result<PreparedSourceCandidate, PreparedSourceFailure> {
+        // Retain the attempted immutable identity even when the charge commits
+        // but its acknowledgement is lost. Cleanup must not swap reservations.
+        self.attempted_basis = Some((
+            basis.task_id.to_owned(),
+            basis.step_id.to_owned(),
+            basis.reservation_hash.to_owned(),
+        ));
         self.read_after_charge(
             context,
             state,
@@ -209,14 +342,14 @@ impl PreparedCapturedSource {
                         request.target,
                         request.base_ledger_hash,
                     )
-                    .map_err(|_| HostError::Operational)?;
+                    .map_err(SourceReadGateError::Store)?;
                 if !receipt.matches(
                     basis,
                     request.target,
                     request.base_ledger_hash,
                     request.validation_bytes,
                 ) {
-                    return Err(HostError::InputChanged);
+                    return Err(HostError::InputChanged.into());
                 }
                 #[cfg(test)]
                 AFTER_CHARGE.with(|slot| {
@@ -233,7 +366,7 @@ impl PreparedCapturedSource {
                     .lock()
                     .map_err(|_| HostError::Operational)?
                     .verify_source_validation_access(execution, receipt)
-                    .map_err(|_| HostError::Operational)
+                    .map_err(SourceReadGateError::Store)
             },
         )
     }
@@ -249,7 +382,7 @@ impl PreparedCapturedSource {
         self.read_after_charge(
             context,
             state,
-            |request| charge(request).map(|()| None),
+            |request| charge(request).map(|()| None).map_err(Into::into),
             |_| Ok(()),
         )
     }
@@ -260,15 +393,17 @@ impl PreparedCapturedSource {
         state: &AppState,
         charge: impl FnOnce(
             SourceValidationRequest<'_>,
-        ) -> Result<Option<CommittedSourceValidation>, HostError>,
-        before_access: impl FnOnce(Option<&CommittedSourceValidation>) -> Result<(), HostError>,
+        ) -> Result<Option<CommittedSourceValidation>, SourceReadGateError>,
+        before_access: impl FnOnce(
+            Option<&CommittedSourceValidation>,
+        ) -> Result<(), SourceReadGateError>,
     ) -> Result<PreparedSourceCandidate, PreparedSourceFailure> {
         if let Err(error) = self.revalidate(context, state) {
             return Err(self.failed(SourceReadFailureKind::BeforeAccess(error)));
         }
         match charge(self.validation_request()) {
             Ok(receipt) => self.validation = receipt,
-            Err(error) => return Err(self.failed(SourceReadFailureKind::BeforeAccess(error))),
+            Err(error) => return Err(self.failed(error.failure_kind())),
         }
         // A charge may have committed even when a subsequent check fails. The
         // failure stage does not release/refund it; durable settlement must query
@@ -277,7 +412,7 @@ impl PreparedCapturedSource {
             return Err(self.failed(SourceReadFailureKind::BeforeAccess(error)));
         }
         if let Err(error) = before_access(self.validation.as_ref()) {
-            return Err(self.failed(SourceReadFailureKind::BeforeAccess(error)));
+            return Err(self.failed(error.failure_kind()));
         }
         let Some(guard) = self.guards.guards.get(&self.target.registered_source_id) else {
             return Err(self.failed(SourceReadFailureKind::BeforeAccess(HostError::InvalidInput)));
@@ -380,7 +515,8 @@ impl PreparedSourceFailure {
     }
     pub(in crate::investigations) fn stage(&self) -> SourceAccessStage {
         match self.kind {
-            SourceReadFailureKind::BeforeAccess(_) => SourceAccessStage::BeforeAccess,
+            SourceReadFailureKind::BeforeAccess(_)
+            | SourceReadFailureKind::BeforeStoreAccess(_) => SourceAccessStage::BeforeAccess,
             _ => SourceAccessStage::AccessStarted,
         }
     }
@@ -429,3 +565,6 @@ thread_local! { static AFTER_CHARGE:std::cell::RefCell<Option<Box<dyn FnOnce()>>
 #[cfg(test)]
 #[path = "prepared_source_tests.rs"]
 mod tests;
+
+#[path = "prepared_source_publication.rs"]
+pub(in crate::investigations) mod publication;

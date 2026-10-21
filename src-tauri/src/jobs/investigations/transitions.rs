@@ -418,6 +418,73 @@ impl JobStore {
         Ok(task.detail)
     }
 
+    /// Internal next-family cancellation uses the existing terminal reserve,
+    /// independently of the source stage allocations. No owner lease is needed
+    /// to request cancellation; settlement still requires owner or orphan proof.
+    #[allow(dead_code)] // Public routing remains gated until controller integration.
+    pub(crate) fn cancel_next_prompt_investigation(
+        &mut self,
+        id: &str,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate(&tx, &self.namespace)?;
+        let mut task = load_next_prompt_task_base(&tx, id)?;
+        if task.phase != Phase::Terminal && !task.detail.summary.cancel_requested {
+            let expected = task.detail.summary.revision;
+            request_cancel(&tx, &mut task)?;
+            save_next_prompt_task(&tx, &task, expected, true)?;
+        }
+        tx.commit()?;
+        Ok(task.detail)
+    }
+
+    /// Internal terminal path for failures outside a pending source read.
+    /// Reservations must settle their durable charge and disposition instead.
+    #[allow(dead_code)] // Public next-family worker routing remains closed.
+    pub(crate) fn stop_next_prompt_investigation(
+        &mut self,
+        execution: &JobExecution,
+        revision: u64,
+        reason: InvestigationStopReason,
+        active_milliseconds: u64,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        execution.verify()?;
+        if execution.inner.namespace != self.namespace {
+            return Err(InvestigationStoreError::Ownership);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate(&tx, &self.namespace)?;
+        let id = task_id_for_job(&tx, execution.id())?.ok_or(InvestigationStoreError::Missing)?;
+        let mut task = load_next_prompt_task_base(&tx, &id)?;
+        check_identity(&task, execution)?;
+        if task.detail.summary.revision != revision || task.phase == Phase::Terminal {
+            return Err(InvestigationStoreError::Stale);
+        }
+        check_job(&tx, execution, true)?;
+        if task.phase == Phase::Reservation || task.pending_source_read.is_some() {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        if active_milliseconds < task.detail.usage.active_milliseconds {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        task.detail.usage.active_milliseconds = active_milliseconds;
+        if task.phase == Phase::Consent {
+            // This prospective call was never invoked; it has no invocation row.
+            task.admission_state
+                .as_mut()
+                .ok_or(InvestigationStoreError::Invalid)?
+                .current_call = None;
+        }
+        stop(&tx, &mut task, reason)?;
+        save_next_prompt_task(&tx, &task, revision, true)?;
+        tx.commit()?;
+        Ok(task.detail)
+    }
+
     pub(crate) fn investigation_recovery_candidates(
         &self,
     ) -> Result<Vec<InvestigationRecoveryCandidate>, InvestigationStoreError> {
@@ -431,7 +498,7 @@ impl JobStore {
         let mut candidates = Vec::new();
         for id in ids {
             let id = id.ok_or(InvestigationStoreError::Invalid)?;
-            let task = load_task(&tx, &id)?;
+            let task = load_execution_task(&tx, &id)?;
             // No owner was ever recorded for a queued task. A concurrent start
             // may still be moving toward claim, so an absent/new lock cannot
             // prove its process died. Such rows remain explicitly cancellable.
@@ -470,7 +537,7 @@ impl JobStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         validate(&tx, &self.namespace)?;
-        let mut task = load_task(&tx, &candidate.id)?;
+        let mut task = load_execution_task(&tx, &candidate.id)?;
         if task.phase == Phase::Terminal
             || task.detail.summary.revision != candidate.revision
             || task.execution != candidate.identity
@@ -478,8 +545,30 @@ impl JobStore {
             tx.commit()?;
             return Ok(None);
         }
+        let next_family = task
+            .detail
+            .summary
+            .specialist_id
+            .uses_next_prompt_admission();
+        if next_family && task.phase == Phase::Reservation {
+            // Keep the recovered OS lock. The source writer rechecks this exact
+            // candidate inside its own immediate transaction and records the
+            // unknown read without refunding its charge or reserved accounting.
+            tx.commit()?;
+            return self
+                .settle_orphaned_next_prompt_source(candidate, reservation)
+                .map(Some);
+        }
         let expected = task.detail.summary.revision;
         let unknown = task.phase == Phase::Invocation;
+        if next_family && task.phase == Phase::Consent {
+            // An uninvoked consent stamp is not a provider call. Preserve all
+            // earlier measured usage while removing only that prospective call.
+            task.admission_state
+                .as_mut()
+                .ok_or(InvestigationStoreError::Invalid)?
+                .current_call = None;
+        }
         if unknown {
             clear_unmeasured_usage(&mut task);
         }
@@ -513,7 +602,11 @@ impl JobStore {
         )?;
         completion::refresh_observation(&tx, &mut task)?;
         sync_terminal_job(&tx, &task)?;
-        save_task(&tx, &task, expected, true)?;
+        if next_family {
+            save_next_prompt_task(&tx, &task, expected, true)?;
+        } else {
+            save_task(&tx, &task, expected, true)?;
+        }
         tx.commit()?;
         Ok(Some(task.detail))
     }
@@ -780,7 +873,7 @@ pub(super) fn check_job(
     }
 }
 
-fn stop(
+pub(super) fn stop(
     connection: &Connection,
     task: &mut StoredTask,
     reason: InvestigationStopReason,
@@ -914,7 +1007,7 @@ pub(in crate::jobs) fn attach_execution(
     if kind != format!("{KIND_PREFIX}{id}") {
         return Err(InvestigationStoreError::Invalid);
     }
-    let mut task = load_task(connection, &id)?;
+    let mut task = load_execution_task(connection, &id)?;
     if task.phase != Phase::Queued
         || task.execution.is_some()
         || task.detail.summary.cancel_requested
@@ -940,7 +1033,16 @@ pub(in crate::jobs) fn attach_execution(
         None,
         "Execution ownership attached atomically; preparation started.",
     )?;
-    save_task(connection, &task, revision, false)
+    if task
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        save_next_prompt_task(connection, &task, revision, false)
+    } else {
+        save_task(connection, &task, revision, false)
+    }
 }
 
 pub(in crate::jobs) fn cancel_for_job(

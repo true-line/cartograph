@@ -61,10 +61,8 @@ pub(super) fn validate_continuation(
     active: u64,
 ) -> Result<InvestigationInputLedger, InvestigationStoreError> {
     let policy = &INVESTIGATION_V2_POLICY;
-    if before.detail.summary.cancel_requested
-        || saved.charge.is_none()
-        || c.current.ledger() != base
-    {
+    validate_next_ledger(before, saved, base, c.candidate.ledger(), kind, active)?;
+    if c.current.ledger() != base {
         return Err(InvestigationStoreError::Invalid);
     }
     let b = &saved.reservation.binding;
@@ -102,27 +100,6 @@ pub(super) fn validate_continuation(
         policy,
     )?;
     let ledger = c.candidate.ledger();
-    if kind == DispositionKind::Acquired {
-        InvestigationTurnBasis {
-            input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
-            previous_ledger: Some(base.clone()),
-            completed_tool: Some(InvestigationTool::ReadEvidence),
-        }
-        .validate_with_policy(ledger, policy)?;
-        if ledger.receipt_references != base.receipt_references
-            || ledger.citations.len() != base.citations.len() + 1
-            || !saved.reservation.source.matches(
-                ledger
-                    .citations
-                    .last()
-                    .ok_or(InvestigationStoreError::Invalid)?,
-            )
-        {
-            return Err(InvestigationStoreError::Invalid);
-        }
-    } else if ledger != base {
-        return Err(InvestigationStoreError::Invalid);
-    }
     let records = completion::derive_attempt_records(
         before,
         &b.step_id,
@@ -152,15 +129,14 @@ pub(super) fn validate_continuation(
     if encode(&disclosure, MAX_DISCLOSURE_BYTES)?.len() > c.proof.disclosure_upper_bytes() {
         return Err(InvestigationStoreError::Invalid);
     }
-    let mut next_metadata = metadata.clone();
-    next_metadata
-        .completed_attempt_ids
-        .extend(records.iter().map(|r| r.attempt_id.clone()));
+    let next_metadata = continuation_metadata(metadata, &records)?;
     let state = disclosure
         .admission
         .as_ref()
         .ok_or(InvestigationStoreError::Invalid)?;
     if state.consumed_budgets != usage_for(saved, kind, active)?
+        || state.mode
+            != next_metadata.next_call_mode_with_policy(&state.consumed_budgets, policy)?
         || state.capacity_feedback.is_some()
         || state.capacity_refusal_count
             != before
@@ -195,4 +171,72 @@ pub(super) fn validate_continuation(
         return Err(InvestigationStoreError::Invalid);
     }
     Ok(ledger.clone())
+}
+
+/// Shared pure post-read ledger validation. A valid ledger is not proof that
+/// source access occurred; only the actual adapter may classify its outcome.
+pub(super) fn validate_next_ledger(
+    before: &StoredTask,
+    saved: &SavedRead,
+    base: &InvestigationInputLedger,
+    ledger: &InvestigationInputLedger,
+    kind: DispositionKind,
+    active: u64,
+) -> Result<(), InvestigationStoreError> {
+    let policy = &INVESTIGATION_V2_POLICY;
+    if !matches!(
+        kind,
+        DispositionKind::Acquired | DispositionKind::ReadUnavailable
+    ) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if active
+        >= before
+            .detail
+            .limits
+            .active_seconds
+            .checked_mul(1000)
+            .ok_or(InvestigationStoreError::Capacity)?
+    {
+        return Err(InvestigationStoreError::Capacity);
+    }
+    if active < before.detail.usage.active_milliseconds
+        || before.detail.summary.cancel_requested
+        || saved.charge.is_none()
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if kind == DispositionKind::Acquired {
+        InvestigationTurnBasis {
+            input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
+            previous_ledger: Some(base.clone()),
+            completed_tool: Some(InvestigationTool::ReadEvidence),
+        }
+        .validate_with_policy(ledger, policy)?;
+        if ledger.receipt_references != base.receipt_references
+            || ledger.citations.len() != base.citations.len() + 1
+            || !saved.reservation.source.matches(
+                ledger
+                    .citations
+                    .last()
+                    .ok_or(InvestigationStoreError::Invalid)?,
+            )
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+    } else if ledger != base {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(())
+}
+
+pub(super) fn continuation_metadata(
+    metadata: &ProtectedCompletionMetadata,
+    records: &[AttemptRecord],
+) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
+    let mut next = metadata.clone();
+    next.completed_attempt_ids
+        .extend(records.iter().map(|record| record.attempt_id.clone()));
+    next.validate_with_policy(&INVESTIGATION_V2_POLICY)?;
+    Ok(next)
 }

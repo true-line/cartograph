@@ -1,0 +1,197 @@
+//! Internal Choice metadata reads use exact previews and one atomic publication.
+use super::*;
+use crate::investigations::context::metadata_admission::MetadataPublicationError;
+use crate::jobs::investigations::{MetadataAdmission, MetadataContinuationRead};
+
+impl<R: tauri::Runtime> Worker<'_, R> {
+    /// False identifies a source proposal for the separate pre-read reservation
+    /// path. It must never fall through to a legacy tool transition.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn admit_next_metadata_response(
+        &mut self,
+        request: &obligations::StagedObligationRequest,
+        current: &InvestigationInput,
+        current_prepared: &PreparedBoundedCompletion,
+        completion: &BoundedCompletion,
+        step_id: &str,
+        provider: &dyn LlmProvider,
+        context: &mut FrozenContext,
+        history: &[String],
+    ) -> Result<bool, Failure> {
+        let policy = &INVESTIGATION_V2_POLICY;
+        let proof = current
+            .ledger()
+            .coverage
+            .as_ref()
+            .ok_or(HostError::InvalidInput)?;
+        let action = ProgressiveInvestigationAction::decode_resolved(
+            &completion.text,
+            &proof.context_id,
+            &request.intent_hash_with_policy(policy)?,
+            current.ledger(),
+            policy,
+        )
+        .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+        self.check_new_work()?;
+        let (read, kind) = match action {
+            CompletionInvestigationAction::Read(QualifiedInvestigationAction::QueryContext {
+                query,
+                ..
+            }) => (
+                context.prepare_query(self.state, query)?,
+                ContextPreviewKind::Query,
+            ),
+            CompletionInvestigationAction::Read(
+                QualifiedInvestigationAction::ReadCoverageInventory(read),
+            ) => (
+                context.prepare_inventory(read)?,
+                ContextPreviewKind::Inventory,
+            ),
+            CompletionInvestigationAction::Read(QualifiedInvestigationAction::SourceOrFinish(
+                _,
+            )) => return Ok(false),
+            CompletionInvestigationAction::Finish(_) => {
+                return Err(Failure::Stop(InvestigationStopReason::InvalidResponse));
+            }
+        };
+        let original: serde_json::Value = serde_json::from_str(&completion.text)
+            .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+        let response = InvestigationResponseMeta {
+            step_id: step_id.into(),
+            response_hash: content_hash(completion.text.as_bytes()),
+            action_hash: content_hash(&bounded_json(&original, 32 * 1024)?),
+            observed_model: completion.response_model.clone(),
+            reported_input_tokens: completion
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.input_tokens),
+            reported_output_tokens: completion
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.output_tokens),
+            active_milliseconds: self.clock.active_milliseconds(),
+        };
+        let active_milliseconds = self.clock.active_milliseconds();
+        let snapshot = self
+            .state
+            .jobs
+            .lock()
+            .map_err(|_| HostError::Operational)?
+            .investigation_metadata_continuation_snapshot(
+                self.id,
+                self.detail.summary.revision,
+                &MetadataContinuationRead {
+                    request,
+                    response: &response,
+                    original_action: &original,
+                    current,
+                    current_prepared,
+                    candidate_ledger: read.ledger(),
+                    raw_response: read.raw(),
+                    kind,
+                    active_milliseconds,
+                },
+            )?;
+        let view = context.prospective_context(&read)?;
+        let candidate = InvestigationInput::prepare_v9_with_policy(
+            &request.question,
+            self.detail.summary.specialist_id,
+            view.ledger.clone(),
+            &view.query_pages,
+            view.evidence,
+            history,
+            snapshot.usage(),
+            snapshot.basis(),
+            request,
+            snapshot.metadata(),
+            &view.inventory_details,
+            snapshot.mode(),
+            snapshot.capacity_refusal_count(),
+            None, // An accepted acquisition clears only the latest refusal slot.
+            policy,
+        );
+        let candidate = match candidate {
+            Ok(candidate) => candidate,
+            Err(InvestigationError::LimitExceeded) => {
+                self.refuse_next_metadata_capacity(&response, &original)?;
+                return Ok(true);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        // The certificate reserves both continuation modes and feedback through
+        // the same production serializer/redactor. It is not a storage permit.
+        let proof = current.certify_context_preview_v9_with_policy(
+            &candidate,
+            kind,
+            read.raw(),
+            snapshot.admitted_usage(),
+            current_prepared.profile(),
+            current_prepared.limits(),
+            snapshot.next_action_id(),
+            policy,
+        );
+        let proof = match proof {
+            Ok(proof) => proof,
+            Err(InvestigationError::LimitExceeded) => {
+                self.refuse_next_metadata_capacity(&response, &original)?;
+                return Ok(true);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let action = candidate.action(snapshot.next_action_id().into())?;
+        let candidate_prepared = firewall(self.state)?
+            .prepare_bounded(provider, &action, current_prepared.limits())
+            .map_err(provider_failure)?;
+        // Size certification and actual protected-field sealing are independent.
+        candidate.seal_disclosure_with_policy(&candidate_prepared, policy)?;
+        let result = context.publish_admitted_metadata(
+            self.state,
+            self.execution,
+            snapshot.revision(),
+            self.clock,
+            read,
+            &MetadataAdmission {
+                response: &response,
+                original_action: &original,
+                current,
+                candidate: &candidate,
+                current_prepared,
+                candidate_prepared: &candidate_prepared,
+                proof: &proof,
+                kind,
+                active_milliseconds,
+            },
+        );
+        self.detail = match result {
+            Ok(detail) => detail,
+            Err(MetadataPublicationError::Host(error)) => return Err(error.into()),
+            Err(MetadataPublicationError::Store(error)) => return Err(error.into()),
+        };
+        super::super::emit_changed(self.app, &self.detail);
+        Ok(true)
+    }
+
+    fn refuse_next_metadata_capacity(
+        &mut self,
+        response: &InvestigationResponseMeta,
+        original: &serde_json::Value,
+    ) -> Result<(), Failure> {
+        // Preparation and storage/tool limits never enter this branch. Keep the
+        // exact original model response; no query/replay rewrite is persisted.
+        self.check_new_work()?;
+        self.detail = self
+            .state
+            .jobs
+            .lock()
+            .map_err(|_| HostError::Operational)?
+            .refuse_next_prompt_capacity(
+                self.execution,
+                self.detail.summary.revision,
+                response,
+                original,
+                CapacityRefusalReason::PromptCapacity,
+            )?;
+        super::super::emit_changed(self.app, &self.detail);
+        Ok(())
+    }
+}

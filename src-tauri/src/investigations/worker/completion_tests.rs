@@ -266,6 +266,9 @@ impl CompletionFixture {
 #[path = "progressive_tests.rs"]
 mod progressive_tests;
 
+#[path = "next_prompt_tests.rs"]
+mod next_prompt_tests;
+
 // AC-0266: actual worker chooses each action; one refusal returns protected
 // feedback, then ordinary source/inventory reads support a real result5.
 #[test]

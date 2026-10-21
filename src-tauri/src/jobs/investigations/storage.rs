@@ -177,7 +177,7 @@ pub(super) fn encode(
     Ok(writer.bytes)
 }
 
-fn decode<T: serde::de::DeserializeOwned + Serialize>(
+pub(super) fn decode<T: serde::de::DeserializeOwned + Serialize>(
     bytes: &[u8],
     hash: &str,
 ) -> Result<T, InvestigationStoreError> {
@@ -570,8 +570,23 @@ pub(super) fn validate_inspection_result(
         .ok_or(InvestigationStoreError::Invalid)?;
     if let Some(intent) = &task.completion_intent {
         let sources = intent.obligations.sources_with_policy(policy)?;
+        if task
+            .detail
+            .summary
+            .specialist_id
+            .uses_next_prompt_admission()
+        {
+            admission_contract::validate_pairing(task)?;
+        }
         if result.schema_version
             != if task
+                .detail
+                .summary
+                .specialist_id
+                .uses_next_prompt_admission()
+            {
+                7
+            } else if task
                 .detail
                 .summary
                 .specialist_id
@@ -663,6 +678,46 @@ pub(super) fn load_task(
 ) -> Result<StoredTask, InvestigationStoreError> {
     let task = load_task_base(connection, id)?;
     super::completion::validate_saved(connection, &task)?;
+    Ok(task)
+}
+
+/// Internal execution routing only. The bounded, checksummed discriminator
+/// chooses a full validator; it never grants authority or opens public history.
+pub(super) fn load_execution_task(
+    connection: &Connection,
+    id: &str,
+) -> Result<StoredTask, InvestigationStoreError> {
+    if connection.is_autocommit() || !id_valid(id) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let row: Option<(Option<Vec<u8>>, Option<String>)> = connection.query_row(
+        "SELECT CASE WHEN typeof(record)='blob' AND length(record)<=262144 THEN record END, CASE WHEN typeof(record_hash)='text' AND length(CAST(record_hash AS BLOB))=64 THEN record_hash END FROM investigation_tasks WHERE id=?1",
+        [id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let (Some(bytes), Some(hash)) = row.ok_or(InvestigationStoreError::Missing)? else {
+        return Err(InvestigationStoreError::Invalid);
+    };
+    let discriminator: StoredTask = decode(&bytes, &hash)?;
+    if discriminator
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        load_next_prompt_task(connection, id)
+    } else {
+        load_task(connection, id)
+    }
+}
+
+/// Full internal reader for callers that are not themselves validating a
+/// historical projection. Keep the base reader separate to avoid replay cycles.
+pub(super) fn load_next_prompt_task(
+    connection: &Connection,
+    id: &str,
+) -> Result<StoredTask, InvestigationStoreError> {
+    let task = load_next_prompt_task_base(connection, id)?;
+    completion::validate_saved(connection, &task)?;
     Ok(task)
 }
 
@@ -774,6 +829,24 @@ pub(super) fn insert_task(
     task: &StoredTask,
 ) -> Result<(), InvestigationStoreError> {
     validate_task(task)?;
+    insert_validated_task(connection, task)
+}
+
+pub(super) fn insert_next_prompt_task(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<(), InvestigationStoreError> {
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    validate_next_prompt_task(task)?;
+    insert_validated_task(connection, task)
+}
+
+fn insert_validated_task(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<(), InvestigationStoreError> {
     let bytes = encode(task, MAX_RECORD_BYTES)?;
     one(connection.execute("INSERT INTO investigation_tasks(id,nonce,conversation_id,job_id,revision,live,record,record_hash) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![task.detail.summary.investigation_id,task.nonce,task.detail.summary.conversation_id,task.detail.summary.job_id,signed(task.detail.summary.revision)?,i64::from(task.phase!=Phase::Terminal),bytes,core_prov::content_hash(&bytes)])?)
 }
@@ -1152,7 +1225,7 @@ pub(super) fn load_ledger(
     {
         return Err(InvestigationStoreError::Invalid);
     }
-    let archive = super::coverage::load(connection, &task.detail.summary.investigation_id)?;
+    let archive = super::coverage::load_for_task(connection, task)?;
     match (&ledger.coverage, archive.as_ref()) {
         (None, None) => {}
         (Some(proof), Some(archive)) if proof == archive.proof() => {

@@ -46,40 +46,7 @@ pub(in crate::jobs::investigations) fn envelope(
         return Err(InvestigationStoreError::Invalid);
     }
     let charged = source_validation::project_validation(connection, reservation_task, reservation)?;
-    let mut acquired = core.ledger.clone();
-    let source = &reservation.source;
-    let source_count = acquired
-        .citations
-        .iter()
-        .filter(|c| c.source.is_some())
-        .count();
-    acquired.revision = acquired
-        .revision
-        .checked_add(1)
-        .ok_or(InvestigationStoreError::Capacity)?;
-    acquired.citations.push(InvestigationCitation {
-        citation_id: format!(
-            "evidence-{}",
-            source_count
-                .checked_add(1)
-                .ok_or(InvestigationStoreError::Capacity)?
-        ),
-        fact: source.fact.clone(),
-        fact_digest: source.fact_digest.clone(),
-        source: Some(source.source.clone()),
-        role: Some(source.role),
-        index: Some(source.index),
-        text_hash: Some("f".repeat(64)),
-        origin: InvestigationEvidenceOrigin::CapturedPrimarySource {
-            registered_source_id: source.registered_source_id.clone(),
-            receipt_id: source.receipt_id.clone(),
-            receipt_inventory_index: source.receipt_inventory_index,
-            captured: source.captured.clone(),
-            scope: agents::PrimarySourceScope::PrimarySourceOnly,
-            input_closure: agents::InputClosureStatus::InputClosureNotEstablished,
-        },
-    });
-    acquired.validate_with_policy(&INVESTIGATION_V2_POLICY)?;
+    let acquired = sizing_acquired_ledger(&core.ledger, &reservation.source)?;
     let mut envelope = SettlementEnvelope {
         bytes: 0,
         events: 0,
@@ -103,19 +70,17 @@ pub(in crate::jobs::investigations) fn envelope(
         if charge.is_some() {
             alternatives.extend([
                 (DispositionKind::Acquired, None, Some(acquired.clone())),
-                (
-                    DispositionKind::ReadUnavailable,
-                    Some(UnavailableReason::PinnedTargetAbsent),
-                    Some(core.ledger.clone()),
-                ),
-                (
-                    DispositionKind::ReadUnavailable,
-                    Some(UnavailableReason::RangeOutOfBounds),
-                    Some(core.ledger.clone()),
-                ),
                 (DispositionKind::KnownReadDiscarded, None, None),
                 (DispositionKind::BoundInvariantDefect, None, None),
             ]);
+            for reason in SOURCE_UNAVAILABLE_REASONS {
+                source_unavailable_reason(&reason)?;
+                alternatives.push((
+                    DispositionKind::ReadUnavailable,
+                    Some(reason),
+                    Some(core.ledger.clone()),
+                ));
+            }
         }
         for (kind, reason, ledger) in alternatives {
             for cancelled in [false, true] {
@@ -183,4 +148,46 @@ pub(in crate::jobs::investigations) fn envelope(
         return Err(InvestigationStoreError::Capacity);
     }
     Ok(envelope)
+}
+
+/// Private metadata-only sizing projection. Its placeholder text hash is never
+/// presented to the actual SettlementPlan constructor or persisted.
+pub(super) fn sizing_acquired_ledger(
+    base: &InvestigationInputLedger,
+    source: &InvestigationInspectionTarget,
+) -> Result<InvestigationInputLedger, InvestigationStoreError> {
+    let mut acquired = base.clone();
+    let source_count = acquired
+        .citations
+        .iter()
+        .filter(|c| c.source.is_some())
+        .count();
+    acquired.revision = acquired
+        .revision
+        .checked_add(1)
+        .ok_or(InvestigationStoreError::Capacity)?;
+    acquired.citations.push(InvestigationCitation {
+        citation_id: format!(
+            "evidence-{}",
+            source_count
+                .checked_add(1)
+                .ok_or(InvestigationStoreError::Capacity)?
+        ),
+        fact: source.fact.clone(),
+        fact_digest: source.fact_digest.clone(),
+        source: Some(source.source.clone()),
+        role: Some(source.role),
+        index: Some(source.index),
+        text_hash: Some("f".repeat(64)),
+        origin: InvestigationEvidenceOrigin::CapturedPrimarySource {
+            registered_source_id: source.registered_source_id.clone(),
+            receipt_id: source.receipt_id.clone(),
+            receipt_inventory_index: source.receipt_inventory_index,
+            captured: source.captured.clone(),
+            scope: agents::PrimarySourceScope::PrimarySourceOnly,
+            input_closure: agents::InputClosureStatus::InputClosureNotEstablished,
+        },
+    });
+    acquired.validate_with_policy(&INVESTIGATION_V2_POLICY)?;
+    Ok(acquired)
 }

@@ -346,14 +346,23 @@ impl InvestigationInput {
     ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
         let (mut prompt, contract) = self.admission_reserve_basis(policy)?;
         target.validate()?;
-        // First closed slice supports descriptors already pinned by the exact
-        // immutable completion contract. A merely self-consistent descriptor
-        // for a different receipt range is not source authority.
-        if !contract
+        // This certificate bounds bytes, not source authority. Selected facts
+        // discovered through query are readable even when not named by an
+        // original obligation. Bind their frozen receipt identity below; the
+        // host must separately authenticate the exact range under retained
+        // guards before reservation and again before actual source access.
+        // An explicitly pinned obligation keeps its exact descriptor. The
+        // broader selected-fact path cannot rebind that existing contract slot.
+        if contract
             .obligations
             .sources_with_policy(policy)?
             .iter()
-            .any(|item| item == target)
+            .any(|pinned| {
+                pinned.fact == target.fact
+                    && pinned.role == target.role
+                    && pinned.index == target.index
+                    && pinned != target
+            })
         {
             return Err(InvestigationError::InvalidInput);
         }

@@ -3,6 +3,42 @@
 use super::*;
 
 impl JobStore {
+    /// Read-only starting metadata for the actual first prompt. The caller keeps
+    /// its original request; redacted history cannot reconstruct that authority.
+    pub(crate) fn investigation_next_prompt_initial_state(
+        &self,
+        execution: &JobExecution,
+        revision: u64,
+        request: &StagedObligationRequest,
+    ) -> Result<(InvestigationDetail, ProtectedCompletionMetadata), InvestigationStoreError> {
+        execution.verify()?;
+        if execution.inner.namespace != self.namespace {
+            return Err(InvestigationStoreError::Ownership);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let id = transitions::task_id_for_job(&tx, execution.id())?
+            .ok_or(InvestigationStoreError::Missing)?;
+        let task = load_next_prompt_task(&tx, &id)?;
+        transitions::check_identity(&task, execution)?;
+        if task.detail.summary.revision != revision || task.phase != Phase::Preparing {
+            return Err(InvestigationStoreError::Stale);
+        }
+        if task.detail.summary.cancel_requested {
+            return Err(InvestigationStoreError::Cancelled);
+        }
+        transitions::check_job(&tx, execution, false)?;
+        if request.intent_hash_with_policy(&INVESTIGATION_V2_POLICY)? != task.intent_hash {
+            return Err(InvestigationStoreError::Conflict);
+        }
+        if task.ledger_revision.is_some() || task.ledger_hash.is_some() {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let metadata = completion::derive_protected_metadata(&task, vec![], &[])?;
+        tx.commit()?;
+        Ok((task.detail, metadata))
+    }
+
     pub(crate) fn admit_next_prompt_initial_context(
         &mut self,
         execution: &JobExecution,
