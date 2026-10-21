@@ -2,8 +2,8 @@
 use super::*;
 use core_graph::coverage::{CoverageReadLimits, MAX_INVENTORY_BYTES};
 
-/// Maximum UTF-8 bytes in a recorded identity, matching the coverage store.
-pub const MAX_COVERAGE_IDENTITY_BYTES: usize = 256;
+/// Maximum UTF-8 bytes in a recorded identity, shared with the coverage store.
+pub use core_graph::coverage::MAX_IDENTITY_BYTES as MAX_COVERAGE_IDENTITY_BYTES;
 /// Maximum repos/basis entries accepted by a durable proof.
 pub const MAX_COVERAGE_REPOS: usize = CoverageReadLimits::MAX_RECORDS;
 
