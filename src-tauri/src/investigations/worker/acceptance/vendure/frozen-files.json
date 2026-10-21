@@ -1,0 +1,87 @@
+{
+  "packages/core/src/api/resolvers/shop/shop-order.resolver.ts": {
+    "blake3": "ab9967f8f8570853240dc3a4812dee1aef2180678dea297792006c008c59e4ce",
+    "byte_len": 19405,
+    "sha256": "1fbcee5fda93e57498ae65d5b9987821e92ccebb89a921cdf64d4dd2134bca0d"
+  },
+  "packages/core/src/common/finite-state-machine/finite-state-machine.ts": {
+    "blake3": "30c878e95c41a4e36233280105639f044b87323a87fff0798a3ba5a5a5e553a6",
+    "byte_len": 3668,
+    "sha256": "eb275983f0d4d35a5aa71720ff9789789cb58269512a364b95c4a1d5d3c8725f"
+  },
+  "packages/core/src/common/finite-state-machine/merge-transition-definitions.ts": {
+    "blake3": "e09a5ea18afcd4b7ceaa0ce177dbab6751e1185f63668795ef24507ef430c329",
+    "byte_len": 848,
+    "sha256": "528601807a75a032184b7cc124092277a04ab9f7e9c0f5e46e8c015146cebe97"
+  },
+  "packages/core/src/common/finite-state-machine/types.ts": {
+    "blake3": "a0a72cefb6e590fd07a7b723995e4677dd3bf10727ff7713c0c2b043a9b990ac",
+    "byte_len": 3424,
+    "sha256": "b22cb7276ff11aa7a06e71a056224054c9e1dca9cd6d63db1d4347996cc653d4"
+  },
+  "packages/core/src/common/finite-state-machine/validate-transition-definition.ts": {
+    "blake3": "049ae1e4f257734d26c82517a57886a2a4e288c8c450a011c10407039f4faeee",
+    "byte_len": 2067,
+    "sha256": "76033e1e98e003c1c51eb9dff04f3c37bc9d724275054f3453f91911c893c05a"
+  },
+  "packages/core/src/config/catalog/multi-channel-stock-location-strategy.ts": {
+    "blake3": "0c6fe82d68c82e44f98be9bcec586453488467068835f3198447def851d30d3f",
+    "byte_len": 9972,
+    "sha256": "82fcda7a83265be981cd44849050539c433cdcd6e7a69d4c570b8c00f90675f4"
+  },
+  "packages/core/src/config/default-config.ts": {
+    "blake3": "14be5d959237ac24269e78f8dced69a6cb1f9f077e65854339bbf3e58c829999",
+    "byte_len": 12753,
+    "sha256": "a126d8a594d6a44c4f04ab31de020965940ea624daaa29f62ece9e5eb57b77be"
+  },
+  "packages/core/src/config/order/default-order-placed-strategy.ts": {
+    "blake3": "ce3bb28a74653a3b79ee2c1f404ecd3e5586db28bbf16c9ad91a107ddb1b9f4b",
+    "byte_len": 896,
+    "sha256": "c4377652a48d55c69cbe99edb788e1130c74b9fcee30b91e9f13716071be77ad"
+  },
+  "packages/core/src/config/order/default-order-process.ts": {
+    "blake3": "b796521f240bf1213887fe8c79c9d52166f576ae461fddb90b9256347c5b581c",
+    "byte_len": 20102,
+    "sha256": "2de47767c358523a6620f9cfaea96c3e2f946a04dad62e8d92ea9862fd50d41f"
+  },
+  "packages/core/src/config/order/default-stock-allocation-strategy.ts": {
+    "blake3": "5987a7216c792a74eb9a1a5c9d61ecd25ba7de1d74b1b042580d0dd35fcf2276",
+    "byte_len": 871,
+    "sha256": "f905be97d657c93d57905d6245657465aba6615ea868ac4b0a0dc16d01f97493"
+  },
+  "packages/core/src/service/helpers/order-state-machine/order-state-machine.ts": {
+    "blake3": "715ea9e66937e7f7ccce1b7da30c715266371f031228fec2dfe7b09757d6be44",
+    "byte_len": 4325,
+    "sha256": "444b6793f629798e1e8353072f2bb786ec67149c5266473ced5ca049fe4ce90d"
+  },
+  "packages/core/src/service/helpers/order-state-machine/order-state.ts": {
+    "blake3": "3828c11c521485572ecacc0f273064608fd5d0b5d6ede8248dc5cedefca29b71",
+    "byte_len": 1379,
+    "sha256": "99edc14942897af3ff089569e3dc4abd43f8126171e739b2a47f0b307dd295e4"
+  },
+  "packages/core/src/service/services/global-settings.service.ts": {
+    "blake3": "78b7435416a0611583d677a50538afd1c098888672432d25401a4b7a1c88ae87",
+    "byte_len": 3599,
+    "sha256": "77eb8331a07e4d00108e1fcf2af0fbc050cab96b30f1a15b7f2c838c8bb6cde8"
+  },
+  "packages/core/src/service/services/order.service.ts": {
+    "blake3": "4f626e95adbb35fc024ea3f3571738249b487d445accc6b859a802cb9a3a32fb",
+    "byte_len": 113725,
+    "sha256": "c0343924f6454cc4ac565a9adda04eb7a8ca0bd10c155c2172a27b58ab036db3"
+  },
+  "packages/core/src/service/services/product-variant.service.ts": {
+    "blake3": "71feb995f13ac074754364e7fe72353f03bed3357ccd56109b69cf9e04c6dadd",
+    "byte_len": 50293,
+    "sha256": "69dba7be26a6e5e66dee009667156edf1b67c420e1604fc4c29d2e379392b864"
+  },
+  "packages/core/src/service/services/stock-level.service.ts": {
+    "blake3": "13e16797768e28afb1024dfccb9af11580ffd48a186e34dbe6aa6b5b0f356e35",
+    "byte_len": 6627,
+    "sha256": "ae299bd90820dedb2deef8de5b4072d3c8a337ca8dfba93d7dee24e5070032f0"
+  },
+  "packages/core/src/service/services/stock-location.service.ts": {
+    "blake3": "1e84a6700b1c541ca896606d49dfe61603b9e37562babb1929afd0e86460d9b1",
+    "byte_len": 16767,
+    "sha256": "eedf4e4aeec0c1cd0da72fe775e3b724f224ec1186e206bdb413a85c65b06e67"
+  }
+}

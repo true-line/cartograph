@@ -201,17 +201,20 @@ fn verify_config(config: &Path, expected_hash: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Metadata independently checked against the SHA256-pinned Git-blob proof and
+// staged source bytes; each BLAKE3 digest was recomputed from those same bytes.
+// Embedded identities permit retained-store reopening after checkout removal.
+fn frozen_files() -> Result<std::collections::BTreeMap<String, input::VerifiedFile>, String> {
+    serde_json::from_str(include_str!("vendure/frozen-files.json"))
+        .map_err(|_| "invalid embedded frozen file identities".into())
+}
+
 fn verify_frozen_input(input: &input::VerifiedInput) -> Result<(), String> {
     if input.repo != "vendurehq/vendure"
         || input.commit_sha != COMMIT
         || input.manifest_sha256 != MANIFEST_SHA
         || input.proof_sha256 != PROOF_SHA
-        || input.files.len() != 17
-        || input
-            .files
-            .values()
-            .try_fold(0_u64, |total, file| total.checked_add(file.byte_len))
-            != Some(270_721)
+        || input.files != frozen_files()?
     {
         return Err("frozen Vendure input identity mismatch".into());
     }

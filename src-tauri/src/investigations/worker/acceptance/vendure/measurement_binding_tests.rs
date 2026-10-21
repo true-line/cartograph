@@ -70,8 +70,28 @@ fn vendure_measurement_shared_frozen_gate_checks_every_pinned_dimension() {
             .files
             .insert(format!("fixture-metadata-{index}.ts"), file.clone());
     }
+    // Four forged summary fields plus equal count/total never establish the
+    // original closure: the arbitrary paths and per-file identities must fail.
+    assert!(verify_frozen_input(&input).is_err());
+    input.files = frozen_files().unwrap();
     verify_frozen_input(&input).unwrap();
-    for field in ["repo", "commit", "manifest", "proof", "count", "bytes"] {
+    assert_eq!(input.files.len(), 17);
+    assert_eq!(
+        input.files.values().map(|file| file.byte_len).sum::<u64>(),
+        270_721
+    );
+    for field in [
+        "repo",
+        "commit",
+        "manifest",
+        "proof",
+        "count",
+        "bytes",
+        "path",
+        "sha256",
+        "blake3",
+        "same_total_sizes",
+    ] {
         let mut changed = input.clone();
         match field {
             "repo" => changed.repo = "example/fixture".into(),
@@ -82,10 +102,35 @@ fn vendure_measurement_shared_frozen_gate_checks_every_pinned_dimension() {
                 changed.files.pop_first();
             }
             "bytes" => changed.files.values_mut().next().unwrap().byte_len += 1,
+            "path" => {
+                let (path, file) = changed.files.pop_first().unwrap();
+                changed.files.insert(format!("altered/{path}"), file);
+            }
+            "sha256" => changed.files.values_mut().next().unwrap().sha256 = "0".repeat(64),
+            "blake3" => changed.files.values_mut().next().unwrap().blake3 = "0".repeat(64),
+            "same_total_sizes" => {
+                let mut files = changed.files.values_mut();
+                files.next().unwrap().byte_len += 1;
+                files.next().unwrap().byte_len -= 1;
+            }
             _ => unreachable!(),
+        }
+        if matches!(field, "path" | "sha256" | "blake3" | "same_total_sizes") {
+            assert_eq!(changed.files.len(), input.files.len());
+            assert_eq!(
+                changed
+                    .files
+                    .values()
+                    .map(|file| file.byte_len)
+                    .sum::<u64>(),
+                270_721
+            );
         }
         assert!(verify_frozen_input(&changed).is_err(), "{field}");
     }
+    // Frozen metadata validation does not reopen the original checkout.
+    std::fs::remove_dir_all(&case.root).unwrap();
+    verify_frozen_input(&input).unwrap();
 }
 
 // The same fixed wrapper used by the ignored manual entrypoint refuses this
