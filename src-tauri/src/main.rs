@@ -9121,12 +9121,23 @@ export function App() {
             languages: Default::default(),
             gate_key: gate_key.into(),
         };
-        let first = super::coverage_config_hash(&[plugin("gate-1")]);
-        assert_eq!(first, super::coverage_config_hash(&[plugin("gate-1")]));
-        assert_ne!(first, super::coverage_config_hash(&[plugin("gate-2")]));
-        let none = serde_json::json!({"basis": "coverage-config-v1", "plugins": []});
+        let registries = crate::Registries::builtin();
+        let first = super::coverage_config_hash(&[plugin("gate-1")], registries);
         assert_eq!(
-            super::coverage_config_hash(&[]),
+            first,
+            super::coverage_config_hash(&[plugin("gate-1")], registries)
+        );
+        assert_ne!(
+            first,
+            super::coverage_config_hash(&[plugin("gate-2")], registries)
+        );
+        let none = serde_json::json!({
+            "basis": "coverage-config-v2",
+            "plugins": [],
+            "registries": registries.identity(),
+        });
+        assert_eq!(
+            super::coverage_config_hash(&[], registries),
             core_prov::content_hash(none.to_string().as_bytes())
         );
     }
