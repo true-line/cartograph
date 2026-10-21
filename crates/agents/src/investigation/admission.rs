@@ -221,7 +221,7 @@ impl InvestigationInputLedger {
                 .ok_or(InvestigationError::LimitExceeded)?;
             returned_facts += query.returned_facts;
         }
-        if query_bytes > 96 * 1024 || returned_facts < selections.len() {
+        if query_bytes > MAX_TOTAL_QUERY_BYTES || returned_facts < selections.len() {
             return Err(InvestigationError::InvalidInput);
         }
         bounded_bytes(self, MAX_MANIFEST_BYTES)?;

@@ -123,10 +123,13 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
             <div className="investigation-actions">
               {summary.actions.can_cancel && <button type="button" className="danger-button" disabled={state.actionBusy}
                 onClick={() => void state.cancel()}>Request cancellation</button>}
-              {summary.actions.can_follow_up && <button type="button" className="secondary-button" disabled={locked} onClick={() => {
+              {summary.actions.can_follow_up && <button type="button" className="secondary-button" disabled={locked || state.catalogLoading || !state.catalog} onClick={() => {
+                if (state.catalogLoading || !state.catalog) return;
                 setParent({ conversation_id: summary.conversation_id, parent_id: summary.investigation_id });
                 setScopeType(summary.scope.type); if (summary.scope.type === 'neighborhood') { setAnchor(summary.scope.anchor); setHops(summary.scope.hops); }
-                setSpecialistId(summary.specialist_id.startsWith('evidence-auditor@') ? 'evidence-auditor@3' : 'domain-analyst@3'); setProviderMode(summary.provider_mode); setQuestion(''); questionRef.current?.focus();
+                setSpecialistId(state.catalog?.specialists.some((item) => item.id === summary.specialist_id)
+                  ? summary.specialist_id : summary.specialist_id.startsWith('evidence-auditor@') ? 'evidence-auditor@3' : 'domain-analyst@3');
+                setProviderMode(summary.provider_mode); setQuestion(''); questionRef.current?.focus();
               }}>Ask a follow-up</button>}
               {state.consent && <button type="button" disabled={state.actionBusy || state.loading} onClick={state.showConsent}>Review next cloud action</button>}
             </div>

@@ -17,6 +17,8 @@ pub(crate) async fn investigation_specialists(
             specialists: [
                 SpecialistId::DomainAnalystV3,
                 SpecialistId::EvidenceAuditorV3,
+                SpecialistId::DomainAnalystV4,
+                SpecialistId::EvidenceAuditorV4,
             ]
             .into_iter()
             .map(|id| id.definition())

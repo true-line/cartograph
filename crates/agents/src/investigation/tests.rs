@@ -559,3 +559,6 @@ mod projection_tests;
 
 #[path = "sealing_tests.rs"]
 mod sealing_tests;
+
+#[path = "turn_tests.rs"]
+mod turn_tests;

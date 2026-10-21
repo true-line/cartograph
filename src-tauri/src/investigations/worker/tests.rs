@@ -19,6 +19,10 @@ enum Mode {
     CancelTool,
     Malformed,
     Unknown,
+    RepeatQuery,
+    RepeatRead,
+    UnavailableRead,
+    PanicAfterQuery,
 }
 
 /// One deterministic provider action per actual host invocation. The fixture
@@ -29,6 +33,7 @@ struct Scripted {
     mode: Mode,
     cancel: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     copied: Mutex<Vec<String>>,
+    prompts: Mutex<Vec<Value>>,
 }
 impl Scripted {
     fn new(mode: Mode) -> Self {
@@ -37,6 +42,7 @@ impl Scripted {
             mode,
             cancel: Mutex::new(None),
             copied: Mutex::new(vec![]),
+            prompts: Mutex::new(vec![]),
         }
     }
 }
@@ -80,10 +86,20 @@ impl LlmProvider for Scripted {
             });
         }
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
-        let action = if call == 0 {
-            json!({ "type": "query_context", "query": { "scope": {"type":"all"}, "kind":"node",
-                "labels":["BusinessRule"], "max_facts":1, "max_bytes":32768, "cursor":null } })
-        } else if call == 1 {
+        self.prompts.lock().unwrap().push(prompt.clone());
+        assert!(
+            !(call == 1 && matches!(self.mode, Mode::PanicAfterQuery)),
+            "simulated owner loss"
+        );
+        let action = if call == 0 || matches!(self.mode, Mode::RepeatQuery) {
+            if matches!(self.mode, Mode::RepeatQuery) {
+                json!({ "type":"query_context", "query": { "scope":{"type":"all"}, "kind":null,
+                    "labels":[], "max_facts":12, "max_bytes":16384, "cursor":null } })
+            } else {
+                json!({ "type": "query_context", "query": { "scope": {"type":"all"}, "kind":"node",
+                    "labels":["BusinessRule"], "max_facts":1, "max_bytes":32768, "cursor":null } })
+            }
+        } else if call == 1 || (call == 2 && matches!(self.mode, Mode::RepeatRead)) {
             let option = if prompt.get("compact_context").is_some() {
                 &prompt["compact_context"]["evidence_options"][0]
             } else {
@@ -95,9 +111,18 @@ impl LlmProvider for Scripted {
                 .iter()
                 .find(|range| range["role"] == "definition_initializer")
                 .unwrap();
-            json!({ "type":"read_evidence", "fact":option["fact"], "role":range["role"], "index":range["index"] })
+            json!({ "type":"read_evidence", "fact":option["fact"], "role":range["role"],
+                "index":if matches!(self.mode, Mode::UnavailableRead) { json!(999) } else { range["index"].clone() } })
         } else {
-            assert_eq!(call, 2, "no hidden repair, retry or extra model step");
+            assert_eq!(
+                call,
+                if matches!(self.mode, Mode::RepeatRead) {
+                    3
+                } else {
+                    2
+                },
+                "no hidden repair, retry or extra model step"
+            );
             let citations = prompt
                 .get("citations")
                 .unwrap_or(&prompt["input_ledger"]["citations"])
@@ -668,3 +693,6 @@ fn investigation_worker_records_unknown_transport_outcome_without_replay() {
 
 #[path = "acceptance.rs"]
 mod acceptance;
+
+#[path = "turn_tests.rs"]
+mod turn_tests;
