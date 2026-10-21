@@ -768,3 +768,111 @@ fn completion_v7_partial_and_metadata_tampering_are_distinct() {
             .is_err()
     );
 }
+
+// AC-0266: policy-aware finish/refusal paths keep v1's literal bounds and
+// identities; the saved policy, not a static ceiling, sets every boundary.
+#[test]
+fn staged_policy_paths_preserve_v1_bounds_and_identities() {
+    let policy = &INVESTIGATION_V1_POLICY;
+    let entries = |count: usize| RefusalFeedback {
+        schema_version: 1,
+        unmet: (0..count)
+            .map(|index| FeedbackEntry {
+                obligation_id: format!("{index:064x}"),
+                kind: "inventory".into(),
+                reason: RefusalReason::AcquiredNotSupplied,
+            })
+            .collect(),
+    };
+    let widest = entries(policy.max_completion_obligations());
+    assert_eq!(
+        widest.bytes().unwrap(),
+        widest.bytes_with_policy(policy).unwrap()
+    );
+    assert!(widest.bytes().unwrap().len() <= 2048);
+    assert_eq!(
+        widest.fingerprint().unwrap(),
+        widest.fingerprint_with_policy(policy).unwrap()
+    );
+    let over = entries(policy.max_completion_obligations() + 1);
+    assert_eq!(over.bytes(), Err(InvestigationError::InvalidInput));
+    assert_eq!(
+        over.bytes_with_policy(policy),
+        Err(InvestigationError::InvalidInput)
+    );
+
+    let metadata = |ids: usize| ProtectedCompletionMetadata {
+        schema_version: 1,
+        request_hash: "a".repeat(64),
+        obligations_hash: "b".repeat(64),
+        completed_attempt_ids: (0..ids).map(|index| format!("{index:064x}")).collect(),
+        refusal_count: 1,
+        last_refusal_id: Some("c".repeat(64)),
+        feedback: Some(widest.clone()),
+    };
+    let full = metadata(policy.max_completed_attempts());
+    assert_eq!(
+        full.fingerprint().unwrap(),
+        full.fingerprint_with_policy(policy).unwrap()
+    );
+    let excess = metadata(policy.max_completed_attempts() + 1);
+    assert_eq!(excess.validate(), Err(InvestigationError::InvalidInput));
+    assert_eq!(
+        excess.validate_with_policy(policy),
+        Err(InvestigationError::InvalidInput)
+    );
+
+    for (source, inventory) in [(true, true), (true, false), (false, false)] {
+        let fixture = fixture(source, inventory, false);
+        let legacy = decide(&fixture, &finish(false), &[]);
+        let ledger = fixture.input.ledger();
+        let scoped = admit_finish_with_policy(
+            &fixture.request,
+            "task",
+            "finish-step",
+            &fixture.input,
+            &fixture.disclosure,
+            &finish(false),
+            &[],
+            None,
+            "now".into(),
+            policy,
+        );
+        match (legacy, scoped) {
+            (Ok(FinishDecision::Accepted(a)), Ok(FinishDecision::Accepted(b))) => {
+                assert_eq!(a.assessment.len(), b.assessment.len());
+            }
+            (
+                Ok(FinishDecision::Refused { feedback: a, .. }),
+                Ok(FinishDecision::Refused { feedback: b, .. }),
+            ) => assert_eq!(a, b),
+            _ => panic!("policy-aware finish diverged from v1"),
+        }
+        let request = fixture.request.normalized().unwrap();
+        assert_eq!(
+            derive_assessment_for_binding(
+                &request.intent_hash().unwrap(),
+                &request.obligations,
+                "task",
+                "finish-step",
+                ledger,
+                &fixture.disclosure,
+                CompletionOutcome::Supported,
+                &[],
+            )
+            .unwrap(),
+            derive_assessment_for_binding_with_policy(
+                &request.intent_hash().unwrap(),
+                &request.obligations,
+                "task",
+                "finish-step",
+                ledger,
+                &fixture.disclosure,
+                CompletionOutcome::Supported,
+                &[],
+                policy,
+            )
+            .unwrap()
+        );
+    }
+}

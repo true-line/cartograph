@@ -112,13 +112,19 @@ pub(super) struct CommonRequestFields<'a> {
 
 impl CommonRequestFields<'_> {
     pub fn validate(&self) -> Result<(), InvestigationError> {
+        self.validate_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+    pub fn validate_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
         self.scope.validate()?;
         if self.expected_context_id.is_some_and(|id| {
             !id.strip_prefix("context-v2:")
                 .is_some_and(crate::source_basis::hash)
         }) || !text(self.question, MAX_QUESTION_BYTES)
             || !opaque_id(self.request_nonce)
-            || self.limit_profile != "investigation-v1"
+            || self.limit_profile != policy.profile()
             || self
                 .expected_graph_revision
                 .is_some_and(|v| !context_hash(v))
@@ -515,7 +521,15 @@ pub struct InvestigationReceiptReference {
 
 impl InvestigationInputLedger {
     pub fn fingerprint(&self) -> Result<String, InvestigationError> {
-        self.validate()?;
+        self.fingerprint_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+
+    /// Policy validation changes admission, never the legacy wire or hash domain.
+    pub fn fingerprint_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<String, InvestigationError> {
+        self.validate_with_policy(policy)?;
         Ok(crate::source_basis::domain_hash(
             if self.schema_version == 2 {
                 b"cartograph:investigation-input-ledger:v2\0"

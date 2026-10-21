@@ -83,10 +83,17 @@ pub struct InvestigationCompletionContract {
 }
 impl InvestigationCompletionContract {
     pub fn validate(&self) -> Result<(), InvestigationError> {
+        self.validate_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+
+    pub fn validate_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
         if self.schema_version != 1
             || !crate::source_basis::hash(&self.request_hash)
-            || self.obligations != self.obligations.normalized()?
-            || self.obligations.fingerprint()? != self.obligations_hash
+            || self.obligations != self.obligations.normalized_with_policy(policy)?
+            || self.obligations.fingerprint_with_policy(policy)? != self.obligations_hash
         {
             return Err(InvestigationError::InvalidInput);
         }
@@ -94,7 +101,14 @@ impl InvestigationCompletionContract {
         Ok(())
     }
     pub fn fingerprint(&self) -> Result<String, InvestigationError> {
-        self.validate()?;
+        self.fingerprint_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+
+    pub fn fingerprint_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<String, InvestigationError> {
+        self.validate_with_policy(policy)?;
         Ok(crate::source_basis::domain_hash(
             b"cartograph:completion-contract:v1\0",
             &bounded_bytes(self, MAX_INPUT_BYTES)?,
@@ -227,6 +241,16 @@ impl InvestigationCompletionResult {
         knowledge: KnowledgeCompleteness,
         limitations: &[String],
     ) -> Result<(), InvestigationError> {
+        self.validate_with_policy(findings, knowledge, limitations, &INVESTIGATION_V1_POLICY)
+    }
+
+    pub fn validate_with_policy(
+        &self,
+        findings: &[InvestigationFinding],
+        knowledge: KnowledgeCompleteness,
+        limitations: &[String],
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
         if self.schema_version != 1
             || [
                 &self.request_hash,
@@ -236,7 +260,7 @@ impl InvestigationCompletionResult {
             .iter()
             .any(|hash| !crate::source_basis::hash(hash))
             || self.assessment.is_empty()
-            || self.assessment.len() > 12
+            || self.assessment.len() > policy.max_completion_obligations()
             || self.assessment.windows(2).any(|pair| {
                 (&pair[0].kind, &pair[0].obligation_id) >= (&pair[1].kind, &pair[1].obligation_id)
             })
@@ -275,10 +299,17 @@ impl InvestigationCompletionDetail {
     /// Shape and canonical projection checks; the host must independently replay
     /// each observation against the durable invocation/attempt witnesses.
     pub fn validate(&self) -> Result<CompletionStatus, InvestigationError> {
+        self.validate_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+
+    pub fn validate_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<CompletionStatus, InvestigationError> {
         if self.schema_version != 1
             || !crate::source_basis::hash(&self.request_hash)
-            || self.obligations != self.obligations.normalized()?
-            || self.obligations_hash != self.obligations.fingerprint()?
+            || self.obligations != self.obligations.normalized_with_policy(policy)?
+            || self.obligations_hash != self.obligations.fingerprint_with_policy(policy)?
             || self.refusal_count > 2
         {
             return Err(InvestigationError::InvalidInput);
@@ -371,10 +402,32 @@ impl InvestigationResult {
         disclosure: &InvestigationDisclosure,
         attempts: &[super::staged_attempt::AttemptEvidence<'_>],
     ) -> Result<(), InvestigationError> {
-        let request = request.normalized()?;
-        request.validate_ledger(ledger)?;
-        self.validate_completion_for_binding(
-            &request.intent_hash()?,
+        self.validate_completion_with_policy(
+            request,
+            task,
+            step,
+            ledger,
+            disclosure,
+            attempts,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_completion_with_policy(
+        &self,
+        request: &super::obligations::StagedObligationRequest,
+        task: &str,
+        step: &str,
+        ledger: &InvestigationInputLedger,
+        disclosure: &InvestigationDisclosure,
+        attempts: &[super::staged_attempt::AttemptEvidence<'_>],
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        let request = request.normalized_with_policy(policy)?;
+        request.validate_ledger_with_policy(ledger, policy)?;
+        self.validate_completion_for_binding_with_policy(
+            &request.intent_hash_with_policy(policy)?,
             &request.obligations,
             &request.expected_context_id,
             request.expected_graph_revision.as_deref(),
@@ -383,6 +436,7 @@ impl InvestigationResult {
             ledger,
             disclosure,
             attempts,
+            policy,
         )
     }
 
@@ -401,8 +455,36 @@ impl InvestigationResult {
         disclosure: &InvestigationDisclosure,
         attempts: &[super::staged_attempt::AttemptEvidence<'_>],
     ) -> Result<(), InvestigationError> {
-        self.validate_with_disclosure(ledger, step, disclosure)?;
-        let envelope = envelope.normalized()?;
+        self.validate_completion_for_binding_with_policy(
+            request_hash,
+            envelope,
+            expected_context_id,
+            expected_graph_revision,
+            task,
+            step,
+            ledger,
+            disclosure,
+            attempts,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_completion_for_binding_with_policy(
+        &self,
+        request_hash: &str,
+        envelope: &ObligationEnvelope,
+        expected_context_id: &str,
+        expected_graph_revision: Option<&str>,
+        task: &str,
+        step: &str,
+        ledger: &InvestigationInputLedger,
+        disclosure: &InvestigationDisclosure,
+        attempts: &[super::staged_attempt::AttemptEvidence<'_>],
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        self.validate_with_disclosure_and_policy(ledger, step, disclosure, policy)?;
+        let envelope = envelope.normalized_with_policy(policy)?;
         let proof = ledger
             .coverage
             .as_ref()
@@ -433,17 +515,18 @@ impl InvestigationResult {
         let contract = InvestigationCompletionContract {
             schema_version: 1,
             request_hash: request_hash.to_owned(),
-            obligations_hash: envelope.fingerprint()?,
+            obligations_hash: envelope.fingerprint_with_policy(policy)?,
             obligations: envelope.clone(),
         };
         if self.investigation_id != task
             || completion.request_hash != contract.request_hash
             || completion.obligations_hash != contract.obligations_hash
             || disclosure.completion_contract_hash.as_deref()
-                != Some(contract.fingerprint()?.as_str())
-            || completion.finishing_attempts_hash != completed_attempts_hash(attempts)?
+                != Some(contract.fingerprint_with_policy(policy)?.as_str())
+            || completion.finishing_attempts_hash
+                != completed_attempts_hash_with_policy(attempts, policy)?
             || completion.assessment
-                != super::staged_finish::derive_assessment_for_binding(
+                != super::staged_finish::derive_assessment_for_binding_with_policy(
                     request_hash,
                     &envelope,
                     task,
@@ -452,6 +535,7 @@ impl InvestigationResult {
                     disclosure,
                     completion.outcome,
                     attempts,
+                    policy,
                 )?
         {
             return Err(InvestigationError::InvalidInput);

@@ -3,6 +3,10 @@
 //! deserialize or construct a policy from their own limit values.
 use super::InvestigationLimits;
 
+/// Host completion-attempt schema ceiling. Raising it requires an explicit
+/// migration; a registry entry may never promise more durable attempt slots.
+pub const MAX_STORED_COMPLETION_ATTEMPTS: usize = 112;
+
 #[derive(Debug)]
 pub struct InvestigationPolicy {
     profile: &'static str,
@@ -41,6 +45,27 @@ pub const INVESTIGATION_V1_POLICY: InvestigationPolicy = InvestigationPolicy {
     consent_wait_seconds: 900,
     wall_seconds: 3600,
 };
+/// Owner-approved specification under integration. Deliberately absent from the
+/// registry until every authority boundary and the opt-in transport support it.
+#[allow(dead_code)] // Not registered until end-to-end integration is complete.
+pub const INVESTIGATION_V2_POLICY: InvestigationPolicy = InvestigationPolicy {
+    profile: "investigation-v2",
+    request_bytes: 64 * 1024,
+    journal_events: 512,
+    max_completion_obligations: 56,
+    model_invocations: 64,
+    tool_actions: 56,
+    selected_facts: 64,
+    evidence_requests: 64,
+    evidence_items: 56,
+    evidence_bytes: 64 * 1024,
+    captured_validation_bytes: 128 * 1024 * 1024,
+    generated_tokens_per_invocation: 2048,
+    generated_token_reservations: 131072,
+    active_seconds: 600,
+    consent_wait_seconds: 900,
+    wall_seconds: 3600,
+};
 const POLICIES: &[&InvestigationPolicy] = &[&INVESTIGATION_V1_POLICY];
 
 // Temporary integration guard: legacy ledger/finish validators still consume
@@ -50,7 +75,8 @@ const _: () = {
     let mut index = 0;
     while index < POLICIES.len() {
         // Evaluate checked derived capacities for every registered policy.
-        let _ = POLICIES[index].max_completed_attempts();
+        assert!(POLICIES[index].max_completed_attempts() <= MAX_STORED_COMPLETION_ATTEMPTS);
+        assert!(POLICIES[index].selected_facts <= super::MAX_SELECTED_FACTS);
         assert!(POLICIES[index].tool_actions <= super::MAX_TOOL_ACTIONS);
         assert!(POLICIES[index].model_invocations <= super::MAX_MODEL_CALLS);
         index += 1;
@@ -58,6 +84,14 @@ const _: () = {
 };
 
 impl InvestigationPolicy {
+    pub const fn profile(&self) -> &'static str {
+        self.profile
+    }
+
+    pub const fn envelope_bytes(&self) -> usize {
+        self.request_bytes
+    }
+
     /// Preserve the existing journal allowance of twice the tool-action ceiling.
     /// This is record capacity, not an additional tool-action allowance.
     pub const fn max_completed_attempts(&self) -> usize {

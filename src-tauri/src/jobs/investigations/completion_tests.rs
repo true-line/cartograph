@@ -872,6 +872,10 @@ fn completion_attempt_journal_resolves_saved_policy_before_bounded_replay() {
 #[test]
 fn completion_attempt_schema_upgrade_preserves_records_and_rolls_back() {
     // AC-0266: retained attempt bytes survive an atomic schema upgrade.
+    assert!(ATTEMPT_SCHEMA[0].contains(&format!(
+        "CHECK(sequence BETWEEN 1 AND {})",
+        agents::investigation::MAX_STORED_COMPLETION_ATTEMPTS
+    )));
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("attempts.db");
     let mut connection = Connection::open(&path).unwrap();

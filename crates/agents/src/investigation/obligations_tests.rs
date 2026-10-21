@@ -472,3 +472,67 @@ fn staged_obligations_legacy_literal_goldens() {
         serde_json::to_string(&actual).unwrap()
     );
 }
+
+#[test]
+fn opt_in_envelope_admits_raw_capacity_without_reinterpreting_v1() {
+    // AC-0264: opt-in admission has a separate identity and preserves legacy bounds.
+    let policy = &super::super::policy::INVESTIGATION_V2_POLICY;
+    let legacy = envelope(vec![inventory('b')]);
+    let legacy_id = legacy.fingerprint().unwrap();
+    assert!(legacy.normalized_with_policy(policy).is_err());
+    let mut opt_in = ObligationEnvelope {
+        schema_version: 2,
+        contract: "investigation-completion-obligations@2".into(),
+        obligations: vec![inventory('b'); 56],
+    };
+    assert!(opt_in.normalized().is_err());
+    let normalized = opt_in.normalized_with_policy(policy).unwrap();
+    assert_eq!(normalized.obligations.len(), 1);
+    assert_ne!(
+        normalized.fingerprint_with_policy(policy).unwrap(),
+        legacy_id
+    );
+    assert_eq!(
+        normalized.obligations[0].content_id().unwrap(),
+        legacy.obligations[0].content_id().unwrap()
+    );
+    opt_in.obligations.push(inventory('b'));
+    assert!(opt_in.normalized_with_policy(policy).is_err());
+    assert!(InvestigationPolicy::for_profile(policy.profile()).is_none());
+    assert!(InvestigationPolicy::for_limits(&policy.limits()).is_none());
+}
+
+#[test]
+fn opt_in_request_family_binds_policy_role_and_envelope() {
+    // AC-0264: selecting a larger policy never reinterprets a legacy request.
+    let policy = &super::super::policy::INVESTIGATION_V2_POLICY;
+    let legacy = request();
+    let old_hash = legacy.intent_hash().unwrap();
+    assert!(legacy.normalized_with_policy(policy).is_err());
+    let mut selected = legacy.clone();
+    selected.schema_version = 5;
+    selected.specialist_id = "domain-analyst@8".into();
+    selected.limit_profile = policy.profile().into();
+    selected.obligations.schema_version = 2;
+    selected.obligations.contract = "investigation-completion-obligations@2".into();
+    let raw = serde_json::to_string(&selected).unwrap();
+    assert!(StagedObligationRequest::decode(&raw).is_err());
+    let admitted = StagedObligationRequest::decode_with_policy(&raw, policy).unwrap();
+    assert_ne!(admitted.intent_hash_with_policy(policy).unwrap(), old_hash);
+    for field in [
+        "schema_version",
+        "specialist_id",
+        "limit_profile",
+        "obligations",
+    ] {
+        let mut mixed = serde_json::to_value(&selected).unwrap();
+        mixed[field] = serde_json::to_value(&legacy).unwrap()[field].clone();
+        assert!(
+            StagedObligationRequest::decode_with_policy(&mixed.to_string(), policy).is_err(),
+            "{field}"
+        );
+    }
+    let padded = format!("{}{}", raw, " ".repeat(policy.request_bytes()));
+    assert!(StagedObligationRequest::decode_with_policy(&padded, policy).is_err());
+    assert_eq!(legacy.intent_hash().unwrap(), old_hash);
+}

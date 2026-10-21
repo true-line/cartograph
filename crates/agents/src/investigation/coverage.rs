@@ -1,6 +1,9 @@
 //! Immutable inventory detail admission for qualified investigations (AC-0239).
 //! This value owns preparation-time data; it never reads the current graph.
-use super::{InvestigationError, MAX_QUERY_BYTES, bounded_bytes};
+use super::{
+    INVESTIGATION_V1_POLICY, InvestigationError, InvestigationPolicy, MAX_QUERY_BYTES,
+    bounded_bytes,
+};
 use context_hub::coverage::CoverageProof;
 use core_graph::coverage::StoredCoverage;
 use serde::{Deserialize, Serialize};
@@ -132,7 +135,17 @@ impl InvestigationCoverageArchive {
         &self,
         reads: &[InvestigationCoverageReadManifest],
     ) -> Result<(), InvestigationError> {
-        if reads.len() > super::MAX_TOOL_ACTIONS as usize {
+        self.validate_reads_with_policy(reads, &INVESTIGATION_V1_POLICY)
+    }
+
+    /// Reconcile under the exact task policy while retaining the archive's
+    /// structural and individual response limits.
+    pub fn validate_reads_with_policy(
+        &self,
+        reads: &[InvestigationCoverageReadManifest],
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        if reads.len() > policy.limits().tool_actions as usize {
             return Err(InvestigationError::LimitExceeded);
         }
         for read in reads {
@@ -204,6 +217,10 @@ impl InvestigationCoverageArchive {
         Ok(detail)
     }
 }
+
+#[cfg(test)]
+#[path = "ledger_policy_tests.rs"]
+mod ledger_policy_tests;
 
 #[cfg(test)]
 mod tests {

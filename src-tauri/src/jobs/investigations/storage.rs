@@ -866,6 +866,8 @@ pub(super) fn load_ledger(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Option<InvestigationInputLedger>, InvestigationStoreError> {
+    let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+        .ok_or(InvestigationStoreError::Invalid)?;
     let Some(revision) = task.ledger_revision else {
         return Ok(None);
     };
@@ -877,7 +879,7 @@ pub(super) fn load_ledger(
         &signed(revision)?,
     )?
     .ok_or(InvestigationStoreError::Invalid)?;
-    ledger.validate()?;
+    ledger.validate_with_policy(policy)?;
     match (&task.detail.coverage_context, &ledger.coverage) {
         (None, None) => {}
         (Some(context), Some(proof))
@@ -903,12 +905,12 @@ pub(super) fn load_ledger(
     match (&ledger.coverage, archive.as_ref()) {
         (None, None) => {}
         (Some(proof), Some(archive)) if proof == archive.proof() => {
-            archive.validate_reads(&ledger.coverage_reads)?;
+            archive.validate_reads_with_policy(&ledger.coverage_reads, policy)?;
         }
         _ => return Err(InvestigationStoreError::Invalid),
     }
 
-    if Some(ledger.fingerprint()?) != task.ledger_hash
+    if Some(ledger.fingerprint_with_policy(policy)?) != task.ledger_hash
         || ledger.revision != revision
         || Some(&ledger.graph_snapshot_id) != task.detail.summary.graph_snapshot_id.as_ref()
         || Some(&ledger.scope_snapshot_id) != task.detail.scope_snapshot_id.as_ref()

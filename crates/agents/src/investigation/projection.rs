@@ -26,7 +26,14 @@ impl CompactInvestigationContext {
         ledger: &InvestigationInputLedger,
         raw_pages: &[String],
     ) -> Result<Self, InvestigationError> {
-        ledger.validate()?;
+        Self::prepare_with_policy(ledger, raw_pages, &INVESTIGATION_V1_POLICY)
+    }
+    pub fn prepare_with_policy(
+        ledger: &InvestigationInputLedger,
+        raw_pages: &[String],
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        ledger.validate_with_policy(policy)?;
         if raw_pages.len() != ledger.queries.len() {
             return Err(InvestigationError::InvalidInput);
         }

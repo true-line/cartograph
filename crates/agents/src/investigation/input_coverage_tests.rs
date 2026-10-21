@@ -519,3 +519,101 @@ fn v6_input_seals_actual_firewall_payload_and_rejects_coverage_mutation() {
     );
     assert!(input.seal_disclosure(&prepared).is_err());
 }
+
+#[test]
+fn selected_policy_input_binds_opt_in_role_contract_and_limits() {
+    // AC-0264: the selected policy is present in the actual bounded prompt.
+    use super::super::obligations::{
+        InventoryTarget, Obligation, ObligationEnvelope, StagedObligationRequest,
+    };
+    use super::super::staged_refusal::ProtectedCompletionMetadata;
+    let policy = &super::super::policy::INVESTIGATION_V2_POLICY;
+    let ledger = initial();
+    let proof = ledger.coverage.as_ref().unwrap();
+    let repo = &proof.qualification.repos[0];
+    let mut obligation = Obligation::Inventory {
+        obligation_id: String::new(),
+        target: InventoryTarget {
+            context_id: proof.context_id.clone(),
+            repo: repo.repo.clone(),
+            inventory_hash: repo.inventory_hash.clone().unwrap(),
+        },
+    };
+    let id = obligation.content_id().unwrap();
+    if let Obligation::Inventory { obligation_id, .. } = &mut obligation {
+        *obligation_id = id;
+    }
+    let request = StagedObligationRequest {
+        schema_version: 5,
+        request_nonce: "selected-policy".into(),
+        specialist_id: "domain-analyst@8".into(),
+        obligations: ObligationEnvelope {
+            schema_version: 2,
+            contract: "investigation-completion-obligations@2".into(),
+            obligations: vec![obligation],
+        },
+        inspection_requirements: None,
+        question: "Explain recovered behavior".into(),
+        scope: InvestigationScope::All,
+        provider_mode: InvestigationProviderMode::Local,
+        limit_profile: policy.profile().into(),
+        expected_graph_revision: None,
+        expected_context_id: proof.context_id.clone(),
+        conversation_id: None,
+        parent_id: None,
+    };
+    let metadata = ProtectedCompletionMetadata {
+        schema_version: 1,
+        request_hash: request.intent_hash_with_policy(policy).unwrap(),
+        obligations_hash: request.obligations.fingerprint_with_policy(policy).unwrap(),
+        completed_attempt_ids: vec![],
+        refusal_count: 0,
+        last_refusal_id: None,
+        feedback: None,
+    };
+    let turn = basis(&ledger, None);
+    let input = InvestigationInput::prepare_v7_with_policy(
+        &request.question,
+        SpecialistId::DomainAnalystV8,
+        ledger.clone(),
+        &[],
+        &[],
+        &[],
+        &InvestigationUsage::default(),
+        &turn,
+        &request,
+        &metadata,
+        &[],
+        policy,
+    )
+    .unwrap();
+    let prompt: Value = serde_json::from_str(&input.payload.prompt).unwrap();
+    assert_eq!(
+        prompt["limits"],
+        serde_json::to_value(policy.limits()).unwrap()
+    );
+    assert_eq!(
+        prompt["completion_contract"]["request_hash"],
+        metadata.request_hash
+    );
+    assert_eq!(
+        prompt["completion_contract"]["obligations"]["schema_version"],
+        2
+    );
+    assert!(
+        InvestigationInput::prepare_v7(
+            &request.question,
+            SpecialistId::DomainAnalystV8,
+            ledger,
+            &[],
+            &[],
+            &[],
+            &InvestigationUsage::default(),
+            &turn,
+            &request,
+            &metadata,
+            &[]
+        )
+        .is_err()
+    );
+}

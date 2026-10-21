@@ -107,8 +107,23 @@ impl AttemptRecord {
         task: &str,
         ledger: &InvestigationInputLedger,
     ) -> Result<(), InvestigationError> {
-        let request = request.normalized()?;
-        self.validate_binding(&request.intent_hash()?, &request.obligations, task, ledger)
+        self.validate_with_policy(request, task, ledger, &INVESTIGATION_V1_POLICY)
+    }
+    pub fn validate_with_policy(
+        &self,
+        request: &StagedObligationRequest,
+        task: &str,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        let request = request.normalized_with_policy(policy)?;
+        self.validate_binding_with_policy(
+            &request.intent_hash_with_policy(policy)?,
+            &request.obligations,
+            task,
+            ledger,
+            policy,
+        )
     }
     pub fn validate_binding(
         &self,
@@ -117,9 +132,25 @@ impl AttemptRecord {
         task: &str,
         ledger: &InvestigationInputLedger,
     ) -> Result<(), InvestigationError> {
+        self.validate_binding_with_policy(
+            request_hash,
+            envelope,
+            task,
+            ledger,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+    pub fn validate_binding_with_policy(
+        &self,
+        request_hash: &str,
+        envelope: &ObligationEnvelope,
+        task: &str,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
         bounded_bytes(self, MAX_MANIFEST_BYTES)?;
-        ledger.validate()?;
-        let envelope = envelope.normalized()?;
+        ledger.validate_with_policy(policy)?;
+        let envelope = envelope.normalized_with_policy(policy)?;
         let obligation = envelope
             .obligations
             .iter()
@@ -130,8 +161,8 @@ impl AttemptRecord {
             || !super::records::opaque_id(task)
             || !super::records::opaque_id(&self.step_id)
             || self.request_hash != request_hash
-            || self.obligations_hash != envelope.fingerprint()?
-            || self.input_ledger_hash != ledger.fingerprint()?
+            || self.obligations_hash != envelope.fingerprint_with_policy(policy)?
+            || self.input_ledger_hash != ledger.fingerprint_with_policy(policy)?
             || self.input_revision != ledger.revision
             || self.attempt_id != self.content_id()?
             || !self.read.matches(obligation)

@@ -90,11 +90,32 @@ pub struct RefusalFeedback {
     pub schema_version: u32,
     pub unmet: Vec<FeedbackEntry>,
 }
+/// Feedback entries are at most 137 encoded bytes (a 64-hex id, `inventory`,
+/// `acquired_not_supplied`); the frame is 31. These allowances keep v1's
+/// literal 2 KiB bound for its 12 obligations and scale with the saved policy.
+const FEEDBACK_ENTRY_BYTES: usize = 160;
+const FEEDBACK_FRAME_BYTES: usize = 128;
+
+fn feedback_bytes(policy: &InvestigationPolicy) -> Result<usize, InvestigationError> {
+    policy
+        .max_completion_obligations()
+        .checked_mul(FEEDBACK_ENTRY_BYTES)
+        .and_then(|bytes| bytes.checked_add(FEEDBACK_FRAME_BYTES))
+        .ok_or(InvestigationError::LimitExceeded)
+}
+
 impl RefusalFeedback {
     pub fn bytes(&self) -> Result<Vec<u8>, InvestigationError> {
+        self.bytes_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+    /// The host resolves `policy` from the exact saved task limits.
+    pub fn bytes_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<Vec<u8>, InvestigationError> {
         if self.schema_version != 1
             || self.unmet.is_empty()
-            || self.unmet.len() > 12
+            || self.unmet.len() > policy.max_completion_obligations()
             || self.unmet.iter().any(|entry| {
                 !crate::source_basis::hash(&entry.obligation_id)
                     || !matches!(entry.kind.as_str(), "source" | "inventory")
@@ -106,12 +127,18 @@ impl RefusalFeedback {
         {
             return Err(InvestigationError::InvalidInput);
         }
-        bounded_bytes(self, 2 * 1024)
+        bounded_bytes(self, feedback_bytes(policy)?)
     }
     pub fn fingerprint(&self) -> Result<String, InvestigationError> {
+        self.fingerprint_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+    pub fn fingerprint_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<String, InvestigationError> {
         Ok(crate::source_basis::domain_hash(
             b"cartograph:obligation-feedback:v1\0",
-            &self.bytes()?,
+            &self.bytes_with_policy(policy)?,
         ))
     }
 }
@@ -154,11 +181,43 @@ pub fn admit_finish(
     model: Option<String>,
     timestamp: String,
 ) -> Result<FinishDecision, InvestigationError> {
+    admit_finish_with_policy(
+        request,
+        task,
+        step,
+        input,
+        disclosure,
+        finish,
+        attempts,
+        model,
+        timestamp,
+        &INVESTIGATION_V1_POLICY,
+    )
+}
+
+/// As [`admit_finish`], bounded by the immutable policy the host resolved
+/// from the exact saved task limits; it must name the request's profile.
+#[allow(clippy::too_many_arguments)]
+pub fn admit_finish_with_policy(
+    request: &StagedObligationRequest,
+    task: &str,
+    step: &str,
+    input: &InvestigationInput,
+    disclosure: &InvestigationDisclosure,
+    finish: &StagedFinish,
+    attempts: &[AttemptEvidence<'_>],
+    model: Option<String>,
+    timestamp: String,
+    policy: &InvestigationPolicy,
+) -> Result<FinishDecision, InvestigationError> {
     finish.validate()?;
-    let request = request.normalized()?;
+    let request = request.normalized_with_policy(policy)?;
+    if request.limit_profile != policy.profile() {
+        return Err(InvestigationError::InvalidInput);
+    }
     let ledger = input.ledger();
     if disclosure.schema_version == 4 {
-        input.validate_completion_binding(&request, disclosure, attempts)?;
+        input.validate_completion_binding_with_policy(&request, disclosure, attempts, policy)?;
     }
     if request
         .expected_graph_revision
@@ -168,7 +227,7 @@ pub fn admit_finish(
             .coverage
             .as_ref()
             .is_none_or(|proof| proof.context_id != request.expected_context_id)
-        || attempts.len() > 2 * MAX_TOOL_ACTIONS as usize
+        || attempts.len() > policy.max_completed_attempts()
     {
         return Err(InvestigationError::InvalidInput);
     }
@@ -190,7 +249,9 @@ pub fn admit_finish(
     input.validate_response_metadata(model.as_deref())?;
     let mut ids = BTreeSet::new();
     for evidence in attempts {
-        evidence.record.validate(&request, task, evidence.ledger)?;
+        evidence
+            .record
+            .validate_with_policy(&request, task, evidence.ledger, policy)?;
         if !ids.insert(&evidence.record.attempt_id) {
             return Err(InvestigationError::InvalidInput);
         }
@@ -213,29 +274,31 @@ pub fn admit_finish(
             return Err(InvestigationError::InvalidInput);
         }
     }
-    let assessment = derive_assessment(
-        &request,
+    let assessment = derive_assessment_for_binding_with_policy(
+        &request.intent_hash_with_policy(policy)?,
+        &request.obligations,
         task,
         step,
         ledger,
         disclosure,
         finish.outcome,
         attempts,
+        policy,
     )?;
     let completion = if disclosure.schema_version == 4 {
         Some(InvestigationCompletionResult {
             schema_version: 1,
             outcome: finish.outcome,
-            request_hash: request.intent_hash()?,
-            obligations_hash: request.obligations.fingerprint()?,
-            finishing_attempts_hash: completed_attempts_hash(attempts)?,
+            request_hash: request.intent_hash_with_policy(policy)?,
+            obligations_hash: request.obligations.fingerprint_with_policy(policy)?,
+            finishing_attempts_hash: completed_attempts_hash_with_policy(attempts, policy)?,
             assessment: assessment.clone(),
         })
     } else {
         None
     };
     // All security/citation/prose replay admission precedes a recoverable decision.
-    let admitted = input.admit_result_bound(
+    let admitted = input.admit_result_bound_with_policy(
         task,
         step,
         Some(disclosure),
@@ -243,6 +306,7 @@ pub fn admit_finish(
         model,
         timestamp,
         completion,
+        policy,
     )?;
     let unmet = assessment
         .iter()
@@ -267,7 +331,7 @@ pub fn admit_finish(
             schema_version: 1,
             unmet,
         };
-        feedback.bytes()?;
+        feedback.bytes_with_policy(policy)?;
         Ok(FinishDecision::Refused {
             assessment,
             feedback,
@@ -310,26 +374,56 @@ pub fn derive_assessment_for_binding(
     outcome: CompletionOutcome,
     attempts: &[AttemptEvidence<'_>],
 ) -> Result<Vec<ObligationObservation>, InvestigationError> {
-    let envelope = envelope.normalized()?;
-    disclosure.validate(ledger)?;
-    if attempts.len() > 2 * MAX_TOOL_ACTIONS as usize {
+    derive_assessment_for_binding_with_policy(
+        request_hash,
+        envelope,
+        task,
+        step,
+        ledger,
+        disclosure,
+        outcome,
+        attempts,
+        &INVESTIGATION_V1_POLICY,
+    )
+}
+/// As [`derive_assessment_for_binding`], bounded by the saved task policy.
+#[allow(clippy::too_many_arguments)]
+pub fn derive_assessment_for_binding_with_policy(
+    request_hash: &str,
+    envelope: &ObligationEnvelope,
+    task: &str,
+    step: &str,
+    ledger: &InvestigationInputLedger,
+    disclosure: &InvestigationDisclosure,
+    outcome: CompletionOutcome,
+    attempts: &[AttemptEvidence<'_>],
+    policy: &InvestigationPolicy,
+) -> Result<Vec<ObligationObservation>, InvestigationError> {
+    let envelope = envelope.normalized_with_policy(policy)?;
+    disclosure.validate_with_policy(ledger, policy)?;
+    if attempts.len() > policy.max_completed_attempts() {
         return Err(InvestigationError::LimitExceeded);
     }
     for evidence in attempts {
-        evidence
-            .record
-            .validate_binding(request_hash, &envelope, task, evidence.ledger)?;
+        evidence.record.validate_binding_with_policy(
+            request_hash,
+            &envelope,
+            task,
+            evidence.ledger,
+            policy,
+        )?;
     }
-    let sources = envelope.sources()?;
+    let sources = envelope.sources_with_policy(policy)?;
     let source_assessment = if sources.is_empty() {
         None
     } else {
-        Some(InvestigationInspectionAssessment::derive(
+        Some(InvestigationInspectionAssessment::derive_with_policy(
             &sources,
             ledger,
             step,
             disclosure,
             &[],
+            policy,
         )?)
     };
     let mut assessment = Vec::new();
