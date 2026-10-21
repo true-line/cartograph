@@ -513,7 +513,8 @@
 - **Security:** Per-tier and per-step cloud consent, host-owned scope/execution, closed read tools, all-input replay admission, transient raw payloads and bounded durable history; no target writes or delegation.
 - **Performance:** SPEC-10 limits model/tool steps, cumulative context/source/file validation, body acquisition, time, events and total admission; start returns durable identity before expensive work on a worker.
 - **AC-0267** Given a frozen V7 synthetic control and independently resolved source/inventory obligations per role, when the explicitly selected acceptance stages run, then immutable bounded receipts separate actual runtime/mechanical outcomes from an authenticated independent semantic review; the analyst stage exits before auditor dispatch, every continuation stays within the ordinary V7 budgets, and no prior control failure or remaining Vendure/native acceptance requirement is reclassified. Deterministic classification, receipt, preparation and review-binding tests never invoke a provider.
-- **Trace:** H4 · `agents`, `llm`, `core-graph`, `context-hub`, `app`, `ui` · — · T-0180..0191,T-0204,T-0234..0236,T-0260..0262
+- **AC-0279** Given an operator-asserted Studio observation path and expected installed runtime/model identities, when the prerequisite collector runs, then only bounded credential-free loopback version/tags GETs produce exclusive external runtime and observation receipts with explicit unknown sampling; host assertion never becomes attestation. An explicit prepare-only handoff uses the existing frozen V7 authority without enabling inference, retains partial failures, excludes capture/model-visible roots, and leaves provider acceptance, native restart and delivery unexecuted.
+- **Trace:** H4 · `agents`, `llm`, `core-graph`, `context-hub`, `app`, `ui` · — · T-0180..0191,T-0204,T-0234..0236,T-0260..0262,T-0267,T-0279
 
 
 ### US-0033 — Drop an application or repo set and see what was and was not covered
