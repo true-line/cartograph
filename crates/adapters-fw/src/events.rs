@@ -127,8 +127,7 @@ pub struct EventSdk {
 /// argument, alongside the registry entry's primary identity (#573: an
 /// EventBridge channel is a detail type on a bus). Only literal-proven
 /// values are recorded; anything else stays unknown, never a wildcard.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventQualifier {
     /// Channel kind of the registry entries the qualifier applies to.
     pub kind: String,
@@ -136,6 +135,16 @@ pub struct EventQualifier {
     pub component: String,
     /// Key holding the value anywhere inside the first object argument.
     pub key: String,
+    /// The file that declared this entry.
+    pub registry: RegistryIdentity,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QualifierEntry {
+    kind: String,
+    component: String,
+    key: String,
 }
 
 /// A key whose array value lists several entries in one call
@@ -143,13 +152,21 @@ pub struct EventQualifier {
 /// a non-literal entry list, is marked as a batch: its first entry's
 /// identity cannot stand for the others, and trace observations cannot be
 /// correlated per entry (#573).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchKey {
     /// Channel kind of the registry entries the key applies to.
     pub kind: String,
     /// Key holding the entry list.
     pub key: String,
+    /// The file that declared this entry.
+    pub registry: RegistryIdentity,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchEntry {
+    kind: String,
+    key: String,
 }
 
 /// A deployed resource type whose observed attribute names a code-layer
@@ -211,9 +228,9 @@ struct RegistryFile {
     #[serde(default)]
     sdks: Vec<SdkEntry>,
     #[serde(default)]
-    qualifiers: Vec<EventQualifier>,
+    qualifiers: Vec<QualifierEntry>,
     #[serde(default)]
-    batch_keys: Vec<BatchKey>,
+    batch_keys: Vec<BatchEntry>,
     #[serde(default)]
     backings: Vec<BackingEntry>,
 }
@@ -367,7 +384,12 @@ impl Registries {
                     qualifier.kind
                 ));
             }
-            qualifiers.push(qualifier);
+            qualifiers.push(EventQualifier {
+                kind: qualifier.kind,
+                component: qualifier.component,
+                key: qualifier.key,
+                registry: registry.clone(),
+            });
         }
         let mut batch_keys = self.batch_keys.clone();
         for batch in file.batch_keys {
@@ -380,7 +402,11 @@ impl Registries {
                     batch.kind
                 ));
             }
-            batch_keys.push(batch);
+            batch_keys.push(BatchKey {
+                kind: batch.kind,
+                key: batch.key,
+                registry: registry.clone(),
+            });
         }
         let mut backings = self.backings.clone();
         for backing in file.backings {
@@ -415,12 +441,15 @@ impl Registries {
     /// layering order. Bind caches and coverage to this, never to a
     /// version string alone.
     pub fn identity(&self) -> String {
-        let parts: Vec<String> = self
+        // Structured, not concatenated: a file name may contain any
+        // separator, so only an unambiguous encoding names one set.
+        let parts: Vec<(&str, &str)> = self
             .sources
             .iter()
-            .map(|source| format!("{}={}", source.name, source.content_hash))
+            .map(|source| (source.name.as_str(), source.content_hash.as_str()))
             .collect();
-        core_prov::content_hash(parts.join("\n").as_bytes())
+        let canonical = serde_json::to_vec(&parts).expect("pairs of strings serialize");
+        core_prov::content_hash(&canonical)
     }
 }
 
@@ -461,9 +490,12 @@ pub struct EventSite {
     /// Set when the call carries several entries ([`Registries::batch_keys`]):
     /// `"N entries"` or `"computed entries"`.
     pub batch: Option<String>,
-    /// The registry file whose entry matched; `None` for sites no registry
-    /// entry produced (chrome runtime messaging).
-    pub registry: Option<RegistryIdentity>,
+    /// The registry files whose entries shaped this site: the matching SDK
+    /// entry's file first, then the file of each qualifier or batch key
+    /// that set a component or the batch marker, in name order, each once.
+    /// Empty for sites no registry entry produced (chrome runtime
+    /// messaging).
+    pub registries: Vec<RegistryIdentity>,
 }
 
 #[cfg(test)]
@@ -580,6 +612,24 @@ mod tests {
             assert_eq!(layered.sdks.len(), builtin.sdks.len(), "{name}");
             assert_eq!(layered.qualifiers, builtin.qualifiers, "{name}");
         }
+    }
+
+    #[test]
+    fn identity_is_unambiguous_whatever_the_file_names_contain() {
+        // Two files `a.json` and `b.json` against one file whose name
+        // embeds the first record: a separator-joined encoding collides.
+        let other = EXTRA_SDK
+            .replace("nats-subject", "nats-other")
+            .replace("publish", "request");
+        let two = Registries::layered(&[file("a.json", EXTRA_SDK), file("b.json", &other)]);
+        let forged_name = format!(
+            "a.json={}\nextension:b.json",
+            core_prov::content_hash(EXTRA_SDK.as_bytes())
+        );
+        let one = Registries::layered(&[file(&forged_name, &other)]);
+        assert!(two.rejected.is_empty() && one.rejected.is_empty());
+        assert_ne!(two.sdks.len(), one.sdks.len());
+        assert_ne!(two.identity(), one.identity());
     }
 
     #[test]

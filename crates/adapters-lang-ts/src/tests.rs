@@ -3391,7 +3391,8 @@ fn an_extension_registry_entry_produces_sites_that_name_its_file() {
     let site = &ex.event_sites[0];
     assert_eq!(site.kind, "nats-subject");
     assert_eq!(site.identity, IdentityExpr::Literal("orders.placed".into()));
-    let registry = site.registry.as_ref().unwrap();
+    assert_eq!(site.registries.len(), 1);
+    let registry = &site.registries[0];
     assert_eq!(registry.name, "extension:nats.json");
     assert_eq!(registry.version, "nats-1");
     // Built-in sites name the built-in file.
@@ -3402,7 +3403,7 @@ fn an_extension_registry_entry_produces_sites_that_name_its_file() {
     )
     .unwrap();
     assert_eq!(
-        sqs.event_sites[0].registry.as_ref().unwrap().name,
+        sqs.event_sites[0].registries[0].name,
         "builtin:event-sdks.json"
     );
 }
@@ -3436,4 +3437,31 @@ fn a_registry_change_invalidates_the_incremental_cache() {
     assert_eq!(extended.event_sites.len(), 1);
     let (back, stats) = run(&mut cache, Registries::builtin());
     assert_eq!((stats.recomputed_files, back.event_sites.len()), (1, 0));
+}
+
+const REGION_QUALIFIER: &str = r#"{"schema":"cartograph-event-sdk-registry@1","version":"region-1",
+  "qualifiers":[{"kind":"sqs-queue","component":"region","key":"Region"}]}"#;
+
+#[test]
+fn a_qualifier_only_extension_is_named_on_the_sites_it_shapes() {
+    let layered =
+        Registries::layered(&[("region.json".into(), REGION_QUALIFIER.as_bytes().to_vec())]);
+    assert!(layered.rejected.is_empty(), "{:?}", layered.rejected);
+    let source = b"import { SendMessageCommand } from '@aws-sdk/client-sqs';\n\
+new SendMessageCommand({ QueueUrl: 'q', Region: 'eu-west-1' });\n\
+new SendMessageCommand({ QueueUrl: 'q' });\n";
+    let ex = extract_source_with(source, "src/sqs.ts", &id(), &layered).unwrap();
+    assert_eq!(ex.event_sites.len(), 2);
+    let shaped = &ex.event_sites[0];
+    assert_eq!(
+        shaped.components.get("region").map(String::as_str),
+        Some("eu-west-1")
+    );
+    let names: Vec<&str> = shaped.registries.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["builtin:event-sdks.json", "extension:region.json"]);
+    // A qualifier that proved nothing contributed nothing.
+    let plain = &ex.event_sites[1];
+    assert!(plain.components.is_empty());
+    let names: Vec<&str> = plain.registries.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["builtin:event-sdks.json"]);
 }

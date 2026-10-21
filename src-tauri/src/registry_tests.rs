@@ -61,4 +61,31 @@ fn extension_registries_load_bounded_and_bind_the_coverage_identity() {
             .any(|r| r.reason.contains("extension files"))
     );
     assert_eq!(crowded.rejected.len(), MAX_EXTENSION_FILES + 2);
+    // The directory does not take a slot: 34 regular files, so exactly the
+    // last two in name order are refused on count.
+    let counted: Vec<&str> = crowded
+        .rejected
+        .iter()
+        .filter(|r| r.reason.contains("extension files"))
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(counted, ["extension:x30.json", "extension:x31.json"]);
+}
+
+#[test]
+fn non_regular_registry_entries_never_consume_an_extension_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("0-directory.json")).unwrap();
+    for i in 0..MAX_EXTENSION_FILES {
+        let method = format!("publish{i:02}");
+        std::fs::write(
+            dir.path().join(format!("x{i:02}.json")),
+            NATS.replace("\"publish\"", &format!("\"{method}\"")),
+        )
+        .unwrap();
+    }
+    let loaded = event_registries_in(dir.path());
+    let rejected: Vec<&str> = loaded.rejected.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(rejected, ["extension:0-directory.json"]);
+    assert_eq!(loaded.sources.len(), 2 + MAX_EXTENSION_FILES);
 }

@@ -759,7 +759,7 @@ pub fn backing_candidates(nodes: &[Node], registries: &Registries) -> Vec<Edge> 
             props: serde_json::json!({
                 "identity_attr": attr,
                 "registry": backing.registry.version,
-                "registry_source": backing.registry,
+                "registry_sources": [backing.registry],
                 "prov": serde_json::to_value(edge_prov).expect("provenance serializes"),
             }),
         });
@@ -1330,7 +1330,7 @@ mod tests {
         assert_eq!(edges[0].label, "BACKS");
         assert_eq!(edges[0].props["registry"], "tf-2026.10");
         assert_eq!(
-            edges[0].props["registry_source"]["name"],
+            edges[0].props["registry_sources"][0]["name"],
             "builtin:channel-backings.json"
         );
         assert_eq!(edges[0].src, "res:local/infra@aws_sqs_queue.orders");

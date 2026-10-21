@@ -19,7 +19,9 @@
 //! (AC-0004, AC-0006). This tier never calls an LLM.
 
 use adapters_fw::client::{FetchSite, NEXT_PAGES_DIR, REACT_ROUTER};
-use adapters_fw::events::{EventSdk, EventSite, IdentityArg, IdentityExpr, Registries, SdkPattern};
+use adapters_fw::events::{
+    EventSdk, EventSite, IdentityArg, IdentityExpr, Registries, RegistryIdentity, SdkPattern,
+};
 use adapters_fw::{HTTP_FACTORIES, NEST};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
@@ -1256,28 +1258,39 @@ fn pair_value_in_args<'t>(cx: &FileCx, args: &TsNode<'t>, key: &str) -> Option<T
     None
 }
 
-/// Literal-proven qualifier components for a site of `kind` (#573).
-fn site_components(
-    cx: &FileCx,
+/// Literal-proven qualifier components for a site of `kind` (#573), each
+/// with the registry file of the qualifier that proved it.
+fn site_components<'r>(
+    cx: &FileCx<'r>,
     args: &TsNode,
     kind: &str,
     classify: &impl Fn(&TsNode) -> IdentityExpr,
-) -> BTreeMap<String, String> {
+) -> Vec<(String, String, &'r RegistryIdentity)> {
     cx.registries
         .qualifiers
         .iter()
         .filter(|q| q.kind == kind)
         .filter_map(|q| match classify(&pair_value_in_args(cx, args, &q.key)?) {
-            IdentityExpr::Literal(value) => Some((q.component.clone(), value)),
+            IdentityExpr::Literal(value) => Some((q.component.clone(), value, &q.registry)),
             _ => None,
         })
         .collect()
 }
 
-/// Batch shape of a site of `kind`: `None` for a single literal entry.
-fn site_batch(cx: &FileCx, args: &TsNode, kind: &str) -> Option<String> {
+/// Batch shape of a site of `kind`, with the registry file of the batch
+/// key that set it: `None` for a single literal entry.
+fn site_batch<'r>(
+    cx: &FileCx<'r>,
+    args: &TsNode,
+    kind: &str,
+) -> Option<(String, &'r RegistryIdentity)> {
     let batch = cx.registries.batch_keys.iter().find(|b| b.kind == kind)?;
-    let value = pair_value_in_args(cx, args, &batch.key)?;
+    let shape = batch_shape(cx, args, &batch.key)?;
+    Some((shape, &batch.registry))
+}
+
+fn batch_shape(cx: &FileCx, args: &TsNode, key: &str) -> Option<String> {
+    let value = pair_value_in_args(cx, args, key)?;
     if value.kind() != "array" {
         return Some("computed entries".into());
     }
@@ -2226,6 +2239,20 @@ fn extract_source_recording(
     let classify = |expr: &TsNode| -> IdentityExpr { classify_identity(&cx, expr, &const_strings) };
     let push_site = |out: &mut Extraction, sdk: &EventSdk, args: &TsNode, site: &TsNode| {
         let kind = sdk.kind.as_str();
+        let components = site_components(&cx, args, kind, &classify);
+        let batch = site_batch(&cx, args, kind);
+        // The SDK entry's file first, then every other contributing file
+        // once, in name order.
+        let mut contributors: BTreeMap<&str, &RegistryIdentity> = BTreeMap::new();
+        for (_, _, registry) in &components {
+            contributors.insert(&registry.name, registry);
+        }
+        if let Some((_, registry)) = &batch {
+            contributors.insert(&registry.name, registry);
+        }
+        contributors.remove(sdk.registry.name.as_str());
+        let mut registries = vec![sdk.registry.clone()];
+        registries.extend(contributors.into_values().cloned());
         out.event_sites.push(EventSite {
             kind: kind.into(),
             role: sdk.role,
@@ -2234,9 +2261,12 @@ fn extract_source_recording(
             path: path.into(),
             byte_start: site.start_byte() as u64,
             byte_end: site.end_byte() as u64,
-            components: site_components(&cx, args, kind, &classify),
-            batch: site_batch(&cx, args, kind),
-            registry: Some(sdk.registry.clone()),
+            components: components
+                .into_iter()
+                .map(|(component, value, _)| (component, value))
+                .collect(),
+            batch: batch.map(|(shape, _)| shape),
+            registries,
         });
     };
 

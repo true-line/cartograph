@@ -415,7 +415,7 @@ fn site(pending: PendingSite, identity: IdentityExpr) -> EventSite {
         byte_end: pending.byte_end,
         components: Default::default(),
         batch: None,
-        registry: None,
+        registries: Vec::new(),
     }
 }
 

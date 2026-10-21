@@ -432,7 +432,8 @@ fn event_registries_for<R: tauri::Runtime>(
 }
 
 /// The scan behind [`event_registries_for`]. Only regular `.json` files
-/// count, in name order; each is read through a bound of one byte past
+/// count, in name order (other `.json` entries are rejected without taking
+/// a slot); each is read through a bound of one byte past
 /// the registry limit, so an oversized or still-growing file is rejected
 /// without being read whole, and files past the count bound are rejected
 /// unread. A file that cannot be read is rejected like an invalid one.
@@ -451,8 +452,23 @@ fn event_registries_in(dir: &std::path::Path) -> Registries {
                 match entry {
                     Ok(entry) => {
                         let name = entry.file_name().to_string_lossy().into_owned();
-                        if name.ends_with(".json") {
-                            names.push((name, entry.path()));
+                        if !name.ends_with(".json") {
+                            continue;
+                        }
+                        // Classify before counting: only regular files take
+                        // one of the bounded extension slots.
+                        match std::fs::symlink_metadata(entry.path()) {
+                            Ok(metadata) if metadata.file_type().is_file() => {
+                                names.push((name, entry.path()))
+                            }
+                            Ok(_) => unreadable.push(RegistryRejection {
+                                name: format!("extension:{name}"),
+                                reason: "unreadable: not a regular file".into(),
+                            }),
+                            Err(error) => unreadable.push(RegistryRejection {
+                                name: format!("extension:{name}"),
+                                reason: format!("unreadable: {error}"),
+                            }),
                         }
                     }
                     Err(error) => unreadable.push(directory_error(error)),

@@ -340,7 +340,9 @@ also reads `<app_data>/registries/*.json` in name order.
   ingest summary lists it with the reason. A rejected file changes no
   recovered fact.
 - Every fact an entry produces names its file in provenance
-  (`registry_source`: name, schema, version, content hash), and the set of
+  (`registry_sources`: name, schema, version and content hash of every
+  file whose SDK entry, qualifier or batch key shaped the fact, on the
+  channel and Gap nodes as well as the edges), and the set of
   accepted files is part of the coverage basis and the parse cache key, so
   adding or editing a file re-extracts instead of reusing stale facts.
 
