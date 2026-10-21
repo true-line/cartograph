@@ -217,7 +217,7 @@ test('Windows ownership tests are required by the same exact-SHA complete-suite 
   assert.equal(condition(windows), condition(rust));
   assert.equal(condition(complete), condition(rust));
   assert.match(windows, /needs: \[policy, merge-evidence, preflight-evidence\]/u);
-  assert.match(windows, /runs-on: \$\{\{ .*vars\.WINDOWS_RUNNER \|\| 'windows-2022' \}\}/u);
+  assert.match(windows, /runs-on: \$\{\{ fromJSON\(.*vars\.WINDOWS_RUNNER \|\| '\["self-hosted", "Windows", "X64"\]'\) \}\}/u);
   assert.match(windows, /timeout-minutes: 20/u);
   assert.match(windows, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/u);
   assert.match(
@@ -294,7 +294,8 @@ test('the native ownership harness includes production modules without a Tauri d
   }
   assert.doesNotMatch(harness, /\b(?:fn|struct|enum|impl)\s|include_str!|include_bytes!|allow\(warnings\)/u);
   const guidance = readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
-  assert.match(guidance, /`windows-2022`: `cargo test --locked -p job-execution-tests --test ownership`/u);
+  assert.match(guidance, /native job ownership tests on Windows:\s+`cargo test --locked -p job-execution-tests --test ownership`/u);
+  assert.match(guidance, /fork and merge-queue runs use hosted\s+`windows-2022`/u);
 });
 
 test('workflow runtime policy is pinned and installer processes are centrally bounded', () => {
@@ -473,7 +474,7 @@ test('fork pull requests and merge-queue runs never reach organisation runners',
   // workflow that reads secrets never runs pull-request code (#631).
   const dir = path.join(root, '.github/workflows');
   const fallback =
-    /\(github\.event_name == 'merge_group' \|\| github\.event\.pull_request\.head\.repo\.fork\) && '(\["(ubuntu|macos)-latest"\]|windows-2022)' \|\|/u;
+    /\(github\.event_name == 'merge_group' \|\| github\.event\.pull_request\.head\.repo\.fork\) && '\["((ubuntu|macos)-latest|windows-2022)"\]' \|\|/u;
   for (const name of readdirSync(dir).filter((file) => file.endsWith('.yml'))) {
     const workflow = readFileSync(path.join(dir, name), 'utf8');
     if (/secrets\.[A-Z]/u.test(workflow)) {
