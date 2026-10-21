@@ -17,6 +17,10 @@ use core_graph::source::FactKey;
 use core_prov::{EvidenceRef, Provenance, content_hash};
 use std::collections::BTreeMap;
 
+#[allow(dead_code)] // Private preparation foundation; durable guarded routing is separate.
+#[path = "prepared_source.rs"]
+pub(super) mod prepared_source;
+
 pub(super) struct EvidenceGuards {
     sources: BTreeMap<String, RegisteredSource>,
     guards: BTreeMap<String, RetentionGuard>,
@@ -106,6 +110,35 @@ impl EvidenceGuards {
                 &binding.receipt_id,
             )
             .map_err(pinned_error)
+    }
+
+    /// Recheck already-held retention identities and registered source metadata.
+    /// Captured evidence remains independent of checkout availability/freshness.
+    fn revalidate(&self, state: &AppState) -> Result<(), HostError> {
+        for (repo, expected) in &self.sources {
+            let current = state
+                .sources
+                .lock()
+                .map_err(|_| HostError::Operational)?
+                .get_by_repo(repo)
+                .map_err(|_| HostError::Operational)?
+                .ok_or(HostError::SourceUnavailable)?;
+            if current.source_id != expected.source_id
+                || current.repo_key != expected.repo_key
+                || current.root() != expected.root()
+                || current.is_managed() != expected.is_managed()
+                || current.clone_url() != expected.clone_url()
+            {
+                return Err(HostError::InputChanged);
+            }
+        }
+        for guard in self.guards.values() {
+            state
+                .primary_sources
+                .verify_task_guard(guard)
+                .map_err(pinned_error)?;
+        }
+        Ok(())
     }
 
     pub(super) fn options(
@@ -250,28 +283,10 @@ impl FrozenContext {
             if text.len() as u64 != span_len {
                 return Err(HostError::InvalidInput);
             }
-            let file = &range.captured.file;
             (
                 range.evidence.clone(),
                 text,
-                InvestigationEvidenceOrigin::CapturedPrimarySource {
-                    registered_source_id: registered.source_id.clone(),
-                    receipt_id: receipt.id().into(),
-                    receipt_inventory_index: inventory_index as u32,
-                    captured: TaskCaptureSpanRef {
-                        file: TaskCaptureFileRef {
-                            source_id: file.source_id.as_str().into(),
-                            capture_id: file.capture_id.clone(),
-                            path: file.path.clone(),
-                            digest: file.digest.clone(),
-                            byte_len: file.byte_len,
-                        },
-                        byte_start: range.captured.byte_start,
-                        byte_end: range.captured.byte_end,
-                    },
-                    scope: PrimarySourceScope::PrimarySourceOnly,
-                    input_closure: InputClosureStatus::InputClosureNotEstablished,
-                },
+                captured_origin(registered, &receipt, inventory_index)?,
             )
         } else {
             let reference = legacy_source.ok_or(HostError::InvalidInput)?;
@@ -307,31 +322,86 @@ impl FrozenContext {
                 InvestigationEvidenceOrigin::WorkingTreeUnverified,
             )
         };
-        let id = format!("evidence-{}", self.evidence.len() + 1);
-        let mut ledger = self.ledger.clone();
-        ledger.revision = ledger
-            .revision
-            .checked_add(1)
-            .ok_or(HostError::LimitExceeded)?;
-        ledger.citations.push(InvestigationCitation {
-            citation_id: id.clone(),
+        let (ledger, evidence) = append_source_evidence(
+            self,
             fact,
-            fact_digest: selected.fact_digest,
-            source: Some(source.clone()),
-            role: Some(wanted_role),
-            index: Some(index),
-            text_hash: Some(content_hash(text.as_bytes())),
+            selected.fact_digest,
+            wanted_role,
+            index,
+            source,
+            text,
             origin,
-        });
-        ledger.validate_with_policy(self.policy)?;
+        )?;
         let mut usage = sink.usage().clone();
         usage.evidence_items += 1;
-        usage.evidence_bytes += text.len();
+        usage.evidence_bytes += evidence.text.len();
         sink.publish_input(&ledger, usage)?;
         self.ledger = ledger;
-        self.evidence.push(AgentEvidence { id, source, text });
+        self.evidence.push(evidence);
         Ok(())
     }
+}
+
+fn captured_origin(
+    registered: &RegisteredSource,
+    receipt: &Receipt,
+    inventory_index: usize,
+) -> Result<InvestigationEvidenceOrigin, HostError> {
+    let range = receipt
+        .ranges()
+        .get(inventory_index)
+        .ok_or(HostError::InvalidInput)?;
+    let file = &range.captured.file;
+    Ok(InvestigationEvidenceOrigin::CapturedPrimarySource {
+        registered_source_id: registered.source_id.clone(),
+        receipt_id: receipt.id().into(),
+        receipt_inventory_index: u32::try_from(inventory_index)
+            .map_err(|_| HostError::InvalidInput)?,
+        captured: TaskCaptureSpanRef {
+            file: TaskCaptureFileRef {
+                source_id: file.source_id.as_str().into(),
+                capture_id: file.capture_id.clone(),
+                path: file.path.clone(),
+                digest: file.digest.clone(),
+                byte_len: file.byte_len,
+            },
+            byte_start: range.captured.byte_start,
+            byte_end: range.captured.byte_end,
+        },
+        scope: PrimarySourceScope::PrimarySourceOnly,
+        input_closure: InputClosureStatus::InputClosureNotEstablished,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_source_evidence(
+    context: &FrozenContext,
+    fact: TaskFactKey,
+    fact_digest: String,
+    role: TaskRangeRole,
+    index: u32,
+    source: EvidenceRef,
+    text: String,
+    origin: InvestigationEvidenceOrigin,
+) -> Result<(InvestigationInputLedger, AgentEvidence), HostError> {
+    let id = format!("evidence-{}", context.evidence.len() + 1);
+    let mut ledger = context.ledger.clone();
+    ledger.revision = ledger
+        .revision
+        .checked_add(1)
+        .ok_or(HostError::LimitExceeded)?;
+    ledger.citations.push(InvestigationCitation {
+        citation_id: id.clone(),
+        fact,
+        fact_digest,
+        source: Some(source.clone()),
+        role: Some(role),
+        index: Some(index),
+        text_hash: Some(content_hash(text.as_bytes())),
+        origin,
+    });
+    ledger.validate_with_policy(context.policy)?;
+    Ok((ledger, AgentEvidence { id, source, text }))
 }
 
 fn legacy_references(props: &serde_json::Value) -> Vec<EvidenceRef> {
