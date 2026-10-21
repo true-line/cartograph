@@ -225,6 +225,7 @@ dependencies = [
  "semantic",
  "serde",
  "serde_json",
+ "sha2",
  "source-capture",
  "source-walk",
  "spec",
