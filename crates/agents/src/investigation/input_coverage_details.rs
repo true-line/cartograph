@@ -6,6 +6,13 @@ impl InvestigationInput {
         &mut self,
         raw_details: &[String],
     ) -> Result<(), InvestigationError> {
+        self.add_coverage_details_raw(raw_details)
+    }
+
+    pub(super) fn add_coverage_details_raw<P: AsRef<str>>(
+        &mut self,
+        raw_details: &[P],
+    ) -> Result<(), InvestigationError> {
         let proof = self
             .ledger
             .coverage
@@ -16,7 +23,7 @@ impl InvestigationInput {
         }
         let mut details = Vec::with_capacity(raw_details.len());
         for (manifest, raw) in self.ledger.coverage_reads.iter().zip(raw_details) {
-            let detail = manifest.admit_response(proof, raw)?;
+            let detail = manifest.admit_response(proof, raw.as_ref())?;
             strict::preflight(&detail.inventory_json, MAX_QUERY_BYTES, 32, 16384, 16384)?;
             let inventory: Value = serde_json::from_str(&detail.inventory_json)
                 .map_err(|_| InvestigationError::InvalidInput)?;

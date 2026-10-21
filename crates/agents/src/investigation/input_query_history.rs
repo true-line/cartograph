@@ -18,6 +18,38 @@ impl InvestigationInput {
         coverage_details: &[String],
         policy: &InvestigationPolicy,
     ) -> Result<Self, InvestigationError> {
+        let (input, prompt) = Self::prepare_progressive_parts_with_policy(
+            question,
+            specialist,
+            ledger,
+            query_pages,
+            evidence,
+            supplied_history,
+            usage,
+            basis,
+            request,
+            metadata,
+            policy,
+            6,
+        )?;
+        input.finish_progressive_input(&prompt, coverage_details)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_progressive_parts_with_policy<P: AsRef<str> + serde::Serialize>(
+        question: &str,
+        specialist: SpecialistId,
+        ledger: InvestigationInputLedger,
+        query_pages: &[P],
+        evidence: &[AgentEvidence],
+        supplied_history: &[String],
+        usage: &InvestigationUsage,
+        basis: &InvestigationTurnBasis,
+        request: &obligations::StagedObligationRequest,
+        metadata: &staged_refusal::ProtectedCompletionMetadata,
+        policy: &InvestigationPolicy,
+        request_schema: u32,
+    ) -> Result<(Self, Value), InvestigationError> {
         if !specialist.uses_query_history_disclosure()
             || policy.profile() != INVESTIGATION_V2_POLICY.profile()
         {
@@ -27,7 +59,7 @@ impl InvestigationInput {
         request.validate_ledger_with_policy(&ledger, policy)?;
         let selected: SpecialistId = serde_json::from_value(json!(request.specialist_id))
             .map_err(|_| InvestigationError::InvalidInput)?;
-        if request.schema_version != 6
+        if request.schema_version != request_schema
             || question != request.question
             || selected != specialist
             || ledger
@@ -107,9 +139,17 @@ impl InvestigationInput {
             serde_json::to_value(contract).map_err(|_| InvestigationError::InvalidInput)?;
         prompt["completion_metadata"] =
             serde_json::to_value(metadata).map_err(|_| InvestigationError::InvalidInput)?;
-        input.payload.prompt = wire::encode_prompt(&prompt, MAX_INPUT_BYTES)?;
-        input.add_coverage_details(coverage_details)?;
-        wire::validate_payload(&input.payload, MAX_INPUT_BYTES)?;
-        Ok(input)
+        Ok((input, prompt))
+    }
+
+    pub(super) fn finish_progressive_input<P: AsRef<str>>(
+        mut self,
+        prompt: &Value,
+        coverage_details: &[P],
+    ) -> Result<Self, InvestigationError> {
+        self.payload.prompt = wire::encode_prompt(prompt, MAX_INPUT_BYTES)?;
+        self.add_coverage_details_raw(coverage_details)?;
+        wire::validate_payload(&self.payload, MAX_INPUT_BYTES)?;
+        Ok(self)
     }
 }

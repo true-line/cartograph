@@ -109,11 +109,11 @@ impl InvestigationInput {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_base_projected(
+    fn prepare_base_projected<P: AsRef<str> + serde::Serialize>(
         question: &str,
         specialist: SpecialistId,
         ledger: InvestigationInputLedger,
-        query_pages: &[String],
+        query_pages: &[P],
         evidence: &[AgentEvidence],
         supplied_history: &[String],
         usage: &InvestigationUsage,
@@ -147,6 +147,7 @@ impl InvestigationInput {
         let mut graph_strings = Vec::new();
         let mut total_query_bytes = 0usize;
         for (raw, manifest) in query_pages.iter().zip(&ledger.queries) {
+            let raw = raw.as_ref();
             if raw.len() != manifest.response_bytes
                 || content_hash(raw.as_bytes()) != manifest.response_hash
             {
@@ -252,13 +253,13 @@ impl InvestigationInput {
             // Select before compaction: routing a new history through the old
             // cumulative selector representation would reject a fitting new input.
             let context = match request_hash {
-                Some(hash) => serde_json::to_value(ProgressiveInvestigationContext::prepare(
+                Some(hash) => serde_json::to_value(ProgressiveInvestigationContext::prepare_raw(
                     hash,
                     &ledger,
                     query_pages,
                     policy,
                 )?),
-                None => serde_json::to_value(CompactInvestigationContext::prepare_with_policy(
+                None => serde_json::to_value(CompactInvestigationContext::prepare_raw_with_policy(
                     &ledger,
                     query_pages,
                     policy,
@@ -778,3 +779,9 @@ mod query_history_input;
 
 #[path = "input_wire.rs"]
 mod wire;
+
+#[path = "input_admission.rs"]
+mod admission_input;
+pub use admission_input::{
+    AdmissionCapacityFeedback, AdmissionReserveMeasurements, CapacityRefusalReason,
+};

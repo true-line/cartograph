@@ -1,0 +1,616 @@
+use super::*;
+use context_hub::coverage::CoverageQualification;
+use obligations::{Obligation, ObligationEnvelope, StagedObligationRequest};
+use serde_json::json;
+
+struct Fixture {
+    ledger: InvestigationInputLedger,
+    request: StagedObligationRequest,
+    metadata: ProtectedCompletionMetadata,
+    basis: InvestigationTurnBasis,
+}
+impl Fixture {
+    fn new(role: SpecialistId, schema: u32) -> Self {
+        let policy = &INVESTIGATION_V2_POLICY;
+        let (target, mut ledger, _) = crate::investigation::tests::inspection_tests::fixture();
+        ledger.schema_version = 2;
+        ledger.coverage = Some(
+            CoverageQualification::new(&[], &[])
+                .unwrap()
+                .durable_proof(&ledger.graph_snapshot_id)
+                .unwrap(),
+        );
+        ledger.revision = 0;
+        ledger.selected_facts.clear();
+        ledger.receipt_references.clear();
+        ledger.citations.clear();
+        ledger.queries.clear();
+        let mut source = Obligation::Source {
+            obligation_id: String::new(),
+            target: Box::new(target),
+        };
+        let id = source.content_id().unwrap();
+        if let Obligation::Source { obligation_id, .. } = &mut source {
+            *obligation_id = id;
+        }
+        let request = StagedObligationRequest {
+            schema_version: schema,
+            request_nonce: "admission-input-fixture".into(),
+            specialist_id: serde_json::to_value(role).unwrap().as_str().unwrap().into(),
+            obligations: ObligationEnvelope {
+                schema_version: 2,
+                contract: "investigation-completion-obligations@2".into(),
+                obligations: vec![source],
+            },
+            inspection_requirements: None,
+            question: "Inspect retained evidence.".into(),
+            scope: InvestigationScope::All,
+            provider_mode: InvestigationProviderMode::Local,
+            limit_profile: policy.profile().into(),
+            expected_graph_revision: Some(ledger.graph_snapshot_id.clone()),
+            expected_context_id: ledger.coverage.as_ref().unwrap().context_id.clone(),
+            conversation_id: None,
+            parent_id: None,
+        };
+        let metadata = ProtectedCompletionMetadata {
+            schema_version: 1,
+            request_hash: request.intent_hash_with_policy(policy).unwrap(),
+            obligations_hash: request.obligations.fingerprint_with_policy(policy).unwrap(),
+            completed_attempt_ids: vec![],
+            refusal_count: 0,
+            last_refusal_id: None,
+            feedback: None,
+        };
+        let basis = InvestigationTurnBasis {
+            input_ledger_hash: ledger.fingerprint_with_policy(policy).unwrap(),
+            previous_ledger: None,
+            completed_tool: None,
+        };
+        Self {
+            ledger,
+            request,
+            metadata,
+            basis,
+        }
+    }
+    fn build(
+        &self,
+        role: SpecialistId,
+        usage: &InvestigationUsage,
+        mode: CompletionCallMode,
+        count: u32,
+        feedback: Option<&AdmissionCapacityFeedback>,
+    ) -> Result<InvestigationInput, InvestigationError> {
+        InvestigationInput::prepare_v9_with_policy(
+            &self.request.question,
+            role,
+            self.ledger.clone(),
+            &[],
+            &[],
+            &[],
+            usage,
+            &self.basis,
+            &self.request,
+            &self.metadata,
+            &[],
+            mode,
+            count,
+            feedback,
+            &INVESTIGATION_V2_POLICY,
+        )
+    }
+}
+fn feedback(reason: CapacityRefusalReason) -> AdmissionCapacityFeedback {
+    AdmissionCapacityFeedback {
+        schema_version: 1,
+        action_hash: "a".repeat(64),
+        reason,
+    }
+}
+fn usage(mode: CompletionCallMode) -> InvestigationUsage {
+    let limits = INVESTIGATION_V2_POLICY.limits();
+    InvestigationUsage {
+        model_invocations: if mode == CompletionCallMode::Choice {
+            1
+        } else {
+            limits.model_invocations - 2
+        },
+        generated_token_reservations: if mode == CompletionCallMode::Choice {
+            2048
+        } else {
+            limits.generated_token_reservations - 4096
+        },
+        ..Default::default()
+    }
+}
+fn prompt(input: &InvestigationInput) -> Value {
+    serde_json::from_str(&input.payload.prompt).unwrap()
+}
+
+#[test]
+fn admission_prompt_builds_actual_progressive_input_for_both_roles_and_modes() {
+    // AC-0287: this builder is internal and grants no dispatch authority.
+    for role in [
+        SpecialistId::DomainAnalystV10,
+        SpecialistId::EvidenceAuditorV10,
+    ] {
+        let fixture = Fixture::new(role, 7);
+        for mode in [CompletionCallMode::Choice, CompletionCallMode::FinishOnly] {
+            let input = fixture
+                .build(
+                    role,
+                    &usage(mode),
+                    mode,
+                    1,
+                    Some(&feedback(CapacityRefusalReason::PromptCapacity)),
+                )
+                .unwrap();
+            let body = prompt(&input);
+            assert_eq!(input.payload.system, role.prompt());
+            assert_eq!(body["schema_version"], 9);
+            assert_eq!(
+                body["turn_progress"]["contract"],
+                "investigation-turn-progress@4"
+            );
+            assert_eq!(
+                body["turn_progress"]["admission_mode"],
+                if mode == CompletionCallMode::Choice {
+                    "choice"
+                } else {
+                    "finish_only"
+                }
+            );
+            assert_eq!(
+                body["turn_progress"]["phase"],
+                if mode == CompletionCallMode::Choice {
+                    "initial"
+                } else {
+                    "finish_only"
+                }
+            );
+            assert_eq!(body["turn_progress"]["last_completed_action"], Value::Null);
+            assert_eq!(body["turn_progress"]["capacity_refusal_count"], 1);
+            assert_eq!(
+                body["completion_metadata"],
+                serde_json::to_value(&fixture.metadata).unwrap()
+            );
+            assert_eq!(
+                body["coverage_qualification"],
+                serde_json::to_value(&fixture.ledger.coverage.as_ref().unwrap().qualification)
+                    .unwrap()
+            );
+            assert_eq!(
+                body["compact_context"]["query_history"]["prior_queries"],
+                json!([])
+            );
+            assert!(!input.payload.prompt.contains("private-plugin-basis"));
+        }
+    }
+}
+
+#[test]
+fn admission_prompt_accept_clears_latest_feedback_without_resetting_count() {
+    let role = SpecialistId::DomainAnalystV10;
+    let fixture = Fixture::new(role, 7);
+    let before = fixture
+        .build(
+            role,
+            &usage(CompletionCallMode::Choice),
+            CompletionCallMode::Choice,
+            1,
+            Some(&feedback(CapacityRefusalReason::UnprovenContribution)),
+        )
+        .unwrap();
+    let after = fixture
+        .build(
+            role,
+            &usage(CompletionCallMode::Choice),
+            CompletionCallMode::Choice,
+            1,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        prompt(&before)["turn_progress"]["capacity_feedback"]["reason"],
+        "unproven_contribution"
+    );
+    assert_eq!(
+        prompt(&after)["turn_progress"]["capacity_feedback"],
+        Value::Null
+    );
+    assert_eq!(prompt(&after)["turn_progress"]["capacity_refusal_count"], 1);
+}
+
+#[test]
+fn admission_prompt_rejects_unbound_mode_count_feedback_and_old_family() {
+    let role = SpecialistId::DomainAnalystV10;
+    let fixture = Fixture::new(role, 7);
+    let actual = usage(CompletionCallMode::Choice);
+    assert!(
+        fixture
+            .build(role, &actual, CompletionCallMode::FinishOnly, 0, None)
+            .is_err()
+    );
+    assert!(
+        fixture
+            .build(
+                role,
+                &actual,
+                CompletionCallMode::Choice,
+                0,
+                Some(&feedback(CapacityRefusalReason::PromptCapacity))
+            )
+            .is_err()
+    );
+    assert!(
+        fixture
+            .build(role, &actual, CompletionCallMode::Choice, 2, None)
+            .is_err()
+    );
+    let mut bad = feedback(CapacityRefusalReason::PromptCapacity);
+    bad.action_hash = "A".repeat(64);
+    assert!(
+        fixture
+            .build(role, &actual, CompletionCallMode::Choice, 1, Some(&bad))
+            .is_err()
+    );
+    bad = feedback(CapacityRefusalReason::PromptCapacity);
+    bad.schema_version = 2;
+    assert!(
+        fixture
+            .build(role, &actual, CompletionCallMode::Choice, 1, Some(&bad))
+            .is_err()
+    );
+    let old = Fixture::new(SpecialistId::DomainAnalystV9, 6);
+    assert!(
+        old.build(
+            SpecialistId::DomainAnalystV9,
+            &actual,
+            CompletionCallMode::Choice,
+            0,
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        InvestigationInput::prepare_v8_with_policy(
+            &fixture.request.question,
+            role,
+            fixture.ledger.clone(),
+            &[],
+            &[],
+            &[],
+            &actual,
+            &fixture.basis,
+            &fixture.request,
+            &fixture.metadata,
+            &[],
+            &INVESTIGATION_V2_POLICY
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn admission_prompt_capacity_reason_wire_is_closed_and_size_pinned() {
+    // Changing this list/length requires re-proving the sizing envelope.
+    for (reason, name, length) in [
+        (CapacityRefusalReason::PromptCapacity, "prompt_capacity", 15),
+        (
+            CapacityRefusalReason::FinishCallReserve,
+            "finish_call_reserve",
+            19,
+        ),
+        (
+            CapacityRefusalReason::FinishTokenReserve,
+            "finish_token_reserve",
+            20,
+        ),
+        (
+            CapacityRefusalReason::UnprovenContribution,
+            "unproven_contribution",
+            21,
+        ),
+    ] {
+        assert_eq!(
+            serde_json::to_string(&reason).unwrap(),
+            format!("\"{name}\"")
+        );
+        assert_eq!(reason.encoded_name(), name);
+        assert_eq!(name.len(), length);
+        assert_eq!(
+            serde_json::from_value::<CapacityRefusalReason>(json!(name)).unwrap(),
+            reason
+        );
+    }
+    assert!(serde_json::from_value::<CapacityRefusalReason>(json!("storage_capacity")).is_err());
+    let mut raw = serde_json::to_value(feedback(CapacityRefusalReason::PromptCapacity)).unwrap();
+    raw["source_text"] = "not permitted".into();
+    assert!(serde_json::from_value::<AdmissionCapacityFeedback>(raw).is_err());
+}
+
+fn assert_dominates(
+    bound: llm::bounded::BoundedWireMeasurements,
+    actual: llm::bounded::BoundedWireMeasurements,
+) {
+    assert!(bound.raw_string_bytes >= actual.raw_string_bytes);
+    assert!(bound.original_payload_bytes >= actual.original_payload_bytes);
+    assert!(bound.redacted_payload_bytes >= actual.redacted_payload_bytes);
+    assert!(bound.original_action_bytes >= actual.original_action_bytes);
+    assert!(bound.egress_fingerprint_bytes >= actual.egress_fingerprint_bytes);
+}
+
+#[test]
+fn admission_prompt_reserve_dominates_actual_simultaneous_feedback_in_both_modes() {
+    // AC-0287: real builders and the real redactor/tuple encoder; no dispatch.
+    use llm::{LlmProvider, OllamaProvider};
+    let provider = OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test",
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    let profile = provider.bounded_profile().unwrap();
+    let limits = llm::bounded::CompletionLimits::default();
+    for role in [
+        SpecialistId::DomainAnalystV10,
+        SpecialistId::EvidenceAuditorV10,
+    ] {
+        let mut fixture = Fixture::new(role, 7);
+        // Immutable source-authored strings stay fixed even when redaction
+        // expands them; only the finite metadata/feedback slots are reserved.
+        fixture.request.question = "Inspect sk-abcdefgh and Unicode é.".into();
+        fixture.metadata.request_hash = fixture
+            .request
+            .intent_hash_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap();
+        let initial = fixture
+            .build(
+                role,
+                &usage(CompletionCallMode::Choice),
+                CompletionCallMode::Choice,
+                0,
+                None,
+            )
+            .unwrap();
+        let reserved = initial
+            .measure_v9_reserve_with_policy(
+                &profile,
+                &limits,
+                "inv:admission-reserve",
+                &INVESTIGATION_V2_POLICY,
+            )
+            .unwrap();
+        fixture.metadata.completed_attempt_ids = (0..INVESTIGATION_V2_POLICY
+            .max_completed_attempts())
+            .map(|index| format!("{index:064x}"))
+            .collect();
+        fixture.metadata.refusal_count = 1;
+        fixture.metadata.last_refusal_id = Some("e".repeat(64));
+        fixture.metadata.feedback = Some(staged_finish::RefusalFeedback {
+            schema_version: 1,
+            unmet: fixture
+                .request
+                .obligations
+                .obligations
+                .iter()
+                .map(|item| {
+                    let (kind, id) = item.key();
+                    staged_finish::FeedbackEntry {
+                        obligation_id: id.into(),
+                        kind: kind.into(),
+                        reason: staged_finish::RefusalReason::AcquiredNotSupplied,
+                    }
+                })
+                .collect(),
+        });
+        for mode in [CompletionCallMode::Choice, CompletionCallMode::FinishOnly] {
+            let mut consumed = usage(mode);
+            if mode == CompletionCallMode::FinishOnly {
+                consumed.model_invocations = INVESTIGATION_V2_POLICY.limits().model_invocations - 1;
+                consumed.generated_token_reservations = INVESTIGATION_V2_POLICY
+                    .limits()
+                    .generated_token_reservations
+                    - 2048;
+            }
+            consumed.reported_input_tokens = Some(u64::MAX);
+            consumed.reported_output_tokens = Some(u64::MAX);
+            for reason in [
+                CapacityRefusalReason::PromptCapacity,
+                CapacityRefusalReason::FinishCallReserve,
+                CapacityRefusalReason::FinishTokenReserve,
+                CapacityRefusalReason::UnprovenContribution,
+            ] {
+                let input = fixture
+                    .build(
+                        role,
+                        &consumed,
+                        mode,
+                        consumed.model_invocations,
+                        Some(&feedback(reason)),
+                    )
+                    .unwrap();
+                let body = prompt(&input);
+                assert!(body["completion_metadata"]["feedback"].is_object());
+                assert!(body["turn_progress"]["capacity_feedback"].is_object());
+                let actual = llm::bounded::measure_bounded_action(
+                    &profile,
+                    &input.action("inv:admission-reserve".into()).unwrap(),
+                    &limits,
+                )
+                .unwrap();
+                assert_dominates(
+                    if mode == CompletionCallMode::Choice {
+                        reserved.choice
+                    } else {
+                        reserved.finish_only
+                    },
+                    actual,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn admission_prompt_reserve_rejects_legacy_and_mismatched_contract() {
+    use llm::{LlmProvider, OllamaProvider};
+    let provider = OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test",
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    let limits = llm::bounded::CompletionLimits::default();
+    let role = SpecialistId::DomainAnalystV10;
+    let fixture = Fixture::new(role, 7);
+    let mut input = fixture
+        .build(
+            role,
+            &usage(CompletionCallMode::Choice),
+            CompletionCallMode::Choice,
+            0,
+            None,
+        )
+        .unwrap();
+    let mut body = prompt(&input);
+    body["completion_metadata"]["request_hash"] = "f".repeat(64).into();
+    input.payload.prompt = body.to_string();
+    assert!(
+        input
+            .measure_v9_reserve_with_policy(
+                &provider.bounded_profile().unwrap(),
+                &limits,
+                "inv:reserve",
+                &INVESTIGATION_V2_POLICY
+            )
+            .is_err()
+    );
+    let old = Fixture::new(SpecialistId::DomainAnalystV9, 6);
+    let input = InvestigationInput::prepare_v8_with_policy(
+        &old.request.question,
+        SpecialistId::DomainAnalystV9,
+        old.ledger,
+        &[],
+        &[],
+        &[],
+        &usage(CompletionCallMode::Choice),
+        &old.basis,
+        &old.request,
+        &old.metadata,
+        &[],
+        &INVESTIGATION_V2_POLICY,
+    )
+    .unwrap();
+    assert!(
+        input
+            .measure_v9_reserve_with_policy(
+                &provider.bounded_profile().unwrap(),
+                &limits,
+                "inv:reserve",
+                &INVESTIGATION_V2_POLICY
+            )
+            .is_err()
+    );
+    let body = prompt(&input);
+    assert_eq!(body["schema_version"], 8);
+    assert!(body["turn_progress"].get("capacity_feedback").is_none());
+    assert!(body["turn_progress"].get("admission_mode").is_none());
+}
+
+#[test]
+fn admission_prompt_borrowed_pages_preserve_exact_query_projection_and_progress() {
+    let role = SpecialistId::DomainAnalystV10;
+    let mut fixture = Fixture::new(role, 7);
+    let previous = fixture.ledger.clone();
+    let raw = json!({"context":{"context_id":fixture.request.expected_context_id,
+        "coverage":fixture.ledger.coverage.as_ref().unwrap().qualification,
+        "response":{"snapshot_id":fixture.ledger.scope_snapshot_id,"view":"recovered_graph",
+        "total_selected":0,"facts":[],"next_cursor":null}},"evidence_options":[]})
+    .to_string();
+    fixture.ledger.revision = 1;
+    fixture.ledger.queries.push(InvestigationQueryManifest {
+        query: InvestigationQuery {
+            scope: InvestigationScope::All,
+            kind: None,
+            labels: vec![],
+            max_facts: 12,
+            max_bytes: 16384,
+            cursor: None,
+        },
+        response_hash: content_hash(raw.as_bytes()),
+        response_bytes: raw.len(),
+        returned_facts: 0,
+        total_selected: 0,
+        has_more: false,
+    });
+    fixture.basis = InvestigationTurnBasis {
+        input_ledger_hash: fixture
+            .ledger
+            .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap(),
+        previous_ledger: Some(previous),
+        completed_tool: Some(InvestigationTool::QueryContext),
+    };
+    let owned = ProgressiveInvestigationContext::prepare(
+        &fixture.metadata.request_hash,
+        &fixture.ledger,
+        std::slice::from_ref(&raw),
+        &INVESTIGATION_V2_POLICY,
+    )
+    .unwrap();
+    let borrowed = ProgressiveInvestigationContext::prepare_raw(
+        &fixture.metadata.request_hash,
+        &fixture.ledger,
+        &[raw.as_str()],
+        &INVESTIGATION_V2_POLICY,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&owned).unwrap(),
+        serde_json::to_vec(&borrowed).unwrap()
+    );
+    for mode in [CompletionCallMode::Choice, CompletionCallMode::FinishOnly] {
+        let input = InvestigationInput::prepare_v9_with_policy(
+            &fixture.request.question,
+            role,
+            fixture.ledger.clone(),
+            &[raw.as_str()],
+            &[],
+            &[],
+            &usage(mode),
+            &fixture.basis,
+            &fixture.request,
+            &fixture.metadata,
+            &[],
+            mode,
+            0,
+            None,
+            &INVESTIGATION_V2_POLICY,
+        )
+        .unwrap();
+        let body = prompt(&input);
+        assert_eq!(
+            body["compact_context"],
+            serde_json::to_value(&borrowed).unwrap()
+        );
+        assert_eq!(
+            body["turn_progress"]["last_completed_action"]["type"],
+            "query_context"
+        );
+        assert!(body["turn_progress"]["last_completed_action"]["query_id"].is_string());
+        assert!(
+            body["turn_progress"]["last_completed_action"]
+                .get("query")
+                .is_none()
+        );
+        assert_eq!(
+            body["turn_progress"]["phase"],
+            if mode == CompletionCallMode::Choice {
+                "after_query"
+            } else {
+                "finish_only"
+            }
+        );
+    }
+}
