@@ -563,6 +563,56 @@ fn admit_input(
     usage: InvestigationUsage,
     first: bool,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = validate_input_candidate(connection, task, ledger, &usage)?;
+    persist_input_rows(connection, task, ledger)?;
+    task.ledger_revision = Some(ledger.revision);
+    task.ledger_hash = Some(ledger.fingerprint_with_policy(policy)?);
+    task.detail.summary.graph_snapshot_id = Some(ledger.graph_snapshot_id.clone());
+    task.detail.scope_snapshot_id = Some(ledger.scope_snapshot_id.clone());
+    task.detail.coverage_context =
+        ledger
+            .coverage
+            .as_ref()
+            .map(|proof| InvestigationCoverageContext {
+                context_id: proof.context_id.clone(),
+                coverage: proof.qualification.clone(),
+            });
+    task.detail.citations = ledger.citations.clone();
+    task.detail.usage = usage;
+    let tool = task.action_tool.take();
+    task.phase = Phase::Ready;
+    task.detail.summary.status = InvestigationStatus::Running;
+    bump(connection, task)?;
+    event(
+        connection,
+        task,
+        if first {
+            InvestigationEventKind::ContextPrepared
+        } else {
+            InvestigationEventKind::ToolCompleted
+        },
+        None,
+        tool,
+        if first {
+            "Frozen context and original input metadata committed."
+        } else {
+            "Tool input and its actual receipt references committed before lease release."
+        },
+    )?;
+    if !first {
+        completion::record_acquisition(connection, task, ledger, tool)?;
+    }
+    completion::refresh_observation(connection, task)
+}
+
+/// Read-only validation shared with prospective admission. The caller retains
+/// the authoritative transaction and must revalidate its task/owner basis.
+pub(super) fn validate_input_candidate(
+    connection: &Connection,
+    task: &StoredTask,
+    ledger: &InvestigationInputLedger,
+    usage: &InvestigationUsage,
+) -> Result<&'static InvestigationPolicy, InvestigationStoreError> {
     let policy = InvestigationPolicy::for_limits(&task.detail.limits)
         .ok_or(InvestigationStoreError::Invalid)?;
     ledger.validate_with_policy(policy)?;
@@ -574,7 +624,7 @@ fn admit_input(
         }
         _ => return Err(InvestigationStoreError::Invalid),
     }
-    validate_usage(&usage, &task.detail.limits)?;
+    validate_usage(usage, &task.detail.limits)?;
     let prior = &task.detail.usage;
     if usage.model_invocations != prior.model_invocations
         || usage.tool_actions != prior.tool_actions
@@ -654,6 +704,17 @@ fn admit_input(
         }
         .validate_with_policy(ledger, policy)?;
     }
+    Ok(policy)
+}
+
+/// Persist only bounded input and newly referenced receipts, in caller order.
+/// The caller must validate the candidate and owns transaction/rollback plus
+/// task, event and completion-attempt finalization; this helper never commits.
+pub(super) fn persist_input_rows(
+    connection: &Connection,
+    task: &StoredTask,
+    ledger: &InvestigationInputLedger,
+) -> Result<(), InvestigationStoreError> {
     let id = &task.detail.summary.investigation_id;
     insert_body(
         connection,
@@ -678,44 +739,7 @@ fn admit_input(
             )?)?;
         }
     }
-    task.ledger_revision = Some(ledger.revision);
-    task.ledger_hash = Some(ledger.fingerprint_with_policy(policy)?);
-    task.detail.summary.graph_snapshot_id = Some(ledger.graph_snapshot_id.clone());
-    task.detail.scope_snapshot_id = Some(ledger.scope_snapshot_id.clone());
-    task.detail.coverage_context =
-        ledger
-            .coverage
-            .as_ref()
-            .map(|proof| InvestigationCoverageContext {
-                context_id: proof.context_id.clone(),
-                coverage: proof.qualification.clone(),
-            });
-    task.detail.citations = ledger.citations.clone();
-    task.detail.usage = usage;
-    let tool = task.action_tool.take();
-    task.phase = Phase::Ready;
-    task.detail.summary.status = InvestigationStatus::Running;
-    bump(connection, task)?;
-    event(
-        connection,
-        task,
-        if first {
-            InvestigationEventKind::ContextPrepared
-        } else {
-            InvestigationEventKind::ToolCompleted
-        },
-        None,
-        tool,
-        if first {
-            "Frozen context and original input metadata committed."
-        } else {
-            "Tool input and its actual receipt references committed before lease release."
-        },
-    )?;
-    if !first {
-        completion::record_acquisition(connection, task, ledger, tool)?;
-    }
-    completion::refresh_observation(connection, task)
+    Ok(())
 }
 
 pub(super) fn check_identity(

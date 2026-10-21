@@ -549,17 +549,42 @@ fn append_attempt(
     revision: u64,
 ) -> Result<(), InvestigationStoreError> {
     saved_policy(task)?;
-    // Reserved decode-only outcome: no current production firewall emits a
-    // trustworthy per-read refusal witness, and redaction is still acquisition.
+    if matches!(outcome, AttemptOutcome::FirewallRefused { .. }) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    validated_intent(task)?;
+    let step_id = latest_step(connection, &task.detail.summary.investigation_id)?;
+    append_attempt_at_step(connection, task, &step_id, read, outcome, revision)
+}
+
+/// Derive and append against the exact saved step/response. This never accepts
+/// caller-fabricated records or silently replaces a stale step with the latest.
+/// The caller owns the transaction and genuine read/event/phase authority.
+pub(super) fn append_attempt_at_step(
+    connection: &Connection,
+    task: &StoredTask,
+    step_id: &str,
+    read: &ReadIntent,
+    outcome: AttemptOutcome,
+    revision: u64,
+) -> Result<(), InvestigationStoreError> {
+    saved_policy(task)?;
     if matches!(outcome, AttemptOutcome::FirewallRefused { .. }) {
         return Err(InvestigationStoreError::Invalid);
     }
     let intent = validated_intent(task)?;
     let id = &task.detail.summary.investigation_id;
-    let step = latest_step(connection, id)?;
-    let response: InvestigationResponseMeta =
-        read_body(connection, "investigation_responses", "step_id", id, &step)?
-            .ok_or(InvestigationStoreError::Invalid)?;
+    if latest_step(connection, id)? != step_id {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let response: InvestigationResponseMeta = read_body(
+        connection,
+        "investigation_responses",
+        "step_id",
+        id,
+        &step_id,
+    )?
+    .ok_or(InvestigationStoreError::Invalid)?;
     if response.action_hash != staged::read_action_hash(read)? {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -575,7 +600,7 @@ fn append_attempt(
         .transpose()?;
     let records = derive_attempt_records(
         task,
-        &step,
+        step_id,
         &response,
         read,
         &outcome,

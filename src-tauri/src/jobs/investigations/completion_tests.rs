@@ -1489,3 +1489,6 @@ mod prospective_attempt_tests;
 
 #[path = "prospective_metadata_tests.rs"]
 mod prospective_metadata_tests;
+
+#[path = "attempt_storage_helper_tests.rs"]
+mod attempt_storage_helper_tests;

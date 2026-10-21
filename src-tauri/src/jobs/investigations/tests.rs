@@ -1523,3 +1523,6 @@ fn investigation_compact_consent_binds_exact_manifest_across_reopen() {
 
 #[path = "policy_tests.rs"]
 mod policy_tests;
+
+#[path = "input_storage_helper_tests.rs"]
+mod input_storage_helper_tests;
