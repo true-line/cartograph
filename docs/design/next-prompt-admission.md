@@ -26,11 +26,19 @@ The working implementation contains shared pure attempt and metadata derivation,
 
 Local component/regression validation: 172 agents tests passed (one existing local-provider test ignored), 98 production storage/ownership harness tests passed, 10 core-redact tests passed, and strict Clippy passed for the changed packages. These are local results; they do not establish Windows runtime success, a whole-prompt certificate, or real-provider acceptance.
 
+The bounded LLM firewall and pure measurement now share the production wire preparation path. It reports raw string bytes, original/redacted payload bytes, original-action tuple bytes and egress-fingerprint tuple bytes. This includes actual redaction of system/prompt and span metadata. Measurements do not authorize dispatch and do not certify unknown source content or provider tokenizer/context capacity.
+
 ## Subsequent integration (not yet implemented)
 
 A private prepared acquisition binds request/family/policy, execution revision, original response/action, base ledger, prospective metadata and retained source/archive identities. Keep source guards through atomic commit. Source validation must still be durably reserved before source bytes are read. Lost or uncertain publication stops rather than replaying the operation.
 
 Reserve a bounded latest-only capacity-feedback slot in every callable state, simultaneously with maximum applicable completion feedback and counter widths. Capacity refusal retains the already charged model call, increments a separate bounded refusal counter, and does not debit tool/raw-response usage or create unavailable/acquired evidence. Bind its durable event to the decoded action hash.
+
+The latest capacity-feedback slot clears after an accepted acquisition; its cumulative refusal counter does not reset. Visible feedback requires a positive counter and binds the most recent refused action. A positive counter with an empty slot is valid. A refusal followed by an accepted acquisition must therefore stop presenting stale refusal advice while preserving its audit count.
+
+Capacity feedback carries schema version 1, a validated action hash and one closed reason: `prompt_capacity`, `unproven_contribution`, `finish_call_reserve`, or `finish_token_reserve`. It carries no arbitrary prose. Its maximum is derived from every enum variant's serialized representation and the counter width at the registered model-call ceiling; adding a variant requires an exhaustive bound reproof. Actual feedback and synthetic sizing maxima remain distinct types.
+
+Storage-headroom shortfalls use the existing terminal storage-exhaustion path, including a query/inventory commit race after a successful precheck. Tool/evidence budget exhaustion retains explicit terminal limit handling. Neither is reported as prompt-capacity refusal. These distinctions preserve the actual cause in the audit record and do not grant another model call.
 
 Derive remaining finishing opportunities from saved completion-refusal allowance. Reserve those calls and their generated tokens separately. When only finishing reserves remain, expose a versioned finish-only phase and certify that prompt variant too. A tool proposal in that phase terminates explicitly. A partial finish is accepted only when the model supplies one and it satisfies the obligations; the host never fabricates success.
 
