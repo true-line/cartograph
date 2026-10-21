@@ -430,6 +430,12 @@ jobs:
         with:
           tool: zizmor@1.30.1
 
+      # zizmor@1.30.1 has no install-action manifest, so it falls back to
+      # cargo-binstall, which installs to <HOME>/.cargo/bin and only adds it to
+      # PATH when cargo is absent; the runner has cargo (#674).
+      - name: Put installed tools on PATH
+        run: echo "$RUNNER_TEMP/install-action-home/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: zizmor
         env:
           GH_TOKEN: ${{ github.token }}
