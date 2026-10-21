@@ -103,6 +103,23 @@ test('queued PR lanes never cancel each other, and package installs serialize on
   assert.equal([...workflow.matchAll(/arguments-json: .*(?:"apt-get"|"--with-deps")/gu)].length, calls.length);
 });
 
+test('install-action never shares its download directory across runners (#674)', () => {
+  // install-action rm -rfs $HOME/.install-action/tmp after every install and
+  // the self-hosted runners share one HOME, so each step gets its own.
+  for (const file of ['.github/workflows/ci.yml', '.github/workflows/package.yml']) {
+    const workflow = readFileSync(path.join(root, file), 'utf8');
+    const steps = workflow.split(/\n(?= +- name: )/u).filter((step) => /uses: taiki-e\/install-action@/u.test(step));
+    assert.ok(steps.length > 0, file);
+    for (const step of steps) {
+      assert.match(step, /\n +env:\n +HOME: \$\{\{ runner\.temp \}\}\/install-action-home\n/u, step);
+    }
+  }
+  // A cargo-binstall fallback lands in that home's .cargo/bin, which the
+  // action leaves off PATH when cargo is present.
+  const ci = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
+  assert.match(ci, /tool: zizmor@[\d.]+\n\n(?: +#.*\n)+ +- name: Put installed tools on PATH\n +run: echo "\$RUNNER_TEMP\/install-action-home\/\.cargo\/bin" >> "\$GITHUB_PATH"/u);
+});
+
 test('direct non-CI entrypoints authorize before checkout and reusable calls inherit policy', () => {
   const workflows = [
     '.github/workflows/close-linked-issues.yml',
