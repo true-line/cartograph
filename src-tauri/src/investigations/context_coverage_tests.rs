@@ -585,7 +585,7 @@ fn qualified_preparation_capacity_rejects_large_raw_inventories_before_copy() {
 fn qualified_preparation_checks_exact_archive_encoding_after_raw_admission() {
     let fixture = Fixture::new(0);
     let scoped = &fixture.scope[0];
-    let inventory = json!({"repo":scoped.repo_key,"commit":"workdir","layer_hints":[],
+    let inventory = json!({"inventory":context_hub::coverage::INVENTORY_VERSION,"repo":scoped.repo_key,"commit":"workdir","layer_hints":[],
         "producers":[],"unsupported":[],"limited":false,"padding":"\\".repeat(350_000)})
     .to_string();
     let connection =

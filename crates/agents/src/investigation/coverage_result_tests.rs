@@ -1,7 +1,7 @@
 use super::*;
 use context_hub::{
     ContextSnapshot,
-    coverage::{CoverageQualification, ScopedRepo},
+    coverage::{CoverageQualification, INVENTORY_VERSION, ScopedRepo},
 };
 use core_graph::coverage::{CoverageRecord, StoredCoverage};
 use llm::bounded::CompletionLimits;
@@ -16,7 +16,7 @@ fn ledger(qualified: bool) -> InvestigationInputLedger {
         registered_source_id: Some("src:api".into()),
         ingest_id: "job:fixture".into(),
         config_hash: "plugins:fixture".into(),
-        inventory_json: json!({"repo":"acme/api","commit":"a".repeat(40),"layer_hints":[],
+        inventory_json: json!({"inventory":INVENTORY_VERSION,"repo":"acme/api","commit":"a".repeat(40),"layer_hints":[],
             "producers":[],"unsupported":[],"limited":false})
         .to_string(),
     };

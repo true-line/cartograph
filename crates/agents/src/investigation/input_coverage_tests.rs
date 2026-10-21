@@ -1,7 +1,7 @@
 use super::*;
 use context_hub::{
     ContextSnapshot,
-    coverage::{CoverageQualification, ScopedRepo},
+    coverage::{CoverageQualification, INVENTORY_VERSION, ScopedRepo},
 };
 use core_graph::coverage::{CoverageRecord, StoredCoverage};
 use core_prov::content_hash;
@@ -14,10 +14,11 @@ fn initial() -> InvestigationInputLedger {
         registered_source_id: Some("src:api".into()),
         ingest_id: "private-ingest-basis".into(),
         config_hash: "private-plugin-basis".into(),
-        inventory_json: json!({"repo":"acme/api", "commit":"a".repeat(40),
+        inventory_json:
+            json!({"inventory":INVENTORY_VERSION,"repo":"acme/api", "commit":"a".repeat(40),
             "layer_hints":["application"], "producers":[{"state":"not_selected"}],
             "unsupported":[], "limited":true})
-        .to_string(),
+            .to_string(),
     };
     let stored = StoredCoverage {
         inventory_hash: record.inventory_hash(),
