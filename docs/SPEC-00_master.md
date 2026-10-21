@@ -59,6 +59,8 @@ The entire engine is organized as a **four-tier escalation ladder**. A fact (nod
 | T3 | **Agentic** | Bounded LLM agent reads surrounding code/evidence and proposes a resolution with cited evidence | Inferred links/annotations | `InferredWeak` |
 | — | **Gap** | None of the above resolved it | Explicit `Gap` node with reason | `Gap` |
 
+**T0.5 exact-name fills (#257, AC-0270).** Between T0 and T2, the deterministic rule `t0_5.name-unique@1` links a call Gap to the one callable Symbol in scope whose name equals the callee text. The rule is deterministic, so the edge records tier `Deterministic` and method `rule t0_5.name-unique@1`. What it asserts is not: uniqueness is a fact about the graph, never a binding proof, because globals beyond the denylist, externals, shadowing and dynamic dispatch can still bind elsewhere. Its confidence is therefore capped at `InferredStrong`, never `Confirmed`. The Gap stays, so R-INT-4 still marks the flow partial. Fills are recomputed on every load and never overwrite another producer's edge (R-INT-1). T2 skips only hops whose stored fill equals what the current graph derives.
+
 **Hard rules (integrity spine):**
 - **R-INT-1** T2/T3 may **never overwrite or upgrade** a T0/T1 fact. They only fill unresolved slots.
 - **R-INT-2** Every node/edge stores its producing tier and confidence tier. The UI and exports render tier distinctly; inferred content is never visually or structurally indistinguishable from confirmed content.

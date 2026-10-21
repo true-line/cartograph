@@ -9,6 +9,7 @@
 pub mod context;
 mod eval_report;
 pub use eval_report::EvalReport;
+pub mod name_unique;
 
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, ProducingMethod, Provenance, Tier, may_overwrite};
@@ -228,18 +229,24 @@ impl AnnIndex {
     }
 }
 
-/// Recover channel/call Gap slots and searchable existing targets.
+/// Recover channel/call Gap slots and searchable existing targets. A hop
+/// that a live T0.5 exact-name fill covers is not T2 work and is left out
+/// (#257, AC-0270); the Gap itself stays open in the graph.
 pub fn graph_inputs(nodes: &[Node], edges: &[Edge]) -> (Vec<UnresolvedHop>, Vec<Candidate>) {
     let gaps: BTreeMap<_, _> = nodes
         .iter()
         .filter(|node| node.label == "Gap")
         .map(|node| (node.id.as_str(), node))
         .collect();
+    let filled = name_unique::live_fills(nodes, edges);
     let mut hops = Vec::new();
     for edge in edges {
         let Some(gap) = gaps.get(edge.dst.as_str()) else {
             continue;
         };
+        if filled.contains(&(gap.id.clone(), edge.src.clone())) {
+            continue;
+        }
         let kind = match edge.label.as_str() {
             "PUBLISHES" | "SUBSCRIBES" => HopKind::Channel,
             "CALLS" => HopKind::Call,

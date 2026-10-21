@@ -20,6 +20,8 @@ mod job_execution;
 mod job_execution_host_tests;
 mod jobs;
 mod metrics;
+#[cfg(test)]
+mod name_unique_tests;
 mod paths;
 mod primary_source;
 #[cfg(test)]
@@ -2017,6 +2019,41 @@ fn stitch_backings(
     Ok(candidates.len() as u64)
 }
 
+/// Recompute the T0.5 exact-name fills (#257, AC-0270) over the whole graph
+/// after every load. A stored fill the current graph no longer derives is
+/// deleted before the current ones are upserted, so a second same-name
+/// Symbol, a removed target or a scope change re-opens its Gap. Only edges
+/// this rule wrote are ever deleted; the plan never targets a pair another
+/// producer holds.
+fn stitch_name_unique(
+    graph: &mut SqliteGraphStore,
+    facts: &mut OperationFacts,
+) -> Result<semantic::name_unique::Plan, String> {
+    let mut nodes = Vec::new();
+    for label in ["Gap", "Symbol", "Component"] {
+        nodes.extend(graph.nodes_with_label(label).map_err(|e| e.to_string())?);
+    }
+    let edges = graph
+        .edges_with_labels(&["CALLS"])
+        .map_err(|e| e.to_string())?;
+    let plan = semantic::name_unique::plan(&nodes, &edges);
+    let planned: std::collections::BTreeSet<_> = plan.edges.iter().map(edge_key).collect();
+    for edge in &edges {
+        let is_fill = edge.props["prov"]["extractor_id"] == semantic::name_unique::EXTRACTOR_ID;
+        if is_fill && !planned.contains(&edge_key(edge)) {
+            graph
+                .delete_edge(&edge.src, &edge.dst, &edge.label)
+                .map_err(|error| error.to_string())?;
+            facts.edges.remove(&edge_key(edge));
+        }
+    }
+    for edge in &plan.edges {
+        graph.put_edge(edge).map_err(|error| error.to_string())?;
+        facts.edges.insert(edge_key(edge));
+    }
+    Ok(plan)
+}
+
 /// Binding evidence a system manifest declares (#589, AC-0240): each
 /// service base URL and each gateway route, resolved to the serving repo's
 /// key through the manifest's own repo list.
@@ -2279,6 +2316,10 @@ struct FindingsSummary {
     drift: u64,
     /// gaps + unsupported + no_evidence (the register headline).
     open_findings: u64,
+    /// Gaps a live T0.5 exact-name fill covers (#257, AC-0270). They stay
+    /// open and counted in `gaps`: the fill is an inferred candidate, never
+    /// a resolution.
+    gaps_with_inferred_fill: u64,
     /// Total graph facts (nodes + edges).
     graph_facts: u64,
 }
@@ -2306,6 +2347,11 @@ fn summarize_register(
         no_evidence,
         drift,
         open_findings: gaps + unsupported + no_evidence,
+        gaps_with_inferred_fill: semantic::name_unique::live_fills(nodes, edges)
+            .into_iter()
+            .map(|(gap, _)| gap)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as u64,
         graph_facts: (nodes.len() + edges.len()) as u64,
     }
 }
@@ -3815,6 +3861,7 @@ fn run_ingest<R: tauri::Runtime>(
 
         ensure_running_job(state, execution)?;
         stitch_backings(&mut graph, &mut published, &registries).map_err(&fail)?;
+        stitch_name_unique(&mut graph, &mut published).map_err(&fail)?;
     }
 
     relink_found_adrs(state, operation, execution, &mut published).map_err(&fail)?;
@@ -4220,6 +4267,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
 
         ensure_running_job(&state, &execution)?;
         stitch_backings(&mut graph, &mut published, &registries).map_err(&fail)?;
+        stitch_name_unique(&mut graph, &mut published).map_err(&fail)?;
     }
     relink_found_adrs(&state, &operation, &execution, &mut published).map_err(&fail)?;
     ensure_running_job(&state, &execution)?;
@@ -4509,6 +4557,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
         ensure_running_job(&state, &execution)?;
         stitch_backings(&mut graph, &mut published, &registries).map_err(&fail)?;
+        stitch_name_unique(&mut graph, &mut published).map_err(&fail)?;
         // AC-0240: declared services and gateway routes join absolute-URL
         // fetches to the owning repo's endpoints.
         stitch_http_bindings(&mut graph, &http_bindings, &mut published).map_err(&fail)?;
