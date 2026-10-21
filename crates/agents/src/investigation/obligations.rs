@@ -233,6 +233,12 @@ impl StagedObligationRequest {
         super::strict::preflight(raw, policy.request_bytes(), 32, 4096, 4096)?;
         let value: Self =
             serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidRequest)?;
+        // Internal normalized families can precede public activation. Keep this
+        // raw entrypoint closed even when a future identity can be constructed
+        // directly for builder/storage tests.
+        if !matches!(value.schema_version, 4..=6) {
+            return Err(InvestigationError::InvalidRequest);
+        }
         value.normalized_with_policy(policy)
     }
     pub fn normalized(&self) -> Result<Self, InvestigationError> {
@@ -358,8 +364,9 @@ fn request_family(
     schema_version: u32,
     specialist_id: &str,
 ) -> Result<(u32, [&'static str; 2], &'static [u8]), InvestigationError> {
-    // V2 has two distinct immutable request/prompt families. Policy alone
-    // cannot select their meaning, including when hashing a saved request.
+    // Policy alone cannot select an immutable request/prompt family, including
+    // when hashing saved requests. Request7/@10 is internal only: the public
+    // raw decoder and top-level IPC discriminator still reject request7.
     match (policy.profile(), schema_version, specialist_id) {
         ("investigation-v1", 4, "domain-analyst@7" | "evidence-auditor@7") => Ok((
             4,
@@ -376,10 +383,18 @@ fn request_family(
             ["domain-analyst@9", "evidence-auditor@9"],
             b"cartograph:investigation-client-intent:v6\0",
         )),
+        ("investigation-v2", 7, "domain-analyst@10" | "evidence-auditor@10") => Ok((
+            7,
+            ["domain-analyst@10", "evidence-auditor@10"],
+            b"cartograph:investigation-client-intent:v7\0",
+        )),
         _ => Err(InvestigationError::InvalidRequest),
     }
 }
 
+#[cfg(test)]
+#[path = "admission_family_tests.rs"]
+mod admission_family_tests;
 #[cfg(test)]
 #[path = "query_history_family_tests.rs"]
 mod query_history_family_tests;

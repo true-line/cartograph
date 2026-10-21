@@ -588,6 +588,18 @@ mod policy_catalog_tests {
     use super::*;
 
     #[test]
+    fn admission_generation_is_not_advertised_before_runtime_activation() {
+        // AC-0287: internal identities never open a second public start path.
+        for specialist in available_specialists() {
+            assert!(!specialist.uses_next_prompt_admission());
+        }
+        for policy in policy_catalog() {
+            assert!(policy.request_schema_version <= 6);
+            assert!(policy.specialist_ids.iter().all(|id| !id.uses_next_prompt_admission()));
+        }
+    }
+
+    #[test]
     fn investigation_policy_catalog_advertises_only_registered_exact_choices() {
         // AC-0286: numeric v2 stays immutable while new starts use the @9 family.
         assert!(!available_specialists().contains(&SpecialistId::DomainAnalystV8));

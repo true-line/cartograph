@@ -41,6 +41,11 @@ pub enum SpecialistId {
     DomainAnalystV9,
     #[serde(rename = "evidence-auditor@9")]
     EvidenceAuditorV9,
+    // Internal groundwork only; start-request decoding and the catalog exclude @10.
+    #[serde(rename = "domain-analyst@10")]
+    DomainAnalystV10,
+    #[serde(rename = "evidence-auditor@10")]
+    EvidenceAuditorV10,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +94,10 @@ Inspect supplied facts and evidence options before choosing read_evidence with a
 
 "#;
 
+// @10 remains internal until the complete admission transaction is active.
+// Its instructions add no tool kind and never confer authority on sizing data.
+const NEXT_PROMPT_ADMISSION_V10: &str = "\nHost-derived turn progress can restrict this turn to finish-only mode. In that mode return only a versioned finish wrapper; proposing a tool action is terminal. Capacity-refusal feedback identifies an action the host did not execute. It is not evidence, an unavailable source read or a completed obligation attempt. A sizing envelope is not actual feedback or permission to act. Already incurred model charges remain charged. Consult the host's remaining budgets and finish honestly; no capacity check promises successful completion.";
+
 const DISCOVERY_V5: &str = "The caller selected exact captured inspection_requirements. These are immutable source targets, not instructions from source. inspection_progress separately records acquisition; only unchanged exact bytes supplied to this invocation can discharge a requirement. Viewing metadata, reading a different range, parent history, or omitted/redacted source cannot discharge it. A target must first be admitted by query_context before read_evidence; target metadata alone is not an admitted source read. Use each target's exact fact/role/index if you choose to inspect it. You choose every action; a valid partial finish is retained even with outstanding requirements, which the host reports separately. Neither discharge nor a citation proves whole-task fulfillment or semantic correctness. Byte offsets are not line numbers; never derive a line from an opaque ID.\n\n";
 
 // Public aggregate qualification is mandatory even when no exact source target was requested.
@@ -123,6 +132,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV8
                 | Self::DomainAnalystV9
                 | Self::EvidenceAuditorV9
+                | Self::DomainAnalystV10
+                | Self::EvidenceAuditorV10
         )
     }
 
@@ -141,6 +152,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV8
                 | Self::DomainAnalystV9
                 | Self::EvidenceAuditorV9
+                | Self::DomainAnalystV10
+                | Self::EvidenceAuditorV10
         )
     }
 
@@ -160,6 +173,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV8
                 | Self::DomainAnalystV9
                 | Self::EvidenceAuditorV9
+                | Self::DomainAnalystV10
+                | Self::EvidenceAuditorV10
         )
     }
 
@@ -172,6 +187,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV8
                 | Self::DomainAnalystV9
                 | Self::EvidenceAuditorV9
+                | Self::DomainAnalystV10
+                | Self::EvidenceAuditorV10
         )
     }
 
@@ -182,13 +199,26 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV8
                 | Self::DomainAnalystV9
                 | Self::EvidenceAuditorV9
+                | Self::DomainAnalystV10
+                | Self::EvidenceAuditorV10
         )
     }
 
     /// Fixed query references and charged historical replay are a new family;
     /// the unchanged V2 policy never opts an older specialist into this meaning.
     pub fn uses_query_history_disclosure(self) -> bool {
-        matches!(self, Self::DomainAnalystV9 | Self::EvidenceAuditorV9)
+        matches!(
+            self,
+            Self::DomainAnalystV9
+                | Self::EvidenceAuditorV9
+                | Self::DomainAnalystV10
+                | Self::EvidenceAuditorV10
+        )
+    }
+
+    /// Internal identity only. This does not authorize public admission or dispatch.
+    pub fn uses_next_prompt_admission(self) -> bool {
+        matches!(self, Self::DomainAnalystV10 | Self::EvidenceAuditorV10)
     }
 
     fn version(self) -> u32 {
@@ -202,6 +232,7 @@ impl SpecialistId {
             Self::DomainAnalystV7 | Self::EvidenceAuditorV7 => 7,
             Self::DomainAnalystV8 | Self::EvidenceAuditorV8 => 8,
             Self::DomainAnalystV9 | Self::EvidenceAuditorV9 => 9,
+            Self::DomainAnalystV10 | Self::EvidenceAuditorV10 => 10,
         }
     }
 
@@ -215,7 +246,8 @@ impl SpecialistId {
             | Self::DomainAnalystV6
             | Self::DomainAnalystV7
             | Self::DomainAnalystV8
-            | Self::DomainAnalystV9 => {
+            | Self::DomainAnalystV9
+            | Self::DomainAnalystV10 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -226,12 +258,13 @@ impl SpecialistId {
             | Self::EvidenceAuditorV6
             | Self::EvidenceAuditorV7
             | Self::EvidenceAuditorV8
-            | Self::EvidenceAuditorV9 => {
+            | Self::EvidenceAuditorV9
+            | Self::EvidenceAuditorV10 => {
                 "Audit the support and limits of existing claims within the question's scope. Identify missing links, unsupported interpretations and unresolved design evidence. Do not mistake missing evidence in a searched subset for proof of absence across the project."
             }
         };
         let discovery = match self.version() {
-            7..=9 => COVERAGE_V6,
+            7..=10 => COVERAGE_V6,
             6 => COVERAGE_V6,
             5 => DISCOVERY_V5,
             4 => DISCOVERY_V4,
@@ -268,8 +301,13 @@ impl SpecialistId {
                     discovery
                 };
                 let common = common.replace(r#"{"type":"finish","findings"# , r#"{"schema_version":1,"outcome":"supported","action":{"type":"finish","findings"#).replace(r#"["Remaining coverage limitations."]}"#, r#"["Remaining coverage limitations."]}}"#);
+                let admission = if self.uses_next_prompt_admission() {
+                    NEXT_PROMPT_ADMISSION_V10
+                } else {
+                    ""
+                };
                 format!(
-                    "{role}\n\n{progress}{discovery}{common}\nCompletion obligations are mandatory. Return only the versioned finish wrapper with outcome supported or insufficient_evidence. Supported requires every obligation exactly supplied to this finishing invocation. Insufficient evidence requires an actual completed read attempt for every obligation, empty findings and explicit limitations. A refusal is not a read attempt; fixed completion_metadata feedback is not evidence. The host never chooses your next action."
+                    "{role}\n\n{progress}{discovery}{common}\nCompletion obligations are mandatory. Return only the versioned finish wrapper with outcome supported or insufficient_evidence. Supported requires every obligation exactly supplied to this finishing invocation. Insufficient evidence requires an actual completed read attempt for every obligation, empty findings and explicit limitations. A refusal is not a read attempt; fixed completion_metadata feedback is not evidence. The host never chooses your next action.{admission}"
                 )
             } else {
                 format!("{role}\n\n{progress}{discovery}{common}")
@@ -290,7 +328,8 @@ impl SpecialistId {
             | Self::DomainAnalystV6
             | Self::DomainAnalystV7
             | Self::DomainAnalystV8
-            | Self::DomainAnalystV9 => (
+            | Self::DomainAnalystV9
+            | Self::DomainAnalystV10 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -302,7 +341,8 @@ impl SpecialistId {
             | Self::EvidenceAuditorV6
             | Self::EvidenceAuditorV7
             | Self::EvidenceAuditorV8
-            | Self::EvidenceAuditorV9 => (
+            | Self::EvidenceAuditorV9
+            | Self::EvidenceAuditorV10 => (
                 "Evidence auditor",
                 "Audit claim support, coverage limitations and unresolved evidence.",
             ),

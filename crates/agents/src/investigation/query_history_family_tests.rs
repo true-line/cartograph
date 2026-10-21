@@ -55,6 +55,7 @@ fn query_history_request_family_requires_exact_schema_role_and_policy_tuple() {
                         ("investigation-v1", 4, 7)
                             | ("investigation-v2", 5, 8)
                             | ("investigation-v2", 6, 9)
+                            | ("investigation-v2", 7, 10)
                     );
                     assert_eq!(
                         value.normalized_with_policy(policy).is_ok(),
@@ -64,9 +65,15 @@ fn query_history_request_family_requires_exact_schema_role_and_policy_tuple() {
                     let raw = serde_json::to_string(&value).unwrap();
                     assert_eq!(
                         StagedObligationRequest::decode_with_policy(&raw, policy).is_ok(),
-                        expected
+                        expected && schema <= 6
                     );
                     assert_eq!(value.intent_hash_with_policy(policy).is_ok(), expected);
+                    if schema == 7 {
+                        // AC-0287: every internal/invalid role-policy tuple is
+                        // still rejected by both public start entrypoints.
+                        assert!(InvestigationStartRequest::decode(&raw).is_err());
+                        assert!(serde_json::from_str::<InvestigationStartRequest>(&raw).is_err());
+                    }
                 }
             }
         }
