@@ -121,6 +121,131 @@ fn admit_archive_size(
 }
 
 impl FrozenContext {
+    /// Acquisition adapter only. Real V7 intent remains the normalized request4;
+    /// this projection is never hashed, stored, or accepted by a start command.
+    pub(super) fn completion_acquisition_request(
+        request: &obligations::StagedObligationRequest,
+    ) -> Result<StartInvestigationRequest, HostError> {
+        let request = request.normalized()?;
+        let sources = request.obligations.sources()?;
+        Ok(StartInvestigationRequest {
+            schema_version: 3,
+            request_nonce: request.request_nonce,
+            specialist_id: if request.specialist_id == "domain-analyst@7" {
+                SpecialistId::DomainAnalystV6
+            } else {
+                SpecialistId::EvidenceAuditorV6
+            },
+            inspection_requirements: if sources.is_empty() {
+                None
+            } else {
+                Some(normalize_inspection_targets(&sources)?)
+            },
+            question: request.question,
+            scope: request.scope,
+            provider_mode: request.provider_mode,
+            limit_profile: request.limit_profile,
+            expected_graph_revision: request.expected_graph_revision,
+            expected_context_id: Some(request.expected_context_id),
+            conversation_id: request.conversation_id,
+            parent_id: request.parent_id,
+        })
+    }
+
+    /// A classified failure completes a real authorized read but never invents
+    /// acquired bytes, citations, or a new acquisition revision.
+    pub(super) fn read_evidence_completion(
+        &mut self,
+        state: &AppState,
+        fact: TaskFactKey,
+        role: TaskRangeRole,
+        index: u32,
+        sink: &mut impl AcquisitionSink,
+    ) -> Result<Option<staged_attempt::UnavailableReason>, HostError> {
+        if index >= 1024 || self.evidence.len() >= 12 {
+            return Err(HostError::LimitExceeded);
+        }
+        let selected = self
+            .ledger
+            .selected_facts
+            .iter()
+            .find(|selected| selected.fact == fact)
+            .cloned()
+            .ok_or(HostError::InvalidInput)?;
+        // Legacy registered-checkout reads cannot classify I/O as a pinned
+        // capture outcome. Keep their existing terminal error semantics.
+        if selected.binding.is_none() {
+            self.read_evidence(state, fact, role, index, sink)?;
+            return Ok(None);
+        }
+        let keys = self
+            .ledger
+            .selected_facts
+            .iter()
+            .map(|selected| crate::task_evidence::graph_fact(&selected.fact))
+            .collect::<Vec<_>>();
+        let preliminary = self.select(state, &keys)?;
+        // Union retention failures may concern unrelated facts; never attribute
+        // them to the requested obligation.
+        let guards = EvidenceGuards::acquire(state, &preliminary)?;
+        let options = match guards.options(state, self, &selected) {
+            Ok(options) => options,
+            Err(HostError::SourceUnavailable) => {
+                return Ok(Some(staged_attempt::UnavailableReason::PinnedTargetAbsent));
+            }
+            Err(error) => return Err(error),
+        };
+        if !options
+            .ranges
+            .iter()
+            .any(|range| range.role == role && range.index == index)
+        {
+            return Ok(Some(staged_attempt::UnavailableReason::RangeOutOfBounds));
+        }
+        // The existing read rechecks the union and may encounter operational
+        // failures; its coarse errors are not per-target absence authority.
+        self.read_evidence(state, fact, role, index, sink)?;
+        Ok(None)
+    }
+
+    pub(super) fn read_inventory_completion(
+        &mut self,
+        request: InvestigationCoverageRead,
+        sink: &mut impl AcquisitionSink,
+    ) -> Result<Option<staged_attempt::UnavailableReason>, HostError> {
+        self.ledger.validate()?;
+        let archive = self
+            .coverage_archive
+            .as_ref()
+            .ok_or(HostError::InvalidInput)?;
+        let proof = self
+            .ledger
+            .coverage
+            .as_ref()
+            .ok_or(HostError::InvalidInput)?;
+        if proof != archive.proof()
+            || request.context_id != proof.context_id
+            || !(1..=MAX_QUERY_BYTES).contains(&request.max_bytes)
+            || !proof.qualification.repos.iter().any(|repo| {
+                repo.repo == request.repo
+                    && repo.status == CoverageStatus::Recorded
+                    && repo.inventory_hash.as_deref() == Some(request.inventory_hash.as_str())
+            })
+        {
+            return Err(HostError::InvalidInput);
+        }
+        match archive.read(&request) {
+            Err(InvestigationError::LimitExceeded) => Ok(Some(
+                staged_attempt::UnavailableReason::InventoryExceedsMaxBytes,
+            )),
+            Err(error) => Err(error.into()),
+            Ok(_) => {
+                self.read_inventory(request, sink)?;
+                Ok(None)
+            }
+        }
+    }
+
     pub(super) fn prepare(
         state: &AppState,
         request: &StartInvestigationRequest,
@@ -268,7 +393,7 @@ impl FrozenContext {
         })
     }
 
-    fn scoped_snapshot(
+    pub(super) fn scoped_snapshot(
         graph: &(Vec<Node>, Vec<Edge>),
         requested: &InvestigationScope,
         complete: ContextSnapshot,

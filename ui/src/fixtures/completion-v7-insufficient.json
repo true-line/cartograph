@@ -1,0 +1,194 @@
+{
+  "detail": {
+    "actions": {
+      "can_cancel": false,
+      "can_follow_up": true
+    },
+    "cancel_requested": false,
+    "citations": [],
+    "completion": {
+      "assessment": [
+        {
+          "acquired": false,
+          "attempted": true,
+          "exactly_supplied": false,
+          "kind": "inventory",
+          "last_attempt_outcome": "unavailable",
+          "obligation_id": "b3ae979b1446782059902440582fddb5527d7ffc75f51c71f967940b949e25e1",
+          "unmet": null
+        }
+      ],
+      "assessment_basis": {
+        "disclosure_hash": "investigation-disclosure-v4:1433ace03490ba94046019045873c2544cdfea12b2a559126722eadc0cea353c",
+        "finishing_attempts_hash": "d0f38e14eb2d20ca0e435f03a0cd660d7468034c7378d7f0950cea0a7e07757d",
+        "input_ledger_hash": "932cc87be8100ef5c03eb9293cc2a7e72f6770fa51e970ea14b03c2aa91434f1",
+        "kind": "finishing_disclosure",
+        "step_id": "step-2"
+      },
+      "obligations": {
+        "contract": "investigation-completion-obligations@1",
+        "obligations": [
+          {
+            "kind": "inventory",
+            "obligation_id": "b3ae979b1446782059902440582fddb5527d7ffc75f51c71f967940b949e25e1",
+            "target": {
+              "context_id": "context-v2:938de535362a55fd479404baea99172bebe29c92a301c30a39b487c96594ee1b",
+              "inventory_hash": "b9bca2e48c8b4ded3acb08be477f6503dbc63c9790f715af5954200ca624950b",
+              "repo": "local/src_009b2972980de227a312b09d6411fca8"
+            }
+          }
+        ],
+        "schema_version": 1
+      },
+      "obligations_hash": "ff5674872e9b66fbe3115f29da1e7c49fa606f58f8f43627fd9f07077d348fc8",
+      "refusal_count": 0,
+      "request_hash": "bb053b66aa5d6b03b938cffe891f9cea1c1c64d0400eba70f7b06c30cac8dcb5",
+      "schema_version": 1
+    },
+    "completion_outcome": "insufficient_evidence",
+    "context_owner": "a333a5506356efa1d2698899a462481b",
+    "conversation_id": "conversation:f74f180e5961d4c863f50898205f03ca",
+    "coverage_context": {
+      "context_id": "context-v2:938de535362a55fd479404baea99172bebe29c92a301c30a39b487c96594ee1b",
+      "coverage": {
+        "contract": "coverage-qualification@1",
+        "coverage_id": "coverage-context-v1:03a1a91887985736e565e504fe1875f5aa282364eb678f4efbfa7102e34ce214",
+        "exhaustive": false,
+        "repos": [
+          {
+            "commit": "workdir",
+            "compared": [
+              "registration",
+              "plugins"
+            ],
+            "counts": {
+              "missing_input": 1,
+              "not_applicable": 0,
+              "not_selected": 0,
+              "unsupported": 0
+            },
+            "inventory_hash": "b9bca2e48c8b4ded3acb08be477f6503dbc63c9790f715af5954200ca624950b",
+            "layer_hints": [],
+            "limited": true,
+            "repo": "local/src_009b2972980de227a312b09d6411fca8",
+            "status": "recorded"
+          }
+        ]
+      }
+    },
+    "created_at": "2026-10-20T15:27:56Z",
+    "error": null,
+    "graph_snapshot_id": "context-v1:e24468f2de5956337dea0637bef83754f6cd3a3581ea046f838cb05e77031be6",
+    "has_result": true,
+    "investigation_id": "investigation:9eb76988f19ff023e2ae9c16d3184cca",
+    "invocation_pending": false,
+    "job_id": 2,
+    "last_event_sequence": 11,
+    "limits": {
+      "active_seconds": 600,
+      "captured_validation_bytes": 134217728,
+      "consent_wait_seconds": 900,
+      "evidence_bytes": 49152,
+      "evidence_items": 12,
+      "evidence_requests": 64,
+      "generated_token_reservations": 16384,
+      "generated_tokens_per_invocation": 2048,
+      "model_invocations": 8,
+      "profile": "investigation-v1",
+      "selected_facts": 64,
+      "tool_actions": 8,
+      "wall_seconds": 3600
+    },
+    "obligation_status": "satisfied",
+    "origin": "app",
+    "parent_id": null,
+    "provider": {
+      "available": true,
+      "deployment": null,
+      "endpoint": "http://127.0.0.1:11434/api/chat",
+      "mode": "local",
+      "model": "scripted-model",
+      "protocol_version": "bounded-json-completion@2",
+      "provider_id": "local-scripted",
+      "unavailable_reason": null
+    },
+    "provider_mode": "local",
+    "question": "Inspect selected source and recorded analysis limits.",
+    "revision": 8,
+    "schema_version": 4,
+    "scope": {
+      "type": "all"
+    },
+    "scope_snapshot_id": "context-v1:e24468f2de5956337dea0637bef83754f6cd3a3581ea046f838cb05e77031be6",
+    "specialist": {
+      "confidence_tier": "InferredWeak",
+      "id": "evidence-auditor@7",
+      "name": "Evidence auditor",
+      "operations": [
+        "query_context",
+        "read_evidence",
+        "read_coverage_inventory",
+        "finish"
+      ],
+      "prompt_fingerprint": "9a3eb1a8b945b04f791bfa7dc5b6c9c2cd7fea7a3fe0c992d2f9f079eb05935a",
+      "purpose": "Audit claim support, coverage limitations and unresolved evidence.",
+      "tier": "Agentic",
+      "version": 7
+    },
+    "specialist_id": "evidence-auditor@7",
+    "status": "completed",
+    "updated_at": "2026-10-20T15:27:56Z",
+    "usage": {
+      "active_milliseconds": 257,
+      "captured_validation_bytes": 0,
+      "evidence_bytes": 0,
+      "evidence_items": 0,
+      "evidence_requests": 0,
+      "generated_token_reservations": 4096,
+      "model_invocations": 2,
+      "reported_input_tokens": 200,
+      "reported_output_tokens": 80,
+      "selected_facts": 0,
+      "tool_actions": 1
+    }
+  },
+  "result": {
+    "completion": {
+      "assessment": [
+        {
+          "acquired": false,
+          "attempted": true,
+          "exactly_supplied": false,
+          "kind": "inventory",
+          "last_attempt_outcome": "unavailable",
+          "obligation_id": "b3ae979b1446782059902440582fddb5527d7ffc75f51c71f967940b949e25e1",
+          "unmet": null
+        }
+      ],
+      "finishing_attempts_hash": "d0f38e14eb2d20ca0e435f03a0cd660d7468034c7378d7f0950cea0a7e07757d",
+      "obligations_hash": "ff5674872e9b66fbe3115f29da1e7c49fa606f58f8f43627fd9f07077d348fc8",
+      "outcome": "insufficient_evidence",
+      "request_hash": "bb053b66aa5d6b03b938cffe891f9cea1c1c64d0400eba70f7b06c30cac8dcb5",
+      "schema_version": 1
+    },
+    "coverage": {
+      "context_id": "context-v2:938de535362a55fd479404baea99172bebe29c92a301c30a39b487c96594ee1b",
+      "coverage_id": "coverage-context-v1:03a1a91887985736e565e504fe1875f5aa282364eb678f4efbfa7102e34ce214",
+      "representation_hash": "50955d9dddd9021250cfc2b3f2c6b64f92601b4e4faa11c92eee81502cf20bd3"
+    },
+    "created_at": "2026-10-20T15:27:56Z",
+    "disclosure_hash": "investigation-disclosure-v4:1433ace03490ba94046019045873c2544cdfea12b2a559126722eadc0cea353c",
+    "findings": [],
+    "graph_snapshot_id": "context-v1:e24468f2de5956337dea0637bef83754f6cd3a3581ea046f838cb05e77031be6",
+    "input_ledger_hash": "932cc87be8100ef5c03eb9293cc2a7e72f6770fa51e970ea14b03c2aa91434f1",
+    "investigation_id": "investigation:9eb76988f19ff023e2ae9c16d3184cca",
+    "invocation_step_id": "step-2",
+    "knowledge_completeness": "insufficient_evidence",
+    "limitations": [
+      "The completed bounded read cannot establish source behavior."
+    ],
+    "observed_response_model": "scripted-model-observed",
+    "result_id": "investigation-result-v5:8d86d8b27b00660cb0a6bf60e3e76d785490e220401cc11127c7221a18bfe2ff",
+    "schema_version": 5
+  }
+}

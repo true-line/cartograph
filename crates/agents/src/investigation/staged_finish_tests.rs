@@ -1,4 +1,4 @@
-use super::super::{obligations::*, staged_attempt::*, staged_finish::*, staged_refusal::*};
+use super::super::{staged_attempt::*, staged_finish::*, staged_refusal::*};
 use super::*;
 use llm::bounded::CompletionLimits;
 use llm::{EgressFirewall, EgressPolicy, OllamaProvider};
@@ -19,6 +19,9 @@ fn identified(mut item: Obligation) -> Obligation {
     item
 }
 fn fixture(source: bool, inventory: bool, secret: bool) -> PreparedFixture {
+    fixture_version(source, inventory, secret, false)
+}
+fn fixture_version(source: bool, inventory: bool, secret: bool, v7: bool) -> PreparedFixture {
     let (target, mut ledger, _) = super::inspection_tests::fixture();
     let repo = target.source.repo.clone();
     let inventory_json=json!({"inventory":context_hub::coverage::INVENTORY_VERSION,"repo":repo,"commit":"pinned-revision","layer_hints":[],"producers":[{"state":"not_selected","stopping_reason":if secret {"limit password=syntheticsecret123 bounded "}else{"optional input not selected"}}],"unsupported":[],"limited":true}).to_string();
@@ -105,7 +108,7 @@ fn fixture(source: bool, inventory: bool, secret: bool) -> PreparedFixture {
     } else {
         vec![]
     };
-    let input = InvestigationInput::prepare_v6(
+    let mut input = InvestigationInput::prepare_v6(
         "Inspect selected evidence",
         SpecialistId::DomainAnalystV6,
         ledger.clone(),
@@ -115,7 +118,7 @@ fn fixture(source: bool, inventory: bool, secret: bool) -> PreparedFixture {
         &InvestigationUsage::default(),
         &InvestigationTurnBasis {
             input_ledger_hash: ledger.fingerprint().unwrap(),
-            previous_ledger: Some(previous),
+            previous_ledger: Some(previous.clone()),
             completed_tool: Some(tool),
         },
         Some(std::slice::from_ref(&target)),
@@ -135,7 +138,7 @@ fn fixture(source: bool, inventory: bool, secret: bool) -> PreparedFixture {
             &CompletionLimits::default(),
         )
         .unwrap();
-    let disclosure = input.seal_disclosure(&prepared).unwrap().unwrap();
+    let mut disclosure = input.seal_disclosure(&prepared).unwrap().unwrap();
     let request = StagedObligationRequest {
         schema_version: 4,
         request_nonce: "staged-nonce".into(),
@@ -170,6 +173,43 @@ fn fixture(source: bool, inventory: bool, secret: bool) -> PreparedFixture {
         .normalized()
         .unwrap(),
     };
+    if v7 {
+        let metadata = ProtectedCompletionMetadata {
+            schema_version: 1,
+            request_hash: request.intent_hash().unwrap(),
+            obligations_hash: request.obligations.fingerprint().unwrap(),
+            completed_attempt_ids: vec![],
+            refusal_count: 0,
+            last_refusal_id: None,
+            feedback: None,
+        };
+        input = InvestigationInput::prepare_v7(
+            &request.question,
+            SpecialistId::DomainAnalystV7,
+            ledger.clone(),
+            &pages,
+            &evidence,
+            &[],
+            &InvestigationUsage::default(),
+            &InvestigationTurnBasis {
+                input_ledger_hash: ledger.fingerprint().unwrap(),
+                previous_ledger: Some(previous),
+                completed_tool: Some(tool),
+            },
+            &request,
+            &metadata,
+            &details,
+        )
+        .unwrap();
+        let prepared = EgressFirewall::new(EgressPolicy::default())
+            .prepare_bounded(
+                &provider,
+                &input.action("task:finish".into()).unwrap(),
+                &CompletionLimits::default(),
+            )
+            .unwrap();
+        disclosure = input.seal_disclosure(&prepared).unwrap().unwrap();
+    }
     PreparedFixture {
         request,
         input,
@@ -431,7 +471,7 @@ fn staged_finish_feedback_is_closed_bounded_and_protected_by_actual_firewall() {
         .action("task:metadata".into())
         .unwrap();
     let mut prompt: serde_json::Value = serde_json::from_str(&action.payload.prompt).unwrap();
-    prompt["staged_completion_metadata"] = serde_json::to_value(&metadata).unwrap();
+    prompt["completion_metadata"] = serde_json::to_value(&metadata).unwrap();
     action.payload.prompt = prompt.to_string();
     let provider = OllamaProvider::new(
         "http://127.0.0.1:11434",
@@ -531,5 +571,200 @@ fn staged_refusal_cap_requires_terminal_and_cannot_prepare_next_input() {
         }
         .validate()
         .is_err()
+    );
+}
+
+// AC-0266: explicit V7 input6/disclosure4/result5, unchanged read protocol,
+// and generation-discriminated transport with no legacy finish fallback.
+#[test]
+fn completion_v7_generations_bind_actual_firewall_and_reject_legacy_authority() {
+    let fixture = fixture_version(true, true, false, true);
+    let raw = serde_json::to_string(&fixture.request).unwrap();
+    assert!(matches!(
+        InvestigationStartRequest::decode(&raw).unwrap(),
+        InvestigationStartRequest::Completion(_)
+    ));
+    assert!(serde_json::from_str::<InvestigationStartRequest>(&raw).is_ok());
+    assert!(
+        serde_json::from_value::<InvestigationStartRequest>(serde_json::from_str(&raw).unwrap())
+            .is_ok()
+    );
+    let mut legacy = request();
+    legacy.schema_version = 3;
+    legacy.specialist_id = SpecialistId::DomainAnalystV7;
+    legacy.expected_context_id = Some(fixture.request.expected_context_id.clone());
+    assert!(legacy.validate().is_err());
+    assert!(InvestigationStartRequest::decode(&serde_json::to_string(&legacy).unwrap()).is_err());
+    // IPC shape decoding defers semantic generation/specialist validation to
+    // start(), while the explicit raw-protocol decoder remains strict.
+    assert!(matches!(
+        serde_json::from_value::<InvestigationStartRequest>(serde_json::to_value(&legacy).unwrap()),
+        Ok(InvestigationStartRequest::Legacy(_))
+    ));
+    let duplicate = raw.replacen(
+        "\"schema_version\":4",
+        "\"schema_version\":4,\"schema_version\":4",
+        1,
+    );
+    assert!(InvestigationStartRequest::decode(&duplicate).is_err());
+    assert!(serde_json::from_str::<InvestigationStartRequest>(&duplicate).is_err());
+    let finish = finish(false);
+    let finish_raw = serde_json::to_string(&finish).unwrap();
+    assert!(matches!(
+        CompletionInvestigationAction::decode(&finish_raw, &fixture.request.expected_context_id)
+            .unwrap(),
+        CompletionInvestigationAction::Finish(_)
+    ));
+    assert!(
+        CompletionInvestigationAction::decode(
+            &serde_json::to_string(&finish.action).unwrap(),
+            &fixture.request.expected_context_id
+        )
+        .is_err()
+    );
+    let prompt: serde_json::Value = serde_json::from_str(
+        &fixture
+            .input
+            .action("task:prompt".into())
+            .unwrap()
+            .payload
+            .prompt,
+    )
+    .unwrap();
+    assert_eq!(prompt["schema_version"], 6);
+    assert_eq!(fixture.disclosure.schema_version, 4);
+    assert!(
+        fixture
+            .disclosure
+            .fingerprint(fixture.input.ledger())
+            .unwrap()
+            .starts_with("investigation-disclosure-v4:")
+    );
+    let result = fixture
+        .input
+        .admit_completion_finish(
+            &fixture.request,
+            "task:finish",
+            "step:finish",
+            &fixture.disclosure,
+            &finish,
+            &[],
+            None,
+            "2026-10-20T12:00:00Z".into(),
+        )
+        .unwrap()
+        .unwrap_or_else(|_| panic!("exact source and inventory must satisfy supported"));
+    assert_eq!(result.schema_version, 5);
+    assert!(result.result_id.starts_with("investigation-result-v5:"));
+    result
+        .validate_completion(
+            &fixture.request,
+            "task:finish",
+            "step:finish",
+            fixture.input.ledger(),
+            &fixture.disclosure,
+            &[],
+        )
+        .unwrap();
+    let actual = json!({"analyst":SpecialistId::DomainAnalystV7.definition().unwrap().prompt_fingerprint,"auditor":SpecialistId::EvidenceAuditorV7.definition().unwrap().prompt_fingerprint,"disclosure":fixture.disclosure.fingerprint(fixture.input.ledger()).unwrap(),"result":result.result_id,"request":fixture.request.intent_hash().unwrap()});
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/completion-v7-goldens.json")).unwrap();
+    assert_eq!(actual, expected);
+    let mut tampered = result.clone();
+    tampered.completion.as_mut().unwrap().outcome = CompletionOutcome::InsufficientEvidence;
+    assert!(
+        tampered
+            .validate_with_disclosure(fixture.input.ledger(), "step:finish", &fixture.disclosure)
+            .is_err()
+    );
+    assert!(
+        fixture
+            .input
+            .admit_result_for_step(
+                "task:finish",
+                "step:finish",
+                Some(&fixture.disclosure),
+                &finish.action,
+                None,
+                "2026-10-20T12:00:00Z".into()
+            )
+            .is_err()
+    );
+}
+
+// AC-0266: a well-formed partial finish is recoverable, while forged protected
+// contract/metadata and malformed findings stay hard errors before refusal.
+#[test]
+fn completion_v7_partial_and_metadata_tampering_are_distinct() {
+    let fixture = fixture_version(true, false, false, true);
+    let finish = finish(false);
+    assert!(matches!(
+        fixture
+            .input
+            .admit_completion_finish(
+                &fixture.request,
+                "task:finish",
+                "step:finish",
+                &fixture.disclosure,
+                &finish,
+                &[],
+                None,
+                "2026-10-20T12:00:00Z".into()
+            )
+            .unwrap(),
+        Err(FinishDecision::Refused { .. })
+    ));
+    let mut forged = fixture.disclosure.clone();
+    forged.completion_metadata_hash = Some("a".repeat(64));
+    assert!(
+        fixture
+            .input
+            .admit_completion_finish(
+                &fixture.request,
+                "task:finish",
+                "step:finish",
+                &forged,
+                &finish,
+                &[],
+                None,
+                "2026-10-20T12:00:00Z".into()
+            )
+            .is_err()
+    );
+    let mut wrong = fixture.request.clone();
+    wrong.request_nonce = "another-nonce".into();
+    assert!(
+        fixture
+            .input
+            .admit_completion_finish(
+                &wrong,
+                "task:finish",
+                "step:finish",
+                &fixture.disclosure,
+                &finish,
+                &[],
+                None,
+                "2026-10-20T12:00:00Z".into()
+            )
+            .is_err()
+    );
+    let mut forged = finish.clone();
+    if let InvestigationAction::Finish { findings, .. } = &mut forged.action {
+        findings[0].citation_ids = vec!["not-supplied".into()];
+    }
+    assert!(
+        fixture
+            .input
+            .admit_completion_finish(
+                &fixture.request,
+                "task:finish",
+                "step:finish",
+                &fixture.disclosure,
+                &forged,
+                &[],
+                None,
+                "2026-10-20T12:00:00Z".into()
+            )
+            .is_err()
     );
 }

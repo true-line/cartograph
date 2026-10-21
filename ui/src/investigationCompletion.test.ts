@@ -1,0 +1,95 @@
+import { describe, expect, it } from 'vitest';
+import supportedWire from './fixtures/completion-v7-supported.json';
+import terminalWire from './fixtures/completion-v7-terminal.json';
+import insufficientWire from './fixtures/completion-v7-insufficient.json';
+import type { InvestigationDetail, InvestigationResult } from './investigationTypes';
+import { completionDetail, completionResult } from './completionFixtures';
+import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
+
+describe('V7 completion wire coherence (AC-0266)', () => {
+  it.each([['supported', supportedWire], ['insufficient', insufficientWire]])('accepts actual durable worker %s wire projections', (_name, wire) => {
+    const detail = wire.detail as unknown as InvestigationDetail;
+    const result = wire.result as unknown as InvestigationResult;
+    expect(validCompletionSummary(detail)).toBe(true);
+    expect(validCompletionResult(result.completion, result)).toBe(true);
+    expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
+    const changed = structuredClone(result); changed.completion!.request_hash = 'f'.repeat(64);
+    expect(validCompletionDetail(detail.completion, detail, changed)).toBe(false);
+  });
+  it('accepts actual durable worker terminal observations without inventing a result', () => {
+    const detail = terminalWire.detail as unknown as InvestigationDetail;
+    expect(terminalWire.result).toBeNull();
+    expect(validCompletionSummary(detail)).toBe(true);
+    expect(validCompletionDetail(detail.completion, detail, null)).toBe(true);
+    expect(validCompletionDetail(detail.completion, detail, completionResult())).toBe(false);
+    const changed = structuredClone(detail); changed.completion!.refusal_count = 1;
+    expect(validCompletionDetail(changed.completion, changed, null)).toBe(false);
+  });
+  it('keeps execution, accepted outcome and actual finishing assessment bound together', () => {
+    const detail = completionDetail(); const result = completionResult();
+    expect(validCompletionSummary(detail)).toBe(true);
+    expect(validCompletionResult(result.completion, result)).toBe(true);
+    expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
+    for (const field of ['request_hash', 'obligations_hash', 'finishing_attempts_hash'] as const) {
+      const changed = structuredClone(result); changed.completion![field] = 'f'.repeat(64);
+      expect(validCompletionDetail(detail.completion, detail, changed)).toBe(false);
+    }
+  });
+  it('accepts insufficient results after unavailable attempts without inventing acquisition', () => {
+    const detail = completionDetail(); const result = completionResult();
+    detail.completion_outcome = 'insufficient_evidence'; result.completion!.outcome = 'insufficient_evidence';
+    result.findings = []; result.knowledge_completeness = 'insufficient_evidence';
+    detail.completion!.assessment.forEach((row) => { row.acquired = false; row.exactly_supplied = false; row.last_attempt_outcome = 'unavailable'; });
+    result.completion!.assessment = structuredClone(detail.completion!.assessment);
+    expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
+    result.completion!.assessment[0].attempted = false;
+    expect(validCompletionResult(result.completion, result)).toBe(false);
+  });
+  it('refuses accepted supported claims with omitted evidence, mismatched context or missing result', () => {
+    const detail = completionDetail(); const result = completionResult();
+    const omitted = structuredClone(result); omitted.completion!.assessment[0].exactly_supplied = false;
+    expect(validCompletionResult(omitted.completion, omitted)).toBe(false);
+    expect(validCompletionDetail(detail.completion, detail, null)).toBe(false);
+    const inventory = detail.completion!.obligations.obligations.find((item) => item.kind === 'inventory')!;
+    if (inventory.kind === 'inventory') inventory.target.context_id = `context-v2:${'f'.repeat(64)}`;
+    expect(validCompletionDetail(detail.completion, detail, result)).toBe(false);
+  });
+  it('retains the actual first-refusal assessment while the next step is pending', () => {
+    const detail = completionDetail('inv-completion', { status: 'awaiting_consent', has_result: false, completion_outcome: undefined, obligation_status: 'unmet' });
+    detail.completion!.refusal_count = 1;
+    detail.completion!.assessment[0].unmet = 'acquired_not_supplied';
+    detail.completion!.assessment[0].exactly_supplied = false;
+    expect(validCompletionDetail(detail.completion, detail, null)).toBe(true);
+    detail.status = 'running'; expect(validCompletionDetail(detail.completion, detail, null)).toBe(true);
+    detail.completion!.refusal_count = 0; expect(validCompletionDetail(detail.completion, detail, null)).toBe(false);
+    detail.completion!.refusal_count = 2; expect(validCompletionDetail(detail.completion, detail, null)).toBe(false);
+    detail.completion!.refusal_count = 1; detail.status = 'failed';
+    expect(validCompletionDetail(detail.completion, detail, null)).toBe(false);
+  });
+  it('keeps host exhaustion result-free and separate from ordinary cancellation', () => {
+    const detail = completionDetail('inv-completion', { status: 'failed', has_result: false, completion_outcome: 'obligations_unmet', obligation_status: 'unmet' });
+    detail.completion!.refusal_count = 2;
+    detail.completion!.assessment[0].unmet = 'acquired_not_supplied'; detail.completion!.assessment[0].exactly_supplied = false;
+    detail.completion!.assessment_basis = { kind: 'terminal_observation', finishing_attempts_hash: 'e'.repeat(64), last_refusal_id: 'f'.repeat(64),
+      last_refusal_basis: { step_id: 'finish:2', input_ledger_hash: 'c'.repeat(64), disclosure_hash: `investigation-disclosure-v4:${'d'.repeat(64)}`, finish_hash: 'f'.repeat(64) } };
+    expect(validCompletionSummary(detail)).toBe(true);
+    expect(validCompletionDetail(detail.completion, detail, null)).toBe(true);
+    expect(validCompletionDetail(detail.completion, detail, completionResult())).toBe(false);
+    detail.status = 'cancelled'; expect(validCompletionSummary(detail)).toBe(false);
+    delete detail.completion_outcome; detail.completion!.refusal_count = 1;
+    expect(validCompletionSummary(detail)).toBe(true);
+    expect(validCompletionDetail(detail.completion, detail, null)).toBe(true);
+  });
+  it('rejects unknown/aliased completion fields and preserves not-assessed running state', () => {
+    const detail = completionDetail('inv-completion', { status: 'running', has_result: false, completion_outcome: undefined, obligation_status: 'not_assessed' });
+    detail.completion!.assessment_basis = { kind: 'not_assessed' }; detail.completion!.assessment = [];
+    expect(validCompletionDetail(detail.completion, detail, null)).toBe(true);
+    expect(validCompletionSummary({ ...detail, inspection_status: 'unmet' })).toBe(false);
+    expect(validCompletionSummary(Object.assign(structuredClone(detail), { completion_obligations: detail.completion!.obligations }))).toBe(false);
+    expect(validCompletionDetail(Object.assign(structuredClone(detail.completion!), { extra: true }), detail, null)).toBe(false);
+    const wrongFamily = completionResult(); wrongFamily.result_id = `investigation-result-v4:${'7'.repeat(64)}`;
+    expect(validCompletionResult(wrongFamily.completion, wrongFamily)).toBe(false);
+    const result = completionResult(); Object.assign(result.completion!, { extra: true });
+    expect(validCompletionResult(result.completion, result)).toBe(false);
+  });
+});

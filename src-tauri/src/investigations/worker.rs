@@ -63,12 +63,69 @@ impl Failure {
     }
 }
 
-/// Called inside a blocking host worker. The execution's final Arc holder cannot
-/// leave while a provider call is outstanding, even if its async waiter is lost.
+/// The legacy entry keeps its original request/start contract.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     id: String,
     request: StartInvestigationRequest,
+    execution: JobExecution,
+    provider: Arc<dyn LlmProvider>,
+    live: Arc<LiveTask>,
+    started: Instant,
+) {
+    run_inner(app, id, request, None, execution, provider, live, started)
+}
+
+/// V7 executes only from real immutable request4 authority.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_completion<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+    request: obligations::StagedObligationRequest,
+    execution: JobExecution,
+    provider: Arc<dyn LlmProvider>,
+    live: Arc<LiveTask>,
+    started: Instant,
+) {
+    match FrozenContext::completion_acquisition_request(&request) {
+        Ok(projected) => run_inner(
+            app,
+            id,
+            projected,
+            Some(request),
+            execution,
+            provider,
+            live,
+            started,
+        ),
+        Err(_) => {
+            let state = app.state::<AppState>();
+            let _cleanup = Cleanup {
+                state: &state,
+                id: &id,
+                live: &live,
+            };
+            stop(
+                &app,
+                &state,
+                &id,
+                &execution,
+                InvestigationStopReason::PreparationFailed,
+                0,
+            );
+        }
+    }
+}
+
+/// Called inside a blocking host worker. The execution's final Arc holder cannot
+/// leave while a provider call is outstanding, even if its async waiter is lost.
+#[allow(clippy::too_many_arguments)]
+fn run_inner<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+    request: StartInvestigationRequest,
+    completion_request: Option<obligations::StagedObligationRequest>,
     execution: JobExecution,
     provider: Arc<dyn LlmProvider>,
     live: Arc<LiveTask>,
@@ -92,7 +149,11 @@ pub(super) fn run<R: tauri::Runtime>(
             detail,
             clock: &mut clock,
         };
-        worker.execute(&request, provider.as_ref())
+        if completion_request.is_some() {
+            worker.execute_inner(&request, completion_request.as_ref(), provider.as_ref())
+        } else {
+            worker.execute(&request, provider.as_ref())
+        }
     })();
     if let Err(failure) = outcome
         && let Some(reason) = failure.reason()
@@ -140,6 +201,15 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         request: &StartInvestigationRequest,
         provider: &dyn LlmProvider,
     ) -> Result<(), Failure> {
+        self.execute_inner(request, None, provider)
+    }
+
+    fn execute_inner(
+        &mut self,
+        request: &StartInvestigationRequest,
+        completion_request: Option<&obligations::StagedObligationRequest>,
+        provider: &dyn LlmProvider,
+    ) -> Result<(), Failure> {
         self.check_new_work()?;
         let history = self.parent_history(request)?;
         let _inspection_guards = super::inspection::validate_targets(self.state, request)
@@ -162,6 +232,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             &history,
             archive_capacity,
         )?;
+        if let Some(request) = completion_request {
+            request.validate_ledger(&context.ledger)?;
+        }
         self.check_new_work()?;
         let mut usage = self.detail.usage.clone();
         usage.active_milliseconds = self.clock.active_milliseconds();
@@ -179,7 +252,42 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             if descriptor(provider, request.provider_mode)? != self.detail.provider {
                 return Err(Failure::Stop(InvestigationStopReason::ProviderFailure));
             }
-            let input = if request.specialist_id.uses_turn_progress() {
+            let (attempts, attempt_ledgers, completion_metadata) = if completion_request.is_some() {
+                let jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
+                (
+                    jobs.investigation_completion_attempts(self.id)?,
+                    jobs.investigation_completion_attempt_ledgers(self.id)?,
+                    Some(jobs.investigation_completion_metadata(self.id)?),
+                )
+            } else {
+                (vec![], vec![], None)
+            };
+            if attempts.len() != attempt_ledgers.len() {
+                return Err(Failure::Store(InvestigationStoreError::Invalid));
+            }
+            let input = if let Some(completion_request) = completion_request {
+                let basis = self
+                    .state
+                    .jobs
+                    .lock()
+                    .map_err(|_| HostError::Operational)?
+                    .investigation_turn_basis(self.id)?;
+                InvestigationInput::prepare_v7(
+                    &completion_request.question,
+                    self.detail.summary.specialist_id,
+                    context.ledger.clone(),
+                    &context.query_pages,
+                    &context.evidence,
+                    &history,
+                    &self.detail.usage,
+                    &basis,
+                    completion_request,
+                    completion_metadata
+                        .as_ref()
+                        .ok_or(HostError::InvalidInput)?,
+                    &context.inventory_details,
+                )?
+            } else if request.specialist_id.uses_turn_progress() {
                 let basis = self
                     .state
                     .jobs
@@ -296,35 +404,66 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             input
                 .validate_response_metadata(completion.response_model.as_deref())
                 .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
-            let (action, inventory_read, action_hash) =
-                if let Some(proof) = &context.ledger.coverage {
-                    let qualified =
-                        QualifiedInvestigationAction::decode(&completion.text, &proof.context_id)
-                            .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
-                    // Hash the entire admitted qualified envelope, including its
-                    // context identity, rather than its legacy projection.
-                    let value: serde_json::Value = serde_json::from_str(&completion.text)
+            let mut completion_finish = None;
+            let (action, inventory_read, action_hash) = if completion_request.is_some() {
+                let proof = context
+                    .ledger
+                    .coverage
+                    .as_ref()
+                    .ok_or(HostError::InvalidInput)?;
+                let action =
+                    CompletionInvestigationAction::decode(&completion.text, &proof.context_id)
                         .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
-                    let hash = content_hash(&bounded_json(&value, 32 * 1024)?);
-                    match qualified {
-                        QualifiedInvestigationAction::QueryContext { query, .. } => (
-                            Some(InvestigationAction::QueryContext { query }),
-                            None,
-                            hash,
-                        ),
-                        QualifiedInvestigationAction::ReadCoverageInventory(read) => {
-                            (None, Some(read), hash)
-                        }
-                        QualifiedInvestigationAction::SourceOrFinish(action) => {
-                            (Some(action), None, hash)
-                        }
+                let value: serde_json::Value = serde_json::from_str(&completion.text)
+                    .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+                let hash = content_hash(&bounded_json(&value, 32 * 1024)?);
+                match action {
+                    CompletionInvestigationAction::Finish(finish) => {
+                        completion_finish = Some(finish);
+                        (None, None, hash)
                     }
-                } else {
-                    let action = InvestigationAction::decode(&completion.text)
+                    CompletionInvestigationAction::Read(
+                        QualifiedInvestigationAction::QueryContext { query, .. },
+                    ) => (
+                        Some(InvestigationAction::QueryContext { query }),
+                        None,
+                        hash,
+                    ),
+                    CompletionInvestigationAction::Read(
+                        QualifiedInvestigationAction::ReadCoverageInventory(read),
+                    ) => (None, Some(read), hash),
+                    CompletionInvestigationAction::Read(
+                        QualifiedInvestigationAction::SourceOrFinish(action),
+                    ) => (Some(action), None, hash),
+                }
+            } else if let Some(proof) = &context.ledger.coverage {
+                let qualified =
+                    QualifiedInvestigationAction::decode(&completion.text, &proof.context_id)
                         .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
-                    let hash = content_hash(&bounded_json(&action, 32 * 1024)?);
-                    (Some(action), None, hash)
-                };
+                // Hash the entire admitted qualified envelope, including its
+                // context identity, rather than its legacy projection.
+                let value: serde_json::Value = serde_json::from_str(&completion.text)
+                    .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+                let hash = content_hash(&bounded_json(&value, 32 * 1024)?);
+                match qualified {
+                    QualifiedInvestigationAction::QueryContext { query, .. } => (
+                        Some(InvestigationAction::QueryContext { query }),
+                        None,
+                        hash,
+                    ),
+                    QualifiedInvestigationAction::ReadCoverageInventory(read) => {
+                        (None, Some(read), hash)
+                    }
+                    QualifiedInvestigationAction::SourceOrFinish(action) => {
+                        (Some(action), None, hash)
+                    }
+                }
+            } else {
+                let action = InvestigationAction::decode(&completion.text)
+                    .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+                let hash = content_hash(&bounded_json(&action, 32 * 1024)?);
+                (Some(action), None, hash)
+            };
             let response = InvestigationResponseMeta {
                 step_id: step_id.clone(),
                 response_hash: content_hash(completion.text.as_bytes()),
@@ -340,6 +479,50 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .and_then(|usage| usage.output_tokens),
                 active_milliseconds: self.clock.active_milliseconds(),
             };
+            if let Some(finish) = completion_finish {
+                let request = completion_request.ok_or(HostError::InvalidInput)?;
+                let timestamp = self
+                    .state
+                    .jobs
+                    .lock()
+                    .map_err(|_| HostError::Operational)?
+                    .investigation_timestamp(0)?;
+                let evidence = attempts
+                    .iter()
+                    .zip(&attempt_ledgers)
+                    .map(|(record, ledger)| staged_attempt::AttemptEvidence { record, ledger })
+                    .collect::<Vec<_>>();
+                match input
+                    .admit_completion_finish(
+                        request,
+                        self.id,
+                        &step_id,
+                        disclosure.as_ref().ok_or(HostError::InvalidInput)?,
+                        &finish,
+                        &evidence,
+                        completion.response_model.clone(),
+                        timestamp,
+                    )
+                    .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?
+                {
+                    Ok(result) => {
+                        self.admit_finish(response, result)?;
+                        return Ok(());
+                    }
+                    Err(staged_finish::FinishDecision::Refused { .. }) => {
+                        // Store rederives inside its transaction and applies the
+                        // cancellation/second-refusal terminal precedence atomically.
+                        self.admit_refusal(request, response, finish, input)?;
+                        if terminal(self.detail.summary.status) {
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                    Err(staged_finish::FinishDecision::Accepted(_)) => {
+                        return Err(Failure::Stop(InvestigationStopReason::InvalidResponse));
+                    }
+                }
+            }
             if let Some(action @ InvestigationAction::Finish { .. }) = &action {
                 let timestamp = self
                     .state
@@ -381,15 +564,46 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             self.transition(InvestigationTransition::BeginTool { tool })?;
             let state = self.state;
             let mut sink = WorkerSink { worker: self };
-            match (action, inventory_read) {
+            let unavailable = match (action, inventory_read) {
                 (Some(InvestigationAction::QueryContext { query }), None) => {
-                    context.query(state, query, &mut sink)?
+                    context.query(state, query, &mut sink)?;
+                    None
                 }
                 (Some(InvestigationAction::ReadEvidence { fact, role, index }), None) => {
-                    context.read_evidence(state, fact, role, index, &mut sink)?
+                    if completion_request.is_some() {
+                        let read = staged_attempt::ReadIntent::Source {
+                            fact: fact.clone(),
+                            role,
+                            index,
+                        };
+                        context
+                            .read_evidence_completion(state, fact, role, index, &mut sink)?
+                            .map(|reason| (read, reason))
+                    } else {
+                        context.read_evidence(state, fact, role, index, &mut sink)?;
+                        None
+                    }
                 }
-                (None, Some(read)) => context.read_inventory(read, &mut sink)?,
+                (None, Some(read)) => {
+                    if completion_request.is_some() {
+                        let intent = staged_attempt::ReadIntent::Inventory {
+                            context_id: read.context_id.clone(),
+                            repo: read.repo.clone(),
+                            inventory_hash: read.inventory_hash.clone(),
+                            max_bytes: read.max_bytes,
+                        };
+                        context
+                            .read_inventory_completion(read, &mut sink)?
+                            .map(|reason| (intent, reason))
+                    } else {
+                        context.read_inventory(read, &mut sink)?;
+                        None
+                    }
+                }
                 _ => return Err(Failure::Stop(InvestigationStopReason::InvalidResponse)),
+            };
+            if let Some((read, reason)) = unavailable {
+                self.transition(InvestigationTransition::ReadUnavailable { read, reason })?;
             }
             self.check_new_work()?;
         }
@@ -558,6 +772,41 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             self.clear_pending()?;
         }
         outcome
+    }
+
+    fn admit_refusal(
+        &mut self,
+        request: &obligations::StagedObligationRequest,
+        response: InvestigationResponseMeta,
+        finish: staged_finish::StagedFinish,
+        input: InvestigationInput,
+    ) -> Result<(), Failure> {
+        for _ in 0..3 {
+            let updated = {
+                let mut jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
+                let current = jobs.investigation(self.id)?;
+                jobs.advance_investigation(
+                    self.execution,
+                    current.summary.revision,
+                    InvestigationTransition::FinishRefused {
+                        request: Box::new(request.clone()),
+                        response: response.clone(),
+                        finish: Box::new(finish.clone()),
+                        input: Box::new(input.clone()),
+                    },
+                )
+            };
+            match updated {
+                Ok(detail) => {
+                    self.detail = detail;
+                    super::emit_changed(self.app, &self.detail);
+                    return Ok(());
+                }
+                Err(InvestigationStoreError::Stale) => continue,
+                Err(_) => return Err(Failure::Stop(InvestigationStopReason::OutcomeUnknown)),
+            }
+        }
+        Err(Failure::Stop(InvestigationStopReason::OutcomeUnknown))
     }
 
     fn admit_finish(

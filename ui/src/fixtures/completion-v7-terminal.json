@@ -1,0 +1,203 @@
+{
+  "detail": {
+    "actions": {
+      "can_cancel": false,
+      "can_follow_up": true
+    },
+    "cancel_requested": false,
+    "citations": [
+      {
+        "citation_id": "fact-1",
+        "fact": {
+          "id": "rule:local/src_745aba9fa93ba8952f9ba546b75481bc@rule.ts#exit@132",
+          "kind": "node"
+        },
+        "fact_digest": "node-v1:ba0f4745e926b81831367bdb00348751bf3bfaab85d618e2ec40b85def52471b",
+        "index": null,
+        "origin": {
+          "kind": "graph_metadata"
+        },
+        "role": null,
+        "source": null,
+        "text_hash": null
+      }
+    ],
+    "completion": {
+      "assessment": [
+        {
+          "acquired": false,
+          "attempted": false,
+          "exactly_supplied": false,
+          "kind": "source",
+          "obligation_id": "16faa8b172fdde5b657fee1b6da140a35cebd55b683454e5ffd2c2905ea2f5c9",
+          "unmet": "not_attempted"
+        }
+      ],
+      "assessment_basis": {
+        "finishing_attempts_hash": "624d0b347af43bcc8e218043ff6e8f893be9ff0a8a8470c0cf275eb2a15d3689",
+        "kind": "terminal_observation",
+        "last_refusal_basis": {
+          "disclosure_hash": "investigation-disclosure-v4:9f6968fe56cab23d2260b8d62ab9c5575e176d998fa83423ba8bf42c38ab6498",
+          "finish_hash": "3ca2bce38554d84eb704d7582a8117009116c478fbbe649e1fddeee0caa31257",
+          "input_ledger_hash": "40db81fc30b7b92645cd9c09eeb19948925274359cdc0679a2e9d6cd0276ce74",
+          "step_id": "step-3"
+        },
+        "last_refusal_id": "e581c0d839f7d6ee4c68a8f46179335592b1092f9002d563db5e48b22a65e032"
+      },
+      "obligations": {
+        "contract": "investigation-completion-obligations@1",
+        "obligations": [
+          {
+            "kind": "source",
+            "obligation_id": "16faa8b172fdde5b657fee1b6da140a35cebd55b683454e5ffd2c2905ea2f5c9",
+            "target": {
+              "captured": {
+                "byte_end": 117,
+                "byte_start": 105,
+                "file": {
+                  "byte_len": 148,
+                  "capture_id": "capture-v1:cdbbb6e2407e5ed65aa376d1b5e1d9db4dc81bebebe8d42cf1ae8d53f101a81b",
+                  "digest": "3be4a496336cb115472ca22ba2aa7c7f16c8813b2c6c429083a2b65d94bd1357",
+                  "path": "rule.ts",
+                  "source_id": "src_745aba9fa93ba8952f9ba546b75481bc"
+                }
+              },
+              "fact": {
+                "id": "rule:local/src_745aba9fa93ba8952f9ba546b75481bc@rule.ts#exit@132",
+                "kind": "node"
+              },
+              "fact_digest": "node-v1:ba0f4745e926b81831367bdb00348751bf3bfaab85d618e2ec40b85def52471b",
+              "graph_snapshot_id": "context-v1:69a9ff22a0178f0f497f648ba707d519ea1a9f41a4544052e92e6d523348a35b",
+              "index": 0,
+              "receipt_id": "ts-primary-v2:10a25615581ae0a4c75faa50e9647d0fff17de0ed5d53296989c0732123d7733",
+              "receipt_inventory_index": 12,
+              "registered_source_id": "src_745aba9fa93ba8952f9ba546b75481bc",
+              "role": "definition_initializer",
+              "schema_version": 1,
+              "source": {
+                "byte_end": 117,
+                "byte_start": 105,
+                "commit_sha": "workdir",
+                "path": "rule.ts",
+                "repo": "local/src_745aba9fa93ba8952f9ba546b75481bc"
+              },
+              "target_id": "75d63fd6d75a129b7c776222f6a638e81aa788ca879585f964221ecae90739e5"
+            }
+          }
+        ],
+        "schema_version": 1
+      },
+      "obligations_hash": "dc8180331007b3980b53c7749de7b4fe9f40b3ea2404136bcdeba840697cdce8",
+      "refusal_count": 2,
+      "request_hash": "479da01992b511cf29a6d8d43557e97d3eee2dade5d4138f5852122c614a09c1",
+      "schema_version": 1
+    },
+    "completion_outcome": "obligations_unmet",
+    "context_owner": "ce97e37bf4f92b90e6616744b246c859",
+    "conversation_id": "conversation:0819611bfd64ff21b7a7d415d4681d7a",
+    "coverage_context": {
+      "context_id": "context-v2:666a6563b268c7a5c1d871c64f4587dbedbfedf875d7dfd2679e1e4c6173ceb2",
+      "coverage": {
+        "contract": "coverage-qualification@1",
+        "coverage_id": "coverage-context-v1:4f0676a8573c222db133887b6b10da4eb3485c08e286b3dfd3a558e515db1ef0",
+        "exhaustive": false,
+        "repos": [
+          {
+            "commit": "workdir",
+            "compared": [
+              "registration",
+              "plugins"
+            ],
+            "counts": {
+              "missing_input": 1,
+              "not_applicable": 0,
+              "not_selected": 0,
+              "unsupported": 0
+            },
+            "inventory_hash": "218a0bafd88ecd5020a46c567f2244d031389cda530205516bf3d1fa9c309988",
+            "layer_hints": [],
+            "limited": true,
+            "repo": "local/src_745aba9fa93ba8952f9ba546b75481bc",
+            "status": "recorded"
+          }
+        ]
+      }
+    },
+    "created_at": "2026-10-20T15:27:56Z",
+    "error": "Two well-formed finishes left completion obligations unmet.",
+    "graph_snapshot_id": "context-v1:69a9ff22a0178f0f497f648ba707d519ea1a9f41a4544052e92e6d523348a35b",
+    "has_result": false,
+    "investigation_id": "investigation:53fded0c53aa88522ad50d6bd04bbe92",
+    "invocation_pending": false,
+    "job_id": 2,
+    "last_event_sequence": 15,
+    "limits": {
+      "active_seconds": 600,
+      "captured_validation_bytes": 134217728,
+      "consent_wait_seconds": 900,
+      "evidence_bytes": 49152,
+      "evidence_items": 12,
+      "evidence_requests": 64,
+      "generated_token_reservations": 16384,
+      "generated_tokens_per_invocation": 2048,
+      "model_invocations": 8,
+      "profile": "investigation-v1",
+      "selected_facts": 64,
+      "tool_actions": 8,
+      "wall_seconds": 3600
+    },
+    "obligation_status": "unmet",
+    "origin": "app",
+    "parent_id": null,
+    "provider": {
+      "available": true,
+      "deployment": null,
+      "endpoint": "http://127.0.0.1:11434/api/chat",
+      "mode": "local",
+      "model": "scripted-model",
+      "protocol_version": "bounded-json-completion@2",
+      "provider_id": "local-scripted",
+      "unavailable_reason": null
+    },
+    "provider_mode": "local",
+    "question": "Inspect selected source and recorded analysis limits.",
+    "revision": 11,
+    "schema_version": 4,
+    "scope": {
+      "type": "all"
+    },
+    "scope_snapshot_id": "context-v1:69a9ff22a0178f0f497f648ba707d519ea1a9f41a4544052e92e6d523348a35b",
+    "specialist": {
+      "confidence_tier": "InferredWeak",
+      "id": "domain-analyst@7",
+      "name": "Domain analyst",
+      "operations": [
+        "query_context",
+        "read_evidence",
+        "read_coverage_inventory",
+        "finish"
+      ],
+      "prompt_fingerprint": "0433cffbeab51580fcb7f31ee7c9be19aa8e38c8375a060d7f4abce9d3a9b3ac",
+      "purpose": "Investigate scoped business behavior, features and design evidence.",
+      "tier": "Agentic",
+      "version": 7
+    },
+    "specialist_id": "domain-analyst@7",
+    "status": "failed",
+    "updated_at": "2026-10-20T15:27:57Z",
+    "usage": {
+      "active_milliseconds": 671,
+      "captured_validation_bytes": 0,
+      "evidence_bytes": 0,
+      "evidence_items": 0,
+      "evidence_requests": 0,
+      "generated_token_reservations": 6144,
+      "model_invocations": 3,
+      "reported_input_tokens": 300,
+      "reported_output_tokens": 120,
+      "selected_facts": 1,
+      "tool_actions": 1
+    }
+  },
+  "result": null
+}

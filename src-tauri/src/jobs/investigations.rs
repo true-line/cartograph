@@ -6,6 +6,8 @@ use agents::investigation::*;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
+#[path = "investigations/completion.rs"]
+mod completion;
 #[path = "investigations/coverage.rs"]
 mod coverage;
 #[cfg(test)]
@@ -26,7 +28,9 @@ mod transitions;
 #[path = "investigations/turn.rs"]
 mod turn;
 
+use agents::investigation::{staged_attempt::*, staged_finish::*, staged_refusal::*};
 use storage::*;
+
 pub(super) use transitions::{attach_execution, cancel_for_job};
 
 pub(crate) const KIND_PREFIX: &str = "investigation-v1:";
@@ -141,6 +145,16 @@ pub(crate) enum InvestigationTransition {
         tool: Option<InvestigationTool>,
         result: Option<Box<InvestigationResult>>,
     },
+    FinishRefused {
+        request: Box<StagedObligationRequest>,
+        response: InvestigationResponseMeta,
+        finish: Box<StagedFinish>,
+        input: Box<InvestigationInput>,
+    },
+    ReadUnavailable {
+        read: ReadIntent,
+        reason: UnavailableReason,
+    },
     BeginTool {
         tool: InvestigationTool,
     },
@@ -243,6 +257,8 @@ struct StoredExecution {
 #[serde(deny_unknown_fields)]
 struct StoredTask {
     schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion_intent: Option<completion::CompletionIntent>,
     nonce: String,
     intent_hash: String,
     expected_graph_revision: Option<String>,
@@ -279,8 +295,18 @@ impl JobStore {
         provider: Option<&InvestigationProvider>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         let normalized = request.normalized()?;
-        let request = &normalized;
-        let intent_hash = request.intent_hash()?;
+        self.start_investigation_internal(&normalized, provider, None)
+    }
+    fn start_investigation_internal(
+        &mut self,
+        request: &StartInvestigationRequest,
+        provider: Option<&InvestigationProvider>,
+        completion_intent: Option<completion::CompletionIntent>,
+    ) -> Result<InvestigationStart, InvestigationStoreError> {
+        let intent_hash = match &completion_intent {
+            Some(intent) => intent.request_hash.clone(),
+            None => request.intent_hash()?,
+        };
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -299,6 +325,9 @@ impl JobStore {
                 detail: record.detail,
                 created: false,
             });
+        }
+        if completion_intent.is_some() {
+            completion::initialize(&tx)?;
         }
         let provider = provider
             .filter(|p| p.available && p.mode == request.provider_mode)
@@ -343,22 +372,36 @@ impl JobStore {
             [job_id],
         )?)?;
         let record = StoredTask {
-            schema_version: 1,
+            schema_version: if completion_intent.is_some() { 2 } else { 1 },
+            completion_intent: completion_intent.clone(),
             nonce: request.request_nonce.clone(),
             intent_hash,
             expected_graph_revision: request.expected_graph_revision.clone(),
             detail: InvestigationDetail {
-                inspection_requirements: request.inspection_requirements.clone(),
+                inspection_requirements: if completion_intent.is_some() {
+                    None
+                } else {
+                    request.inspection_requirements.clone()
+                },
                 inspection_assessment: None,
                 summary: InvestigationSummary {
-                    inspection_status: request
-                        .inspection_requirements
+                    inspection_status: if completion_intent.is_some() {
+                        None
+                    } else {
+                        request
+                            .inspection_requirements
+                            .as_ref()
+                            .map(|_| InvestigationInspectionStatus::Pending)
+                    },
+                    inspection_requirement_count: if completion_intent.is_some() {
+                        None
+                    } else {
+                        request.inspection_requirements.as_ref().map(Vec::len)
+                    },
+                    completion_outcome: None,
+                    obligation_status: completion_intent
                         .as_ref()
-                        .map(|_| InvestigationInspectionStatus::Pending),
-                    inspection_requirement_count: request
-                        .inspection_requirements
-                        .as_ref()
-                        .map(Vec::len),
+                        .map(|_| CompletionStatus::NotAssessed),
                     schema_version: request.schema_version,
                     investigation_id: id.clone(),
                     conversation_id,
@@ -392,6 +435,7 @@ impl JobStore {
                 usage: InvestigationUsage::default(),
                 citations: Vec::new(),
                 error: None,
+                completion: completion_intent.as_ref().map(completion::initial_detail),
             },
             phase: Phase::Queued,
             execution: None,

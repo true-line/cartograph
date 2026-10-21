@@ -1,0 +1,440 @@
+//! Versioned completion projections. Execution status is a separate state axis.
+use super::{
+    obligations::ObligationEnvelope,
+    staged_finish::{CompletionOutcome, ObligationObservation},
+    *,
+};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionStatus {
+    NotAssessed,
+    Satisfied,
+    Unmet,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvestigationCompletionOutcome {
+    Supported,
+    InsufficientEvidence,
+    ObligationsUnmet,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionAttemptOutcome {
+    Acquired,
+    Unavailable,
+    FirewallRefused,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletionRefusalBasis {
+    pub step_id: String,
+    pub input_ledger_hash: String,
+    pub disclosure_hash: String,
+    pub finish_hash: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CompletionAssessmentBasis {
+    NotAssessed,
+    FinishingDisclosure {
+        step_id: String,
+        input_ledger_hash: String,
+        disclosure_hash: String,
+        finishing_attempts_hash: String,
+    },
+    TerminalObservation {
+        finishing_attempts_hash: String,
+        last_refusal_id: Option<String>,
+        last_refusal_basis: Option<CompletionRefusalBasis>,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvestigationCompletionDetail {
+    pub schema_version: u32,
+    pub request_hash: String,
+    pub obligations_hash: String,
+    pub obligations: ObligationEnvelope,
+    pub refusal_count: u32,
+    pub assessment_basis: CompletionAssessmentBasis,
+    pub assessment: Vec<ObligationObservation>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvestigationCompletionResult {
+    pub schema_version: u32,
+    pub outcome: CompletionOutcome,
+    pub request_hash: String,
+    pub obligations_hash: String,
+    pub finishing_attempts_hash: String,
+    pub assessment: Vec<ObligationObservation>,
+}
+/// Mandatory immutable input6 object, distinct from the normalized envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvestigationCompletionContract {
+    pub schema_version: u32,
+    pub request_hash: String,
+    pub obligations_hash: String,
+    pub obligations: ObligationEnvelope,
+}
+impl InvestigationCompletionContract {
+    pub fn validate(&self) -> Result<(), InvestigationError> {
+        if self.schema_version != 1
+            || !crate::source_basis::hash(&self.request_hash)
+            || self.obligations != self.obligations.normalized()?
+            || self.obligations.fingerprint()? != self.obligations_hash
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        bounded_bytes(self, MAX_INPUT_BYTES)?;
+        Ok(())
+    }
+    pub fn fingerprint(&self) -> Result<String, InvestigationError> {
+        self.validate()?;
+        Ok(crate::source_basis::domain_hash(
+            b"cartograph:completion-contract:v1\0",
+            &bounded_bytes(self, MAX_INPUT_BYTES)?,
+        ))
+    }
+}
+
+/// The IPC object stays flat; generation is inspected before decoding one arm.
+#[derive(Debug, Clone)]
+pub enum InvestigationStartRequest {
+    Legacy(StartInvestigationRequest),
+    Completion(super::obligations::StagedObligationRequest),
+}
+impl InvestigationStartRequest {
+    pub fn decode(raw: &str) -> Result<Self, InvestigationError> {
+        strict::preflight(raw, 8 * 1024, 32, 4096, 128)?;
+        let value: serde_json::Value =
+            serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidRequest)?;
+        match value["schema_version"].as_u64() {
+            Some(1..=3) => {
+                let request: StartInvestigationRequest =
+                    serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidRequest)?;
+                request.validate()?;
+                Ok(Self::Legacy(request))
+            }
+            Some(4) => Ok(Self::Completion(
+                super::obligations::StagedObligationRequest::decode(raw)?,
+            )),
+            _ => Err(InvestigationError::InvalidRequest),
+        }
+    }
+}
+impl Serialize for InvestigationStartRequest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Legacy(request) => request.serialize(serializer),
+            Self::Completion(request) => request.serialize(serializer),
+        }
+    }
+}
+impl<'de> Deserialize<'de> for InvestigationStartRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // IPC may already have parsed arguments into Value, collapsing duplicate
+        // keys. Only discriminate the generation and decode its closed shape here:
+        // semantic failures must reach start's structured invalid_input response.
+        // Raw-protocol callers use decode() for strict preflight and validation.
+        let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+        let value: serde_json::Value =
+            serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+        match value["schema_version"].as_u64() {
+            Some(1..=3) => serde_json::from_str(raw.get())
+                .map(Self::Legacy)
+                .map_err(serde::de::Error::custom),
+            Some(4) => serde_json::from_str(raw.get())
+                .map(Self::Completion)
+                .map_err(serde::de::Error::custom),
+            _ => Err(serde::de::Error::custom(
+                "Unsupported investigation request generation",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum CompletionInvestigationAction {
+    Read(QualifiedInvestigationAction),
+    Finish(super::staged_finish::StagedFinish),
+}
+impl CompletionInvestigationAction {
+    pub fn decode(raw: &str, context_id: &str) -> Result<Self, InvestigationError> {
+        strict::preflight(raw, MAX_ACTION_BYTES, 32, 4096, 32)?;
+        let value: serde_json::Value =
+            serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidAction)?;
+        if value.get("schema_version").is_some() {
+            return super::staged_finish::StagedFinish::decode(raw).map(Self::Finish);
+        }
+        match QualifiedInvestigationAction::decode(raw, context_id)? {
+            QualifiedInvestigationAction::SourceOrFinish(InvestigationAction::Finish {
+                ..
+            }) => Err(InvestigationError::InvalidAction),
+            read => Ok(Self::Read(read)),
+        }
+    }
+}
+
+/// Ordered, duplicate-free completed observations, including unavailable reads.
+pub fn completed_attempts_hash(
+    attempts: &[super::staged_attempt::AttemptEvidence<'_>],
+) -> Result<String, InvestigationError> {
+    let ids: Vec<_> = attempts
+        .iter()
+        .map(|attempt| attempt.record.attempt_id.as_str())
+        .collect();
+    if ids.len() > 2 * MAX_TOOL_ACTIONS as usize
+        || ids.iter().any(|id| !crate::source_basis::hash(id))
+        || ids.iter().collect::<std::collections::BTreeSet<_>>().len() != ids.len()
+    {
+        return Err(InvestigationError::InvalidInput);
+    }
+    Ok(crate::source_basis::domain_hash(
+        b"cartograph:completion-attempts:v1\0",
+        &bounded_bytes(&ids, MAX_RECORD_BYTES)?,
+    ))
+}
+impl InvestigationCompletionResult {
+    pub fn validate(
+        &self,
+        findings: &[InvestigationFinding],
+        knowledge: KnowledgeCompleteness,
+        limitations: &[String],
+    ) -> Result<(), InvestigationError> {
+        if self.schema_version != 1
+            || [
+                &self.request_hash,
+                &self.obligations_hash,
+                &self.finishing_attempts_hash,
+            ]
+            .iter()
+            .any(|hash| !crate::source_basis::hash(hash))
+            || self.assessment.is_empty()
+            || self.assessment.len() > 12
+            || self.assessment.windows(2).any(|pair| {
+                (&pair[0].kind, &pair[0].obligation_id) >= (&pair[1].kind, &pair[1].obligation_id)
+            })
+            || self.assessment.iter().any(|observation| {
+                !crate::source_basis::hash(&observation.obligation_id)
+                    || !matches!(observation.kind.as_str(), "source" | "inventory")
+                    || observation.unmet.is_some()
+                    || observation.attempted != observation.last_attempt_outcome.is_some()
+                    || (observation.exactly_supplied && !observation.acquired)
+            })
+            || limitations.is_empty()
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        match self.outcome {
+            CompletionOutcome::Supported
+                if !findings.is_empty()
+                    && knowledge != KnowledgeCompleteness::InsufficientEvidence
+                    && self.assessment.iter().all(|item| item.exactly_supplied) =>
+            {
+                Ok(())
+            }
+            CompletionOutcome::InsufficientEvidence
+                if findings.is_empty()
+                    && knowledge == KnowledgeCompleteness::InsufficientEvidence
+                    && self.assessment.iter().all(|item| item.attempted) =>
+            {
+                Ok(())
+            }
+            _ => Err(InvestigationError::InvalidInput),
+        }
+    }
+}
+
+impl InvestigationCompletionDetail {
+    /// Shape and canonical projection checks; the host must independently replay
+    /// each observation against the durable invocation/attempt witnesses.
+    pub fn validate(&self) -> Result<CompletionStatus, InvestigationError> {
+        if self.schema_version != 1
+            || !crate::source_basis::hash(&self.request_hash)
+            || self.obligations != self.obligations.normalized()?
+            || self.obligations_hash != self.obligations.fingerprint()?
+            || self.refusal_count > 2
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let hash = |value: &str| crate::source_basis::hash(value);
+        let ledger_hash = |value: &str| {
+            value
+                .strip_prefix("investigation-input-v2:")
+                .is_some_and(hash)
+                || value
+                    .strip_prefix("investigation-input-v1:")
+                    .is_some_and(hash)
+                || hash(value)
+        };
+        let disclosure_hash = |value: &str| {
+            value
+                .strip_prefix("investigation-disclosure-v4:")
+                .is_some_and(hash)
+        };
+        let basis_ok = match &self.assessment_basis {
+            CompletionAssessmentBasis::NotAssessed => {
+                return if self.assessment.is_empty() && self.refusal_count == 0 {
+                    Ok(CompletionStatus::NotAssessed)
+                } else {
+                    Err(InvestigationError::InvalidInput)
+                };
+            }
+            CompletionAssessmentBasis::FinishingDisclosure {
+                step_id,
+                input_ledger_hash,
+                disclosure_hash: disclosed,
+                finishing_attempts_hash,
+            } => {
+                records::opaque_id(step_id)
+                    && ledger_hash(input_ledger_hash)
+                    && disclosure_hash(disclosed)
+                    && hash(finishing_attempts_hash)
+            }
+            CompletionAssessmentBasis::TerminalObservation {
+                finishing_attempts_hash,
+                last_refusal_id,
+                last_refusal_basis,
+            } => {
+                hash(finishing_attempts_hash)
+                    && last_refusal_id.is_some() == last_refusal_basis.is_some()
+                    && (self.refusal_count > 0) == last_refusal_id.is_some()
+                    && last_refusal_id.as_deref().is_none_or(hash)
+                    && last_refusal_basis.as_ref().is_none_or(|basis| {
+                        records::opaque_id(&basis.step_id)
+                            && ledger_hash(&basis.input_ledger_hash)
+                            && disclosure_hash(&basis.disclosure_hash)
+                            && hash(&basis.finish_hash)
+                    })
+            }
+        };
+        if !basis_ok
+            || self.assessment.len() != self.obligations.obligations.len()
+            || self
+                .assessment
+                .iter()
+                .zip(&self.obligations.obligations)
+                .any(|(observation, obligation)| {
+                    let (kind, id) = obligation.key();
+                    observation.kind != kind
+                        || observation.obligation_id != id
+                        || observation.attempted != observation.last_attempt_outcome.is_some()
+                        || (observation.exactly_supplied && !observation.acquired)
+                })
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(if self.assessment.iter().all(|item| item.unmet.is_none()) {
+            CompletionStatus::Satisfied
+        } else {
+            CompletionStatus::Unmet
+        })
+    }
+}
+
+impl InvestigationResult {
+    /// Reopen validation binds mixed assessment to immutable V7 intent and actual
+    /// ordered durable reads. It does not trust persisted fulfillment flags.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_completion(
+        &self,
+        request: &super::obligations::StagedObligationRequest,
+        task: &str,
+        step: &str,
+        ledger: &InvestigationInputLedger,
+        disclosure: &InvestigationDisclosure,
+        attempts: &[super::staged_attempt::AttemptEvidence<'_>],
+    ) -> Result<(), InvestigationError> {
+        let request = request.normalized()?;
+        request.validate_ledger(ledger)?;
+        self.validate_completion_for_binding(
+            &request.intent_hash()?,
+            &request.obligations,
+            &request.expected_context_id,
+            request.expected_graph_revision.as_deref(),
+            task,
+            step,
+            ledger,
+            disclosure,
+            attempts,
+        )
+    }
+
+    /// History requires only the immutable saved intent hash and projections,
+    /// never retaining or reconstructing the original unredacted question.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_completion_for_binding(
+        &self,
+        request_hash: &str,
+        envelope: &ObligationEnvelope,
+        expected_context_id: &str,
+        expected_graph_revision: Option<&str>,
+        task: &str,
+        step: &str,
+        ledger: &InvestigationInputLedger,
+        disclosure: &InvestigationDisclosure,
+        attempts: &[super::staged_attempt::AttemptEvidence<'_>],
+    ) -> Result<(), InvestigationError> {
+        self.validate_with_disclosure(ledger, step, disclosure)?;
+        let envelope = envelope.normalized()?;
+        let proof = ledger
+            .coverage
+            .as_ref()
+            .ok_or(InvestigationError::InvalidInput)?;
+        if proof.context_id != expected_context_id
+            || expected_graph_revision.is_some_and(|graph| graph != ledger.graph_snapshot_id)
+            || envelope.obligations.iter().any(|item| match item {
+                super::obligations::Obligation::Source { target, .. } => {
+                    target.graph_snapshot_id != ledger.graph_snapshot_id
+                }
+                super::obligations::Obligation::Inventory { target, .. } => {
+                    target.context_id != expected_context_id
+                        || !proof.qualification.repos.iter().any(|repo| {
+                            repo.repo == target.repo
+                                && repo.status == context_hub::coverage::CoverageStatus::Recorded
+                                && repo.inventory_hash.as_deref()
+                                    == Some(target.inventory_hash.as_str())
+                        })
+                }
+            })
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let completion = self
+            .completion
+            .as_ref()
+            .ok_or(InvestigationError::InvalidInput)?;
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: request_hash.to_owned(),
+            obligations_hash: envelope.fingerprint()?,
+            obligations: envelope.clone(),
+        };
+        if self.investigation_id != task
+            || completion.request_hash != contract.request_hash
+            || completion.obligations_hash != contract.obligations_hash
+            || disclosure.completion_contract_hash.as_deref()
+                != Some(contract.fingerprint()?.as_str())
+            || completion.finishing_attempts_hash != completed_attempts_hash(attempts)?
+            || completion.assessment
+                != super::staged_finish::derive_assessment_for_binding(
+                    request_hash,
+                    &envelope,
+                    task,
+                    step,
+                    ledger,
+                    disclosure,
+                    completion.outcome,
+                    attempts,
+                )?
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
+}

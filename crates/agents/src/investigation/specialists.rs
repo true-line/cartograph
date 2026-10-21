@@ -29,6 +29,10 @@ pub enum SpecialistId {
     DomainAnalystV6,
     #[serde(rename = "evidence-auditor@6")]
     EvidenceAuditorV6,
+    #[serde(rename = "domain-analyst@7")]
+    DomainAnalystV7,
+    #[serde(rename = "evidence-auditor@7")]
+    EvidenceAuditorV7,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +94,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV5
                 | Self::DomainAnalystV6
                 | Self::EvidenceAuditorV6
+                | Self::DomainAnalystV7
+                | Self::EvidenceAuditorV7
         )
     }
 
@@ -102,6 +108,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV5
                 | Self::DomainAnalystV6
                 | Self::EvidenceAuditorV6
+                | Self::DomainAnalystV7
+                | Self::EvidenceAuditorV7
         )
     }
 
@@ -111,7 +119,17 @@ impl SpecialistId {
 
     /// Explicit coverage-qualified protocol; legacy definitions never acquire it.
     pub fn uses_coverage_qualification(self) -> bool {
-        matches!(self, Self::DomainAnalystV6 | Self::EvidenceAuditorV6)
+        matches!(
+            self,
+            Self::DomainAnalystV6
+                | Self::EvidenceAuditorV6
+                | Self::DomainAnalystV7
+                | Self::EvidenceAuditorV7
+        )
+    }
+
+    pub fn uses_completion_obligations(self) -> bool {
+        matches!(self, Self::DomainAnalystV7 | Self::EvidenceAuditorV7)
     }
 
     fn version(self) -> u32 {
@@ -122,6 +140,7 @@ impl SpecialistId {
             Self::DomainAnalystV4 | Self::EvidenceAuditorV4 => 4,
             Self::DomainAnalystV5 | Self::EvidenceAuditorV5 => 5,
             Self::DomainAnalystV6 | Self::EvidenceAuditorV6 => 6,
+            Self::DomainAnalystV7 | Self::EvidenceAuditorV7 => 7,
         }
     }
 
@@ -132,7 +151,8 @@ impl SpecialistId {
             | Self::DomainAnalystV3
             | Self::DomainAnalystV4
             | Self::DomainAnalystV5
-            | Self::DomainAnalystV6 => {
+            | Self::DomainAnalystV6
+            | Self::DomainAnalystV7 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -140,11 +160,13 @@ impl SpecialistId {
             | Self::EvidenceAuditorV3
             | Self::EvidenceAuditorV4
             | Self::EvidenceAuditorV5
-            | Self::EvidenceAuditorV6 => {
+            | Self::EvidenceAuditorV6
+            | Self::EvidenceAuditorV7 => {
                 "Audit the support and limits of existing claims within the question's scope. Identify missing links, unsupported interpretations and unresolved design evidence. Do not mistake missing evidence in a searched subset for proof of absence across the project."
             }
         };
         let discovery = match self.version() {
+            7 => COVERAGE_V6,
             6 => COVERAGE_V6,
             5 => DISCOVERY_V5,
             4 => DISCOVERY_V4,
@@ -163,7 +185,15 @@ impl SpecialistId {
                 r#"{"type":"query_context","query":{"scope""#,
                 r#"{"type":"query_context","context_id":"the exact context_id supplied by the host","query":{"scope""#,
             );
-            format!("{role}\n\n{progress}{discovery}{common}")
+            if self.uses_completion_obligations() {
+                let discovery = discovery.replace("A valid partial finish remains useful with outstanding targets; neither discharge nor citation proves whole-task correctness.", "A supported finish requires every mixed completion obligation exactly supplied; outstanding obligations cause a bounded refusal. Fulfillment does not prove semantic correctness.");
+                let common = common.replace(r#"{"type":"finish","findings"# , r#"{"schema_version":1,"outcome":"supported","action":{"type":"finish","findings"#).replace(r#"["Remaining coverage limitations."]}"#, r#"["Remaining coverage limitations."]}}"#);
+                format!(
+                    "{role}\n\n{progress}{discovery}{common}\nCompletion obligations are mandatory. Return only the versioned finish wrapper with outcome supported or insufficient_evidence. Supported requires every obligation exactly supplied to this finishing invocation. Insufficient evidence requires an actual completed read attempt for every obligation, empty findings and explicit limitations. A refusal is not a read attempt; fixed completion_metadata feedback is not evidence. The host never chooses your next action."
+                )
+            } else {
+                format!("{role}\n\n{progress}{discovery}{common}")
+            }
         } else {
             format!("{role}\n\n{progress}{discovery}{COMMON}")
         }
@@ -177,7 +207,8 @@ impl SpecialistId {
             | Self::DomainAnalystV3
             | Self::DomainAnalystV4
             | Self::DomainAnalystV5
-            | Self::DomainAnalystV6 => (
+            | Self::DomainAnalystV6
+            | Self::DomainAnalystV7 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -186,7 +217,8 @@ impl SpecialistId {
             | Self::EvidenceAuditorV3
             | Self::EvidenceAuditorV4
             | Self::EvidenceAuditorV5
-            | Self::EvidenceAuditorV6 => (
+            | Self::EvidenceAuditorV6
+            | Self::EvidenceAuditorV7 => (
                 "Evidence auditor",
                 "Audit claim support, coverage limitations and unresolved evidence.",
             ),

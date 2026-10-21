@@ -1,3 +1,4 @@
+import { completionCatalog, completionChoices, completionDetail, completionResult, inventoryObligation, sourceObligation } from '../completionFixtures';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
@@ -432,5 +433,59 @@ export const CatalogRefreshRequiresExplicitReplacement: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await expect(useInvestigationStore.getState().start).toHaveBeenCalledWith(expect.objectContaining({
       specialist_id: 'evidence-auditor@3' }));
+  },
+};
+
+export const V7RequiresExplicitMixedSelection: Story = {
+  // AC-0266: explicit source and recorded-inventory choices share one caller envelope.
+  beforeEach: () => {
+    useInvestigationStore.setState(state({ catalog: completionCatalog, history: [], selectedId: null, detail: null, result: null,
+      draftInspectionRequirements: [sourceObligation.target] }), true);
+    mockIPC((command) => command === 'investigation_obligation_choices' ? completionChoices : command === 'resolve_investigation_source_obligation' ? sourceObligation : null);
+    return () => { clearMocks(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); };
+  },
+  render: function MixedCompletionStory() { return <InvestigationsSurface state={useInvestigationStore()} anchors={[]} canStart />; },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
+    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@7/ }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Refresh completion choices' }));
+    await waitFor(() => expect(canvas.getByRole('button', { name: 'Require inventory acme/api' })).toBeEnabled());
+    await expect(canvas.getByRole('button', { name: 'Require inventory example/stale' })).toBeDisabled();
+    await userEvent.click(canvas.getByRole('button', { name: 'Require inventory acme/api' }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Require selected sources for completion' }));
+    await waitFor(() => expect(useInvestigationStore.getState().draftObligations).toHaveLength(2));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Inspect this selected evidence.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(useInvestigationStore.getState().start).toHaveBeenCalledWith(expect.objectContaining({
+      specialist_id: 'domain-analyst@7', obligations: { schema_version: 1, contract: 'investigation-completion-obligations@1',
+        obligations: [inventoryObligation, sourceObligation] } }));
+    await expect(useInvestigationStore.getState().start).not.toHaveBeenCalledWith(expect.objectContaining({ inspection_requirements: expect.anything() }));
+  },
+};
+
+export const V7FollowUpWaitsAndClearsBothKinds: Story = {
+  // AC-0266: catalog loading cannot clear a draft; an explicit follow-up clears both partitions.
+  beforeEach: () => {
+    useInvestigationStore.setState(state({ catalog: completionCatalog, catalogLoading: true,
+      detail: completionDetail(), result: completionResult(), history: [completionDetail()],
+      draftObligations: [inventoryObligation, sourceObligation], obligationChoices: completionChoices,
+      draftInspectionRequirements: [sourceObligation.target] }), true);
+    return () => useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  },
+  render: function FollowUpCompletionStory() { return <InvestigationsSurface state={useInvestigationStore()} anchors={[]} canStart />; },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement); const followUp = canvas.getByRole('button', { name: 'Ask a follow-up' });
+    await expect(followUp).toBeDisabled(); await userEvent.click(followUp);
+    await expect(useInvestigationStore.getState().draftObligations).toHaveLength(2);
+    useInvestigationStore.setState({ catalogLoading: false });
+    await waitFor(() => expect(followUp).toBeEnabled()); await userEvent.click(followUp);
+    await expect(useInvestigationStore.getState().draftObligations).toEqual([]);
+    await expect(useInvestigationStore.getState().draftInspectionRequirements).toEqual([]);
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@7/ })).toBeChecked();
+    useInvestigationStore.setState({ catalog: investigationCatalog });
+    await waitFor(() => expect(canvas.getByText(/Choose an available specialist explicitly/)).toBeVisible());
+    await expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@7');
+    await expect(canvas.getByRole('button', { name: 'Start follow-up' })).toBeDisabled();
   },
 };

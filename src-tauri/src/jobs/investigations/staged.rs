@@ -1,10 +1,8 @@
-//! Optional internal staging journal. No production caller or task transition.
-//! Slice 3 must combine TerminalRequired with host terminal publication in this
-//! same caller-owned transaction; this helper never commits or clears a phase.
+//! Immutable completion refusal journal shared by the production transition and
+//! test adapter. The caller publishes any required terminal outcome in this same
+//! transaction; this helper never commits or clears a phase.
 use super::*;
-use agents::investigation::{
-    obligations::*, staged_attempt::*, staged_finish::*, staged_refusal::*,
-};
+use agents::investigation::{staged_attempt::*, staged_finish::*, staged_refusal::*};
 use rusqlite::Transaction;
 
 fn schema() -> Vec<String> {
@@ -23,7 +21,7 @@ fn schema() -> Vec<String> {
     }
     sql
 }
-fn initialize(tx: &Transaction<'_>) -> Result<(), InvestigationStoreError> {
+pub(super) fn initialize(tx: &Transaction<'_>) -> Result<(), InvestigationStoreError> {
     let count: i64 = tx.query_row(
         "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'staged_completion_*'",
         [],
@@ -62,6 +60,13 @@ struct Binding {
 impl Binding {
     fn validate(&self, task: &StoredTask) -> Result<(), InvestigationStoreError> {
         self.envelope.normalized()?;
+        if let Some(intent) = &task.completion_intent
+            && (self.request_hash != intent.request_hash
+                || self.envelope != intent.obligations
+                || self.expected_context != intent.expected_context)
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
         let sources = self.envelope.sources()?;
         let sources = if sources.is_empty() {
             vec![]
@@ -74,11 +79,19 @@ impl Binding {
             || self.redacted_question_hash
                 != core_prov::content_hash(task.detail.summary.question.as_bytes())
             || sources
-                != task
-                    .detail
-                    .inspection_requirements
-                    .clone()
-                    .unwrap_or_default()
+                != if let Some(intent) = &task.completion_intent {
+                    let sources = intent.obligations.sources()?;
+                    if sources.is_empty() {
+                        vec![]
+                    } else {
+                        normalize_inspection_targets(&sources)?
+                    }
+                } else {
+                    task.detail
+                        .inspection_requirements
+                        .clone()
+                        .unwrap_or_default()
+                }
             || task
                 .detail
                 .coverage_context
@@ -122,50 +135,65 @@ fn bind(
 ) -> Result<Binding, InvestigationStoreError> {
     initialize(tx)?;
     let request = request.normalized()?;
-    let sources = request.obligations.sources()?;
-    let projected = StartInvestigationRequest {
-        schema_version: 3,
-        request_nonce: request.request_nonce.clone(),
-        specialist_id: if request.specialist_id == "domain-analyst@7" {
-            SpecialistId::DomainAnalystV6
-        } else {
-            SpecialistId::EvidenceAuditorV6
-        },
-        inspection_requirements: if sources.is_empty() {
-            None
-        } else {
-            Some(normalize_inspection_targets(&sources)?)
-        },
-        question: request.question.clone(),
-        scope: request.scope.clone(),
-        provider_mode: request.provider_mode,
-        limit_profile: request.limit_profile.clone(),
-        expected_graph_revision: request.expected_graph_revision.clone(),
-        expected_context_id: Some(request.expected_context_id.clone()),
-        conversation_id: request.conversation_id.clone(),
-        parent_id: request.parent_id.clone(),
-    };
-    if projected.intent_hash() != Ok(task.intent_hash.clone()) {
-        return Err(InvestigationStoreError::Invalid);
-    }
-    let expected_role = if request.specialist_id == "domain-analyst@7" {
-        SpecialistId::DomainAnalystV6
+    if let Some(intent) = &task.completion_intent {
+        intent.validate(task)?;
+        if intent.request_hash != request.intent_hash()?
+            || intent.obligations != request.obligations
+            || intent.expected_context != request.expected_context_id
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
     } else {
-        SpecialistId::EvidenceAuditorV6
-    };
-    if task.nonce != request.request_nonce
-        || task.detail.summary.specialist_id != expected_role
-        || task.detail.summary.scope != request.scope
-        || task.detail.summary.provider_mode != request.provider_mode
-        || task.detail.summary.parent_id != request.parent_id
-        || request
-            .conversation_id
-            .as_ref()
-            .is_some_and(|id| id != &task.detail.summary.conversation_id)
-        || redacted_history_text(&request.question, MAX_QUESTION_BYTES)?
-            != task.detail.summary.question
-    {
+        #[cfg(not(test))]
         return Err(InvestigationStoreError::Invalid);
+        #[cfg(test)]
+        {
+            let sources = request.obligations.sources()?;
+            let projected = StartInvestigationRequest {
+                schema_version: 3,
+                request_nonce: request.request_nonce.clone(),
+                specialist_id: if request.specialist_id == "domain-analyst@7" {
+                    SpecialistId::DomainAnalystV6
+                } else {
+                    SpecialistId::EvidenceAuditorV6
+                },
+                inspection_requirements: if sources.is_empty() {
+                    None
+                } else {
+                    Some(normalize_inspection_targets(&sources)?)
+                },
+                question: request.question.clone(),
+                scope: request.scope.clone(),
+                provider_mode: request.provider_mode,
+                limit_profile: request.limit_profile.clone(),
+                expected_graph_revision: request.expected_graph_revision.clone(),
+                expected_context_id: Some(request.expected_context_id.clone()),
+                conversation_id: request.conversation_id.clone(),
+                parent_id: request.parent_id.clone(),
+            };
+            if projected.intent_hash() != Ok(task.intent_hash.clone()) {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            let expected_role = if request.specialist_id == "domain-analyst@7" {
+                SpecialistId::DomainAnalystV6
+            } else {
+                SpecialistId::EvidenceAuditorV6
+            };
+            if task.nonce != request.request_nonce
+                || task.detail.summary.specialist_id != expected_role
+                || task.detail.summary.scope != request.scope
+                || task.detail.summary.provider_mode != request.provider_mode
+                || task.detail.summary.parent_id != request.parent_id
+                || request
+                    .conversation_id
+                    .as_ref()
+                    .is_some_and(|id| id != &task.detail.summary.conversation_id)
+                || redacted_history_text(&request.question, MAX_QUESTION_BYTES)?
+                    != task.detail.summary.question
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+        }
     }
     let binding = Binding {
         legacy_intent_hash: task.intent_hash.clone(),
@@ -231,7 +259,7 @@ fn insert(
     one(tx.execute(&sql, params![id, sequence, body, hash])?)?;
     Ok(())
 }
-fn read<T: serde::de::DeserializeOwned + Serialize>(
+pub(super) fn read<T: serde::de::DeserializeOwned + Serialize>(
     connection: &Connection,
     table: &str,
     id: &str,
@@ -284,6 +312,24 @@ fn completed_attempts(
     id: &str,
     attempts: &[AttemptRecord],
 ) -> Result<Vec<InvestigationInputLedger>, InvestigationStoreError> {
+    let task = load_task_base(connection, id)?;
+    if task.completion_intent.is_some() {
+        let durable = super::completion::attempts(connection, &task)?;
+        if durable.len() < attempts.len()
+            || durable
+                .iter()
+                .take(attempts.len())
+                .map(|entry| &entry.record)
+                .collect::<Vec<_>>()
+                != attempts.iter().collect::<Vec<_>>()
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        return attempts
+            .iter()
+            .map(|attempt| saved_ledger(connection, id, attempt.input_revision))
+            .collect();
+    }
     if attempts.len() > MAX_TOOL_ACTIONS as usize {
         return Err(InvestigationStoreError::Capacity);
     }
@@ -343,7 +389,7 @@ fn completed_attempts(
         if response.action_hash != read_action_hash(&attempt.read)? {
             return Err(InvestigationStoreError::Invalid);
         }
-        let task = load_task(connection, id)?;
+        let task = load_task_base(connection, id)?;
         if task.detail.summary.last_event_sequence > MAX_EVENTS {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -384,7 +430,7 @@ fn completed_attempts(
     }
     Ok(ledgers)
 }
-fn read_action_hash(read: &ReadIntent) -> Result<String, InvestigationStoreError> {
+pub(super) fn read_action_hash(read: &ReadIntent) -> Result<String, InvestigationStoreError> {
     let value = match read {
         ReadIntent::Source { fact, role, index } => {
             serde_json::json!({"type":"read_evidence","fact":fact,"role":role,"index":index})
@@ -469,7 +515,7 @@ pub(super) fn load(
         return Ok(entries);
     }
     validate_schema(connection)?;
-    let task = load_task(connection, id)?;
+    let task = load_task_base(connection, id)?;
     let binding = read::<Binding>(connection, "staged_completion_intents", id, None, 32 * 1024)?
         .ok_or(InvestigationStoreError::Invalid)?;
     binding.validate(&task)?;
@@ -632,12 +678,12 @@ pub(super) fn append(
     validate(tx, namespace)?;
     let id = transitions::task_id_for_job(tx, execution.id())?
         .ok_or(InvestigationStoreError::Missing)?;
-    let task = load_task(tx, &id)?;
+    let task = load_task_base(tx, &id)?;
     transitions::check_identity(&task, execution)?;
-    transitions::check_job(tx, execution, false)?;
+    transitions::check_job(tx, execution, task.completion_intent.is_some())?;
     if execution.inner.namespace != *namespace
         || task.phase != Phase::Invocation
-        || task.detail.summary.cancel_requested
+        || (task.detail.summary.cancel_requested && task.completion_intent.is_none())
     {
         return Err(InvestigationStoreError::Stale);
     }
@@ -678,8 +724,12 @@ pub(super) fn append(
     else {
         return Err(InvestigationStoreError::Invalid);
     };
-    let canonical =
-        serde_json::to_value(&finish.action).map_err(|_| InvestigationStoreError::Invalid)?;
+    let canonical = if task.completion_intent.is_some() {
+        serde_json::to_value(finish)
+    } else {
+        serde_json::to_value(&finish.action)
+    }
+    .map_err(|_| InvestigationStoreError::Invalid)?;
     if response.action_hash != core_prov::content_hash(&encode(&canonical, MAX_ACTION_BYTES)?) {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -719,6 +769,9 @@ pub(super) fn append(
     entry.entry_id = entry.content_id()?;
     // Include the actual ordinary response body and its row allowance before
     // writing it. Shared accounting will charge that row once after commit.
+    if task.completion_intent.is_some() {
+        encode(&entry, 64 * 1024)?;
+    }
     let response_body = encode(&entry.response, 4096)?;
     let bytes = encode(&entry, MAX_RECORD_BYTES)?.len()
         + entry.record.feedback.bytes()?.len()
@@ -732,7 +785,17 @@ pub(super) fn append(
     let global = stored_bytes(tx, None)?
         .checked_add(bytes)
         .ok_or(InvestigationStoreError::Capacity)?;
-    if task_bytes > TASK_CAPACITY - TERMINAL_RESERVE || global > STORE_CAPACITY {
+    let terminal = task.completion_intent.is_some()
+        && (disposition == RefusalDisposition::TerminalRequired
+            || task.detail.summary.cancel_requested);
+    if task_bytes
+        > if terminal {
+            TASK_CAPACITY
+        } else {
+            TASK_CAPACITY - TERMINAL_RESERVE
+        }
+        || global > STORE_CAPACITY
+    {
         return Err(InvestigationStoreError::Capacity);
     }
     one(tx.execute(

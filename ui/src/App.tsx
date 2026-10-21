@@ -791,8 +791,11 @@ export default function App() {
               requirementError={primarySource.requirementError ?? investigations.inspectionDraftError}
               onRequire={(index) => {
                 if (!capturedSelectionMatches) return;
-                void primarySource.resolveInspectionTarget(index).then((target) => {
-                  if (target && useInvestigationStore.getState().addInspectionRequirement(target)) {
+                void primarySource.resolveInspectionTarget(index).then(async (target) => {
+                  if (!target) return;
+                  const state = useInvestigationStore.getState();
+                  const added = state.composer.specialistId.endsWith('@7') ? await state.addSourceObligation(target) : state.addInspectionRequirement(target);
+                  if (added) {
                     clearSelection();
                     navigate('investigations');
                   }

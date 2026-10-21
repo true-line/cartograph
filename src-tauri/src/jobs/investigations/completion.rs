@@ -1,0 +1,1243 @@
+//! Real generation-four completion intent and durable read observations.
+use super::*;
+use rusqlite::Transaction;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CompletionIntent {
+    pub schema_version: u32,
+    pub request_hash: String,
+    pub obligations: ObligationEnvelope,
+    pub obligations_hash: String,
+    pub expected_context: String,
+    pub expected_graph: Option<String>,
+    nonce: String,
+    specialist: SpecialistId,
+    scope: InvestigationScope,
+    provider_mode: InvestigationProviderMode,
+    parent: Option<String>,
+    conversation: Option<String>,
+    question_hash: String,
+}
+impl CompletionIntent {
+    fn new(request: &StagedObligationRequest) -> Result<Self, InvestigationStoreError> {
+        Ok(Self {
+            schema_version: 1,
+            request_hash: request.intent_hash()?,
+            obligations: request.obligations.clone(),
+            obligations_hash: request.obligations.fingerprint()?,
+            expected_context: request.expected_context_id.clone(),
+            expected_graph: request.expected_graph_revision.clone(),
+            nonce: request.request_nonce.clone(),
+            specialist: if request.specialist_id == "domain-analyst@7" {
+                SpecialistId::DomainAnalystV7
+            } else {
+                SpecialistId::EvidenceAuditorV7
+            },
+            scope: request.scope.clone(),
+            provider_mode: request.provider_mode,
+            parent: request.parent_id.clone(),
+            conversation: request.conversation_id.clone(),
+            question_hash: core_prov::content_hash(
+                redacted_history_text(&request.question, MAX_QUESTION_BYTES)?.as_bytes(),
+            ),
+        })
+    }
+    pub(super) fn validate(&self, task: &StoredTask) -> Result<(), InvestigationStoreError> {
+        let summary = &task.detail.summary;
+        if self.schema_version != 1
+            || !hash_valid(&self.request_hash)
+            || self.request_hash != task.intent_hash
+            || self.obligations != self.obligations.normalized()?
+            || self.obligations.fingerprint()? != self.obligations_hash
+            || self.expected_graph != task.expected_graph_revision
+            || self.nonce != task.nonce
+            || self.specialist != summary.specialist_id
+            || self.scope != summary.scope
+            || self.provider_mode != summary.provider_mode
+            || self.parent != summary.parent_id
+            || self
+                .conversation
+                .as_ref()
+                .is_some_and(|id| id != &summary.conversation_id)
+            || self.question_hash != core_prov::content_hash(summary.question.as_bytes())
+            || !summary.specialist_id.uses_completion_obligations()
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        if task.detail.inspection_requirements.is_some()
+            || task.detail.inspection_assessment.is_some()
+            || summary.inspection_status.is_some()
+            || summary.inspection_requirement_count.is_some()
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        if task.ledger_revision.is_some()
+            && task
+                .detail
+                .coverage_context
+                .as_ref()
+                .is_none_or(|context| context.context_id != self.expected_context)
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        Ok(())
+    }
+    pub(super) fn contract(&self) -> InvestigationCompletionContract {
+        InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: self.request_hash.clone(),
+            obligations_hash: self.obligations_hash.clone(),
+            obligations: self.obligations.clone(),
+        }
+    }
+}
+pub(super) fn initial_detail(intent: &CompletionIntent) -> InvestigationCompletionDetail {
+    InvestigationCompletionDetail {
+        schema_version: 1,
+        request_hash: intent.request_hash.clone(),
+        obligations_hash: intent.obligations_hash.clone(),
+        obligations: intent.obligations.clone(),
+        refusal_count: 0,
+        assessment_basis: CompletionAssessmentBasis::NotAssessed,
+        assessment: vec![],
+    }
+}
+impl JobStore {
+    pub(crate) fn start_completion_investigation(
+        &mut self,
+        request: &StagedObligationRequest,
+        provider: Option<&InvestigationProvider>,
+    ) -> Result<InvestigationStart, InvestigationStoreError> {
+        let request = request.normalized()?;
+        let intent = CompletionIntent::new(&request)?;
+        let sources = request.obligations.sources()?;
+        let projected = StartInvestigationRequest {
+            schema_version: 4,
+            request_nonce: request.request_nonce.clone(),
+            specialist_id: intent.specialist,
+            inspection_requirements: if sources.is_empty() {
+                None
+            } else {
+                Some(normalize_inspection_targets(&sources)?)
+            },
+            question: request.question.clone(),
+            scope: request.scope.clone(),
+            provider_mode: request.provider_mode,
+            limit_profile: request.limit_profile.clone(),
+            expected_graph_revision: request.expected_graph_revision.clone(),
+            expected_context_id: Some(request.expected_context_id.clone()),
+            conversation_id: request.conversation_id.clone(),
+            parent_id: request.parent_id.clone(),
+        };
+        self.start_investigation_internal(&projected, provider, Some(intent))
+    }
+    pub(crate) fn existing_investigation_completion(
+        &self,
+        request: &StagedObligationRequest,
+    ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
+        let hash = request.intent_hash()?;
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM investigation_tasks WHERE nonce=?1",
+                [&request.request_nonce],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let detail = if let Some(id) = id {
+            let task = load_task(&tx, &id)?;
+            if task.schema_version != 2 || task.intent_hash != hash {
+                return Err(InvestigationStoreError::Conflict);
+            }
+            Some(task.detail)
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(detail)
+    }
+    pub(crate) fn investigation_completion_attempts(
+        &self,
+        id: &str,
+    ) -> Result<Vec<AttemptRecord>, InvestigationStoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let task = load_task(&tx, id)?;
+        let rows = attempts(&tx, &task)?;
+        tx.commit()?;
+        Ok(rows.into_iter().map(|entry| entry.record).collect())
+    }
+    pub(crate) fn investigation_completion_attempt_ledgers(
+        &self,
+        id: &str,
+    ) -> Result<Vec<InvestigationInputLedger>, InvestigationStoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let task = load_task(&tx, id)?;
+        let rows = attempts(&tx, &task)?;
+        let ledgers = rows
+            .iter()
+            .map(|entry| ledger_at(&tx, id, entry.record.input_revision))
+            .collect::<Result<Vec<_>, _>>()?;
+        tx.commit()?;
+        Ok(ledgers)
+    }
+    pub(crate) fn investigation_completion_metadata(
+        &self,
+        id: &str,
+    ) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let task = load_task(&tx, id)?;
+        let metadata = metadata(&tx, &task, None)?;
+        tx.commit()?;
+        Ok(metadata)
+    }
+}
+const ATTEMPT_SCHEMA: &[&str] = &[
+    "CREATE TABLE completion_attempts(task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 32), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence)) STRICT",
+    "CREATE TRIGGER completion_attempts_no_update BEFORE UPDATE ON completion_attempts BEGIN SELECT RAISE(ABORT,'immutable completion attempt'); END",
+    "CREATE TRIGGER completion_attempts_no_delete BEFORE DELETE ON completion_attempts BEGIN SELECT RAISE(ABORT,'immutable completion attempt'); END",
+];
+pub(super) fn initialize(tx: &Transaction<'_>) -> Result<(), InvestigationStoreError> {
+    let count: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'completion_*'",
+        [],
+        |row| row.get(0),
+    )?;
+    if count == 0 {
+        for sql in ATTEMPT_SCHEMA {
+            tx.execute_batch(sql)?;
+        }
+    }
+    validate_schema(tx)
+}
+fn validate_schema(connection: &Connection) -> Result<(), InvestigationStoreError> {
+    let (count,bounded):(i64,bool)=connection.query_row("SELECT count(*),coalesce(min(typeof(sql)='text' AND length(CAST(sql AS BLOB))<=4096),0) FROM sqlite_schema WHERE name GLOB 'completion_*' OR (tbl_name='completion_attempts' AND name NOT GLOB 'sqlite_*')",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    if count != ATTEMPT_SCHEMA.len() as i64 || !bounded {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let actual=connection.prepare("SELECT sql FROM sqlite_schema WHERE name GLOB 'completion_*' OR (tbl_name='completion_attempts' AND name NOT GLOB 'sqlite_*')")?.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+    if ATTEMPT_SCHEMA
+        .iter()
+        .any(|sql| !actual.iter().any(|actual| actual == sql))
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(())
+}
+pub(super) fn stored_bytes(
+    connection: &Connection,
+    id: Option<&str>,
+) -> Result<usize, InvestigationStoreError> {
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name GLOB 'completion_*')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(0);
+    }
+    validate_schema(connection)?;
+    let bytes:i64=connection.query_row("SELECT coalesce(sum(length(CAST(body AS BLOB))+length(CAST(body_hash AS BLOB))+256),0) FROM completion_attempts WHERE (?1 IS NULL OR task_id=?1)",[id],|r|r.get(0))?;
+    usize::try_from(bytes).map_err(|_| InvestigationStoreError::Capacity)
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AttemptEntry {
+    pub record: AttemptRecord,
+    response_hash: String,
+    action_hash: String,
+    event_sequence: u64,
+}
+fn ledger_at(
+    connection: &Connection,
+    id: &str,
+    revision: u64,
+) -> Result<InvestigationInputLedger, InvestigationStoreError> {
+    read_body(
+        connection,
+        "investigation_inputs",
+        "revision",
+        id,
+        &signed(revision)?,
+    )?
+    .ok_or(InvestigationStoreError::Invalid)
+}
+fn latest_step(connection: &Connection, id: &str) -> Result<String, InvestigationStoreError> {
+    connection.query_row("SELECT CASE WHEN typeof(step_id)='text' AND length(CAST(step_id AS BLOB))<=128 THEN step_id END FROM investigation_invocations WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",[id],|row|row.get(0)).map_err(Into::into)
+}
+fn ordinal(connection: &Connection, id: &str, step: &str) -> Result<i64, InvestigationStoreError> {
+    connection
+        .query_row(
+            "SELECT rowid FROM investigation_invocations WHERE task_id=?1 AND step_id=?2",
+            params![id, step],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+pub(super) fn attempts(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<Vec<AttemptEntry>, InvestigationStoreError> {
+    let Some(intent) = &task.completion_intent else {
+        return Ok(vec![]);
+    };
+    validate_schema(connection)?;
+    let id = &task.detail.summary.investigation_id;
+    let sequences = connection
+        .prepare(
+            "SELECT sequence FROM completion_attempts WHERE task_id=?1 ORDER BY sequence LIMIT 33",
+        )?
+        .query_map([id], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if sequences.len() > 2 * MAX_TOOL_ACTIONS as usize {
+        return Err(InvestigationStoreError::Capacity);
+    }
+    let mut entries = Vec::new();
+    for (index, sequence) in sequences.into_iter().enumerate() {
+        if sequence != index as i64 + 1 {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let entry: AttemptEntry =
+            read_body(connection, "completion_attempts", "sequence", id, &sequence)?
+                .ok_or(InvestigationStoreError::Invalid)?;
+        let ledger = ledger_at(connection, id, entry.record.input_revision)?;
+        entry
+            .record
+            .validate_binding(&intent.request_hash, &intent.obligations, id, &ledger)?;
+        let response: InvestigationResponseMeta = read_body(
+            connection,
+            "investigation_responses",
+            "step_id",
+            id,
+            &entry.record.step_id,
+        )?
+        .ok_or(InvestigationStoreError::Invalid)?;
+        let actual_step: PendingInvestigationStep = read_body(
+            connection,
+            "investigation_invocations",
+            "step_id",
+            id,
+            &entry.record.step_id,
+        )?
+        .ok_or(InvestigationStoreError::Invalid)?;
+        validate_step(&actual_step)?;
+        if actual_step.step_id != entry.record.step_id || response.step_id != entry.record.step_id {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        if response.response_hash != entry.response_hash
+            || response.action_hash != entry.action_hash
+            || staged::read_action_hash(&entry.record.read)? != entry.action_hash
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let event: InvestigationEvent = read_body(
+            connection,
+            "investigation_events",
+            "sequence",
+            id,
+            &signed(entry.event_sequence)?,
+        )?
+        .ok_or(InvestigationStoreError::Invalid)?;
+        if event.investigation_id != *id
+            || event.sequence != entry.event_sequence
+            || event.sequence > task.detail.summary.last_event_sequence
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        match &entry.record.outcome {
+            AttemptOutcome::SourceAcquired { .. } | AttemptOutcome::InventoryAcquired { .. } => {
+                let expected_tool =
+                    if matches!(entry.record.outcome, AttemptOutcome::SourceAcquired { .. }) {
+                        InvestigationTool::ReadEvidence
+                    } else {
+                        InvestigationTool::ReadCoverageInventory
+                    };
+                if event.kind != InvestigationEventKind::ToolCompleted
+                    || event.tool != Some(expected_tool)
+                {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+                let before = ledger_at(
+                    connection,
+                    id,
+                    entry
+                        .record
+                        .input_revision
+                        .checked_sub(1)
+                        .ok_or(InvestigationStoreError::Invalid)?,
+                )?;
+                let step: PendingInvestigationStep = read_body(
+                    connection,
+                    "investigation_invocations",
+                    "step_id",
+                    id,
+                    &entry.record.step_id,
+                )?
+                .ok_or(InvestigationStoreError::Invalid)?;
+                if step.input_ledger_hash != before.fingerprint()? {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+                InvestigationTurnBasis {
+                    input_ledger_hash: ledger.fingerprint()?,
+                    previous_ledger: Some(before.clone()),
+                    completed_tool: Some(expected_tool),
+                }
+                .validate(&ledger)?;
+                match &entry.record.outcome {
+                    AttemptOutcome::SourceAcquired { citation_id } => {
+                        if ledger
+                            .citations
+                            .get(before.citations.len())
+                            .is_none_or(|citation| &citation.citation_id != citation_id)
+                        {
+                            return Err(InvestigationStoreError::Invalid);
+                        }
+                    }
+                    AttemptOutcome::InventoryAcquired { read_index } => {
+                        if *read_index != before.coverage_reads.len() {
+                            return Err(InvestigationStoreError::Invalid);
+                        }
+                    }
+                    _ => return Err(InvestigationStoreError::Invalid),
+                }
+            }
+            AttemptOutcome::Unavailable { reason } => {
+                if actual_step.input_ledger_hash != ledger.fingerprint()? {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+                if let ReadIntent::Inventory {
+                    context_id,
+                    repo,
+                    inventory_hash,
+                    max_bytes,
+                } = &entry.record.read
+                {
+                    let archive = super::coverage::load(connection, id)?
+                        .ok_or(InvestigationStoreError::Invalid)?;
+                    if !matches!(
+                        archive.read(&InvestigationCoverageRead {
+                            context_id: context_id.clone(),
+                            repo: repo.clone(),
+                            inventory_hash: inventory_hash.clone(),
+                            max_bytes: *max_bytes
+                        }),
+                        Err(InvestigationError::LimitExceeded)
+                    ) {
+                        return Err(InvestigationStoreError::Invalid);
+                    }
+                }
+                if event.kind != InvestigationEventKind::ReadUnavailable
+                    || event.step_id.as_deref() != Some(entry.record.step_id.as_str())
+                    || event.summary != unavailable_message(reason)
+                {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+            }
+            AttemptOutcome::FirewallRefused { .. } => return Err(InvestigationStoreError::Invalid),
+        }
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+fn unavailable_message(reason: &UnavailableReason) -> &'static str {
+    match reason {
+        UnavailableReason::PinnedTargetAbsent => "Pinned completion target was unavailable.",
+        UnavailableReason::RangeOutOfBounds => "Completion source range was unavailable.",
+        UnavailableReason::InventoryExceedsMaxBytes => {
+            "Retained completion inventory exceeds the requested response budget."
+        }
+    }
+}
+fn append_attempt(
+    connection: &Connection,
+    task: &StoredTask,
+    read: &ReadIntent,
+    outcome: AttemptOutcome,
+    revision: u64,
+) -> Result<(), InvestigationStoreError> {
+    // Reserved decode-only outcome: no current production firewall emits a
+    // trustworthy per-read refusal witness, and redaction is still acquisition.
+    if matches!(outcome, AttemptOutcome::FirewallRefused { .. }) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let intent = task
+        .completion_intent
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    let id = &task.detail.summary.investigation_id;
+    let step = latest_step(connection, id)?;
+    let response: InvestigationResponseMeta =
+        read_body(connection, "investigation_responses", "step_id", id, &step)?
+            .ok_or(InvestigationStoreError::Invalid)?;
+    if response.action_hash != staged::read_action_hash(read)? {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let mut count = attempts(connection, task)?.len();
+    for obligation in &intent.obligations.obligations {
+        if !read.matches(obligation) {
+            continue;
+        }
+        let mut record = AttemptRecord {
+            schema_version: 1,
+            attempt_id: String::new(),
+            task_id: id.clone(),
+            request_hash: intent.request_hash.clone(),
+            obligations_hash: intent.obligations_hash.clone(),
+            obligation_id: obligation.key().1.into(),
+            step_id: step.clone(),
+            read: read.clone(),
+            input_ledger_hash: String::new(),
+            input_revision: revision,
+            outcome: outcome.clone(),
+        };
+        let ledger = ledger_at(connection, id, revision)?;
+        record.input_ledger_hash = ledger.fingerprint()?;
+        record.attempt_id = record.content_id()?;
+        record.validate_binding(&intent.request_hash, &intent.obligations, id, &ledger)?;
+        count += 1;
+        if count > 2 * MAX_TOOL_ACTIONS as usize {
+            return Err(InvestigationStoreError::Capacity);
+        }
+        let entry = AttemptEntry {
+            record,
+            response_hash: response.response_hash.clone(),
+            action_hash: response.action_hash.clone(),
+            event_sequence: task.detail.summary.last_event_sequence,
+        };
+        insert_body(
+            connection,
+            "completion_attempts",
+            id,
+            &signed(count as u64)?,
+            &entry,
+            MAX_RECORD_BYTES,
+        )?;
+    }
+    Ok(())
+}
+pub(super) fn record_acquisition(
+    connection: &Connection,
+    task: &StoredTask,
+    ledger: &InvestigationInputLedger,
+    tool: Option<InvestigationTool>,
+) -> Result<(), InvestigationStoreError> {
+    if task.completion_intent.is_none() {
+        return Ok(());
+    }
+    let before = ledger_at(
+        connection,
+        &task.detail.summary.investigation_id,
+        ledger
+            .revision
+            .checked_sub(1)
+            .ok_or(InvestigationStoreError::Invalid)?,
+    )?;
+    match tool {
+        Some(InvestigationTool::ReadEvidence) => {
+            let citation = ledger
+                .citations
+                .get(before.citations.len())
+                .ok_or(InvestigationStoreError::Invalid)?;
+            let role = citation.role.ok_or(InvestigationStoreError::Invalid)?;
+            let index = citation.index.ok_or(InvestigationStoreError::Invalid)?;
+            append_attempt(
+                connection,
+                task,
+                &ReadIntent::Source {
+                    fact: citation.fact.clone(),
+                    role,
+                    index,
+                },
+                AttemptOutcome::SourceAcquired {
+                    citation_id: citation.citation_id.clone(),
+                },
+                ledger.revision,
+            )
+        }
+        Some(InvestigationTool::ReadCoverageInventory) => {
+            let index = before.coverage_reads.len();
+            let read = ledger
+                .coverage_reads
+                .get(index)
+                .ok_or(InvestigationStoreError::Invalid)?;
+            append_attempt(
+                connection,
+                task,
+                &ReadIntent::Inventory {
+                    context_id: read.request.context_id.clone(),
+                    repo: read.request.repo.clone(),
+                    inventory_hash: read.request.inventory_hash.clone(),
+                    max_bytes: read.request.max_bytes,
+                },
+                AttemptOutcome::InventoryAcquired { read_index: index },
+                ledger.revision,
+            )
+        }
+        _ => Ok(()),
+    }
+}
+pub(super) fn unavailable(
+    connection: &Connection,
+    task: &mut StoredTask,
+    read: ReadIntent,
+    reason: UnavailableReason,
+) -> Result<(), InvestigationStoreError> {
+    if task.phase != Phase::Tool || task.completion_intent.is_none() {
+        return Err(InvestigationStoreError::Stale);
+    }
+    let tool = match read {
+        ReadIntent::Source { .. } => InvestigationTool::ReadEvidence,
+        ReadIntent::Inventory { .. } => InvestigationTool::ReadCoverageInventory,
+    };
+    if task.action_tool != Some(tool) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if let ReadIntent::Inventory {
+        context_id,
+        repo,
+        inventory_hash,
+        max_bytes,
+    } = &read
+    {
+        if reason != UnavailableReason::InventoryExceedsMaxBytes {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let archive = super::coverage::load(connection, &task.detail.summary.investigation_id)?
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let request = InvestigationCoverageRead {
+            context_id: context_id.clone(),
+            repo: repo.clone(),
+            inventory_hash: inventory_hash.clone(),
+            max_bytes: *max_bytes,
+        };
+        if !matches!(
+            archive.read(&request),
+            Err(InvestigationError::LimitExceeded)
+        ) {
+            return Err(InvestigationStoreError::Invalid);
+        }
+    }
+    let step = latest_step(connection, &task.detail.summary.investigation_id)?;
+    task.phase = Phase::Ready;
+    task.action_tool = None;
+    bump(connection, task)?;
+    event(
+        connection,
+        task,
+        InvestigationEventKind::ReadUnavailable,
+        Some(&step),
+        Some(tool),
+        unavailable_message(&reason),
+    )?;
+    append_attempt(
+        connection,
+        task,
+        &read,
+        AttemptOutcome::Unavailable { reason },
+        task.ledger_revision
+            .ok_or(InvestigationStoreError::Invalid)?,
+    )?;
+    refresh_observation(connection, task)
+}
+fn raw_refusals(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<Vec<staged::JournalEntry>, InvestigationStoreError> {
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='staged_completion_refusals')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(vec![]);
+    }
+    let id = &task.detail.summary.investigation_id;
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM staged_completion_refusals WHERE task_id=?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    if !(0..=2).contains(&count) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let mut entries = vec![];
+    for sequence in 1..=count {
+        let entry: staged::JournalEntry = staged::read(
+            connection,
+            "staged_completion_refusals",
+            id,
+            Some(sequence as u32),
+            MAX_RECORD_BYTES,
+        )?
+        .ok_or(InvestigationStoreError::Invalid)?;
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+fn metadata(
+    connection: &Connection,
+    task: &StoredTask,
+    step: Option<&str>,
+) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
+    let intent = task
+        .completion_intent
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    let id = &task.detail.summary.investigation_id;
+    let cutoff = step
+        .map(|step| {
+            connection
+                .query_row(
+                    "SELECT rowid FROM investigation_invocations WHERE task_id=?1 AND step_id=?2",
+                    params![id, step],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()
+        })
+        .transpose()?
+        .flatten();
+    let mut records = vec![];
+    for entry in attempts(connection, task)? {
+        if match cutoff {
+            None => true,
+            Some(cutoff) => ordinal(connection, id, &entry.record.step_id)? < cutoff,
+        } {
+            records.push(entry.record.attempt_id);
+        }
+    }
+    let mut refusals = vec![];
+    for entry in raw_refusals(connection, task)? {
+        if match cutoff {
+            None => true,
+            Some(cutoff) => ordinal(connection, id, &entry.record.step_id)? < cutoff,
+        } {
+            refusals.push(entry);
+        }
+    }
+    let last = refusals.last();
+    let metadata = ProtectedCompletionMetadata {
+        schema_version: 1,
+        request_hash: intent.request_hash.clone(),
+        obligations_hash: intent.obligations_hash.clone(),
+        completed_attempt_ids: records,
+        refusal_count: refusals.len() as u32,
+        last_refusal_id: last.map(|entry| entry.record.refusal_id.clone()),
+        feedback: last.map(|entry| entry.record.feedback.clone()),
+    };
+    metadata.validate()?;
+    Ok(metadata)
+}
+pub(super) fn validate_step_metadata(
+    connection: &Connection,
+    task: &StoredTask,
+    step: &PendingInvestigationStep,
+) -> Result<(), InvestigationStoreError> {
+    let intent = task
+        .completion_intent
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    let disclosure = step
+        .disclosure
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    let metadata = metadata(connection, task, Some(&step.step_id))?;
+    if disclosure.schema_version != 4
+        || disclosure.completion_contract_hash.as_deref()
+            != Some(intent.contract().fingerprint()?.as_str())
+        || disclosure.completion_metadata_hash.as_deref() != Some(metadata.fingerprint()?.as_str())
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(())
+}
+fn attempt_domain_hash(domain: &[u8], value: &[u8]) -> String {
+    let mut bytes = domain.to_vec();
+    bytes.extend_from_slice(value);
+    core_prov::content_hash(&bytes)
+}
+fn attempts_hash(entries: &[AttemptEntry]) -> Result<String, InvestigationStoreError> {
+    let ids = entries
+        .iter()
+        .map(|entry| entry.record.attempt_id.as_str())
+        .collect::<Vec<_>>();
+    Ok(attempt_domain_hash(
+        b"cartograph:completion-attempts:v1\0",
+        &encode(&ids, MAX_RECORD_BYTES)?,
+    ))
+}
+fn observed_assessment(
+    intent: &CompletionIntent,
+    entries: &[AttemptEntry],
+) -> Vec<ObligationObservation> {
+    intent
+        .obligations
+        .obligations
+        .iter()
+        .map(|obligation| {
+            let matching = entries
+                .iter()
+                .filter(|entry| entry.record.obligation_id == obligation.key().1)
+                .collect::<Vec<_>>();
+            let acquired = matching.iter().any(|entry| {
+                matches!(
+                    entry.record.outcome,
+                    AttemptOutcome::SourceAcquired { .. }
+                        | AttemptOutcome::InventoryAcquired { .. }
+                )
+            });
+            let last = matching.last().map(|entry| match entry.record.outcome {
+                AttemptOutcome::SourceAcquired { .. }
+                | AttemptOutcome::InventoryAcquired { .. } => CompletionAttemptOutcome::Acquired,
+                AttemptOutcome::Unavailable { .. } => CompletionAttemptOutcome::Unavailable,
+                AttemptOutcome::FirewallRefused { .. } => CompletionAttemptOutcome::FirewallRefused,
+            });
+            ObligationObservation {
+                obligation_id: obligation.key().1.into(),
+                kind: obligation.key().0.into(),
+                attempted: !matching.is_empty(),
+                acquired,
+                exactly_supplied: false,
+                unmet: Some(if matching.is_empty() {
+                    RefusalReason::NotAttempted
+                } else if acquired {
+                    RefusalReason::AcquiredNotSupplied
+                } else {
+                    RefusalReason::Unavailable
+                }),
+                last_attempt_outcome: last,
+            }
+        })
+        .collect()
+}
+fn observation_detail(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<InvestigationCompletionDetail, InvestigationStoreError> {
+    let intent = task
+        .completion_intent
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    let entries = attempts(connection, task)?;
+    let refusals = raw_refusals(connection, task)?;
+    let last = refusals.last();
+    if task.phase != Phase::Terminal && last.is_none() {
+        return Ok(initial_detail(intent));
+    }
+    let basis = if task.phase != Phase::Terminal {
+        let last = last.ok_or(InvestigationStoreError::Invalid)?;
+        let ids = last
+            .attempts
+            .iter()
+            .map(|record| record.attempt_id.as_str())
+            .collect::<Vec<_>>();
+        CompletionAssessmentBasis::FinishingDisclosure {
+            step_id: last.record.step_id.clone(),
+            input_ledger_hash: last.record.input_ledger_hash.clone(),
+            disclosure_hash: last.record.disclosure_hash.clone(),
+            finishing_attempts_hash: attempt_domain_hash(
+                b"cartograph:completion-attempts:v1\0",
+                &encode(&ids, MAX_RECORD_BYTES)?,
+            ),
+        }
+    } else {
+        CompletionAssessmentBasis::TerminalObservation {
+            finishing_attempts_hash: attempts_hash(&entries)?,
+            last_refusal_id: last.map(|entry| entry.record.refusal_id.clone()),
+            last_refusal_basis: last.map(|entry| CompletionRefusalBasis {
+                step_id: entry.record.step_id.clone(),
+                input_ledger_hash: entry.record.input_ledger_hash.clone(),
+                disclosure_hash: entry.record.disclosure_hash.clone(),
+                finish_hash: entry.record.finish_hash.clone(),
+            }),
+        }
+    };
+    let same_attempts = last.is_some_and(|last| {
+        last.attempts
+            .iter()
+            .map(|record| &record.attempt_id)
+            .eq(entries.iter().map(|entry| &entry.record.attempt_id))
+    });
+    let assessment = if task.phase != Phase::Terminal || same_attempts {
+        last.ok_or(InvestigationStoreError::Invalid)?
+            .record
+            .assessment
+            .clone()
+    } else {
+        observed_assessment(intent, &entries)
+    };
+    Ok(InvestigationCompletionDetail {
+        schema_version: 1,
+        request_hash: intent.request_hash.clone(),
+        obligations_hash: intent.obligations_hash.clone(),
+        obligations: intent.obligations.clone(),
+        refusal_count: refusals.len() as u32,
+        assessment_basis: basis,
+        assessment,
+    })
+}
+pub(super) fn refresh_observation(
+    connection: &Connection,
+    task: &mut StoredTask,
+) -> Result<(), InvestigationStoreError> {
+    if task.completion_intent.is_none() {
+        return Ok(());
+    }
+    let detail = observation_detail(connection, task)?;
+    task.detail.summary.obligation_status = Some(detail.validate()?);
+    task.detail.completion = Some(detail);
+    Ok(())
+}
+pub(super) fn validate_result(
+    connection: &Connection,
+    task: &StoredTask,
+    result: &InvestigationResult,
+    ledger: &InvestigationInputLedger,
+    step: &PendingInvestigationStep,
+) -> Result<(), InvestigationStoreError> {
+    let Some(intent) = &task.completion_intent else {
+        if result.completion.is_some() {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        return Ok(());
+    };
+    let records = attempts(connection, task)?;
+    let ledgers = records
+        .iter()
+        .map(|entry| {
+            ledger_at(
+                connection,
+                &task.detail.summary.investigation_id,
+                entry.record.input_revision,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let evidence = records
+        .iter()
+        .zip(&ledgers)
+        .map(|(entry, ledger)| AttemptEvidence {
+            record: &entry.record,
+            ledger,
+        })
+        .collect::<Vec<_>>();
+    result.validate_completion_for_binding(
+        &intent.request_hash,
+        &intent.obligations,
+        &intent.expected_context,
+        intent.expected_graph.as_deref(),
+        &task.detail.summary.investigation_id,
+        &step.step_id,
+        ledger,
+        step.disclosure
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?,
+        &evidence,
+    )?;
+    Ok(())
+}
+pub(super) fn accepted(
+    connection: &Connection,
+    task: &mut StoredTask,
+    result: &InvestigationResult,
+    ledger: &InvestigationInputLedger,
+    step: &PendingInvestigationStep,
+) -> Result<(), InvestigationStoreError> {
+    if task.completion_intent.is_none() {
+        return Ok(());
+    }
+    validate_result(connection, task, result, ledger, step)?;
+    let intent = task
+        .completion_intent
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    let completion = result
+        .completion
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    let refusals = raw_refusals(connection, task)?;
+    let detail = InvestigationCompletionDetail {
+        schema_version: 1,
+        request_hash: intent.request_hash.clone(),
+        obligations_hash: intent.obligations_hash.clone(),
+        obligations: intent.obligations.clone(),
+        refusal_count: refusals.len() as u32,
+        assessment_basis: CompletionAssessmentBasis::FinishingDisclosure {
+            step_id: step.step_id.clone(),
+            input_ledger_hash: ledger.fingerprint()?,
+            disclosure_hash: step
+                .disclosure
+                .as_ref()
+                .ok_or(InvestigationStoreError::Invalid)?
+                .fingerprint(ledger)?,
+            finishing_attempts_hash: completion.finishing_attempts_hash.clone(),
+        },
+        assessment: completion.assessment.clone(),
+    };
+    task.detail.summary.completion_outcome = Some(match completion.outcome {
+        CompletionOutcome::Supported => InvestigationCompletionOutcome::Supported,
+        CompletionOutcome::InsufficientEvidence => {
+            InvestigationCompletionOutcome::InsufficientEvidence
+        }
+    });
+    task.detail.summary.obligation_status = Some(detail.validate()?);
+    task.detail.completion = Some(detail);
+    Ok(())
+}
+// Mutable task metadata cannot erase an already admitted completion contract.
+// Legacy staged adapters are permitted, but their invocation disclosures are V6.
+fn validate_legacy_evidence(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<(), InvestigationStoreError> {
+    let id = &task.detail.summary.investigation_id;
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='completion_attempts')",
+        [],
+        |row| row.get(0),
+    )?;
+    if exists {
+        validate_schema(connection)?;
+        let has_attempt: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM completion_attempts WHERE task_id=?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if has_attempt {
+            return Err(InvestigationStoreError::Invalid);
+        }
+    }
+    let steps = connection
+        .prepare("SELECT CASE WHEN typeof(step_id)='text' AND length(CAST(step_id AS BLOB))<=128 THEN step_id END FROM investigation_invocations WHERE task_id=?1 LIMIT ?2")?
+        .query_map(params![id, task.detail.limits.model_invocations + 1], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if steps.len() > task.detail.limits.model_invocations as usize {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    for step_id in steps {
+        let step: PendingInvestigationStep = read_body(
+            connection,
+            "investigation_invocations",
+            "step_id",
+            id,
+            &step_id,
+        )?
+        .ok_or(InvestigationStoreError::Invalid)?;
+        if step
+            .disclosure
+            .as_ref()
+            .is_some_and(|disclosure| disclosure.schema_version == 4)
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+    }
+    Ok(())
+}
+pub(super) fn validate_saved(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<(), InvestigationStoreError> {
+    let Some(intent) = &task.completion_intent else {
+        return validate_legacy_evidence(connection, task);
+    };
+    let _attempts = attempts(connection, task)?;
+    let raw = raw_refusals(connection, task)?;
+    let refusals = if raw.is_empty() {
+        vec![]
+    } else {
+        staged::load(connection, &task.detail.summary.investigation_id)?
+    };
+    let detail = task
+        .detail
+        .completion
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    if detail.refusal_count != refusals.len() as u32 {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if task.detail.summary.has_result {
+        let id = &task.detail.summary.investigation_id;
+        let result: InvestigationResult =
+            read_body(connection, "investigation_results", "task_id", id, id)?
+                .ok_or(InvestigationStoreError::Invalid)?;
+        let completion = result
+            .completion
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let step_id = result
+            .invocation_step_id
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let step: PendingInvestigationStep = read_body(
+            connection,
+            "investigation_invocations",
+            "step_id",
+            id,
+            step_id,
+        )?
+        .ok_or(InvestigationStoreError::Invalid)?;
+        let ledger = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
+        let expected = InvestigationCompletionDetail {
+            schema_version: 1,
+            request_hash: intent.request_hash.clone(),
+            obligations_hash: intent.obligations_hash.clone(),
+            obligations: intent.obligations.clone(),
+            refusal_count: refusals.len() as u32,
+            assessment_basis: CompletionAssessmentBasis::FinishingDisclosure {
+                step_id: step_id.clone(),
+                input_ledger_hash: ledger.fingerprint()?,
+                disclosure_hash: step
+                    .disclosure
+                    .as_ref()
+                    .ok_or(InvestigationStoreError::Invalid)?
+                    .fingerprint(&ledger)?,
+                finishing_attempts_hash: completion.finishing_attempts_hash.clone(),
+            },
+            assessment: completion.assessment.clone(),
+        };
+        if detail != &expected
+            || task.detail.summary.completion_outcome
+                != Some(match completion.outcome {
+                    CompletionOutcome::Supported => InvestigationCompletionOutcome::Supported,
+                    CompletionOutcome::InsufficientEvidence => {
+                        InvestigationCompletionOutcome::InsufficientEvidence
+                    }
+                })
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+    } else {
+        let host_cap = refusals.len() == 2
+            && task.phase == Phase::Terminal
+            && !task.detail.summary.cancel_requested;
+        if task.detail.summary.completion_outcome
+            != if host_cap {
+                Some(InvestigationCompletionOutcome::ObligationsUnmet)
+            } else {
+                None
+            }
+            || (host_cap && task.detail.summary.status != InvestigationStatus::Failed)
+            || (refusals.len() == 2 && task.phase != Phase::Terminal)
+            || &observation_detail(connection, task)? != detail
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+    }
+    Ok(())
+}
+pub(super) fn reserve_invocation(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<(), InvestigationStoreError> {
+    if task.completion_intent.is_none() {
+        return Ok(());
+    }
+    let count = raw_refusals(connection, task)?.len();
+    if count >= 2 {
+        return Err(InvestigationStoreError::Capacity);
+    }
+    // A production journal/task is each capped at 64 KiB. Reserve the complete
+    // response, feedback, row allowances and three bounded terminal events on
+    // every call, including after refusal followed by successful acquisition.
+    if remaining_task_capacity(connection, &task.detail.summary.investigation_id)? < 192 * 1024
+        || remaining_store_capacity(connection)? < 192 * 1024
+    {
+        return Err(InvestigationStoreError::Capacity);
+    }
+    Ok(())
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn refused(
+    tx: &Transaction<'_>,
+    namespace: &ExecutionNamespace,
+    execution: &JobExecution,
+    task: &mut StoredTask,
+    request: &StagedObligationRequest,
+    input: &InvestigationInput,
+    finish: &StagedFinish,
+    response: InvestigationResponseMeta,
+) -> Result<(), InvestigationStoreError> {
+    if task.phase != Phase::Invocation || task.completion_intent.is_none() {
+        return Err(InvestigationStoreError::Stale);
+    }
+    let records = attempts(tx, task)?;
+    let attempts = records
+        .into_iter()
+        .map(|entry| entry.record)
+        .collect::<Vec<_>>();
+    let disposition = staged::append(
+        tx,
+        namespace,
+        execution,
+        request,
+        input,
+        finish,
+        response.clone(),
+        &attempts,
+    )?;
+    let entries = raw_refusals(tx, task)?;
+    let entry = entries.last().ok_or(InvestigationStoreError::Invalid)?;
+    task.detail.usage = entry.usage.clone();
+    task.pending = None;
+    task.approved = false;
+    task.action_tool = None;
+    task.phase = Phase::Ready;
+    task.detail.summary.status = InvestigationStatus::Running;
+    task.detail.summary.completion_outcome = None;
+    bump(tx, task)?;
+    event(
+        tx,
+        task,
+        InvestigationEventKind::ModelCompleted,
+        Some(&response.step_id),
+        None,
+        "A complete refused finish response was durably admitted.",
+    )?;
+    event(
+        tx,
+        task,
+        InvestigationEventKind::FinishRefused,
+        Some(&response.step_id),
+        None,
+        "Completion obligations remain unmet; fixed feedback was retained.",
+    )?;
+    if task.detail.summary.cancel_requested || disposition == RefusalDisposition::TerminalRequired {
+        task.phase = Phase::Terminal;
+        task.detail.summary.status = if task.detail.summary.cancel_requested {
+            InvestigationStatus::Cancelled
+        } else {
+            InvestigationStatus::Failed
+        };
+        task.detail.summary.completion_outcome = if task.detail.summary.cancel_requested {
+            None
+        } else {
+            Some(InvestigationCompletionOutcome::ObligationsUnmet)
+        };
+        task.detail.error = Some(
+            if task.detail.summary.cancel_requested {
+                "Cancellation won over a late unmet finish."
+            } else {
+                "Two well-formed finishes left completion obligations unmet."
+            }
+            .into(),
+        );
+        bump(tx, task)?;
+        event(
+            tx,
+            task,
+            if task.detail.summary.cancel_requested {
+                InvestigationEventKind::Cancelled
+            } else {
+                InvestigationEventKind::Failed
+            },
+            Some(&response.step_id),
+            None,
+            "No further completion invocation is authorized.",
+        )?;
+        transitions::sync_terminal_job(tx, task)?;
+    }
+    refresh_observation(tx, task)
+}
+#[cfg(test)]
+#[path = "completion_tests.rs"]
+mod tests;

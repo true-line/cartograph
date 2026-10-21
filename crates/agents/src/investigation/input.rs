@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 /// Prepared once per model step after coherent host acquisition. All fields are
 /// private so replacing query/source bytes requires revalidation and a new hash.
+#[derive(Clone)]
 pub struct InvestigationInput {
     ledger: InvestigationInputLedger,
     payload: CompletionPayload,
@@ -375,6 +376,96 @@ impl InvestigationInput {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(super) fn validate_completion_binding(
+        &self,
+        request: &obligations::StagedObligationRequest,
+        disclosure: &InvestigationDisclosure,
+        attempts: &[staged_attempt::AttemptEvidence<'_>],
+    ) -> Result<(), InvestigationError> {
+        let prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let contract: InvestigationCompletionContract =
+            serde_json::from_value(prompt["completion_contract"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        let metadata: staged_refusal::ProtectedCompletionMetadata =
+            serde_json::from_value(prompt["completion_metadata"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        let request = request.normalized()?;
+        if prompt["schema_version"] != 6
+            || disclosure.schema_version != 4
+            || contract.request_hash != request.intent_hash()?
+            || contract.obligations != request.obligations
+            || contract.obligations_hash != request.obligations.fingerprint()?
+            || metadata.request_hash != contract.request_hash
+            || metadata.obligations_hash != contract.obligations_hash
+            || metadata.completed_attempt_ids
+                != attempts
+                    .iter()
+                    .map(|item| item.record.attempt_id.clone())
+                    .collect::<Vec<_>>()
+            || disclosure.completion_contract_hash.as_deref()
+                != Some(contract.fingerprint()?.as_str())
+            || disclosure.completion_metadata_hash.as_deref()
+                != Some(metadata.fingerprint()?.as_str())
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
+
+    /// V7 finish admission returns a genuine schema5 result only after exact
+    /// obligations are satisfied; a refused finish carries no publishable result.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_completion_finish(
+        &self,
+        request: &obligations::StagedObligationRequest,
+        task: &str,
+        step: &str,
+        disclosure: &InvestigationDisclosure,
+        finish: &staged_finish::StagedFinish,
+        attempts: &[staged_attempt::AttemptEvidence<'_>],
+        model: Option<String>,
+        timestamp: String,
+    ) -> Result<Result<InvestigationResult, staged_finish::FinishDecision>, InvestigationError>
+    {
+        if disclosure.schema_version != 4 {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let decision = staged_finish::admit_finish(
+            request,
+            task,
+            step,
+            self,
+            disclosure,
+            finish,
+            attempts,
+            model.clone(),
+            timestamp.clone(),
+        )?;
+        let staged_finish::FinishDecision::Accepted(candidate) = decision else {
+            return Ok(Err(decision));
+        };
+        let completion = InvestigationCompletionResult {
+            schema_version: 1,
+            outcome: candidate.outcome,
+            request_hash: request.intent_hash()?,
+            obligations_hash: request.obligations.fingerprint()?,
+            finishing_attempts_hash: completed_attempts_hash(attempts)?,
+            assessment: candidate.assessment,
+        };
+        let result = self.admit_result_bound(
+            task,
+            step,
+            Some(disclosure),
+            &finish.action,
+            model,
+            timestamp,
+            Some(completion),
+        )?;
+        result.validate_with_disclosure(&self.ledger, step, disclosure)?;
+        Ok(Ok(result))
+    }
+
     pub fn admit_result_for_step(
         &self,
         investigation_id: &str,
@@ -383,6 +474,28 @@ impl InvestigationInput {
         action: &InvestigationAction,
         observed_response_model: Option<String>,
         created_at: String,
+    ) -> Result<InvestigationResult, InvestigationError> {
+        self.admit_result_bound(
+            investigation_id,
+            step_id,
+            disclosure,
+            action,
+            observed_response_model,
+            created_at,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn admit_result_bound(
+        &self,
+        investigation_id: &str,
+        step_id: &str,
+        disclosure: Option<&InvestigationDisclosure>,
+        action: &InvestigationAction,
+        observed_response_model: Option<String>,
+        created_at: String,
+        completion: Option<InvestigationCompletionResult>,
     ) -> Result<InvestigationResult, InvestigationError> {
         if self.compact != disclosure.is_some() {
             return Err(InvestigationError::InvalidInput);
@@ -408,6 +521,20 @@ impl InvestigationInput {
             prose,
             self.graph_strings.iter().map(String::as_str),
         )?;
+        if let Some(completion) = completion {
+            return InvestigationResult::admit_with_completion(
+                investigation_id,
+                &self.ledger,
+                step_id,
+                disclosure.ok_or(InvestigationError::InvalidInput)?,
+                self.inspection_requirements.as_deref(),
+                completion,
+                action,
+                self.supplied_strings.iter().map(String::as_str),
+                observed_response_model,
+                created_at,
+            );
+        }
         if let Some(disclosure) = disclosure {
             if let Some(targets) = &self.inspection_requirements {
                 return InvestigationResult::admit_with_inspection(

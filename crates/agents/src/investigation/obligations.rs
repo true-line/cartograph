@@ -1,9 +1,10 @@
-//! Staged generation-4 primitives only. No catalog, start, prompt or finish integration.
+//! Immutable generation-4 requests and mixed completion-obligation identities.
+//! Acquisition, execution and public availability remain host responsibilities.
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-// Existing request/inspection bounds have no exported constant; staging does not alter them.
+// Share the existing request/inspection admission bounds without changing old encodings.
 const REQUEST_BYTES: usize = 8 * 1024;
 const MAX_OBLIGATIONS: usize = 12;
 const CONTRACT: &str = "investigation-completion-obligations@1";
@@ -150,8 +151,8 @@ impl ObligationEnvelope {
     }
 }
 
-/// Internal only: generation 4 deliberately cannot deserialize into the public
-/// StartInvestigationRequest, and its specialist strings add no public enum cases.
+/// Generation4 is a distinct closed request family. The transport selects this
+/// arm explicitly; legacy StartInvestigationRequest never accepts V7 roles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StagedObligationRequest {
@@ -241,6 +242,44 @@ impl StagedObligationRequest {
             obligations,
             ..self.clone()
         })
+    }
+    /// Bind a normalized V7 intent to its retained qualified acquisition basis.
+    pub fn validate_ledger(
+        &self,
+        ledger: &InvestigationInputLedger,
+    ) -> Result<(), InvestigationError> {
+        let request = self.normalized()?;
+        ledger.validate()?;
+        let proof = ledger
+            .coverage
+            .as_ref()
+            .ok_or(InvestigationError::InvalidInput)?;
+        if proof.context_id != request.expected_context_id
+            || request
+                .expected_graph_revision
+                .as_deref()
+                .is_some_and(|graph| graph != ledger.graph_snapshot_id)
+            || request
+                .obligations
+                .obligations
+                .iter()
+                .any(|item| match item {
+                    Obligation::Inventory { target, .. } => {
+                        !proof.qualification.repos.iter().any(|repo| {
+                            repo.repo == target.repo
+                                && repo.status == context_hub::coverage::CoverageStatus::Recorded
+                                && repo.inventory_hash.as_deref()
+                                    == Some(target.inventory_hash.as_str())
+                        })
+                    }
+                    Obligation::Source { target, .. } => {
+                        target.graph_snapshot_id != ledger.graph_snapshot_id
+                    }
+                })
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
     }
     pub fn intent_hash(&self) -> Result<String, InvestigationError> {
         Ok(crate::source_basis::domain_hash(

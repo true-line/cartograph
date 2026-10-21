@@ -116,6 +116,9 @@ impl StartInvestigationRequest {
     /// run after the durable deduplication lookup, not inside this method.
     pub fn validate(&self) -> Result<(), InvestigationError> {
         self.scope.validate()?;
+        if self.specialist_id.uses_completion_obligations() {
+            return Err(InvestigationError::InvalidRequest);
+        }
         let v6 = self.specialist_id.uses_coverage_qualification();
         let v5 = self.specialist_id.uses_inspection_requirements();
         if (self.schema_version
@@ -248,6 +251,10 @@ pub struct InvestigationSummary {
     pub inspection_status: Option<InvestigationInspectionStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspection_requirement_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_outcome: Option<InvestigationCompletionOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligation_status: Option<CompletionStatus>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -288,6 +295,8 @@ pub struct InvestigationDetail {
     pub inspection_requirements: Option<Vec<InvestigationInspectionTarget>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspection_assessment: Option<InvestigationInspectionAssessment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<InvestigationCompletionDetail>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,6 +341,8 @@ pub enum InvestigationEventKind {
     Interrupted,
     OutcomeUnknown,
     EvidenceValidationReserved,
+    FinishRefused,
+    ReadUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,6 +384,8 @@ pub struct InvestigationResult {
     pub disclosure_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspection_assessment: Option<InvestigationInspectionAssessment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<InvestigationCompletionResult>,
     pub findings: Vec<InvestigationFinding>,
     pub knowledge_completeness: KnowledgeCompleteness,
     pub limitations: Vec<String>,

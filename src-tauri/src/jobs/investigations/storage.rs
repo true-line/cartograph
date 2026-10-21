@@ -242,9 +242,13 @@ pub(super) fn validate_usage(
 fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     let detail = &task.detail;
     let summary = &detail.summary;
-    if task.schema_version != 1
+    let v7 = summary.specialist_id.uses_completion_obligations();
+    if task.schema_version != if v7 { 2 } else { 1 }
+        || task.completion_intent.is_some() != v7
         || summary.schema_version
-            != if summary.specialist_id.uses_coverage_qualification() {
+            != if v7 {
+                4
+            } else if summary.specialist_id.uses_coverage_qualification() {
                 3
             } else if summary.specialist_id.uses_inspection_requirements() {
                 2
@@ -279,6 +283,27 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
         || detail.citations.len() > 76
         || summary.created_at.len() > 32
         || summary.updated_at.len() > 32
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if let Some(intent) = &task.completion_intent {
+        intent.validate(task)?;
+        let detail = task
+            .detail
+            .completion
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        if detail.request_hash != intent.request_hash
+            || detail.obligations != intent.obligations
+            || detail.obligations_hash != intent.obligations_hash
+            || Some(detail.validate()?) != summary.obligation_status
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        encode(task, 64 * 1024)?;
+    } else if task.detail.completion.is_some()
+        || summary.completion_outcome.is_some()
+        || summary.obligation_status.is_some()
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -407,12 +432,28 @@ pub(super) fn validate_step_basis(
     if let Some(disclosure) = &step.disclosure {
         let ledger = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
         disclosure.validate(&ledger)?;
-        let expected = task
-            .detail
-            .inspection_requirements
+        let completion_sources = task
+            .completion_intent
             .as_ref()
-            .map(|targets| inspection_requirements_hash(targets))
+            .map(|intent| intent.obligations.sources())
             .transpose()?;
+        let expected = match &completion_sources {
+            Some(sources) if !sources.is_empty() => Some(inspection_requirements_hash(
+                &normalize_inspection_targets(sources)?,
+            )?),
+            Some(_) => None,
+            None => task
+                .detail
+                .inspection_requirements
+                .as_ref()
+                .map(|targets| inspection_requirements_hash(targets))
+                .transpose()?,
+        };
+        if task.completion_intent.is_some() {
+            super::completion::validate_step_metadata(connection, task, step)?;
+        } else if disclosure.schema_version == 4 {
+            return Err(InvestigationStoreError::Invalid);
+        }
         if disclosure.inspection_requirements_hash != expected {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -437,6 +478,25 @@ pub(super) fn validate_inspection_result(
     task: &StoredTask,
     result: &InvestigationResult,
 ) -> Result<(), InvestigationStoreError> {
+    if let Some(intent) = &task.completion_intent {
+        let sources = intent.obligations.sources()?;
+        if result.schema_version != 5 {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        return match (&result.inspection_assessment, sources.is_empty()) {
+            (None, true) => Ok(()),
+            (Some(assessment), false)
+                if assessment.targets()? == normalize_inspection_targets(&sources)?
+                    && assessment.requirements_hash
+                        == inspection_requirements_hash(&normalize_inspection_targets(
+                            &sources,
+                        )?)? =>
+            {
+                Ok(())
+            }
+            _ => Err(InvestigationStoreError::Invalid),
+        };
+    }
     match (
         &task.detail.inspection_requirements,
         &result.inspection_assessment,
@@ -444,6 +504,13 @@ pub(super) fn validate_inspection_result(
         (Some(targets), Some(assessment))
             if result.schema_version
                 == if task
+                    .detail
+                    .summary
+                    .specialist_id
+                    .uses_completion_obligations()
+                {
+                    5
+                } else if task
                     .detail
                     .summary
                     .specialist_id
@@ -469,7 +536,17 @@ pub(super) fn validate_inspection_result(
                     .summary
                     .specialist_id
                     .uses_coverage_qualification()
-                    || result.schema_version == 4) =>
+                    || result.schema_version
+                        == if task
+                            .detail
+                            .summary
+                            .specialist_id
+                            .uses_completion_obligations()
+                        {
+                            5
+                        } else {
+                            4
+                        }) =>
         {
             Ok(())
         }
@@ -478,6 +555,15 @@ pub(super) fn validate_inspection_result(
 }
 
 pub(super) fn load_task(
+    connection: &Connection,
+    id: &str,
+) -> Result<StoredTask, InvestigationStoreError> {
+    let task = load_task_base(connection, id)?;
+    super::completion::validate_saved(connection, &task)?;
+    Ok(task)
+}
+
+pub(super) fn load_task_base(
     connection: &Connection,
     id: &str,
 ) -> Result<StoredTask, InvestigationStoreError> {
@@ -511,6 +597,19 @@ pub(super) fn load_task(
     }
     if let Some(pending) = &task.pending {
         validate_step_basis(connection, &task, pending)?;
+        if task.completion_intent.is_some() && task.phase == Phase::Invocation {
+            let invoked: PendingInvestigationStep = read_body(
+                connection,
+                "investigation_invocations",
+                "step_id",
+                id,
+                &pending.step_id,
+            )?
+            .ok_or(InvestigationStoreError::Invalid)?;
+            if &invoked != pending {
+                return Err(InvestigationStoreError::Invalid);
+            }
+        }
     }
     let qualified = task
         .detail
@@ -646,6 +745,7 @@ pub(super) fn stored_bytes(
     // The optional journal is lazily created; legacy stores keep identical
     // accounting without creating or migrating its private schema.
     let journal_bytes = super::staged::journal_bytes(connection, id)?;
+    let completion_bytes = super::completion::stored_bytes(connection, id)?;
     let refs: i64 = connection.query_row(
         "SELECT coalesce(sum(length(CAST(task_id AS BLOB))+length(CAST(source_id AS BLOB))+length(CAST(repo_key AS BLOB))+length(CAST(receipt_id AS BLOB))+128),0) FROM investigation_refs WHERE (?1 IS NULL OR task_id=?1)",
         [id], |r| r.get(0),
@@ -653,6 +753,7 @@ pub(super) fn stored_bytes(
     bytes
         .checked_add(usize::try_from(refs).map_err(|_| InvestigationStoreError::Invalid)?)
         .and_then(|bytes| bytes.checked_add(journal_bytes))
+        .and_then(|bytes| bytes.checked_add(completion_bytes))
         .ok_or(InvestigationStoreError::Capacity)
 }
 
@@ -830,6 +931,7 @@ pub(super) fn load_result(
             }
             validate_step_basis(connection, task, &step)?;
             validate_result_basis(result, &ledger, &step)?;
+            super::completion::validate_result(connection, task, result, &ledger, &step)?;
         } else {
             if task.detail.summary.specialist_id.uses_compact_disclosure() {
                 return Err(InvestigationStoreError::Invalid);
@@ -837,7 +939,9 @@ pub(super) fn load_result(
             result.validate(&ledger)?;
         }
         validate_inspection_result(task, result)?;
-        if result.inspection_assessment != task.detail.inspection_assessment {
+        if task.completion_intent.is_none()
+            && result.inspection_assessment != task.detail.inspection_assessment
+        {
             return Err(InvestigationStoreError::Invalid);
         }
         if result.investigation_id != *id {

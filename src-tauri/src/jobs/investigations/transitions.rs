@@ -23,7 +23,7 @@ impl JobStore {
             InvestigationTransition::ActionAdmitted {
                 result: Some(_),
                 ..
-            }
+            } | InvestigationTransition::FinishRefused { .. }
         );
         let stopping = matches!(&transition, InvestigationTransition::StopWithElapsed { .. });
         if task.detail.summary.revision != expected_revision {
@@ -88,6 +88,7 @@ impl JobStore {
                 )?;
             }
             InvestigationTransition::BeginInvocation { step } => {
+                completion::reserve_invocation(&tx, &task)?;
                 validate_step(&step)?;
                 validate_step_basis(&tx, &task, &step)?;
                 if task.ledger_hash.as_ref() != Some(&step.input_ledger_hash) {
@@ -172,6 +173,7 @@ impl JobStore {
                         load_ledger(&tx, &task)?.ok_or(InvestigationStoreError::Invalid)?;
                     validate_result_basis(result, &ledger, &invoked)?;
                     validate_inspection_result(&task, result)?;
+                    completion::accepted(&tx, &mut task, result, &ledger, &invoked)?;
                     if result.investigation_id != id
                         || result.observed_response_model != response.observed_model
                     {
@@ -182,14 +184,16 @@ impl JobStore {
                         "INSERT INTO investigation_results VALUES (?1,?2,?3)",
                         params![id, body, core_prov::content_hash(&body)],
                     )?)?;
-                    task.detail.inspection_assessment = result.inspection_assessment.clone();
-                    if let Some(assessment) = &result.inspection_assessment {
-                        task.detail.summary.inspection_status =
-                            Some(if assessment.requirements.iter().all(|r| r.supplied) {
-                                InvestigationInspectionStatus::Supplied
-                            } else {
-                                InvestigationInspectionStatus::Unmet
-                            });
+                    if task.completion_intent.is_none() {
+                        task.detail.inspection_assessment = result.inspection_assessment.clone();
+                        if let Some(assessment) = &result.inspection_assessment {
+                            task.detail.summary.inspection_status =
+                                Some(if assessment.requirements.iter().all(|r| r.supplied) {
+                                    InvestigationInspectionStatus::Supplied
+                                } else {
+                                    InvestigationInspectionStatus::Unmet
+                                });
+                        }
                     }
                     task.detail.summary.status = InvestigationStatus::Completed;
                     task.detail.summary.has_result = true;
@@ -237,6 +241,26 @@ impl JobStore {
                 if result.is_some() {
                     sync_terminal_job(&tx, &task)?;
                 }
+            }
+            InvestigationTransition::FinishRefused {
+                request,
+                response,
+                finish,
+                input,
+            } => {
+                completion::refused(
+                    &tx,
+                    &self.namespace,
+                    execution,
+                    &mut task,
+                    &request,
+                    &input,
+                    &finish,
+                    response,
+                )?;
+            }
+            InvestigationTransition::ReadUnavailable { read, reason } => {
+                completion::unavailable(&tx, &mut task, read, reason)?;
             }
             InvestigationTransition::BeginTool { tool } => {
                 if task.phase != Phase::Action || task.action_tool != Some(tool) {
@@ -487,6 +511,7 @@ impl JobStore {
                 "Owner death confirmed; transient preparation was interrupted."
             },
         )?;
+        completion::refresh_observation(&tx, &mut task)?;
         sync_terminal_job(&tx, &task)?;
         save_task(&tx, &task, expected, true)?;
         tx.commit()?;
@@ -684,7 +709,11 @@ fn admit_input(
         } else {
             "Tool input and its actual receipt references committed before lease release."
         },
-    )
+    )?;
+    if !first {
+        completion::record_acquisition(connection, task, ledger, tool)?;
+    }
+    completion::refresh_observation(connection, task)
 }
 
 pub(super) fn check_identity(
@@ -775,6 +804,7 @@ fn stop(
         None,
         reason.message(),
     )?;
+    completion::refresh_observation(connection, task)?;
     sync_terminal_job(connection, task)
 }
 
@@ -812,10 +842,10 @@ fn request_cancel(
         "Cancellation requested; outstanding provider work retains its execution lease.",
     )?;
     connection.execute("UPDATE jobs SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?1 AND status IN ('queued','running')",[task.detail.summary.job_id])?;
-    Ok(())
+    completion::refresh_observation(connection, task)
 }
 
-fn sync_terminal_job(
+pub(super) fn sync_terminal_job(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<(), InvestigationStoreError> {

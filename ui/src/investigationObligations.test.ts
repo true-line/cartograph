@@ -1,0 +1,108 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
+import { useInvestigationStore } from './investigationStore';
+import { completionChoices, inventoryObligation, sourceObligation } from './completionFixtures';
+import { obligationEnvelope, validObligationChoices } from './investigationObligations';
+import type { StartInvestigationRequest } from './investigationTypes';
+
+beforeEach(() => { vi.stubGlobal('window', {}); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); });
+afterEach(() => { clearMocks(); vi.unstubAllGlobals(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); });
+const draft = () => ({ specialist_id: 'domain-analyst@7' as const, question: 'Inspect selected evidence.', scope: { type: 'all' as const },
+  provider_mode: 'local' as const, limit_profile: 'investigation-v1', obligations: obligationEnvelope([inventoryObligation]) });
+
+describe('explicit mixed obligations (AC-0266)', () => {
+  it('freezes generation4 envelope, exact context and nonce across uncertain retry', async () => {
+    const starts: StartInvestigationRequest[] = [];
+    mockIPC((command, args) => { if (command === 'start_investigation') { starts.push(structuredClone((args as {request: StartInvestigationRequest}).request)); throw new Error('uncertain'); } return null; });
+    useInvestigationStore.setState({ obligationChoices: completionChoices });
+    const value = draft(); await useInvestigationStore.getState().start(value);
+    value.question = 'Changed question'; value.obligations.obligations = [sourceObligation];
+    await useInvestigationStore.getState().retryStart();
+    expect(starts).toHaveLength(2); expect(starts[0]).toEqual(starts[1]);
+    expect(starts[0].schema_version).toBe(4); expect(starts[0].expected_context_id).toBe(completionChoices.context_id);
+    expect(starts[0]).not.toHaveProperty('inspection_requirements');
+    expect(starts[0].question).toBe('Inspect selected evidence.');
+  });
+  it('admits at most12 combined selections, rejects conflicts and never changes earlier identities', () => {
+    const state = useInvestigationStore.getState(); useInvestigationStore.setState({ obligationChoices: completionChoices });
+    expect(state.addObligation(sourceObligation)).toBe(true); expect(state.addObligation(inventoryObligation)).toBe(true);
+    if (inventoryObligation.kind !== 'inventory') throw new Error('fixture');
+    expect(state.addObligation({ ...inventoryObligation, target: { ...inventoryObligation.target, repo: 'changed' } })).toBe(false);
+    expect(state.addObligation({ ...inventoryObligation, obligation_id: '4'.repeat(64), target: { ...inventoryObligation.target, inventory_hash: 'f'.repeat(64) } })).toBe(false);
+    expect(state.addObligation({ ...inventoryObligation, obligation_id: '4'.repeat(64), target: { ...inventoryObligation.target, context_id: `context-v2:${'f'.repeat(64)}` } })).toBe(false);
+    for (let i = 0; i < 10; i++) expect(state.addObligation({ ...inventoryObligation, obligation_id: (i + 4).toString(16).repeat(64), target: { ...inventoryObligation.target, repo: `repo${i}` } })).toBe(true);
+    expect(state.addObligation({ ...inventoryObligation, obligation_id: 'f'.repeat(64) })).toBe(false);
+    expect(useInvestigationStore.getState().draftObligations).toHaveLength(12);
+  });
+  it('bounds the complete serialized request and requires refreshing after scope changes', async () => {
+    let starts = 0; mockIPC(() => { starts++; return null; }); useInvestigationStore.setState({ obligationChoices: completionChoices });
+    await useInvestigationStore.getState().start({ ...draft(), question: 'x'.repeat(8192) });
+    expect(starts).toBe(0); expect(useInvestigationStore.getState().obligationDraftError).toContain('8,192');
+    useInvestigationStore.getState().addObligation(inventoryObligation);
+    useInvestigationStore.getState().updateComposer({ scopeType: 'neighborhood', anchor: 'fact:1' });
+    expect(useInvestigationStore.getState().obligationChoices).toBeNull();
+    expect(useInvestigationStore.getState().draftObligations).toHaveLength(1);
+    await useInvestigationStore.getState().start(draft()); expect(starts).toBe(0);
+  });
+  it('rejects stale/unrecorded selection claims and malformed choices without legacy fallback', () => {
+    const malformed = structuredClone(completionChoices); malformed.inventories[1].obligation = inventoryObligation;
+    expect(validObligationChoices(malformed)).toBe(false);
+    expect(validObligationChoices(Object.assign(structuredClone(completionChoices), { completion_obligations: [] }))).toBe(false);
+  });
+  it('keeps both kinds after definitive drift rejection until explicit follow-up clearing', async () => {
+    mockIPC(() => { throw { code: 'refresh_required', definitive: true }; }); useInvestigationStore.setState({ obligationChoices: completionChoices });
+    useInvestigationStore.getState().addObligation(sourceObligation); useInvestigationStore.getState().addObligation(inventoryObligation);
+    await useInvestigationStore.getState().start(draft());
+    expect(useInvestigationStore.getState().pendingStart).toBeNull(); expect(useInvestigationStore.getState().draftObligations).toHaveLength(2);
+    useInvestigationStore.getState().clearObligations(); expect(useInvestigationStore.getState().draftObligations).toEqual([]);
+  });
+});
+
+it('loads only coherent generation4 detail/result pairs and rejects altered saved bindings (AC-0266)', async () => {
+  const { completionDetail, completionResult } = await import('./completionFixtures');
+  let detail = completionDetail('saved', { last_event_sequence: 0 });
+  let result = completionResult('saved');
+  mockIPC((command) => {
+    if (command === 'get_investigation') return detail;
+    if (command === 'investigation_result') return result;
+    if (command === 'investigation_consent') return null;
+    if (command === 'investigation_events') return { investigation_id: 'saved', items: [], next_sequence: 0, has_more: false };
+    return null;
+  });
+  await useInvestigationStore.getState().open('saved');
+  expect(useInvestigationStore.getState().error).toBeNull();
+  expect(useInvestigationStore.getState().result?.schema_version).toBe(5);
+  result = structuredClone(result); result.completion!.obligations_hash = 'f'.repeat(64);
+  await useInvestigationStore.getState().refreshSelected();
+  expect(useInvestigationStore.getState().error).toContain('consistently');
+  expect(useInvestigationStore.getState().result?.completion?.obligations_hash).toBe('b'.repeat(64));
+  result = completionResult('saved'); detail = completionDetail('saved', { last_event_sequence: 0 });
+  Object.assign(detail.completion!, { obligations_alias: detail.completion!.obligations });
+  await useInvestigationStore.getState().refreshSelected();
+  expect(useInvestigationStore.getState().error).toContain('consistently');
+});
+
+it('does not resurrect a source selection after the user clears or changes its context (AC-0266)', async () => {
+  let release!: (value: typeof sourceObligation) => void;
+  mockIPC((command) => command === 'resolve_investigation_source_obligation'
+    ? new Promise((resolve) => { release = resolve; }) : null);
+  useInvestigationStore.setState({ obligationChoices: completionChoices });
+  const pending = useInvestigationStore.getState().addSourceObligation(sourceObligation.target);
+  useInvestigationStore.getState().clearObligations();
+  useInvestigationStore.setState({ obligationChoices: completionChoices });
+  release(sourceObligation);
+  expect(await pending).toBe(false);
+  expect(useInvestigationStore.getState().draftObligations).toEqual([]);
+});
+
+
+it('never decodes a generation5 result as legacy history (AC-0266)', async () => {
+  const { investigationDetail } = await import('./investigationFixtures');
+  const { completionResult } = await import('./completionFixtures');
+  const detail = investigationDetail('legacy', { last_event_sequence: 0, graph_snapshot_id: sourceObligation.target.graph_snapshot_id });
+  mockIPC((command) => command === 'get_investigation' ? detail : command === 'investigation_result' ? completionResult('legacy') :
+    command === 'investigation_events' ? { investigation_id: 'legacy', items: [], next_sequence: 0, has_more: false } : null);
+  await useInvestigationStore.getState().open('legacy');
+  expect(useInvestigationStore.getState().result).toBeNull();
+  expect(useInvestigationStore.getState().error).toContain('consistently');
+});
