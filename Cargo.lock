@@ -4131,9 +4131,13 @@ version = "0.15.5"
 dependencies = [
  "core-graph",
  "core-prov",
+ "core-redact",
  "llm",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.21",
  "usearch",
 ]

@@ -907,6 +907,12 @@ pub(crate) fn forget(state: &AppState, id: &str, fingerprint: &str) -> Result<u6
     if preview.fingerprint != fingerprint {
         return Err("Retained source changed; refresh the preview before forgetting.".into());
     }
+    // Serialize cache generation invalidation with preview snapshot and publication.
+    // Rotate before capture deletion; a later failure leaves only safe cold misses.
+    let graph_guard = state.graph.lock().map_err(storage_error)?;
+    graph_guard
+        .invalidate_derived_state()
+        .map_err(storage_error)?;
     state
         .primary_sources
         .captures

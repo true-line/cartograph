@@ -29,6 +29,8 @@ mod proposals;
 mod registered_source_tests;
 #[cfg(test)]
 mod registry_tests;
+#[cfg(test)]
+mod semantic_cache_tests;
 mod settings;
 mod source_access;
 mod sources;
@@ -81,6 +83,7 @@ struct RepoExtractionCache {
 
 #[derive(Default)]
 struct ExtractionCaches {
+    embedding: Option<Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>>,
     repos: std::collections::BTreeMap<String, RepoExtractionCache>,
 }
 
@@ -4628,6 +4631,7 @@ fn read_filtered_graph(
 
 #[derive(Serialize)]
 struct SemanticPreview {
+    embedding_cache: Option<semantic::embedding_cache::CacheStats>,
     eval_id: Option<i64>,
     provider: String,
     eval: semantic::EvalReport,
@@ -4655,6 +4659,7 @@ fn build_semantic_preview(
     let flows = flowtracer::trace(&overlay.nodes, &overlay.edges);
     let dossier = spec::flow_dossier(&flows);
     Ok(SemanticPreview {
+        embedding_cache: None,
         eval_id: None,
         provider: provider.id().to_string(),
         eval,
@@ -4666,6 +4671,33 @@ fn build_semantic_preview(
     })
 }
 
+fn build_cached_semantic_preview(
+    provider: &dyn LlmProvider,
+    cache: Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>,
+    lease: semantic::embedding_cache::Lease,
+    nodes: &[Node],
+    edges: &[Edge],
+    eval_pairs: &[semantic::LabeledPair],
+    precision_floor: f32,
+) -> Result<SemanticPreview, String> {
+    let cached = semantic::embedding_cache::CachedProvider::new(provider, cache, lease)
+        .map_err(|e| e.to_string())?;
+    if !(0.0..=1.0).contains(&precision_floor)
+        || !eval_pairs.iter().any(|p| p.is_match)
+        || !eval_pairs.iter().any(|p| !p.is_match)
+    {
+        return Err("invalid semantic evaluation inputs".into());
+    }
+    let (hops, candidates) = semantic::graph_inputs(nodes, edges);
+    let inputs =
+        semantic::embedding_inputs(&hops, &candidates, eval_pairs).map_err(|e| e.to_string())?;
+    cached.embed(&inputs).map_err(|e| e.to_string())?;
+    cached.seal().map_err(|e| e.to_string())?;
+    let mut preview = build_semantic_preview(&cached, nodes, edges, eval_pairs, precision_floor)?;
+    preview.embedding_cache = Some(cached.finish().map_err(|e| e.to_string())?);
+    Ok::<_, String>(preview)
+}
+
 /// Run the local-only T2 resolver as a best-effort preview. Confirmed graph
 /// facts are read into an ephemeral overlay; only eval-approved Gap fills are
 /// reflected in the returned flows and dossier.
@@ -4675,22 +4707,67 @@ async fn semantic_preview(
     precision_floor: f32,
     state: State<'_, AppState>,
 ) -> Result<SemanticPreview, String> {
-    let (nodes, edges) = {
+    let (nodes, edges, cache, lease) = {
         let graph = state.graph.lock().map_err(|error| error.to_string())?;
+        let cache = state
+            .extraction_caches
+            .lock()
+            .map_err(|e| e.to_string())?
+            .embedding
+            .clone()
+            .ok_or("embedding cache unavailable")?;
+        let lease = cache
+            .lock()
+            .map_err(|e| e.to_string())?
+            .bind_instance(&graph.instance_id().map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
         // Computed channel gaps can be backed only by a T0 IaC Resource.
         // Resources are semantic candidates, not flow nodes, and any Channel
         // they imply is materialized only in the ephemeral approved overlay.
         let mut node_labels = flowtracer::FLOW_NODE_LABELS.to_vec();
         node_labels.push("Resource");
-        read_filtered_graph(&*graph, &node_labels, flowtracer::FLOW_EDGE_LABELS)?
+        let (nodes, edges) =
+            read_filtered_graph(&*graph, &node_labels, flowtracer::FLOW_EDGE_LABELS)?;
+        (nodes, edges, cache, lease)
     };
-    let mut preview = tauri::async_runtime::spawn_blocking(move || {
+    let worker_cache = Arc::clone(&cache);
+    let worker_lease = lease.clone();
+    let preview = tauri::async_runtime::spawn_blocking(move || {
         let provider = llm::OllamaProvider::local_default().map_err(|error| error.to_string())?;
-        build_semantic_preview(&provider, &nodes, &edges, &eval_pairs, precision_floor)
+        build_cached_semantic_preview(
+            &provider,
+            worker_cache,
+            worker_lease,
+            &nodes,
+            &edges,
+            &eval_pairs,
+            precision_floor,
+        )
     })
     .await
     .map_err(|error| error.to_string())??;
-    let mut jobs = state.jobs.lock().map_err(|error| error.to_string())?;
+    record_semantic_preview(&state.graph, &state.jobs, &cache, &lease, preview)
+}
+
+fn record_semantic_preview(
+    graph: &Mutex<SqliteGraphStore>,
+    jobs: &Mutex<JobStore>,
+    cache: &Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>,
+    lease: &semantic::embedding_cache::Lease,
+    mut preview: SemanticPreview,
+) -> Result<SemanticPreview, String> {
+    // No provider work under this guard. Clear and forget use the same graph lock.
+    let _graph = graph.lock().map_err(|e| e.to_string())?;
+    if cache
+        .lock()
+        .map_err(|e| e.to_string())?
+        .lease()
+        .map_err(|e| e.to_string())?
+        != *lease
+    {
+        return Err("stale semantic preview generation".into());
+    }
+    let mut jobs = jobs.lock().map_err(|error| error.to_string())?;
     let eval = jobs
         .record_eval(
             &preview.provider,
@@ -5041,7 +5118,24 @@ fn main() {
             install_help_menu(app)?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            let graph = SqliteGraphStore::open(data_dir.join("graph.db"))?;
+            let embedding_cache = Arc::new(Mutex::new(
+                semantic::embedding_cache::EmbeddingCache::open(data_dir.join("embeddings.db"))?,
+            ));
+            let invalidator = Arc::clone(&embedding_cache);
+            let graph = SqliteGraphStore::open_with_reset_hook(
+                data_dir.join("graph.db"),
+                Box::new(move || {
+                    invalidator
+                        .lock()
+                        .map_err(|e| e.to_string())?
+                        .invalidate()
+                        .map_err(|e| e.to_string())
+                }),
+            )?;
+            embedding_cache
+                .lock()
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .bind_instance(&graph.instance_id()?)?;
             let state_path = data_dir.join("state.db");
             app.manage(work_packets::PacketRuntime::open(&state_path)?);
             let jobs = JobStore::open(&state_path)?;
@@ -5073,7 +5167,10 @@ fn main() {
                 settings: Mutex::new(tier_settings),
                 decisions: Mutex::new(decisions),
                 proposals: Mutex::new(staged_proposals),
-                extraction_caches: Mutex::new(ExtractionCaches::default()),
+                extraction_caches: Mutex::new(ExtractionCaches {
+                    embedding: Some(embedding_cache),
+                    ..Default::default()
+                }),
                 sources: Arc::new(Mutex::new(sources)),
                 primary_sources: primary_source::PrimarySourceStore::open(&data_dir)
                     .map_err(std::io::Error::other)?,

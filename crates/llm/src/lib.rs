@@ -254,6 +254,15 @@ pub enum ProviderError {
     },
 }
 
+/// Observed local embedding artifact identity; not execution attestation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingIdentity {
+    pub endpoint: String,
+    pub model: String,
+    pub digest: String,
+    pub recipe: String,
+}
+
 /// Model-provider SPI from SPEC-00 §8.2.
 pub trait LlmProvider: Send + Sync {
     /// Stable provider identifier.
@@ -264,6 +273,10 @@ pub trait LlmProvider: Send + Sync {
     fn capabilities(&self) -> ProviderCaps;
     /// Embed a batch of texts in input order.
     fn embed(&self, batch: &[String]) -> Result<Vec<Embedding>, ProviderError>;
+    /// Read-only verified identity for persistent embedding reuse. Unknown is unpinned.
+    fn embedding_cache_identity(&self) -> Result<Option<EmbeddingIdentity>, ProviderError> {
+        Ok(None)
+    }
     /// Identity of the model `embed` uses, recorded as a fact's producing
     /// method (AC-0244). Defaults to the provider identity; a provider that
     /// pairs separate embedding and completion models names only this one.
@@ -472,7 +485,20 @@ impl OllamaProvider {
             .base_url
             .join("api/tags")
             .map_err(|error| ProviderError::InvalidUrl(error.to_string()))?;
-        let tags: Tags = self.client.get(url).send()?.error_for_status()?.json()?;
+        let mut response = self.client.get(url).send()?.error_for_status()?;
+        let mut bytes = Vec::new();
+        use std::io::Read;
+        response
+            .by_ref()
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| ProviderError::InvalidEmbeddings(error.to_string()))?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(ProviderError::InvalidEmbeddings(
+                "model metadata limit".into(),
+            ));
+        }
+        let tags: Tags = serde_json::from_slice(&bytes)?;
         Ok(tags
             .models
             .into_iter()
@@ -501,8 +527,63 @@ struct EmbedRequest<'a> {
     truncate: bool,
 }
 
+fn deserialize_bounded_embeddings<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Embedding>, D::Error> {
+    struct Vector(Embedding);
+    impl<'de> Deserialize<'de> for Vector {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = Vector;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("at most 4096 embedding coordinates")
+                }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> Result<Vector, A::Error> {
+                    let mut out = Vec::new();
+                    while let Some(value) = seq.next_element::<f32>()? {
+                        if out.len() == 4096 {
+                            return Err(serde::de::Error::custom(
+                                "embedding dimensions exceed 4096",
+                            ));
+                        }
+                        out.push(value);
+                    }
+                    Ok(Vector(out))
+                }
+            }
+            d.deserialize_seq(Visitor)
+        }
+    }
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<Embedding>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("at most 128 embedding vectors")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(Vector(value)) = seq.next_element::<Vector>()? {
+                if out.len() == 128 {
+                    return Err(serde::de::Error::custom("embedding count exceeds 128"));
+                }
+                out.push(value);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_seq(Visitor)
+}
+
 #[derive(Deserialize)]
 struct EmbedResponse {
+    #[serde(deserialize_with = "deserialize_bounded_embeddings")]
     embeddings: Vec<Embedding>,
 }
 
@@ -556,6 +637,32 @@ impl LlmProvider for OllamaProvider {
         format!("ollama:{}", self.embedding_model)
     }
 
+    fn embedding_cache_identity(&self) -> Result<Option<EmbeddingIdentity>, ProviderError> {
+        let name = if self.embedding_model.contains(':') {
+            self.embedding_model.clone()
+        } else {
+            format!("{}:latest", self.embedding_model)
+        };
+        let models = self.list_local_models()?;
+        let matching: Vec<_> = models.iter().filter(|m| m.name == name).collect();
+        if matching.len() != 1 {
+            return Ok(None);
+        }
+        let digest = matching[0]
+            .digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&matching[0].digest);
+        if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(None);
+        }
+        Ok(Some(EmbeddingIdentity {
+            endpoint: self.base_url.to_string(),
+            model: name,
+            digest: format!("sha256:{}", digest.to_ascii_lowercase()),
+            recipe: "ollama-embed-truncate-false@1".into(),
+        }))
+    }
+
     fn completion_model_id(&self) -> String {
         format!("ollama:{}", self.completion_model)
     }
@@ -580,7 +687,15 @@ impl LlmProvider for OllamaProvider {
             .base_url
             .join("api/embed")
             .map_err(|error| ProviderError::InvalidUrl(error.to_string()))?;
-        let response: EmbedResponse = self
+        if batch.len() > 128
+            || batch.iter().any(|t| t.len() > 65536)
+            || batch.iter().map(String::len).sum::<usize>() > 1024 * 1024
+        {
+            return Err(ProviderError::InvalidEmbeddings(
+                "embedding request bounds".into(),
+            ));
+        }
+        let mut response = self
             .client
             .post(endpoint)
             .json(&EmbedRequest {
@@ -589,8 +704,20 @@ impl LlmProvider for OllamaProvider {
                 truncate: false,
             })
             .send()?
-            .error_for_status()?
-            .json()?;
+            .error_for_status()?;
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        response
+            .by_ref()
+            .take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| ProviderError::InvalidEmbeddings(e.to_string()))?;
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(ProviderError::InvalidEmbeddings(
+                "embedding response bounds".into(),
+            ));
+        }
+        let response: EmbedResponse = serde_json::from_slice(&bytes)?;
         validate_embeddings(batch.len(), &response.embeddings)?;
         Ok(response.embeddings)
     }
@@ -934,6 +1061,45 @@ mod tests {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn ollama_embedding_identity_normalizes_bare_and_prefixed_digests() {
+        // AC-0269: actual /api/tags uses bare64hex; both forms name one artifact.
+        for prefix in ["", "sha256:"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let body=serde_json::json!({"models":[{"name":"test-model:latest","digest":format!("{prefix}{}","A".repeat(64))}]}).to_string();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request).unwrap();
+                assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /api/tags "));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            });
+            let provider = OllamaProvider::new(
+                &format!("http://{address}"),
+                "test-model",
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            let identity = provider.embedding_cache_identity().unwrap().unwrap();
+            assert_eq!(identity.digest, format!("sha256:{}", "a".repeat(64)));
+            server.join().unwrap();
+        }
+    }
+    #[test]
+    fn ollama_embedding_decode_is_dimension_and_count_bounded() {
+        // AC-0269: bounds apply while decoding, before unbounded vector allocation.
+        let oversized = serde_json::json!({"embeddings":[vec![1.;4097]]}).to_string();
+        assert!(serde_json::from_str::<EmbedResponse>(&oversized).is_err());
+        let oversized = serde_json::json!({"embeddings":vec![vec![1.];129]}).to_string();
+        assert!(serde_json::from_str::<EmbedResponse>(&oversized).is_err());
+    }
     #[test]
     fn unavailable_local_provider_fails_without_fallback() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

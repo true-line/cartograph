@@ -7,6 +7,7 @@
 //! facts are never mutation targets (R-INT-1).
 
 pub mod context;
+pub mod embedding_cache;
 mod eval_report;
 pub use eval_report::EvalReport;
 
@@ -355,19 +356,68 @@ fn evidence_from(props: &serde_json::Value) -> Vec<EvidenceRef> {
 }
 
 /// Produce staged ANN proposals. No graph mutation occurs here.
-pub fn propose(
-    provider: &dyn LlmProvider,
-    hops: &[UnresolvedHop],
+fn candidate_groups(
     candidates: &[Candidate],
-    neighbors: usize,
-) -> Result<Vec<SemanticProposal>, SemanticError> {
-    let mut grouped: BTreeMap<(HopKind, Option<String>), Vec<&Candidate>> = BTreeMap::new();
+) -> BTreeMap<(HopKind, Option<String>), Vec<&Candidate>> {
+    let mut grouped: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for candidate in candidates {
         grouped
             .entry((candidate.kind, candidate.subtype.clone()))
             .or_default()
             .push(candidate);
     }
+    grouped
+}
+
+/// Exact text plan shared with the proposal grouping; labels never enter cache keys.
+/// No candidates from groups without matching unresolved hops are embedded.
+pub fn embedding_inputs(
+    hops: &[UnresolvedHop],
+    candidates: &[Candidate],
+    pairs: &[LabeledPair],
+) -> Result<Vec<String>, SemanticError> {
+    if pairs.len() > embedding_cache::MAX_ROWS / 2
+        || candidates.len() > embedding_cache::MAX_ROWS
+        || hops.len() > embedding_cache::MAX_ROWS
+    {
+        return Err(SemanticError::Index("embedding plan count bounds".into()));
+    }
+    let mut texts: Vec<&String> = pairs
+        .iter()
+        .flat_map(|pair| [&pair.query, &pair.candidate])
+        .collect();
+    for (key, compatible) in candidate_groups(candidates) {
+        let matching: Vec<_> = hops
+            .iter()
+            .filter(|hop| (hop.kind, hop.subtype.clone()) == key)
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+        texts.extend(compatible.into_iter().map(|candidate| &candidate.text));
+        texts.extend(matching.into_iter().map(|hop| &hop.query));
+    }
+    if texts.len() > embedding_cache::MAX_ROWS
+        || texts
+            .iter()
+            .any(|t| t.len() > embedding_cache::MAX_TEXT_BYTES)
+        || texts
+            .iter()
+            .try_fold(0usize, |n, t| n.checked_add(t.len()))
+            .is_none_or(|n| n > embedding_cache::MAX_INPUT_BYTES)
+    {
+        return Err(SemanticError::Index("embedding plan bounds".into()));
+    }
+    Ok(texts.into_iter().cloned().collect())
+}
+
+pub fn propose(
+    provider: &dyn LlmProvider,
+    hops: &[UnresolvedHop],
+    candidates: &[Candidate],
+    neighbors: usize,
+) -> Result<Vec<SemanticProposal>, SemanticError> {
+    let grouped = candidate_groups(candidates);
     let mut proposals = Vec::new();
     for (key, compatible) in grouped {
         let compatible_hops: Vec<&UnresolvedHop> = hops
