@@ -91,6 +91,7 @@ impl ObligationEnvelope {
         // Admit the complete raw list before any target/partition ownership.
         let mut entries = BTreeMap::new();
         let mut source_keys = BTreeMap::new();
+        let mut inventory_keys = BTreeMap::new();
         let mut snapshot = None;
         for item in &self.obligations {
             if item.key().1 != item.content_id()? {
@@ -108,6 +109,13 @@ impl ObligationEnvelope {
                 {
                     return Err(InvestigationError::InvalidRequest);
                 }
+            }
+            if let Obligation::Inventory { target, .. } = item
+                && inventory_keys
+                    .insert((&target.context_id, &target.repo), &target.inventory_hash)
+                    .is_some_and(|old| old != &target.inventory_hash)
+            {
+                return Err(InvestigationError::InvalidRequest);
             }
             if entries
                 .insert(item.key(), item)
@@ -166,6 +174,8 @@ pub(super) struct StagedObligationRequest {
     pub conversation_id: Option<String>,
     pub parent_id: Option<String>,
 }
+// Presence-only decoder: a present array is rejected later, while null must
+// never collapse to the absent legacy field and bypass the authority check.
 fn present_legacy<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Option<Vec<InvestigationInspectionTarget>>, D::Error> {

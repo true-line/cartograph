@@ -84,6 +84,15 @@ fn staged_obligations_normalize_mixed_inventory_only_and_source_conflicts() {
             .len(),
         1
     );
+    let mut conflicting_inventory = inventory('b');
+    if let Obligation::Inventory { target, .. } = &mut conflicting_inventory {
+        target.inventory_hash = "c".repeat(64);
+    }
+    assert!(
+        envelope(vec![inventory('b'), identified(conflicting_inventory)])
+            .normalized()
+            .is_err()
+    );
     assert!(envelope(vec![]).normalized().is_err());
     assert!(envelope(vec![first.clone(); 13]).normalized().is_err());
     assert!(envelope(vec![first.clone(); 12]).normalized().is_err()); // descriptors exceed aggregate bytes even when duplicate
