@@ -59,7 +59,8 @@ struct Binding {
 }
 impl Binding {
     fn validate(&self, task: &StoredTask) -> Result<(), InvestigationStoreError> {
-        self.envelope.normalized()?;
+        let policy = super::completion::saved_policy(task)?;
+        self.envelope.normalized_with_policy(policy)?;
         if let Some(intent) = &task.completion_intent
             && (self.request_hash != intent.request_hash
                 || self.envelope != intent.obligations
@@ -67,11 +68,11 @@ impl Binding {
         {
             return Err(InvestigationStoreError::Invalid);
         }
-        let sources = self.envelope.sources()?;
+        let sources = self.envelope.sources_with_policy(policy)?;
         let sources = if sources.is_empty() {
             vec![]
         } else {
-            normalize_inspection_targets(&sources)?
+            normalize_inspection_targets_with_policy(&sources, policy)?
         };
         if self.legacy_intent_hash != task.intent_hash
             || !hash_valid(&self.request_hash)
@@ -80,11 +81,11 @@ impl Binding {
                 != core_prov::content_hash(task.detail.summary.question.as_bytes())
             || sources
                 != if let Some(intent) = &task.completion_intent {
-                    let sources = intent.obligations.sources()?;
+                    let sources = intent.obligations.sources_with_policy(policy)?;
                     if sources.is_empty() {
                         vec![]
                     } else {
-                        normalize_inspection_targets(&sources)?
+                        normalize_inspection_targets_with_policy(&sources, policy)?
                     }
                 } else {
                     task.detail
@@ -128,16 +129,53 @@ impl Binding {
         Ok(())
     }
 }
+pub(super) fn journal_entry_bytes(policy: &InvestigationPolicy) -> usize {
+    if policy.profile() == INVESTIGATION_V1_POLICY.profile() {
+        64 * 1024
+    } else {
+        MAX_RECORD_BYTES
+    }
+}
+fn binding_bytes(policy: &InvestigationPolicy) -> usize {
+    if policy.profile() == INVESTIGATION_V1_POLICY.profile() {
+        32 * 1024
+    } else {
+        // The normalized envelope and fixed bounded bindings remain mandatory.
+        MAX_RECORD_BYTES
+    }
+}
+pub(super) fn binding_reservation_bytes(
+    task: &StoredTask,
+    policy: &InvestigationPolicy,
+) -> Result<usize, InvestigationStoreError> {
+    let intent = task
+        .completion_intent
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    let binding = Binding {
+        legacy_intent_hash: task.intent_hash.clone(),
+        request_hash: intent.request_hash.clone(),
+        envelope: intent.obligations.normalized_with_policy(policy)?,
+        expected_graph: intent.expected_graph.clone(),
+        expected_context: intent.expected_context.clone(),
+        redacted_question_hash: core_prov::content_hash(task.detail.summary.question.as_bytes()),
+    };
+    encode(&binding, binding_bytes(policy))?
+        .len()
+        .checked_add(64 + 256)
+        .ok_or(InvestigationStoreError::Capacity)
+}
 fn bind(
     tx: &Transaction<'_>,
     task: &StoredTask,
     request: &StagedObligationRequest,
 ) -> Result<Binding, InvestigationStoreError> {
+    let policy = super::completion::saved_policy(task)?;
     initialize(tx)?;
-    let request = request.normalized()?;
+    let request = request.normalized_with_policy(policy)?;
     if let Some(intent) = &task.completion_intent {
         intent.validate(task)?;
-        if intent.request_hash != request.intent_hash()?
+        if intent.request_hash != request.intent_hash_with_policy(policy)?
             || intent.obligations != request.obligations
             || intent.expected_context != request.expected_context_id
         {
@@ -148,7 +186,7 @@ fn bind(
         return Err(InvestigationStoreError::Invalid);
         #[cfg(test)]
         {
-            let sources = request.obligations.sources()?;
+            let sources = request.obligations.sources_with_policy(policy)?;
             let projected = StartInvestigationRequest {
                 schema_version: 3,
                 request_nonce: request.request_nonce.clone(),
@@ -160,7 +198,7 @@ fn bind(
                 inspection_requirements: if sources.is_empty() {
                     None
                 } else {
-                    Some(normalize_inspection_targets(&sources)?)
+                    Some(normalize_inspection_targets_with_policy(&sources, policy)?)
                 },
                 question: request.question.clone(),
                 scope: request.scope.clone(),
@@ -197,7 +235,7 @@ fn bind(
     }
     let binding = Binding {
         legacy_intent_hash: task.intent_hash.clone(),
-        request_hash: request.intent_hash()?,
+        request_hash: request.intent_hash_with_policy(policy)?,
         envelope: request.obligations,
         expected_graph: request.expected_graph_revision,
         expected_context: request.expected_context_id,
@@ -205,7 +243,13 @@ fn bind(
     };
     binding.validate(task)?;
     let id = &task.detail.summary.investigation_id;
-    if let Some(existing) = read::<Binding>(tx, "staged_completion_intents", id, None, 32 * 1024)? {
+    if let Some(existing) = read::<Binding>(
+        tx,
+        "staged_completion_intents",
+        id,
+        None,
+        binding_bytes(policy),
+    )? {
         if existing.request_hash != binding.request_hash || existing.envelope != binding.envelope {
             return Err(InvestigationStoreError::Conflict);
         }
@@ -218,7 +262,7 @@ fn bind(
         id,
         None,
         &binding,
-        32 * 1024,
+        binding_bytes(policy),
     )?;
     Ok(binding)
 }
@@ -313,6 +357,7 @@ fn completed_attempts(
     attempts: &[AttemptRecord],
 ) -> Result<Vec<InvestigationInputLedger>, InvestigationStoreError> {
     let task = load_task_base(connection, id)?;
+    let policy = super::completion::saved_policy(&task)?;
     if task.completion_intent.is_some() {
         let durable = super::completion::attempts(connection, &task)?;
         if durable.len() < attempts.len()
@@ -330,8 +375,6 @@ fn completed_attempts(
             .map(|attempt| saved_ledger(connection, id, attempt.input_revision))
             .collect();
     }
-    let policy = InvestigationPolicy::for_limits(&task.detail.limits)
-        .ok_or(InvestigationStoreError::Invalid)?;
     if attempts.len() > policy.limits().tool_actions as usize {
         return Err(InvestigationStoreError::Capacity);
     }
@@ -367,15 +410,15 @@ fn completed_attempts(
             .ok_or(InvestigationStoreError::Invalid)?;
         let before = saved_ledger(connection, id, previous_revision)?;
         let after = saved_ledger(connection, id, attempt.input_revision)?;
-        if before.fingerprint()? != read_step.input_ledger_hash {
+        if before.fingerprint_with_policy(policy)? != read_step.input_ledger_hash {
             return Err(InvestigationStoreError::Invalid);
         }
         InvestigationTurnBasis {
-            input_ledger_hash: after.fingerprint()?,
+            input_ledger_hash: after.fingerprint_with_policy(policy)?,
             previous_ledger: Some(before.clone()),
             completed_tool: Some(expected_tool),
         }
-        .validate(&after)?;
+        .validate_with_policy(&after, policy)?;
         if match &attempt.outcome {
             AttemptOutcome::SourceAcquired { citation_id } => after
                 .citations
@@ -518,8 +561,15 @@ pub(super) fn load(
     }
     validate_schema(connection)?;
     let task = load_task_base(connection, id)?;
-    let binding = read::<Binding>(connection, "staged_completion_intents", id, None, 32 * 1024)?
-        .ok_or(InvestigationStoreError::Invalid)?;
+    let policy = super::completion::saved_policy(&task)?;
+    let binding = read::<Binding>(
+        connection,
+        "staged_completion_intents",
+        id,
+        None,
+        binding_bytes(policy),
+    )?
+    .ok_or(InvestigationStoreError::Invalid)?;
     binding.validate(&task)?;
     let count: i64 = connection.query_row(
         "SELECT count(*) FROM staged_completion_refusals WHERE task_id=?1",
@@ -549,7 +599,7 @@ pub(super) fn load(
             "staged_completion_feedback",
             id,
             Some(sequence),
-            2048,
+            RefusalFeedback::max_bytes_with_policy(policy)?,
         )?
         .ok_or(InvestigationStoreError::Invalid)?;
         let ledger = saved_ledger(connection, id, entry.ledger_revision)?;
@@ -573,7 +623,7 @@ pub(super) fn load(
             .zip(&attempt_ledgers)
             .map(|(record, ledger)| AttemptEvidence { record, ledger })
             .collect::<Vec<_>>();
-        let assessment = derive_assessment_for_binding(
+        let assessment = derive_assessment_for_binding_with_policy(
             &binding.request_hash,
             &binding.envelope,
             id,
@@ -582,13 +632,15 @@ pub(super) fn load(
             disclosure,
             entry.record.outcome,
             &witnesses,
+            policy,
         )?;
-        entry.record.validate_stored_basis(
+        entry.record.validate_stored_basis_with_policy(
             &binding.request_hash,
             &binding.envelope,
             &ledger,
             disclosure,
             entries.last().map(|entry| &entry.record),
+            policy,
         )?;
         if entry.record.task_id != id
             || entry.record.refusal_count != sequence
@@ -597,7 +649,7 @@ pub(super) fn load(
             || entry.response.step_id != step.step_id
             || entry.response.response_hash != entry.record.response_hash
             || !hash_valid(&entry.response.action_hash)
-            || step.input_ledger_hash != ledger.fingerprint()?
+            || step.input_ledger_hash != ledger.fingerprint_with_policy(policy)?
             || disclosure.payload_hash != step.payload_hash
             || entry.usage.model_invocations > task.detail.usage.model_invocations
             || entry.usage.active_milliseconds < entry.response.active_milliseconds
@@ -681,6 +733,7 @@ pub(super) fn append(
     let id = transitions::task_id_for_job(tx, execution.id())?
         .ok_or(InvestigationStoreError::Missing)?;
     let task = load_task_base(tx, &id)?;
+    let policy = super::completion::saved_policy(&task)?;
     transitions::check_identity(&task, execution)?;
     transitions::check_job(tx, execution, task.completion_intent.is_some())?;
     if execution.inner.namespace != *namespace
@@ -712,7 +765,7 @@ pub(super) fn append(
     let FinishDecision::Refused {
         assessment,
         feedback,
-    } = admit_finish(
+    } = admit_finish_with_policy(
         request,
         &id,
         &step.step_id,
@@ -722,6 +775,7 @@ pub(super) fn append(
         &evidence,
         response.observed_model.clone(),
         "staged-admission".into(),
+        policy,
     )?
     else {
         return Err(InvestigationStoreError::Invalid);
@@ -740,10 +794,10 @@ pub(super) fn append(
         refusal_id: String::new(),
         task_id: id.clone(),
         request_hash: binding.request_hash,
-        obligations_hash: binding.envelope.fingerprint()?,
+        obligations_hash: binding.envelope.fingerprint_with_policy(policy)?,
         step_id: step.step_id.clone(),
-        input_ledger_hash: ledger.fingerprint()?,
-        disclosure_hash: disclosure.fingerprint(&ledger)?,
+        input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
+        disclosure_hash: disclosure.fingerprint_with_policy(&ledger, policy)?,
         finish_hash: finish.fingerprint()?,
         outcome: finish.outcome,
         response_hash: response.response_hash.clone(),
@@ -753,12 +807,13 @@ pub(super) fn append(
         feedback,
     };
     record.refusal_id = record.content_id()?;
-    let disposition = record.validate(
+    let disposition = record.validate_with_policy(
         request,
         &ledger,
         disclosure,
         finish,
         previous.last().map(|entry| &entry.record),
+        policy,
     )?;
     let mut entry = JournalEntry {
         entry_id: String::new(),
@@ -772,11 +827,11 @@ pub(super) fn append(
     // Include the actual ordinary response body and its row allowance before
     // writing it. Shared accounting will charge that row once after commit.
     if task.completion_intent.is_some() {
-        encode(&entry, 64 * 1024)?;
+        encode(&entry, journal_entry_bytes(policy))?;
     }
     let response_body = encode(&entry.response, 4096)?;
     let bytes = encode(&entry, MAX_RECORD_BYTES)?.len()
-        + entry.record.feedback.bytes()?.len()
+        + entry.record.feedback.bytes_with_policy(policy)?.len()
         + 1024
         + response_body.len()
         + 64
@@ -836,7 +891,7 @@ pub(super) fn append(
         &id,
         Some(entry.record.refusal_count),
         &entry.record.feedback,
-        2048,
+        RefusalFeedback::max_bytes_with_policy(policy)?,
     )?;
     Ok(disposition)
 }

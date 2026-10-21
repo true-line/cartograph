@@ -108,6 +108,13 @@ impl RefusalFeedback {
     pub fn bytes(&self) -> Result<Vec<u8>, InvestigationError> {
         self.bytes_with_policy(&INVESTIGATION_V1_POLICY)
     }
+    /// Exact stored-feedback ceiling, so the host can preflight a saved record
+    /// before decoding it. v1 remains 2048 bytes.
+    pub fn max_bytes_with_policy(
+        policy: &InvestigationPolicy,
+    ) -> Result<usize, InvestigationError> {
+        feedback_bytes(policy)
+    }
     /// The host resolves `policy` from the exact saved task limits.
     pub fn bytes_with_policy(
         &self,

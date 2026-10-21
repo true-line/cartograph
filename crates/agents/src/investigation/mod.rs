@@ -37,7 +37,10 @@ pub use disclosure::*;
 pub use input::*;
 pub use inspection::*;
 pub use obligations::*;
-pub use policy::{INVESTIGATION_V1_POLICY, InvestigationPolicy, MAX_STORED_COMPLETION_ATTEMPTS};
+pub use policy::{
+    INVESTIGATION_V1_POLICY, INVESTIGATION_V2_POLICY, InvestigationPolicy,
+    MAX_STORED_COMPLETION_ATTEMPTS,
+};
 pub use privacy::{redacted_history_text, reject_prose_replay};
 pub use projection::*;
 pub use protocol::*;

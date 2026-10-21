@@ -9,10 +9,12 @@ fn validate_targets<R: tauri::Runtime>(
 ) -> Result<Vec<RetentionGuard>, String> {
     // Refuse an impossible obligation before any durable start/provider lookup.
     super::super::completion_choices::validate_request(app, state, request)?;
+    let policy = InvestigationPolicy::for_profile(&request.limit_profile)
+        .ok_or_else(|| "Unknown investigation policy.".to_owned())?;
     let mut guards = Vec::new();
     for target in request
         .obligations
-        .sources()
+        .sources_with_policy(policy)
         .map_err(|error| error.to_string())?
     {
         let (actual, guard) = super::super::inspection::resolve(
@@ -35,8 +37,10 @@ pub(super) fn start<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     started: Instant,
 ) -> Result<InvestigationSummary, InvestigationStartError> {
+    let policy = InvestigationPolicy::for_profile(&request.limit_profile)
+        .ok_or_else(|| rejected("invalid_input", "Unknown investigation policy."))?;
     let request = request
-        .normalized()
+        .normalized_with_policy(policy)
         .map_err(|error| rejected("invalid_input", error))?;
     let state = app.state::<AppState>();
     // Recover a committed nonce before consulting mutable source/provider state.
@@ -49,12 +53,10 @@ pub(super) fn start<R: tauri::Runtime>(
     {
         return Ok(prior.summary);
     }
-    let specialist = if request.specialist_id == "domain-analyst@7" {
-        SpecialistId::DomainAnalystV7
-    } else {
-        SpecialistId::EvidenceAuditorV7
-    };
-    if !AVAILABLE_SPECIALISTS.contains(&specialist) {
+    let specialist: SpecialistId =
+        serde_json::from_value(serde_json::Value::String(request.specialist_id.clone()))
+            .map_err(|error| rejected("invalid_input", error))?;
+    if !available_specialists().contains(&specialist) {
         return Err(rejected(
             "invalid_input",
             "This specialist version is not available.",

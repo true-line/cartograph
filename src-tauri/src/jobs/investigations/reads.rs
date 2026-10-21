@@ -199,10 +199,18 @@ impl JobStore {
             // Verify the current pointer/hash as well as the independently
             // retained revisions. Historical references are never subtracted.
             let current = load_ledger(&tx, &task)?;
-            let revisions = tx.prepare("SELECT revision FROM investigation_inputs WHERE task_id=?1 ORDER BY revision LIMIT 10")?
-                .query_map([&id], |row| row.get::<_, i64>(0))?
+            let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+                .ok_or(InvestigationStoreError::Invalid)?;
+            let max_revisions = u64::from(policy.limits().tool_actions)
+                .checked_add(1)
+                .ok_or(InvestigationStoreError::Invalid)?;
+            let query_limit = max_revisions
+                .checked_add(1)
+                .ok_or(InvestigationStoreError::Invalid)?;
+            let revisions = tx.prepare("SELECT revision FROM investigation_inputs WHERE task_id=?1 ORDER BY revision LIMIT ?2")?
+                .query_map(params![&id, signed(query_limit)?], |row| row.get::<_, i64>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
-            if revisions.len() > 9
+            if revisions.len() as u64 > max_revisions
                 || revisions.last().copied() != task.ledger_revision.map(signed).transpose()?
             {
                 return Err(InvestigationStoreError::Invalid);
@@ -212,7 +220,7 @@ impl JobStore {
                 let ledger: InvestigationInputLedger =
                     read_body(&tx, "investigation_inputs", "revision", &id, &revision)?
                         .ok_or(InvestigationStoreError::Invalid)?;
-                ledger.validate()?;
+                ledger.validate_with_policy(policy)?;
                 encode(&ledger, MAX_MANIFEST_BYTES)?;
                 if signed(ledger.revision)? != revision
                     || Some(&ledger.graph_snapshot_id)

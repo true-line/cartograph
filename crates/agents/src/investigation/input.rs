@@ -371,6 +371,15 @@ impl InvestigationInput {
         &self,
         prepared: &llm::bounded::PreparedBoundedCompletion,
     ) -> Result<Option<InvestigationDisclosure>, InvestigationError> {
+        self.seal_disclosure_with_policy(prepared, &INVESTIGATION_V1_POLICY)
+    }
+
+    /// The host passes the policy resolved from the exact saved task limits.
+    pub fn seal_disclosure_with_policy(
+        &self,
+        prepared: &llm::bounded::PreparedBoundedCompletion,
+        policy: &InvestigationPolicy,
+    ) -> Result<Option<InvestigationDisclosure>, InvestigationError> {
         if !self.compact {
             return Ok(None);
         }
@@ -378,7 +387,14 @@ impl InvestigationInput {
         if !prepared.matches_action(&action) {
             return Err(InvestigationError::InvalidInput);
         }
-        super::sealing::seal(&self.ledger, &self.payload, prepared).map(Some)
+        super::sealing::seal_with_policy(
+            &self.ledger,
+            &self.payload,
+            prepared,
+            policy,
+            self.inspection_requirements.as_deref(),
+        )
+        .map(Some)
     }
 
     pub fn admit_result(
@@ -420,7 +436,14 @@ impl InvestigationInput {
             serde_json::from_value(prompt["completion_metadata"].clone())
                 .map_err(|_| InvestigationError::InvalidInput)?;
         let request = request.normalized_with_policy(policy)?;
-        if prompt["schema_version"] != 6
+        // The exact policy fixes the completion prompt schema: v1 stays 6, and a
+        // non-v1 policy carries its inspection targets once, in schema 7.
+        let schema = if policy.profile() == INVESTIGATION_V1_POLICY.profile() {
+            6
+        } else {
+            7
+        };
+        if prompt["schema_version"] != schema
             || disclosure.schema_version != 4
             || contract.request_hash != request.intent_hash_with_policy(policy)?
             || contract.obligations != request.obligations
@@ -457,10 +480,37 @@ impl InvestigationInput {
         timestamp: String,
     ) -> Result<Result<InvestigationResult, staged_finish::FinishDecision>, InvestigationError>
     {
+        self.admit_completion_finish_with_policy(
+            request,
+            task,
+            step,
+            disclosure,
+            finish,
+            attempts,
+            model,
+            timestamp,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_completion_finish_with_policy(
+        &self,
+        request: &obligations::StagedObligationRequest,
+        task: &str,
+        step: &str,
+        disclosure: &InvestigationDisclosure,
+        finish: &staged_finish::StagedFinish,
+        attempts: &[staged_attempt::AttemptEvidence<'_>],
+        model: Option<String>,
+        timestamp: String,
+        policy: &InvestigationPolicy,
+    ) -> Result<Result<InvestigationResult, staged_finish::FinishDecision>, InvestigationError>
+    {
         if disclosure.schema_version != 4 {
             return Err(InvestigationError::InvalidInput);
         }
-        let decision = staged_finish::admit_finish(
+        let decision = staged_finish::admit_finish_with_policy(
             request,
             task,
             step,
@@ -470,6 +520,7 @@ impl InvestigationInput {
             attempts,
             model.clone(),
             timestamp.clone(),
+            policy,
         )?;
         let staged_finish::FinishDecision::Accepted(candidate) = decision else {
             return Ok(Err(decision));
@@ -477,12 +528,12 @@ impl InvestigationInput {
         let completion = InvestigationCompletionResult {
             schema_version: 1,
             outcome: candidate.outcome,
-            request_hash: request.intent_hash()?,
-            obligations_hash: request.obligations.fingerprint()?,
-            finishing_attempts_hash: completed_attempts_hash(attempts)?,
+            request_hash: request.intent_hash_with_policy(policy)?,
+            obligations_hash: request.obligations.fingerprint_with_policy(policy)?,
+            finishing_attempts_hash: completed_attempts_hash_with_policy(attempts, policy)?,
             assessment: candidate.assessment,
         };
-        let result = self.admit_result_bound(
+        let result = self.admit_result_bound_with_policy(
             task,
             step,
             Some(disclosure),
@@ -490,8 +541,9 @@ impl InvestigationInput {
             model,
             timestamp,
             Some(completion),
+            policy,
         )?;
-        result.validate_with_disclosure(&self.ledger, step, disclosure)?;
+        result.validate_with_disclosure_and_policy(&self.ledger, step, disclosure, policy)?;
         Ok(Ok(result))
     }
 

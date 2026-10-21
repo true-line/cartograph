@@ -35,8 +35,7 @@ runtime counters and per-invocation transport limits. The exact selected
 policy must be bound into task intent, consent and durable evidence.
 
 Keep investigation-v1, existing request and envelope encodings, role definitions,
-fingerprints and frozen acceptance controls unchanged. The initial registry
-contains only v1. A future opt-in policy uses a separately versioned request
+fingerprints and frozen acceptance controls unchanged. The default remains v1. The opt-in policy uses a separately versioned request
 and envelope family when larger admission bounds would change the old contract.
 Mint domain-analyst@8 and evidence-auditor@8 for that policy rather than editing
 @7 in place. Preserve target identities if their individual semantics and bounds
@@ -63,6 +62,11 @@ Consent binds the actual per-call payload and limits; more aggregate calls
 do not automatically enlarge the per-call transport contract. The UI must
 advertise explicit eligible policies and freeze the chosen request during an
 uncertain retry.
+The bounded transport's source-span allowance is explicit and comes from the
+saved policy's evidence-item limit. Its legacy value of 12 is omitted from
+serialized limits, preserving old payload and consent hashes; the v2 value of
+56 is included in the prepared payload's consent identity. The independent
+128 KiB serialized input ceiling still applies before firewall preparation.
 
 The owner approved the measured opt-in proposal and retention of v1 time caps on
 2026-10-21: Claude conversation `9e891118-de11-45fd-9e91-92d266702eee`, proposal
@@ -76,14 +80,26 @@ output-token reservations. Individual source reads remain 8,192 bytes, inventory
 2,048 tokens and input 128 KiB. Task storage stays 2 MiB with 256 KiB terminal
 reserve; global storage stays 256 MiB. Active/consent/wall time caps remain
 600/900/3,600 seconds. These values are capacity ceilings, not completion promises.
-The specification remains unregistered during integration. Do not enable the new route until all
-admission, persistence and execution boundaries support it. The remaining global
-MAX_MODEL_CALLS and MAX_TOOL_ACTIONS bounds in investigation/mod.rs feed admission,
-coverage and staged finish/refusal validators (including doubled bounds). They
-must be routed consistently for the opt-in family. The immutable specialists
-COMMON prompt also embeds eight calls/actions; the @8 definitions must state the
-new policy without changing legacy text. This decision does
+The v2 registry entry is enabled together with admission, persistence, transport
+and execution integration and their synthetic boundary tests. Admission, coverage,
+staged finish/refusal and replay validators must resolve the selected policy,
+including derived attempt capacities. The immutable specialists COMMON prompt
+embeds eight calls/actions; the @8 definitions state the new policy without
+changing legacy text. This decision does
 not authorize a provider run or establish semantic acceptance under #598.
+
+Use prompt schema 7 only for v2. Exact source descriptors appear once in the
+completion contract's source obligations, rather than also appearing in an
+inspection-requirements array. Keep the inspection hash, progress and private
+admitted targets. Sealing reconstructs the canonical targets from the protected
+contract and verifies their identity against those private targets and the
+inspection hash; progress remains tied to the ordered target identities.
+Reject a second descriptor array. V1 retains prompt schema 6 and its exact bytes.
+This removes redundant input rather than enlarging the 128 KiB payload ceiling.
+The initial synthetic 56-source fixture with 112 attempt IDs required 147,041
+serialized payload bytes before this change, even with no source text; its
+request was 57,621 bytes. Capacity witnesses must cover the revised encoding
+and still reject combinations that exceed the independently enforced ceiling.
 
 ## Consequences
 

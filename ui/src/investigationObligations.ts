@@ -1,4 +1,4 @@
-import type { InvestigationObligation, InvestigationObligationChoices, InvestigationObligationEnvelope } from './investigationTypes';
+import type { InvestigationObligation, InvestigationObligationChoices, InvestigationObligationEnvelope, InvestigationPolicy, InvestigationCatalog, SpecialistId } from './investigationTypes';
 
 const hash = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 const context = (value: unknown) => typeof value === 'string' && /^context-v2:[0-9a-f]{64}$/.test(value);
@@ -22,16 +22,33 @@ export function validObligationChoices(value: InvestigationObligationChoices | n
       return (item.status === 'stale' || item.status === 'unrecorded') && closed(item, ['repo', 'status']);
     }));
 }
-export function obligationEnvelope(values: InvestigationObligation[]): InvestigationObligationEnvelope {
-  return { schema_version: 1, contract: 'investigation-completion-obligations@1', obligations: [...values].sort((a, b) =>
+export function obligationEnvelope(values: InvestigationObligation[], policy?: Pick<InvestigationPolicy, 'envelope_schema_version' | 'envelope_contract' | 'max_completion_obligations' | 'envelope_bytes'>): InvestigationObligationEnvelope {
+  return { schema_version: policy?.envelope_schema_version ?? 1, contract: (policy?.envelope_contract ?? 'investigation-completion-obligations@1') as InvestigationObligationEnvelope['contract'], obligations: [...values].sort((a, b) =>
     a.kind.localeCompare(b.kind) || a.obligation_id.localeCompare(b.obligation_id)) };
 }
-export function validObligationEnvelope(value: InvestigationObligationEnvelope): boolean {
-  return Boolean(value && closed(value, ['schema_version', 'contract', 'obligations']) && value.schema_version === 1 &&
-    value.contract === 'investigation-completion-obligations@1' && Array.isArray(value.obligations) && value.obligations.length >= 1 &&
-    value.obligations.length <= 12 && value.obligations.every(validObligation) &&
+export function validObligationEnvelope(value: InvestigationObligationEnvelope, policy?: Pick<InvestigationPolicy, 'envelope_schema_version' | 'envelope_contract' | 'max_completion_obligations' | 'envelope_bytes'>): boolean {
+  return Boolean(value && closed(value, ['schema_version', 'contract', 'obligations']) && value.schema_version === (policy?.envelope_schema_version ?? 1) &&
+    value.contract === (policy?.envelope_contract ?? 'investigation-completion-obligations@1') && Array.isArray(value.obligations) && value.obligations.length >= 1 &&
+    value.obligations.length <= (policy?.max_completion_obligations ?? 12) && new TextEncoder().encode(JSON.stringify(value)).length <= (policy?.envelope_bytes ?? 8192) && value.obligations.every(validObligation) &&
     new Set(value.obligations.map((item) => `${item.kind}:${item.obligation_id}`)).size === value.obligations.length &&
     value.obligations.every((item, index) => index === 0 ||
       value.obligations[index - 1].kind < item.kind || (value.obligations[index - 1].kind === item.kind &&
         value.obligations[index - 1].obligation_id < item.obligation_id)));
+}
+
+/** Only the host's advertised compatible policies can enable a new role. */
+export function investigationPolicy(catalog: InvestigationCatalog | null, profile: string, specialist: SpecialistId): (Omit<InvestigationPolicy, 'limits'> & { limits?: InvestigationPolicy['limits'] }) | undefined {
+  const advertised = catalog?.policies?.find((policy) => policy.limits.profile === profile && policy.specialist_ids.includes(specialist));
+  if (advertised) {
+    const modern = specialist.endsWith('@8');
+    if (advertised.request_schema_version !== (modern ? 5 : 4) || advertised.envelope_schema_version !== (modern ? 2 : 1) ||
+        advertised.envelope_contract !== `investigation-completion-obligations@${modern ? 2 : 1}` ||
+        (modern && profile !== 'investigation-v2') || (!modern && profile !== 'investigation-v1') ||
+        ![advertised.max_completion_obligations, advertised.request_bytes, advertised.envelope_bytes].every((value) => Number.isSafeInteger(value) && value > 0)) return undefined;
+    return advertised;
+  }
+  if (specialist.endsWith('@8') || profile !== 'investigation-v1') return undefined;
+  return { limits: catalog?.limits, request_schema_version: 4, envelope_schema_version: 1,
+    envelope_contract: 'investigation-completion-obligations@1', max_completion_obligations: 12,
+    request_bytes: 8192, envelope_bytes: 8192, specialist_ids: [specialist] };
 }

@@ -31,3 +31,16 @@ export function completionResult(id = 'inv-completion', overrides: Partial<Inves
     completion: { schema_version: 1, outcome: 'supported', request_hash: 'a'.repeat(64), obligations_hash: 'b'.repeat(64),
       finishing_attempts_hash: 'e'.repeat(64), assessment: detail.completion!.assessment }, ...overrides });
 }
+
+/** Advertised opt-in example; production keeps this unavailable until registered. */
+export const expandedCompletionCatalog: InvestigationCatalog = {
+  ...completionCatalog,
+  specialists: [...completionCatalog.specialists, ...completionCatalog.specialists.filter((item) => item.version === 7).map((item) => ({
+    ...item, id: item.id.replace('@7', '@8') as import('./investigationTypes').SpecialistId, version: 8,
+  }))],
+  policies: [{ limits: { ...completionCatalog.limits, profile: 'investigation-v2', model_invocations: 64, tool_actions: 56,
+    evidence_requests: 64, evidence_items: 56, evidence_bytes: 65536, generated_token_reservations: 131072 },
+    request_schema_version: 5, envelope_schema_version: 2, envelope_contract: 'investigation-completion-obligations@2',
+    max_completion_obligations: 56, request_bytes: 65536, envelope_bytes: 65536,
+    specialist_ids: ['domain-analyst@8', 'evidence-auditor@8'] }],
+};

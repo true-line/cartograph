@@ -241,12 +241,16 @@ pub(super) fn validate_usage(
 
 fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     let detail = &task.detail;
+    let policy =
+        InvestigationPolicy::for_limits(&detail.limits).ok_or(InvestigationStoreError::Invalid)?;
     let summary = &detail.summary;
     let v7 = summary.specialist_id.uses_completion_obligations();
     if task.schema_version != if v7 { 2 } else { 1 }
         || task.completion_intent.is_some() != v7
         || summary.schema_version
-            != if v7 {
+            != if summary.specialist_id.uses_policy_selection() {
+                5
+            } else if v7 {
                 4
             } else if summary.specialist_id.uses_coverage_qualification() {
                 3
@@ -280,7 +284,12 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
             != (summary.specialist_id.uses_coverage_qualification()
                 && task.ledger_revision.is_some())
         || task.ledger_hash.as_ref().is_some_and(|v| !hash_valid(v))
-        || detail.citations.len() > 76
+        || detail.citations.len()
+            > detail
+                .limits
+                .selected_facts
+                .checked_add(detail.limits.evidence_items)
+                .ok_or(InvestigationStoreError::Capacity)?
         || summary.created_at.len() > 32
         || summary.updated_at.len() > 32
     {
@@ -296,11 +305,18 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
         if detail.request_hash != intent.request_hash
             || detail.obligations != intent.obligations
             || detail.obligations_hash != intent.obligations_hash
-            || Some(detail.validate()?) != summary.obligation_status
+            || Some(detail.validate_with_policy(policy)?) != summary.obligation_status
         {
             return Err(InvestigationStoreError::Invalid);
         }
-        encode(task, 64 * 1024)?;
+        encode(
+            task,
+            if policy.profile() == INVESTIGATION_V1_POLICY.profile() {
+                64 * 1024
+            } else {
+                MAX_RECORD_BYTES
+            },
+        )?;
     } else if task.detail.completion.is_some()
         || summary.completion_outcome.is_some()
         || summary.obligation_status.is_some()
@@ -428,27 +444,30 @@ pub(super) fn validate_step_basis(
     task: &StoredTask,
     step: &PendingInvestigationStep,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+        .ok_or(InvestigationStoreError::Invalid)?;
     if task.detail.summary.specialist_id.uses_compact_disclosure() != step.disclosure.is_some() {
         return Err(InvestigationStoreError::Invalid);
     }
     if let Some(disclosure) = &step.disclosure {
         let ledger = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
-        disclosure.validate(&ledger)?;
+        disclosure.validate_with_policy(&ledger, policy)?;
         let completion_sources = task
             .completion_intent
             .as_ref()
-            .map(|intent| intent.obligations.sources())
+            .map(|intent| intent.obligations.sources_with_policy(policy))
             .transpose()?;
         let expected = match &completion_sources {
-            Some(sources) if !sources.is_empty() => Some(inspection_requirements_hash(
-                &normalize_inspection_targets(sources)?,
+            Some(sources) if !sources.is_empty() => Some(inspection_requirements_hash_with_policy(
+                &normalize_inspection_targets_with_policy(sources, policy)?,
+                policy,
             )?),
             Some(_) => None,
             None => task
                 .detail
                 .inspection_requirements
                 .as_ref()
-                .map(|targets| inspection_requirements_hash(targets))
+                .map(|targets| inspection_requirements_hash_with_policy(targets, policy))
                 .transpose()?,
         };
         if task.completion_intent.is_some() {
@@ -469,10 +488,13 @@ pub(super) fn validate_result_basis(
     step: &PendingInvestigationStep,
     limits: &InvestigationLimits,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = InvestigationPolicy::for_limits(limits).ok_or(InvestigationStoreError::Invalid)?;
     validate_step(step, limits)?;
     match &step.disclosure {
-        Some(disclosure) => result.validate_with_disclosure(ledger, &step.step_id, disclosure)?,
-        None => result.validate(ledger)?,
+        Some(disclosure) => {
+            result.validate_with_disclosure_and_policy(ledger, &step.step_id, disclosure, policy)?
+        }
+        None => result.validate_with_policy(ledger, policy)?,
     }
     Ok(())
 }
@@ -481,19 +503,23 @@ pub(super) fn validate_inspection_result(
     task: &StoredTask,
     result: &InvestigationResult,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+        .ok_or(InvestigationStoreError::Invalid)?;
     if let Some(intent) = &task.completion_intent {
-        let sources = intent.obligations.sources()?;
+        let sources = intent.obligations.sources_with_policy(policy)?;
         if result.schema_version != 5 {
             return Err(InvestigationStoreError::Invalid);
         }
         return match (&result.inspection_assessment, sources.is_empty()) {
             (None, true) => Ok(()),
             (Some(assessment), false)
-                if assessment.targets()? == normalize_inspection_targets(&sources)?
+                if assessment.targets_with_policy(policy)?
+                    == normalize_inspection_targets_with_policy(&sources, policy)?
                     && assessment.requirements_hash
-                        == inspection_requirements_hash(&normalize_inspection_targets(
-                            &sources,
-                        )?)? =>
+                        == inspection_requirements_hash_with_policy(
+                            &normalize_inspection_targets_with_policy(&sources, policy)?,
+                            policy,
+                        )? =>
             {
                 Ok(())
             }

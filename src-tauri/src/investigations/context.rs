@@ -17,6 +17,47 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// Validated acquisition authority, separate from every public request family.
+/// Completion requests retain their actual role and selected immutable policy.
+#[derive(Clone)]
+pub(super) struct AcquisitionRequest {
+    pub specialist_id: SpecialistId,
+    pub inspection_requirements: Option<Vec<InvestigationInspectionTarget>>,
+    pub question: String,
+    pub scope: InvestigationScope,
+    pub provider_mode: InvestigationProviderMode,
+    pub expected_graph_revision: Option<String>,
+    pub expected_context_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub policy: &'static InvestigationPolicy,
+}
+impl TryFrom<&StartInvestigationRequest> for AcquisitionRequest {
+    type Error = HostError;
+    fn try_from(request: &StartInvestigationRequest) -> Result<Self, HostError> {
+        request.validate()?;
+        Ok(Self {
+            specialist_id: request.specialist_id,
+            inspection_requirements: request.inspection_requirements.clone(),
+            question: request.question.clone(),
+            scope: request.scope.clone(),
+            provider_mode: request.provider_mode,
+            expected_graph_revision: request.expected_graph_revision.clone(),
+            expected_context_id: request.expected_context_id.clone(),
+            conversation_id: request.conversation_id.clone(),
+            parent_id: request.parent_id.clone(),
+            policy: InvestigationPolicy::for_profile(&request.limit_profile)
+                .ok_or(HostError::InvalidInput)?,
+        })
+    }
+}
+impl TryFrom<&AcquisitionRequest> for AcquisitionRequest {
+    type Error = HostError;
+    fn try_from(request: &AcquisitionRequest) -> Result<Self, HostError> {
+        Ok(request.clone())
+    }
+}
+
 /// One owner holds the original raw graph for exact comparisons and the frozen
 /// authorized query projection. Nothing is rebuilt from live context mid-task.
 pub(super) struct FrozenContext {
@@ -28,6 +69,7 @@ pub(super) struct FrozenContext {
     pub(super) coverage_archive: Option<InvestigationCoverageArchive>,
     pub(super) inventory_details: Vec<String>,
     qualified: Option<CoverageContext>,
+    pub(super) policy: &'static InvestigationPolicy,
 }
 
 #[derive(Serialize)]
@@ -151,34 +193,38 @@ fn projection(nodes: Vec<Node>, edges: Vec<Edge>) -> Result<ContextSnapshot, Hos
 }
 
 impl FrozenContext {
-    /// Acquisition adapter only. Real V7 intent remains the normalized request4;
-    /// this projection is never hashed, stored, or accepted by a start command.
     pub(super) fn completion_acquisition_request(
         request: &obligations::StagedObligationRequest,
-    ) -> Result<StartInvestigationRequest, HostError> {
-        let request = request.normalized()?;
-        let sources = request.obligations.sources()?;
-        Ok(StartInvestigationRequest {
-            schema_version: 3,
-            request_nonce: request.request_nonce,
-            specialist_id: if request.specialist_id == "domain-analyst@7" {
-                SpecialistId::DomainAnalystV6
-            } else {
-                SpecialistId::EvidenceAuditorV6
-            },
+    ) -> Result<AcquisitionRequest, HostError> {
+        let policy = InvestigationPolicy::for_profile(&request.limit_profile)
+            .ok_or(HostError::InvalidInput)?;
+        Self::completion_acquisition_request_with_policy(request, policy)
+    }
+
+    pub(super) fn completion_acquisition_request_with_policy(
+        request: &obligations::StagedObligationRequest,
+        policy: &'static InvestigationPolicy,
+    ) -> Result<AcquisitionRequest, HostError> {
+        let request = request.normalized_with_policy(policy)?;
+        let sources = request.obligations.sources_with_policy(policy)?;
+        let specialist_id =
+            serde_json::from_value(serde_json::Value::String(request.specialist_id.clone()))
+                .map_err(|_| HostError::InvalidInput)?;
+        Ok(AcquisitionRequest {
+            specialist_id,
             inspection_requirements: if sources.is_empty() {
                 None
             } else {
-                Some(normalize_inspection_targets(&sources)?)
+                Some(normalize_inspection_targets_with_policy(&sources, policy)?)
             },
             question: request.question,
             scope: request.scope,
             provider_mode: request.provider_mode,
-            limit_profile: request.limit_profile,
             expected_graph_revision: request.expected_graph_revision,
             expected_context_id: Some(request.expected_context_id),
             conversation_id: request.conversation_id,
             parent_id: request.parent_id,
+            policy,
         })
     }
 
@@ -192,7 +238,7 @@ impl FrozenContext {
         index: u32,
         sink: &mut impl AcquisitionSink,
     ) -> Result<Option<staged_attempt::UnavailableReason>, HostError> {
-        if index >= 1024 || self.evidence.len() >= 12 {
+        if index >= 1024 || self.evidence.len() >= self.policy.limits().evidence_items {
             return Err(HostError::LimitExceeded);
         }
         let selected = self
@@ -243,7 +289,7 @@ impl FrozenContext {
         request: InvestigationCoverageRead,
         sink: &mut impl AcquisitionSink,
     ) -> Result<Option<staged_attempt::UnavailableReason>, HostError> {
-        self.ledger.validate()?;
+        self.ledger.validate_with_policy(self.policy)?;
         let archive = self
             .coverage_archive
             .as_ref()
@@ -278,10 +324,10 @@ impl FrozenContext {
 
     pub(super) fn prepare(
         state: &AppState,
-        request: &StartInvestigationRequest,
+        request: impl TryInto<AcquisitionRequest, Error = HostError>,
         history: &[String],
     ) -> Result<Self, HostError> {
-        request.validate()?;
+        let request = request.try_into()?;
         if request.specialist_id.uses_coverage_qualification() {
             return Err(HostError::InvalidInput);
         }
@@ -291,7 +337,7 @@ impl FrozenContext {
             .map_err(|_| HostError::Operational)?
             .read_snapshot_bounded(SnapshotReadLimits::default())
             .map_err(graph_error)?;
-        Self::from_graph(graph, request, history)
+        Self::from_graph(graph, &request, history)
     }
 
     /// The app-backed path brackets registration/plugin discovery around one
@@ -299,27 +345,28 @@ impl FrozenContext {
     pub(super) fn prepare_with_app<R: tauri::Runtime>(
         app: &tauri::AppHandle<R>,
         state: &AppState,
-        request: &StartInvestigationRequest,
+        request: impl TryInto<AcquisitionRequest, Error = HostError>,
         history: &[String],
         archive_capacity: Option<usize>,
     ) -> Result<Self, HostError> {
+        let request = request.try_into()?;
         if !request.specialist_id.uses_coverage_qualification() {
-            return Self::prepare(state, request, history);
+            return Self::prepare(state, &request, history);
         }
         let archive_capacity = archive_capacity.ok_or(HostError::InvalidInput)?;
-        Self::prepare_qualified_with_scope(state, request, history, archive_capacity, || {
+        Self::prepare_qualified_with_scope(state, &request, history, archive_capacity, || {
             crate::context::coverage_scope(app, state).map_err(|_| HostError::Operational)
         })
     }
 
     fn prepare_qualified_with_scope(
         state: &AppState,
-        request: &StartInvestigationRequest,
+        request: impl TryInto<AcquisitionRequest, Error = HostError>,
         history: &[String],
         archive_capacity: usize,
         mut scope: impl FnMut() -> Result<Vec<ScopedRepo>, HostError>,
     ) -> Result<Self, HostError> {
-        request.validate()?;
+        let request = request.try_into()?;
         if !request.specialist_id.uses_coverage_qualification() {
             return Err(HostError::InvalidInput);
         }
@@ -334,7 +381,7 @@ impl FrozenContext {
         let stable = crate::context::stable_scope(&before, scope()?);
         let qualification =
             CoverageQualification::new(&stable, &recorded).map_err(context_error)?;
-        let mut prepared = Self::from_graph(graph, request, history)?;
+        let mut prepared = Self::from_graph(graph, &request, history)?;
         // Both paths retain the one already-authorized immutable scoped
         // projection from this same bounded graph read.
         let qualified =
@@ -364,7 +411,7 @@ impl FrozenContext {
         let archive = InvestigationCoverageArchive::new(proof.clone(), originals)?;
         prepared.ledger.schema_version = 2;
         prepared.ledger.coverage = Some(proof);
-        prepared.ledger.validate()?;
+        prepared.ledger.validate_with_policy(prepared.policy)?;
         prepared.coverage_archive = Some(archive);
         prepared.qualified = Some(qualified);
         Ok(prepared)
@@ -372,9 +419,10 @@ impl FrozenContext {
 
     fn from_graph(
         graph: (Vec<Node>, Vec<Edge>),
-        request: &StartInvestigationRequest,
+        request: impl TryInto<AcquisitionRequest, Error = HostError>,
         history: &[String],
     ) -> Result<Self, HostError> {
+        let request = request.try_into()?;
         let complete = projection(graph.0.clone(), graph.1.clone())?;
         let graph_id = complete.id().to_owned();
         if request
@@ -405,7 +453,7 @@ impl FrozenContext {
                 .then(|| content_hash(&history_bytes)),
             supplied_history_bytes: history_bytes.len(),
         };
-        ledger.validate()?;
+        ledger.validate_with_policy(request.policy)?;
         Ok(Self {
             graph,
             snapshot,
@@ -415,6 +463,7 @@ impl FrozenContext {
             coverage_archive: None,
             inventory_details: vec![],
             qualified: None,
+            policy: request.policy,
         })
     }
 
@@ -477,7 +526,7 @@ impl FrozenContext {
         sink: &mut impl AcquisitionSink,
     ) -> Result<(), HostError> {
         query.validate()?;
-        self.ledger.validate()?;
+        self.ledger.validate_with_policy(self.policy)?;
         match (
             &self.qualified,
             &self.ledger.coverage,
@@ -535,7 +584,7 @@ impl FrozenContext {
                 .iter()
                 .map(|f| graph_reference(&f.reference)),
         );
-        if keys.len() > MAX_SELECTED_FACTS {
+        if keys.len() > self.policy.limits().selected_facts {
             return Err(HostError::LimitExceeded);
         }
         let keys = keys.into_iter().collect::<Vec<_>>();
@@ -638,7 +687,7 @@ impl FrozenContext {
             total_selected: response.context.page().total_selected,
             has_more: response.context.page().next_cursor.is_some(),
         });
-        ledger.validate()?;
+        ledger.validate_with_policy(self.policy)?;
         let mut usage = sink.usage().clone();
         usage.selected_facts = ledger.selected_facts.len();
         sink.publish_input(&ledger, usage)?;
@@ -656,7 +705,7 @@ impl FrozenContext {
         request: InvestigationCoverageRead,
         sink: &mut impl AcquisitionSink,
     ) -> Result<(), HostError> {
-        self.ledger.validate()?;
+        self.ledger.validate_with_policy(self.policy)?;
         let archive = self
             .coverage_archive
             .as_ref()
@@ -689,7 +738,7 @@ impl FrozenContext {
                 response_hash: content_hash(&raw),
                 response_bytes: raw.len(),
             });
-        ledger.validate()?;
+        ledger.validate_with_policy(self.policy)?;
         let raw = String::from_utf8(raw).map_err(|_| HostError::InvalidInput)?;
         sink.publish_input(&ledger, sink.usage().clone())?;
         self.ledger = ledger;

@@ -1126,3 +1126,50 @@ fn staged_refusal_response_replay_requires_complete_history_and_preserves_unknow
         tx.rollback().unwrap();
     }
 }
+
+#[test]
+fn staged_binding_row_caps_preserve_semantic_field_validation() {
+    // AC-0266: the V2 outer record cap grants no authority to substituted or
+    // unbounded binding fields. Existing v1 persisted bindings remain 32 KiB.
+    let mut fixture = Fixture::new();
+    let namespace = fixture.store.namespace.clone();
+    let tx = fixture.store.conn.transaction().unwrap();
+    let task = load_task_base(&tx, &fixture.id).unwrap();
+    let original = bind(&tx, &task, &fixture.request).unwrap();
+    assert_eq!(binding_bytes(&INVESTIGATION_V1_POLICY), 32 * 1024);
+    assert_eq!(binding_bytes(&INVESTIGATION_V2_POLICY), MAX_RECORD_BYTES);
+    assert_eq!(journal_entry_bytes(&INVESTIGATION_V1_POLICY), 64 * 1024);
+    assert_eq!(
+        journal_entry_bytes(&INVESTIGATION_V2_POLICY),
+        MAX_RECORD_BYTES
+    );
+    for field in ["request_hash", "context", "graph", "question", "envelope"] {
+        let mut binding = original.clone();
+        match field {
+            "request_hash" => binding.request_hash = "0".repeat(65),
+            "context" => binding.expected_context = "x".repeat(64 * 1024),
+            "graph" => binding.expected_graph = Some("0".repeat(64)),
+            "question" => binding.redacted_question_hash = "0".repeat(64),
+            _ => binding.envelope.contract = "unknown".into(),
+        }
+        encode(&binding, binding_bytes(&INVESTIGATION_V2_POLICY)).unwrap();
+        assert_eq!(
+            binding.validate(&task),
+            Err(InvestigationStoreError::Invalid),
+            "{field}"
+        );
+    }
+    // The original binding still supports the ordinary production transition.
+    append(
+        &tx,
+        &namespace,
+        &fixture.execution,
+        &fixture.request,
+        &fixture.input,
+        &fixture.finish,
+        fixture.response.clone(),
+        &[],
+    )
+    .unwrap();
+    tx.rollback().unwrap();
+}

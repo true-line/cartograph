@@ -167,7 +167,7 @@ impl FrozenContext {
             .find(|s| s.fact == fact)
             .cloned()
             .ok_or(HostError::InvalidInput)?;
-        if index >= 1024 || self.evidence.len() >= 12 {
+        if index >= 1024 || self.evidence.len() >= self.policy.limits().evidence_items {
             return Err(HostError::LimitExceeded);
         }
         let keys = self
@@ -230,7 +230,7 @@ impl FrozenContext {
                 .usage()
                 .evidence_bytes
                 .checked_add(span_len as usize)
-                .is_none_or(|n| n > 48 * 1024)
+                .is_none_or(|n| n > self.policy.limits().evidence_bytes)
             {
                 return Err(HostError::LimitExceeded);
             }
@@ -284,7 +284,7 @@ impl FrozenContext {
                 .usage()
                 .evidence_bytes
                 .checked_add(length as usize)
-                .is_none_or(|n| n > 48 * 1024)
+                .is_none_or(|n| n > self.policy.limits().evidence_bytes)
             {
                 return Err(HostError::LimitExceeded);
             }
@@ -323,7 +323,7 @@ impl FrozenContext {
             text_hash: Some(content_hash(text.as_bytes())),
             origin,
         });
-        ledger.validate()?;
+        ledger.validate_with_policy(self.policy)?;
         let mut usage = sink.usage().clone();
         usage.evidence_items += 1;
         usage.evidence_bytes += text.len();

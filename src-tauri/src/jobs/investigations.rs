@@ -302,6 +302,8 @@ impl JobStore {
         provider: Option<&InvestigationProvider>,
         completion_intent: Option<completion::CompletionIntent>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
+        let policy = InvestigationPolicy::for_profile(&request.limit_profile)
+            .ok_or(InvestigationStoreError::Invalid)?;
         let intent_hash = match &completion_intent {
             Some(intent) => intent.request_hash.clone(),
             None => request.intent_hash()?,
@@ -430,7 +432,7 @@ impl JobStore {
                 provider: provider.clone(),
                 scope_snapshot_id: None,
                 coverage_context: None,
-                limits: InvestigationLimits::default(),
+                limits: policy.limits(),
                 usage: InvestigationUsage::default(),
                 citations: Vec::new(),
                 error: None,

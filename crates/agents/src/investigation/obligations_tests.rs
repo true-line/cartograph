@@ -475,7 +475,7 @@ fn staged_obligations_legacy_literal_goldens() {
 
 #[test]
 fn opt_in_envelope_admits_raw_capacity_without_reinterpreting_v1() {
-    // AC-0264: opt-in admission has a separate identity and preserves legacy bounds.
+    // AC-0281: opt-in admission has a separate identity and preserves legacy bounds.
     let policy = &super::super::policy::INVESTIGATION_V2_POLICY;
     let legacy = envelope(vec![inventory('b')]);
     let legacy_id = legacy.fingerprint().unwrap();
@@ -498,13 +498,23 @@ fn opt_in_envelope_admits_raw_capacity_without_reinterpreting_v1() {
     );
     opt_in.obligations.push(inventory('b'));
     assert!(opt_in.normalized_with_policy(policy).is_err());
-    assert!(InvestigationPolicy::for_profile(policy.profile()).is_none());
-    assert!(InvestigationPolicy::for_limits(&policy.limits()).is_none());
+    assert_eq!(
+        InvestigationPolicy::for_profile(policy.profile())
+            .unwrap()
+            .limits(),
+        policy.limits()
+    );
+    assert_eq!(
+        InvestigationPolicy::for_limits(&policy.limits())
+            .unwrap()
+            .profile(),
+        policy.profile()
+    );
 }
 
 #[test]
 fn opt_in_request_family_binds_policy_role_and_envelope() {
-    // AC-0264: selecting a larger policy never reinterprets a legacy request.
+    // AC-0281: selecting a larger policy never reinterprets a legacy request.
     let policy = &super::super::policy::INVESTIGATION_V2_POLICY;
     let legacy = request();
     let old_hash = legacy.intent_hash().unwrap();

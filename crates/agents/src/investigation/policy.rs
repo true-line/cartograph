@@ -1,4 +1,4 @@
-//! Closed immutable policy registry. No new profile or execution path is enabled.
+//! Closed immutable policy registry with an explicit opt-in expanded profile.
 //! Admission bounds are distinct from durable runtime counters; callers cannot
 //! deserialize or construct a policy from their own limit values.
 use super::InvestigationLimits;
@@ -45,9 +45,7 @@ pub const INVESTIGATION_V1_POLICY: InvestigationPolicy = InvestigationPolicy {
     consent_wait_seconds: 900,
     wall_seconds: 3600,
 };
-/// Owner-approved specification under integration. Deliberately absent from the
-/// registry until every authority boundary and the opt-in transport support it.
-#[allow(dead_code)] // Not registered until end-to-end integration is complete.
+/// Owner-approved opt-in policy; per-call and storage limits remain independent.
 pub const INVESTIGATION_V2_POLICY: InvestigationPolicy = InvestigationPolicy {
     profile: "investigation-v2",
     request_bytes: 64 * 1024,
@@ -66,19 +64,15 @@ pub const INVESTIGATION_V2_POLICY: InvestigationPolicy = InvestigationPolicy {
     consent_wait_seconds: 900,
     wall_seconds: 3600,
 };
-const POLICIES: &[&InvestigationPolicy] = &[&INVESTIGATION_V1_POLICY];
+const POLICIES: &[&InvestigationPolicy] = &[&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY];
 
-// Temporary integration guard: legacy ledger/finish validators still consume
-// these ceilings. A larger policy must not become registrable before those
-// authority paths are made policy-aware. This does not implement the opt-in path.
+// A registered profile must fit the durable schema and unchanged fact ceiling.
 const _: () = {
     let mut index = 0;
     while index < POLICIES.len() {
         // Evaluate checked derived capacities for every registered policy.
         assert!(POLICIES[index].max_completed_attempts() <= MAX_STORED_COMPLETION_ATTEMPTS);
         assert!(POLICIES[index].selected_facts <= super::MAX_SELECTED_FACTS);
-        assert!(POLICIES[index].tool_actions <= super::MAX_TOOL_ACTIONS);
-        assert!(POLICIES[index].model_invocations <= super::MAX_MODEL_CALLS);
         index += 1;
     }
 };
@@ -99,6 +93,15 @@ impl InvestigationPolicy {
             Some(limit) => limit,
             None => panic!("registered investigation attempt capacity overflow"),
         }
+    }
+
+    /// Outer raw transport bound before choosing a closed request family.
+    pub fn maximum_request_bytes() -> usize {
+        POLICIES
+            .iter()
+            .map(|policy| policy.request_bytes())
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn for_profile(profile: &str) -> Option<&'static Self> {
@@ -163,7 +166,7 @@ mod tests {
         assert_eq!(policy.max_completion_obligations(), 12);
         for profile in [
             "",
-            "investigation-v2",
+            "investigation-v3",
             "INVESTIGATION-V1",
             "investigation-v1 ",
         ] {

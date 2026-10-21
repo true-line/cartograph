@@ -481,9 +481,27 @@ fn v6_input_seals_actual_firewall_payload_and_rejects_coverage_mutation() {
             .prepare_bounded(&provider, &action, &CompletionLimits::default())
             .unwrap();
         // Check mandatory admission independently of action identity comparison.
-        assert!(crate::investigation::sealing::seal(&ledger, &action.payload, &changed).is_err());
+        assert!(
+            crate::investigation::sealing::seal_with_policy(
+                &ledger,
+                &action.payload,
+                &changed,
+                &INVESTIGATION_V1_POLICY,
+                None
+            )
+            .is_err()
+        );
         // A changed post-firewall representation is refused independently too.
-        assert!(crate::investigation::sealing::seal(&ledger, &original.payload, &changed).is_err());
+        assert!(
+            crate::investigation::sealing::seal_with_policy(
+                &ledger,
+                &original.payload,
+                &changed,
+                &INVESTIGATION_V1_POLICY,
+                None
+            )
+            .is_err()
+        );
     }
     let mut secret_ledger = initial();
     let qualification = CoverageQualification::new(
@@ -522,7 +540,7 @@ fn v6_input_seals_actual_firewall_payload_and_rejects_coverage_mutation() {
 
 #[test]
 fn selected_policy_input_binds_opt_in_role_contract_and_limits() {
-    // AC-0264: the selected policy is present in the actual bounded prompt.
+    // AC-0281: the selected policy is present in the actual bounded prompt.
     use super::super::obligations::{
         InventoryTarget, Obligation, ObligationEnvelope, StagedObligationRequest,
     };
@@ -617,3 +635,6 @@ fn selected_policy_input_binds_opt_in_role_contract_and_limits() {
         .is_err()
     );
 }
+
+#[path = "input_capacity_tests.rs"]
+mod capacity_tests;

@@ -3,7 +3,7 @@
 
 use super::{
     AcquisitionSink, HostError,
-    context::{FrozenContext, bounded_json},
+    context::{AcquisitionRequest, FrozenContext, bounded_json},
     runtime::{LiveTask, RunClock, descriptor},
 };
 use crate::jobs::investigations::{
@@ -74,7 +74,16 @@ pub(super) fn run<R: tauri::Runtime>(
     live: Arc<LiveTask>,
     started: Instant,
 ) {
-    run_inner(app, id, request, None, execution, provider, live, started)
+    run_inner(
+        app,
+        id,
+        AcquisitionRequest::try_from(&request),
+        None,
+        execution,
+        provider,
+        live,
+        started,
+    )
 }
 
 /// V7 executes only from real immutable request4 authority.
@@ -92,7 +101,7 @@ pub(super) fn run_completion<R: tauri::Runtime>(
         Ok(projected) => run_inner(
             app,
             id,
-            projected,
+            Ok(projected),
             Some(request),
             execution,
             provider,
@@ -124,7 +133,7 @@ pub(super) fn run_completion<R: tauri::Runtime>(
 fn run_inner<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     id: String,
-    request: StartInvestigationRequest,
+    request: Result<AcquisitionRequest, HostError>,
     completion_request: Option<obligations::StagedObligationRequest>,
     execution: JobExecution,
     provider: Arc<dyn LlmProvider>,
@@ -139,6 +148,7 @@ fn run_inner<R: tauri::Runtime>(
     };
     let mut clock = RunClock::new(started);
     let outcome = (|| {
+        let request = request?;
         let detail = read_detail(&state, &id)?;
         let mut worker = Worker {
             app: &app,
@@ -149,11 +159,7 @@ fn run_inner<R: tauri::Runtime>(
             detail,
             clock: &mut clock,
         };
-        if completion_request.is_some() {
-            worker.execute_inner(&request, completion_request.as_ref(), provider.as_ref())
-        } else {
-            worker.execute(&request, provider.as_ref())
-        }
+        worker.execute_inner(&request, completion_request.as_ref(), provider.as_ref())
     })();
     if let Err(failure) = outcome
         && let Some(reason) = failure.reason()
@@ -196,24 +202,36 @@ struct Worker<'a, R: tauri::Runtime> {
 }
 
 impl<R: tauri::Runtime> Worker<'_, R> {
-    fn execute(
-        &mut self,
-        request: &StartInvestigationRequest,
-        provider: &dyn LlmProvider,
-    ) -> Result<(), Failure> {
-        self.execute_inner(request, None, provider)
-    }
-
     fn execute_inner(
         &mut self,
-        request: &StartInvestigationRequest,
+        request: &AcquisitionRequest,
         completion_request: Option<&obligations::StagedObligationRequest>,
         provider: &dyn LlmProvider,
     ) -> Result<(), Failure> {
+        let policy = InvestigationPolicy::for_limits(&self.detail.limits)
+            .ok_or(InvestigationStoreError::Invalid)?;
+        if request.policy.profile() != policy.profile()
+            || request.specialist_id != self.detail.summary.specialist_id
+        {
+            return Err(Failure::Store(InvestigationStoreError::Invalid));
+        }
         self.check_new_work()?;
         let history = self.parent_history(request)?;
-        let _inspection_guards = super::inspection::validate_targets(self.state, request)
+        let mut _inspection_guards = Vec::new();
+        for target in request.inspection_requirements.as_deref().unwrap_or(&[]) {
+            let (actual, guard) = super::inspection::resolve(
+                self.state,
+                &target.fact,
+                &target.graph_snapshot_id,
+                &target.receipt_id,
+                target.receipt_inventory_index as usize,
+            )
             .map_err(|_| Failure::Stop(InvestigationStopReason::InputChanged))?;
+            if actual != *target {
+                return Err(Failure::Stop(InvestigationStopReason::InputChanged));
+            }
+            _inspection_guards.push(guard);
+        }
         let archive_capacity = if request.specialist_id.uses_coverage_qualification() {
             Some(
                 self.state
@@ -233,7 +251,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             archive_capacity,
         )?;
         if let Some(request) = completion_request {
-            request.validate_ledger(&context.ledger)?;
+            request.validate_ledger_with_policy(&context.ledger, policy)?;
         }
         self.check_new_work()?;
         let mut usage = self.detail.usage.clone();
@@ -272,7 +290,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .lock()
                     .map_err(|_| HostError::Operational)?
                     .investigation_turn_basis(self.id)?;
-                InvestigationInput::prepare_v7(
+                InvestigationInput::prepare_v7_with_policy(
                     &completion_request.question,
                     self.detail.summary.specialist_id,
                     context.ledger.clone(),
@@ -286,6 +304,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                         .as_ref()
                         .ok_or(HostError::InvalidInput)?,
                     &context.inventory_details,
+                    policy,
                 )?
             } else if request.specialist_id.uses_turn_progress() {
                 let basis = self
@@ -345,19 +364,19 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             let step_id = format!("step-{}", self.detail.usage.model_invocations + 1);
             let action = input.action(format!("{}:{step_id}", self.id))?;
             let input_bytes = bounded_json(&action.payload, 128 * 1024)?.len();
-            let policy = InvestigationPolicy::for_limits(&self.detail.limits)
-                .ok_or(InvestigationStoreError::Invalid)?;
             let mut transport = CompletionLimits::default().values();
             transport.max_output_tokens = policy.limits().generated_tokens_per_invocation;
+            transport.max_spans = u32::try_from(policy.limits().evidence_items)
+                .map_err(|_| HostError::InvalidInput)?;
             let limits = CompletionLimits::new(transport).map_err(provider_failure)?;
             let prepared = firewall(self.state)?
                 .prepare_bounded(provider, &action, &limits)
                 .map_err(provider_failure)?;
-            let disclosure = input.seal_disclosure(&prepared)?;
+            let disclosure = input.seal_disclosure_with_policy(&prepared, policy)?;
             let step = PendingInvestigationStep {
                 step_id: step_id.clone(),
                 payload_hash: prepared.preview().egress.payload_hash.clone(),
-                input_ledger_hash: context.ledger.fingerprint()?,
+                input_ledger_hash: context.ledger.fingerprint_with_policy(policy)?,
                 input_bytes,
                 generated_tokens: limits.values().max_output_tokens,
                 disclosure: disclosure.clone(),
@@ -497,7 +516,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .map(|(record, ledger)| staged_attempt::AttemptEvidence { record, ledger })
                     .collect::<Vec<_>>();
                 match input
-                    .admit_completion_finish(
+                    .admit_completion_finish_with_policy(
                         request,
                         self.id,
                         &step_id,
@@ -506,6 +525,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                         &evidence,
                         completion.response_model.clone(),
                         timestamp,
+                        policy,
                     )
                     .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?
                 {
@@ -666,7 +686,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         Ok(())
     }
 
-    fn parent_history(&self, request: &StartInvestigationRequest) -> Result<Vec<String>, Failure> {
+    fn parent_history(&self, request: &AcquisitionRequest) -> Result<Vec<String>, Failure> {
         let Some(parent_id) = &request.parent_id else {
             return Ok(Vec::new());
         };

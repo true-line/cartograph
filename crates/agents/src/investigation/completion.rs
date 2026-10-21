@@ -124,11 +124,18 @@ pub enum InvestigationStartRequest {
 }
 impl InvestigationStartRequest {
     pub fn decode(raw: &str) -> Result<Self, InvestigationError> {
-        strict::preflight(raw, 8 * 1024, 32, 4096, 128)?;
+        strict::preflight(
+            raw,
+            InvestigationPolicy::maximum_request_bytes(),
+            32,
+            4096,
+            128,
+        )?;
         let value: serde_json::Value =
             serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidRequest)?;
         match value["schema_version"].as_u64() {
             Some(1..=3) => {
+                strict::preflight(raw, INVESTIGATION_V1_POLICY.request_bytes(), 32, 4096, 128)?;
                 let request: StartInvestigationRequest =
                     serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidRequest)?;
                 request.validate()?;
@@ -137,6 +144,16 @@ impl InvestigationStartRequest {
             Some(4) => Ok(Self::Completion(
                 super::obligations::StagedObligationRequest::decode(raw)?,
             )),
+            Some(5) => {
+                let policy = value["limit_profile"]
+                    .as_str()
+                    .and_then(InvestigationPolicy::for_profile)
+                    .filter(|policy| policy.profile() == "investigation-v2")
+                    .ok_or(InvestigationError::InvalidRequest)?;
+                Ok(Self::Completion(
+                    super::obligations::StagedObligationRequest::decode_with_policy(raw, policy)?,
+                ))
+            }
             _ => Err(InvestigationError::InvalidRequest),
         }
     }
@@ -162,7 +179,7 @@ impl<'de> Deserialize<'de> for InvestigationStartRequest {
             Some(1..=3) => serde_json::from_str(raw.get())
                 .map(Self::Legacy)
                 .map_err(serde::de::Error::custom),
-            Some(4) => serde_json::from_str(raw.get())
+            Some(4 | 5) => serde_json::from_str(raw.get())
                 .map(Self::Completion)
                 .map_err(serde::de::Error::custom),
             _ => Err(serde::de::Error::custom(

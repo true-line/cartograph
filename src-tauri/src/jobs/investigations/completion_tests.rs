@@ -19,6 +19,16 @@ impl Fixture {
         Self::with_mode(InvestigationProviderMode::Local)
     }
     fn with_mode(mode: InvestigationProviderMode) -> Self {
+        Self::with_policy(mode, &INVESTIGATION_V1_POLICY)
+    }
+    fn registered_v2() -> Self {
+        let policy = InvestigationPolicy::for_profile(INVESTIGATION_V2_POLICY.profile())
+            .expect("V2 durable tests require registration after the production capacity audit");
+        assert_eq!(policy.limits(), INVESTIGATION_V2_POLICY.limits());
+        Self::with_policy(InvestigationProviderMode::Local, policy)
+    }
+    fn with_policy(mode: InvestigationProviderMode, policy: &InvestigationPolicy) -> Self {
+        let legacy = policy.profile() == INVESTIGATION_V1_POLICY.profile();
         let directory = tempfile::tempdir().unwrap();
         let mut store = JobStore::open(directory.path().join("state.db")).unwrap();
         let snapshot = context_hub::ContextSnapshot::new(vec![], vec![]).unwrap();
@@ -53,19 +63,29 @@ impl Fixture {
             *obligation_id = hash;
         }
         let request = StagedObligationRequest {
-            schema_version: 4,
+            schema_version: if legacy { 4 } else { 5 },
             request_nonce: "completion-test".into(),
-            specialist_id: "domain-analyst@7".into(),
+            specialist_id: if legacy {
+                "domain-analyst@7"
+            } else {
+                "domain-analyst@8"
+            }
+            .into(),
             obligations: ObligationEnvelope {
-                schema_version: 1,
-                contract: "investigation-completion-obligations@1".into(),
+                schema_version: if legacy { 1 } else { 2 },
+                contract: if legacy {
+                    "investigation-completion-obligations@1"
+                } else {
+                    "investigation-completion-obligations@2"
+                }
+                .into(),
                 obligations: vec![obligation],
             },
             inspection_requirements: None,
             question: "Inspect explicit completion requirements".into(),
             scope: InvestigationScope::All,
             provider_mode: mode,
-            limit_profile: "investigation-v1".into(),
+            limit_profile: policy.profile().into(),
             expected_graph_revision: None,
             expected_context_id: proof.context_id.clone(),
             conversation_id: None,
@@ -135,9 +155,10 @@ impl Fixture {
             .store
             .investigation_completion_metadata(&self.id)
             .unwrap();
-        let input = InvestigationInput::prepare_v7(
+        let policy = InvestigationPolicy::for_limits(&detail.limits).unwrap();
+        let input = InvestigationInput::prepare_v7_with_policy(
             &self.request.question,
-            SpecialistId::DomainAnalystV7,
+            detail.summary.specialist_id,
             ledger,
             &[],
             &[],
@@ -147,6 +168,7 @@ impl Fixture {
             &self.request,
             &metadata,
             &self.inventory_details,
+            policy,
         )
         .unwrap();
         let action = input
@@ -161,11 +183,14 @@ impl Fixture {
         let prepared = EgressFirewall::new(EgressPolicy::default())
             .prepare_bounded(&provider, &action, &CompletionLimits::default())
             .unwrap();
-        let disclosure = input.seal_disclosure(&prepared).unwrap().unwrap();
+        let disclosure = input
+            .seal_disclosure_with_policy(&prepared, policy)
+            .unwrap()
+            .unwrap();
         let step = PendingInvestigationStep {
             step_id: format!("step-{}", detail.usage.model_invocations + 1),
             payload_hash: prepared.preview().egress.payload_hash.clone(),
-            input_ledger_hash: input.ledger().fingerprint().unwrap(),
+            input_ledger_hash: input.ledger().fingerprint_with_policy(policy).unwrap(),
             input_bytes: serde_json::to_vec(&action.payload).unwrap().len(),
             generated_tokens: 2048,
             disclosure: Some(disclosure),
@@ -980,4 +1005,456 @@ fn completion_attempt_schema_upgrade_rejects_unknown_schema_without_repair() {
         )
         .unwrap();
     assert_eq!(sql, LEGACY_ATTEMPT_TABLE);
+}
+
+#[test]
+fn completion_metadata_authority_rejects_altered_saved_policy() {
+    // AC-0266: internal replay/metadata entrypoints cannot accept caller limits
+    // even when invoked without the outer public retained-task loader.
+    let mut fixture = Fixture::new();
+    let tx = fixture.store.conn.transaction().unwrap();
+    let mut task = load_task_base(&tx, &fixture.id).unwrap();
+    task.detail.limits.evidence_bytes += 1;
+    assert!(matches!(
+        metadata(&tx, &task, None),
+        Err(InvestigationStoreError::Invalid)
+    ));
+    assert!(matches!(
+        raw_refusals(&tx, &task),
+        Err(InvestigationStoreError::Invalid)
+    ));
+    assert!(matches!(
+        reserve_invocation(&tx, &task),
+        Err(InvestigationStoreError::Invalid)
+    ));
+    assert!(matches!(
+        validate_saved(&tx, &task),
+        Err(InvestigationStoreError::Invalid)
+    ));
+    assert!(matches!(
+        refresh_observation(&tx, &mut task),
+        Err(InvestigationStoreError::Invalid)
+    ));
+    tx.rollback().unwrap();
+    assert_eq!(
+        fixture.store.investigation(&fixture.id).unwrap().limits,
+        InvestigationLimits::default()
+    );
+}
+
+#[test]
+fn completion_policy_reservation_covers_serialized_large_refusal_shape() {
+    // AC-0266: this measures typed candidate records without registering V2,
+    // publishing fabricated witnesses, or claiming a completed production run.
+    let mut fixture = Fixture::new();
+    fixture.refuse();
+    let tx = fixture.store.conn.transaction().unwrap();
+    let mut task = load_task_base(&tx, &fixture.id).unwrap();
+    assert_eq!(
+        invocation_reservation_bytes(&task, &INVESTIGATION_V1_POLICY).unwrap(),
+        192 * 1024
+    );
+    let mut journal = staged::load(&tx, &fixture.id).unwrap().remove(0);
+    let base = fixture.request.obligations.obligations[0].clone();
+    let obligations = (0..INVESTIGATION_V2_POLICY.max_completion_obligations())
+        .map(|index| {
+            let mut obligation = base.clone();
+            if let Obligation::Inventory { target, .. } = &mut obligation {
+                target.repo = format!("{index:03}{}", "r".repeat(253));
+            }
+            let id = obligation.content_id().unwrap();
+            if let Obligation::Inventory { obligation_id, .. } = &mut obligation {
+                *obligation_id = id;
+            }
+            obligation
+        })
+        .collect();
+    let envelope = ObligationEnvelope {
+        schema_version: 2,
+        contract: "investigation-completion-obligations@2".into(),
+        obligations,
+    }
+    .normalized_with_policy(&INVESTIGATION_V2_POLICY)
+    .unwrap();
+    let obligations_hash = envelope
+        .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+        .unwrap();
+    journal.record.assessment = envelope
+        .obligations
+        .iter()
+        .map(|obligation| ObligationObservation {
+            obligation_id: obligation.key().1.into(),
+            kind: obligation.key().0.into(),
+            attempted: true,
+            acquired: true,
+            exactly_supplied: false,
+            unmet: Some(RefusalReason::AcquiredNotSupplied),
+            last_attempt_outcome: Some(CompletionAttemptOutcome::Acquired),
+        })
+        .collect();
+    journal.record.feedback.unmet = journal
+        .record
+        .assessment
+        .iter()
+        .map(|item| FeedbackEntry {
+            obligation_id: item.obligation_id.clone(),
+            kind: item.kind.clone(),
+            reason: RefusalReason::AcquiredNotSupplied,
+        })
+        .collect();
+    journal.record.obligations_hash = obligations_hash.clone();
+    journal.attempts = (0..INVESTIGATION_V2_POLICY.max_completed_attempts())
+        .map(|index| {
+            let obligation = &envelope.obligations[index % envelope.obligations.len()];
+            let Obligation::Inventory { target, .. } = obligation else {
+                unreachable!()
+            };
+            let mut attempt = AttemptRecord {
+                schema_version: 1,
+                attempt_id: String::new(),
+                task_id: fixture.id.clone(),
+                request_hash: journal.record.request_hash.clone(),
+                obligations_hash: obligations_hash.clone(),
+                obligation_id: obligation.key().1.into(),
+                step_id: format!("step-{index:03}{}", "s".repeat(120)),
+                read: ReadIntent::Inventory {
+                    context_id: target.context_id.clone(),
+                    repo: target.repo.clone(),
+                    inventory_hash: target.inventory_hash.clone(),
+                    max_bytes: MAX_QUERY_BYTES,
+                },
+                input_ledger_hash: journal.record.input_ledger_hash.clone(),
+                input_revision: index as u64,
+                outcome: AttemptOutcome::Unavailable {
+                    reason: UnavailableReason::InventoryExceedsMaxBytes,
+                },
+            };
+            attempt.attempt_id = attempt.content_id().unwrap();
+            attempt
+        })
+        .collect();
+    task.detail.limits = INVESTIGATION_V2_POLICY.limits();
+    task.detail.summary.specialist_id = SpecialistId::DomainAnalystV8;
+    task.detail.specialist = SpecialistId::DomainAnalystV8.definition().unwrap();
+    let intent = task.completion_intent.as_mut().unwrap();
+    intent.schema_version = 2;
+    intent.limit_profile = Some(INVESTIGATION_V2_POLICY.profile().into());
+    intent.specialist = SpecialistId::DomainAnalystV8;
+    intent.obligations = envelope.clone();
+    intent.obligations_hash = obligations_hash.clone();
+    let detail = task.detail.completion.as_mut().unwrap();
+    detail.obligations = envelope;
+    detail.obligations_hash = obligations_hash;
+    detail.assessment = journal.record.assessment.clone();
+    let binding = staged::binding_reservation_bytes(&task, &INVESTIGATION_V2_POLICY).unwrap();
+    let ordinary_row = 64 + 256;
+    let actual = encode(
+        &journal,
+        staged::journal_entry_bytes(&INVESTIGATION_V2_POLICY),
+    )
+    .unwrap()
+    .len()
+        + ordinary_row
+        + encode(&task, MAX_RECORD_BYTES).unwrap().len()
+        + 64
+        + 3 * 128
+        + 1024
+        + binding
+        + journal
+            .record
+            .feedback
+            .bytes_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap()
+            .len()
+        + ordinary_row
+        + encode(&journal.response, 4096).unwrap().len()
+        + ordinary_row
+        + 3 * (16 * 1024 + ordinary_row);
+    let reservation = invocation_reservation_bytes(&task, &INVESTIGATION_V2_POLICY).unwrap();
+    assert!(actual <= reservation);
+    assert!(reservation > TERMINAL_RESERVE);
+    assert!(reservation < TASK_CAPACITY - TERMINAL_RESERVE);
+    // The terminal transaction is covered by previously reserved nonterminal
+    // space; its admission cannot rely on TERMINAL_RESERVE by itself.
+    check_invocation_capacity(&tx, &task, &INVESTIGATION_V2_POLICY).unwrap();
+    let remaining = remaining_task_capacity(&tx, &fixture.id).unwrap();
+    let padding = remaining - (reservation - 1) - ordinary_row;
+    tx.execute("INSERT INTO investigation_responses VALUES (?1,'candidate-reservation-padding',zeroblob(?2),?3)", params![fixture.id, padding as i64, "0".repeat(64)]).unwrap();
+    assert_eq!(
+        check_invocation_capacity(&tx, &task, &INVESTIGATION_V2_POLICY),
+        Err(InvestigationStoreError::Capacity)
+    );
+    let after = load_task_base(&tx, &fixture.id).unwrap();
+    assert_eq!(after.detail.usage.model_invocations, 1);
+    tx.rollback().unwrap();
+}
+
+// AC-0281: exercise the registered V2 policy through the real durable route.
+#[test]
+fn completion_v2_durable_nonce_reopen_and_saved_policy_are_exact() {
+    let mut fixture = Fixture::registered_v2();
+    let before = fixture.store.investigation(&fixture.id).unwrap();
+    assert_eq!(before.limits, INVESTIGATION_V2_POLICY.limits());
+    assert_eq!(before.summary.specialist_id, SpecialistId::DomainAnalystV8);
+    let repeated = fixture
+        .store
+        .start_completion_investigation(&fixture.request, None)
+        .unwrap();
+    assert!(!repeated.created);
+    assert_eq!(repeated.detail, before);
+    let mut changed = fixture.request.clone();
+    changed.question.push('?');
+    assert!(matches!(
+        fixture.store.start_completion_investigation(&changed, None),
+        Err(InvestigationStoreError::Conflict)
+    ));
+    // A separately valid legacy family cannot reuse the nonce of the V2 task.
+    let mut legacy = fixture.request.clone();
+    legacy.schema_version = 4;
+    legacy.specialist_id = "domain-analyst@7".into();
+    legacy.limit_profile = INVESTIGATION_V1_POLICY.profile().into();
+    legacy.obligations.schema_version = 1;
+    legacy.obligations.contract = "investigation-completion-obligations@1".into();
+    assert!(matches!(
+        fixture.store.start_completion_investigation(&legacy, None),
+        Err(InvestigationStoreError::Conflict)
+    ));
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&fixture.id).unwrap(), before);
+    assert_eq!(
+        reopened
+            .investigation_completion_metadata(&fixture.id)
+            .unwrap()
+            .request_hash,
+        fixture
+            .request
+            .intent_hash_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap()
+    );
+    let tx = fixture.store.conn.transaction().unwrap();
+    let mut task = load_task_base(&tx, &fixture.id).unwrap();
+    task.detail.limits.tool_actions -= 1;
+    let body = encode(&task, MAX_RECORD_BYTES).unwrap();
+    tx.execute(
+        "UPDATE investigation_tasks SET record=?2,record_hash=?3 WHERE id=?1",
+        params![fixture.id, body, core_prov::content_hash(&body)],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(
+        reopened.investigation(&fixture.id).unwrap_err(),
+        InvestigationStoreError::Invalid
+    );
+}
+
+#[test]
+fn completion_v2_refusals_replay_exact_policy_and_publish_terminal_once() {
+    let mut fixture = Fixture::registered_v2();
+    let first = fixture.refuse();
+    assert_eq!(first.summary.status, InvestigationStatus::Running);
+    assert_eq!(first.completion.as_ref().unwrap().refusal_count, 1);
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&fixture.id).unwrap(), first);
+    let feedback = reopened
+        .investigation_completion_metadata(&fixture.id)
+        .unwrap();
+    feedback
+        .validate_with_policy(&INVESTIGATION_V2_POLICY)
+        .unwrap();
+    assert_eq!(feedback.refusal_count, 1);
+    let second = fixture.refuse();
+    assert_eq!(second.summary.status, InvestigationStatus::Failed);
+    assert_eq!(
+        second.summary.completion_outcome,
+        Some(InvestigationCompletionOutcome::ObligationsUnmet)
+    );
+    assert_eq!(second.usage.model_invocations, 2);
+    assert!(!second.summary.has_result);
+    let entries = staged::load(&fixture.store.conn, &fixture.id).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(
+        entries[1].record.previous_refusal.as_deref(),
+        Some(entries[0].record.refusal_id.as_str())
+    );
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&fixture.id).unwrap(), second);
+    assert!(
+        reopened
+            .investigation_result(&fixture.id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        reopened.investigation_history(None, None).unwrap().items[0],
+        second.summary
+    );
+}
+
+#[test]
+fn completion_v2_capacity_failure_precedes_invocation_and_token_reservation() {
+    let mut fixture = Fixture::registered_v2();
+    let (_, step) = fixture.prepare_step();
+    let before = fixture.store.investigation(&fixture.id).unwrap();
+    let tx = fixture.store.conn.transaction().unwrap();
+    let task = load_task_base(&tx, &fixture.id).unwrap();
+    let required = invocation_reservation_bytes(&task, &INVESTIGATION_V2_POLICY).unwrap();
+    let remaining = remaining_task_capacity(&tx, &fixture.id).unwrap();
+    let padding = remaining - (required - 1) - 64 - 256;
+    tx.execute(
+        "INSERT INTO investigation_responses VALUES (?1,'v2-capacity-padding',zeroblob(?2),?3)",
+        params![fixture.id, padding as i64, "0".repeat(64)],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        fixture.advance(InvestigationTransition::BeginInvocation { step }),
+        Err(InvestigationStoreError::Capacity)
+    );
+    let after = fixture.store.investigation(&fixture.id).unwrap();
+    assert_eq!(after.summary.revision, before.summary.revision);
+    assert_eq!(after.usage, before.usage);
+    let count: i64 = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT count(*) FROM investigation_invocations WHERE task_id=?1",
+            [&fixture.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&fixture.id).unwrap(), after);
+}
+
+#[test]
+fn completion_v2_nine_durable_reads_finish_and_reopen_without_v1_fallback() {
+    let mut fixture = Fixture::registered_v2();
+    for _ in 0..9 {
+        let (_, step) = fixture.step();
+        let Obligation::Inventory { target, .. } = &fixture.request.obligations.obligations[0]
+        else {
+            unreachable!()
+        };
+        let request = InvestigationCoverageRead {
+            context_id: target.context_id.clone(),
+            repo: target.repo.clone(),
+            inventory_hash: target.inventory_hash.clone(),
+            max_bytes: MAX_QUERY_BYTES,
+        };
+        let raw = serde_json::to_vec(&fixture.archive.read(&request).unwrap()).unwrap();
+        let read = ReadIntent::Inventory {
+            context_id: request.context_id.clone(),
+            repo: request.repo.clone(),
+            inventory_hash: request.inventory_hash.clone(),
+            max_bytes: request.max_bytes,
+        };
+        fixture
+            .advance(InvestigationTransition::ActionAdmitted {
+                response: Fixture::response(&step, staged::read_action_hash(&read).unwrap()),
+                tool: Some(InvestigationTool::ReadCoverageInventory),
+                result: None,
+            })
+            .unwrap();
+        fixture
+            .advance(InvestigationTransition::BeginTool {
+                tool: InvestigationTool::ReadCoverageInventory,
+            })
+            .unwrap();
+        let mut ledger = fixture
+            .store
+            .investigation_ledger(&fixture.id)
+            .unwrap()
+            .unwrap();
+        ledger.revision += 1;
+        ledger
+            .coverage_reads
+            .push(InvestigationCoverageReadManifest {
+                request,
+                response_hash: core_prov::content_hash(&raw),
+                response_bytes: raw.len(),
+            });
+        let usage = fixture.store.investigation(&fixture.id).unwrap().usage;
+        fixture
+            .advance(InvestigationTransition::InputAdmitted {
+                ledger: Box::new(ledger),
+                usage,
+            })
+            .unwrap();
+        fixture
+            .inventory_details
+            .push(String::from_utf8(raw).unwrap());
+    }
+    let acquired = fixture.store.investigation(&fixture.id).unwrap();
+    assert_eq!(acquired.usage.tool_actions, 9);
+    let ledger = fixture
+        .store
+        .investigation_ledger(&fixture.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ledger.coverage_reads.len(), 9);
+    assert!(ledger.validate().is_err());
+    ledger
+        .validate_with_policy(&INVESTIGATION_V2_POLICY)
+        .unwrap();
+    let attempts = fixture
+        .store
+        .investigation_completion_attempts(&fixture.id)
+        .unwrap();
+    let ledgers = fixture
+        .store
+        .investigation_completion_attempt_ledgers(&fixture.id)
+        .unwrap();
+    assert_eq!(attempts.len(), 9);
+    let evidence = attempts
+        .iter()
+        .zip(&ledgers)
+        .map(|(record, ledger)| AttemptEvidence { record, ledger })
+        .collect::<Vec<_>>();
+    let (input, step) = fixture.step();
+    let finish = Fixture::finish();
+    let result = input
+        .admit_completion_finish_with_policy(
+            &fixture.request,
+            &fixture.id,
+            &step.step_id,
+            step.disclosure.as_ref().unwrap(),
+            &finish,
+            &evidence,
+            Some("test-model".into()),
+            "2026-10-21T12:00:00Z".into(),
+            &INVESTIGATION_V2_POLICY,
+        )
+        .unwrap()
+        .ok()
+        .expect("nine durable reads must admit the honest finish");
+    let result_id = result.result_id.clone();
+    let response = Fixture::response(
+        &step,
+        core_prov::content_hash(&serde_json::to_vec(&finish).unwrap()),
+    );
+    let completed = fixture
+        .advance(InvestigationTransition::ActionAdmitted {
+            response,
+            tool: None,
+            result: Some(Box::new(result)),
+        })
+        .unwrap();
+    assert_eq!(completed.summary.status, InvestigationStatus::Completed);
+    assert_eq!(completed.usage.model_invocations, 10);
+    assert_eq!(
+        completed.summary.completion_outcome,
+        Some(InvestigationCompletionOutcome::InsufficientEvidence)
+    );
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&fixture.id).unwrap(), completed);
+    assert_eq!(
+        reopened
+            .investigation_result(&fixture.id)
+            .unwrap()
+            .unwrap()
+            .result_id,
+        result_id
+    );
 }

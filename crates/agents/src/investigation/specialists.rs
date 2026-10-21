@@ -86,6 +86,9 @@ inspection_requirements may be absent for a coverage-only investigation. If pres
 
 "#;
 
+const LEGACY_TARGET_LOCATION: &str = "inspection_requirements may be absent for a coverage-only investigation. If present, these are immutable caller-selected exact captured source targets.";
+const POLICY_TARGET_LOCATION: &str = "Exact captured source targets appear once in completion_contract.obligations: each source obligation's target is immutable and caller-selected. inspection_progress refers to these targets by target_id; there is no separate inspection_requirements array.";
+
 impl SpecialistId {
     pub fn uses_compact_disclosure(self) -> bool {
         matches!(
@@ -218,6 +221,11 @@ impl SpecialistId {
             };
             if self.uses_completion_obligations() {
                 let discovery = discovery.replace("A valid partial finish remains useful with outstanding targets; neither discharge nor citation proves whole-task correctness.", "A supported finish requires every mixed completion obligation exactly supplied; outstanding obligations cause a bounded refusal. Fulfillment does not prove semantic correctness.");
+                let discovery = if self.uses_policy_selection() {
+                    discovery.replace(LEGACY_TARGET_LOCATION, POLICY_TARGET_LOCATION)
+                } else {
+                    discovery
+                };
                 let common = common.replace(r#"{"type":"finish","findings"# , r#"{"schema_version":1,"outcome":"supported","action":{"type":"finish","findings"#).replace(r#"["Remaining coverage limitations."]}"#, r#"["Remaining coverage limitations."]}}"#);
                 format!(
                     "{role}\n\n{progress}{discovery}{common}\nCompletion obligations are mandatory. Return only the versioned finish wrapper with outcome supported or insufficient_evidence. Supported requires every obligation exactly supplied to this finishing invocation. Insufficient evidence requires an actual completed read attempt for every obligation, empty findings and explicit limitations. A refusal is not a read attempt; fixed completion_metadata feedback is not evidence. The host never chooses your next action."
@@ -287,7 +295,7 @@ mod policy_tests {
 
     #[test]
     fn opt_in_specialists_version_budget_text_without_mutating_legacy() {
-        // AC-0264: opt-in roles have distinct identities; legacy prompts retain limits.
+        // AC-0281: opt-in roles have distinct identities; legacy prompts retain limits.
         for (old, new) in [
             (SpecialistId::DomainAnalystV7, SpecialistId::DomainAnalystV8),
             (
@@ -301,10 +309,12 @@ mod policy_tests {
             assert!(!new_prompt.contains("at most8 model invocations and8 tool actions"));
             assert_eq!(
                 new_prompt,
-                old_prompt.replace(
-                    "at most8 model invocations and8 tool actions",
-                    "at most64 model invocations and56 tool actions"
-                )
+                old_prompt
+                    .replace(
+                        "at most8 model invocations and8 tool actions",
+                        "at most64 model invocations and56 tool actions"
+                    )
+                    .replace(LEGACY_TARGET_LOCATION, POLICY_TARGET_LOCATION)
             );
             assert_eq!(new.definition().unwrap().version, 8);
             assert_ne!(

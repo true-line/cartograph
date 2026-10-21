@@ -274,7 +274,11 @@ impl InvestigationInput {
         input.add_coverage_details(coverage_details)?;
         prompt = serde_json::from_str(&input.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
-        prompt["schema_version"] = 6.into();
+        prompt["schema_version"] = if policy.profile() == INVESTIGATION_V2_POLICY.profile() {
+            7.into()
+        } else {
+            6.into()
+        };
         prompt["completion_contract"] =
             serde_json::to_value(contract).map_err(|_| InvestigationError::InvalidInput)?;
         prompt["completion_metadata"] =
@@ -301,8 +305,12 @@ impl InvestigationInput {
         prompt["schema_version"] = 4.into();
         prompt["inspection_requirements_hash"] =
             inspection_requirements_hash_with_policy(&targets, policy)?.into();
-        prompt["inspection_requirements"] =
-            serde_json::to_value(&targets).map_err(|_| InvestigationError::InvalidInput)?;
+        // V2 supplies these exact descriptors once in completion_contract.
+        // Keep the private targets and their hash for finishing disclosure.
+        if policy.profile() != INVESTIGATION_V2_POLICY.profile() {
+            prompt["inspection_requirements"] =
+                serde_json::to_value(&targets).map_err(|_| InvestigationError::InvalidInput)?;
+        }
         prompt["inspection_progress"] = serde_json::json!({"requirements":targets.iter().map(|target|serde_json::json!({
             "target_id":target.target_id,"acquired":self.ledger.citations.iter().any(|citation|target.matches(citation)),
             "exact_supply":"determined_by_finishing_disclosure"})).collect::<Vec<_>>()});

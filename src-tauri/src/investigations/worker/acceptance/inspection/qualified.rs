@@ -161,7 +161,7 @@ fn prepare_with_inventory(
         Some(inventory_factory),
         |app, state, request| {
             let prepared =
-                FrozenContext::prepare_with_app(app, state, request, &[], Some(PREVIEW_CAPACITY))
+                FrozenContext::prepare_with_app(app, state, &*request, &[], Some(PREVIEW_CAPACITY))
                     .expect("Qualified preview failed before task creation");
             let archive = prepared.coverage_archive.unwrap();
             request.expected_context_id = Some(archive.proof().context_id.clone());

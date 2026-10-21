@@ -62,6 +62,23 @@ pub struct InvestigationCatalog {
     pub specialists: Vec<InvestigationSpecialist>,
     pub providers: Vec<InvestigationProvider>,
     pub limits: InvestigationLimits,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policies: Vec<InvestigationPolicyCatalogEntry>,
+}
+
+/// Host-owned closed choices; numeric fields describe the immutable policy,
+/// never caller-provided overrides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvestigationPolicyCatalogEntry {
+    pub limits: InvestigationLimits,
+    pub request_schema_version: u32,
+    pub envelope_schema_version: u32,
+    pub envelope_contract: String,
+    pub max_completion_obligations: usize,
+    pub request_bytes: usize,
+    pub envelope_bytes: usize,
+    pub specialist_ids: Vec<SpecialistId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

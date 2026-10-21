@@ -892,3 +892,163 @@ fn bounded_cloud_transport_requires_verified_tls_and_hostname() {
         }
     }
 }
+
+#[test]
+fn bounded_span_limits_require_explicit_capacity_and_reject_excess() {
+    // AC-0281: expanded source counts require a validated declaration; the
+    // default firewall retains its legacy12 allowance. No request is dispatched.
+    let local = OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test-model",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::local_only());
+    let spans = |count: usize| {
+        let mut input = action();
+        input.payload.spans = (0..count)
+            .map(|index| {
+                let mut span = input.payload.spans[0].clone();
+                span.id = format!("evidence-{index}");
+                span
+            })
+            .collect();
+        input
+    };
+    firewall
+        .prepare_bounded(&local, &spans(12), &CompletionLimits::default())
+        .unwrap();
+    assert_eq!(
+        firewall
+            .prepare_bounded(&local, &spans(13), &CompletionLimits::default())
+            .unwrap_err(),
+        not_sent(FailureCode::InvalidInput)
+    );
+    let expanded = CompletionLimits::new(CompletionLimitValues {
+        max_spans: 37,
+        ..Default::default()
+    })
+    .unwrap();
+    let prepared = firewall
+        .prepare_bounded(&local, &spans(37), &expanded)
+        .unwrap();
+    assert_eq!(prepared.preview().egress.payload.spans.len(), 37);
+    assert_eq!(prepared.limits().values().max_spans, 37);
+    assert_eq!(
+        firewall
+            .prepare_bounded(&local, &spans(38), &expanded)
+            .unwrap_err(),
+        not_sent(FailureCode::InvalidInput)
+    );
+    let maximum = CompletionLimits::new(CompletionLimitValues {
+        max_spans: 56,
+        ..Default::default()
+    })
+    .unwrap();
+    firewall
+        .prepare_bounded(&local, &spans(56), &maximum)
+        .unwrap();
+    assert_eq!(
+        firewall
+            .prepare_bounded(&local, &spans(57), &maximum)
+            .unwrap_err(),
+        not_sent(FailureCode::InvalidInput)
+    );
+    for max_spans in [0, 57] {
+        let values = CompletionLimitValues {
+            max_spans,
+            ..Default::default()
+        };
+        assert_eq!(
+            CompletionLimits::new(values).unwrap_err(),
+            not_sent(FailureCode::InvalidLimits)
+        );
+        assert!(
+            serde_json::from_str::<CompletionLimits>(&serde_json::to_string(&values).unwrap())
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn bounded_span_limits_preserve_legacy_wire_and_consent_identity() {
+    // AC-0281: omitted/default12 bytes and old hash recipe remain exact; a
+    // different explicit span allowance changes the consent-bound identity.
+    let literal = r#"{"input_bytes":131072,"request_bytes":524288,"response_bytes":262144,"output_text_bytes":32768,"max_output_tokens":2048,"request_timeout_ms":180000}"#;
+    let legacy: CompletionLimits = serde_json::from_str(literal).unwrap();
+    assert_eq!(legacy.values().max_spans, 12);
+    assert_eq!(legacy, CompletionLimits::default());
+    assert_eq!(serde_json::to_string(&legacy).unwrap(), literal);
+    assert_eq!(serde_json::to_string(&legacy.values()).unwrap(), literal);
+    let explicit12 = literal.replace('}', ",\"max_spans\":12}");
+    assert_eq!(
+        serde_json::from_str::<CompletionLimits>(&explicit12).unwrap(),
+        legacy
+    );
+    let cloud = AnthropicProvider::with_endpoint(
+        ClaudeLane::Opus,
+        "fixture-key",
+        "https://example.invalid/".into(),
+    )
+    .unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::allow_cloud_for([AnalysisTier::Agentic]));
+    let input = action();
+    let prepared = firewall.prepare_bounded(&cloud, &input, &legacy).unwrap();
+    #[derive(serde::Serialize)]
+    struct LegacyLimits {
+        input_bytes: u64,
+        request_bytes: u64,
+        response_bytes: u64,
+        output_text_bytes: u64,
+        max_output_tokens: u32,
+        request_timeout_ms: u64,
+    }
+    let old_values = LegacyLimits {
+        input_bytes: 131072,
+        request_bytes: 524288,
+        response_bytes: 262144,
+        output_text_bytes: 32768,
+        max_output_tokens: 2048,
+        request_timeout_ms: 180000,
+    };
+    let old_hash_bytes = serde_json::to_vec(&(
+        "cartograph-bounded-egress-v1",
+        prepared.profile(),
+        old_values,
+        input.tier,
+        &input.action_id,
+        &prepared.preview().egress.payload,
+    ))
+    .unwrap();
+    assert_eq!(
+        prepared.preview().egress.payload_hash,
+        blake3::hash(&old_hash_bytes).to_hex().to_string()
+    );
+    let grant = ConsentGrant::from_preview(&prepared.preview().egress);
+    let expanded = CompletionLimits::new(CompletionLimitValues {
+        max_spans: 37,
+        ..legacy.values()
+    })
+    .unwrap();
+    let encoded = serde_json::to_string(&expanded).unwrap();
+    assert!(encoded.ends_with(",\"max_spans\":37}"));
+    assert_eq!(
+        serde_json::from_str::<CompletionLimits>(&encoded).unwrap(),
+        expanded
+    );
+    let changed = firewall.prepare_bounded(&cloud, &input, &expanded).unwrap();
+    assert_ne!(
+        prepared.preview().egress.payload_hash,
+        changed.preview().egress.payload_hash
+    );
+    assert_eq!(
+        firewall
+            .authorize_bounded(&cloud, &changed, Some(&grant))
+            .err()
+            .unwrap(),
+        not_sent(FailureCode::ConsentMismatch)
+    );
+    firewall
+        .authorize_bounded(&cloud, &prepared, Some(&grant))
+        .unwrap();
+}

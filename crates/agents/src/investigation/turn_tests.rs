@@ -228,7 +228,14 @@ fn v4_sealing_protects_turn_state_and_legacy_input_requires_explicit_version() {
         .prepare_bounded(&provider, &changed, &CompletionLimits::default())
         .unwrap();
     assert!(
-        crate::investigation::sealing::seal(input.ledger(), &action.payload, &prepared).is_err()
+        crate::investigation::sealing::seal_with_policy(
+            input.ledger(),
+            &action.payload,
+            &prepared,
+            &INVESTIGATION_V1_POLICY,
+            None
+        )
+        .is_err()
     );
     assert_ne!(
         SpecialistId::DomainAnalystV4
@@ -239,6 +246,57 @@ fn v4_sealing_protects_turn_state_and_legacy_input_requires_explicit_version() {
             .definition()
             .unwrap()
             .prompt_fingerprint
+    );
+}
+
+#[test]
+fn sealing_binds_the_explicit_policy_to_supplied_limits() {
+    let current = initial();
+    let input = input(&current, None, None, &[]);
+    let provider = OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test-model",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let action = input.action("inv:step".into()).unwrap();
+    let prepared = firewall
+        .prepare_bounded(&provider, &action, &CompletionLimits::default())
+        .unwrap();
+    // The v1 wrapper and the explicit v1 path seal the identical record.
+    let v1 = input.seal_disclosure(&prepared).unwrap().unwrap();
+    let explicit = input
+        .seal_disclosure_with_policy(&prepared, &INVESTIGATION_V1_POLICY)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&v1).unwrap(),
+        serde_json::to_value(&explicit).unwrap()
+    );
+    // A policy other than the one whose limits were supplied is refused, and so
+    // is a firewall representation whose limits were changed in transit.
+    assert!(
+        input
+            .seal_disclosure_with_policy(&prepared, &INVESTIGATION_V2_POLICY)
+            .is_err()
+    );
+    let mut changed = action.clone();
+    let mut value: serde_json::Value = serde_json::from_str(&changed.payload.prompt).unwrap();
+    value["limits"] = serde_json::to_value(INVESTIGATION_V2_POLICY.limits()).unwrap();
+    changed.payload.prompt = value.to_string();
+    let prepared = firewall
+        .prepare_bounded(&provider, &changed, &CompletionLimits::default())
+        .unwrap();
+    assert!(
+        crate::investigation::sealing::seal_with_policy(
+            input.ledger(),
+            &action.payload,
+            &prepared,
+            &INVESTIGATION_V1_POLICY,
+            None
+        )
+        .is_err()
     );
 }
 

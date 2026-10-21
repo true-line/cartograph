@@ -361,6 +361,25 @@ Initial hard ceiling profile (the host may narrow it, never silently enlarge it)
 | Frozen canonical graph / combined node and edge rows | 32 MiB / 50,000 |
 | Graph JSON depth / cumulative JSON values | 32 / 1,000,000 |
 
+**Explicit opt-in policy (ADR-0040, AC-0281).** The table above remains the
+immutable default `investigation-v1`. The separately selected `investigation-v2`
+contract uses request generation 5, envelope generation 2 and @8 specialists.
+Its ceilings are 56 tool actions, 64 invocations, 56 obligations/evidence items,
+64 KiB request/envelope/acquired source bytes, 512 journal events and 131,072
+generated-token reservations. Other table limits remain unchanged. Registration
+is gated on complete admission, execution, replay and capacity validation.
+The UI freezes this explicit choice with the request across uncertain retries.
+
+V2 prompt schema 7 carries each exact source target once, in the completion
+contract. Its inspection hash and ordered progress bind to the host's private
+admitted targets during firewall sealing. V1 prompt bytes remain unchanged.
+The bounded transport resolves `max_spans` from the saved policy's evidence-item
+ceiling; its default 12 is omitted from serialized limits to preserve historical
+hashes, while a nondefault allowance participates in the consent hash. No profile
+enlarges the 128 KiB serialized input ceiling. Independent maxima need not fit
+together; overflowing combinations fail before provider dispatch, without
+silently dropping source text. Policy approval does not authorize provider runs.
+
 Bounds are independent. Enforce task/conversation counts and the aggregate 2-MiB
 per-task reservation in the same IMMEDIATE start transaction. Queued, consent-waiting,
 cancellation-pending and failed ownership observations continue to consume one of

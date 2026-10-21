@@ -30,6 +30,8 @@ impl JobStore {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let task = load_task(&tx, id)?;
+        let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+            .ok_or(InvestigationStoreError::Invalid)?;
         let current = load_ledger(&tx, &task)?.ok_or(InvestigationStoreError::Invalid)?;
         let previous_ledger = if let Some(revision) = current.revision.checked_sub(1) {
             Some(
@@ -47,11 +49,11 @@ impl JobStore {
         };
         let completed_tool = completed_tool(&tx, &task, current.revision)?;
         let basis = InvestigationTurnBasis {
-            input_ledger_hash: current.fingerprint()?,
+            input_ledger_hash: current.fingerprint_with_policy(policy)?,
             previous_ledger,
             completed_tool,
         };
-        basis.validate(&current)?;
+        basis.validate_with_policy(&current, policy)?;
         tx.commit()?;
         Ok(basis)
     }
