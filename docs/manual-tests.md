@@ -572,7 +572,7 @@ transcripts, durations, task records, and restart evidence.
 **Issue #652. Procedure: UNEXECUTED. H4/H5 remain PLANNED.**
 
 The frozen [revision 2 protocol](acceptance/v7-completion-control-v2.md) has SHA-256
-`6f584efbfa7f91a002eea4735294096a87979e4e4e4ffff618d92d00f09ad911e7`.
+`6f584efbfa7f91a002eea4735294096a87979e4e4ffff618d92d00f09ad911e7`.
 Its historical draft header is preserved byte-for-byte. This procedure implements
 that protocol; neither the document nor a successful scripted test authorizes a
 provider invocation. Integrate and review the prerequisite stack before execution.
