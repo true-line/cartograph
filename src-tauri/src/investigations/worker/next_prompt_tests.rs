@@ -222,6 +222,14 @@ impl LlmProvider for NextProvider {
                 "limitations":["No inventory acquisition has completed."]}})
             .to_string()
         };
+        if call == 2
+            && let Some(cancel) = self.observed.cancel.lock().unwrap().as_ref()
+        {
+            // The final response has been computed while the invocation is in
+            // flight. A late durable cancel must not rebase that valid finish.
+            cancel();
+            assert_eq!((control.check)(), CallDirective::Cancelled);
+        }
         Ok(BoundedCompletion {
             text,
             requested_model: "scripted-model".into(),
@@ -670,4 +678,176 @@ pub(in crate::investigations) fn with_public_start_fixture(
         request.request_nonce = "public-command-activation-fixture".into();
     }
     test(fixture.base.app.handle(), request, &fixture.base.app_data);
+}
+
+// AC-0187, AC-0287: cancellation during a dispatched completion preserves a
+// valid finish bound to its actual supplied input, without another acquisition.
+#[test]
+fn next_prompt_worker_late_inflight_cancel_retains_valid_finish_against_original_input() {
+    let mut scripted = NextProvider::new(false);
+    scripted.source_scenario = Some(SourceScenario::Acquired);
+    let provider = Arc::new(scripted);
+    let fixture = NextFixture::with_source_obligation(
+        provider.as_ref(),
+        SpecialistId::DomainAnalystV10,
+        true,
+    );
+    let app = fixture.base.base.app.handle().clone();
+    let id = fixture.id.clone();
+    let cancelled_basis = Arc::new(Mutex::new(None));
+    let observed_basis = cancelled_basis.clone();
+    *provider.observed.cancel.lock().unwrap() = Some(Box::new(move || {
+        let state = app.state::<AppState>();
+        let mut jobs = state.jobs.lock().unwrap();
+        let before = jobs.investigation(&id).unwrap();
+        assert_eq!(before.summary.status, InvestigationStatus::Running);
+        assert_eq!(before.usage.model_invocations, 3);
+        assert_eq!(before.usage.tool_actions, 2);
+        assert_eq!(before.usage.evidence_requests, 1);
+        let ledger = jobs.investigation_ledger(&id).unwrap().unwrap();
+        let cancelled = jobs.cancel_next_prompt_investigation(&id).unwrap();
+        assert!(cancelled.summary.cancel_requested);
+        assert_eq!(cancelled.summary.revision, before.summary.revision + 1);
+        assert_eq!(
+            cancelled.summary.last_event_sequence,
+            before.summary.last_event_sequence + 1
+        );
+        assert_eq!(cancelled.summary.status, before.summary.status);
+        assert!(before.summary.invocation_pending && cancelled.summary.invocation_pending);
+        assert_eq!(cancelled.usage, before.usage);
+        assert_eq!(cancelled.citations, before.citations);
+        assert!(
+            observed_basis
+                .lock()
+                .unwrap()
+                .replace((before.usage, ledger))
+                .is_none()
+        );
+    }));
+    fixture.run(provider.clone());
+    let state = fixture.base.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs
+        .investigation_owned_detail(&fixture.execution, &fixture.id)
+        .unwrap();
+    assert_eq!(
+        detail.summary.status,
+        InvestigationStatus::Completed,
+        "{:?}",
+        detail.error
+    );
+    assert!(detail.summary.cancel_requested);
+    assert_eq!(
+        detail.summary.completion_outcome,
+        Some(InvestigationCompletionOutcome::Supported)
+    );
+    assert!(detail.summary.has_result);
+    assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(provider.observed.prompts.lock().unwrap().len(), 3);
+    assert_eq!(detail.usage.model_invocations, 3);
+    assert_eq!(detail.usage.reported_input_tokens, Some(300));
+    assert_eq!(detail.usage.reported_output_tokens, Some(120));
+    assert_eq!(detail.usage.tool_actions, 2);
+    assert_eq!(detail.usage.evidence_requests, 1);
+    assert_eq!(detail.usage.evidence_items, 1);
+    assert_eq!(detail.completion.as_ref().unwrap().refusal_count, 0);
+    let (before, ledger) = cancelled_basis
+        .lock()
+        .unwrap()
+        .take()
+        .expect("cancel ran inside final call");
+    assert_eq!(
+        detail.usage.captured_validation_bytes,
+        before.captured_validation_bytes
+    );
+    assert_eq!(detail.usage.evidence_bytes, before.evidence_bytes);
+    assert_eq!(
+        jobs.investigation_ledger(&fixture.id).unwrap().unwrap(),
+        ledger
+    );
+    let result = jobs.investigation_result(&fixture.id).unwrap().unwrap();
+    assert_eq!(result.schema_version, 7);
+    assert_eq!(result.invocation_step_id.as_deref(), Some("step-3"));
+    assert_eq!(
+        result.input_ledger_hash,
+        ledger
+            .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap()
+    );
+    assert_eq!(result.graph_snapshot_id, ledger.graph_snapshot_id);
+    assert_eq!(
+        provider.observed.prompts.lock().unwrap()[2]["input_ledger_hash"],
+        result.input_ledger_hash
+    );
+    let connection =
+        rusqlite::Connection::open(fixture.base.base.app_data.join("state.db")).unwrap();
+    let invocation: Vec<u8> = connection
+        .query_row(
+            "SELECT body FROM investigation_invocations WHERE task_id=?1 AND step_id='step-3'",
+            [&fixture.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let invocation: PendingInvestigationStep = serde_json::from_slice(&invocation).unwrap();
+    result
+        .validate_with_disclosure_and_policy(
+            &ledger,
+            "step-3",
+            invocation.disclosure.as_ref().unwrap(),
+            &INVESTIGATION_V2_POLICY,
+        )
+        .unwrap();
+    for (table, count) in [
+        ("investigation_invocations", 3),
+        ("investigation_responses", 3),
+        ("completion_attempts", 1),
+        ("investigation_read_reservations", 1),
+    ] {
+        let saved: i64 = connection
+            .query_row(
+                &format!("SELECT count(*) FROM {table} WHERE task_id=?1"),
+                [&fixture.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            saved, count,
+            "{table}: no retry or acquisition after late cancel"
+        );
+    }
+    let events = jobs.investigation_events(&fixture.id, 0).unwrap();
+    assert!(!events.has_more);
+    assert!(!events.items.iter().any(|event| matches!(
+        event.kind,
+        InvestigationEventKind::FinishRefused | InvestigationEventKind::CapacityRefused
+    )));
+    let cancel = events
+        .items
+        .iter()
+        .position(|event| event.kind == InvestigationEventKind::CancelRequested)
+        .unwrap();
+    assert!(events.items[cancel + 1..].iter().all(|event| !matches!(
+        event.kind,
+        InvestigationEventKind::ModelStarted
+            | InvestigationEventKind::ToolStarted
+            | InvestigationEventKind::EvidenceValidationReserved
+    )));
+    assert!(
+        events.items[cancel + 1..]
+            .iter()
+            .any(|event| event.kind == InvestigationEventKind::ResultPersisted)
+    );
+    assert_eq!(jobs.investigation(&fixture.id).unwrap(), detail);
+    drop(jobs);
+    let reopened =
+        crate::jobs::JobStore::open(fixture.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&fixture.id).unwrap(), detail);
+    assert_eq!(
+        reopened.investigation_result(&fixture.id).unwrap().unwrap(),
+        result
+    );
+    assert_eq!(
+        serde_json::to_string(&state.graph.lock().unwrap().read_snapshot().unwrap()).unwrap(),
+        fixture.base.base.graph_before
+    );
 }

@@ -51,12 +51,31 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         };
         // A response is admitted once against its authenticated saved call.
         // A lost revision or acknowledgement is not permission to resubmit it.
+        // Read the current revision once so a cancellation during the call can
+        // retain a valid late finish (AC-0187). The writer authenticates the
+        // original saved call/input; this does not rebase an acquisition.
         let detail = {
             let mut jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
             let current = jobs.investigation_owned_detail(self.execution, self.id)?;
             if terminal(current.summary.status) {
                 return Err(Failure::AlreadyTerminal);
             }
+            let basis = &self.detail.summary;
+            let same_basis = current.summary.revision == basis.revision;
+            let cancel_only = !basis.cancel_requested
+                && current.summary.cancel_requested
+                && basis.revision.checked_add(1) == Some(current.summary.revision)
+                && basis.last_event_sequence.checked_add(1)
+                    == Some(current.summary.last_event_sequence)
+                && current.summary.status == basis.status
+                && current.summary.invocation_pending
+                && basis.invocation_pending
+                && current.usage == self.detail.usage;
+            if !same_basis && !cancel_only {
+                return Err(InvestigationStoreError::Stale.into());
+            }
+            // The writer also requires Invocation and authenticates the exact
+            // saved step/input, so the cancellation exception cannot rebind it.
             jobs.admit_next_prompt_finish(
                 self.execution,
                 current.summary.revision,
