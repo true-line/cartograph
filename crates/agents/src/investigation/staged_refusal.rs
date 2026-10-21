@@ -218,7 +218,8 @@ pub struct FinishCallReserve {
 
 /// Resource-only next-turn decision. Neither variant authorizes dispatch or
 /// proves byte capacity; the host must also certify that mode's exact input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CompletionCallMode {
     Choice,
     FinishOnly,

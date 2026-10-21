@@ -277,7 +277,7 @@ pub fn admit_finish_with_policy(
         return Err(InvestigationError::InvalidInput);
     }
     let ledger = input.ledger();
-    if matches!(disclosure.schema_version, 4 | 5) {
+    if matches!(disclosure.schema_version, 4..=6) {
         input.validate_completion_binding_with_policy(&request, disclosure, attempts, policy)?;
     }
     if request
@@ -346,7 +346,7 @@ pub fn admit_finish_with_policy(
         attempts,
         policy,
     )?;
-    let completion = if matches!(disclosure.schema_version, 4 | 5) {
+    let completion = if matches!(disclosure.schema_version, 4..=6) {
         Some(InvestigationCompletionResult {
             schema_version: 1,
             outcome: finish.outcome,

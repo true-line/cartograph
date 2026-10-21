@@ -446,13 +446,30 @@ impl InvestigationInput {
         if !prepared.matches_action(&action) {
             return Err(InvestigationError::InvalidInput);
         }
-        super::sealing::seal_with_policy(
-            &self.ledger,
-            &self.payload,
-            prepared,
-            policy,
-            self.inspection_requirements.as_deref(),
-        )
+        let prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let admission = if prompt["schema_version"] == 9 {
+            Some(self.disclosed_admission_with_policy(policy)?)
+        } else {
+            None
+        };
+        match admission {
+            Some(admission) => super::sealing::seal_with_admission_policy(
+                &self.ledger,
+                &self.payload,
+                prepared,
+                policy,
+                self.inspection_requirements.as_deref(),
+                Some(admission),
+            ),
+            None => super::sealing::seal_with_policy(
+                &self.ledger,
+                &self.payload,
+                prepared,
+                policy,
+                self.inspection_requirements.as_deref(),
+            ),
+        }
         .map(Some)
     }
 
@@ -495,15 +512,24 @@ impl InvestigationInput {
             serde_json::from_value(prompt["completion_metadata"].clone())
                 .map_err(|_| InvestigationError::InvalidInput)?;
         let request = request.normalized_with_policy(policy)?;
-        let progressive = request.schema_version == 6;
+        let progressive = matches!(request.schema_version, 6 | 7);
+        let admission = request.schema_version == 7;
         let schema = match request.schema_version {
             4 => 6,
             5 => 7,
             6 => 8,
+            7 => 9,
             _ => return Err(InvestigationError::InvalidInput),
         };
         if prompt["schema_version"] != schema
-            || disclosure.schema_version != if progressive { 5 } else { 4 }
+            || disclosure.schema_version
+                != if admission {
+                    6
+                } else if progressive {
+                    5
+                } else {
+                    4
+                }
             || (progressive
                 && disclosure
                     .query_history
@@ -524,6 +550,14 @@ impl InvestigationInput {
             || disclosure.completion_metadata_hash.as_deref()
                 != Some(metadata.fingerprint_with_policy(policy)?.as_str())
         {
+            return Err(InvestigationError::InvalidInput);
+        }
+        if admission {
+            if disclosure.admission.as_ref() != Some(&self.disclosed_admission_with_policy(policy)?)
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+        } else if disclosure.admission.is_some() {
             return Err(InvestigationError::InvalidInput);
         }
         Ok(())
@@ -572,7 +606,13 @@ impl InvestigationInput {
     ) -> Result<Result<InvestigationResult, staged_finish::FinishDecision>, InvestigationError>
     {
         let request = request.normalized_with_policy(policy)?;
-        if disclosure.schema_version != if request.schema_version == 6 { 5 } else { 4 } {
+        if disclosure.schema_version
+            != match request.schema_version {
+                7 => 6,
+                6 => 5,
+                _ => 4,
+            }
+        {
             return Err(InvestigationError::InvalidInput);
         }
         let request = &request;

@@ -40,7 +40,7 @@ pub struct AdmissionCapacityFeedback {
 }
 
 impl AdmissionCapacityFeedback {
-    fn validate(&self) -> Result<(), InvestigationError> {
+    pub(in crate::investigation) fn validate(&self) -> Result<(), InvestigationError> {
         if self.schema_version != 1 || !crate::source_basis::hash(&self.action_hash) {
             return Err(InvestigationError::InvalidInput);
         }
@@ -524,6 +524,34 @@ impl InvestigationInput {
             policy,
             Some((span_index, bytes)),
         )
+    }
+
+    /// The actual prompt's disclosed state, never a synthetic reserve view.
+    /// Host journal comparison remains necessary to authenticate feedback/count.
+    pub(in crate::investigation) fn disclosed_admission_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<DisclosedAdmissionState, InvestigationError> {
+        let (prompt, _) = self.admission_reserve_basis(policy)?;
+        let progress = &prompt["turn_progress"];
+        let state = DisclosedAdmissionState {
+            schema_version: 1,
+            mode: serde_json::from_value(progress["admission_mode"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?,
+            consumed_budgets: serde_json::from_value(prompt["consumed_budgets"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?,
+            capacity_refusal_count: serde_json::from_value(
+                progress["capacity_refusal_count"].clone(),
+            )
+            .map_err(|_| InvestigationError::InvalidInput)?,
+            capacity_feedback: serde_json::from_value(progress["capacity_feedback"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?,
+            turn_progress_hash: core_prov::content_hash(&bounded_bytes(progress, MAX_INPUT_BYTES)?),
+        };
+        let metadata = serde_json::from_value(prompt["completion_metadata"].clone())
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        state.validate_with_metadata(&metadata, policy)?;
+        Ok(state)
     }
 
     fn admission_reserve_basis(

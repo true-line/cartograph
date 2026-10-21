@@ -31,6 +31,7 @@ fn fixture(
     };
     let request_hash = "a".repeat(64);
     let disclosure = InvestigationDisclosure {
+        admission: None,
         schema_version: if progressive { 5 } else { 4 },
         query_history: progressive.then(|| {
             DisclosedQueryHistory::from_ledger(&request_hash, &ledger, &INVESTIGATION_V2_POLICY)

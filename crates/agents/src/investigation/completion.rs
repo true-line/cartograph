@@ -349,6 +349,10 @@ impl InvestigationCompletionDetail {
                     && value
                         .strip_prefix("investigation-disclosure-v5:")
                         .is_some_and(hash))
+                || (policy.profile() == INVESTIGATION_V2_POLICY.profile()
+                    && value
+                        .strip_prefix("investigation-disclosure-v6:")
+                        .is_some_and(hash))
         };
         let basis_ok = match &self.assessment_basis {
             CompletionAssessmentBasis::NotAssessed => {
@@ -447,10 +451,12 @@ impl InvestigationResult {
     ) -> Result<(), InvestigationError> {
         let request = request.normalized_with_policy(policy)?;
         request.validate_ledger_with_policy(ledger, policy)?;
-        let progressive = request.schema_version == 6;
-        if disclosure.schema_version != if progressive { 5 } else { 4 }
-            || self.schema_version != if progressive { 6 } else { 5 }
-        {
+        let (disclosure_schema, result_schema) = match request.schema_version {
+            7 => (6, 7),
+            6 => (5, 6),
+            _ => (4, 5),
+        };
+        if disclosure.schema_version != disclosure_schema || self.schema_version != result_schema {
             return Err(InvestigationError::InvalidInput);
         }
         self.validate_completion_for_binding_with_policy(

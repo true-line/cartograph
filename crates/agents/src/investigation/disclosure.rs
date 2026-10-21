@@ -167,6 +167,8 @@ impl DisclosedQueryHistory {
 #[serde(deny_unknown_fields)]
 pub struct InvestigationDisclosure {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<DisclosedAdmissionState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_history: Option<DisclosedQueryHistory>,
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -228,6 +230,13 @@ impl InvestigationDisclosure {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        let admission = self.admission.is_some();
+        if let Some(state) = &self.admission {
+            state.validate_with_policy(policy)?;
+            if !completion || self.query_history.is_none() {
+                return Err(InvestigationError::InvalidInput);
+            }
+        }
         let progressive = self.query_history.is_some();
         if let Some(history) = &self.query_history
             && (!completion
@@ -237,7 +246,9 @@ impl InvestigationDisclosure {
             return Err(InvestigationError::InvalidInput);
         }
         if self.schema_version
-            != if progressive {
+            != if admission {
+                6
+            } else if progressive {
                 5
             } else if completion {
                 4
@@ -373,7 +384,12 @@ impl InvestigationDisclosure {
         policy: &InvestigationPolicy,
     ) -> Result<String, InvestigationError> {
         self.validate_with_policy(ledger, policy)?;
-        let (prefix, domain): (&str, &[u8]) = if self.schema_version == 5 {
+        let (prefix, domain): (&str, &[u8]) = if self.schema_version == 6 {
+            (
+                "investigation-disclosure-v6",
+                b"cartograph:investigation-disclosure:v6\0",
+            )
+        } else if self.schema_version == 5 {
             (
                 "investigation-disclosure-v5",
                 b"cartograph:investigation-disclosure:v5\0",
@@ -426,3 +442,7 @@ impl InvestigationDisclosure {
             .collect())
     }
 }
+
+#[path = "disclosure_admission.rs"]
+mod admission;
+pub use admission::DisclosedAdmissionState;
