@@ -73,6 +73,7 @@ const _: () = {
         // Evaluate checked derived capacities for every registered policy.
         assert!(POLICIES[index].max_completed_attempts() <= MAX_STORED_COMPLETION_ATTEMPTS);
         assert!(POLICIES[index].selected_facts <= super::MAX_SELECTED_FACTS);
+        assert!(POLICIES[index].evidence_items <= llm::bounded::MAX_COMPLETION_SPANS as usize);
         index += 1;
     }
 };

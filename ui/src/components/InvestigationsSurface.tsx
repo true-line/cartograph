@@ -35,13 +35,13 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const provider = state.catalog?.providers.find((item) => item.mode === providerMode);
   const summary = state.detail ?? state.history.find((item) => item.investigation_id === state.selectedId);
-  const selectedSpecialistAvailable = Boolean(state.catalog?.specialists.some((item) => item.id === specialistId));
   const questionBytes = new TextEncoder().encode(question).length;
   const locked = state.starting || state.pendingStart !== null;
   const requirements = state.draftInspectionRequirements;
   const completionVersion = specialistId.endsWith('@7') || specialistId.endsWith('@8');
   const profile = state.composer.limitProfile ?? 'investigation-v1';
   const policy = investigationPolicy(state.catalog, profile, specialistId);
+  const selectedSpecialistAvailable = Boolean(policy && state.catalog?.specialists.some((item) => item.id === specialistId));
   const limits = policy?.limits ?? (profile === 'investigation-v1' ? state.catalog?.limits : undefined);
   const requestLimit = policy?.request_bytes ?? 8192;
   const choices = state.obligationChoices;
@@ -100,7 +100,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
           </label>)}</div>
       </fieldset>
       {state.catalog && !state.catalogLoading && !selectedSpecialistAvailable && <p role="status">
-        Selected specialist <code>{specialistId}</code> is unavailable. Choose an available specialist explicitly to continue.
+        Selected specialist <code>{specialistId}</code> is unavailable for this investigation budget. Choose an available specialist explicitly to continue.
         {parent && ' The saved parent keeps its original specialist version.'}
       </p>}
       {state.catalogLoading && <p role="status">Loading specialists…</p>}

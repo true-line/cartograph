@@ -2,7 +2,8 @@ use super::*;
 
 #[test]
 fn investigation_saved_policy_rejects_rehashed_tampering_after_reopen() {
-    // AC-0188: a valid record hash does not authorize caller-selected limits.
+    // AC-0188, AC-0281: a valid record hash does not authorize caller-selected
+    // limits, including another registered policy for a legacy specialist.
     let mut fixture = Fixture::new();
     let detail = fixture
         .store
@@ -22,12 +23,22 @@ fn investigation_saved_policy_rejects_rehashed_tampering_after_reopen() {
             |row| row.get(0),
         )
         .unwrap();
-    for mutation in ["unknown_profile", "more_calls", "less_tokens"] {
+    for mutation in [
+        "unknown_profile",
+        "more_calls",
+        "less_tokens",
+        "other_registered_policy",
+    ] {
         let mut task: StoredTask = serde_json::from_slice(&original).unwrap();
         match mutation {
-            "unknown_profile" => task.detail.limits.profile = "investigation-v2".into(),
+            "unknown_profile" => task.detail.limits.profile = "investigation-unknown".into(),
             "more_calls" => task.detail.limits.model_invocations += 1,
             "less_tokens" => task.detail.limits.generated_token_reservations -= 1,
+            "other_registered_policy" => {
+                task.detail.limits = INVESTIGATION_V2_POLICY.limits();
+                assert!(InvestigationPolicy::for_limits(&task.detail.limits).is_some());
+                assert!(!task.detail.summary.specialist_id.uses_policy_selection());
+            }
             _ => unreachable!(),
         }
         let bytes = serde_json::to_vec(&task).unwrap();
@@ -39,6 +50,16 @@ fn investigation_saved_policy_rejects_rehashed_tampering_after_reopen() {
                 params![id, bytes, core_prov::content_hash(&bytes)],
             )
             .unwrap();
+        assert_eq!(
+            fixture.store.investigation(id).unwrap_err(),
+            InvestigationStoreError::Invalid,
+            "read {mutation}"
+        );
+        assert_eq!(
+            fixture.store.investigation_history(None, None).unwrap_err(),
+            InvestigationStoreError::Invalid,
+            "history {mutation}"
+        );
         let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
         assert_eq!(
             reopened.investigation(id).unwrap_err(),

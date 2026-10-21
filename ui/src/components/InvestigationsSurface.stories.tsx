@@ -528,3 +528,26 @@ export const ExpandedStartUncertain: Story = {
     await expect(args.state.start).not.toHaveBeenCalled();
   },
 };
+
+
+export const ExpandedBudgetRequiresCompatibleSpecialist: Story = {
+  // AC-0281: switching a legacy role to expanded budget explains the required explicit selection.
+  args: { state: state({ catalog: expandedCompletionCatalog, obligationChoices: completionChoices,
+    draftObligations: [inventoryObligation], detail: null, selectedId: null }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
+    await userEvent.type(canvas.getByLabelText('Question'), 'Inspect required evidence.');
+    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
+    await expect(canvas.getByText(/is unavailable for this investigation budget/)).toBeVisible();
+    await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled();
+    for (const radio of canvas.getAllByRole('radio')) await expect(radio).not.toBeChecked();
+    await expect(args.state.start).not.toHaveBeenCalled();
+    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@8/ }));
+    await expect(canvas.queryByText(/is unavailable for this investigation budget/)).not.toBeInTheDocument();
+    await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeEnabled();
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@8',
+      limit_profile: 'investigation-v2', obligations: expect.objectContaining({ schema_version: 2 }) }));
+  },
+};

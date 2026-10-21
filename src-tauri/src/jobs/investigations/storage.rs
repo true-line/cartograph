@@ -272,7 +272,8 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
         || detail.specialist != summary.specialist_id.definition()?
         || detail.provider.mode != summary.provider_mode
-        || InvestigationPolicy::for_limits(&detail.limits).is_none()
+        || summary.specialist_id.uses_policy_selection()
+            != (policy.profile() == INVESTIGATION_V2_POLICY.profile())
         || redacted_history_text(&summary.question, MAX_QUESTION_BYTES)? != summary.question
         || summary.last_event_sequence > journal_event_limit(task)?
         || summary.actions.can_cancel

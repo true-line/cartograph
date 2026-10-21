@@ -17,6 +17,9 @@ pub const PROTOCOL_VERSION: &str = "bounded-json-completion@2";
 /// shortens connection establishment; clients never get rebuilt for an invocation.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Maximum source spans accepted by the bounded completion transport.
+pub const MAX_COMPLETION_SPANS: u32 = 56;
+
 /// Serializable declared limits. Deserialize through [`CompletionLimits`] before
 /// trusting caller-supplied values. All byte counts exclude HTTP/TLS framing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,7 +80,7 @@ impl CompletionLimits {
                 u64::from(ceiling.max_output_tokens),
             ),
             (values.request_timeout_ms, ceiling.request_timeout_ms),
-            (u64::from(values.max_spans), 56),
+            (u64::from(values.max_spans), u64::from(MAX_COMPLETION_SPANS)),
         ];
         if pairs.iter().any(|(value, max)| *value == 0 || value > max) {
             return Err(not_sent(FailureCode::InvalidLimits));
