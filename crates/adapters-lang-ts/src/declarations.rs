@@ -22,52 +22,23 @@ pub(super) fn emit(
     out: &mut Extraction,
     mut direct: Option<&mut captured::DirectFacts>,
 ) {
-    let mut push = |node: Node, edge: Edge, out: &mut Extraction| {
+    let mut push = |node: Node, edge: Edge, local: bool, out: &mut Extraction| {
         if let Some(direct) = direct.as_deref_mut() {
-            direct.declarations.insert(node.id.clone(), node.clone());
+            let facts = if local {
+                &mut direct.locals
+            } else {
+                &mut direct.declarations
+            };
+            facts.insert(node.id.clone(), node.clone());
         }
         out.nodes.push(node);
         out.edges.push(edge);
     };
     let file = file_id(cx.id.repo, cx.path);
-    let top = top_level_declarators(root);
-    let names = unique_names(cx, &top, |cx, declarator| {
-        declarator
-            .child_by_field_name("name")
-            .filter(|name| name.kind() == "identifier")
-            .map(|name| cx.text(&name).to_owned())
-    });
-    for (declarator, name) in top.iter().zip(names) {
-        let Some(name) = name else { continue };
-        let value = declarator.child_by_field_name("value").map(unwrap_value);
-        if value.is_some_and(callable::is_callable) {
-            continue; // Already a Symbol.
-        }
-        let id = decl_id(cx, &name);
-        let binding = declarator
-            .parent()
-            .and_then(|statement| statement.child(0))
-            .map(|keyword| cx.text(&keyword).to_owned())
-            .unwrap_or_default();
-        let exported = declarator
-            .parent()
-            .and_then(|statement| statement.parent())
-            .is_some_and(|parent| parent.kind() == "export_statement");
-        push(
-            declaration(cx, &id, &name, "Variable", *declarator, |props| {
-                props["binding"] = serde_json::json!(binding);
-                props["exported"] = serde_json::json!(exported);
-            }),
-            defined_in(cx, &id, &file, *declarator),
-            out,
-        );
-        if let Some(object) = value.filter(|value| value.kind() == "object") {
-            let mut members = Vec::new();
-            properties(cx, object, &name, &id, &file, &mut members);
-            for (node, edge) in members {
-                push(node, edge, out);
-            }
-        }
+    let mut facts = Vec::new();
+    variables(cx, &declarators(root), None, &file, &mut facts);
+    for (node, edge) in facts.drain(..) {
+        push(node, edge, false, out);
     }
     for function in syntax_nodes
         .iter()
@@ -89,7 +60,7 @@ pub(super) fn emit(
                 label: "DECORATES".into(),
                 props: serde_json::json!({ "prov": cx.prov(&decorator, &format!("DECORATES {id}")) }),
             };
-            push(node, edge, out);
+            push(node, edge, false, out);
         }
         let evidence = function
             .parent()
@@ -122,7 +93,73 @@ pub(super) fn emit(
             label: "SIGNATURE_OF".into(),
             props: serde_json::json!({ "prov": cx.prov_bytes(start, end, &format!("SIGNATURE_OF {id}")) }),
         };
-        push(node, edge, out);
+        push(node, edge, false, out);
+        // Locals of a body too large to inspect whole get their own ranges.
+        if body.kind() == "statement_block" {
+            variables(
+                cx,
+                &declarators(body),
+                Some((&name, &sid)),
+                &file,
+                &mut facts,
+            );
+            for (node, edge) in facts.drain(..) {
+                push(node, edge, true, out);
+            }
+        }
+    }
+}
+
+/// Variable facts, with object-literal members, for `declarators`. `local`
+/// is the enclosing oversized callable's name and Symbol id: it qualifies
+/// each name as `{callable}/{name}` and is recorded on the fact.
+fn variables(
+    cx: &FileCx<'_>,
+    declarators: &[TsNode<'_>],
+    local: Option<(&str, &str)>,
+    file: &str,
+    facts: &mut Vec<(Node, Edge)>,
+) {
+    let names = unique_names(cx, declarators, |cx, declarator| {
+        declarator
+            .child_by_field_name("name")
+            .filter(|name| name.kind() == "identifier")
+            .map(|name| cx.text(&name).to_owned())
+    });
+    for (declarator, name) in declarators.iter().zip(names) {
+        let Some(name) = name else { continue };
+        let value = declarator.child_by_field_name("value").map(unwrap_value);
+        if value.is_some_and(callable::is_callable) {
+            continue; // Already a Symbol.
+        }
+        let name = match local {
+            Some((function, _)) => format!("{function}/{name}"),
+            None => name,
+        };
+        let id = decl_id(cx, &name);
+        let binding = declarator
+            .parent()
+            .and_then(|statement| statement.child(0))
+            .map(|keyword| cx.text(&keyword).to_owned())
+            .unwrap_or_default();
+        let exported = declarator
+            .parent()
+            .and_then(|statement| statement.parent())
+            .is_some_and(|parent| parent.kind() == "export_statement");
+        facts.push((
+            declaration(cx, &id, &name, "Variable", *declarator, |props| {
+                props["binding"] = serde_json::json!(binding);
+                props["exported"] = serde_json::json!(exported);
+                if let Some((_, symbol)) = local {
+                    props["scope"] = serde_json::json!("local");
+                    props["symbol"] = serde_json::json!(symbol);
+                }
+            }),
+            defined_in(cx, &id, file, *declarator),
+        ));
+        if let Some(object) = value.filter(|value| value.kind() == "object") {
+            properties(cx, object, &name, &id, file, facts);
+        }
     }
 }
 
@@ -224,12 +261,12 @@ fn defined_in(cx: &FileCx<'_>, id: &str, file: &str, span: TsNode<'_>) -> Edge {
     }
 }
 
-/// Declarators of `const`/`let`/`var` statements directly in the program,
-/// including exported ones, in source order.
-fn top_level_declarators(root: TsNode<'_>) -> Vec<TsNode<'_>> {
+/// Declarators of `const`/`let`/`var` statements directly in `container` (the
+/// program or a function body), including exported ones, in source order.
+fn declarators(container: TsNode<'_>) -> Vec<TsNode<'_>> {
     let mut result = Vec::new();
-    let mut cursor = root.walk();
-    for statement in root.named_children(&mut cursor) {
+    let mut cursor = container.walk();
+    for statement in container.named_children(&mut cursor) {
         let statement = if statement.kind() == "export_statement" {
             match statement.child_by_field_name("declaration") {
                 Some(declaration) => declaration,

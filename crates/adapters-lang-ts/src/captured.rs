@@ -61,6 +61,9 @@ pub(super) struct DirectFacts {
     pub(super) owners: BTreeMap<String, Node>,
     /// Declaration, Decorator and Signature facts (#693), never rule owners.
     pub(super) declarations: BTreeMap<String, Node>,
+    /// Locals of oversized callables (#699), minted last: they fill only the
+    /// budget the file's own declarations leave, and the rest are counted.
+    pub(super) locals: BTreeMap<String, Node>,
     pub(super) rules: Vec<(Node, Edge)>,
 }
 
@@ -299,7 +302,12 @@ fn extract_file_with(
     let mut declarations = Vec::new();
     let mut declaration_bytes = 0;
     let mut omitted_declarations = 0;
-    for (id_key, node) in direct.owners.iter().chain(&direct.declarations) {
+    for (id_key, node) in direct
+        .owners
+        .iter()
+        .chain(&direct.declarations)
+        .chain(&direct.locals)
+    {
         let key = core_graph::source::FactKey::Node { id: id_key.clone() };
         if receipts.contains_key(&key) {
             continue;

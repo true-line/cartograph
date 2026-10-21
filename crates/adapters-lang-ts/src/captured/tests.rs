@@ -824,7 +824,7 @@ fn captured_declarations_are_bounded_per_file_before_admission() {
 // citable within one inspection range, without touching Symbol identities.
 #[test]
 fn captured_declaration_facts_cite_config_decorators_and_headers() {
-    let body = "  const step = 1;\n".repeat(600);
+    let body = "  options.step(1);\n".repeat(600);
     let fields: String = (0..900)
         .map(|index| format!("f{index}: {index}, "))
         .collect();
@@ -1068,4 +1068,139 @@ fn captured_declaration_nesting_is_bounded() {
             .iter()
             .all(|node| node.props["span_exceeds_range_cap"] == true)
     );
+}
+
+// AC-0283: locals of a callable too large to inspect whole get their own
+// citable ranges; nested blocks, callables and in-cap functions are unchanged.
+#[test]
+fn captured_oversized_callable_locals_are_citable() {
+    let filler = "            check(fromState);\n".repeat(600);
+    let source = format!(
+        r#"export function configureDefaultOrderProcess(options: Options) {{
+    let connection: TransactionalConnection;
+    let eventBus: EventBus;
+    var twice = 1;
+    var twice = 2;
+    const orderProcess: OrderProcess<OrderState> = {{
+        transitions: {{
+            Created: {{ to: ['AddingItems', 'Draft'] }},
+            Draft: {{ to: ['Cancelled'] }},
+        }},
+        init(injector) {{ connection = injector.get(TransactionalConnection); }},
+        async onTransitionStart(fromState, toState) {{
+{filler}        }},
+    }};
+    const handler = () => 1;
+    if (options.strict) {{ const nested = 1; }}
+    return orderProcess;
+}}
+export function small() {{ const inner = 1; return inner; }}
+"#
+    );
+    let (directory, capture) = fixture(source.as_bytes(), "order.ts");
+    let (facts, receipts) = extract_file(capture.file("order.ts").unwrap(), &parser_id()).unwrap();
+    let text = |node: &Node| {
+        let receipt = receipts
+            .iter()
+            .find(|receipt| receipt.fact_key() == &FactKey::from_node(node))
+            .unwrap_or_else(|| panic!("{} is not citable", node.id));
+        assert!(receipt.matches_node(node));
+        let evidence = &receipt.ranges()[0].evidence;
+        source[evidence.byte_start as usize..evidence.byte_end as usize].to_owned()
+    };
+    let named = |name: &str| {
+        facts
+            .nodes
+            .iter()
+            .find(|node| node.label == "Declaration" && node.props["name"] == name)
+    };
+    let function = facts
+        .nodes
+        .iter()
+        .find(|node| node.label == "Symbol" && node.props["name"] == "configureDefaultOrderProcess")
+        .unwrap();
+    assert!(text(function).len() > crate::declarations::MAX_CITABLE_SPAN_BYTES);
+    let connection = named("configureDefaultOrderProcess/connection").unwrap();
+    assert_eq!(
+        connection.id,
+        format!("decl:{REPO}@order.ts#configureDefaultOrderProcess/connection")
+    );
+    assert_eq!(text(connection), "connection: TransactionalConnection");
+    assert_eq!(connection.props["binding"], "let");
+    assert_eq!(connection.props["scope"], "local");
+    assert_eq!(connection.props["symbol"], function.id.as_str());
+    assert_eq!(connection.props["exported"], false);
+    assert_eq!(
+        text(named("configureDefaultOrderProcess/eventBus").unwrap()),
+        "eventBus: EventBus"
+    );
+    let twice: Vec<_> = facts
+        .nodes
+        .iter()
+        .filter(|node| node.id.contains("#configureDefaultOrderProcess/twice@"))
+        .map(text)
+        .collect();
+    assert_eq!(twice, ["twice = 1", "twice = 2"]);
+    // The oversized object is a flagged gap; its sections are citable.
+    let process = named("configureDefaultOrderProcess/orderProcess").unwrap();
+    assert_eq!(process.props["span_exceeds_range_cap"], true);
+    let transitions = named("configureDefaultOrderProcess/orderProcess.transitions").unwrap();
+    assert!(text(transitions).starts_with("transitions: {\n            Created:"));
+    assert!(text(transitions).len() <= crate::declarations::MAX_CITABLE_SPAN_BYTES);
+    assert_eq!(transitions.props["declaration"], process.id.as_str());
+    for absent in [
+        "configureDefaultOrderProcess/handler",
+        "configureDefaultOrderProcess/nested",
+        "configureDefaultOrderProcess/orderProcess.init",
+        "configureDefaultOrderProcess/orderProcess.onTransitionStart",
+        "small/inner",
+        "inner",
+    ] {
+        assert!(
+            named(absent).is_none(),
+            "{absent} must not be a Declaration"
+        );
+    }
+    let (_, directory_receipts, stats) = extract_captured_dir(
+        directory.path(),
+        &parser_id(),
+        &capture,
+        Registries::builtin(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(by_fact(directory_receipts), receipts);
+    assert!(stats.omitted_declaration_receipts.is_empty());
+    // Locals are minted last: when the file's own facts exhaust the budget,
+    // only locals are omitted, and they are counted.
+    let file = capture.file("order.ts").unwrap();
+    let produce = |receipts| {
+        extract_file_with(
+            file,
+            &parser_id(),
+            Registries::builtin(),
+            ReceiptBudget {
+                bytes: usize::MAX,
+                receipts,
+            },
+        )
+        .unwrap()
+        .1
+    };
+    let local = |receipt: &Receipt| match receipt.fact_key() {
+        FactKey::Node { id } => {
+            id.starts_with("decl:") && id.contains("#configureDefaultOrderProcess/")
+        }
+        _ => false,
+    };
+    let all = produce(usize::MAX);
+    let locals = all
+        .declarations
+        .iter()
+        .filter(|(receipt, _)| local(receipt))
+        .count();
+    assert_eq!(locals, 6);
+    let rest = produce(all.declarations.len() - locals);
+    assert_eq!(rest.omitted_declarations, locals as u64);
+    assert!(!rest.declarations.iter().any(|(receipt, _)| local(receipt)));
 }

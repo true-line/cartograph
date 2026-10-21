@@ -53,12 +53,21 @@ span and a provenance-only v2 receipt:
     the header does not fit. That flag names the gap instead of hiding it.
   - A `SIGNATURE_OF` edge links it to the Symbol.
   - Nested callables keep their own Symbols.
+  - Its body's direct `const`/`let`/`var` declarators also become Variable
+    facts (#699), with id `decl:<repo>@<path>#<callable>/<name>`,
+    `scope: "local"` and the callable's Symbol id as `symbol`. Their object
+    sections follow the Property rules above. Callables within 8 KiB add
+    nothing, because their whole span is already inspectable. Declarations
+    in nested blocks (`if`, loops, inner `{}`) are deliberately not scanned:
+    inside an oversized callable they remain a gap.
 
 Declaration and Property facts also get a `DEFINED_IN` edge to their File.
 
 These facts never become rule owners: the producer records them separately
 from callable owners. They are minted under #691's per-file and directory
-declaration bounds, and every omission is named per file.
+declaration bounds, and every omission is named per file. Locals of
+oversized callables are minted last, so they take only the budget the file's
+own declarations leave.
 
 Existing Symbol and Component spans, identities and props do not change.
 Label-matching consumers send the new labels to their existing generic
@@ -73,3 +82,5 @@ handling for unknown labels.
 - Class, field and parameter decorators remain uncovered. Parameter decorators
   already sit inside their method's span.
 - JSDoc comments remain a named gap. They are documentation, not behaviour.
+- Declarations in nested blocks of an oversized callable, and the opener of
+  an oversized local object, are not separately citable (#699).
