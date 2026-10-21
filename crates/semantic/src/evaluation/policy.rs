@@ -241,6 +241,7 @@ pub fn planned_embedding_texts(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PredictionChoice {
+    MissingPolicy,
     Admitted { target_id: String },
     BelowThreshold,
     Ambiguous,
@@ -317,10 +318,16 @@ pub fn predict(
     check_binding()?;
     let mut predictions = Vec::new();
     for case in &inputs.cases {
-        let family = policy
-            .families
-            .get(&case.family)
-            .ok_or("missing explicit family policy")?;
+        // Preserve every frozen case in the sealed receipt, including explicit
+        // abstentions for families with no configured decision rule.
+        let Some(family) = policy.families.get(&case.family) else {
+            predictions.push(CasePrediction {
+                case: case.clone(),
+                ranked: Vec::new(),
+                choice: PredictionChoice::MissingPolicy,
+            });
+            continue;
+        };
         let retrieve = family.neighbors;
         let hop = crate::UnresolvedHop {
             gap_id: case.hop.gap_id.clone(),

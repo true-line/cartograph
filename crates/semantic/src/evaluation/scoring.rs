@@ -179,9 +179,16 @@ pub(super) fn score_predictions(
         .map(|family| (family, ScoringCounts::default()))
         .collect();
     for prediction in &sealed.predictions {
-        let c = counts
-            .get_mut(&prediction.case.family)
-            .ok_or("unconfigured scoring family")?;
+        let Some(c) = counts.get_mut(&prediction.case.family) else {
+            if prediction.choice != PredictionChoice::MissingPolicy || !prediction.ranked.is_empty()
+            {
+                return Err("unconfigured scoring family has a prediction".into());
+            }
+            continue;
+        };
+        if prediction.choice == PredictionChoice::MissingPolicy {
+            return Err("configured scoring family is missing its prediction".into());
+        }
         c.cases += 1;
         c.staged_proposals += prediction.ranked.len() as u64;
         let admitted = match &prediction.choice {

@@ -628,7 +628,7 @@ mod tests {
             }
         }
     }
-    fn independent_files() -> tempfile::TempDir {
+    fn independent_files(missing_policy_case: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         copy(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/t2-visible-mechanism-v1"),
@@ -645,6 +645,25 @@ mod tests {
         }
         for label in b["labels"].as_array_mut().unwrap() {
             label["origin"]["reviewer"] = serde_json::json!("separate-reviewer");
+        }
+        if missing_policy_case {
+            // Retain a genuine evaluation-split case with no configured policy,
+            // alongside the adequately supported Call family.
+            let family = serde_json::json!({"kind":"Channel", "subtype":"missing-policy"});
+            let case = i["cases"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|case| case["case_id"] == "c-call-multi-acceptable")
+                .unwrap();
+            case["family"] = family.clone();
+            case["hop"]["edge_label"] = serde_json::json!("PUBLISHES");
+            for candidate in case["candidates"].as_array_mut().unwrap() {
+                candidate["family"] = family.clone();
+            }
+            case["candidate_set_hash"] = serde_json::json!(fixtures::sha256(
+                &fixtures::canonical_json(&case["candidates"]).unwrap()
+            ));
         }
         fixtures::catalogue_test_documents(&mut i, &mut l, &mut b);
         let input = fixtures::canonical_json(&i).unwrap();
@@ -731,7 +750,17 @@ mod tests {
     // that renaming a visible fixture establishes an independently valid dataset.
     #[test]
     fn reviewed_receipt_scores_shared_predictions_and_live_gate_revalidates_trust() {
-        let dir = independent_files();
+        reviewed_receipt_scenario(false);
+    }
+
+    // AC-0275: missing family policy abstains without disabling configured families.
+    #[test]
+    fn reviewed_missing_family_policy_preserves_configured_admission() {
+        reviewed_receipt_scenario(true);
+    }
+
+    fn reviewed_receipt_scenario(omit_channel_policy: bool) {
+        let dir = independent_files(omit_channel_policy);
         let bundle = fixtures::load_independent_dataset(dir.path()).unwrap();
         let observations = observed(dir.path(), &bundle);
         let provider = Scripted {
@@ -755,6 +784,7 @@ mod tests {
             .map(|c| c.family.clone())
             .collect::<BTreeSet<_>>()
             .into_iter()
+            .filter(|family| !omit_channel_policy || family.kind() == HopKind::Call)
             .map(|family| FamilyPolicy {
                 family,
                 threshold: 0.9,
@@ -803,6 +833,28 @@ mod tests {
         let reviewed = ReviewedDataset::load(dir.path(), &good_anchor, &observations).unwrap();
         // The public visible scorer cannot cast this purpose into MechanismReceipt.
         let sealed = policy::predict(&policy, &inputs, &cached).unwrap();
+        if omit_channel_policy {
+            assert!(
+                sealed
+                    .predictions
+                    .iter()
+                    .any(|prediction| prediction.choice == policy::PredictionChoice::MissingPolicy)
+            );
+            let mut missing = policy::predict(&policy, &inputs, &cached).unwrap();
+            missing
+                .predictions
+                .retain(|prediction| prediction.choice != policy::PredictionChoice::MissingPolicy);
+            assert!(
+                scoring::score_predictions(&missing, &EvaluationLabels::from_bundle(&bundle))
+                    .is_err()
+            );
+            let mut duplicate = policy::predict(&policy, &inputs, &cached).unwrap();
+            duplicate.predictions.push(duplicate.predictions[0].clone());
+            assert!(
+                scoring::score_predictions(&duplicate, &EvaluationLabels::from_bundle(&bundle))
+                    .is_err()
+            );
+        }
         assert!(scoring::score(sealed, EvaluationLabels::from_bundle(&bundle)).is_err());
         let receipt = reviewed.predict_and_score(&policy, &cached).unwrap();
         let call = receipt
@@ -824,6 +876,28 @@ mod tests {
         );
         assert_eq!(result.admitted.len(), 1);
         assert!(!result.staged.is_empty());
+        if omit_channel_policy {
+            let (mut mixed_hops, mut mixed_candidates) = live(&bundle, "c-call-multi-acceptable");
+            mixed_hops.extend(hops.clone());
+            mixed_candidates.extend(candidates.clone());
+            let mixed = receipt.predict_live(
+                dir.path(),
+                &good_anchor,
+                &observations,
+                &policy,
+                &cached,
+                &mixed_hops,
+                &mixed_candidates,
+            );
+            assert_eq!(mixed.admitted.len(), 1);
+            assert!(mixed.summary.families.iter().any(|family| family.family
+                == FamilyKey::new(HopKind::Call, None)
+                && family.reason == DecisionReason::IndependentlyEvaluated));
+            assert!(mixed.summary.families.iter().any(|family| family.family
+                == FamilyKey::new(HopKind::Channel, Some("missing-policy".into()))
+                && family.reason == DecisionReason::MissingEvidence
+                && family.admitted == 0));
+        }
         assert_eq!(
             result.summary.families[0].reason,
             DecisionReason::IndependentlyEvaluated
@@ -898,7 +972,11 @@ mod tests {
         assert!(thin.admitted.is_empty());
         assert_eq!(
             thin.summary.families[0].reason,
-            DecisionReason::InsufficientEvidence
+            if omit_channel_policy {
+                DecisionReason::MissingEvidence
+            } else {
+                DecisionReason::InsufficientEvidence
+            }
         );
         let changed = receipt.predict_live(
             dir.path(),
