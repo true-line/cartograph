@@ -9732,7 +9732,7 @@ export const THIRD_PARTY_NOTICES = [
   "SOFTWARE.",
   "```",
   "",
-  "## cytoscape 3.34.3",
+  "## cytoscape 3.34.4",
   "",
   "License: MIT",
   "",
