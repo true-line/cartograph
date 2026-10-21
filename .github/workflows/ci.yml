@@ -272,7 +272,7 @@ jobs:
       always() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
-    runs-on: ${{ (github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && 'windows-2022' || vars.WINDOWS_RUNNER || 'windows-2022' }}
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["windows-2022"]' || vars.WINDOWS_RUNNER || '["self-hosted", "Windows", "X64"]') }}
     timeout-minutes: 20
     steps:
       - name: Checkout exact validation commit
