@@ -65,16 +65,8 @@ fn inspection_actual_captured_target_finishes_with_bound_assessment_and_location
     assert_eq!(reopened.investigation(&fixture.id).unwrap(), detail);
     assert_eq!(
         reopened.investigation_result(&fixture.id).unwrap(),
-        Some(result.clone())
+        Some(result)
     );
-    std::fs::write(
-        "/private/tmp/cartograph-622-backend-fixture.json",
-        serde_json::to_vec_pretty(
-            &json!({"target":target,"detail":detail,"result":result,"location":location}),
-        )
-        .unwrap(),
-    )
-    .unwrap();
 }
 
 #[test]
