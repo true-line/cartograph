@@ -1483,3 +1483,9 @@ fn completion_v2_nine_durable_reads_finish_and_reopen_without_v1_fallback() {
 
 #[path = "assessment_basis_tests.rs"]
 mod assessment_basis_tests;
+
+#[path = "prospective_attempt_tests.rs"]
+mod prospective_attempt_tests;
+
+#[path = "prospective_metadata_tests.rs"]
+mod prospective_metadata_tests;

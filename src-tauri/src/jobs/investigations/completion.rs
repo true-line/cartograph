@@ -537,6 +537,10 @@ fn unavailable_message(reason: &UnavailableReason) -> &'static str {
         }
     }
 }
+#[path = "prospective_attempt.rs"]
+mod prospective_attempt;
+pub(super) use prospective_attempt::derive_attempt_records;
+
 fn append_attempt(
     connection: &Connection,
     task: &StoredTask,
@@ -544,7 +548,7 @@ fn append_attempt(
     outcome: AttemptOutcome,
     revision: u64,
 ) -> Result<(), InvestigationStoreError> {
-    let policy = saved_policy(task)?;
+    saved_policy(task)?;
     // Reserved decode-only outcome: no current production firewall emits a
     // trustworthy per-read refusal witness, and redaction is still acquisition.
     if matches!(outcome, AttemptOutcome::FirewallRefused { .. }) {
@@ -559,38 +563,26 @@ fn append_attempt(
     if response.action_hash != staged::read_action_hash(read)? {
         return Err(InvestigationStoreError::Invalid);
     }
-    let mut count = attempts(connection, task)?.len();
-    for obligation in &intent.obligations.obligations {
-        if !read.matches(obligation) {
-            continue;
-        }
-        count += 1;
-        if count > policy.max_completed_attempts() {
-            return Err(InvestigationStoreError::Capacity);
-        }
-        let mut record = AttemptRecord {
-            schema_version: 1,
-            attempt_id: String::new(),
-            task_id: id.clone(),
-            request_hash: intent.request_hash.clone(),
-            obligations_hash: intent.obligations_hash.clone(),
-            obligation_id: obligation.key().1.into(),
-            step_id: step.clone(),
-            read: read.clone(),
-            input_ledger_hash: String::new(),
-            input_revision: revision,
-            outcome: outcome.clone(),
-        };
-        let ledger = ledger_at(connection, id, revision)?;
-        record.input_ledger_hash = ledger.fingerprint_with_policy(policy)?;
-        record.attempt_id = record.content_id()?;
-        record.validate_binding_with_policy(
-            &intent.request_hash,
-            &intent.obligations,
-            id,
-            &ledger,
-            policy,
-        )?;
+    let count = attempts(connection, task)?.len();
+    // Incidental reads with no matching obligation historically require no
+    // acquisition ledger lookup. Keep that behavior in the shared derivation.
+    let ledger = intent
+        .obligations
+        .obligations
+        .iter()
+        .any(|obligation| read.matches(obligation))
+        .then(|| ledger_at(connection, id, revision))
+        .transpose()?;
+    let records = derive_attempt_records(
+        task,
+        &step,
+        &response,
+        read,
+        &outcome,
+        ledger.as_ref(),
+        count,
+    )?;
+    for (offset, record) in records.into_iter().enumerate() {
         let entry = AttemptEntry {
             record,
             response_hash: response.response_hash.clone(),
@@ -601,7 +593,7 @@ fn append_attempt(
             connection,
             "completion_attempts",
             id,
-            &signed(count as u64)?,
+            &signed((count + offset + 1) as u64)?,
             &entry,
             MAX_RECORD_BYTES,
         )?;
@@ -768,13 +760,17 @@ fn raw_refusals(
     }
     Ok(entries)
 }
+#[path = "prospective_metadata.rs"]
+mod prospective_metadata;
+pub(super) use prospective_metadata::derive_protected_metadata;
+
 fn metadata(
     connection: &Connection,
     task: &StoredTask,
     step: Option<&str>,
 ) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
-    let policy = saved_policy(task)?;
-    let intent = validated_intent(task)?;
+    saved_policy(task)?;
+    validated_intent(task)?;
     let id = &task.detail.summary.investigation_id;
     let cutoff = step
         .map(|step| {
@@ -806,18 +802,14 @@ fn metadata(
             refusals.push(entry);
         }
     }
-    let last = refusals.last();
-    let metadata = ProtectedCompletionMetadata {
-        schema_version: 1,
-        request_hash: intent.request_hash.clone(),
-        obligations_hash: intent.obligations_hash.clone(),
-        completed_attempt_ids: records,
-        refusal_count: refusals.len() as u32,
-        last_refusal_id: last.map(|entry| entry.record.refusal_id.clone()),
-        feedback: last.map(|entry| entry.record.feedback.clone()),
-    };
-    metadata.validate_with_policy(policy)?;
-    Ok(metadata)
+    derive_protected_metadata(
+        task,
+        records,
+        &refusals
+            .iter()
+            .map(|entry| &entry.record)
+            .collect::<Vec<_>>(),
+    )
 }
 pub(super) fn validate_step_metadata(
     connection: &Connection,

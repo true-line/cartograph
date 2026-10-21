@@ -116,6 +116,52 @@ pub fn redact_text(input: &str) -> (String, usize) {
     (output, count)
 }
 
+/// Bound the serialized content of one direct UTF-8 source string, before and
+/// after [`redact_text`], under [`TEXT_POLICY_VERSION`] `redact-text@1`.
+///
+/// Returns checked `6 * utf8_bytes`, excluding the two JSON string quotes. If a
+/// serialized payload skeleton already contains an empty text string, add only
+/// this content bound. The caller must establish that the eventual valid UTF-8
+/// text has at most `utf8_bytes` bytes. Unknown policies and arithmetic overflow
+/// return `None`; changing the policy requires re-proving this bound.
+///
+/// This applies to a string serialized directly once by `serde_json`, such as
+/// `CompletionPayload.spans[i].text`. Source metadata, nested JSON strings,
+/// prompts, provider transport encoding and whole-payload admission are excluded.
+///
+/// # Provenance argument for redact-text@1
+///
+/// Give each original UTF-8 byte six credits: JSON escaping costs at most six
+/// bytes per original byte, including controls, quotes and backslashes. Each
+/// private-key marker costs 22 ASCII bytes and replaces at least 52 original
+/// bytes; a provider-token marker costs 16 for at least 11; an AWS marker costs
+/// 25 for 20. Assignment replacement preserves captures `$1` and `$2` exactly
+/// and spends at least four value characters (at least four original bytes) on
+/// the ten-byte `[REDACTED]` marker. Preserved Unicode whitespace and captures
+/// keep their original byte credits.
+///
+/// Bearer replacement retains provenance for its six canonical ASCII keyword
+/// bytes, and spends the whitespace/token bytes (at least nine) on the eleven
+/// bytes ` [REDACTED]`. This distinction matters across sequential passes:
+/// `secret=Bearer abcdefgh` becomes `secret=Bearer [REDACTED]`, then
+/// `secret=[REDACTED] [REDACTED]`. The final assignment can consume canonical
+/// `Bearer`, which still carries the six original keyword bytes' credits.
+///
+/// Only the bracketed marker blocks are inert under later patterns: their
+/// interiors contain no later token prefix or sensitive assignment name or
+/// separator, and brackets stop token/value matches from traversing a block.
+/// Newly exposed word boundaries can match remaining original bytes, but do
+/// not reuse spent provenance. Thus surviving text, canonical keyword bytes
+/// and inserted markers are paid for by disjoint original byte credits. No
+/// assumption that redaction shrinks text, or that every replacement is inert,
+/// is needed. The sixfold bound is sharp for a run of NUL characters.
+pub fn direct_source_json_content_bound(utf8_bytes: usize) -> Option<usize> {
+    if TEXT_POLICY_VERSION != "redact-text@1" {
+        return None;
+    }
+    utf8_bytes.checked_mul(6)
+}
+
 /// Whether a string matches the toolchain's conservative token-shaped policy.
 ///
 /// The value must contain at least 40 UTF-8 bytes, no whitespace, and only
@@ -255,5 +301,86 @@ mod tests {
         assert!(is_token_shaped(
             "message.cannot-start-action-without-required-context"
         ));
+    }
+
+    fn assert_direct_source_content_bound(text: &str) {
+        let bound = direct_source_json_content_bound(text.len()).unwrap();
+        let original = serde_json::to_vec(text).unwrap();
+        let redacted = serde_json::to_vec(&redact_text(text).0).unwrap();
+        assert!(original.len() - 2 <= bound);
+        assert!(redacted.len() - 2 <= bound);
+    }
+
+    #[test]
+    fn direct_source_bound_covers_controls_unicode_and_json_escaping() {
+        // #708: count UTF-8 bytes and one actual JSON encoding, not characters.
+        assert_eq!(TEXT_POLICY_VERSION, "redact-text@1");
+        let controls = (0_u8..=31).map(char::from).collect::<String>();
+        assert_direct_source_content_bound(&controls);
+        for text in [
+            "",
+            "\"\\/",
+            "é漢🦀",
+            "\u{7f}\u{85}\u{2028}\u{2029}",
+            "Bearer\u{2003}abcdefgh",
+            "ſecret\u{85}=\u{2003}'éééé'",
+        ] {
+            assert_direct_source_content_bound(text);
+        }
+    }
+
+    #[test]
+    fn direct_source_bound_covers_shortest_matches_and_cross_pass_expansion() {
+        // #708: every expanding replacement is exercised through real redaction.
+        for (text, expected) in [
+            (
+                "-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----",
+                "[REDACTED PRIVATE KEY]",
+            ),
+            ("Bearer abcdefgh", "Bearer [REDACTED]"),
+            ("sk-abcdefgh", "[REDACTED TOKEN]"),
+            ("ghp_abcdefgh", "[REDACTED TOKEN]"),
+            ("github_pat_abcdefgh", "[REDACTED TOKEN]"),
+            ("AKIA0000000000000000", "[REDACTED AWS ACCESS KEY]"),
+            ("secret=aaaa", "secret=[REDACTED]"),
+            ("secret=Bearer abcdefgh", "secret=[REDACTED] [REDACTED]"),
+        ] {
+            assert_eq!(redact_text(text).0, expected);
+            assert_direct_source_content_bound(text);
+        }
+        assert_eq!(redact_text("secret=Bearer abcdefgh").1, 2);
+        assert!(redact_text("secret=aaaa").0.len() > "secret=aaaa".len());
+    }
+
+    #[test]
+    fn direct_source_bound_covers_mixed_repeated_sequential_redaction() {
+        // #708: preserved whitespace/quotes, escaping and generated Bearer text mix.
+        let corpus = concat!(
+            "secret=Bearer abcdefgh; password\t=\n'aaaa'; ",
+            "sk-abcdefgh/ghp_abcdefgh github_pat_abcdefgh AKIA0000000000000000\n",
+            "-----BEGIN PRIVATE KEY-----\0\"\\🦀-----END PRIVATE KEY-----\n",
+            "Bearer\u{2003}abcdefgh ſecret\u{85}=\u{2003}'éééé'\0\u{1f}\"\\\n",
+        );
+        for count in [1, 2, 8, 64] {
+            assert_direct_source_content_bound(&corpus.repeat(count));
+        }
+    }
+
+    #[test]
+    fn direct_source_bound_is_sharp_for_control_runs_and_checked_at_usize_limit() {
+        // #708: quotes are excluded; a single byte less cannot cover this source.
+        let text = "\0".repeat(8192);
+        let bound = direct_source_json_content_bound(text.len()).unwrap();
+        assert_eq!(serde_json::to_vec(&text).unwrap().len() - 2, bound);
+        assert_eq!(
+            serde_json::to_vec(&redact_text(&text).0).unwrap().len() - 2,
+            bound
+        );
+        assert!(serde_json::to_vec(&text).unwrap().len() - 2 > bound - 1);
+        assert_eq!(direct_source_json_content_bound(0), Some(0));
+        let largest = usize::MAX / 6;
+        assert_eq!(direct_source_json_content_bound(largest), Some(largest * 6));
+        assert_eq!(direct_source_json_content_bound(largest + 1), None);
+        assert_eq!(direct_source_json_content_bound(usize::MAX), None);
     }
 }
