@@ -13,6 +13,7 @@ use core_graph::coverage::StoredCoverage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 mod validation;
 pub use validation::{
@@ -323,7 +324,7 @@ impl CoverageQualification {
 /// A snapshot read under recorded coverage limits.
 #[derive(Debug)]
 pub struct CoverageContext {
-    snapshot: ContextSnapshot,
+    snapshot: Arc<ContextSnapshot>,
     coverage: CoverageQualification,
     context_id: String,
 }
@@ -361,22 +362,38 @@ impl ContextSnapshot {
         self,
         coverage: CoverageQualification,
     ) -> Result<CoverageContext, ContextError> {
-        let context_id = content_identity(
-            "context-v2",
-            &ContextIdentity {
-                snapshot_id: self.id(),
-                coverage_id: &coverage.coverage_id,
-            },
-        )?;
-        Ok(CoverageContext {
-            snapshot: self,
-            coverage,
-            context_id,
-        })
+        CoverageContext::from_shared_snapshot(Arc::new(self), coverage)
     }
 }
 
 impl CoverageContext {
+    /// Qualify an existing immutable projection without rebuilding its facts,
+    /// adjacency or identity. Coverage must originate from the same graph read,
+    /// exactly as required by [`ContextSnapshot::with_coverage`].
+    pub fn from_shared_snapshot(
+        snapshot: Arc<ContextSnapshot>,
+        coverage: CoverageQualification,
+    ) -> Result<Self, ContextError> {
+        let context_id = content_identity(
+            "context-v2",
+            &ContextIdentity {
+                snapshot_id: snapshot.id(),
+                coverage_id: &coverage.coverage_id,
+            },
+        )?;
+        Ok(Self {
+            snapshot,
+            coverage,
+            context_id,
+        })
+    }
+
+    /// Test whether this context shares the supplied graph projection allocation.
+    /// This exposes no graph facts or unqualified query access.
+    pub fn shares_snapshot(&self, snapshot: &Arc<ContextSnapshot>) -> bool {
+        Arc::ptr_eq(&self.snapshot, snapshot)
+    }
+
     /// Graph-only snapshot identity, unchanged from [`ContextSnapshot::id`].
     pub fn snapshot_id(&self) -> &str {
         self.snapshot.id()

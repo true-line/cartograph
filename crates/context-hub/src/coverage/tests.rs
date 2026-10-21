@@ -319,3 +319,97 @@ fn qualified_query_is_bounded_and_continues_only_in_its_context() {
         Err(ContextError::ResponseBudgetExceeded { max_bytes: 64, .. })
     ));
 }
+
+// AC-0239: qualifying an already-owned projection shares exactly that immutable
+// snapshot and preserves legacy query bytes, qualified pages, budgets and proof.
+#[test]
+fn shared_coverage_projection_preserves_owned_wire_identity_and_cursor_contract() {
+    let scope = [scoped("acme/api", Some("src:acme/api"), "config:v1")];
+    let recorded = [stored(
+        "acme/api",
+        "job-1",
+        inventory("acme/api", &["ran"], 0, false),
+    )];
+    let coverage = CoverageQualification::new(&scope, &recorded).unwrap();
+    let graph = || {
+        ContextSnapshot::new((0..3).map(|index| Node {
+        id: format!("mod:{index}"), label: "Module".into(), props: json!({"name": format!("module-{index}"), "nested": {"escaped": "a\nb"}}),
+    }).collect(), (0..2).map(|index| Edge { src: format!("mod:{index}"), dst: format!("mod:{}", index + 1), label: "CALLS".into(), props: json!({}) }).collect()).unwrap()
+    };
+    let original = Arc::new(graph());
+    let shared =
+        CoverageContext::from_shared_snapshot(Arc::clone(&original), coverage.clone()).unwrap();
+    let owned = graph().with_coverage(coverage).unwrap();
+    assert!(shared.shares_snapshot(&original));
+    assert!(!shared.shares_snapshot(&Arc::new(graph())));
+    assert_eq!(Arc::strong_count(&original), 2);
+    assert_eq!(shared.snapshot_id(), owned.snapshot_id());
+    assert_eq!(shared.context_id(), owned.context_id());
+    assert_eq!(
+        serde_json::to_vec(&shared.durable_proof().unwrap()).unwrap(),
+        serde_json::to_vec(&owned.durable_proof().unwrap()).unwrap()
+    );
+    let request = QueryRequest {
+        max_facts: 1,
+        max_bytes: 4096,
+        ..QueryRequest::default()
+    };
+    let mut cursor = None;
+    let mut facts = 0;
+    loop {
+        let qualified = QualifiedRequest {
+            request: QueryRequest {
+                cursor,
+                ..request.clone()
+            },
+            context_id: Some(shared.context_id().to_owned()),
+        };
+        let actual = shared.query(qualified.clone()).unwrap();
+        let previous = owned.query(qualified).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&previous).unwrap()
+        );
+        facts += actual.response.facts.len();
+        let Some(next) = actual.response.next_cursor else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    assert_eq!(facts, 5);
+    let neighborhood = QualifiedRequest {
+        request: QueryRequest {
+            scope: super::super::QueryScope::Neighborhood {
+                anchor: "mod:0".into(),
+                hops: 1,
+            },
+            ..QueryRequest::default()
+        },
+        context_id: None,
+    };
+    let scoped = shared.query(neighborhood.clone()).unwrap();
+    assert_eq!(scoped.response.facts.len(), 3);
+    assert_eq!(
+        serde_json::to_vec(&scoped).unwrap(),
+        serde_json::to_vec(&owned.query(neighborhood).unwrap()).unwrap()
+    );
+    for (max_bytes, context_id) in [(64, None), (4096, Some("wrong-context".into()))] {
+        let request = QualifiedRequest {
+            request: QueryRequest {
+                max_bytes,
+                ..request.clone()
+            },
+            context_id,
+        };
+        assert_eq!(
+            shared.query(request.clone()).unwrap_err().to_string(),
+            owned.query(request).unwrap_err().to_string()
+        );
+    }
+    drop(shared);
+    assert_eq!(Arc::strong_count(&original), 1);
+    assert_eq!(
+        original.query(QueryRequest::default()).unwrap().facts.len(),
+        5
+    );
+}

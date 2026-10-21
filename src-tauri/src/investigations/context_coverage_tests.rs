@@ -626,3 +626,99 @@ fn qualified_preparation_checks_exact_archive_encoding_after_raw_admission() {
         Err(HostError::LimitExceeded)
     );
 }
+
+// AC-0239: reproduce the previous two-build preparation beside the new shared
+// path. Count actual constructor inputs, not guessed heap/allocator/RSS bytes.
+#[test]
+fn qualified_preparation_shares_one_scoped_projection_and_halves_construction_work() {
+    let fixture = Fixture::new(128);
+    {
+        use core_graph::GraphStore;
+        let mut graph = fixture.state.graph.lock().unwrap();
+        for index in 0..127 {
+            graph
+                .put_edge(&Edge {
+                    src: format!("mod:{index}"),
+                    dst: format!("mod:{}", index + 1),
+                    label: "CALLS".into(),
+                    props: json!({"order": index}),
+                })
+                .unwrap();
+        }
+    }
+    for scope in [
+        InvestigationScope::All,
+        InvestigationScope::Neighborhood {
+            anchor: "mod:0".into(),
+            hops: 1,
+        },
+    ] {
+        let mut requested = request();
+        requested.scope = scope.clone();
+        let (graph, records) = fixture
+            .state
+            .graph
+            .lock()
+            .unwrap()
+            .read_snapshot_with_coverage_bounded(
+                SnapshotReadLimits::default(),
+                coverage_preparation_limits(TEST_ARCHIVE_CAPACITY).unwrap(),
+            )
+            .unwrap();
+        let qualification = CoverageQualification::new(&fixture.scope, &records).unwrap();
+        take_projection_work();
+        let mut previous = FrozenContext::from_graph(graph, &requested, &[]).unwrap();
+        let complete = projection(previous.graph.0.clone(), previous.graph.1.clone()).unwrap();
+        let scoped =
+            FrozenContext::scoped_snapshot(&previous.graph, &requested.scope, complete).unwrap();
+        let previous_qualified = scoped.with_coverage(qualification).unwrap();
+        let before = take_projection_work();
+        assert!(!previous_qualified.shares_snapshot(&previous.snapshot));
+        assert_eq!(Arc::strong_count(&previous.snapshot), 1);
+        previous.ledger.schema_version = 2;
+        previous.ledger.coverage = Some(previous_qualified.durable_proof().unwrap());
+        previous.ledger.validate().unwrap();
+
+        let prepared = fixture.prepare(&requested).unwrap();
+        let after = take_projection_work();
+        let qualified = prepared.qualified.as_ref().unwrap();
+        assert!(qualified.shares_snapshot(&prepared.snapshot));
+        assert_eq!(Arc::strong_count(&prepared.snapshot), 2);
+        assert_eq!(before.constructions, 2 * after.constructions);
+        assert_eq!(before.nodes, 2 * after.nodes);
+        assert_eq!(before.edges, 2 * after.edges);
+        let expected = if matches!(scope, InvestigationScope::All) {
+            ProjectionWork {
+                constructions: 1,
+                nodes: 128,
+                edges: 127,
+            }
+        } else {
+            ProjectionWork {
+                constructions: 2,
+                nodes: 130,
+                edges: 128,
+            }
+        };
+        assert_eq!(after, expected);
+        assert_eq!(
+            serde_json::to_vec(&previous.ledger).unwrap(),
+            serde_json::to_vec(&prepared.ledger).unwrap()
+        );
+        let page = QualifiedRequest {
+            request: QueryRequest {
+                max_facts: 7,
+                max_bytes: 4096,
+                ..QueryRequest::default()
+            },
+            context_id: Some(qualified.context_id().to_owned()),
+        };
+        assert_eq!(
+            serde_json::to_vec(&previous_qualified.query(page.clone()).unwrap()).unwrap(),
+            serde_json::to_vec(&qualified.query(page).unwrap()).unwrap()
+        );
+        eprintln!(
+            "{scope:?}: projection constructor work {before:?} -> {after:?}; distinct retained scoped projections 2 -> 1; immutable handles 2 (not allocator-byte measurement)"
+        );
+    }
+}

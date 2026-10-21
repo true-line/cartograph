@@ -15,12 +15,13 @@ use core_graph::{Edge, Node, SnapshotReadLimits};
 use core_prov::content_hash;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// One owner holds the original raw graph for exact comparisons and the frozen
 /// authorized query projection. Nothing is rebuilt from live context mid-task.
 pub(super) struct FrozenContext {
     pub(super) graph: (Vec<Node>, Vec<Edge>),
-    pub(super) snapshot: ContextSnapshot,
+    pub(super) snapshot: Arc<ContextSnapshot>,
     pub(super) ledger: InvestigationInputLedger,
     pub(super) query_pages: Vec<String>,
     pub(super) evidence: Vec<AgentEvidence>,
@@ -118,6 +119,35 @@ fn admit_archive_size(
         },
     )
     .map_err(|_| HostError::LimitExceeded)
+}
+
+// Counts actual application projection construction work in native tests only;
+// this is structural ownership/work evidence, not allocator or RSS measurement.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ProjectionWork {
+    constructions: usize,
+    nodes: usize,
+    edges: usize,
+}
+#[cfg(test)]
+thread_local! {
+    static PROJECTION_WORK: std::cell::Cell<ProjectionWork> = const { std::cell::Cell::new(ProjectionWork { constructions: 0, nodes: 0, edges: 0 }) };
+}
+#[cfg(test)]
+fn take_projection_work() -> ProjectionWork {
+    PROJECTION_WORK.with(std::cell::Cell::take)
+}
+fn projection(nodes: Vec<Node>, edges: Vec<Edge>) -> Result<ContextSnapshot, HostError> {
+    #[cfg(test)]
+    PROJECTION_WORK.with(|counter| {
+        let mut work = counter.get();
+        work.constructions += 1;
+        work.nodes += nodes.len();
+        work.edges += edges.len();
+        counter.set(work);
+    });
+    ContextSnapshot::new(nodes, edges).map_err(|_| HostError::InvalidInput)
 }
 
 impl FrozenContext {
@@ -305,15 +335,11 @@ impl FrozenContext {
         let qualification =
             CoverageQualification::new(&stable, &recorded).map_err(context_error)?;
         let mut prepared = Self::from_graph(graph, request, history)?;
-        // ContextSnapshot is an owned projection; keep its existing field for
-        // source acquisitions and construct the qualified view from the same
-        // frozen raw graph, never from a second database read.
-        let complete = ContextSnapshot::new(prepared.graph.0.clone(), prepared.graph.1.clone())
-            .map_err(|_| HostError::InvalidInput)?;
-        let qualified_snapshot = Self::scoped_snapshot(&prepared.graph, &request.scope, complete)?;
-        let qualified = qualified_snapshot
-            .with_coverage(qualification)
-            .map_err(context_error)?;
+        // Both paths retain the one already-authorized immutable scoped
+        // projection from this same bounded graph read.
+        let qualified =
+            CoverageContext::from_shared_snapshot(Arc::clone(&prepared.snapshot), qualification)
+                .map_err(context_error)?;
         let proof = qualified.durable_proof().map_err(context_error)?;
         bounded_json(&proof, MAX_MANIFEST_BYTES)?;
         if request
@@ -349,8 +375,7 @@ impl FrozenContext {
         request: &StartInvestigationRequest,
         history: &[String],
     ) -> Result<Self, HostError> {
-        let complete = ContextSnapshot::new(graph.0.clone(), graph.1.clone())
-            .map_err(|_| HostError::InvalidInput)?;
+        let complete = projection(graph.0.clone(), graph.1.clone())?;
         let graph_id = complete.id().to_owned();
         if request
             .expected_graph_revision
@@ -359,7 +384,7 @@ impl FrozenContext {
         {
             return Err(HostError::InputChanged);
         }
-        let snapshot = Self::scoped_snapshot(&graph, &request.scope, complete)?;
+        let snapshot = Arc::new(Self::scoped_snapshot(&graph, &request.scope, complete)?);
         let history_bytes = if history.is_empty() {
             Vec::new()
         } else {
@@ -440,7 +465,7 @@ impl FrozenContext {
                     })
                     .cloned()
                     .collect();
-                ContextSnapshot::new(nodes, edges).map_err(|_| HostError::InvalidInput)?
+                projection(nodes, edges)?
             }
         })
     }
