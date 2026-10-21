@@ -1,5 +1,16 @@
 # cartograph
 
+## 0.17.0
+
+### Minor Changes
+
+- 23aa519: Add explicit source and coverage-inventory obligations for V7 specialist investigations. Supported findings require the exact selected evidence in the finishing disclosure; insufficient-evidence results and unmet-obligation termination remain visibly distinct. Preserve the selected contract and evidence assessment in saved investigation history.
+
+### Patch Changes
+
+- 64479d6: Require an explicit replacement when a saved or selected investigation specialist is unavailable, preserving historical versions and selections across catalog refreshes.
+- 1c03e4e: Reuse one immutable scoped graph projection for qualified specialist investigations, reducing duplicate preparation work and retained graph data while preserving evidence identities and query limits.
+
 ## 0.16.0
 
 ### Minor Changes
