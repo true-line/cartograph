@@ -27,6 +27,27 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 /// Stable semantic resolver identifier stored in proposal provenance.
 pub const EXTRACTOR_ID: &str = "t2.semantic-ann";
 
+/// Why an unresolved hop is held out of ANN candidacy. An excluded hop stays
+/// an honest Gap in the graph — it is never embedded and never proposed —
+/// and carries this reason so the register can group it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HopExclusion {
+    /// The hop's query is interface dispatch (`IFace.method`): the receiver's
+    /// concrete type is unknown without a type hierarchy, so no embedding
+    /// can resolve it.
+    DynamicDispatch,
+}
+
+impl HopExclusion {
+    /// Stable human-readable tag, e.g. for register grouping.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            HopExclusion::DynamicDispatch => "dynamic dispatch - needs type hierarchy",
+        }
+    }
+}
+
 /// A graph Gap plus the incoming edge slot that a higher tier may fill.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnresolvedHop {
@@ -44,11 +65,21 @@ pub struct UnresolvedHop {
     pub query: String,
     /// T0/T1 evidence that created the unresolved slot.
     pub evidence: Vec<EvidenceRef>,
+    /// Exclusion from ANN candidacy, with the reason. `None` marks ordinary
+    /// T2 work; `Some` marks a hop that is never embedded or proposed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusion: Option<HopExclusion>,
 }
 
 impl UnresolvedHop {
     pub fn family(&self) -> FamilyKey {
         FamilyKey::new(self.kind, self.subtype.clone())
+    }
+
+    /// Whether this hop enters ANN candidacy. Excluded hops stay honest
+    /// Gaps: they are never embedded and never proposed.
+    pub fn is_ann_candidate(&self) -> bool {
+        self.exclusion.is_none()
     }
 }
 
@@ -242,9 +273,54 @@ impl AnnIndex {
     }
 }
 
+/// Conservative interface-dispatch detector for unresolved hop queries
+/// (#259, AC-0285).
+///
+/// A query is interface dispatch when it has the shape `IFace.member`: the
+/// leading segment is a receiver named in the interface convention — a
+/// capital `I` followed by another capital letter and at least one further
+/// character (`IChannel`, `INodeProcess`) — and a non-empty member access
+/// follows it. The receiver's concrete type is unknown without a type
+/// hierarchy, so no embedding can resolve the hop.
+///
+/// The rule is deliberately conservative: a wrong exclusion silently drops
+/// a resolvable hop, while a wrong inclusion only spends an embedding, so
+/// when in doubt a hop stays in candidacy. In particular:
+///
+/// - `Item.get`, `Icon.render` — `I` followed by a lowercase letter is a
+///   plain capitalized name, not the interface convention.
+/// - `IO.read`, `ID.parse` — a two-letter receiver is an acronym, not the
+///   `IFoo` convention, which needs at least three characters.
+/// - `IFoo` with no member access — a bare type reference is not dispatch.
+/// - `channel.listen` — a lower-case receiver is a value, not a type.
+fn is_interface_dispatch(query: &str) -> bool {
+    let mut segments = query.split('.');
+    let receiver = segments.next().unwrap_or_default();
+    // A member access must follow the receiver.
+    let Some(member) = segments.next() else {
+        return false;
+    };
+    if member.is_empty() {
+        return false;
+    }
+    let mut chars = receiver.chars();
+    if chars.next() != Some('I') {
+        return false;
+    }
+    // A capital `I` followed by another capital letter opens the convention.
+    if !chars.next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return false;
+    }
+    // At least one further character: `IO` and `ID` are acronyms, not `IFoo`.
+    chars.next().is_some()
+}
+
 /// Recover channel/call Gap slots and searchable existing targets. A hop
 /// that a live T0.5 exact-name fill covers is not T2 work and is left out
-/// (#257, AC-0270); the Gap itself stays open in the graph.
+/// (#257, AC-0270); the Gap itself stays open in the graph. A hop whose
+/// query is interface dispatch (`IFace.method`) is classified out of ANN
+/// candidacy (#259, AC-0285): it stays in the list as an honest Gap tagged
+/// with its [`HopExclusion`] reason, but is never embedded or proposed.
 pub fn graph_inputs(nodes: &[Node], edges: &[Edge]) -> (Vec<UnresolvedHop>, Vec<Candidate>) {
     let gaps: BTreeMap<_, _> = nodes
         .iter()
@@ -276,6 +352,10 @@ pub fn graph_inputs(nodes: &[Node], edges: &[Edge]) -> (Vec<UnresolvedHop>, Vec<
         if query.is_empty() || evidence.is_empty() {
             continue;
         }
+        // Interface dispatch (`IFace.method`) is classified out of ANN
+        // candidacy (#259, AC-0285): the hop stays an honest Gap, tagged
+        // with the exclusion reason, but is never embedded or proposed.
+        let exclusion = is_interface_dispatch(&query).then_some(HopExclusion::DynamicDispatch);
         hops.push(UnresolvedHop {
             gap_id: gap.id.clone(),
             source_id: edge.src.clone(),
@@ -286,6 +366,7 @@ pub fn graph_inputs(nodes: &[Node], edges: &[Edge]) -> (Vec<UnresolvedHop>, Vec<
                 .flatten(),
             query,
             evidence,
+            exclusion,
         });
     }
     hops.sort_by(|a, b| a.gap_id.cmp(&b.gap_id));
@@ -404,7 +485,10 @@ pub fn embedding_inputs(
         .flat_map(|pair| [&pair.query, &pair.candidate])
         .collect();
     for (key, compatible) in candidate_groups(candidates) {
-        let matching: Vec<_> = hops.iter().filter(|hop| hop.family() == key).collect();
+        let matching: Vec<_> = hops
+            .iter()
+            .filter(|hop| hop.is_ann_candidate() && hop.family() == key)
+            .collect();
         if matching.is_empty() {
             continue;
         }
@@ -434,8 +518,11 @@ pub fn propose(
     let grouped = candidate_groups(candidates);
     let mut proposals = Vec::new();
     for (key, compatible) in grouped {
-        let compatible_hops: Vec<&UnresolvedHop> =
-            hops.iter().filter(|hop| hop.family() == key).collect();
+        let compatible_hops: Vec<&UnresolvedHop> = hops
+            .iter()
+            .filter(|hop| hop.is_ann_candidate())
+            .filter(|hop| hop.family() == key)
+            .collect();
         if compatible_hops.is_empty() {
             continue;
         }
@@ -1200,6 +1287,136 @@ mod tests {
                 }
             );
             assert_eq!(proposal.provenance.tier, Tier::Semantic);
+        }
+    }
+
+    // AC-0285 (T-0285): an interface-dispatch hop (`IFace.method`) is
+    // classified out of ANN candidacy — never embedded, never proposed —
+    // and stays an honest Gap tagged with the exclusion reason.
+    #[test]
+    fn interface_dispatch_hops_are_excluded_from_ann_candidacy() {
+        let nodes = vec![
+            Node {
+                id: "sym:shop@caller.ts#run".into(),
+                label: "Symbol".into(),
+                props: serde_json::json!({"name": "run", "prov": evidence("caller.ts")}),
+            },
+            Node {
+                id: "gap:call:shop@caller.ts@8".into(),
+                label: "Gap".into(),
+                props: serde_json::json!({
+                    "callee": "IChannel.listen",
+                    "reason": "unresolved call target",
+                    "prov": evidence("caller.ts")
+                }),
+            },
+            Node {
+                id: "sym:shop@channel.ts#listen".into(),
+                label: "Symbol".into(),
+                props: serde_json::json!({
+                    "name": "IChannel.listen", "prov": evidence("channel.ts")
+                }),
+            },
+        ];
+        let edges = vec![Edge {
+            src: "sym:shop@caller.ts#run".into(),
+            dst: "gap:call:shop@caller.ts@8".into(),
+            label: "CALLS".into(),
+            props: serde_json::json!({"prov": {
+                "confidence_tier": "Gap", "evidence": evidence("caller.ts")["evidence"]
+            }}),
+        }];
+        let (hops, candidates) = graph_inputs(&nodes, &edges);
+        // The hop stays an honest Gap, tagged with the exclusion reason.
+        assert_eq!(hops.len(), 1);
+        assert_eq!(hops[0].exclusion, Some(HopExclusion::DynamicDispatch));
+        assert_eq!(
+            hops[0]
+                .exclusion
+                .expect("excluded hop carries a reason")
+                .reason(),
+            "dynamic dispatch - needs type hierarchy"
+        );
+        assert!(!hops[0].is_ann_candidate());
+        // It never produces proposals, even against a same-text candidate.
+        let proposals = propose(&KeywordProvider, &hops, &candidates, 2).unwrap();
+        assert!(proposals.is_empty());
+        // Its query is never embedded: the family has no eligible hop, so
+        // neither the query nor its candidates enter the embedding plan.
+        let texts = embedding_inputs(&hops, &candidates, &[]).unwrap();
+        assert!(texts.is_empty());
+        // The Gap itself is untouched in the graph.
+        assert!(nodes.iter().any(|node| node.label == "Gap"));
+    }
+
+    // AC-0285 (T-0285): conservative look-alikes still enter ANN candidacy
+    // and produce proposals.
+    #[test]
+    fn interface_lookalike_hops_stay_in_ann_candidacy() {
+        let nodes = vec![
+            Node {
+                id: "sym:shop@caller.ts#run".into(),
+                label: "Symbol".into(),
+                props: serde_json::json!({"name": "run", "prov": evidence("caller.ts")}),
+            },
+            Node {
+                id: "gap:call:shop@caller.ts@8".into(),
+                label: "Gap".into(),
+                props: serde_json::json!({
+                    "callee": "Item.getOrder",
+                    "reason": "unresolved call target",
+                    "prov": evidence("caller.ts")
+                }),
+            },
+            Node {
+                id: "sym:shop@item.ts#getOrder".into(),
+                label: "Symbol".into(),
+                props: serde_json::json!({
+                    "name": "Item.getOrder", "prov": evidence("item.ts")
+                }),
+            },
+        ];
+        let edges = vec![Edge {
+            src: "sym:shop@caller.ts#run".into(),
+            dst: "gap:call:shop@caller.ts@8".into(),
+            label: "CALLS".into(),
+            props: serde_json::json!({"prov": {
+                "confidence_tier": "Gap", "evidence": evidence("caller.ts")["evidence"]
+            }}),
+        }];
+        let (hops, candidates) = graph_inputs(&nodes, &edges);
+        assert_eq!(hops.len(), 1);
+        assert_eq!(hops[0].exclusion, None);
+        assert!(hops[0].is_ann_candidate());
+        let proposals = propose(&KeywordProvider, &hops, &candidates, 2).unwrap();
+        assert!(!proposals.is_empty());
+        assert_eq!(proposals[0].target_id, "sym:shop@item.ts#getOrder");
+    }
+
+    // AC-0285 (T-0285): the interface-dispatch detector is conservative —
+    // look-alikes stay in candidacy, only `IFoo.member` is excluded.
+    #[test]
+    fn interface_dispatch_detection_stays_conservative() {
+        // Interface dispatch: `I` + capital + at least one more character,
+        // then a member access.
+        for query in ["IChannel.listen", "INodeProcess.cwd", "IWidget.render"] {
+            assert!(
+                is_interface_dispatch(query),
+                "{query} is interface dispatch"
+            );
+        }
+        // `I` followed by a lowercase letter is a plain capitalized name.
+        for query in ["Item.get", "Icon.render"] {
+            assert!(!is_interface_dispatch(query), "{query} stays in candidacy");
+        }
+        // Two-letter receivers are acronyms, not the `IFoo` convention.
+        for query in ["IO.read", "ID.parse"] {
+            assert!(!is_interface_dispatch(query), "{query} stays in candidacy");
+        }
+        // A bare type reference is not dispatch; a lower-case receiver is a
+        // value, not a type; plain names never match.
+        for query in ["IFoo", "channel.listen", "Store.get", "process order"] {
+            assert!(!is_interface_dispatch(query), "{query} stays in candidacy");
         }
     }
 }

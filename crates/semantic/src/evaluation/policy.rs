@@ -342,6 +342,7 @@ pub fn predict(
             subtype: case.family.subtype().map(str::to_owned),
             query: case.hop.query.clone(),
             evidence: evidence(&case.hop.evidence),
+            exclusion: None,
         };
         let candidates: Vec<_> = case
             .candidates
