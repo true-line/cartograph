@@ -114,7 +114,16 @@ jobs:
             exit 1
           fi
 
-          git fetch origin main
+          # A stalled transport once held this step until the job timeout
+          # (#689). Bound each attempt, retry once, then fail visibly.
+          for attempt in 1 2; do
+            timeout --kill-after=10s 120 git fetch --no-tags origin main && break
+            if [ "$attempt" = 2 ]; then
+              echo "::error::Could not fetch origin/main to verify $TAG."
+              exit 1
+            fi
+            sleep 10
+          done
           if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
             echo "::error::$TAG does not resolve to a commit on main."
             exit 1
@@ -172,7 +181,13 @@ jobs:
     uses: ./.github/workflows/package.yml
     with:
       ref: ${{ needs.validate.outputs.tag }}
-    secrets: inherit
+    # Pass only the signing secrets package.yml declares; never inherit all.
+    secrets:
+      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
 
   publish:
     name: Publish GitHub Release
