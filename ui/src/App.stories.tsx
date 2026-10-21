@@ -876,12 +876,15 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-// Lazy route chunks may be cold in a fresh Storybook browser. Keep that wait
-// explicitly bounded without making story order responsible for warming it.
+// Lazy route chunks may be cold in a fresh Storybook browser. Keep the first
+// wait on a lazy surface explicitly bounded without making story order
+// responsible for warming it; later waits keep the default so regressions
+// still fail fast (#682).
+const LAZY_ROUTE_WAIT = { timeout: 5_000 };
 const waitForSpecWorkbench = (canvasElement: HTMLElement) =>
   waitFor(
     () => expect(within(canvasElement).getByText('9 artifacts')).toBeInTheDocument(),
-    { timeout: 5_000 },
+    LAZY_ROUTE_WAIT,
   );
 
 export const ConnectedToCore: Story = {
@@ -1082,8 +1085,9 @@ export const FlowHopsRouteByKind: Story = {
     const canvas = within(canvasElement);
     await waitFor(() => expect(canvas.getByText('core v0.0.1')).toBeInTheDocument());
     await userEvent.click(canvas.getByRole('button', { name: 'Flows' }));
-    await waitFor(() =>
-      expect(canvas.getByText('PARTIAL (1 gap)')).toBeInTheDocument(),
+    await waitFor(
+      () => expect(canvas.getByText('PARTIAL (1 gap)')).toBeInTheDocument(),
+      LAZY_ROUTE_WAIT,
     );
 
     await userEvent.click(
@@ -1290,10 +1294,12 @@ export const AtlasNodeToEvidence: Story = {
     const canvas = within(canvasElement);
     await waitFor(() => expect(canvas.getByText('core v0.0.1')).toBeInTheDocument());
     await userEvent.click(canvas.getByRole('button', { name: 'Atlas' }));
-    await waitFor(() =>
-      expect(within(canvas.getByLabelText('Confidence legend')).getByRole('status')).toHaveTextContent(
-        '2 nodes · 1 edges',
-      ),
+    await waitFor(
+      () =>
+        expect(within(canvas.getByLabelText('Confidence legend')).getByRole('status')).toHaveTextContent(
+          '2 nodes · 1 edges',
+        ),
+      LAZY_ROUTE_WAIT,
     );
     await userEvent.click(canvas.getByRole('button', { name: /^GET \/users$/ }));
     await waitFor(() => {
