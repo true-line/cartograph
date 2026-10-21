@@ -328,14 +328,12 @@ impl InvestigationInput {
                 return Err(InvestigationError::LimitExceeded);
             }
         }
-        let prompt = String::from_utf8(bounded_bytes(&prompt_value, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        let payload = CompletionPayload {
+        let mut payload = CompletionPayload {
             system: specialist.prompt(),
-            prompt,
+            prompt: String::new(),
             spans,
         };
-        bounded_bytes(&payload, MAX_INPUT_BYTES)?;
+        wire::replace_prompt(&mut payload, &prompt_value, MAX_INPUT_BYTES)?;
         Ok(Self {
             ledger,
             payload,
@@ -397,9 +395,7 @@ impl InvestigationInput {
         self.payload
             .spans
             .retain(|span| selected.contains(&span.id));
-        self.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        bounded_bytes(&self.payload, MAX_INPUT_BYTES)?;
+        wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
         Ok(self)
     }
 
@@ -779,3 +775,6 @@ mod coverage_details;
 
 #[path = "input_query_history.rs"]
 mod query_history_input;
+
+#[path = "input_wire.rs"]
+mod wire;

@@ -28,9 +28,7 @@ impl InvestigationInput {
             .map_err(|_| InvestigationError::InvalidInput)?;
         prompt["coverage_details"] =
             serde_json::to_value(details).map_err(|_| InvestigationError::InvalidInput)?;
-        self.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        bounded_bytes(&self.payload, MAX_INPUT_BYTES)?;
+        wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
         Ok(())
     }
 }

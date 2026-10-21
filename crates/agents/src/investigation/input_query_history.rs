@@ -107,10 +107,9 @@ impl InvestigationInput {
             serde_json::to_value(contract).map_err(|_| InvestigationError::InvalidInput)?;
         prompt["completion_metadata"] =
             serde_json::to_value(metadata).map_err(|_| InvestigationError::InvalidInput)?;
-        input.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
+        input.payload.prompt = wire::encode_prompt(&prompt, MAX_INPUT_BYTES)?;
         input.add_coverage_details(coverage_details)?;
-        bounded_bytes(&input.payload, MAX_INPUT_BYTES)?;
+        wire::validate_payload(&input.payload, MAX_INPUT_BYTES)?;
         Ok(input)
     }
 }
