@@ -61,7 +61,7 @@ exceptions = [
   # CDLA-Permissive-2.0 permits sharing with its agreement text; no general
   # license allowance or advisory exception is introduced. The current macOS
   # production targets use platform trust and do not distribute this package.
-  { name = "webpki-root-certs", version = "=1.0.9", allow = ["CDLA-Permissive-2.0"] },
+  { name = "webpki-root-certs", version = "=1.0.10", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [bans]
