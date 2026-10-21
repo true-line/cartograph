@@ -654,13 +654,11 @@ pub(super) fn append(
     entry.entry_id = entry.content_id()?;
     let bytes =
         encode(&entry, MAX_RECORD_BYTES)?.len() + entry.record.feedback.bytes()?.len() + 1024;
-    let task_bytes = journal_bytes(tx, Some(&id))?
-        .checked_add(stored_bytes(tx, Some(&id))?)
-        .and_then(|n| n.checked_add(bytes))
+    let task_bytes = stored_bytes(tx, Some(&id))?
+        .checked_add(bytes)
         .ok_or(InvestigationStoreError::Capacity)?;
-    let global = journal_bytes(tx, None)?
-        .checked_add(stored_bytes(tx, None)?)
-        .and_then(|n| n.checked_add(bytes))
+    let global = stored_bytes(tx, None)?
+        .checked_add(bytes)
         .ok_or(InvestigationStoreError::Capacity)?;
     if task_bytes > TASK_CAPACITY - TERMINAL_RESERVE || global > STORE_CAPACITY {
         return Err(InvestigationStoreError::Capacity);
@@ -683,10 +681,19 @@ pub(super) fn append(
     )?;
     Ok(disposition)
 }
-fn journal_bytes(
+pub(super) fn journal_bytes(
     connection: &Connection,
     id: Option<&str>,
 ) -> Result<usize, InvestigationStoreError> {
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name GLOB 'staged_completion_*')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(0);
+    }
+    validate_schema(connection)?;
     let mut total = 0usize;
     for table in [
         "staged_completion_intents",

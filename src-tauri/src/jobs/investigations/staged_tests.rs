@@ -818,3 +818,158 @@ fn staged_refusal_journal_exact_intent_rejects_redaction_collisions() {
         tx.rollback().unwrap();
     }
 }
+
+// AC-0265: ordinary shared capacity checks include every committed journal row,
+// not just the private append path, with identical per-task/global charging.
+#[test]
+fn staged_refusal_journal_counts_toward_ordinary_capacity_after_commit() {
+    let mut fixture = Fixture::new();
+    let task_before = stored_bytes(&fixture.store.conn, Some(&fixture.id)).unwrap();
+    let global_before = stored_bytes(&fixture.store.conn, None).unwrap();
+    let task_remaining = remaining_task_capacity(&fixture.store.conn, &fixture.id).unwrap();
+    let global_remaining = remaining_store_capacity(&fixture.store.conn).unwrap();
+    let namespace = fixture.store.namespace.clone();
+    let tx = fixture.store.conn.transaction().unwrap();
+    append(
+        &tx,
+        &namespace,
+        &fixture.execution,
+        &fixture.request,
+        &fixture.input,
+        &fixture.finish,
+        fixture.response.clone(),
+        &[],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let mut charged = 0usize;
+    for table in [
+        "staged_completion_intents",
+        "staged_completion_refusals",
+        "staged_completion_feedback",
+    ] {
+        let bytes: i64 = fixture.store.conn.query_row(
+            &format!("SELECT sum(length(CAST(body AS BLOB))+length(CAST(body_hash AS BLOB))+256) FROM {table} WHERE task_id=?1"),
+            [&fixture.id], |row| row.get(0)).unwrap();
+        charged += usize::try_from(bytes).unwrap();
+    }
+    assert!(charged > 0);
+    assert_eq!(
+        stored_bytes(&fixture.store.conn, Some(&fixture.id)).unwrap(),
+        task_before + charged
+    );
+    assert_eq!(
+        stored_bytes(&fixture.store.conn, None).unwrap(),
+        global_before + charged
+    );
+    assert_eq!(
+        remaining_task_capacity(&fixture.store.conn, &fixture.id).unwrap(),
+        task_remaining - charged
+    );
+    assert_eq!(
+        remaining_store_capacity(&fixture.store.conn).unwrap(),
+        global_remaining - charged
+    );
+    let task = {
+        let tx = fixture.store.conn.unchecked_transaction().unwrap();
+        let task = load_task(&tx, &fixture.id).unwrap();
+        tx.commit().unwrap();
+        task
+    };
+    // This ordinary-body padding fits exactly under the old journal-blind
+    // accounting. SQLite supplies its bytes, without a large owned Rust buffer.
+    let padding = TASK_CAPACITY - TERMINAL_RESERVE - task_before - 64 - 256;
+    fixture
+        .store
+        .conn
+        .execute(
+            "INSERT INTO investigation_events VALUES (?1,999,zeroblob(?2),?3)",
+            params![fixture.id, i64::try_from(padding).unwrap(), "0".repeat(64)],
+        )
+        .unwrap();
+    assert_eq!(
+        task_before + padding + 64 + 256,
+        TASK_CAPACITY - TERMINAL_RESERVE
+    );
+    assert_eq!(
+        check_task_capacity(&fixture.store.conn, &fixture.id, false),
+        Err(InvestigationStoreError::Capacity)
+    );
+    assert_eq!(
+        remaining_task_capacity(&fixture.store.conn, &fixture.id),
+        Err(InvestigationStoreError::Capacity)
+    );
+    // A real ordinary coordinator write is refused and rolled back as well.
+    let before: Vec<u8> = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT record FROM investigation_tasks WHERE id=?1",
+            [&fixture.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let tx = fixture.store.conn.transaction().unwrap();
+    assert_eq!(
+        save_task(&tx, &task, task.detail.summary.revision, false),
+        Err(InvestigationStoreError::Capacity)
+    );
+    tx.rollback().unwrap();
+    assert_eq!(
+        fixture.store.cancel_investigation(&fixture.id),
+        Err(InvestigationStoreError::Capacity)
+    );
+    let after: Vec<u8> = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT record FROM investigation_tasks WHERE id=?1",
+            [&fixture.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after, before);
+}
+
+// AC-0265: capacity reads neither create optional tables nor charge a legacy
+// store differently when the journal is absent or initialized but empty.
+#[test]
+fn staged_refusal_journal_capacity_preserves_legacy_without_optional_tables() {
+    let mut fixture = Fixture::new();
+    let task_before = stored_bytes(&fixture.store.conn, Some(&fixture.id)).unwrap();
+    let global_before = stored_bytes(&fixture.store.conn, None).unwrap();
+    assert_eq!(
+        journal_bytes(&fixture.store.conn, Some(&fixture.id)).unwrap(),
+        0
+    );
+    let count: i64 = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'staged_completion_*'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(
+        remaining_task_capacity(&fixture.store.conn, &fixture.id).unwrap(),
+        TASK_CAPACITY - TERMINAL_RESERVE - task_before
+    );
+    assert_eq!(
+        remaining_store_capacity(&fixture.store.conn).unwrap(),
+        STORE_CAPACITY - global_before
+    );
+    let tx = fixture.store.conn.transaction().unwrap();
+    initialize(&tx).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        stored_bytes(&fixture.store.conn, Some(&fixture.id)).unwrap(),
+        task_before
+    );
+    assert_eq!(
+        stored_bytes(&fixture.store.conn, None).unwrap(),
+        global_before
+    );
+    fixture.store.cancel_investigation(&fixture.id).unwrap();
+}
