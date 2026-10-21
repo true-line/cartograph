@@ -67,7 +67,9 @@ fn semantic_cached_preview_reopens_zero_embedding_calls_and_reset_blocks_publica
     let dir = tempfile::tempdir().unwrap();
     let graph_path = dir.path().join("graph.db");
     let cache_path = dir.path().join("embeddings.db");
-    let cache = Arc::new(Mutex::new(EmbeddingCache::open(&cache_path).unwrap()));
+    let cache = Arc::new(Mutex::new(
+        EmbeddingCache::open_disposable(dir.path()).unwrap(),
+    ));
     let graph = Mutex::new(graph(&graph_path, &cache));
     let lease = cache
         .lock()
@@ -83,7 +85,9 @@ fn semantic_cached_preview_reopens_zero_embedding_calls_and_reset_blocks_publica
     let cold = record_semantic_preview(&graph, &jobs, &cache, &lease, cold).unwrap();
     drop(graph);
     drop(cache);
-    let cache = Arc::new(Mutex::new(EmbeddingCache::open(&cache_path).unwrap()));
+    let cache = Arc::new(Mutex::new(
+        EmbeddingCache::open_disposable(dir.path()).unwrap(),
+    ));
     let graph = Mutex::new(self::graph(&graph_path, &cache));
     let lease = cache
         .lock()
@@ -99,6 +103,11 @@ fn semantic_cached_preview_reopens_zero_embedding_calls_and_reset_blocks_publica
         serde_json::to_vec(&warm.eval).unwrap()
     );
     assert_eq!(p.0.load(Ordering::SeqCst), 1);
+    // Corrupt disposable schema must not block the actual graph clear.
+    rusqlite::Connection::open(&cache_path)
+        .unwrap()
+        .execute_batch("CREATE VIEW poisoned AS SELECT 1")
+        .unwrap();
     // Actual reset runs after snapshot/computation but before journal publication.
     clear_graph_store(&mut graph.lock().unwrap()).unwrap();
     assert!(record_semantic_preview(&graph, &jobs, &cache, &lease, warm).is_err());
@@ -116,7 +125,7 @@ fn semantic_cache_schema_reset_and_recreated_graph_invalidate_instance_and_vecto
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("graph.db");
     let cache = Arc::new(Mutex::new(
-        EmbeddingCache::open(dir.path().join("embeddings.db")).unwrap(),
+        EmbeddingCache::open_disposable(dir.path()).unwrap(),
     ));
     let store = graph(&path, &cache);
     let instance = store.instance_id().unwrap();
@@ -157,7 +166,7 @@ fn semantic_cache_retained_source_forget_invalidates_but_preserves_graph_facts()
     .unwrap();
     let mut state = crate::registered_source_tests::app_state(dir.path());
     let cache = Arc::new(Mutex::new(
-        EmbeddingCache::open(dir.path().join("embeddings.db")).unwrap(),
+        EmbeddingCache::open_disposable(dir.path()).unwrap(),
     ));
     state.graph = Mutex::new(graph(&dir.path().join("graph.db"), &cache));
     let source = state
@@ -195,6 +204,10 @@ fn semantic_cache_retained_source_forget_invalidates_but_preserves_graph_facts()
     assert!(primary_source::forget(&state, &source.source_id, "stale").is_err());
     assert_eq!(cache.lock().unwrap().lease().unwrap(), lease);
     let preview = primary_source::preview(&state, &source.source_id).unwrap();
+    rusqlite::Connection::open(dir.path().join("embeddings.db"))
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
     primary_source::forget(&state, &source.source_id, &preview.fingerprint).unwrap();
     assert_ne!(cache.lock().unwrap().lease().unwrap(), lease);
     assert_eq!(state.graph.lock().unwrap().all_nodes().unwrap().len(), 1);

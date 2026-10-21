@@ -26,14 +26,21 @@ trust the local provider and are not cryptographic execution attestation.
 Use a separately bounded SQLite vector store. Admit row counts, payload lengths
 and aggregate sizes before decoding. Validate full embedding batches, finite
 values and dimension consistency before atomic publication. Namespace metadata
-pins dimension, recipe and manifest together. Deterministic sequence-based
-eviction avoids wall-clock dependence. Concurrent writes retain the first
+pins dimension, recipe and manifest together. Deterministic insertion-sequence FIFO eviction avoids wall-clock dependence;
+cache hits do not refresh age. Namespace capacity also evicts the oldest
+unprotected namespace and its vectors, so model churn cannot permanently
+prevent previews while unused old namespaces occupy the store. Concurrent writes retain the first
 published value; every operation reads back that winning value before using it.
 Counters distinguish hits, unique misses, calls, conflicts, invalid rows,
 unpinned identities and evictions.
 
-Bind app integration to the graph-store instance and generation, not an invented
-system identifier. Graph clear, startup schema reset and retained-source forget
+Bind app integration to a random cache-store epoch plus graph-store instance
+and generation, not an invented system identifier. Corrupt, foreign or unsupported
+cache contents in the host-owned disposable store are replaced when writable;
+replacement creates a new epoch so an old lease can never become current again.
+Actual filesystem/deletion failures remain explicit and are not reported as
+successful erasure. Keep the cache handle separate from long-lived extraction
+locks so previews cannot block graph readers while waiting for an ingest. Graph clear, startup schema reset and retained-source forget
 invalidate the generation and delete associated vector rows under a lifecycle
 guard. A preview leases its generation before reading its graph and checks it
 before publishing or returning. Invalidation must prevent an in-flight request

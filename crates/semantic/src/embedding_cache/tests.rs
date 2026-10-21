@@ -437,3 +437,198 @@ fn embedding_cache_failed_operation_cannot_seal_prior_staged_vectors() {
         0
     );
 }
+
+#[test]
+fn embedding_cache_disposable_recovery_rotates_epoch_and_preserves_attached_database() {
+    // AC-0269: recovery can discard only the fixed main cache, never attached user data.
+    let dir = tempfile::tempdir().unwrap();
+    let mut cache = EmbeddingCache::open_disposable(dir.path()).unwrap();
+    let old = cache.bind_instance(&"a".repeat(32)).unwrap();
+    let external = dir.path().canonicalize().unwrap().join("user.db");
+    cache
+        .connection
+        .execute(
+            "ATTACH DATABASE ?1 AS external",
+            [external.to_str().unwrap()],
+        )
+        .unwrap();
+    cache.connection.execute_batch("CREATE TABLE external.important(value TEXT); INSERT INTO external.important VALUES('keep'); CREATE VIEW unexpected AS SELECT 1;").unwrap();
+    cache.invalidate().unwrap();
+    let new = cache.bind_instance(&"a".repeat(32)).unwrap();
+    assert_ne!(old, new);
+    assert_ne!(old.epoch, new.epoch);
+    assert_eq!(old.generation, new.generation);
+    assert!(cache.check(&old).is_err());
+    assert_eq!(
+        cache
+            .connection
+            .query_row("SELECT value FROM external.important", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        "keep"
+    );
+}
+#[test]
+fn embedding_cache_fixed_path_recovers_corrupt_foreign_and_newer_schema() {
+    // AC-0269: disposable storage is not a prerequisite for application availability.
+    for kind in ["corrupt", "foreign", "newer"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("embeddings.db");
+        match kind {
+            "corrupt" => std::fs::write(&path, b"not a SQLite database").unwrap(),
+            "foreign" => {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch("CREATE TABLE user_data(value); INSERT INTO user_data VALUES('foreign'); PRAGMA user_version=99;").unwrap();
+            }
+            _ => {
+                let cache = EmbeddingCache::open(&path).unwrap();
+                cache
+                    .connection
+                    .pragma_update(None, "user_version", 99)
+                    .unwrap();
+            }
+        }
+        let mut cache = EmbeddingCache::open_disposable(dir.path()).unwrap();
+        cache.validate().unwrap();
+        assert_eq!(
+            cache
+                .connection
+                .query_row("SELECT count(*) FROM vectors", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let lease = cache.bind_instance(&"a".repeat(32)).unwrap();
+        let p = Scripted::new();
+        let cache = Arc::new(Mutex::new(cache));
+        let wrapper = CachedProvider::new(&p, cache, lease).unwrap();
+        wrapper.embed(&["cold".into()]).unwrap();
+        wrapper.seal().unwrap();
+        assert_eq!(wrapper.finish().unwrap().calls, 1);
+    }
+}
+#[test]
+fn embedding_cache_ordinary_open_leaves_foreign_schema_and_version_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("user.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE precious(value); INSERT INTO precious VALUES('keep'); PRAGMA user_version=99;").unwrap();
+    let before: String = conn
+        .query_row("SELECT group_concat(sql,';') FROM sqlite_master", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    drop(conn);
+    assert!(EmbeddingCache::open(&path).is_err());
+    let conn = Connection::open(path).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT group_concat(sql,';') FROM sqlite_master", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        99
+    );
+}
+#[test]
+fn embedding_cache_counter_exhaustion_recovers_before_invalidation() {
+    // AC-0269: hostile/exhausted signed counters cannot block graph or retention work.
+    let dir = tempfile::tempdir().unwrap();
+    let mut cache = EmbeddingCache::open_disposable(dir.path()).unwrap();
+    let old = cache.bind_instance(&"a".repeat(32)).unwrap();
+    cache
+        .connection
+        .execute_batch(
+            "UPDATE cache_meta SET generation=9223372036854775807,sequence=9223372036854775807",
+        )
+        .unwrap();
+    cache.invalidate().unwrap();
+    let new = cache.bind_instance(&"a".repeat(32)).unwrap();
+    assert_ne!(old.epoch, new.epoch);
+    cache.validate().unwrap();
+}
+#[test]
+fn embedding_cache_namespace_capacity_evicts_oldest_unprotected_namespace() {
+    // AC-0269: the 257th artifact namespace remains useful even below byte/row caps.
+    let (_dir, cache, lease) = setup();
+    let mut store = cache.lock().unwrap();
+    let mut stats = CacheStats::default();
+    let key = hash(b"one");
+    for n in 0..257 {
+        let space = hash(n.to_string().as_bytes());
+        store
+            .publish(
+                &lease,
+                &space,
+                &[(key.clone(), 3, vec![1.])],
+                &BTreeSet::from([(space.clone(), key.clone())]),
+                &mut stats,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .connection
+            .query_row("SELECT count(*) FROM spaces", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        256
+    );
+    assert_eq!(stats.evictions, 1);
+    assert!(
+        store
+            .load(&lease, &hash(b"0"), &key, 3, &mut stats)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .load(&lease, &hash(b"256"), &key, 3, &mut stats)
+            .unwrap()
+            .is_some()
+    );
+}
+#[cfg(unix)]
+#[test]
+fn embedding_cache_disposable_rejects_main_and_sidecar_links() {
+    use std::os::unix::fs::symlink;
+    for name in [
+        "embeddings.db",
+        "embeddings.db-wal",
+        "embeddings.db-shm",
+        "embeddings.db-journal",
+    ] {
+        for hard in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let precious = dir.path().join("precious.db");
+            std::fs::write(&precious, b"keep this user file").unwrap();
+            let alias = dir.path().join(name);
+            if hard {
+                std::fs::hard_link(&precious, &alias).unwrap()
+            } else {
+                symlink(&precious, &alias).unwrap()
+            };
+            assert!(EmbeddingCache::open_disposable(dir.path()).is_err());
+            assert_eq!(std::fs::read(precious).unwrap(), b"keep this user file");
+        }
+    }
+}
+
+#[test]
+fn embedding_cache_working_set_accepts_exact_row_limit_and_rejects_next() {
+    // AC-0269: capacity includes the currently admitted key without an off-by-one.
+    let (_dir, cache, lease) = setup();
+    let p = Scripted::new();
+    let wrapper = CachedProvider::new(&p, cache, lease).unwrap();
+    {
+        let mut state = wrapper.state.lock().unwrap();
+        for n in 0..MAX_ROWS - 1 {
+            state.vectors.insert(format!("{n:064x}"), (1, vec![1., 1.]));
+        }
+        state.vector_bytes = (MAX_ROWS - 1) * 8;
+    }
+    wrapper.embed(&["final allowed key".into()]).unwrap();
+    assert_eq!(wrapper.state.lock().unwrap().vectors.len(), MAX_ROWS);
+    assert!(wrapper.embed(&["one key too many".into()]).is_err());
+}

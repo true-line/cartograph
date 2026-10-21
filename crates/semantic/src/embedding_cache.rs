@@ -5,7 +5,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -16,8 +16,10 @@ pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
 pub const BATCH_COUNT: usize = 128;
 pub const BATCH_BYTES: usize = 1024 * 1024;
+mod lifecycle;
+
 const RECIPE: &str = "embedding-cache-le-f32@1";
-const SCHEMA: &str = "CREATE TABLE cache_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance TEXT NOT NULL, generation INTEGER NOT NULL CHECK(generation>=0), sequence INTEGER NOT NULL CHECK(sequence>=0)) STRICT; CREATE TABLE spaces (id TEXT PRIMARY KEY, dimension INTEGER NOT NULL CHECK(dimension BETWEEN 1 AND 4096)) STRICT; CREATE TABLE vectors (space TEXT NOT NULL REFERENCES spaces(id), key TEXT NOT NULL CHECK(length(key)=64), text_bytes INTEGER NOT NULL CHECK(text_bytes BETWEEN 0 AND 65536), dimension INTEGER NOT NULL CHECK(dimension BETWEEN 1 AND 4096), vector BLOB NOT NULL CHECK(length(vector)=dimension*4), sequence INTEGER NOT NULL CHECK(sequence>0), PRIMARY KEY(space,key)) STRICT;";
+const SCHEMA: &str = "CREATE TABLE cache_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance TEXT NOT NULL, epoch TEXT NOT NULL CHECK(length(epoch)=32), generation INTEGER NOT NULL CHECK(generation>=0), sequence INTEGER NOT NULL CHECK(sequence>=0)) STRICT; CREATE TABLE spaces (id TEXT PRIMARY KEY, dimension INTEGER NOT NULL CHECK(dimension BETWEEN 1 AND 4096)) STRICT; CREATE TABLE vectors (space TEXT NOT NULL REFERENCES spaces(id), key TEXT NOT NULL CHECK(length(key)=64), text_bytes INTEGER NOT NULL CHECK(text_bytes BETWEEN 0 AND 65536), dimension INTEGER NOT NULL CHECK(dimension BETWEEN 1 AND 4096), vector BLOB NOT NULL CHECK(length(vector)=dimension*4), sequence INTEGER NOT NULL CHECK(sequence>0), PRIMARY KEY(space,key)) STRICT;";
 fn error(value: impl std::fmt::Display) -> ProviderError {
     ProviderError::InvalidEmbeddings(format!("embedding cache: {value}"))
 }
@@ -35,6 +37,7 @@ fn hash(bytes: &[u8]) -> String {
 pub struct Lease {
     instance: String,
     generation: i64,
+    epoch: String,
 }
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CacheStats {
@@ -52,41 +55,16 @@ pub struct CacheStats {
 
 pub struct EmbeddingCache {
     connection: Connection,
+    disposable: bool,
+    path: PathBuf,
 }
 impl EmbeddingCache {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, ProviderError> {
-        let connection = Connection::open(path).map_err(error)?;
-        connection
-            .pragma_update(None, "foreign_keys", true)
-            .map_err(error)?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(error)?;
-        let exists: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='cache_meta')",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(error)?;
-        if !exists {
-            let tx = connection.unchecked_transaction().map_err(error)?;
-            tx.execute_batch(SCHEMA).map_err(error)?;
-            tx.execute("INSERT INTO cache_meta VALUES(1,'',0,0)", [])
-                .map_err(error)?;
-            tx.pragma_update(None, "user_version", 1).map_err(error)?;
-            tx.commit().map_err(error)?;
-        }
-        let result = Self { connection };
-        result.validate()?;
-        Ok(result)
-    }
     fn validate(&self) -> Result<(), ProviderError> {
         let version: i64 = self
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(error)?;
-        if version != 1 {
+        if version != 2 {
             return Err(error("unsupported schema"));
         }
         let admitted: bool = self.connection.query_row("SELECT count(*)=3 AND coalesce(min(typeof(name)='text' AND length(CAST(name AS BLOB))<=64 AND typeof(sql)='text' AND length(CAST(sql AS BLOB))<=4096),0) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",[],|r|r.get(0)).map_err(error)?;
@@ -112,7 +90,7 @@ impl EmbeddingCache {
         if objects.len() != 3 || objects.iter().any(|(_, sql)| !expected.contains(sql)) {
             return Err(error("unexpected schema objects"));
         }
-        let invalid: bool = self.connection.query_row("SELECT count(*) != 1 OR coalesce(max(NOT(singleton=1 AND typeof(instance)='text' AND length(CAST(instance AS BLOB))<=128 AND typeof(generation)='integer' AND generation>=0 AND typeof(sequence)='integer' AND sequence>=0)),1) FROM cache_meta",[],|r|r.get(0)).map_err(error)?;
+        let invalid: bool = self.connection.query_row("SELECT count(*) != 1 OR coalesce(max(NOT(singleton=1 AND typeof(instance)='text' AND length(CAST(instance AS BLOB))<=128 AND typeof(epoch)='text' AND length(CAST(epoch AS BLOB))=32 AND epoch NOT GLOB '*[^0-9a-f]*' AND typeof(generation)='integer' AND generation BETWEEN 0 AND 9223372036854775805 AND typeof(sequence)='integer' AND sequence BETWEEN 0 AND 9223372036854675807)),1) FROM cache_meta",[],|r|r.get(0)).map_err(error)?;
         if invalid {
             return Err(error("invalid lifecycle metadata"));
         }
@@ -144,16 +122,16 @@ impl EmbeddingCache {
     }
     /// Rotate before destructive lifecycle work; transactionally delete every vector.
     pub fn invalidate(&mut self) -> Result<(), ProviderError> {
-        self.validate()?;
+        self.ensure()?;
         let tx = self.connection.transaction().map_err(error)?;
-        tx.execute_batch("DELETE FROM vectors; DELETE FROM spaces; UPDATE cache_meta SET generation=generation+1, sequence=0 WHERE singleton=1;").map_err(error)?;
+        tx.execute_batch("DELETE FROM vectors; DELETE FROM spaces; UPDATE cache_meta SET epoch=lower(hex(randomblob(16))), generation=0, sequence=0 WHERE singleton=1;").map_err(error)?;
         tx.commit().map_err(error)
     }
     pub fn bind_instance(&mut self, instance: &str) -> Result<Lease, ProviderError> {
         if instance.len() != 32 || !instance.bytes().all(|c| c.is_ascii_hexdigit()) {
             return Err(error("invalid graph instance"));
         }
-        self.validate()?;
+        self.ensure()?;
         let current: String = self
             .connection
             .query_row(
@@ -174,12 +152,13 @@ impl EmbeddingCache {
     pub fn lease(&self) -> Result<Lease, ProviderError> {
         self.connection
             .query_row(
-                "SELECT instance,generation FROM cache_meta WHERE singleton=1 AND typeof(instance)='text' AND length(CAST(instance AS BLOB))<=128 AND typeof(generation)='integer' AND generation>=0",
+                "SELECT instance,generation,epoch FROM cache_meta WHERE singleton=1 AND typeof(instance)='text' AND length(CAST(instance AS BLOB))<=128 AND typeof(generation)='integer' AND generation>=0 AND typeof(epoch)='text' AND length(CAST(epoch AS BLOB))=32 AND epoch NOT GLOB '*[^0-9a-f]*'",
                 [],
                 |r| {
                     Ok(Lease {
                         instance: r.get(0)?,
                         generation: r.get(1)?,
+                        epoch: r.get(2)?,
                     })
                 },
             )
@@ -252,12 +231,13 @@ impl EmbeddingCache {
             .map_err(error)?;
         let current: Lease = tx
             .query_row(
-                "SELECT instance,generation FROM cache_meta WHERE singleton=1",
+                "SELECT instance,generation,epoch FROM cache_meta WHERE singleton=1",
                 [],
                 |r| {
                     Ok(Lease {
                         instance: r.get(0)?,
                         generation: r.get(1)?,
+                        epoch: r.get(2)?,
                     })
                 },
             )
@@ -332,7 +312,27 @@ impl EmbeddingCache {
             .query_row("SELECT count(*) FROM spaces", [], |r| r.get(0))
             .map_err(error)?;
         if spaces > 256 {
-            return Err(error("namespace capacity"));
+            // Whole-namespace FIFO eviction is independent of vector byte/row pressure.
+            // The current operation's namespace (or any protected namespace) survives.
+            let oldest:Vec<String>=tx.prepare("SELECT s.id FROM spaces s JOIN vectors v ON v.space=s.id GROUP BY s.id ORDER BY min(v.sequence),s.id LIMIT 257").map_err(error)?.query_map([],|r|r.get(0)).map_err(error)?.collect::<Result<_,_>>().map_err(error)?;
+            let mut remaining = spaces;
+            for owner in oldest {
+                if remaining <= 256 {
+                    break;
+                }
+                if protected.iter().any(|(space, _)| space == &owner) {
+                    continue;
+                }
+                stats.evictions += tx
+                    .execute("DELETE FROM vectors WHERE space=?1", [&owner])
+                    .map_err(error)?;
+                tx.execute("DELETE FROM spaces WHERE id=?1", [&owner])
+                    .map_err(error)?;
+                remaining -= 1;
+            }
+            if remaining > 256 {
+                return Err(error("protected namespaces exceed capacity"));
+            }
         }
         tx.commit().map_err(error)
     }
@@ -367,7 +367,7 @@ impl<'a> CachedProvider<'a> {
         if provider.locality() != Locality::Local || provider.id().len() > 512 {
             return Err(error("local provider required"));
         }
-        cache.lock().map_err(error)?.validate()?;
+        cache.lock().map_err(error)?.ensure()?;
         let identity = provider.embedding_cache_identity()?;
         if identity.as_ref().is_some_and(|id| {
             id.endpoint.is_empty()
@@ -528,7 +528,12 @@ impl CachedProvider<'_> {
                 .checked_add(text.len())
                 .ok_or_else(|| error("unique input overflow"))?;
             if state.unique_bytes > MAX_INPUT_BYTES
-                || state.vectors.len() + misses.len() >= MAX_ROWS
+                || state
+                    .vectors
+                    .len()
+                    .checked_add(misses.len())
+                    .and_then(|n| n.checked_add(1))
+                    .is_none_or(|n| n > MAX_ROWS)
             {
                 return Err(error("whole-preview working set"));
             }

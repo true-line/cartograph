@@ -65,6 +65,7 @@ struct AppState {
     decisions: Mutex<agents::DecisionLog>,
     proposals: Mutex<agents::ProposalStore>,
     extraction_caches: Mutex<ExtractionCaches>,
+    embedding_cache: Option<Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>>,
     /// Durable, host-owned authority for operational source locations.
     sources: Arc<Mutex<SourceRegistry>>,
     primary_sources: primary_source::PrimarySourceStore,
@@ -83,7 +84,6 @@ struct RepoExtractionCache {
 
 #[derive(Default)]
 struct ExtractionCaches {
-    embedding: Option<Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>>,
     repos: std::collections::BTreeMap<String, RepoExtractionCache>,
 }
 
@@ -4710,10 +4710,7 @@ async fn semantic_preview(
     let (nodes, edges, cache, lease) = {
         let graph = state.graph.lock().map_err(|error| error.to_string())?;
         let cache = state
-            .extraction_caches
-            .lock()
-            .map_err(|e| e.to_string())?
-            .embedding
+            .embedding_cache
             .clone()
             .ok_or("embedding cache unavailable")?;
         let lease = cache
@@ -5119,7 +5116,7 @@ fn main() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let embedding_cache = Arc::new(Mutex::new(
-                semantic::embedding_cache::EmbeddingCache::open(data_dir.join("embeddings.db"))?,
+                semantic::embedding_cache::EmbeddingCache::open_disposable(&data_dir)?,
             ));
             let invalidator = Arc::clone(&embedding_cache);
             let graph = SqliteGraphStore::open_with_reset_hook(
@@ -5167,10 +5164,8 @@ fn main() {
                 settings: Mutex::new(tier_settings),
                 decisions: Mutex::new(decisions),
                 proposals: Mutex::new(staged_proposals),
-                extraction_caches: Mutex::new(ExtractionCaches {
-                    embedding: Some(embedding_cache),
-                    ..Default::default()
-                }),
+                extraction_caches: Mutex::new(ExtractionCaches::default()),
+                embedding_cache: Some(embedding_cache),
                 sources: Arc::new(Mutex::new(sources)),
                 primary_sources: primary_source::PrimarySourceStore::open(&data_dir)
                     .map_err(std::io::Error::other)?,
@@ -8769,6 +8764,7 @@ export function App() {
                 agents::ProposalStore::open(state_path.with_file_name("proposals.sqlite")).unwrap(),
             ),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
+            embedding_cache: None,
             primary_sources: super::primary_source::PrimarySourceStore::open(
                 state_path.parent().unwrap(),
             )
@@ -9746,6 +9742,7 @@ export function App() {
                 agents::ProposalStore::open(state_path.with_file_name("proposals.sqlite")).unwrap(),
             ),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
+            embedding_cache: None,
             primary_sources: super::primary_source::PrimarySourceStore::open(dir).unwrap(),
             sources: test_source_registry(&state_path, &std::collections::BTreeSet::new()),
             metrics: std::sync::Mutex::new(
@@ -10254,6 +10251,7 @@ export function App() {
                 agents::ProposalStore::open(state_path.with_file_name("proposals.sqlite")).unwrap(),
             ),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
+            embedding_cache: None,
             primary_sources: super::primary_source::PrimarySourceStore::open(
                 state_path.parent().unwrap(),
             )
@@ -10510,6 +10508,7 @@ export function App() {
                 agents::ProposalStore::open(state_path.with_file_name("proposals.sqlite")).unwrap(),
             ),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
+            embedding_cache: None,
             primary_sources: super::primary_source::PrimarySourceStore::open(
                 state_path.parent().unwrap(),
             )
