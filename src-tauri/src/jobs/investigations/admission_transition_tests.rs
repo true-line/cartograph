@@ -2,10 +2,62 @@ use super::super::{admission_journal::tests as fixture, completion::internal_nex
 use super::*;
 
 #[test]
+fn capacity_transition_rejects_scalar_corruption_without_reviving_task() {
+    // AC-0287: the saved row, not just its JSON, is the admission authority.
+    for corrupt in [
+        "UPDATE investigation_tasks SET live=0",
+        "UPDATE investigation_tasks SET job_id=job_id+1",
+        "UPDATE investigation_tasks SET nonce='different-nonce'",
+        "UPDATE investigation_tasks SET conversation_id='different-conversation'",
+        "UPDATE investigation_tasks SET record_hash=printf('%0100000d',0)",
+    ] {
+        let mut f = internal_next_prompt_fixture();
+        let proposal = fixture::proposal(&f, 1);
+        let response = fixture::response(&f, &proposal);
+        f.store.conn.execute_batch(corrupt).unwrap();
+        let before_events: i64 = f
+            .store
+            .conn
+            .query_row("SELECT count(*) FROM investigation_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        {
+            let tx = f.store.conn.transaction().unwrap();
+            assert!(
+                refuse_capacity(
+                    &tx,
+                    &f.task,
+                    &response,
+                    &proposal,
+                    CapacityRefusalReason::PromptCapacity
+                )
+                .is_err(),
+                "{corrupt}"
+            );
+            let responses: i64 = tx
+                .query_row("SELECT count(*) FROM investigation_responses", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let events: i64 = tx
+                .query_row("SELECT count(*) FROM investigation_events", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(responses, 0, "{corrupt}");
+            assert_eq!(events, before_events, "{corrupt}");
+        }
+    }
+}
+
+#[test]
 fn capacity_transition_persists_response_feedback_and_ready_without_acquisition() {
     let mut f = internal_next_prompt_fixture();
     let proposal = fixture::proposal(&f, 1);
-    let response = fixture::response(&f, &proposal);
+    let mut response = fixture::response(&f, &proposal);
+    response.reported_input_tokens = Some(10);
+    response.reported_output_tokens = Some(5);
     let before_usage = f.task.detail.usage.clone();
     let before_ledger = encode(&f.ledger, MAX_MANIFEST_BYTES).unwrap();
     let tx = f.store.conn.transaction().unwrap();
@@ -35,6 +87,12 @@ fn capacity_transition_persists_response_feedback_and_ready_without_acquisition(
         before_usage.generated_token_reservations
     );
     assert_eq!(next.detail.usage.tool_actions, before_usage.tool_actions);
+    assert_eq!(next.detail.usage.reported_input_tokens, Some(10));
+    assert_eq!(next.detail.usage.reported_output_tokens, Some(5));
+    assert_eq!(
+        next.detail.usage.active_milliseconds,
+        response.active_milliseconds
+    );
     assert_eq!(
         next.detail.usage.evidence_requests,
         before_usage.evidence_requests
@@ -57,6 +115,20 @@ fn capacity_transition_persists_response_feedback_and_ready_without_acquisition(
     .unwrap();
     assert_eq!(encode(&ledger, MAX_MANIFEST_BYTES).unwrap(), before_ledger);
     tx.commit().unwrap();
+    {
+        let tx = f.store.conn.transaction().unwrap();
+        assert!(
+            refuse_capacity(
+                &tx,
+                &f.task,
+                &response,
+                &proposal,
+                CapacityRefusalReason::PromptCapacity
+            )
+            .is_err()
+        );
+        // Retrying with the unacknowledged old record cannot double-charge.
+    }
     f.task = next;
     assert_eq!(fixture::state(&f).count, 1);
 }

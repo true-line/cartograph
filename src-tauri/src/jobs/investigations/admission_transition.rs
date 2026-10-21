@@ -24,12 +24,8 @@ pub(super) fn refuse_capacity(
     // authentication is a separate caller responsibility in this same Tx.
     let id = &task.detail.summary.investigation_id;
     let expected = encode(task, MAX_RECORD_BYTES)?;
-    let saved: (Vec<u8>, String) = tx.query_row(
-        "SELECT CASE WHEN typeof(record)='blob' AND length(record)<=262144 THEN record END, record_hash FROM investigation_tasks WHERE id=?1 AND revision=?2",
-        params![id,signed(task.detail.summary.revision)?],
-        |row| Ok((row.get(0)?,row.get(1)?)),
-    ).optional()?.ok_or(InvestigationStoreError::Stale)?;
-    if saved.0 != expected || saved.1 != core_prov::content_hash(&saved.0) {
+    let saved = storage::load_next_prompt_task_base(tx, id)?;
+    if encode(&saved, MAX_RECORD_BYTES)? != expected {
         return Err(InvestigationStoreError::Stale);
     }
     let call = task
@@ -37,7 +33,6 @@ pub(super) fn refuse_capacity(
         .as_ref()
         .and_then(|state| state.current_call.as_ref())
         .ok_or(InvestigationStoreError::Invalid)?;
-    call.validate_saved(tx, task)?;
     if call.mode() != CompletionCallMode::Choice {
         // Worker settles the distinct terminal protocol outcome. A refusal here
         // must never create feedback or permit another model call.

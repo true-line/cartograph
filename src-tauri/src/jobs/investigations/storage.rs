@@ -657,6 +657,27 @@ pub(super) fn load_task_base(
     connection: &Connection,
     id: &str,
 ) -> Result<StoredTask, InvestigationStoreError> {
+    load_task_base_contract(connection, id, false)
+}
+
+/// Internal task3 reader in the caller's snapshot. Public/history loading keeps
+/// its closed family gate. Row bounds and every SQL scalar parity check are
+/// shared, while saved @10 calls use their exact journal/ordinal contract.
+pub(super) fn load_next_prompt_task_base(
+    connection: &Connection,
+    id: &str,
+) -> Result<StoredTask, InvestigationStoreError> {
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    load_task_base_contract(connection, id, true)
+}
+
+fn load_task_base_contract(
+    connection: &Connection,
+    id: &str,
+    next_prompt: bool,
+) -> Result<StoredTask, InvestigationStoreError> {
     if !id_valid(id) {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -669,7 +690,11 @@ pub(super) fn load_task_base(
         return Err(InvestigationStoreError::Invalid);
     };
     let task: StoredTask = decode(&bytes, &hash)?;
-    validate_task(&task)?;
+    if next_prompt {
+        validate_next_prompt_task(&task)?;
+    } else {
+        validate_task(&task)?;
+    }
     let namespace: String = connection.query_row(
         "SELECT namespace FROM investigation_meta WHERE singleton=1",
         [],
@@ -685,7 +710,15 @@ pub(super) fn load_task_base(
     {
         return Err(InvestigationStoreError::Invalid);
     }
-    if let Some(pending) = &task.pending {
+    if next_prompt {
+        if let Some(call) = task
+            .admission_state
+            .as_ref()
+            .and_then(|state| state.current_call.as_ref())
+        {
+            call.validate_saved(connection, &task)?;
+        }
+    } else if let Some(pending) = &task.pending {
         validate_step_basis(connection, &task, pending)?;
         if task.completion_intent.is_some() && task.phase == Phase::Invocation {
             let invoked: PendingInvestigationStep = read_body(
