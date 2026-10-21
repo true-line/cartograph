@@ -74,6 +74,12 @@ function handle() {}
     assert_eq!(subscribe.dst, chan.id);
     assert_eq!(confidence(&publish.props), "Confirmed");
     assert_eq!(publish.props["resolver"], "literal");
+    // The registry file that recognized the site is named in full (#594).
+    assert_eq!(publish.props["registry"], "ts-2026.10");
+    let source = &publish.props["registry_source"];
+    assert_eq!(source["name"], "builtin:event-sdks.json");
+    assert_eq!(source["schema"], "cartograph-event-sdk-registry@1");
+    assert_eq!(source["content_hash"].as_str().map(str::len), Some(64));
     // No Gap emitted for resolved sites.
     assert!(out.nodes.iter().all(|n| n.label != "Gap"));
 }
@@ -161,6 +167,10 @@ function channelFor(tenant: string): string { return 'tenant.' + tenant; }
         .expect("edge to the Gap");
     assert_eq!(publish.dst, gap.id);
     assert_eq!(confidence(&publish.props), "Gap");
+    assert_eq!(
+        publish.props["registry_source"]["name"],
+        "builtin:event-sdks.json"
+    );
 }
 
 // AC-0012 (env-ref miss): an env ref with no matching key in any env file

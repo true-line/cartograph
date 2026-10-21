@@ -21,6 +21,7 @@
 //! untouched; observation lands beside them under `observed` with its own
 //! `observed_prov` (Tier::Dynamic, Confirmed — the tier's ceiling).
 
+use adapters_fw::events::Registries;
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet};
@@ -686,20 +687,15 @@ pub fn enrich_pulumi_resources(
     enrichment
 }
 
-/// Resource types whose observed attribute names a code-layer channel:
-/// (terraform type, channel kind, identity attribute). Kinds match the
-/// event SDK registry (`adapters-fw::events`) exactly — that equality is
-/// what makes the join deterministic.
-pub const CHANNEL_BACKINGS: &[(&str, &str, &str)] = &[
-    ("aws_sqs_queue", "sqs-queue", "url"),
-    ("aws_sns_topic", "sns-topic", "arn"),
-];
-
 /// `BACKS` edge candidates from enriched nodes: deployed resource → the
-/// channel its observed identity names (`chan:{kind}:{identity}`). The
-/// caller inserts a candidate only if that channel node exists — a queue
-/// no code publishes or subscribes to is topology, not a channel.
-pub fn backing_candidates(nodes: &[Node]) -> Vec<Edge> {
+/// channel its observed identity names (`chan:{kind}:{identity}`). Which
+/// resource types back which channel kinds, through which observed
+/// attribute, is the channel-backing registry's data (#594); its kinds are
+/// established by the event SDK registry, which is what makes the join
+/// deterministic. The caller inserts a candidate only if that channel node
+/// exists — a queue no code publishes or subscribes to is topology, not a
+/// channel.
+pub fn backing_candidates(nodes: &[Node], registries: &Registries) -> Vec<Edge> {
     let mut out = Vec::new();
     for node in nodes {
         if node.label != "Resource" {
@@ -708,21 +704,26 @@ pub fn backing_candidates(nodes: &[Node]) -> Vec<Edge> {
         let Some(rtype) = node.props.get("type").and_then(|t| t.as_str()) else {
             continue;
         };
-        let Some((_, kind, attr)) = CHANNEL_BACKINGS.iter().find(|(t, ..)| *t == rtype) else {
+        let Some(backing) = registries
+            .backings
+            .iter()
+            .find(|b| b.resource_type == rtype)
+        else {
             continue;
         };
+        let (kind, attr) = (&backing.kind, backing.attribute.as_str());
         let Some(identity) = node
             .props
             .get("observed")
             .and_then(|observed| {
                 observed
-                    .get(*attr)
+                    .get(attr)
                     .or_else(|| {
                         observed
                             .get("outputs")
-                            .and_then(|outputs| outputs.get(*attr))
+                            .and_then(|outputs| outputs.get(attr))
                     })
-                    .or_else(|| observed.get("inputs").and_then(|inputs| inputs.get(*attr)))
+                    .or_else(|| observed.get("inputs").and_then(|inputs| inputs.get(attr)))
             })
             .and_then(|v| v.as_str())
         else {
@@ -757,6 +758,8 @@ pub fn backing_candidates(nodes: &[Node]) -> Vec<Edge> {
             label: "BACKS".into(),
             props: serde_json::json!({
                 "identity_attr": attr,
+                "registry": backing.registry.version,
+                "registry_source": backing.registry,
                 "prov": serde_json::to_value(edge_prov).expect("provenance serializes"),
             }),
         });
@@ -1219,7 +1222,7 @@ mod tests {
             nodes[0].props["observed_prov"]["evidence"][0]["path"],
             "stack.json"
         );
-        let backing = backing_candidates(&nodes);
+        let backing = backing_candidates(&nodes, Registries::builtin());
         assert_eq!(backing.len(), 1);
         assert_eq!(
             backing[0].props["prov"]["extractor_id"],
@@ -1322,9 +1325,14 @@ mod tests {
             "aws_sqs_queue",
         )];
         enrich_resources(&mut nodes, "local/infra", &state, "state.json", STATE);
-        let edges = backing_candidates(&nodes);
+        let edges = backing_candidates(&nodes, Registries::builtin());
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].label, "BACKS");
+        assert_eq!(edges[0].props["registry"], "tf-2026.10");
+        assert_eq!(
+            edges[0].props["registry_source"]["name"],
+            "builtin:channel-backings.json"
+        );
         assert_eq!(edges[0].src, "res:local/infra@aws_sqs_queue.orders");
         assert_eq!(
             edges[0].dst,
@@ -1337,7 +1345,7 @@ mod tests {
             "res:local/infra@aws_sqs_queue.orders",
             "aws_sqs_queue",
         )];
-        assert!(backing_candidates(&bare).is_empty());
+        assert!(backing_candidates(&bare, Registries::builtin()).is_empty());
     }
 
     #[test]
@@ -1354,7 +1362,7 @@ mod tests {
             "observed_prov".into(),
             observed_prov("state.json", &(0..1), "Observed aws_sqs_queue.q"),
         );
-        assert!(backing_candidates(&nodes).is_empty());
+        assert!(backing_candidates(&nodes, Registries::builtin()).is_empty());
     }
 
     #[test]

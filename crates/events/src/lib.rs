@@ -12,7 +12,7 @@
 //! R-INT-4). The T1/T2 rungs of the ladder join at M6/M7; cross-repo
 //! matching at M5.
 
-use adapters_fw::events::{ChannelRole, EVENT_SDK_VERSION, EventSite, IdentityExpr};
+use adapters_fw::events::{ChannelRole, EventSite, IdentityExpr};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::BTreeMap;
@@ -179,6 +179,18 @@ fn add_site_qualifiers(props: &mut serde_json::Value, site: &EventSite) {
     }
 }
 
+/// Record the registry file whose entry recognized the site (#594): its
+/// version as `registry`, as before, and its full identity — name, schema,
+/// version, content hash — as `registry_source`. Sites no registry entry
+/// produced carry neither.
+fn add_site_registry(props: &mut serde_json::Value, site: &EventSite) {
+    let (Some(map), Some(registry)) = (props.as_object_mut(), &site.registry) else {
+        return;
+    };
+    map.insert("registry".into(), registry.version.as_str().into());
+    map.insert("registry_source".into(), serde_json::json!(registry));
+}
+
 /// Stitch event sites into channel facts. Deterministic: channels are
 /// emitted in sorted id order, edges in site order (sites arrive sorted by
 /// file from the extractor).
@@ -220,13 +232,13 @@ pub fn stitch(sites: &[EventSite], cfg: &ConfigIndex, id: &SourceId) -> Extracti
                 });
                 let mut props = serde_json::json!({
                     "resolver": resolver,
-                    "registry": EVENT_SDK_VERSION,
                     "prov": prov(
                         id, &site.path, (site.byte_start, site.byte_end),
                         ConfidenceTier::Confirmed, &format!("{edge_label} -> {chan_id}"),
                     ),
                 });
                 add_site_qualifiers(&mut props, site);
+                add_site_registry(&mut props, site);
                 out.edges.push(Edge {
                     src,
                     dst: chan_id.clone(),
@@ -266,18 +278,19 @@ pub fn stitch(sites: &[EventSite], cfg: &ConfigIndex, id: &SourceId) -> Extracti
                     label: "Gap".into(),
                     props,
                 });
+                let mut props = serde_json::json!({
+                    "reason": reason,
+                    "prov": prov(
+                        id, &site.path, (site.byte_start, site.byte_end),
+                        ConfidenceTier::Gap, &format!("{edge_label} -> {gap_id}"),
+                    ),
+                });
+                add_site_registry(&mut props, site);
                 out.edges.push(Edge {
                     src,
                     dst: gap_id.clone(),
                     label: edge_label.into(),
-                    props: serde_json::json!({
-                        "reason": reason,
-                        "registry": EVENT_SDK_VERSION,
-                        "prov": prov(
-                            id, &site.path, (site.byte_start, site.byte_end),
-                            ConfidenceTier::Gap, &format!("{edge_label} -> {gap_id}"),
-                        ),
-                    }),
+                    props,
                 });
             }
         }

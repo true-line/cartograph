@@ -6,6 +6,7 @@
 //! Directory enrichment still reads live configuration and is outside closure.
 
 use super::{ExtractError, Extraction, IncrementalStats, SourceId};
+use adapters_fw::events::Registries;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::fs::{Dir, OpenOptions};
 use core_graph::{Edge, Node};
@@ -213,9 +214,20 @@ fn enumerate_with_limits(
 /// retrospective attestation of a caller-provided Extraction occurs here.
 /// Unsupported/oversized receipt inventories omit that whole receipt; they do
 /// not truncate ranges or change ordinary recovered facts or interpretation.
+///
+/// Event sites are recognized under the built-in registries; receipts cover
+/// lexical rules only, so they are identical under any registry set.
 pub fn extract_file(
     file: &CapturedFile,
     id: &SourceId,
+) -> Result<(Extraction, Vec<Receipt>), CapturedError> {
+    extract_file_with(file, id, Registries::builtin())
+}
+
+fn extract_file_with(
+    file: &CapturedFile,
+    id: &SourceId,
+    registries: &Registries,
 ) -> Result<(Extraction, Vec<Receipt>), CapturedError> {
     if !supported(&file.reference().path) || !valid_path(&file.reference().path) {
         return Err(CapturedError::Invalid("unsupported captured path"));
@@ -226,6 +238,7 @@ pub fn extract_file(
         file.bytes(),
         &file.reference().path,
         id,
+        registries,
         Some(&mut direct),
     )?;
     let mut receipts = BTreeMap::new();
@@ -260,11 +273,15 @@ pub fn extract_file(
 /// and facts are byte-identical to a serial run for any worker count
 /// (AC-0217) — parallelism changes only wall-clock time.
 ///
+/// Event sites are recognized under `registries`, the ingest's one
+/// effective registry set (#594).
+///
 /// [`workers`]: source_walk::parallel::workers
 pub fn extract_captured_dir(
     root: &Path,
     id: &SourceId,
     capture: &Capture,
+    registries: &Registries,
     on_file: &mut dyn FnMut(&str),
 ) -> Result<(Extraction, Vec<Receipt>, IncrementalStats), CapturedError> {
     receipt::validate_source_repo(&capture.manifest().source_id, id.repo)?;
@@ -280,7 +297,7 @@ pub fn extract_captured_dir(
     let mut stats = IncrementalStats::default();
     source_walk::parallel::map_ordered(
         &paths,
-        |path| extract_file(capture.file(path)?, id),
+        |path| extract_file_with(capture.file(path)?, id, registries),
         |path, (facts, file_receipts)| {
             on_file(path);
             for receipt in &file_receipts {

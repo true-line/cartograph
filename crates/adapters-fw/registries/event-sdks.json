@@ -1,0 +1,72 @@
+{
+  "schema": "cartograph-event-sdk-registry@1",
+  "version": "ts-2026.10",
+  "sdks": [
+    {
+      "kind": "sqs-queue",
+      "role": "produces",
+      "pattern": { "constructor": { "module": "@aws-sdk/client-sqs", "ctor": "SendMessageCommand" } },
+      "identity": { "key": "QueueUrl" }
+    },
+    {
+      "kind": "sns-topic",
+      "role": "produces",
+      "pattern": { "constructor": { "module": "@aws-sdk/client-sns", "ctor": "PublishCommand" } },
+      "identity": { "key": "TopicArn" }
+    },
+    {
+      "kind": "eventbridge-detail-type",
+      "role": "produces",
+      "pattern": { "constructor": { "module": "@aws-sdk/client-eventbridge", "ctor": "PutEventsCommand" } },
+      "identity": { "key": "DetailType" }
+    },
+    {
+      "kind": "sqs-queue",
+      "role": "produces",
+      "pattern": { "method": { "module": "aws-sdk", "ctor": "AWS.SQS", "method": "sendMessage" } },
+      "identity": { "key": "QueueUrl" }
+    },
+    {
+      "kind": "sns-topic",
+      "role": "produces",
+      "pattern": { "method": { "module": "aws-sdk", "ctor": "AWS.SNS", "method": "publish" } },
+      "identity": { "key": "TopicArn" }
+    },
+    {
+      "kind": "sqs-queue",
+      "role": "consumes",
+      "pattern": { "constructor": { "module": "sqs-consumer", "ctor": "Consumer" } },
+      "identity": { "key": "queueUrl" }
+    },
+    {
+      "kind": "kafka-topic",
+      "role": "produces",
+      "pattern": { "factory_method": { "module": "kafkajs", "factory": "producer", "method": "send" } },
+      "identity": { "key": "topic" }
+    },
+    {
+      "kind": "kafka-topic",
+      "role": "consumes",
+      "pattern": { "factory_method": { "module": "kafkajs", "factory": "consumer", "method": "subscribe" } },
+      "identity": { "key": "topic" }
+    },
+    {
+      "kind": "inproc-event",
+      "role": "produces",
+      "pattern": { "method": { "module": "events", "ctor": "EventEmitter", "method": "emit" } },
+      "identity": "first"
+    },
+    {
+      "kind": "inproc-event",
+      "role": "consumes",
+      "pattern": { "method": { "module": "events", "ctor": "EventEmitter", "method": "on" } },
+      "identity": "first"
+    }
+  ],
+  "qualifiers": [
+    { "kind": "eventbridge-detail-type", "component": "bus", "key": "EventBusName" }
+  ],
+  "batch_keys": [
+    { "kind": "eventbridge-detail-type", "key": "Entries" }
+  ]
+}

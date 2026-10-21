@@ -19,10 +19,7 @@
 //! (AC-0004, AC-0006). This tier never calls an LLM.
 
 use adapters_fw::client::{FetchSite, NEXT_PAGES_DIR, REACT_ROUTER};
-use adapters_fw::events::{
-    ChannelRole, EVENT_BATCH_KEYS, EVENT_QUALIFIERS, EVENT_SDKS, EventSite, IdentityArg,
-    IdentityExpr, SdkPattern,
-};
+use adapters_fw::events::{EventSdk, EventSite, IdentityArg, IdentityExpr, Registries, SdkPattern};
 use adapters_fw::{HTTP_FACTORIES, NEST};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
@@ -150,6 +147,9 @@ struct CachedFile {
 #[derive(Debug, Default)]
 pub struct IncrementalCache {
     files: BTreeMap<String, CachedFile>,
+    /// [`Registries::identity`] the cached parses were produced under; a
+    /// different registry set invalidates every entry (#594).
+    registries: Option<String>,
 }
 
 /// Physical source-file work performed by one incremental extraction.
@@ -284,6 +284,7 @@ struct FileCx<'a> {
     source: &'a [u8],
     path: &'a str,
     id: &'a SourceId<'a>,
+    registries: &'a Registries,
 }
 
 impl FileCx<'_> {
@@ -407,7 +408,7 @@ fn emit_eval_extraction(
     let offset = site.start_byte();
     let marker = format!("__cgeval{offset}");
     let synthetic = format!("function {marker}({}) {{\n{code}\n}}\n", params.join(", "));
-    let Ok(inner) = extract_source(synthetic.as_bytes(), cx.path, cx.id) else {
+    let Ok(inner) = extract_source_with(synthetic.as_bytes(), cx.path, cx.id, cx.registries) else {
         return None;
     };
     let entry = sym_id(cx.id.repo, cx.path, &format!("eval@{offset}"));
@@ -1203,7 +1204,7 @@ fn push_pulumi_edge(
 fn identity_in_args(
     cx: &FileCx,
     args: &TsNode,
-    spec: IdentityArg,
+    spec: &IdentityArg,
     classify: &impl Fn(&TsNode) -> IdentityExpr,
 ) -> IdentityExpr {
     let mut w = args.walk();
@@ -1219,7 +1220,7 @@ fn identity_in_args(
             while let Some(node) = stack.pop() {
                 if node.kind() == "pair"
                     && let Some(k) = node.child_by_field_name("key")
-                    && cx.text(&k).trim_matches(['"', '\'']) == key
+                    && cx.text(&k).trim_matches(['"', '\'']) == *key
                     && let Some(v) = node.child_by_field_name("value")
                 {
                     return classify(&v);
@@ -1262,11 +1263,12 @@ fn site_components(
     kind: &str,
     classify: &impl Fn(&TsNode) -> IdentityExpr,
 ) -> BTreeMap<String, String> {
-    EVENT_QUALIFIERS
+    cx.registries
+        .qualifiers
         .iter()
         .filter(|q| q.kind == kind)
-        .filter_map(|q| match classify(&pair_value_in_args(cx, args, q.key)?) {
-            IdentityExpr::Literal(value) => Some((q.component.to_string(), value)),
+        .filter_map(|q| match classify(&pair_value_in_args(cx, args, &q.key)?) {
+            IdentityExpr::Literal(value) => Some((q.component.clone(), value)),
             _ => None,
         })
         .collect()
@@ -1274,8 +1276,8 @@ fn site_components(
 
 /// Batch shape of a site of `kind`: `None` for a single literal entry.
 fn site_batch(cx: &FileCx, args: &TsNode, kind: &str) -> Option<String> {
-    let (_, key) = EVENT_BATCH_KEYS.iter().find(|(k, _)| *k == kind)?;
-    let value = pair_value_in_args(cx, args, key)?;
+    let batch = cx.registries.batch_keys.iter().find(|b| b.kind == kind)?;
+    let value = pair_value_in_args(cx, args, &batch.key)?;
     if value.kind() != "array" {
         return Some("computed entries".into());
     }
@@ -1290,19 +1292,31 @@ fn site_batch(cx: &FileCx, args: &TsNode, kind: &str) -> Option<String> {
     (entries.len() > 1).then(|| format!("{} entries", entries.len()))
 }
 
-/// Extract facts from one TypeScript source file.
+/// Extract facts from one TypeScript source file under the built-in event
+/// registries.
 pub fn extract_source(
     source: &[u8],
     path: &str,
     id: &SourceId,
 ) -> Result<Extraction, ExtractError> {
-    extract_source_recording(source, path, id, None)
+    extract_source_with(source, path, id, Registries::builtin())
+}
+
+/// [`extract_source`] under an explicit effective registry set (#594).
+pub fn extract_source_with(
+    source: &[u8],
+    path: &str,
+    id: &SourceId,
+    registries: &Registries,
+) -> Result<Extraction, ExtractError> {
+    extract_source_recording(source, path, id, registries, None)
 }
 
 fn extract_source_recording(
     source: &[u8],
     path: &str,
     id: &SourceId,
+    registries: &Registries,
     mut direct: Option<&mut captured::DirectFacts>,
 ) -> Result<Extraction, ExtractError> {
     let is_tsx = vue::component_tsx(source, path).unwrap_or(!path.ends_with(".ts"));
@@ -1330,7 +1344,12 @@ fn extract_source_recording(
         .parse(source, None)
         .ok_or_else(|| ExtractError::NoTree(path.into()))?;
     let root = tree.root_node();
-    let cx = FileCx { source, path, id };
+    let cx = FileCx {
+        source,
+        path,
+        id,
+        registries,
+    };
     let mut out = Extraction::default();
 
     // File node spans the whole file.
@@ -2205,22 +2224,19 @@ fn extract_source_recording(
     }
 
     let classify = |expr: &TsNode| -> IdentityExpr { classify_identity(&cx, expr, &const_strings) };
-    let push_site = |out: &mut Extraction,
-                     kind: &str,
-                     role: ChannelRole,
-                     identity: IdentityExpr,
-                     args: &TsNode,
-                     site: &TsNode| {
+    let push_site = |out: &mut Extraction, sdk: &EventSdk, args: &TsNode, site: &TsNode| {
+        let kind = sdk.kind.as_str();
         out.event_sites.push(EventSite {
             kind: kind.into(),
-            role,
-            identity,
+            role: sdk.role,
+            identity: identity_in_args(&cx, args, &sdk.identity, &classify),
             symbol: enclosing_symbol(&cx, *site),
             path: path.into(),
             byte_start: site.start_byte() as u64,
             byte_end: site.end_byte() as u64,
             components: site_components(&cx, args, kind, &classify),
             batch: site_batch(&cx, args, kind),
+            registry: Some(sdk.registry.clone()),
         });
     };
 
@@ -2250,15 +2266,14 @@ fn extract_source_recording(
             continue;
         };
         let from = import_modules.get(&ctor).map(|m| norm_module(m));
-        for sdk in EVENT_SDKS {
-            let SdkPattern::Constructor { module, ctor: c } = sdk.pattern else {
+        for sdk in &registries.sdks {
+            let SdkPattern::Constructor { module, ctor: c } = &sdk.pattern else {
                 continue;
             };
-            if ctor != c || from.as_deref() != Some(module) {
+            if ctor != *c || from.as_deref() != Some(module.as_str()) {
                 continue;
             }
-            let identity = identity_in_args(&cx, &args, sdk.identity, &classify);
-            push_site(&mut out, sdk.kind, sdk.role, identity, &args, &site);
+            push_site(&mut out, sdk, &args, &site);
         }
     }
 
@@ -2290,33 +2305,30 @@ fn extract_source_recording(
         let (Some(recv), Some(method), Some(args), Some(site)) = (recv, method, args, site) else {
             continue;
         };
-        for sdk in EVENT_SDKS {
-            let matched = match sdk.pattern {
+        for sdk in &registries.sdks {
+            let matched = match &sdk.pattern {
                 SdkPattern::Method {
                     module,
                     ctor,
                     method: m,
                 } => {
-                    method == m
-                        && constructed.get(&recv).map(String::as_str) == Some(ctor)
-                        && ctor_module(ctor, &import_modules).as_deref() == Some(module)
+                    method == *m
+                        && constructed.get(&recv) == Some(ctor)
+                        && ctor_module(ctor, &import_modules).as_ref() == Some(module)
                 }
                 SdkPattern::FactoryMethod {
                     module,
                     factory,
                     method: m,
                 } => {
-                    method == m
-                        && factory_receivers
-                            .get(&recv)
-                            .map(|(mo, f)| (mo.as_str(), f.as_str()))
+                    method == *m
+                        && factory_receivers.get(&recv).map(|(mo, f)| (mo, f))
                             == Some((module, factory))
                 }
                 SdkPattern::Constructor { .. } => false,
             };
             if matched {
-                let identity = identity_in_args(&cx, &args, sdk.identity, &classify);
-                push_site(&mut out, sdk.kind, sdk.role, identity, &args, &site);
+                push_site(&mut out, sdk, &args, &site);
             }
         }
     }
@@ -2926,20 +2938,28 @@ pub fn extract_dir_incremental(
     id: &SourceId,
     cache: &mut IncrementalCache,
 ) -> Result<(Extraction, IncrementalStats), ExtractError> {
-    extract_dir_incremental_with_progress(root, id, cache, &mut |_| {})
+    extract_dir_incremental_with_progress(root, id, cache, Registries::builtin(), &mut |_| {})
 }
 
 /// Same as [`extract_dir_incremental`], calling `on_file` with each file's
 /// repo-relative path as its result is merged, in sorted walk order (files
 /// parse ahead on parallel workers, #236) — a live progress hook for the
 /// shell's progress UI (#209); callers that don't need it use
-/// [`extract_dir_incremental`], which passes a no-op.
+/// [`extract_dir_incremental`], which passes a no-op. Event sites are
+/// recognized under `registries`, the one effective registry set of this
+/// ingest (#594); a cache filled under a different set is discarded whole.
 pub fn extract_dir_incremental_with_progress(
     root: &Path,
     id: &SourceId,
     cache: &mut IncrementalCache,
+    registries: &Registries,
     on_file: &mut dyn FnMut(&str),
 ) -> Result<(Extraction, IncrementalStats), ExtractError> {
+    let identity = registries.identity();
+    if cache.registries.as_ref() != Some(&identity) {
+        cache.files.clear();
+        cache.registries = Some(identity);
+    }
     let mut files = Vec::new();
     collect_ts_files(root, &mut files)?;
     files.sort(); // deterministic order (US-0014)
@@ -2971,7 +2991,7 @@ pub fn extract_dir_incremental_with_progress(
             let fresh = if reusable {
                 None
             } else {
-                Some(extract_source(&source, rel, id)?)
+                Some(extract_source_with(&source, rel, id, registries)?)
             };
             Ok::<_, ExtractError>((source_hash, fresh))
         },

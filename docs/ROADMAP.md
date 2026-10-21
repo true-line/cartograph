@@ -50,7 +50,7 @@ Implemented facts at the baseline commit, with the place to look.
 
 **Extensibility and skills (V7, V8, V9).**
 - The WASM plugin contract is one function, `extract-source` (`crates/adapters-plugin-host/wit/adapter.wit:14-25`). A plugin can add a language but not augment one (`crates/ingest/src/preflight.rs:521-533`).
-- Four registries are Rust `const` tables with no data or plugin entry point: event SDKs (`crates/adapters-fw/src/events.rs:78-81`), AWS capabilities (`crates/iac/src/registry.rs:57-115`), channel backings (`crates/dynamic/src/lib.rs:690-693`) and T1 formats (`crates/ingest/src/manifest.rs:39-53`).
+- Two registries are Rust `const` tables with no data or plugin entry point: AWS capabilities (`crates/iac/src/registry.rs:57-115`) and T1 formats (`crates/ingest/src/manifest.rs:39-53`). Event SDKs and channel backings became versioned data files with an extension directory in #594 (`crates/adapters-fw/registries/`).
 - The repository has one local skill, the adapter authoring router (`.agents/skills/add-language-adapter/SKILL.md`). Nothing measures disclosure or tokens.
 
 ## 3. Decisions

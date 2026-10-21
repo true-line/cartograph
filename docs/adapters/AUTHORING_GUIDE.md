@@ -303,6 +303,49 @@ Wiring it in (`src-tauri/src/main.rs`):
    Settings show. Ingest tests fail on a claim with no fixture, a fixture
    with no claim, or an installed language with no cells.
 
+## Path C: an event registry data file
+
+When an existing adapter already parses the language and only an SDK call
+shape is missing (a message bus client, say), no code is needed. The event
+SDK and channel backing registries are data: the built-in files are
+`crates/adapters-fw/registries/event-sdks.json` and
+`crates/adapters-fw/registries/channel-backings.json`, and each ingest
+also reads `<app_data>/registries/*.json` in name order.
+
+```json
+{
+  "schema": "cartograph-event-sdk-registry@1",
+  "version": "nats-1",
+  "sdks": [
+    {
+      "kind": "nats-subject",
+      "role": "produces",
+      "pattern": { "method": { "module": "nats", "ctor": "Client", "method": "publish" } },
+      "identity": "first"
+    }
+  ]
+}
+```
+
+- `pattern` is one of `constructor {module, ctor}`, `method {module, ctor,
+  method}` or `factory_method {module, factory, method}`; `identity` is
+  `"first"` or `{"key": "<property>"}`. An SDK file may also declare
+  `qualifiers` and `batch_keys`; a
+  `cartograph-channel-backing-registry@1` file declares `backings`
+  (`resource_type`, `kind`, `attribute`) for kinds some SDK entry
+  establishes.
+- Each file is validated whole: unknown fields or schemas, duplicate keys,
+  invalid names, more than 64 KiB, or a call shape, qualifier, batch key or
+  backing that is already registered rejects the entire file, and the
+  ingest summary lists it with the reason. A rejected file changes no
+  recovered fact.
+- Every fact an entry produces names its file in provenance
+  (`registry_source`: name, schema, version, content hash), and the set of
+  accepted files is part of the coverage basis and the parse cache key, so
+  adding or editing a file re-extracts instead of reusing stale facts.
+
+The TypeScript adapter is the one that consults the event registry today.
+
 ## Traceability — required either way
 
 Per `AGENTS.md`'s SDLC, any new user-visible capability gets an AC in

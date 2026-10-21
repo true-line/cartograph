@@ -1,0 +1,8 @@
+{
+  "schema": "cartograph-channel-backing-registry@1",
+  "version": "tf-2026.10",
+  "backings": [
+    { "resource_type": "aws_sqs_queue", "kind": "sqs-queue", "attribute": "url" },
+    { "resource_type": "aws_sns_topic", "kind": "sns-topic", "attribute": "arn" }
+  ]
+}

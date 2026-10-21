@@ -186,11 +186,14 @@ fn captured_directory_preserves_completion_but_excludes_eval_and_derived_facts()
     let capture = capture(directory.path(), &paths);
     let ordinary = crate::extract_dir(directory.path(), &parser_id()).unwrap();
     let mut visited = Vec::new();
-    let (captured, receipts, stats) =
-        extract_captured_dir(directory.path(), &parser_id(), &capture, &mut |path| {
-            visited.push(path.to_string())
-        })
-        .unwrap();
+    let (captured, receipts, stats) = extract_captured_dir(
+        directory.path(),
+        &parser_id(),
+        &capture,
+        Registries::builtin(),
+        &mut |path| visited.push(path.to_string()),
+    )
+    .unwrap();
     assert_eq!(ordinary.nodes, captured.nodes);
     assert_eq!(ordinary.edges, captured.edges);
     assert_eq!(visited, paths);
@@ -220,8 +223,14 @@ fn captured_directory_preserves_completion_but_excludes_eval_and_derived_facts()
         b"export default 7;",
     )
     .unwrap();
-    let (again, again_receipts, stats) =
-        extract_captured_dir(directory.path(), &parser_id(), &capture, &mut |_| {}).unwrap();
+    let (again, again_receipts, stats) = extract_captured_dir(
+        directory.path(),
+        &parser_id(),
+        &capture,
+        Registries::builtin(),
+        &mut |_| {},
+    )
+    .unwrap();
     assert_eq!(captured.nodes, again.nodes);
     assert_eq!(captured.edges, again.edges);
     assert_eq!(receipts, again_receipts);
@@ -294,7 +303,14 @@ fn live_config_changes_remain_outside_primary_receipt_closure() {
                 .to_string(),
         )
         .unwrap();
-        extract_captured_dir(directory.path(), &parser_id(), &capture, &mut |_| {}).unwrap()
+        extract_captured_dir(
+            directory.path(),
+            &parser_id(),
+            &capture,
+            Registries::builtin(),
+            &mut |_| {},
+        )
+        .unwrap()
     };
     let (first, first_receipts, _) = run("one.ts");
     let (second, second_receipts, _) = run("two.ts");
@@ -554,11 +570,14 @@ fn captured_extraction_is_byte_identical_to_serial() {
     let run = |workers: usize| {
         source_walk::parallel::with_workers(workers, || {
             let mut visited = Vec::new();
-            let (extraction, receipts, stats) =
-                extract_captured_dir(directory.path(), &parser_id(), &capture, &mut |path| {
-                    visited.push(path.to_string())
-                })
-                .unwrap();
+            let (extraction, receipts, stats) = extract_captured_dir(
+                directory.path(),
+                &parser_id(),
+                &capture,
+                Registries::builtin(),
+                &mut |path| visited.push(path.to_string()),
+            )
+            .unwrap();
             (
                 extraction.nodes,
                 extraction.edges,
