@@ -1087,3 +1087,48 @@ range or parent history is presented as a current source inspection.
 
 **Pass:** structured locations and selected target identities match the exact
 captured source. **Fail:** live file text or opaque IDs determine the locations.
+
+## MT-H4-06 — Observe installed Studio prerequisites, optionally prepare V7 (AC-0279, T-0279)
+
+**Procedure: UNEXECUTED.** This operator-only helper does not authorize a provider
+run. Read-only observation uses an already established credential-free loopback
+forward or execution on the explicitly asserted Studio
+`mac14x13-m2max-32g-60f1` (optional `.local` or `.lan`). It creates no tunnel and cannot prove
+which host serves loopback. Verify that path independently. Do not provision or
+substitute a model. Observation is not a later dispatch identity guarantee.
+
+1. Select the reviewed checkout, expected installed runtime version/model/digest,
+   future absolute V7 run directory, and a new absolute observation directory
+   outside that run and all declared capture/model-visible roots. Supply those
+   roots explicitly. Keep the independent rubric outside all those roots and
+   model inputs. The collector admits only HTTP loopback origins without URL
+   credentials, query or fragment and issues GET `/api/version` and `/api/tags`.
+2. Use `node scripts/collect-v7-runtime-prerequisites.mjs` with `--checkout`,
+   `--endpoint`, `--model`, `--expected-runtime-version`, `--expected-model-digest`,
+   `--target-host`, `--observation-path` (`on-studio` or `operator-established-forward`),
+   `--confirm-target-path operator-asserted`, `--output-dir`, `--run-dir`, and one
+   or more `--capture-root` and `--model-visible-root` arguments. Sampling fields
+   remain explicit null/unverified; version/tags do not prove active settings.
+3. Retain the exclusive `runtime-receipt.json`, `observation.json`, and any failure
+   marker. They contain bounded identities/hashes, never raw responses, secrets
+   or the rubric. Failure receipts keep a closed diagnostic code (for example,
+   timeout versus identity mismatch) and only a short safe observed version token
+   or selected hexadecimal model digest; arbitrary exception text is omitted. Never overwrite or delete partial output to retry. The helper pins the output
+   directory and rechecks paths around writes; a changed boundary refuses further
+   receipts and preserves the original attempt. These checks do not provide an
+   atomic filesystem capability against an arbitrary privileged racing writer.
+4. Only an explicitly selected `--prepare-only --rubric /absolute/external/path`
+   may invoke the existing Cargo preparation entrypoint. This performs local
+   capture/state mutation and queues an analyst, but makes no model call. Rust
+   remains authoritative for clean commit/tree, app version, @7 fingerprints,
+   protocol hash, captures/requests and `frozen-definition` SHA-256. Publish that
+   digest before any separately authorized stage under MT-H4-05. The helper never
+   sets analyst/auditor stage or execution opt-in and never dispatches CI.
+
+**Pass:** expected read-only runtime/model observations and immutable external
+receipts agree, with host assertion and unknown sampling stated honestly; optional
+preparation preserves the existing frozen contract. **Fail:** credentials/oracle
+leak, unexpected route/redirect, ambiguity, mismatch, overwrite, hidden execution
+or forged host/runtime authority. This is not synthetic/Vendure/native acceptance;
+`delivery_pass` remains false and #598 stays open. Offline negatives are tested
+without HTTP, Cargo, model calls or provisioning.
