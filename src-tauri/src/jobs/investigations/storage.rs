@@ -92,7 +92,14 @@ pub(super) fn validate(
 pub(super) fn validate_archive_schema(
     connection: &Connection,
 ) -> Result<(), InvestigationStoreError> {
-    validate_layout(connection, &schema())?;
+    let mut expected = schema();
+    // Read reservations are optional: old stores do not acquire empty tables or
+    // new charges on open. Only a complete, exact versioned additive namespace
+    // is recognized; partial/foreign schemas fail before any body is read.
+    if super::read_reservations::validate_optional_schema(connection)? {
+        expected.extend(super::read_reservations::schema());
+    }
+    validate_layout(connection, &expected)?;
     super::coverage::validate_version(connection)
 }
 
@@ -240,6 +247,16 @@ pub(super) fn validate_usage(
 }
 
 fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
+    // The @10 descriptor is internal groundwork. It may not inherit @9's
+    // task2/summary6 branch before its exact task3 contract is implemented.
+    if task
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
     let detail = &task.detail;
     let policy =
         InvestigationPolicy::for_limits(&detail.limits).ok_or(InvestigationStoreError::Invalid)?;
@@ -754,7 +771,9 @@ pub(super) fn stored_bytes(
     connection: &Connection,
     id: Option<&str>,
 ) -> Result<usize, InvestigationStoreError> {
-    // Fixed scalar/index/namespace/conversation allowance plus every stored body.
+    // Effective occupied capacity: fixed allowances, every stored body, and
+    // additional pending source-settlement claims. Claims are beyond the
+    // existing TERMINAL_RESERVE; do not add that reserve here a second time.
     // BLOB casts charge UTF-8 bytes even if a malformed row has SQL TEXT type.
     let (tasks, records): (i64, i64) = connection.query_row(
         "SELECT count(*), coalesce(sum(length(CAST(record AS BLOB))+length(CAST(record_hash AS BLOB))+length(CAST(id AS BLOB))+length(CAST(nonce AS BLOB))+length(CAST(conversation_id AS BLOB))),0) FROM investigation_tasks WHERE (?1 IS NULL OR id=?1)",
@@ -789,6 +808,8 @@ pub(super) fn stored_bytes(
     // accounting without creating or migrating its private schema.
     let journal_bytes = super::staged::journal_bytes(connection, id)?;
     let completion_bytes = super::completion::stored_bytes(connection, id)?;
+    let read_bytes = super::read_reservations::stored_bytes(connection, id)?;
+    let read_claims = super::read_reservations::pending_storage_claims(connection, id)?;
     let refs: i64 = connection.query_row(
         "SELECT coalesce(sum(length(CAST(task_id AS BLOB))+length(CAST(source_id AS BLOB))+length(CAST(repo_key AS BLOB))+length(CAST(receipt_id AS BLOB))+128),0) FROM investigation_refs WHERE (?1 IS NULL OR task_id=?1)",
         [id], |r| r.get(0),
@@ -797,6 +818,8 @@ pub(super) fn stored_bytes(
         .checked_add(usize::try_from(refs).map_err(|_| InvestigationStoreError::Invalid)?)
         .and_then(|bytes| bytes.checked_add(journal_bytes))
         .and_then(|bytes| bytes.checked_add(completion_bytes))
+        .and_then(|bytes| bytes.checked_add(read_bytes))
+        .and_then(|bytes| bytes.checked_add(read_claims))
         .ok_or(InvestigationStoreError::Capacity)
 }
 

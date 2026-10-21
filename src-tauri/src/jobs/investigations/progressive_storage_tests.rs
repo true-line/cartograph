@@ -123,16 +123,54 @@ fn progressive_summary_reader_rejects_unactivated_admission_generation() {
     // AC-0287: recognizing an internal specialist cannot admit a future saved UI record.
     let fixture = progressive();
     let before = fixture.store.investigation(&fixture.id).unwrap();
-    let tx = fixture.store.conn.unchecked_transaction().unwrap();
-    let mut task = load_task_base(&tx, &fixture.id).unwrap();
-    task.detail.summary.schema_version = 7;
-    task.detail.summary.specialist_id = SpecialistId::DomainAnalystV10;
-    let bytes = serde_json::to_vec(&task).unwrap();
-    tx.execute(
-        "UPDATE investigation_tasks SET record=?1, record_hash=?2 WHERE id=?3",
-        rusqlite::params![bytes, core_prov::content_hash(&bytes), fixture.id],
-    ).unwrap();
-    assert!(load_task_base(&tx, &fixture.id).is_err());
-    tx.rollback().unwrap();
+    for summary_schema in [6, 7] {
+        let tx = fixture.store.conn.unchecked_transaction().unwrap();
+        let mut task = load_task_base(&tx, &fixture.id).unwrap();
+        task.detail.summary.schema_version = summary_schema;
+        task.detail.specialist = SpecialistId::DomainAnalystV10.definition().unwrap();
+        task.detail.summary.specialist_id = SpecialistId::DomainAnalystV10;
+        let bytes = serde_json::to_vec(&task).unwrap();
+        tx.execute(
+            "UPDATE investigation_tasks SET record=?1, record_hash=?2 WHERE id=?3",
+            rusqlite::params![bytes, core_prov::content_hash(&bytes), fixture.id],
+        )
+        .unwrap();
+        assert!(load_task_base(&tx, &fixture.id).is_err());
+        tx.rollback().unwrap();
+    }
     assert_eq!(fixture.store.investigation(&fixture.id).unwrap(), before);
+}
+
+#[test]
+fn progressive_internal_start_cannot_persist_admission_role_as_old_task_family() {
+    // AC-0287: internal normalization alone must not route @10 into task2/summary6.
+    let mut fixture = progressive();
+    let mut future = fixture.request.clone();
+    future.schema_version = 7;
+    future.specialist_id = "domain-analyst@10".into();
+    future.request_nonce = "unactivated-admission-start".into();
+    future
+        .normalized_with_policy(&INVESTIGATION_V2_POLICY)
+        .unwrap();
+    let before: i64 = fixture
+        .store
+        .conn
+        .query_row("SELECT count(*) FROM investigation_tasks", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(
+        fixture
+            .store
+            .start_completion_investigation(&future, None)
+            .is_err()
+    );
+    let after: i64 = fixture
+        .store
+        .conn
+        .query_row("SELECT count(*) FROM investigation_tasks", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(before, after);
 }

@@ -9,6 +9,11 @@ use super::*;
 const OWNED: &str = "name GLOB 'investigation_read_*' OR (tbl_name GLOB 'investigation_read_*' AND name NOT GLOB 'sqlite_*')";
 const MAX_RESERVATIONS_PER_TASK: usize = 64;
 const MAX_RESERVATIONS: usize = MAX_TASKS * MAX_RESERVATIONS_PER_TASK;
+// Logical capacity allowances following the existing store's bookkeeping
+// convention, not measured SQLite physical page/index usage. These estimates
+// are not a proven upper bound on physical disk allocation.
+const READ_ROW_ALLOWANCE_BYTES: usize = 256;
+const READ_NAMESPACE_ALLOWANCE_BYTES: usize = 256;
 const TABLES: [&str; 3] = [
     "investigation_read_reservations",
     "investigation_read_validation_charges",
@@ -35,6 +40,8 @@ pub(super) struct ReadBinding {
     pub base_ledger_revision: u64,
     pub context_id: String,
     pub archive_hash: String,
+    /// Immutable usage at reservation admission, before its validation charge.
+    /// Load validates this saved base, never substitutes current task usage.
     pub base_usage: InvestigationUsage,
     pub prior_completion_hash: String,
     pub certification_basis_hash: String,
@@ -47,8 +54,11 @@ pub(super) struct Reservation {
     pub binding: ReadBinding,
     /// Exact retained descriptor; public validation proves consistency only.
     pub source: InvestigationInspectionTarget,
-    /// Checked by admission against a production-derived maximal settlement
-    /// plan. This format validator bounds it; it does not certify that plan.
+    /// ADDITIONAL headroom beyond the preexisting TERMINAL_RESERVE, checked by
+    /// admission against a production-derived maximal settlement plan. Already
+    /// written rows are charged separately. This format validator bounds the
+    /// claim; it does not size/certify that plan or add the terminal reserve a
+    /// second time.
     pub storage_claim_bytes: usize,
 }
 impl Reservation {
@@ -92,7 +102,8 @@ impl Reservation {
         }
         self.source.validate()?;
         validate_usage(&b.base_usage, &policy.limits())?;
-        // Reserve eventual tool debits before accepting the source action.
+        // Reserve eventual tool debits against the immutable admission base.
+        // Repeating this check on load must not use later current task usage.
         if b.base_usage.tool_actions >= policy.limits().tool_actions
             || b.base_usage.evidence_requests >= policy.limits().evidence_requests
             || b.base_usage
@@ -323,6 +334,19 @@ fn namespace_count(connection: &Connection) -> Result<i64, InvestigationStoreErr
         |row| row.get(0),
     )?)
 }
+/// Absent namespace preserves legacy autocommit metadata/capacity reads. A
+/// present namespace is inspected only in a caller transaction, including its
+/// exact DDL and singleton version. Never creates or repairs schema on a read.
+pub(super) fn validate_optional_schema(
+    connection: &Connection,
+) -> Result<bool, InvestigationStoreError> {
+    if namespace_count(connection)? == 0 {
+        return Ok(false);
+    }
+    validate_schema(connection)?;
+    Ok(true)
+}
+
 pub(super) fn validate_schema(connection: &Connection) -> Result<(), InvestigationStoreError> {
     require_transaction(connection)?;
     let expected = schema();
@@ -543,23 +567,22 @@ pub(super) fn insert_disposition(
     insert(connection, TABLES[2], task, step, disposition)
 }
 
-/// Actual stored rows only. Root integration must add this to ALL subsequent
-/// task/global admission, and add pending_storage_claims separately exactly once.
+/// Actual stored rows only. Shared storage::stored_bytes adds these rows and
+/// pending_storage_claims exactly once to every task/global capacity admission.
 pub(super) fn stored_bytes(
     connection: &Connection,
     task: Option<&str>,
 ) -> Result<usize, InvestigationStoreError> {
-    require_transaction(connection)?;
-    if namespace_count(connection)? == 0 {
+    if !validate_optional_schema(connection)? {
         return Ok(0);
     }
     preflight(connection)?;
-    let mut bytes = 256usize; // schema metadata allowance, charged once globally
+    let mut bytes = READ_NAMESPACE_ALLOWANCE_BYTES; // charged once globally
     if task.is_some() {
         bytes = 0;
     }
     for table in TABLES {
-        let sum: i64 = connection.query_row(&format!("SELECT coalesce(sum(length(CAST(body AS BLOB))+length(CAST(body_hash AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(step_id AS BLOB))+256),0) FROM {table} WHERE (?1 IS NULL OR task_id=?1)"),
+        let sum: i64 = connection.query_row(&format!("SELECT coalesce(sum(length(CAST(body AS BLOB))+length(CAST(body_hash AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(step_id AS BLOB))+{READ_ROW_ALLOWANCE_BYTES}),0) FROM {table} WHERE (?1 IS NULL OR task_id=?1)"),
             [task], |row| row.get(0))?;
         bytes = bytes
             .checked_add(usize::try_from(sum).map_err(|_| InvestigationStoreError::Capacity)?)
@@ -575,8 +598,7 @@ pub(super) fn pending_storage_claims(
     connection: &Connection,
     task: Option<&str>,
 ) -> Result<usize, InvestigationStoreError> {
-    require_transaction(connection)?;
-    if namespace_count(connection)? == 0 {
+    if !validate_optional_schema(connection)? {
         return Ok(0);
     }
     preflight(connection)?;

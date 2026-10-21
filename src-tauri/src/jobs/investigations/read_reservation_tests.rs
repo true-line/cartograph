@@ -495,3 +495,27 @@ fn read_reservation_accounting_charges_all_rows_and_bounds_record_counts() {
     );
     assert_eq!(pending_storage_claims(&tx, Some("task:1")).unwrap(), 0);
 }
+
+#[test]
+fn read_reservation_storage_ceiling_covers_every_accepted_policy_budget() {
+    // AC-0287 / review P3: Reservation::validate currently accepts only V2 for
+    // both @10 specialists. Policy increases must not silently exceed the
+    // immutable storage record ceiling.
+    for specialist in [
+        SpecialistId::DomainAnalystV10,
+        SpecialistId::EvidenceAuditorV10,
+    ] {
+        let mut r = reservation("task:1", "step:budget");
+        r.binding.specialist_id = specialist;
+        r.validate().unwrap();
+        let limits = InvestigationPolicy::for_profile(&r.binding.policy_profile)
+            .unwrap()
+            .limits();
+        assert!(MAX_RESERVATIONS_PER_TASK >= limits.tool_actions as usize);
+        assert!(MAX_RESERVATIONS_PER_TASK >= limits.evidence_requests as usize);
+        assert_eq!(r.binding.policy_profile, INVESTIGATION_V2_POLICY.profile());
+    }
+}
+
+#[path = "read_reservation_storage_tests.rs"]
+mod storage_tests;
