@@ -95,6 +95,34 @@ impl InvestigationInput {
         usage: &InvestigationUsage,
         policy: &InvestigationPolicy,
     ) -> Result<Self, InvestigationError> {
+        Self::prepare_base_projected(
+            question,
+            specialist,
+            ledger,
+            query_pages,
+            evidence,
+            supplied_history,
+            usage,
+            policy,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_base_projected(
+        question: &str,
+        specialist: SpecialistId,
+        ledger: InvestigationInputLedger,
+        query_pages: &[String],
+        evidence: &[AgentEvidence],
+        supplied_history: &[String],
+        usage: &InvestigationUsage,
+        policy: &InvestigationPolicy,
+        request_hash: Option<&str>,
+    ) -> Result<Self, InvestigationError> {
+        if specialist.uses_query_history_disclosure() != request_hash.is_some() {
+            return Err(InvestigationError::InvalidInput);
+        }
         if specialist.uses_policy_selection() != (policy.profile() == "investigation-v2") {
             return Err(InvestigationError::InvalidInput);
         }
@@ -221,8 +249,22 @@ impl InvestigationInput {
         }
         let compact = specialist.uses_compact_disclosure();
         let prompt_value = if compact {
-            let context =
-                CompactInvestigationContext::prepare_with_policy(&ledger, query_pages, policy)?;
+            // Select before compaction: routing a new history through the old
+            // cumulative selector representation would reject a fitting new input.
+            let context = match request_hash {
+                Some(hash) => serde_json::to_value(ProgressiveInvestigationContext::prepare(
+                    hash,
+                    &ledger,
+                    query_pages,
+                    policy,
+                )?),
+                None => serde_json::to_value(CompactInvestigationContext::prepare_with_policy(
+                    &ledger,
+                    query_pages,
+                    policy,
+                )?),
+            }
+            .map_err(|_| InvestigationError::InvalidInput)?;
             let citations: Vec<_> = ledger
                 .citations
                 .iter()
@@ -436,15 +478,20 @@ impl InvestigationInput {
             serde_json::from_value(prompt["completion_metadata"].clone())
                 .map_err(|_| InvestigationError::InvalidInput)?;
         let request = request.normalized_with_policy(policy)?;
-        // The exact policy fixes the completion prompt schema: v1 stays 6, and a
-        // non-v1 policy carries its inspection targets once, in schema 7.
-        let schema = if policy.profile() == INVESTIGATION_V1_POLICY.profile() {
-            6
-        } else {
-            7
+        let progressive = request.schema_version == 6;
+        let schema = match request.schema_version {
+            4 => 6,
+            5 => 7,
+            6 => 8,
+            _ => return Err(InvestigationError::InvalidInput),
         };
         if prompt["schema_version"] != schema
-            || disclosure.schema_version != 4
+            || disclosure.schema_version != if progressive { 5 } else { 4 }
+            || (progressive
+                && disclosure
+                    .query_history
+                    .as_ref()
+                    .is_none_or(|binding| binding.request_hash != contract.request_hash))
             || contract.request_hash != request.intent_hash_with_policy(policy)?
             || contract.obligations != request.obligations
             || contract.obligations_hash != request.obligations.fingerprint_with_policy(policy)?
@@ -507,9 +554,11 @@ impl InvestigationInput {
         policy: &InvestigationPolicy,
     ) -> Result<Result<InvestigationResult, staged_finish::FinishDecision>, InvestigationError>
     {
-        if disclosure.schema_version != 4 {
+        let request = request.normalized_with_policy(policy)?;
+        if disclosure.schema_version != if request.schema_version == 6 { 5 } else { 4 } {
             return Err(InvestigationError::InvalidInput);
         }
+        let request = &request;
         let decision = staged_finish::admit_finish_with_policy(
             request,
             task,
@@ -721,3 +770,6 @@ mod versions;
 
 #[path = "input_coverage_details.rs"]
 mod coverage_details;
+
+#[path = "input_query_history.rs"]
+mod query_history_input;

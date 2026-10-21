@@ -248,7 +248,9 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     if task.schema_version != if v7 { 2 } else { 1 }
         || task.completion_intent.is_some() != v7
         || summary.schema_version
-            != if summary.specialist_id.uses_policy_selection() {
+            != if summary.specialist_id.uses_query_history_disclosure() {
+                6
+            } else if summary.specialist_id.uses_policy_selection() {
                 5
             } else if v7 {
                 4
@@ -473,7 +475,7 @@ pub(super) fn validate_step_basis(
         };
         if task.completion_intent.is_some() {
             super::completion::validate_step_metadata(connection, task, step)?;
-        } else if disclosure.schema_version == 4 {
+        } else if matches!(disclosure.schema_version, 4 | 5) {
             return Err(InvestigationStoreError::Invalid);
         }
         if disclosure.inspection_requirements_hash != expected {
@@ -508,7 +510,18 @@ pub(super) fn validate_inspection_result(
         .ok_or(InvestigationStoreError::Invalid)?;
     if let Some(intent) = &task.completion_intent {
         let sources = intent.obligations.sources_with_policy(policy)?;
-        if result.schema_version != 5 {
+        if result.schema_version
+            != if task
+                .detail
+                .summary
+                .specialist_id
+                .uses_query_history_disclosure()
+            {
+                6
+            } else {
+                5
+            }
+        {
             return Err(InvestigationStoreError::Invalid);
         }
         return match (&result.inspection_assessment, sources.is_empty()) {

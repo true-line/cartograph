@@ -218,7 +218,9 @@ impl InvestigationInput {
         coverage_details: &[String],
         policy: &InvestigationPolicy,
     ) -> Result<Self, InvestigationError> {
-        if !specialist.uses_completion_obligations() {
+        // Newer disclosure families must use their own builder. In particular,
+        // policy identity alone cannot select an older model-visible prompt.
+        if !specialist.uses_completion_obligations() || specialist.uses_query_history_disclosure() {
             return Err(InvestigationError::InvalidInput);
         }
         let request = request.normalized_with_policy(policy)?;

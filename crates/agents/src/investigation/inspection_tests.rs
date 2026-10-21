@@ -63,6 +63,7 @@ pub(in crate::investigation) fn fixture() -> (
         representation_hash: content_hash(b"representation"),
     };
     let disclosure = InvestigationDisclosure {
+        query_history: None,
         completion_contract_hash: None,
         completion_metadata_hash: None,
         coverage_details: vec![],

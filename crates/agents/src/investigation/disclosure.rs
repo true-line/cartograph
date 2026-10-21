@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const COMPACT_DISCLOSURE_POLICY: &str = "deduplicated-recovered-context@1";
+pub const QUERY_HISTORY_DISCLOSURE_POLICY: &str = "investigation-progressive-query-history@1";
 pub const MAX_DISCLOSURE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,12 +117,53 @@ impl DisclosedInvestigationCoverage {
     }
 }
 
+/// Supplied references are separate from supplied selector/result views.
+/// The host must also bind request_hash to the actual saved task intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisclosedQueryHistory {
+    pub request_hash: String,
+    pub registry_hash: String,
+    pub query_ids: Vec<String>,
+}
+impl DisclosedQueryHistory {
+    pub(super) fn from_ledger(
+        request_hash: &str,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        let references = (0..ledger.queries.len())
+            .map(|index| QueryHistoryReference::from_ledger(request_hash, ledger, index, policy))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !crate::source_basis::hash(request_hash)
+            || policy.profile() != INVESTIGATION_V2_POLICY.profile()
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(Self {
+            request_hash: request_hash.into(),
+            registry_hash: super::query_history::registry_hash(
+                request_hash,
+                ledger,
+                policy,
+                &references,
+            )?,
+            query_ids: references
+                .into_iter()
+                .map(|reference| reference.query_id)
+                .collect(),
+        })
+    }
+}
+
 /// A complete accounting in acquisition order. Each acquired fact, query and
 /// source citation has exactly one supplied/omitted entry, including uncited
 /// evidence. Original source bindings are resolved through input_ledger_hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvestigationDisclosure {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_history: Option<DisclosedQueryHistory>,
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<DisclosedInvestigationCoverage>,
@@ -182,8 +224,18 @@ impl InvestigationDisclosure {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        let progressive = self.query_history.is_some();
+        if let Some(history) = &self.query_history
+            && (!completion
+                || history
+                    != &DisclosedQueryHistory::from_ledger(&history.request_hash, ledger, policy)?)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
         if self.schema_version
-            != if completion {
+            != if progressive {
+                5
+            } else if completion {
                 4
             } else if self.coverage.is_some() {
                 3
@@ -196,7 +248,12 @@ impl InvestigationDisclosure {
                 .inspection_requirements_hash
                 .as_deref()
                 .is_some_and(|hash| !crate::source_basis::hash(hash))
-            || self.policy != COMPACT_DISCLOSURE_POLICY
+            || self.policy
+                != if progressive {
+                    QUERY_HISTORY_DISCLOSURE_POLICY
+                } else {
+                    COMPACT_DISCLOSURE_POLICY
+                }
             || self.input_ledger_hash != ledger.fingerprint_with_policy(policy)?
             || self.graph_snapshot_id != ledger.graph_snapshot_id
             || self.scope_snapshot_id != ledger.scope_snapshot_id
@@ -235,6 +292,18 @@ impl InvestigationDisclosure {
                 return Err(InvestigationError::InvalidInput);
             }
             entry.representation.validate()?;
+            if progressive {
+                let latest = index + 1 == self.queries.len();
+                if (latest && !entry.representation.is_supplied())
+                    || (!latest
+                        && entry.representation
+                            != DisclosureRepresentation::Omitted {
+                                reason: DisclosureOmissionReason::NotSelected,
+                            })
+                {
+                    return Err(InvestigationError::InvalidInput);
+                }
+            }
         }
         let acquired_sources = ledger
             .citations
@@ -297,7 +366,12 @@ impl InvestigationDisclosure {
         policy: &InvestigationPolicy,
     ) -> Result<String, InvestigationError> {
         self.validate_with_policy(ledger, policy)?;
-        let (prefix, domain): (&str, &[u8]) = if self.schema_version == 4 {
+        let (prefix, domain): (&str, &[u8]) = if self.schema_version == 5 {
+            (
+                "investigation-disclosure-v5",
+                b"cartograph:investigation-disclosure:v5\0",
+            )
+        } else if self.schema_version == 4 {
             (
                 "investigation-disclosure-v4",
                 b"cartograph:investigation-disclosure:v4\0",

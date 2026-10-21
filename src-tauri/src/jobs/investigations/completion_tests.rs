@@ -14,6 +14,8 @@ struct Fixture {
     archive: InvestigationCoverageArchive,
     inventory_details: Vec<String>,
 }
+#[path = "progressive_storage_tests.rs"]
+mod progressive_storage_tests;
 impl Fixture {
     fn new() -> Self {
         Self::with_mode(InvestigationProviderMode::Local)
@@ -28,6 +30,13 @@ impl Fixture {
         Self::with_policy(InvestigationProviderMode::Local, policy)
     }
     fn with_policy(mode: InvestigationProviderMode, policy: &InvestigationPolicy) -> Self {
+        Self::with_family(mode, policy, false)
+    }
+    fn with_family(
+        mode: InvestigationProviderMode,
+        policy: &InvestigationPolicy,
+        progressive: bool,
+    ) -> Self {
         let legacy = policy.profile() == INVESTIGATION_V1_POLICY.profile();
         let directory = tempfile::tempdir().unwrap();
         let mut store = JobStore::open(directory.path().join("state.db")).unwrap();
@@ -63,9 +72,17 @@ impl Fixture {
             *obligation_id = hash;
         }
         let request = StagedObligationRequest {
-            schema_version: if legacy { 4 } else { 5 },
+            schema_version: if progressive {
+                6
+            } else if legacy {
+                4
+            } else {
+                5
+            },
             request_nonce: "completion-test".into(),
-            specialist_id: if legacy {
+            specialist_id: if progressive {
+                "domain-analyst@9"
+            } else if legacy {
                 "domain-analyst@7"
             } else {
                 "domain-analyst@8"
@@ -156,7 +173,12 @@ impl Fixture {
             .investigation_completion_metadata(&self.id)
             .unwrap();
         let policy = InvestigationPolicy::for_limits(&detail.limits).unwrap();
-        let input = InvestigationInput::prepare_v7_with_policy(
+        let prepare = if detail.summary.specialist_id.uses_query_history_disclosure() {
+            InvestigationInput::prepare_v8_with_policy
+        } else {
+            InvestigationInput::prepare_v7_with_policy
+        };
+        let input = prepare(
             &self.request.question,
             detail.summary.specialist_id,
             ledger,

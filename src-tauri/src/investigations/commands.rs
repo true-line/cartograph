@@ -27,8 +27,8 @@ fn available_specialists() -> Vec<SpecialistId> {
     let mut specialists = AVAILABLE_SPECIALISTS.to_vec();
     if InvestigationPolicy::for_profile("investigation-v2").is_some() {
         specialists.extend([
-            SpecialistId::DomainAnalystV8,
-            SpecialistId::EvidenceAuditorV8,
+            SpecialistId::DomainAnalystV9,
+            SpecialistId::EvidenceAuditorV9,
         ]);
     }
     specialists
@@ -42,7 +42,7 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
             let v2 = name == "investigation-v2";
             Some(InvestigationPolicyCatalogEntry {
                 limits: policy.limits(),
-                request_schema_version: if v2 { 5 } else { 4 },
+                request_schema_version: if v2 { 6 } else { 4 },
                 envelope_schema_version: if v2 { 2 } else { 1 },
                 envelope_contract: if v2 {
                     "investigation-completion-obligations@2"
@@ -55,8 +55,8 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
                 envelope_bytes: policy.envelope_bytes(),
                 specialist_ids: if v2 {
                     vec![
-                        SpecialistId::DomainAnalystV8,
-                        SpecialistId::EvidenceAuditorV8,
+                        SpecialistId::DomainAnalystV9,
+                        SpecialistId::EvidenceAuditorV9,
                     ]
                 } else {
                     vec![
@@ -587,6 +587,9 @@ mod policy_catalog_tests {
 
     #[test]
     fn investigation_policy_catalog_advertises_only_registered_exact_choices() {
+        // AC-0286: numeric v2 stays immutable while new starts use the @9 family.
+        assert!(!available_specialists().contains(&SpecialistId::DomainAnalystV8));
+        assert!(!available_specialists().contains(&SpecialistId::EvidenceAuditorV8));
         // AC-0281: catalog choices cannot activate an unregistered policy.
         assert_eq!(InvestigationLimits::default().profile, "investigation-v1");
         let choices = policy_catalog();
@@ -605,7 +608,7 @@ mod policy_catalog_tests {
                     .all(|id| available_specialists().contains(id))
             );
             let expanded = policy.profile() == "investigation-v2";
-            assert_eq!(choice.request_schema_version, if expanded { 5 } else { 4 });
+            assert_eq!(choice.request_schema_version, if expanded { 6 } else { 4 });
             assert_eq!(choice.envelope_schema_version, if expanded { 2 } else { 1 });
             assert!(
                 choice
@@ -621,7 +624,7 @@ mod policy_catalog_tests {
             InvestigationPolicy::for_profile("investigation-v2").is_some()
         );
         assert_eq!(
-            available_specialists().contains(&SpecialistId::DomainAnalystV8),
+            available_specialists().contains(&SpecialistId::DomainAnalystV9),
             InvestigationPolicy::for_profile("investigation-v2").is_some()
         );
     }

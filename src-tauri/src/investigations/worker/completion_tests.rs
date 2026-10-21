@@ -14,6 +14,34 @@ fn export_wire(name: &str, detail: &InvestigationDetail, result: Option<&Investi
 }
 
 pub(super) fn scripted_action(mode: Mode, call: usize, prompt: &Value) -> Value {
+    let progressive = matches!(
+        mode,
+        Mode::ProgressiveReplay
+            | Mode::ProgressiveReplayWrongContext
+            | Mode::ProgressiveReplayWrongIndex
+            | Mode::ProgressiveReplayWrongId
+    );
+    if progressive && call == 1 {
+        return json!({"type":"query_context","context_id":prompt["context_id"],"query":{"scope":{"type":"all"},"kind":"edge","labels":["NoSuchFixtureLabel"],"max_facts":1,"max_bytes":32768,"cursor":null}});
+    }
+    if progressive && call == 2 {
+        let reference = &prompt["compact_context"]["query_history"]["prior_queries"][0];
+        let mut replay = json!({"type":"replay_query","context_id":prompt["context_id"],"query_index":reference["query_index"],"query_id":reference["query_id"]});
+        match mode {
+            Mode::ProgressiveReplayWrongContext => {
+                replay["context_id"] = json!(format!("context-v2:{}", "0".repeat(64)))
+            }
+            Mode::ProgressiveReplayWrongIndex => replay["query_index"] = json!(999),
+            Mode::ProgressiveReplayWrongId => replay["query_id"] = json!("0".repeat(64)),
+            _ => (),
+        }
+        return replay;
+    }
+    let call = if progressive {
+        call.saturating_sub(2)
+    } else {
+        call
+    };
     let obligations = prompt["completion_contract"]["obligations"]["obligations"]
         .as_array()
         .unwrap();
@@ -154,7 +182,9 @@ impl CompletionFixture {
             &INVESTIGATION_V1_POLICY
         };
         let request = StagedObligationRequest {
-            schema_version: if specialist.uses_policy_selection() {
+            schema_version: if specialist.uses_query_history_disclosure() {
+                6
+            } else if specialist.uses_policy_selection() {
                 5
             } else {
                 4
@@ -232,6 +262,9 @@ impl CompletionFixture {
         );
     }
 }
+
+#[path = "progressive_tests.rs"]
+mod progressive_tests;
 
 // AC-0266: actual worker chooses each action; one refusal returns protected
 // feedback, then ordinary source/inventory reads support a real result5.

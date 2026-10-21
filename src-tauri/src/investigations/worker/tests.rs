@@ -34,6 +34,10 @@ enum Mode {
     CompletionNoAttempt,
     CompletionRedacted,
     CompletionCancelRefused,
+    ProgressiveReplay,
+    ProgressiveReplayWrongContext,
+    ProgressiveReplayWrongIndex,
+    ProgressiveReplayWrongId,
 }
 
 /// One deterministic provider action per actual host invocation. The fixture
@@ -102,7 +106,7 @@ impl LlmProvider for Scripted {
             !(call == 1 && matches!(self.mode, Mode::PanicAfterQuery)),
             "simulated owner loss"
         );
-        let mut action = if matches!(prompt["schema_version"].as_u64(), Some(6 | 7)) {
+        let mut action = if matches!(prompt["schema_version"].as_u64(), Some(6..=8)) {
             completion_tests::scripted_action(self.mode, call, &prompt)
         } else if matches!(self.mode, Mode::InventoryFinish) {
             if call == 0 {

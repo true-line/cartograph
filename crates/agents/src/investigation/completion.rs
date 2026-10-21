@@ -144,7 +144,7 @@ impl InvestigationStartRequest {
             Some(4) => Ok(Self::Completion(
                 super::obligations::StagedObligationRequest::decode(raw)?,
             )),
-            Some(5) => {
+            Some(5 | 6) => {
                 let policy = value["limit_profile"]
                     .as_str()
                     .and_then(InvestigationPolicy::for_profile)
@@ -345,6 +345,10 @@ impl InvestigationCompletionDetail {
             value
                 .strip_prefix("investigation-disclosure-v4:")
                 .is_some_and(hash)
+                || (policy.profile() == INVESTIGATION_V2_POLICY.profile()
+                    && value
+                        .strip_prefix("investigation-disclosure-v5:")
+                        .is_some_and(hash))
         };
         let basis_ok = match &self.assessment_basis {
             CompletionAssessmentBasis::NotAssessed => {
@@ -443,6 +447,12 @@ impl InvestigationResult {
     ) -> Result<(), InvestigationError> {
         let request = request.normalized_with_policy(policy)?;
         request.validate_ledger_with_policy(ledger, policy)?;
+        let progressive = request.schema_version == 6;
+        if disclosure.schema_version != if progressive { 5 } else { 4 }
+            || self.schema_version != if progressive { 6 } else { 5 }
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
         self.validate_completion_for_binding_with_policy(
             &request.intent_hash_with_policy(policy)?,
             &request.obligations,
@@ -536,6 +546,10 @@ impl InvestigationResult {
             obligations: envelope.clone(),
         };
         if self.investigation_id != task
+            || disclosure
+                .query_history
+                .as_ref()
+                .is_some_and(|history| history.request_hash != request_hash)
             || completion.request_hash != contract.request_hash
             || completion.obligations_hash != contract.obligations_hash
             || disclosure.completion_contract_hash.as_deref()

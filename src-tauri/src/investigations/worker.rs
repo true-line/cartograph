@@ -290,7 +290,17 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .lock()
                     .map_err(|_| HostError::Operational)?
                     .investigation_turn_basis(self.id)?;
-                InvestigationInput::prepare_v7_with_policy(
+                let prepare = if self
+                    .detail
+                    .summary
+                    .specialist_id
+                    .uses_query_history_disclosure()
+                {
+                    InvestigationInput::prepare_v8_with_policy
+                } else {
+                    InvestigationInput::prepare_v7_with_policy
+                };
+                prepare(
                     &completion_request.question,
                     self.detail.summary.specialist_id,
                     context.ledger.clone(),
@@ -434,9 +444,40 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .coverage
                     .as_ref()
                     .ok_or(HostError::InvalidInput)?;
-                let action =
+                // Replay must resolve against this exact request and saved
+                // ledger before ActionAdmitted/BeginTool consume any budget.
+                let action = if self
+                    .detail
+                    .summary
+                    .specialist_id
+                    .uses_query_history_disclosure()
+                {
+                    let jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
+                    let saved_ledger = jobs
+                        .investigation_ledger(self.id)?
+                        .ok_or(HostError::InvalidInput)?;
+                    let saved_request_hash = jobs
+                        .investigation_completion_metadata(self.id)?
+                        .request_hash;
+                    if saved_ledger != context.ledger
+                        || saved_request_hash
+                            != completion_request
+                                .ok_or(HostError::InvalidInput)?
+                                .intent_hash_with_policy(policy)?
+                    {
+                        return Err(Failure::Stop(InvestigationStopReason::InputChanged));
+                    }
+                    ProgressiveInvestigationAction::decode_resolved(
+                        &completion.text,
+                        &proof.context_id,
+                        &saved_request_hash,
+                        &saved_ledger,
+                        policy,
+                    )
+                } else {
                     CompletionInvestigationAction::decode(&completion.text, &proof.context_id)
-                        .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+                }
+                .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
                 let value: serde_json::Value = serde_json::from_str(&completion.text)
                     .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
                 let hash = content_hash(&bounded_json(&value, 32 * 1024)?);
