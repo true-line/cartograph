@@ -10,18 +10,35 @@ const MAX_PROMPT_DEPTH: usize = 40;
 const MAX_PROMPT_VALUES: usize = 16384;
 const MAX_PROMPT_ARRAY_ITEMS: usize = 32768;
 
-pub(super) fn seal(
+/// `policy` is the one the host resolved from the exact saved task limits. The
+/// supplied prompt must carry exactly those limits; nothing is inferred from it.
+pub(super) fn seal_with_policy(
     ledger: &InvestigationInputLedger,
     original: &CompletionPayload,
     prepared: &PreparedBoundedCompletion,
+    policy: &InvestigationPolicy,
+    private_targets: Option<&[InvestigationInspectionTarget]>,
 ) -> Result<InvestigationDisclosure, InvestigationError> {
     let egress = &prepared.preview().egress;
     let before = parse_prompt(&original.prompt)?;
     let after = parse_prompt(&egress.payload.prompt)?;
+    // Schema 7 is the exact non-v1 completion prompt: its inspection targets are
+    // carried once, inside the completion contract. v1 never produces it, and a
+    // non-v1 completion prompt never uses schema 6.
+    let schema = before["schema_version"].as_u64();
+    let legacy = policy.profile() == INVESTIGATION_V1_POLICY.profile();
+    if (schema == Some(7) && legacy) || (schema == Some(6) && !legacy) {
+        return Err(InvestigationError::InvalidInput);
+    }
+    let limits =
+        serde_json::to_value(policy.limits()).map_err(|_| InvestigationError::InvalidInput)?;
+    if before.get("limits") != Some(&limits) || after.get("limits") != Some(&limits) {
+        return Err(InvestigationError::InvalidInput);
+    }
     if let Some(proof) = &ledger.coverage {
         let public = serde_json::to_value(&proof.qualification)
             .map_err(|_| InvestigationError::InvalidInput)?;
-        if !matches!(before["schema_version"].as_u64(), Some(5 | 6))
+        if !matches!(schema, Some(5..=7))
             || before.get("coverage_qualification") != Some(&public)
             || before.get("context_id").and_then(Value::as_str) != Some(proof.context_id.as_str())
             || before.get("coverage_qualification") != after.get("coverage_qualification")
@@ -29,7 +46,7 @@ pub(super) fn seal(
         {
             return Err(InvestigationError::InvalidInput);
         }
-    } else if matches!(before["schema_version"].as_u64(), Some(5 | 6)) {
+    } else if matches!(schema, Some(5..=7)) {
         return Err(InvestigationError::InvalidInput);
     }
     // Protocol/basis/citation identities must survive redaction exactly. Source
@@ -46,16 +63,13 @@ pub(super) fn seal(
             return Err(InvestigationError::InvalidInput);
         }
     }
-    if (before["schema_version"] == 3
-        || before["schema_version"] == 4
-        || before["schema_version"] == 5
-        || before["schema_version"] == 6)
+    if matches!(schema, Some(3..=7))
         && (before.get("turn_progress").is_none()
             || before.get("turn_progress") != after.get("turn_progress"))
     {
         return Err(InvestigationError::InvalidInput);
     }
-    if matches!(before["schema_version"].as_u64(), Some(4..=6)) {
+    if matches!(schema, Some(4..=6)) {
         for field in [
             "inspection_requirements",
             "inspection_requirements_hash",
@@ -68,7 +82,19 @@ pub(super) fn seal(
             }
         }
     }
-    let (completion_contract_hash, completion_metadata_hash) = if before["schema_version"] == 6 {
+    if schema == Some(7) {
+        if before.get("inspection_requirements").is_some()
+            || after.get("inspection_requirements").is_some()
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        for field in ["inspection_requirements_hash", "inspection_progress"] {
+            if before.get(field) != after.get(field) {
+                return Err(InvestigationError::InvalidInput);
+            }
+        }
+    }
+    let (completion_contract_hash, completion_metadata_hash) = if matches!(schema, Some(6 | 7)) {
         for field in ["completion_contract", "completion_metadata"] {
             if before.get(field).is_none() || before.get(field) != after.get(field) {
                 return Err(InvestigationError::InvalidInput);
@@ -85,7 +111,14 @@ pub(super) fn seal(
         {
             return Err(InvestigationError::InvalidInput);
         }
-        (Some(contract.fingerprint()?), Some(metadata.fingerprint()?))
+        let hashes = (
+            Some(contract.fingerprint_with_policy(policy)?),
+            Some(metadata.fingerprint_with_policy(policy)?),
+        );
+        if schema == Some(7) {
+            contract_targets(&before, &contract, policy, private_targets)?;
+        }
+        hashes
     } else {
         if before.get("completion_contract").is_some()
             || before.get("completion_metadata").is_some()
@@ -242,7 +275,7 @@ pub(super) fn seal(
                     .ok_or(InvestigationError::InvalidInput)
             })
             .transpose()?,
-        schema_version: if before["schema_version"] == 6 {
+        schema_version: if matches!(schema, Some(6 | 7)) {
             4
         } else if before["schema_version"] == 5 {
             3
@@ -252,7 +285,7 @@ pub(super) fn seal(
             1
         },
         policy: COMPACT_DISCLOSURE_POLICY.into(),
-        input_ledger_hash: ledger.fingerprint()?,
+        input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
         graph_snapshot_id: ledger.graph_snapshot_id.clone(),
         scope_snapshot_id: ledger.scope_snapshot_id.clone(),
         payload_hash: egress.payload_hash.clone(),
@@ -280,8 +313,55 @@ pub(super) fn seal(
             })
             .transpose()?,
     };
-    disclosure.validate(ledger)?;
+    disclosure.validate_with_policy(ledger, policy)?;
     Ok(disclosure)
+}
+
+/// Reconstruct the canonical inspection targets from the validated contract and
+/// bind them to the supplied hash, the supplied progress order and the host's
+/// private admitted targets. The prompt holds no second descriptor copy.
+fn contract_targets(
+    before: &Value,
+    contract: &InvestigationCompletionContract,
+    policy: &InvestigationPolicy,
+    private_targets: Option<&[InvestigationInspectionTarget]>,
+) -> Result<(), InvestigationError> {
+    let sources = contract.obligations.sources_with_policy(policy)?;
+    let targets = if sources.is_empty() {
+        None
+    } else {
+        Some(normalize_inspection_targets_with_policy(&sources, policy)?)
+    };
+    if targets.as_deref() != private_targets {
+        return Err(InvestigationError::InvalidInput);
+    }
+    let Some(targets) = targets else {
+        return if before.get("inspection_requirements_hash").is_some()
+            || before.get("inspection_progress").is_some()
+        {
+            Err(InvestigationError::InvalidInput)
+        } else {
+            Ok(())
+        };
+    };
+    let hash = inspection_requirements_hash_with_policy(&targets, policy)?;
+    let progress = before
+        .get("inspection_progress")
+        .and_then(|progress| progress.get("requirements"))
+        .and_then(Value::as_array)
+        .ok_or(InvestigationError::InvalidInput)?;
+    if before
+        .get("inspection_requirements_hash")
+        .and_then(Value::as_str)
+        != Some(hash.as_str())
+        || progress.len() != targets.len()
+        || progress.iter().zip(&targets).any(|(entry, target)| {
+            entry.get("target_id").and_then(Value::as_str) != Some(target.target_id.as_str())
+        })
+    {
+        return Err(InvestigationError::InvalidInput);
+    }
+    Ok(())
 }
 
 fn parse_prompt(raw: &str) -> Result<Value, InvestigationError> {

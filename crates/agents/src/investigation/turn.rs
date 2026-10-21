@@ -108,8 +108,15 @@ impl InvestigationTurnBasis {
     /// Reconcile durable input ordering and tool identity. Unavailable reads do
     /// not publish an input; repeated successful reads append distinct citations.
     pub fn validate(&self, current: &InvestigationInputLedger) -> Result<(), InvestigationError> {
-        current.validate()?;
-        if self.input_ledger_hash != current.fingerprint()? {
+        self.validate_with_policy(current, &INVESTIGATION_V1_POLICY)
+    }
+    pub fn validate_with_policy(
+        &self,
+        current: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        current.validate_with_policy(policy)?;
+        if self.input_ledger_hash != current.fingerprint_with_policy(policy)? {
             return Err(InvestigationError::InvalidInput);
         }
         let Some(previous) = &self.previous_ledger else {
@@ -125,7 +132,7 @@ impl InvestigationTurnBasis {
                 Err(InvestigationError::InvalidInput)
             };
         };
-        previous.validate()?;
+        previous.validate_with_policy(policy)?;
         if previous.schema_version != current.schema_version
             || previous.coverage != current.coverage
             || previous.revision.checked_add(1) != Some(current.revision)
@@ -180,12 +187,21 @@ impl InvestigationTurnBasis {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn progress(
         &self,
         current: &InvestigationInputLedger,
         compact: &serde_json::Value,
     ) -> Result<InvestigationTurnProgress, InvestigationError> {
-        self.validate(current)?;
+        self.progress_with_policy(current, compact, &INVESTIGATION_V1_POLICY)
+    }
+    pub(super) fn progress_with_policy(
+        &self,
+        current: &InvestigationInputLedger,
+        compact: &serde_json::Value,
+        policy: &InvestigationPolicy,
+    ) -> Result<InvestigationTurnProgress, InvestigationError> {
+        self.validate_with_policy(current, policy)?;
         let (phase, last_completed_action) = match self.completed_tool {
             None => (InvestigationTurnPhase::Initial, None),
             Some(InvestigationTool::QueryContext) => (

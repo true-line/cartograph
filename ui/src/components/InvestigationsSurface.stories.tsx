@@ -1,4 +1,4 @@
-import { completionCatalog, completionChoices, completionDetail, completionResult, inventoryObligation, sourceObligation } from '../completionFixtures';
+import { expandedCompletionCatalog, completionCatalog, completionChoices, completionDetail, completionResult, inventoryObligation, sourceObligation } from '../completionFixtures';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
@@ -487,5 +487,67 @@ export const V7FollowUpWaitsAndClearsBothKinds: Story = {
     await waitFor(() => expect(canvas.getByText(/Choose an available specialist explicitly/)).toBeVisible());
     await expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@7');
     await expect(canvas.getByRole('button', { name: 'Start follow-up' })).toBeDisabled();
+  },
+};
+
+export const ExplicitExpandedBudget: Story = {
+  // AC-0281: expanded admission requires explicit budget selection and fresh obligations.
+  args: { state: state({ catalog: expandedCompletionCatalog, obligationChoices: completionChoices,
+    draftObligations: [inventoryObligation], detail: null, selectedId: null }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@7' });
+    await userEvent.type(canvas.getByLabelText('Question'), 'Inspect all required evidence.');
+    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
+    await expect(canvas.getByText(/Expanded investigations allow more evidence/)).toBeVisible();
+    await expect(canvas.getByText(/Choose 1–56 combined obligations/)).toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@8',
+      limit_profile: 'investigation-v2', obligations: { schema_version: 2, contract: 'investigation-completion-obligations@2', obligations: [inventoryObligation] } }));
+  },
+};
+
+export const ExpandedStartUncertain: Story = {
+  args: { state: state({ catalog: expandedCompletionCatalog, obligationChoices: completionChoices,
+    draftObligations: [inventoryObligation], detail: null, selectedId: null,
+    pendingStart: { schema_version: 5, specialist_id: 'domain-analyst@8', limit_profile: 'investigation-v2',
+      request_nonce: 'retained-nonce', question: 'Frozen expanded investigation.', scope: { type: 'all' }, provider_mode: 'local',
+      obligations: { schema_version: 2, contract: 'investigation-completion-obligations@2', obligations: [inventoryObligation] },
+      expected_context_id: completionChoices.context_id, expected_graph_revision: completionChoices.graph_snapshot_id,
+      conversation_id: null, parent_id: null }, startError: 'Admission could not be confirmed. Retry the same request.' }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    // Hydration represents the frozen composer retained by an uncertain host response.
+    useInvestigationStore.setState({ composer: { ...useInvestigationStore.getState().composer,
+      specialistId: 'domain-analyst@8', limitProfile: 'investigation-v2', question: 'Frozen expanded investigation.' } });
+    await waitFor(() => expect(canvas.getByLabelText('Investigation budget')).toHaveValue('investigation-v2'));
+    await expect(canvas.getByLabelText('Investigation budget')).toBeDisabled();
+    await expect(canvas.getByLabelText('Question')).toBeDisabled();
+    await userEvent.click(canvas.getByRole('button', { name: 'Retry same start request' }));
+    await expect(args.state.retryStart).toHaveBeenCalledTimes(1);
+    await expect(args.state.start).not.toHaveBeenCalled();
+  },
+};
+
+
+export const ExpandedBudgetRequiresCompatibleSpecialist: Story = {
+  // AC-0281: switching a legacy role to expanded budget explains the required explicit selection.
+  args: { state: state({ catalog: expandedCompletionCatalog, obligationChoices: completionChoices,
+    draftObligations: [inventoryObligation], detail: null, selectedId: null }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
+    await userEvent.type(canvas.getByLabelText('Question'), 'Inspect required evidence.');
+    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
+    await expect(canvas.getByText(/is unavailable for this investigation budget/)).toBeVisible();
+    await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled();
+    for (const radio of canvas.getAllByRole('radio')) await expect(radio).not.toBeChecked();
+    await expect(args.state.start).not.toHaveBeenCalled();
+    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@8/ }));
+    await expect(canvas.queryByText(/is unavailable for this investigation budget/)).not.toBeInTheDocument();
+    await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeEnabled();
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@8',
+      limit_profile: 'investigation-v2', obligations: expect.objectContaining({ schema_version: 2 }) }));
   },
 };

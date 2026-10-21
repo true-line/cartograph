@@ -23,6 +23,52 @@ const AVAILABLE_SPECIALISTS: [SpecialistId; 10] = [
     SpecialistId::EvidenceAuditorV7,
 ];
 
+fn available_specialists() -> Vec<SpecialistId> {
+    let mut specialists = AVAILABLE_SPECIALISTS.to_vec();
+    if InvestigationPolicy::for_profile("investigation-v2").is_some() {
+        specialists.extend([
+            SpecialistId::DomainAnalystV8,
+            SpecialistId::EvidenceAuditorV8,
+        ]);
+    }
+    specialists
+}
+
+fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
+    ["investigation-v1", "investigation-v2"]
+        .into_iter()
+        .filter_map(|name| {
+            let policy = InvestigationPolicy::for_profile(name)?;
+            let v2 = name == "investigation-v2";
+            Some(InvestigationPolicyCatalogEntry {
+                limits: policy.limits(),
+                request_schema_version: if v2 { 5 } else { 4 },
+                envelope_schema_version: if v2 { 2 } else { 1 },
+                envelope_contract: if v2 {
+                    "investigation-completion-obligations@2"
+                } else {
+                    "investigation-completion-obligations@1"
+                }
+                .into(),
+                max_completion_obligations: policy.max_completion_obligations(),
+                request_bytes: policy.request_bytes(),
+                envelope_bytes: policy.envelope_bytes(),
+                specialist_ids: if v2 {
+                    vec![
+                        SpecialistId::DomainAnalystV8,
+                        SpecialistId::EvidenceAuditorV8,
+                    ]
+                } else {
+                    vec![
+                        SpecialistId::DomainAnalystV7,
+                        SpecialistId::EvidenceAuditorV7,
+                    ]
+                },
+            })
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub(crate) async fn investigation_specialists(
     app: tauri::AppHandle,
@@ -31,7 +77,7 @@ pub(crate) async fn investigation_specialists(
         let state = app.state::<AppState>();
         Ok(InvestigationCatalog {
             schema_version: 1,
-            specialists: AVAILABLE_SPECIALISTS
+            specialists: available_specialists()
                 .into_iter()
                 .map(|id| id.definition())
                 .collect::<Result<_, _>>()
@@ -44,6 +90,7 @@ pub(crate) async fn investigation_specialists(
             .map(|mode| state.investigations.descriptor(mode))
             .collect(),
             limits: InvestigationLimits::default(),
+            policies: policy_catalog(),
         })
     })
     .await
@@ -531,5 +578,51 @@ mod staged_tests {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod policy_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn investigation_policy_catalog_advertises_only_registered_exact_choices() {
+        // AC-0281: catalog choices cannot activate an unregistered policy.
+        assert_eq!(InvestigationLimits::default().profile, "investigation-v1");
+        let choices = policy_catalog();
+        for choice in &choices {
+            let policy = InvestigationPolicy::for_limits(&choice.limits).unwrap();
+            assert_eq!(choice.request_bytes, policy.request_bytes());
+            assert_eq!(choice.envelope_bytes, policy.envelope_bytes());
+            assert_eq!(
+                choice.max_completion_obligations,
+                policy.max_completion_obligations()
+            );
+            assert!(
+                choice
+                    .specialist_ids
+                    .iter()
+                    .all(|id| available_specialists().contains(id))
+            );
+            let expanded = policy.profile() == "investigation-v2";
+            assert_eq!(choice.request_schema_version, if expanded { 5 } else { 4 });
+            assert_eq!(choice.envelope_schema_version, if expanded { 2 } else { 1 });
+            assert!(
+                choice
+                    .specialist_ids
+                    .iter()
+                    .all(|id| id.uses_policy_selection() == expanded)
+            );
+        }
+        assert_eq!(
+            choices
+                .iter()
+                .any(|p| p.limits.profile == "investigation-v2"),
+            InvestigationPolicy::for_profile("investigation-v2").is_some()
+        );
+        assert_eq!(
+            available_specialists().contains(&SpecialistId::DomainAnalystV8),
+            InvestigationPolicy::for_profile("investigation-v2").is_some()
+        );
     }
 }

@@ -150,7 +150,15 @@ impl InvestigationDisclosure {
     /// preparation path must separately check actual representation bytes before
     /// sealing this record; metadata does not attest unavailable old source.
     pub fn validate(&self, ledger: &InvestigationInputLedger) -> Result<(), InvestigationError> {
-        ledger.validate()?;
+        self.validate_with_policy(ledger, &INVESTIGATION_V1_POLICY)
+    }
+
+    pub fn validate_with_policy(
+        &self,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        ledger.validate_with_policy(policy)?;
         let expected_coverage = ledger
             .coverage
             .as_ref()
@@ -189,7 +197,7 @@ impl InvestigationDisclosure {
                 .as_deref()
                 .is_some_and(|hash| !crate::source_basis::hash(hash))
             || self.policy != COMPACT_DISCLOSURE_POLICY
-            || self.input_ledger_hash != ledger.fingerprint()?
+            || self.input_ledger_hash != ledger.fingerprint_with_policy(policy)?
             || self.graph_snapshot_id != ledger.graph_snapshot_id
             || self.scope_snapshot_id != ledger.scope_snapshot_id
             || !crate::source_basis::hash(&self.payload_hash)
@@ -280,7 +288,15 @@ impl InvestigationDisclosure {
         &self,
         ledger: &InvestigationInputLedger,
     ) -> Result<String, InvestigationError> {
-        self.validate(ledger)?;
+        self.fingerprint_with_policy(ledger, &INVESTIGATION_V1_POLICY)
+    }
+
+    pub fn fingerprint_with_policy(
+        &self,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<String, InvestigationError> {
+        self.validate_with_policy(ledger, policy)?;
         let (prefix, domain): (&str, &[u8]) = if self.schema_version == 4 {
             (
                 "investigation-disclosure-v4",
@@ -307,7 +323,15 @@ impl InvestigationDisclosure {
         &self,
         ledger: &InvestigationInputLedger,
     ) -> Result<BTreeSet<String>, InvestigationError> {
-        self.validate(ledger)?;
+        self.eligible_citations_with_policy(ledger, &INVESTIGATION_V1_POLICY)
+    }
+
+    pub fn eligible_citations_with_policy(
+        &self,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<BTreeSet<String>, InvestigationError> {
+        self.validate_with_policy(ledger, policy)?;
         Ok(ledger
             .citations
             .iter()

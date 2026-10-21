@@ -6,9 +6,9 @@ use std::collections::BTreeMap;
 
 // Share the existing request/inspection admission bounds without changing old encodings.
 /// Generation-4 whole-request, envelope and individual target encoding cap.
-pub const COMPLETION_REQUEST_BYTES: usize = 8 * 1024;
+pub const COMPLETION_REQUEST_BYTES: usize = INVESTIGATION_V1_POLICY.request_bytes();
 /// Raw mixed-obligation admission cap, applied before ordering or deduplication.
-pub const MAX_COMPLETION_OBLIGATIONS: usize = 12;
+pub const MAX_COMPLETION_OBLIGATIONS: usize = INVESTIGATION_V1_POLICY.max_completion_obligations();
 const CONTRACT: &str = "investigation-completion-obligations@1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,13 +84,20 @@ pub struct ObligationEnvelope {
 }
 impl ObligationEnvelope {
     pub fn normalized(&self) -> Result<Self, InvestigationError> {
-        if self.schema_version != 1
-            || self.contract != CONTRACT
-            || !(1..=MAX_COMPLETION_OBLIGATIONS).contains(&self.obligations.len())
+        self.normalized_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+    pub fn normalized_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        let (schema, contract, _) = envelope_family(policy)?;
+        if self.schema_version != schema
+            || self.contract != contract
+            || !(1..=policy.max_completion_obligations()).contains(&self.obligations.len())
         {
             return Err(InvestigationError::InvalidRequest);
         }
-        bounded_bytes(self, COMPLETION_REQUEST_BYTES)?;
+        bounded_bytes(self, policy.envelope_bytes())?;
         // Admit the complete raw list before any target/partition ownership.
         let mut entries = BTreeMap::new();
         let mut source_keys = BTreeMap::new();
@@ -128,21 +135,37 @@ impl ObligationEnvelope {
             }
         }
         Ok(Self {
-            schema_version: 1,
-            contract: CONTRACT.into(),
+            schema_version: schema,
+            contract: contract.into(),
             obligations: entries.into_values().cloned().collect(),
         })
     }
     pub fn fingerprint(&self) -> Result<String, InvestigationError> {
+        self.fingerprint_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+    pub fn fingerprint_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<String, InvestigationError> {
+        let (_, _, domain) = envelope_family(policy)?;
         Ok(crate::source_basis::domain_hash(
-            b"cartograph:completion-obligations:v1\0",
-            &bounded_bytes(&self.normalized()?, COMPLETION_REQUEST_BYTES)?,
+            domain,
+            &bounded_bytes(
+                &self.normalized_with_policy(policy)?,
+                policy.envelope_bytes(),
+            )?,
         ))
     }
     /// Projection is for future authoritative host validation, not another authority.
     pub fn sources(&self) -> Result<Vec<InvestigationInspectionTarget>, InvestigationError> {
+        self.sources_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+    pub fn sources_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<Vec<InvestigationInspectionTarget>, InvestigationError> {
         Ok(self
-            .normalized()?
+            .normalized_with_policy(policy)?
             .obligations
             .into_iter()
             .filter_map(|item| match item {
@@ -150,6 +173,20 @@ impl ObligationEnvelope {
                 _ => None,
             })
             .collect())
+    }
+}
+
+fn envelope_family(
+    policy: &InvestigationPolicy,
+) -> Result<(u32, &'static str, &'static [u8]), InvestigationError> {
+    match policy.profile() {
+        "investigation-v1" => Ok((1, CONTRACT, b"cartograph:completion-obligations:v1\0")),
+        "investigation-v2" => Ok((
+            2,
+            "investigation-completion-obligations@2",
+            b"cartograph:completion-obligations:v2\0",
+        )),
+        _ => Err(InvestigationError::InvalidRequest),
     }
 }
 
@@ -186,43 +223,50 @@ fn present_legacy<'de, D: serde::Deserializer<'de>>(
 }
 impl StagedObligationRequest {
     pub fn decode(raw: &str) -> Result<Self, InvestigationError> {
-        super::strict::preflight(raw, COMPLETION_REQUEST_BYTES, 32, 4096, 4096)?;
+        Self::decode_with_policy(raw, &INVESTIGATION_V1_POLICY)
+    }
+    /// The transport must select a registered policy before decoding this family.
+    pub fn decode_with_policy(
+        raw: &str,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        super::strict::preflight(raw, policy.request_bytes(), 32, 4096, 4096)?;
         let value: Self =
             serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidRequest)?;
-        value.normalized()
+        value.normalized_with_policy(policy)
     }
     pub fn normalized(&self) -> Result<Self, InvestigationError> {
+        self.normalized_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+    pub fn normalized_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
         // Whole request admission must precede envelope partition clones.
-        bounded_bytes(self, COMPLETION_REQUEST_BYTES)?;
-        if self.schema_version != 4
+        bounded_bytes(self, policy.request_bytes())?;
+        let (schema, roles, _) = request_family(policy)?;
+        if self.schema_version != schema
             || self.inspection_requirements.is_some()
-            || !matches!(
-                self.specialist_id.as_str(),
-                "domain-analyst@7" | "evidence-auditor@7"
-            )
-            || !self
-                .expected_context_id
-                .strip_prefix("context-v2:")
-                .is_some_and(crate::source_basis::hash)
+            || !roles.contains(&self.specialist_id.as_str())
         {
             return Err(InvestigationError::InvalidRequest);
         }
-        // Reuse immutable field validation without changing any legacy branches.
-        StartInvestigationRequest {
-            schema_version: 3,
-            request_nonce: self.request_nonce.clone(),
-            specialist_id: SpecialistId::DomainAnalystV6,
-            inspection_requirements: None,
-            question: self.question.clone(),
-            scope: self.scope.clone(),
-            provider_mode: self.provider_mode,
-            limit_profile: self.limit_profile.clone(),
-            expected_graph_revision: self.expected_graph_revision.clone(),
-            expected_context_id: Some(self.expected_context_id.clone()),
-            conversation_id: self.conversation_id.clone(),
-            parent_id: self.parent_id.clone(),
+        super::records::CommonRequestFields {
+            request_nonce: &self.request_nonce,
+            question: &self.question,
+            scope: &self.scope,
+            limit_profile: &self.limit_profile,
+            expected_graph_revision: self.expected_graph_revision.as_deref(),
+            expected_context_id: Some(&self.expected_context_id),
+            conversation_id: self.conversation_id.as_deref(),
+            parent_id: self.parent_id.as_deref(),
         }
-        .validate()?;
+        .validate_with_policy(policy)?;
+        // The former V6 projection's 8 KiB bound was redundant: the admitted
+        // whole V7 request retains the same common-field encodings, a role at
+        // least as long as domain-analyst@6, and the additional obligations.
+        // V7 also retains null optional IDs that the projection omitted. No
+        // projection allocation or legacy-family validation is needed here.
         for item in &self.obligations.obligations {
             match item {
                 Obligation::Source { target, .. }
@@ -239,7 +283,7 @@ impl StagedObligationRequest {
                 _ => (),
             }
         }
-        let obligations = self.obligations.normalized()?;
+        let obligations = self.obligations.normalized_with_policy(policy)?;
         Ok(Self {
             obligations,
             ..self.clone()
@@ -250,8 +294,15 @@ impl StagedObligationRequest {
         &self,
         ledger: &InvestigationInputLedger,
     ) -> Result<(), InvestigationError> {
-        let request = self.normalized()?;
-        ledger.validate()?;
+        self.validate_ledger_with_policy(ledger, &INVESTIGATION_V1_POLICY)
+    }
+    pub fn validate_ledger_with_policy(
+        &self,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        let request = self.normalized_with_policy(policy)?;
+        ledger.validate_with_policy(policy)?;
         let proof = ledger
             .coverage
             .as_ref()
@@ -284,10 +335,38 @@ impl StagedObligationRequest {
         Ok(())
     }
     pub fn intent_hash(&self) -> Result<String, InvestigationError> {
+        self.intent_hash_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+    pub fn intent_hash_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<String, InvestigationError> {
+        let (_, _, domain) = request_family(policy)?;
         Ok(crate::source_basis::domain_hash(
-            b"cartograph:investigation-client-intent:v4\0",
-            &bounded_bytes(&self.normalized()?, COMPLETION_REQUEST_BYTES)?,
+            domain,
+            &bounded_bytes(
+                &self.normalized_with_policy(policy)?,
+                policy.request_bytes(),
+            )?,
         ))
+    }
+}
+
+fn request_family(
+    policy: &InvestigationPolicy,
+) -> Result<(u32, [&'static str; 2], &'static [u8]), InvestigationError> {
+    match policy.profile() {
+        "investigation-v1" => Ok((
+            4,
+            ["domain-analyst@7", "evidence-auditor@7"],
+            b"cartograph:investigation-client-intent:v4\0",
+        )),
+        "investigation-v2" => Ok((
+            5,
+            ["domain-analyst@8", "evidence-auditor@8"],
+            b"cartograph:investigation-client-intent:v5\0",
+        )),
+        _ => Err(InvestigationError::InvalidRequest),
     }
 }
 

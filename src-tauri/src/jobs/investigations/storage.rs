@@ -241,12 +241,16 @@ pub(super) fn validate_usage(
 
 fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     let detail = &task.detail;
+    let policy =
+        InvestigationPolicy::for_limits(&detail.limits).ok_or(InvestigationStoreError::Invalid)?;
     let summary = &detail.summary;
     let v7 = summary.specialist_id.uses_completion_obligations();
     if task.schema_version != if v7 { 2 } else { 1 }
         || task.completion_intent.is_some() != v7
         || summary.schema_version
-            != if v7 {
+            != if summary.specialist_id.uses_policy_selection() {
+                5
+            } else if v7 {
                 4
             } else if summary.specialist_id.uses_coverage_qualification() {
                 3
@@ -268,9 +272,10 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
         || detail.specialist != summary.specialist_id.definition()?
         || detail.provider.mode != summary.provider_mode
-        || detail.limits != InvestigationLimits::default()
+        || summary.specialist_id.uses_policy_selection()
+            != (policy.profile() == INVESTIGATION_V2_POLICY.profile())
         || redacted_history_text(&summary.question, MAX_QUESTION_BYTES)? != summary.question
-        || summary.last_event_sequence > MAX_EVENTS
+        || summary.last_event_sequence > journal_event_limit(task)?
         || summary.actions.can_cancel
             != (task.phase != Phase::Terminal && !summary.cancel_requested)
         || !summary.actions.can_follow_up
@@ -280,7 +285,12 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
             != (summary.specialist_id.uses_coverage_qualification()
                 && task.ledger_revision.is_some())
         || task.ledger_hash.as_ref().is_some_and(|v| !hash_valid(v))
-        || detail.citations.len() > 76
+        || detail.citations.len()
+            > detail
+                .limits
+                .selected_facts
+                .checked_add(detail.limits.evidence_items)
+                .ok_or(InvestigationStoreError::Capacity)?
         || summary.created_at.len() > 32
         || summary.updated_at.len() > 32
     {
@@ -296,11 +306,18 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
         if detail.request_hash != intent.request_hash
             || detail.obligations != intent.obligations
             || detail.obligations_hash != intent.obligations_hash
-            || Some(detail.validate()?) != summary.obligation_status
+            || Some(detail.validate_with_policy(policy)?) != summary.obligation_status
         {
             return Err(InvestigationStoreError::Invalid);
         }
-        encode(task, 64 * 1024)?;
+        encode(
+            task,
+            if policy.profile() == INVESTIGATION_V1_POLICY.profile() {
+                64 * 1024
+            } else {
+                MAX_RECORD_BYTES
+            },
+        )?;
     } else if task.detail.completion.is_some()
         || summary.completion_outcome.is_some()
         || summary.obligation_status.is_some()
@@ -384,7 +401,7 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
         return Err(InvestigationStoreError::Invalid);
     }
     if let Some(pending) = &task.pending {
-        validate_step(pending)?;
+        validate_step(pending, &detail.limits)?;
     }
     if task.pending.is_some() != matches!(task.phase, Phase::Consent | Phase::Invocation)
         || (task.approved && task.phase != Phase::Consent)
@@ -398,14 +415,16 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
 
 pub(super) fn validate_step(
     step: &PendingInvestigationStep,
+    limits: &InvestigationLimits,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = InvestigationPolicy::for_limits(limits).ok_or(InvestigationStoreError::Invalid)?;
     if !id_valid(&step.step_id)
         || !hash_valid(&step.payload_hash)
         || !hash_valid(&step.input_ledger_hash)
         || step.input_bytes == 0
         || step.input_bytes > MAX_INPUT_BYTES
         || step.generated_tokens == 0
-        || step.generated_tokens > 2048
+        || step.generated_tokens > policy.limits().generated_tokens_per_invocation
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -426,27 +445,30 @@ pub(super) fn validate_step_basis(
     task: &StoredTask,
     step: &PendingInvestigationStep,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+        .ok_or(InvestigationStoreError::Invalid)?;
     if task.detail.summary.specialist_id.uses_compact_disclosure() != step.disclosure.is_some() {
         return Err(InvestigationStoreError::Invalid);
     }
     if let Some(disclosure) = &step.disclosure {
         let ledger = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
-        disclosure.validate(&ledger)?;
+        disclosure.validate_with_policy(&ledger, policy)?;
         let completion_sources = task
             .completion_intent
             .as_ref()
-            .map(|intent| intent.obligations.sources())
+            .map(|intent| intent.obligations.sources_with_policy(policy))
             .transpose()?;
         let expected = match &completion_sources {
-            Some(sources) if !sources.is_empty() => Some(inspection_requirements_hash(
-                &normalize_inspection_targets(sources)?,
+            Some(sources) if !sources.is_empty() => Some(inspection_requirements_hash_with_policy(
+                &normalize_inspection_targets_with_policy(sources, policy)?,
+                policy,
             )?),
             Some(_) => None,
             None => task
                 .detail
                 .inspection_requirements
                 .as_ref()
-                .map(|targets| inspection_requirements_hash(targets))
+                .map(|targets| inspection_requirements_hash_with_policy(targets, policy))
                 .transpose()?,
         };
         if task.completion_intent.is_some() {
@@ -465,11 +487,15 @@ pub(super) fn validate_result_basis(
     result: &InvestigationResult,
     ledger: &InvestigationInputLedger,
     step: &PendingInvestigationStep,
+    limits: &InvestigationLimits,
 ) -> Result<(), InvestigationStoreError> {
-    validate_step(step)?;
+    let policy = InvestigationPolicy::for_limits(limits).ok_or(InvestigationStoreError::Invalid)?;
+    validate_step(step, limits)?;
     match &step.disclosure {
-        Some(disclosure) => result.validate_with_disclosure(ledger, &step.step_id, disclosure)?,
-        None => result.validate(ledger)?,
+        Some(disclosure) => {
+            result.validate_with_disclosure_and_policy(ledger, &step.step_id, disclosure, policy)?
+        }
+        None => result.validate_with_policy(ledger, policy)?,
     }
     Ok(())
 }
@@ -478,19 +504,23 @@ pub(super) fn validate_inspection_result(
     task: &StoredTask,
     result: &InvestigationResult,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+        .ok_or(InvestigationStoreError::Invalid)?;
     if let Some(intent) = &task.completion_intent {
-        let sources = intent.obligations.sources()?;
+        let sources = intent.obligations.sources_with_policy(policy)?;
         if result.schema_version != 5 {
             return Err(InvestigationStoreError::Invalid);
         }
         return match (&result.inspection_assessment, sources.is_empty()) {
             (None, true) => Ok(()),
             (Some(assessment), false)
-                if assessment.targets()? == normalize_inspection_targets(&sources)?
+                if assessment.targets_with_policy(policy)?
+                    == normalize_inspection_targets_with_policy(&sources, policy)?
                     && assessment.requirements_hash
-                        == inspection_requirements_hash(&normalize_inspection_targets(
-                            &sources,
-                        )?)? =>
+                        == inspection_requirements_hash_with_policy(
+                            &normalize_inspection_targets_with_policy(&sources, policy)?,
+                            policy,
+                        )? =>
             {
                 Ok(())
             }
@@ -757,6 +787,12 @@ pub(super) fn stored_bytes(
         .ok_or(InvestigationStoreError::Capacity)
 }
 
+pub(super) fn journal_event_limit(task: &StoredTask) -> Result<u64, InvestigationStoreError> {
+    InvestigationPolicy::for_limits(&task.detail.limits)
+        .map(InvestigationPolicy::journal_events)
+        .ok_or(InvestigationStoreError::Invalid)
+}
+
 pub(super) fn event(
     connection: &Connection,
     task: &mut StoredTask,
@@ -771,12 +807,17 @@ pub(super) fn event(
         .last_event_sequence
         .checked_add(1)
         .ok_or(InvestigationStoreError::Capacity)?;
+    let event_limit = journal_event_limit(task)?;
     let maximum = if task.phase == Phase::Terminal {
-        MAX_EVENTS
+        event_limit
     } else if kind == InvestigationEventKind::CancelRequested {
-        MAX_EVENTS - 2
+        event_limit
+            .checked_sub(2)
+            .ok_or(InvestigationStoreError::Invalid)?
     } else {
-        MAX_EVENTS - 3
+        event_limit
+            .checked_sub(3)
+            .ok_or(InvestigationStoreError::Invalid)?
     };
     if next > maximum {
         return Err(InvestigationStoreError::Capacity);
@@ -852,6 +893,8 @@ pub(super) fn load_ledger(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Option<InvestigationInputLedger>, InvestigationStoreError> {
+    let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+        .ok_or(InvestigationStoreError::Invalid)?;
     let Some(revision) = task.ledger_revision else {
         return Ok(None);
     };
@@ -863,7 +906,7 @@ pub(super) fn load_ledger(
         &signed(revision)?,
     )?
     .ok_or(InvestigationStoreError::Invalid)?;
-    ledger.validate()?;
+    ledger.validate_with_policy(policy)?;
     match (&task.detail.coverage_context, &ledger.coverage) {
         (None, None) => {}
         (Some(context), Some(proof))
@@ -889,12 +932,12 @@ pub(super) fn load_ledger(
     match (&ledger.coverage, archive.as_ref()) {
         (None, None) => {}
         (Some(proof), Some(archive)) if proof == archive.proof() => {
-            archive.validate_reads(&ledger.coverage_reads)?;
+            archive.validate_reads_with_policy(&ledger.coverage_reads, policy)?;
         }
         _ => return Err(InvestigationStoreError::Invalid),
     }
 
-    if Some(ledger.fingerprint()?) != task.ledger_hash
+    if Some(ledger.fingerprint_with_policy(policy)?) != task.ledger_hash
         || ledger.revision != revision
         || Some(&ledger.graph_snapshot_id) != task.detail.summary.graph_snapshot_id.as_ref()
         || Some(&ledger.scope_snapshot_id) != task.detail.scope_snapshot_id.as_ref()
@@ -930,7 +973,7 @@ pub(super) fn load_result(
                 return Err(InvestigationStoreError::Invalid);
             }
             validate_step_basis(connection, task, &step)?;
-            validate_result_basis(result, &ledger, &step)?;
+            validate_result_basis(result, &ledger, &step, &task.detail.limits)?;
             super::completion::validate_result(connection, task, result, &ledger, &step)?;
         } else {
             if task.detail.summary.specialist_id.uses_compact_disclosure() {

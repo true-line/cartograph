@@ -90,7 +90,13 @@ fn compact_disclosure_sealing_rejects_missing_or_null_history() {
             .unwrap();
         // Reach the sealing check itself, independently of action matching.
         assert_eq!(
-            super::sealing::seal(input.ledger(), &action.payload, &prepared),
+            super::sealing::seal_with_policy(
+                input.ledger(),
+                &action.payload,
+                &prepared,
+                &INVESTIGATION_V1_POLICY,
+                None
+            ),
             Err(InvestigationError::InvalidInput)
         );
     }

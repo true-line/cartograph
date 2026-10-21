@@ -3,7 +3,7 @@ import supportedWire from './fixtures/completion-v7-supported.json';
 import terminalWire from './fixtures/completion-v7-terminal.json';
 import insufficientWire from './fixtures/completion-v7-insufficient.json';
 import type { InvestigationDetail, InvestigationResult } from './investigationTypes';
-import { completionDetail, completionResult } from './completionFixtures';
+import { expandedCompletionCatalog, completionDetail, completionResult } from './completionFixtures';
 import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
 
 describe('V7 completion wire coherence (AC-0266)', () => {
@@ -92,4 +92,19 @@ describe('V7 completion wire coherence (AC-0266)', () => {
     const result = completionResult(); Object.assign(result.completion!, { extra: true });
     expect(validCompletionResult(result.completion, result)).toBe(false);
   });
+});
+
+
+it('binds expanded saved history to its own role, envelope and profile (AC-0281)', () => {
+  const detail = completionDetail(undefined, { schema_version: 5, specialist_id: 'domain-analyst@8',
+    limits: expandedCompletionCatalog.policies![0].limits, last_event_sequence: 227 });
+  detail.completion!.obligations.schema_version = 2;
+  detail.completion!.obligations.contract = 'investigation-completion-obligations@2';
+  const result = completionResult();
+  expect(validCompletionSummary(detail)).toBe(true);
+  expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
+  detail.limits = { ...detail.limits, profile: 'investigation-v1' };
+  expect(validCompletionDetail(detail.completion, detail, result)).toBe(false);
+  detail.schema_version = 4;
+  expect(validCompletionSummary(detail)).toBe(false);
 });

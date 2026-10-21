@@ -103,10 +103,17 @@ impl InvestigationInspectionTarget {
 pub fn normalize_inspection_targets(
     targets: &[InvestigationInspectionTarget],
 ) -> Result<Vec<InvestigationInspectionTarget>, InvestigationError> {
-    if targets.is_empty() || targets.len() > 12 {
+    normalize_inspection_targets_with_policy(targets, &INVESTIGATION_V1_POLICY)
+}
+
+pub fn normalize_inspection_targets_with_policy(
+    targets: &[InvestigationInspectionTarget],
+    policy: &InvestigationPolicy,
+) -> Result<Vec<InvestigationInspectionTarget>, InvestigationError> {
+    if targets.is_empty() || targets.len() > policy.max_completion_obligations() {
         return Err(InvestigationError::InvalidRequest);
     }
-    bounded_bytes(&targets, 8 * 1024)?;
+    bounded_bytes(&targets, policy.envelope_bytes())?;
     let mut identities = BTreeMap::new();
     let mut exact = BTreeMap::new();
     for target in targets {
@@ -128,10 +135,17 @@ pub fn normalize_inspection_targets(
 pub fn inspection_requirements_hash(
     targets: &[InvestigationInspectionTarget],
 ) -> Result<String, InvestigationError> {
-    let targets = normalize_inspection_targets(targets)?;
+    inspection_requirements_hash_with_policy(targets, &INVESTIGATION_V1_POLICY)
+}
+
+pub fn inspection_requirements_hash_with_policy(
+    targets: &[InvestigationInspectionTarget],
+    policy: &InvestigationPolicy,
+) -> Result<String, InvestigationError> {
+    let targets = normalize_inspection_targets_with_policy(targets, policy)?;
     Ok(crate::source_basis::domain_hash(
         b"cartograph:inspection-requirements:v1\0",
-        &bounded_bytes(&targets, 8 * 1024)?,
+        &bounded_bytes(&targets, policy.envelope_bytes())?,
     ))
 }
 
@@ -171,14 +185,32 @@ impl InvestigationInspectionAssessment {
         disclosure: &InvestigationDisclosure,
         findings: &[InvestigationFinding],
     ) -> Result<Self, InvestigationError> {
-        disclosure.validate(ledger)?;
-        let targets = normalize_inspection_targets(targets)?;
+        Self::derive_with_policy(
+            targets,
+            ledger,
+            step,
+            disclosure,
+            findings,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    pub fn derive_with_policy(
+        targets: &[InvestigationInspectionTarget],
+        ledger: &InvestigationInputLedger,
+        step: &str,
+        disclosure: &InvestigationDisclosure,
+        findings: &[InvestigationFinding],
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        disclosure.validate_with_policy(ledger, policy)?;
+        let targets = normalize_inspection_targets_with_policy(targets, policy)?;
         if !super::records::opaque_id(step)
             || targets[0].graph_snapshot_id != ledger.graph_snapshot_id
         {
             return Err(InvestigationError::InvalidInput);
         }
-        let requirements_hash = inspection_requirements_hash(&targets)?;
+        let requirements_hash = inspection_requirements_hash_with_policy(&targets, policy)?;
         if disclosure.inspection_requirements_hash.as_deref() != Some(requirements_hash.as_str()) {
             return Err(InvestigationError::InvalidInput);
         }
@@ -226,14 +258,23 @@ impl InvestigationInspectionAssessment {
         Ok(Self {
             schema_version: 1,
             requirements_hash,
-            input_ledger_hash: ledger.fingerprint()?,
+            input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
             finishing_step_id: step.into(),
-            disclosure_hash: disclosure.fingerprint(ledger)?,
+            disclosure_hash: disclosure.fingerprint_with_policy(ledger, policy)?,
             requirements,
         })
     }
     pub fn targets(&self) -> Result<Vec<InvestigationInspectionTarget>, InvestigationError> {
-        if self.schema_version != 1 || self.requirements.is_empty() || self.requirements.len() > 12
+        self.targets_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+
+    pub fn targets_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<Vec<InvestigationInspectionTarget>, InvestigationError> {
+        if self.schema_version != 1
+            || self.requirements.is_empty()
+            || self.requirements.len() > policy.max_completion_obligations()
         {
             return Err(InvestigationError::InvalidInput);
         }
@@ -247,7 +288,27 @@ impl InvestigationInspectionAssessment {
         disclosure: &InvestigationDisclosure,
         findings: &[InvestigationFinding],
     ) -> Result<(), InvestigationError> {
-        if *self != Self::derive(&self.targets()?, ledger, step, disclosure, findings)? {
+        self.validate_with_policy(ledger, step, disclosure, findings, &INVESTIGATION_V1_POLICY)
+    }
+
+    pub fn validate_with_policy(
+        &self,
+        ledger: &InvestigationInputLedger,
+        step: &str,
+        disclosure: &InvestigationDisclosure,
+        findings: &[InvestigationFinding],
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        if *self
+            != Self::derive_with_policy(
+                &self.targets_with_policy(policy)?,
+                ledger,
+                step,
+                disclosure,
+                findings,
+                policy,
+            )?
+        {
             return Err(InvestigationError::InvalidInput);
         }
         Ok(())

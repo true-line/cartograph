@@ -6,6 +6,8 @@ use rusqlite::Transaction;
 #[serde(deny_unknown_fields)]
 pub(super) struct CompletionIntent {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit_profile: Option<String>,
     pub request_hash: String,
     pub obligations: ObligationEnvelope,
     pub obligations_hash: String,
@@ -21,19 +23,27 @@ pub(super) struct CompletionIntent {
 }
 impl CompletionIntent {
     fn new(request: &StagedObligationRequest) -> Result<Self, InvestigationStoreError> {
+        let policy = InvestigationPolicy::for_profile(&request.limit_profile)
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let request = request.normalized_with_policy(policy)?;
         Ok(Self {
-            schema_version: 1,
-            request_hash: request.intent_hash()?,
+            schema_version: if policy.profile() == "investigation-v1" {
+                1
+            } else {
+                2
+            },
+            limit_profile: (policy.profile() != "investigation-v1")
+                .then(|| policy.profile().into()),
+            request_hash: request.intent_hash_with_policy(policy)?,
             obligations: request.obligations.clone(),
-            obligations_hash: request.obligations.fingerprint()?,
+            obligations_hash: request.obligations.fingerprint_with_policy(policy)?,
             expected_context: request.expected_context_id.clone(),
             expected_graph: request.expected_graph_revision.clone(),
             nonce: request.request_nonce.clone(),
-            specialist: if request.specialist_id == "domain-analyst@7" {
-                SpecialistId::DomainAnalystV7
-            } else {
-                SpecialistId::EvidenceAuditorV7
-            },
+            specialist: serde_json::from_value(serde_json::Value::String(
+                request.specialist_id.clone(),
+            ))
+            .map_err(|_| InvestigationStoreError::Invalid)?,
             scope: request.scope.clone(),
             provider_mode: request.provider_mode,
             parent: request.parent_id.clone(),
@@ -44,12 +54,16 @@ impl CompletionIntent {
         })
     }
     pub(super) fn validate(&self, task: &StoredTask) -> Result<(), InvestigationStoreError> {
+        let policy = saved_policy(task)?;
+        let legacy = policy.profile() == "investigation-v1";
         let summary = &task.detail.summary;
-        if self.schema_version != 1
+        if self.schema_version != if legacy { 1 } else { 2 }
+            || self.limit_profile.as_deref() != if legacy { None } else { Some(policy.profile()) }
+            || summary.specialist_id.uses_policy_selection() == legacy
             || !hash_valid(&self.request_hash)
             || self.request_hash != task.intent_hash
-            || self.obligations != self.obligations.normalized()?
-            || self.obligations.fingerprint()? != self.obligations_hash
+            || self.obligations != self.obligations.normalized_with_policy(policy)?
+            || self.obligations.fingerprint_with_policy(policy)? != self.obligations_hash
             || self.expected_graph != task.expected_graph_revision
             || self.nonce != task.nonce
             || self.specialist != summary.specialist_id
@@ -109,17 +123,19 @@ impl JobStore {
         request: &StagedObligationRequest,
         provider: Option<&InvestigationProvider>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
-        let request = request.normalized()?;
+        let policy = InvestigationPolicy::for_profile(&request.limit_profile)
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let request = request.normalized_with_policy(policy)?;
         let intent = CompletionIntent::new(&request)?;
-        let sources = request.obligations.sources()?;
+        let sources = request.obligations.sources_with_policy(policy)?;
         let projected = StartInvestigationRequest {
-            schema_version: 4,
+            schema_version: request.schema_version,
             request_nonce: request.request_nonce.clone(),
             specialist_id: intent.specialist,
             inspection_requirements: if sources.is_empty() {
                 None
             } else {
-                Some(normalize_inspection_targets(&sources)?)
+                Some(normalize_inspection_targets_with_policy(&sources, policy)?)
             },
             question: request.question.clone(),
             scope: request.scope.clone(),
@@ -136,7 +152,9 @@ impl JobStore {
         &self,
         request: &StagedObligationRequest,
     ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
-        let hash = request.intent_hash()?;
+        let policy = InvestigationPolicy::for_profile(&request.limit_profile)
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let hash = request.intent_hash_with_policy(policy)?;
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let id: Option<String> = tx
@@ -194,8 +212,9 @@ impl JobStore {
         Ok(metadata)
     }
 }
+const LEGACY_ATTEMPT_TABLE: &str = "CREATE TABLE completion_attempts(task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 32), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence)) STRICT";
 const ATTEMPT_SCHEMA: &[&str] = &[
-    "CREATE TABLE completion_attempts(task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 32), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence)) STRICT",
+    "CREATE TABLE completion_attempts(task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 112), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence)) STRICT",
     "CREATE TRIGGER completion_attempts_no_update BEFORE UPDATE ON completion_attempts BEGIN SELECT RAISE(ABORT,'immutable completion attempt'); END",
     "CREATE TRIGGER completion_attempts_no_delete BEFORE DELETE ON completion_attempts BEGIN SELECT RAISE(ABORT,'immutable completion attempt'); END",
 ];
@@ -210,21 +229,41 @@ pub(super) fn initialize(tx: &Transaction<'_>) -> Result<(), InvestigationStoreE
             tx.execute_batch(sql)?;
         }
     }
+    let legacy = validate_schema_version(tx)?;
+    if legacy {
+        // Migrate only the exact known schema, in the caller's transaction.
+        // Copy opaque bodies and hashes byte-for-byte; policy remains authoritative.
+        tx.execute_batch("DROP TRIGGER completion_attempts_no_update; DROP TRIGGER completion_attempts_no_delete; ALTER TABLE completion_attempts RENAME TO completion_attempts_legacy")?;
+        for sql in ATTEMPT_SCHEMA {
+            tx.execute_batch(sql)?;
+        }
+        tx.execute_batch("INSERT INTO completion_attempts(task_id,sequence,body,body_hash) SELECT task_id,sequence,body,body_hash FROM completion_attempts_legacy; DROP TABLE completion_attempts_legacy")?;
+    }
     validate_schema(tx)
 }
 fn validate_schema(connection: &Connection) -> Result<(), InvestigationStoreError> {
+    validate_schema_version(connection).map(|_| ())
+}
+/// Both historical and current schemas remain readable; only initialization
+/// upgrades a historical table, atomically with the new investigation.
+fn validate_schema_version(connection: &Connection) -> Result<bool, InvestigationStoreError> {
     let (count,bounded):(i64,bool)=connection.query_row("SELECT count(*),coalesce(min(typeof(sql)='text' AND length(CAST(sql AS BLOB))<=4096),0) FROM sqlite_schema WHERE name GLOB 'completion_*' OR (tbl_name='completion_attempts' AND name NOT GLOB 'sqlite_*')",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
     if count != ATTEMPT_SCHEMA.len() as i64 || !bounded {
         return Err(InvestigationStoreError::Invalid);
     }
     let actual=connection.prepare("SELECT sql FROM sqlite_schema WHERE name GLOB 'completion_*' OR (tbl_name='completion_attempts' AND name NOT GLOB 'sqlite_*')")?.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-    if ATTEMPT_SCHEMA
-        .iter()
-        .any(|sql| !actual.iter().any(|actual| actual == sql))
-    {
+    let legacy = actual.iter().any(|sql| sql == LEGACY_ATTEMPT_TABLE);
+    if ATTEMPT_SCHEMA.iter().enumerate().any(|(index, sql)| {
+        let expected = if legacy && index == 0 {
+            LEGACY_ATTEMPT_TABLE
+        } else {
+            sql
+        };
+        !actual.iter().any(|actual| actual == expected)
+    }) {
         return Err(InvestigationStoreError::Invalid);
     }
-    Ok(())
+    Ok(legacy)
 }
 pub(super) fn stored_bytes(
     connection: &Connection,
@@ -280,18 +319,23 @@ pub(super) fn attempts(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<AttemptEntry>, InvestigationStoreError> {
+    let policy = saved_policy(task)?;
+    let limit = policy.max_completed_attempts();
     let Some(intent) = &task.completion_intent else {
         return Ok(vec![]);
     };
+    intent.validate(task)?;
     validate_schema(connection)?;
     let id = &task.detail.summary.investigation_id;
     let sequences = connection
         .prepare(
-            "SELECT sequence FROM completion_attempts WHERE task_id=?1 ORDER BY sequence LIMIT 33",
+            "SELECT sequence FROM completion_attempts WHERE task_id=?1 ORDER BY sequence LIMIT ?2",
         )?
-        .query_map([id], |row| row.get::<_, i64>(0))?
+        .query_map(params![id, signed(limit as u64 + 1)?], |row| {
+            row.get::<_, i64>(0)
+        })?
         .collect::<Result<Vec<_>, _>>()?;
-    if sequences.len() > 2 * MAX_TOOL_ACTIONS as usize {
+    if sequences.len() > limit {
         return Err(InvestigationStoreError::Capacity);
     }
     let mut entries = Vec::new();
@@ -303,9 +347,13 @@ pub(super) fn attempts(
             read_body(connection, "completion_attempts", "sequence", id, &sequence)?
                 .ok_or(InvestigationStoreError::Invalid)?;
         let ledger = ledger_at(connection, id, entry.record.input_revision)?;
-        entry
-            .record
-            .validate_binding(&intent.request_hash, &intent.obligations, id, &ledger)?;
+        entry.record.validate_binding_with_policy(
+            &intent.request_hash,
+            &intent.obligations,
+            id,
+            &ledger,
+            policy,
+        )?;
         let response: InvestigationResponseMeta = read_body(
             connection,
             "investigation_responses",
@@ -322,7 +370,7 @@ pub(super) fn attempts(
             &entry.record.step_id,
         )?
         .ok_or(InvestigationStoreError::Invalid)?;
-        validate_step(&actual_step)?;
+        validate_step(&actual_step, &task.detail.limits)?;
         if actual_step.step_id != entry.record.step_id || response.step_id != entry.record.step_id {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -376,15 +424,15 @@ pub(super) fn attempts(
                     &entry.record.step_id,
                 )?
                 .ok_or(InvestigationStoreError::Invalid)?;
-                if step.input_ledger_hash != before.fingerprint()? {
+                if step.input_ledger_hash != before.fingerprint_with_policy(policy)? {
                     return Err(InvestigationStoreError::Invalid);
                 }
                 InvestigationTurnBasis {
-                    input_ledger_hash: ledger.fingerprint()?,
+                    input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
                     previous_ledger: Some(before.clone()),
                     completed_tool: Some(expected_tool),
                 }
-                .validate(&ledger)?;
+                .validate_with_policy(&ledger, policy)?;
                 match &entry.record.outcome {
                     AttemptOutcome::SourceAcquired { citation_id } => {
                         if ledger
@@ -404,7 +452,7 @@ pub(super) fn attempts(
                 }
             }
             AttemptOutcome::Unavailable { reason } => {
-                if actual_step.input_ledger_hash != ledger.fingerprint()? {
+                if actual_step.input_ledger_hash != ledger.fingerprint_with_policy(policy)? {
                     return Err(InvestigationStoreError::Invalid);
                 }
                 if let ReadIntent::Inventory {
@@ -457,15 +505,13 @@ fn append_attempt(
     outcome: AttemptOutcome,
     revision: u64,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = saved_policy(task)?;
     // Reserved decode-only outcome: no current production firewall emits a
     // trustworthy per-read refusal witness, and redaction is still acquisition.
     if matches!(outcome, AttemptOutcome::FirewallRefused { .. }) {
         return Err(InvestigationStoreError::Invalid);
     }
-    let intent = task
-        .completion_intent
-        .as_ref()
-        .ok_or(InvestigationStoreError::Invalid)?;
+    let intent = validated_intent(task)?;
     let id = &task.detail.summary.investigation_id;
     let step = latest_step(connection, id)?;
     let response: InvestigationResponseMeta =
@@ -478,6 +524,10 @@ fn append_attempt(
     for obligation in &intent.obligations.obligations {
         if !read.matches(obligation) {
             continue;
+        }
+        count += 1;
+        if count > policy.max_completed_attempts() {
+            return Err(InvestigationStoreError::Capacity);
         }
         let mut record = AttemptRecord {
             schema_version: 1,
@@ -493,13 +543,15 @@ fn append_attempt(
             outcome: outcome.clone(),
         };
         let ledger = ledger_at(connection, id, revision)?;
-        record.input_ledger_hash = ledger.fingerprint()?;
+        record.input_ledger_hash = ledger.fingerprint_with_policy(policy)?;
         record.attempt_id = record.content_id()?;
-        record.validate_binding(&intent.request_hash, &intent.obligations, id, &ledger)?;
-        count += 1;
-        if count > 2 * MAX_TOOL_ACTIONS as usize {
-            return Err(InvestigationStoreError::Capacity);
-        }
+        record.validate_binding_with_policy(
+            &intent.request_hash,
+            &intent.obligations,
+            id,
+            &ledger,
+            policy,
+        )?;
         let entry = AttemptEntry {
             record,
             response_hash: response.response_hash.clone(),
@@ -645,6 +697,7 @@ fn raw_refusals(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<staged::JournalEntry>, InvestigationStoreError> {
+    saved_policy(task)?;
     let exists: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='staged_completion_refusals')",
         [],
@@ -681,10 +734,8 @@ fn metadata(
     task: &StoredTask,
     step: Option<&str>,
 ) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
-    let intent = task
-        .completion_intent
-        .as_ref()
-        .ok_or(InvestigationStoreError::Invalid)?;
+    let policy = saved_policy(task)?;
+    let intent = validated_intent(task)?;
     let id = &task.detail.summary.investigation_id;
     let cutoff = step
         .map(|step| {
@@ -726,7 +777,7 @@ fn metadata(
         last_refusal_id: last.map(|entry| entry.record.refusal_id.clone()),
         feedback: last.map(|entry| entry.record.feedback.clone()),
     };
-    metadata.validate()?;
+    metadata.validate_with_policy(policy)?;
     Ok(metadata)
 }
 pub(super) fn validate_step_metadata(
@@ -734,10 +785,8 @@ pub(super) fn validate_step_metadata(
     task: &StoredTask,
     step: &PendingInvestigationStep,
 ) -> Result<(), InvestigationStoreError> {
-    let intent = task
-        .completion_intent
-        .as_ref()
-        .ok_or(InvestigationStoreError::Invalid)?;
+    let policy = saved_policy(task)?;
+    let intent = validated_intent(task)?;
     let disclosure = step
         .disclosure
         .as_ref()
@@ -745,27 +794,26 @@ pub(super) fn validate_step_metadata(
     let metadata = metadata(connection, task, Some(&step.step_id))?;
     if disclosure.schema_version != 4
         || disclosure.completion_contract_hash.as_deref()
-            != Some(intent.contract().fingerprint()?.as_str())
-        || disclosure.completion_metadata_hash.as_deref() != Some(metadata.fingerprint()?.as_str())
+            != Some(intent.contract().fingerprint_with_policy(policy)?.as_str())
+        || disclosure.completion_metadata_hash.as_deref()
+            != Some(metadata.fingerprint_with_policy(policy)?.as_str())
     {
         return Err(InvestigationStoreError::Invalid);
     }
     Ok(())
 }
-fn attempt_domain_hash(domain: &[u8], value: &[u8]) -> String {
-    let mut bytes = domain.to_vec();
-    bytes.extend_from_slice(value);
-    core_prov::content_hash(&bytes)
+fn validated_intent(task: &StoredTask) -> Result<&CompletionIntent, InvestigationStoreError> {
+    let intent = task
+        .completion_intent
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    intent.validate(task)?;
+    Ok(intent)
 }
-fn attempts_hash(entries: &[AttemptEntry]) -> Result<String, InvestigationStoreError> {
-    let ids = entries
-        .iter()
-        .map(|entry| entry.record.attempt_id.as_str())
-        .collect::<Vec<_>>();
-    Ok(attempt_domain_hash(
-        b"cartograph:completion-attempts:v1\0",
-        &encode(&ids, MAX_RECORD_BYTES)?,
-    ))
+pub(super) fn saved_policy(
+    task: &StoredTask,
+) -> Result<&'static InvestigationPolicy, InvestigationStoreError> {
+    InvestigationPolicy::for_limits(&task.detail.limits).ok_or(InvestigationStoreError::Invalid)
 }
 fn observed_assessment(
     intent: &CompletionIntent,
@@ -815,10 +863,8 @@ fn observation_detail(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<InvestigationCompletionDetail, InvestigationStoreError> {
-    let intent = task
-        .completion_intent
-        .as_ref()
-        .ok_or(InvestigationStoreError::Invalid)?;
+    let policy = saved_policy(task)?;
+    let intent = validated_intent(task)?;
     let entries = attempts(connection, task)?;
     let refusals = raw_refusals(connection, task)?;
     let last = refusals.last();
@@ -827,6 +873,9 @@ fn observation_detail(
     }
     let basis = if task.phase != Phase::Terminal {
         let last = last.ok_or(InvestigationStoreError::Invalid)?;
+        if last.attempts.len() > policy.max_completed_attempts() {
+            return Err(InvestigationStoreError::Capacity);
+        }
         let ids = last
             .attempts
             .iter()
@@ -836,14 +885,17 @@ fn observation_detail(
             step_id: last.record.step_id.clone(),
             input_ledger_hash: last.record.input_ledger_hash.clone(),
             disclosure_hash: last.record.disclosure_hash.clone(),
-            finishing_attempts_hash: attempt_domain_hash(
-                b"cartograph:completion-attempts:v1\0",
-                &encode(&ids, MAX_RECORD_BYTES)?,
-            ),
+            finishing_attempts_hash: completed_attempt_ids_hash_with_policy(&ids, policy)?,
         }
     } else {
         CompletionAssessmentBasis::TerminalObservation {
-            finishing_attempts_hash: attempts_hash(&entries)?,
+            finishing_attempts_hash: completed_attempt_ids_hash_with_policy(
+                &entries
+                    .iter()
+                    .map(|entry| entry.record.attempt_id.as_str())
+                    .collect::<Vec<_>>(),
+                policy,
+            )?,
             last_refusal_id: last.map(|entry| entry.record.refusal_id.clone()),
             last_refusal_basis: last.map(|entry| CompletionRefusalBasis {
                 step_id: entry.record.step_id.clone(),
@@ -881,11 +933,12 @@ pub(super) fn refresh_observation(
     connection: &Connection,
     task: &mut StoredTask,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = saved_policy(task)?;
     if task.completion_intent.is_none() {
         return Ok(());
     }
     let detail = observation_detail(connection, task)?;
-    task.detail.summary.obligation_status = Some(detail.validate()?);
+    task.detail.summary.obligation_status = Some(detail.validate_with_policy(policy)?);
     task.detail.completion = Some(detail);
     Ok(())
 }
@@ -896,12 +949,14 @@ pub(super) fn validate_result(
     ledger: &InvestigationInputLedger,
     step: &PendingInvestigationStep,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = saved_policy(task)?;
     let Some(intent) = &task.completion_intent else {
         if result.completion.is_some() {
             return Err(InvestigationStoreError::Invalid);
         }
         return Ok(());
     };
+    intent.validate(task)?;
     let records = attempts(connection, task)?;
     let ledgers = records
         .iter()
@@ -921,7 +976,7 @@ pub(super) fn validate_result(
             ledger,
         })
         .collect::<Vec<_>>();
-    result.validate_completion_for_binding(
+    result.validate_completion_for_binding_with_policy(
         &intent.request_hash,
         &intent.obligations,
         &intent.expected_context,
@@ -933,6 +988,7 @@ pub(super) fn validate_result(
             .as_ref()
             .ok_or(InvestigationStoreError::Invalid)?,
         &evidence,
+        policy,
     )?;
     Ok(())
 }
@@ -943,14 +999,12 @@ pub(super) fn accepted(
     ledger: &InvestigationInputLedger,
     step: &PendingInvestigationStep,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = saved_policy(task)?;
     if task.completion_intent.is_none() {
         return Ok(());
     }
     validate_result(connection, task, result, ledger, step)?;
-    let intent = task
-        .completion_intent
-        .as_ref()
-        .ok_or(InvestigationStoreError::Invalid)?;
+    let intent = validated_intent(task)?;
     let completion = result
         .completion
         .as_ref()
@@ -964,12 +1018,12 @@ pub(super) fn accepted(
         refusal_count: refusals.len() as u32,
         assessment_basis: CompletionAssessmentBasis::FinishingDisclosure {
             step_id: step.step_id.clone(),
-            input_ledger_hash: ledger.fingerprint()?,
+            input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
             disclosure_hash: step
                 .disclosure
                 .as_ref()
                 .ok_or(InvestigationStoreError::Invalid)?
-                .fingerprint(ledger)?,
+                .fingerprint_with_policy(ledger, policy)?,
             finishing_attempts_hash: completion.finishing_attempts_hash.clone(),
         },
         assessment: completion.assessment.clone(),
@@ -980,7 +1034,7 @@ pub(super) fn accepted(
             InvestigationCompletionOutcome::InsufficientEvidence
         }
     });
-    task.detail.summary.obligation_status = Some(detail.validate()?);
+    task.detail.summary.obligation_status = Some(detail.validate_with_policy(policy)?);
     task.detail.completion = Some(detail);
     Ok(())
 }
@@ -990,6 +1044,7 @@ fn validate_legacy_evidence(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = saved_policy(task)?;
     let id = &task.detail.summary.investigation_id;
     let exists: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='completion_attempts')",
@@ -1009,9 +1064,9 @@ fn validate_legacy_evidence(
     }
     let steps = connection
         .prepare("SELECT CASE WHEN typeof(step_id)='text' AND length(CAST(step_id AS BLOB))<=128 THEN step_id END FROM investigation_invocations WHERE task_id=?1 LIMIT ?2")?
-        .query_map(params![id, task.detail.limits.model_invocations + 1], |row| row.get::<_, String>(0))?
+        .query_map(params![id, policy.limits().model_invocations + 1], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    if steps.len() > task.detail.limits.model_invocations as usize {
+    if steps.len() > policy.limits().model_invocations as usize {
         return Err(InvestigationStoreError::Invalid);
     }
     for step_id in steps {
@@ -1037,9 +1092,11 @@ pub(super) fn validate_saved(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = saved_policy(task)?;
     let Some(intent) = &task.completion_intent else {
         return validate_legacy_evidence(connection, task);
     };
+    intent.validate(task)?;
     let _attempts = attempts(connection, task)?;
     let raw = raw_refusals(connection, task)?;
     let refusals = if raw.is_empty() {
@@ -1085,12 +1142,12 @@ pub(super) fn validate_saved(
             refusal_count: refusals.len() as u32,
             assessment_basis: CompletionAssessmentBasis::FinishingDisclosure {
                 step_id: step_id.clone(),
-                input_ledger_hash: ledger.fingerprint()?,
+                input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
                 disclosure_hash: step
                     .disclosure
                     .as_ref()
                     .ok_or(InvestigationStoreError::Invalid)?
-                    .fingerprint(&ledger)?,
+                    .fingerprint_with_policy(&ledger, policy)?,
                 finishing_attempts_hash: completion.finishing_attempts_hash.clone(),
             },
             assessment: completion.assessment.clone(),
@@ -1125,22 +1182,57 @@ pub(super) fn validate_saved(
     }
     Ok(())
 }
+fn invocation_reservation_bytes(
+    task: &StoredTask,
+    policy: &InvestigationPolicy,
+) -> Result<usize, InvestigationStoreError> {
+    if policy.profile() == INVESTIGATION_V1_POLICY.profile() {
+        return Ok(192 * 1024);
+    }
+    // Conservatively charge a whole replacement task rather than its growth.
+    // The row, response and event caps already bound their actual serializers.
+    // Reservation comes from nonterminal headroom, before any provider call;
+    // terminal publication therefore does not rely on TERMINAL_RESERVE alone.
+    let ordinary_row = 64 + 256;
+    let task_row = MAX_RECORD_BYTES + 64 + 3 * 128 + 1024;
+    [
+        super::staged::journal_entry_bytes(policy) + ordinary_row,
+        task_row,
+        super::staged::binding_reservation_bytes(task, policy)?,
+        RefusalFeedback::max_bytes_with_policy(policy)? + ordinary_row,
+        4096 + ordinary_row,
+        3 * (16 * 1024 + ordinary_row),
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, bytes| {
+        total
+            .checked_add(bytes)
+            .ok_or(InvestigationStoreError::Capacity)
+    })
+}
 pub(super) fn reserve_invocation(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = saved_policy(task)?;
     if task.completion_intent.is_none() {
         return Ok(());
     }
+    validated_intent(task)?;
     let count = raw_refusals(connection, task)?.len();
     if count >= 2 {
         return Err(InvestigationStoreError::Capacity);
     }
-    // A production journal/task is each capped at 64 KiB. Reserve the complete
-    // response, feedback, row allowances and three bounded terminal events on
-    // every call, including after refusal followed by successful acquisition.
-    if remaining_task_capacity(connection, &task.detail.summary.investigation_id)? < 192 * 1024
-        || remaining_store_capacity(connection)? < 192 * 1024
+    check_invocation_capacity(connection, task, policy)
+}
+fn check_invocation_capacity(
+    connection: &Connection,
+    task: &StoredTask,
+    policy: &InvestigationPolicy,
+) -> Result<(), InvestigationStoreError> {
+    let required = invocation_reservation_bytes(task, policy)?;
+    if remaining_task_capacity(connection, &task.detail.summary.investigation_id)? < required
+        || remaining_store_capacity(connection)? < required
     {
         return Err(InvestigationStoreError::Capacity);
     }

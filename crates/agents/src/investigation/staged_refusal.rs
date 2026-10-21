@@ -47,10 +47,30 @@ impl RefusalRecord {
         finish: &StagedFinish,
         previous: Option<&RefusalRecord>,
     ) -> Result<RefusalDisposition, InvestigationError> {
+        self.validate_with_policy(
+            request,
+            ledger,
+            disclosure,
+            finish,
+            previous,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+    /// As [`Self::validate`], bounded by the policy the host resolved from the
+    /// exact saved task limits; it must name the request's profile.
+    pub fn validate_with_policy(
+        &self,
+        request: &StagedObligationRequest,
+        ledger: &InvestigationInputLedger,
+        disclosure: &InvestigationDisclosure,
+        finish: &StagedFinish,
+        previous: Option<&RefusalRecord>,
+        policy: &InvestigationPolicy,
+    ) -> Result<RefusalDisposition, InvestigationError> {
         if self.finish_hash != finish.fingerprint()? || self.outcome != finish.outcome {
             return Err(InvestigationError::InvalidInput);
         }
-        self.validate_basis(request, ledger, disclosure, previous)
+        self.validate_basis_with_policy(request, ledger, disclosure, previous, policy)
     }
     pub fn validate_basis(
         &self,
@@ -59,12 +79,32 @@ impl RefusalRecord {
         disclosure: &InvestigationDisclosure,
         previous: Option<&RefusalRecord>,
     ) -> Result<RefusalDisposition, InvestigationError> {
-        self.validate_stored_basis(
-            &request.intent_hash()?,
+        self.validate_basis_with_policy(
+            request,
+            ledger,
+            disclosure,
+            previous,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+    pub fn validate_basis_with_policy(
+        &self,
+        request: &StagedObligationRequest,
+        ledger: &InvestigationInputLedger,
+        disclosure: &InvestigationDisclosure,
+        previous: Option<&RefusalRecord>,
+        policy: &InvestigationPolicy,
+    ) -> Result<RefusalDisposition, InvestigationError> {
+        if request.limit_profile != policy.profile() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        self.validate_stored_basis_with_policy(
+            &request.intent_hash_with_policy(policy)?,
             &request.obligations,
             ledger,
             disclosure,
             previous,
+            policy,
         )
     }
     pub fn validate_stored_basis(
@@ -75,16 +115,35 @@ impl RefusalRecord {
         disclosure: &InvestigationDisclosure,
         previous: Option<&RefusalRecord>,
     ) -> Result<RefusalDisposition, InvestigationError> {
+        self.validate_stored_basis_with_policy(
+            request_hash,
+            envelope,
+            ledger,
+            disclosure,
+            previous,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+    /// Stored records carry no profile; the host supplies the saved policy.
+    pub fn validate_stored_basis_with_policy(
+        &self,
+        request_hash: &str,
+        envelope: &ObligationEnvelope,
+        ledger: &InvestigationInputLedger,
+        disclosure: &InvestigationDisclosure,
+        previous: Option<&RefusalRecord>,
+        policy: &InvestigationPolicy,
+    ) -> Result<RefusalDisposition, InvestigationError> {
         bounded_bytes(self, MAX_MANIFEST_BYTES)?;
-        self.feedback.bytes()?;
-        let obligations = envelope.normalized()?;
+        self.feedback.bytes_with_policy(policy)?;
+        let obligations = envelope.normalized_with_policy(policy)?;
         if self.schema_version != 1
             || !super::records::opaque_id(&self.task_id)
             || !super::records::opaque_id(&self.step_id)
             || self.request_hash != request_hash
-            || self.obligations_hash != obligations.fingerprint()?
-            || self.input_ledger_hash != ledger.fingerprint()?
-            || self.disclosure_hash != disclosure.fingerprint(ledger)?
+            || self.obligations_hash != obligations.fingerprint_with_policy(policy)?
+            || self.input_ledger_hash != ledger.fingerprint_with_policy(policy)?
+            || self.disclosure_hash != disclosure.fingerprint_with_policy(ledger, policy)?
             || !crate::source_basis::hash(&self.finish_hash)
             || !crate::source_basis::hash(&self.response_hash)
             || self.refusal_id != self.content_id()?
@@ -147,7 +206,14 @@ pub struct ProtectedCompletionMetadata {
 }
 impl ProtectedCompletionMetadata {
     pub fn fingerprint(&self) -> Result<String, InvestigationError> {
-        self.validate()?;
+        self.fingerprint_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+    /// The host resolves `policy` from the exact saved task limits.
+    pub fn fingerprint_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<String, InvestigationError> {
+        self.validate_with_policy(policy)?;
         Ok(crate::source_basis::domain_hash(
             b"cartograph:completion-metadata:v1\0",
             &bounded_bytes(self, MAX_INPUT_BYTES)?,
@@ -155,9 +221,15 @@ impl ProtectedCompletionMetadata {
     }
 
     pub fn validate(&self) -> Result<(), InvestigationError> {
+        self.validate_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+    pub fn validate_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
         bounded_bytes(self, MAX_MANIFEST_BYTES)?;
         if self.schema_version != 1 || !crate::source_basis::hash(&self.request_hash) || !crate::source_basis::hash(&self.obligations_hash)
-            || self.completed_attempt_ids.len() > 2 * MAX_TOOL_ACTIONS as usize
+            || self.completed_attempt_ids.len() > policy.max_completed_attempts()
             || self.completed_attempt_ids.iter().any(|id| !crate::source_basis::hash(id))
             || self.completed_attempt_ids.iter().collect::<std::collections::BTreeSet<_>>().len() != self.completed_attempt_ids.len()
             || self.refusal_count > 1 // count two cannot authorize another input
@@ -168,7 +240,7 @@ impl ProtectedCompletionMetadata {
             return Err(InvestigationError::InvalidInput);
         }
         if let Some(feedback) = &self.feedback {
-            feedback.bytes()?;
+            feedback.bytes_with_policy(policy)?;
         }
         Ok(())
     }
@@ -179,7 +251,15 @@ impl ProtectedCompletionMetadata {
         original: &llm::CompletionAction,
         prepared: &llm::bounded::PreparedBoundedCompletion,
     ) -> Result<String, InvestigationError> {
-        self.validate()?;
+        self.seal_with_policy(original, prepared, &INVESTIGATION_V1_POLICY)
+    }
+    pub fn seal_with_policy(
+        &self,
+        original: &llm::CompletionAction,
+        prepared: &llm::bounded::PreparedBoundedCompletion,
+        policy: &InvestigationPolicy,
+    ) -> Result<String, InvestigationError> {
+        self.validate_with_policy(policy)?;
         if !prepared.matches_action(original) {
             return Err(InvestigationError::InvalidInput);
         }

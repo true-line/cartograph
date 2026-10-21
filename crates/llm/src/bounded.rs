@@ -17,6 +17,9 @@ pub const PROTOCOL_VERSION: &str = "bounded-json-completion@2";
 /// shortens connection establishment; clients never get rebuilt for an invocation.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Maximum source spans accepted by the bounded completion transport.
+pub const MAX_COMPLETION_SPANS: u32 = 56;
+
 /// Serializable declared limits. Deserialize through [`CompletionLimits`] before
 /// trusting caller-supplied values. All byte counts exclude HTTP/TLS framing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +31,21 @@ pub struct CompletionLimitValues {
     pub output_text_bytes: u64,
     pub max_output_tokens: u32,
     pub request_timeout_ms: u64,
+    /// Source-span count is explicit for expanded investigations. Omitting the
+    /// legacy allowance preserves existing serialized limits and consent hashes.
+    #[serde(
+        default = "default_max_spans",
+        skip_serializing_if = "legacy_max_spans"
+    )]
+    pub max_spans: u32,
+}
+
+const fn default_max_spans() -> u32 {
+    12
+}
+
+fn legacy_max_spans(value: &u32) -> bool {
+    *value == default_max_spans()
 }
 
 impl Default for CompletionLimitValues {
@@ -39,6 +57,7 @@ impl Default for CompletionLimitValues {
             output_text_bytes: 32 * 1024,
             max_output_tokens: 2048,
             request_timeout_ms: 180_000,
+            max_spans: default_max_spans(),
         }
     }
 }
@@ -61,6 +80,7 @@ impl CompletionLimits {
                 u64::from(ceiling.max_output_tokens),
             ),
             (values.request_timeout_ms, ceiling.request_timeout_ms),
+            (u64::from(values.max_spans), u64::from(MAX_COMPLETION_SPANS)),
         ];
         if pairs.iter().any(|(value, max)| *value == 0 || value > max) {
             return Err(not_sent(FailureCode::InvalidLimits));
@@ -293,7 +313,9 @@ impl EgressFirewall {
         let profile = provider.bounded_profile()?;
         validate_provider(provider, &profile)?;
         check_policy(self, &profile, action.tier)?;
-        if !identifier(&action.action_id, 1024) || action.payload.spans.len() > 12 {
+        if !identifier(&action.action_id, 1024)
+            || action.payload.spans.len() > limits.0.max_spans as usize
+        {
             return Err(not_sent(FailureCode::InvalidInput));
         }
         let mut ids = std::collections::BTreeSet::new();

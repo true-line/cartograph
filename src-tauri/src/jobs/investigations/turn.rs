@@ -30,6 +30,8 @@ impl JobStore {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let task = load_task(&tx, id)?;
+        let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+            .ok_or(InvestigationStoreError::Invalid)?;
         let current = load_ledger(&tx, &task)?.ok_or(InvestigationStoreError::Invalid)?;
         let previous_ledger = if let Some(revision) = current.revision.checked_sub(1) {
             Some(
@@ -47,11 +49,11 @@ impl JobStore {
         };
         let completed_tool = completed_tool(&tx, &task, current.revision)?;
         let basis = InvestigationTurnBasis {
-            input_ledger_hash: current.fingerprint()?,
+            input_ledger_hash: current.fingerprint_with_policy(policy)?,
             previous_ledger,
             completed_tool,
         };
-        basis.validate(&current)?;
+        basis.validate_with_policy(&current, policy)?;
         tx.commit()?;
         Ok(basis)
     }
@@ -63,16 +65,20 @@ fn completed_tool(
     input_revision: u64,
 ) -> Result<Option<InvestigationTool>, InvestigationStoreError> {
     let id = &task.detail.summary.investigation_id;
+    let event_limit = journal_event_limit(task)?;
+    let query_limit = event_limit
+        .checked_add(1)
+        .ok_or(InvestigationStoreError::Invalid)?;
     let sequences = connection
         .prepare(
             "SELECT sequence FROM investigation_events WHERE task_id=?1 ORDER BY sequence LIMIT ?2",
         )?
-        .query_map(params![id, signed(MAX_EVENTS + 1)?], |row| {
+        .query_map(params![id, signed(query_limit)?], |row| {
             row.get::<_, i64>(0)
         })?
         .collect::<Result<Vec<_>, _>>()?;
     if sequences.len() as u64 != task.detail.summary.last_event_sequence
-        || sequences.len() as u64 > MAX_EVENTS
+        || sequences.len() as u64 > event_limit
     {
         return Err(InvestigationStoreError::Invalid);
     }

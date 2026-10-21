@@ -1,5 +1,5 @@
 import type { InvestigationCompletionDetail, InvestigationCompletionResult, InvestigationDetail,
-  InvestigationObligationObservation, InvestigationResult, InvestigationSummary } from './investigationTypes';
+  InvestigationObligationObservation, InvestigationResult, InvestigationSummary, InvestigationPolicy } from './investigationTypes';
 import { validObligationEnvelope } from './investigationObligations';
 
 const hash = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
@@ -8,7 +8,7 @@ const ledger = hash;
 const disclosure = (v: unknown) => typeof v === 'string' && /^investigation-disclosure-v4:[0-9a-f]{64}$/.test(v);
 const fields = (v: object, required: string[], optional: string[] = []) => required.every((key) => key in v) &&
   Object.keys(v).every((key) => required.includes(key) || optional.includes(key));
-const observations = (rows: InvestigationObligationObservation[]) => Array.isArray(rows) && rows.length <= 12 &&
+const observations = (rows: InvestigationObligationObservation[], maximum = 12) => Array.isArray(rows) && rows.length <= maximum &&
   new Set(rows.map((row) => row.obligation_id)).size === rows.length && rows.every((row) => row &&
     fields(row, ['obligation_id', 'kind', 'attempted', 'acquired', 'exactly_supplied', 'unmet'], ['last_attempt_outcome']) &&
     hash(row.obligation_id) && ['source', 'inventory'].includes(row.kind) &&
@@ -18,17 +18,17 @@ const observations = (rows: InvestigationObligationObservation[]) => Array.isArr
     (row.last_attempt_outcome === undefined ? !row.attempted : row.attempted &&
       ['acquired', 'unavailable', 'firewall_refused'].includes(row.last_attempt_outcome)));
 
-export function validCompletionResult(value: InvestigationCompletionResult | undefined, result: InvestigationResult): boolean {
+export function validCompletionResult(value: InvestigationCompletionResult | undefined, result: InvestigationResult, maximum = 12): boolean {
   if (result.schema_version !== 5 || !/^investigation-result-v5:[0-9a-f]{64}$/.test(result.result_id) || !hash(result.input_ledger_hash) ||
       !/^context-v1:[0-9a-f]{64}$/.test(result.graph_snapshot_id) || !fields(result, ['schema_version', 'completion', 'coverage', 'investigation_id', 'result_id', 'input_ledger_hash', 'graph_snapshot_id', 'invocation_step_id', 'disclosure_hash', 'findings', 'knowledge_completeness', 'limitations', 'observed_response_model', 'created_at'], ['inspection_assessment']) ||
       !value || !fields(value, ['schema_version', 'outcome', 'request_hash', 'obligations_hash', 'finishing_attempts_hash', 'assessment']) ||
       value.schema_version !== 1 || !hash(value.request_hash) || !hash(value.obligations_hash) || !hash(value.finishing_attempts_hash) ||
-      !observations(value.assessment) || !value.assessment.length || value.assessment.some((row) => row.unmet !== null)) return false;
+      !observations(value.assessment, maximum) || !value.assessment.length || value.assessment.some((row) => row.unmet !== null)) return false;
   const inspection = result.inspection_assessment;
   if (inspection !== undefined && (!inspection || !fields(inspection, ['schema_version', 'requirements_hash', 'input_ledger_hash', 'finishing_step_id', 'disclosure_hash', 'requirements']) ||
       inspection.schema_version !== 1 || !hash(inspection.requirements_hash) || inspection.input_ledger_hash !== result.input_ledger_hash ||
       inspection.finishing_step_id !== result.invocation_step_id || inspection.disclosure_hash !== result.disclosure_hash ||
-      !Array.isArray(inspection.requirements) || !inspection.requirements.length || inspection.requirements.length > 12 ||
+      !Array.isArray(inspection.requirements) || !inspection.requirements.length || inspection.requirements.length > maximum ||
       new Set(inspection.requirements.map((row) => row.target_id)).size !== inspection.requirements.length ||
       inspection.requirements.some((row) => !fields(row, ['target_id', 'target', 'status', 'acquired', 'supplied', 'cited']) ||
         row.target_id !== row.target.target_id || !hash(row.target_id) || row.target.graph_snapshot_id !== result.graph_snapshot_id ||
@@ -45,7 +45,7 @@ export function validCompletionSummary(value: InvestigationSummary): boolean {
   if (!fields(value, ['schema_version', 'investigation_id', 'conversation_id', 'parent_id', 'job_id', 'specialist_id', 'question', 'scope', 'provider_mode', 'status', 'revision', 'cancel_requested', 'invocation_pending', 'actions', 'graph_snapshot_id', 'last_event_sequence', 'has_result', 'created_at', 'updated_at', 'obligation_status'],
       ['completion_outcome', 'completion', 'coverage_context', 'context_owner', 'origin', 'specialist', 'provider', 'scope_snapshot_id', 'limits', 'usage', 'citations', 'error']) ||
       !['queued', 'preparing', 'running', 'awaiting_consent', 'completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(value.status) ||
-      value.schema_version !== 4 || !['domain-analyst@7', 'evidence-auditor@7'].includes(value.specialist_id) ||
+      !(value.schema_version === 4 ? ['domain-analyst@7', 'evidence-auditor@7'] : value.schema_version === 5 ? ['domain-analyst@8', 'evidence-auditor@8'] : []).includes(value.specialist_id) ||
       !['not_assessed', 'satisfied', 'unmet'].includes(value.obligation_status ?? '') ||
       ['inspection_status', 'inspection_requirement_count', 'inspection_requirements', 'inspection_assessment'].some((key) => key in value)) return false;
   if (value.completion_outcome === undefined) return !value.has_result && value.status !== 'completed';
@@ -55,10 +55,13 @@ export function validCompletionSummary(value: InvestigationSummary): boolean {
 }
 export function validCompletionDetail(value: InvestigationCompletionDetail | undefined, detail: InvestigationDetail,
   result: InvestigationResult | null): boolean {
+  const modern = detail.schema_version === 5;
+  const policy: InvestigationPolicy | undefined = modern ? { limits: detail.limits, request_schema_version: 5, envelope_schema_version: 2, envelope_contract: 'investigation-completion-obligations@2', max_completion_obligations: 56, request_bytes: 65536, envelope_bytes: 65536, specialist_ids: [detail.specialist_id] } : undefined;
+  if (modern && detail.limits.profile !== 'investigation-v2' || !modern && detail.limits.profile !== 'investigation-v1') return false;
   if (!['completion', 'context_owner', 'origin', 'specialist', 'provider', 'scope_snapshot_id', 'limits', 'usage', 'citations', 'error'].every((key) => key in detail) ||
       !value || !fields(value, ['schema_version', 'request_hash', 'obligations_hash', 'obligations', 'refusal_count', 'assessment_basis', 'assessment']) ||
-      value.schema_version !== 1 || !hash(value.request_hash) || !hash(value.obligations_hash) || !validObligationEnvelope(value.obligations) ||
-      !Number.isSafeInteger(value.refusal_count) || value.refusal_count < 0 || value.refusal_count > 2 || !observations(value.assessment)) return false;
+      value.schema_version !== 1 || !hash(value.request_hash) || !hash(value.obligations_hash) || !validObligationEnvelope(value.obligations, policy) ||
+      !Number.isSafeInteger(value.refusal_count) || value.refusal_count < 0 || value.refusal_count > 2 || !observations(value.assessment, modern ? 56 : 12)) return false;
   if (value.obligations.obligations.some((item) => item.kind === 'source'
     ? detail.graph_snapshot_id !== null && item.target.graph_snapshot_id !== detail.graph_snapshot_id
     : detail.coverage_context !== undefined && (item.target.context_id !== detail.coverage_context.context_id ||
@@ -83,7 +86,7 @@ export function validCompletionDetail(value: InvestigationCompletionDetail | und
     value.refusal_count === 1 && detail.obligation_status === 'unmet' && value.assessment.some((row) => row.unmet !== null);
   if (basis.kind === 'finishing_disclosure') return fields(basis, ['kind', 'step_id', 'input_ledger_hash', 'disclosure_hash', 'finishing_attempts_hash']) &&
     step(basis.step_id) && ledger(basis.input_ledger_hash) && disclosure(basis.disclosure_hash) && hash(basis.finishing_attempts_hash) &&
-    Boolean(result && result.completion && result.schema_version === 5 && validCompletionResult(result.completion, result) &&
+    Boolean(result && result.completion && result.schema_version === 5 && validCompletionResult(result.completion, result, modern ? 56 : 12) &&
       result.completion?.outcome === detail.completion_outcome && result.completion.request_hash === value.request_hash &&
       result.completion.obligations_hash === value.obligations_hash && result.completion.finishing_attempts_hash === basis.finishing_attempts_hash &&
       result.invocation_step_id === basis.step_id && result.input_ledger_hash === basis.input_ledger_hash && result.disclosure_hash === basis.disclosure_hash &&

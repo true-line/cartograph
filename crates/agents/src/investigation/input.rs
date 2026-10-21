@@ -73,7 +73,32 @@ impl InvestigationInput {
         supplied_history: &[String],
         usage: &InvestigationUsage,
     ) -> Result<Self, InvestigationError> {
-        ledger.validate()?;
+        Self::prepare_base_with_policy(
+            question,
+            specialist,
+            ledger,
+            query_pages,
+            evidence,
+            supplied_history,
+            usage,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_base_with_policy(
+        question: &str,
+        specialist: SpecialistId,
+        ledger: InvestigationInputLedger,
+        query_pages: &[String],
+        evidence: &[AgentEvidence],
+        supplied_history: &[String],
+        usage: &InvestigationUsage,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        if specialist.uses_policy_selection() != (policy.profile() == "investigation-v2") {
+            return Err(InvestigationError::InvalidInput);
+        }
+        ledger.validate_with_policy(policy)?;
         // Qualified ledgers require their own preparation path; legacy prompts
         // must never silently discard mandatory coverage.
         if ledger.schema_version
@@ -84,7 +109,7 @@ impl InvestigationInput {
             }
             || !text(question, MAX_QUESTION_BYTES)
             || query_pages.len() != ledger.queries.len()
-            || evidence.len() > 12
+            || evidence.len() > policy.limits().evidence_items
             || supplied_history.len() > 12
         {
             return Err(InvestigationError::InvalidInput);
@@ -140,7 +165,7 @@ impl InvestigationInput {
             source_bytes = source_bytes
                 .checked_add(source.text.len())
                 .ok_or(InvestigationError::LimitExceeded)?;
-            if source_bytes > 48 * 1024 {
+            if source_bytes > policy.limits().evidence_bytes {
                 return Err(InvestigationError::LimitExceeded);
             }
             supplied_strings.push(source.text.clone());
@@ -196,7 +221,8 @@ impl InvestigationInput {
         }
         let compact = specialist.uses_compact_disclosure();
         let prompt_value = if compact {
-            let context = CompactInvestigationContext::prepare(&ledger, query_pages)?;
+            let context =
+                CompactInvestigationContext::prepare_with_policy(&ledger, query_pages, policy)?;
             let citations: Vec<_> = ledger
                 .citations
                 .iter()
@@ -214,14 +240,14 @@ impl InvestigationInput {
                 "schema_version": 2,
                 "policy": COMPACT_DISCLOSURE_POLICY,
                 "question": question,
-                "input_ledger_hash": ledger.fingerprint()?,
+                "input_ledger_hash": ledger.fingerprint_with_policy(policy)?,
                 "graph_snapshot_id": ledger.graph_snapshot_id,
                 "scope_snapshot_id": ledger.scope_snapshot_id,
                 "compact_context": context,
                 "citations": citations,
                 "prior_findings_as_t3_history": supplied_history,
                 "consumed_budgets": usage,
-                "limits": InvestigationLimits::default(),
+                "limits": policy.limits(),
                 "coverage": "Bounded recovered context only. Captured source attests its primary source, not complete producer input closure. Unknown evidence is not absence. Findings remain T3/InferredWeak."
             })
         } else {
@@ -229,11 +255,11 @@ impl InvestigationInput {
                 "schema_version": 1,
                 "question": question,
                 "input_ledger": ledger,
-                "input_ledger_hash": ledger.fingerprint()?,
+                "input_ledger_hash": ledger.fingerprint_with_policy(policy)?,
                 "context_pages": pages,
                 "prior_findings_as_t3_history": supplied_history,
                 "consumed_budgets": usage,
-                "limits": InvestigationLimits::default(),
+                "limits": policy.limits(),
                 "coverage": "This is a bounded recovered-context investigation. Captured source attests only its primary source; full producer input closure is not established. Unknown evidence is not proof of absence. All generated findings remain T3/InferredWeak."
             })
         };
@@ -345,6 +371,15 @@ impl InvestigationInput {
         &self,
         prepared: &llm::bounded::PreparedBoundedCompletion,
     ) -> Result<Option<InvestigationDisclosure>, InvestigationError> {
+        self.seal_disclosure_with_policy(prepared, &INVESTIGATION_V1_POLICY)
+    }
+
+    /// The host passes the policy resolved from the exact saved task limits.
+    pub fn seal_disclosure_with_policy(
+        &self,
+        prepared: &llm::bounded::PreparedBoundedCompletion,
+        policy: &InvestigationPolicy,
+    ) -> Result<Option<InvestigationDisclosure>, InvestigationError> {
         if !self.compact {
             return Ok(None);
         }
@@ -352,7 +387,14 @@ impl InvestigationInput {
         if !prepared.matches_action(&action) {
             return Err(InvestigationError::InvalidInput);
         }
-        super::sealing::seal(&self.ledger, &self.payload, prepared).map(Some)
+        super::sealing::seal_with_policy(
+            &self.ledger,
+            &self.payload,
+            prepared,
+            policy,
+            self.inspection_requirements.as_deref(),
+        )
+        .map(Some)
     }
 
     pub fn admit_result(
@@ -375,12 +417,15 @@ impl InvestigationInput {
         )
     }
 
+    /// Binds the sealed completion contract and metadata to this request
+    /// under the policy the host resolved from the exact saved task limits.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn validate_completion_binding(
+    pub(super) fn validate_completion_binding_with_policy(
         &self,
         request: &obligations::StagedObligationRequest,
         disclosure: &InvestigationDisclosure,
         attempts: &[staged_attempt::AttemptEvidence<'_>],
+        policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
         let prompt: Value = serde_json::from_str(&self.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
@@ -390,12 +435,19 @@ impl InvestigationInput {
         let metadata: staged_refusal::ProtectedCompletionMetadata =
             serde_json::from_value(prompt["completion_metadata"].clone())
                 .map_err(|_| InvestigationError::InvalidInput)?;
-        let request = request.normalized()?;
-        if prompt["schema_version"] != 6
+        let request = request.normalized_with_policy(policy)?;
+        // The exact policy fixes the completion prompt schema: v1 stays 6, and a
+        // non-v1 policy carries its inspection targets once, in schema 7.
+        let schema = if policy.profile() == INVESTIGATION_V1_POLICY.profile() {
+            6
+        } else {
+            7
+        };
+        if prompt["schema_version"] != schema
             || disclosure.schema_version != 4
-            || contract.request_hash != request.intent_hash()?
+            || contract.request_hash != request.intent_hash_with_policy(policy)?
             || contract.obligations != request.obligations
-            || contract.obligations_hash != request.obligations.fingerprint()?
+            || contract.obligations_hash != request.obligations.fingerprint_with_policy(policy)?
             || metadata.request_hash != contract.request_hash
             || metadata.obligations_hash != contract.obligations_hash
             || metadata.completed_attempt_ids
@@ -404,9 +456,9 @@ impl InvestigationInput {
                     .map(|item| item.record.attempt_id.clone())
                     .collect::<Vec<_>>()
             || disclosure.completion_contract_hash.as_deref()
-                != Some(contract.fingerprint()?.as_str())
+                != Some(contract.fingerprint_with_policy(policy)?.as_str())
             || disclosure.completion_metadata_hash.as_deref()
-                != Some(metadata.fingerprint()?.as_str())
+                != Some(metadata.fingerprint_with_policy(policy)?.as_str())
         {
             return Err(InvestigationError::InvalidInput);
         }
@@ -428,10 +480,37 @@ impl InvestigationInput {
         timestamp: String,
     ) -> Result<Result<InvestigationResult, staged_finish::FinishDecision>, InvestigationError>
     {
+        self.admit_completion_finish_with_policy(
+            request,
+            task,
+            step,
+            disclosure,
+            finish,
+            attempts,
+            model,
+            timestamp,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_completion_finish_with_policy(
+        &self,
+        request: &obligations::StagedObligationRequest,
+        task: &str,
+        step: &str,
+        disclosure: &InvestigationDisclosure,
+        finish: &staged_finish::StagedFinish,
+        attempts: &[staged_attempt::AttemptEvidence<'_>],
+        model: Option<String>,
+        timestamp: String,
+        policy: &InvestigationPolicy,
+    ) -> Result<Result<InvestigationResult, staged_finish::FinishDecision>, InvestigationError>
+    {
         if disclosure.schema_version != 4 {
             return Err(InvestigationError::InvalidInput);
         }
-        let decision = staged_finish::admit_finish(
+        let decision = staged_finish::admit_finish_with_policy(
             request,
             task,
             step,
@@ -441,6 +520,7 @@ impl InvestigationInput {
             attempts,
             model.clone(),
             timestamp.clone(),
+            policy,
         )?;
         let staged_finish::FinishDecision::Accepted(candidate) = decision else {
             return Ok(Err(decision));
@@ -448,12 +528,12 @@ impl InvestigationInput {
         let completion = InvestigationCompletionResult {
             schema_version: 1,
             outcome: candidate.outcome,
-            request_hash: request.intent_hash()?,
-            obligations_hash: request.obligations.fingerprint()?,
-            finishing_attempts_hash: completed_attempts_hash(attempts)?,
+            request_hash: request.intent_hash_with_policy(policy)?,
+            obligations_hash: request.obligations.fingerprint_with_policy(policy)?,
+            finishing_attempts_hash: completed_attempts_hash_with_policy(attempts, policy)?,
             assessment: candidate.assessment,
         };
-        let result = self.admit_result_bound(
+        let result = self.admit_result_bound_with_policy(
             task,
             step,
             Some(disclosure),
@@ -461,8 +541,9 @@ impl InvestigationInput {
             model,
             timestamp,
             Some(completion),
+            policy,
         )?;
-        result.validate_with_disclosure(&self.ledger, step, disclosure)?;
+        result.validate_with_disclosure_and_policy(&self.ledger, step, disclosure, policy)?;
         Ok(Ok(result))
     }
 
@@ -497,6 +578,32 @@ impl InvestigationInput {
         created_at: String,
         completion: Option<InvestigationCompletionResult>,
     ) -> Result<InvestigationResult, InvestigationError> {
+        self.admit_result_bound_with_policy(
+            investigation_id,
+            step_id,
+            disclosure,
+            action,
+            observed_response_model,
+            created_at,
+            completion,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    /// As [`Self::admit_result_bound`]; every admission branch is bounded by
+    /// the policy the host resolved from the exact saved task limits.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn admit_result_bound_with_policy(
+        &self,
+        investigation_id: &str,
+        step_id: &str,
+        disclosure: Option<&InvestigationDisclosure>,
+        action: &InvestigationAction,
+        observed_response_model: Option<String>,
+        created_at: String,
+        completion: Option<InvestigationCompletionResult>,
+        policy: &InvestigationPolicy,
+    ) -> Result<InvestigationResult, InvestigationError> {
         if self.compact != disclosure.is_some() {
             return Err(InvestigationError::InvalidInput);
         }
@@ -522,7 +629,7 @@ impl InvestigationInput {
             self.graph_strings.iter().map(String::as_str),
         )?;
         if let Some(completion) = completion {
-            return InvestigationResult::admit_with_completion(
+            return InvestigationResult::admit_with_completion_and_policy(
                 investigation_id,
                 &self.ledger,
                 step_id,
@@ -533,11 +640,12 @@ impl InvestigationInput {
                 self.supplied_strings.iter().map(String::as_str),
                 observed_response_model,
                 created_at,
+                policy,
             );
         }
         if let Some(disclosure) = disclosure {
             if let Some(targets) = &self.inspection_requirements {
-                return InvestigationResult::admit_with_inspection(
+                return InvestigationResult::admit_with_inspection_and_policy(
                     investigation_id,
                     &self.ledger,
                     step_id,
@@ -547,9 +655,10 @@ impl InvestigationInput {
                     observed_response_model,
                     created_at,
                     targets,
+                    policy,
                 );
             }
-            return InvestigationResult::admit_with_disclosure(
+            return InvestigationResult::admit_with_disclosure_and_policy(
                 investigation_id,
                 &self.ledger,
                 step_id,
@@ -558,15 +667,17 @@ impl InvestigationInput {
                 self.supplied_strings.iter().map(String::as_str),
                 observed_response_model,
                 created_at,
+                policy,
             );
         }
-        InvestigationResult::admit(
+        InvestigationResult::admit_with_policy(
             investigation_id,
             &self.ledger,
             action,
             self.supplied_strings.iter().map(String::as_str),
             observed_response_model,
             created_at,
+            policy,
         )
     }
 }

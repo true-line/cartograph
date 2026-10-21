@@ -1,3 +1,4 @@
+import { expandedCompletionCatalog, completionChoices, inventoryObligation } from './completionFixtures';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC as mockTauriIPC } from '@tauri-apps/api/mocks';
 import backendInspection from './fixtures/investigation-inspection-backend.json';
@@ -734,4 +735,32 @@ it('rejects a premature V6 inspection assessment before a finishing result (AC-0
   await useInvestigationStore.getState().open('pending');
   expect(useInvestigationStore.getState().error).not.toBeNull();
   expect(useInvestigationStore.getState().detail).toBeNull();
+});
+
+
+it('freezes expanded policy, envelope, generation and nonce across uncertain retry (AC-0281)', async () => {
+  useInvestigationStore.setState({ catalog: expandedCompletionCatalog, obligationChoices: completionChoices });
+  const store = useInvestigationStore.getState();
+  store.updateComposer({ specialistId: 'domain-analyst@8', limitProfile: 'investigation-v2' });
+  const requests: unknown[] = [];
+  mockIPC((command, args) => { if (command === 'start_investigation') requests.push(structuredClone(args)); throw new Error('Uncertain transport'); });
+  await store.start({ specialist_id: 'domain-analyst@8', limit_profile: 'investigation-v2', question: 'Inspect evidence.',
+    scope: { type: 'all' }, provider_mode: 'local', obligations: { schema_version: 2,
+      contract: 'investigation-completion-obligations@2', obligations: [inventoryObligation] } });
+  expect(useInvestigationStore.getState().pendingStart).toMatchObject({ schema_version: 5, limit_profile: 'investigation-v2' });
+  store.updateComposer({ specialistId: 'domain-analyst@7', limitProfile: 'investigation-v1' });
+  useInvestigationStore.setState({ catalog: null });
+  await store.retryStart();
+  expect(requests).toHaveLength(2);
+  expect(requests[1]).toEqual(requests[0]);
+  expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@8', limitProfile: 'investigation-v2' });
+});
+
+it('refuses expanded roles without an eligible policy (AC-0281)', async () => {
+  const start = vi.fn(); mockIPC(start);
+  useInvestigationStore.setState({ catalog: { ...expandedCompletionCatalog, policies: [] }, obligationChoices: completionChoices });
+  await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@8', limit_profile: 'investigation-v2',
+    question: 'Inspect evidence.', scope: { type: 'all' }, provider_mode: 'local', obligations: {
+      schema_version: 2, contract: 'investigation-completion-obligations@2', obligations: [inventoryObligation] } });
+  expect(start).not.toHaveBeenCalled();
 });

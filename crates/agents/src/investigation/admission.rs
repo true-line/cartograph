@@ -29,6 +29,20 @@ impl InvestigationInputLedger {
     /// Enforce bounded, complete metadata before publication or use as a saved
     /// historical basis. This does not certify source bytes or current freshness.
     pub fn validate(&self) -> Result<(), InvestigationError> {
+        self.validate_with_policy(&INVESTIGATION_V1_POLICY)
+    }
+
+    /// The host resolves this closed policy from exact saved task limits. The
+    /// ledger wire does not carry caller-selected validation allowances.
+    pub fn validate_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        let limits = policy.limits();
+        let max_citations = limits
+            .selected_facts
+            .checked_add(limits.evidence_items)
+            .ok_or(InvestigationError::LimitExceeded)?;
         match (self.schema_version, &self.coverage) {
             (1, None) => {}
             (2, Some(proof)) if proof.snapshot_id == self.scope_snapshot_id => {
@@ -40,10 +54,10 @@ impl InvestigationInputLedger {
         }
         if !super::records::context_hash(&self.graph_snapshot_id)
             || !super::records::context_hash(&self.scope_snapshot_id)
-            || self.selected_facts.len() > MAX_SELECTED_FACTS
-            || self.receipt_references.len() > MAX_SELECTED_FACTS
-            || self.queries.len() > MAX_TOOL_ACTIONS as usize
-            || self.citations.len() > MAX_SELECTED_FACTS + 12
+            || self.selected_facts.len() > limits.selected_facts
+            || self.receipt_references.len() > limits.selected_facts
+            || self.queries.len() > limits.tool_actions as usize
+            || self.citations.len() > max_citations
             || self.supplied_history_bytes > 16 * 1024
             || (self.supplied_history_bytes == 0) != self.supplied_history_hash.is_none()
             || self
@@ -53,7 +67,13 @@ impl InvestigationInputLedger {
         {
             return Err(InvestigationError::InvalidInput);
         }
-        if self.queries.len() + self.coverage_reads.len() > MAX_TOOL_ACTIONS as usize {
+        if self
+            .queries
+            .len()
+            .checked_add(self.coverage_reads.len())
+            .ok_or(InvestigationError::LimitExceeded)?
+            > limits.tool_actions as usize
+        {
             return Err(InvestigationError::LimitExceeded);
         }
         if let Some(proof) = &self.coverage {
@@ -211,9 +231,9 @@ impl InvestigationInputLedger {
             }
         }
         if graph_citations.len() != selections.len()
-            || evidence_items > 12
-            || source_bytes > 48 * 1024
-            || validation_bytes > 128 * 1024 * 1024
+            || evidence_items > limits.evidence_items
+            || source_bytes > limits.evidence_bytes as u64
+            || validation_bytes > limits.captured_validation_bytes
         {
             return Err(InvestigationError::InvalidInput);
         }
@@ -266,6 +286,26 @@ impl InvestigationResult {
         observed_response_model: Option<String>,
         created_at: String,
     ) -> Result<Self, InvestigationError> {
+        Self::admit_with_policy(
+            investigation_id,
+            ledger,
+            action,
+            supplied_strings,
+            observed_response_model,
+            created_at,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    pub fn admit_with_policy<'a>(
+        investigation_id: &str,
+        ledger: &InvestigationInputLedger,
+        action: &InvestigationAction,
+        supplied_strings: impl IntoIterator<Item = &'a str>,
+        observed_response_model: Option<String>,
+        created_at: String,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
         Self::admit_bound(
             investigation_id,
             ledger,
@@ -276,6 +316,7 @@ impl InvestigationResult {
             supplied_strings,
             observed_response_model,
             created_at,
+            policy,
         )
     }
 
@@ -291,6 +332,31 @@ impl InvestigationResult {
         observed_response_model: Option<String>,
         created_at: String,
     ) -> Result<Self, InvestigationError> {
+        Self::admit_with_disclosure_and_policy(
+            investigation_id,
+            ledger,
+            step_id,
+            disclosure,
+            action,
+            supplied_strings,
+            observed_response_model,
+            created_at,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_with_disclosure_and_policy<'a>(
+        investigation_id: &str,
+        ledger: &InvestigationInputLedger,
+        step_id: &str,
+        disclosure: &InvestigationDisclosure,
+        action: &InvestigationAction,
+        supplied_strings: impl IntoIterator<Item = &'a str>,
+        observed_response_model: Option<String>,
+        created_at: String,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
         Self::admit_bound(
             investigation_id,
             ledger,
@@ -301,6 +367,7 @@ impl InvestigationResult {
             supplied_strings,
             observed_response_model,
             created_at,
+            policy,
         )
     }
 
@@ -316,6 +383,33 @@ impl InvestigationResult {
         created_at: String,
         targets: &[InvestigationInspectionTarget],
     ) -> Result<Self, InvestigationError> {
+        Self::admit_with_inspection_and_policy(
+            investigation_id,
+            ledger,
+            step_id,
+            disclosure,
+            action,
+            supplied_strings,
+            observed_response_model,
+            created_at,
+            targets,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_with_inspection_and_policy<'a>(
+        investigation_id: &str,
+        ledger: &InvestigationInputLedger,
+        step_id: &str,
+        disclosure: &InvestigationDisclosure,
+        action: &InvestigationAction,
+        supplied_strings: impl IntoIterator<Item = &'a str>,
+        observed_response_model: Option<String>,
+        created_at: String,
+        targets: &[InvestigationInspectionTarget],
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
         Self::admit_bound(
             investigation_id,
             ledger,
@@ -326,10 +420,12 @@ impl InvestigationResult {
             supplied_strings,
             observed_response_model,
             created_at,
+            policy,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    // Retain the legacy v1 bridge while production callers carry a policy.
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub(super) fn admit_with_completion<'a>(
         investigation_id: &str,
         ledger: &InvestigationInputLedger,
@@ -342,6 +438,35 @@ impl InvestigationResult {
         model: Option<String>,
         created_at: String,
     ) -> Result<Self, InvestigationError> {
+        Self::admit_with_completion_and_policy(
+            investigation_id,
+            ledger,
+            step_id,
+            disclosure,
+            targets,
+            completion,
+            action,
+            supplied_strings,
+            model,
+            created_at,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn admit_with_completion_and_policy<'a>(
+        investigation_id: &str,
+        ledger: &InvestigationInputLedger,
+        step_id: &str,
+        disclosure: &InvestigationDisclosure,
+        targets: Option<&[InvestigationInspectionTarget]>,
+        completion: InvestigationCompletionResult,
+        action: &InvestigationAction,
+        supplied_strings: impl IntoIterator<Item = &'a str>,
+        model: Option<String>,
+        created_at: String,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
         Self::admit_bound(
             investigation_id,
             ledger,
@@ -352,6 +477,7 @@ impl InvestigationResult {
             supplied_strings,
             model,
             created_at,
+            policy,
         )
     }
 
@@ -366,8 +492,9 @@ impl InvestigationResult {
         supplied_strings: impl IntoIterator<Item = &'a str>,
         observed_response_model: Option<String>,
         created_at: String,
+        policy: &InvestigationPolicy,
     ) -> Result<Self, InvestigationError> {
-        ledger.validate()?;
+        ledger.validate_with_policy(policy)?;
         if ledger.schema_version == 2 && binding.is_none() {
             return Err(InvestigationError::InvalidInput);
         }
@@ -381,7 +508,7 @@ impl InvestigationResult {
                 if !super::records::opaque_id(step) {
                     return Err(InvestigationError::InvalidInput);
                 }
-                disclosure.eligible_citations(ledger)?
+                disclosure.eligible_citations_with_policy(ledger, policy)?
             }
             None => ledger
                 .citations
@@ -437,11 +564,11 @@ impl InvestigationResult {
             completion,
             investigation_id: investigation_id.into(),
             result_id: String::new(),
-            input_ledger_hash: ledger.fingerprint()?,
+            input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
             graph_snapshot_id: ledger.graph_snapshot_id.clone(),
             invocation_step_id: binding.map(|(step, _)| step.to_owned()),
             disclosure_hash: binding
-                .map(|(_, disclosure)| disclosure.fingerprint(ledger))
+                .map(|(_, disclosure)| disclosure.fingerprint_with_policy(ledger, policy))
                 .transpose()?,
             findings,
             knowledge_completeness: *knowledge_completeness,
@@ -451,23 +578,29 @@ impl InvestigationResult {
         };
         if let Some(targets) = inspection_targets {
             let (step, disclosure) = binding.ok_or(InvestigationError::InvalidInput)?;
-            result.inspection_assessment = Some(InvestigationInspectionAssessment::derive(
-                targets,
-                ledger,
-                step,
-                disclosure,
-                &result.findings,
-            )?);
+            result.inspection_assessment =
+                Some(InvestigationInspectionAssessment::derive_with_policy(
+                    targets,
+                    ledger,
+                    step,
+                    disclosure,
+                    &result.findings,
+                    policy,
+                )?);
         }
         result.result_id = result.content_id()?;
         match binding {
             Some((_, disclosure)) if result.schema_version == 5 => {
-                result.validate_bound(ledger, &disclosure.eligible_citations(ledger)?)?;
+                result.validate_bound(
+                    ledger,
+                    &disclosure.eligible_citations_with_policy(ledger, policy)?,
+                    policy,
+                )?;
             }
             Some((step, disclosure)) => {
-                result.validate_with_disclosure(ledger, step, disclosure)?
+                result.validate_with_disclosure_and_policy(ledger, step, disclosure, policy)?
             }
-            None => result.validate(ledger)?,
+            None => result.validate_with_policy(ledger, policy)?,
         }
         Ok(result)
     }
@@ -505,6 +638,14 @@ impl InvestigationResult {
     }
 
     pub fn validate(&self, ledger: &InvestigationInputLedger) -> Result<(), InvestigationError> {
+        self.validate_with_policy(ledger, &INVESTIGATION_V1_POLICY)
+    }
+
+    pub fn validate_with_policy(
+        &self,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
         if self.schema_version != 1
             || self.completion.is_some()
             || ledger.schema_version != 1
@@ -515,12 +656,13 @@ impl InvestigationResult {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        ledger.validate_with_policy(policy)?;
         let citations = ledger
             .citations
             .iter()
             .map(|c| c.citation_id.clone())
             .collect();
-        self.validate_bound(ledger, &citations)
+        self.validate_bound(ledger, &citations, policy)
     }
 
     /// Validate saved disclosed results against their exact finishing invocation.
@@ -529,6 +671,21 @@ impl InvestigationResult {
         ledger: &InvestigationInputLedger,
         step_id: &str,
         disclosure: &InvestigationDisclosure,
+    ) -> Result<(), InvestigationError> {
+        self.validate_with_disclosure_and_policy(
+            ledger,
+            step_id,
+            disclosure,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    pub fn validate_with_disclosure_and_policy(
+        &self,
+        ledger: &InvestigationInputLedger,
+        step_id: &str,
+        disclosure: &InvestigationDisclosure,
+        policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
         if self.schema_version
             != if disclosure.schema_version == 4 {
@@ -546,33 +703,40 @@ impl InvestigationResult {
                 != disclosure.inspection_requirements_hash.is_some()
             || !super::records::opaque_id(step_id)
             || self.invocation_step_id.as_deref() != Some(step_id)
-            || self.disclosure_hash.as_deref() != Some(disclosure.fingerprint(ledger)?.as_str())
+            || self.disclosure_hash.as_deref()
+                != Some(disclosure.fingerprint_with_policy(ledger, policy)?.as_str())
         {
             return Err(InvestigationError::InvalidInput);
         }
         if let Some(completion) = &self.completion {
-            completion.validate(
+            completion.validate_with_policy(
                 &self.findings,
                 self.knowledge_completeness,
                 &self.limitations,
+                policy,
             )?;
         }
         if let Some(assessment) = &self.inspection_assessment {
-            assessment.validate(ledger, step_id, disclosure, &self.findings)?;
+            assessment.validate_with_policy(ledger, step_id, disclosure, &self.findings, policy)?;
         }
-        self.validate_bound(ledger, &disclosure.eligible_citations(ledger)?)
+        self.validate_bound(
+            ledger,
+            &disclosure.eligible_citations_with_policy(ledger, policy)?,
+            policy,
+        )
     }
 
     fn validate_bound(
         &self,
         ledger: &InvestigationInputLedger,
         citations: &BTreeSet<String>,
+        policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
-        ledger.validate()?;
+        ledger.validate_with_policy(policy)?;
         if !super::records::opaque_id(&self.investigation_id)
             || !text(&self.created_at, 64)
             || self.graph_snapshot_id != ledger.graph_snapshot_id
-            || self.input_ledger_hash != ledger.fingerprint()?
+            || self.input_ledger_hash != ledger.fingerprint_with_policy(policy)?
             || self.result_id != self.content_id()?
             || self
                 .observed_response_model

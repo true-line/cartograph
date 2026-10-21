@@ -102,7 +102,7 @@ impl LlmProvider for Scripted {
             !(call == 1 && matches!(self.mode, Mode::PanicAfterQuery)),
             "simulated owner loss"
         );
-        let mut action = if prompt["schema_version"] == 6 {
+        let mut action = if matches!(prompt["schema_version"].as_u64(), Some(6 | 7)) {
             completion_tests::scripted_action(self.mode, call, &prompt)
         } else if matches!(self.mode, Mode::InventoryFinish) {
             if call == 0 {

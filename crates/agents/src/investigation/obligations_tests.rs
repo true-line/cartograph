@@ -57,6 +57,128 @@ fn request() -> StagedObligationRequest {
     }
 }
 
+// Historical normalization oracle, kept only in tests. Production admission
+// borrows common fields and never creates this artificial legacy request.
+fn historical_projection(value: &StagedObligationRequest) -> StartInvestigationRequest {
+    StartInvestigationRequest {
+        schema_version: 3,
+        request_nonce: value.request_nonce.clone(),
+        specialist_id: SpecialistId::DomainAnalystV6,
+        inspection_requirements: None,
+        question: value.question.clone(),
+        scope: value.scope.clone(),
+        provider_mode: value.provider_mode,
+        limit_profile: value.limit_profile.clone(),
+        expected_graph_revision: value.expected_graph_revision.clone(),
+        expected_context_id: Some(value.expected_context_id.clone()),
+        conversation_id: value.conversation_id.clone(),
+        parent_id: value.parent_id.clone(),
+    }
+}
+
+#[test]
+fn staged_obligations_common_field_validation_matches_legacy() {
+    // AC-0264: extracting borrowed validation preserves every common rejection.
+    for case in [
+        "empty_question",
+        "long_question",
+        "nul_question",
+        "empty_nonce",
+        "long_nonce",
+        "invalid_nonce",
+        "unknown_profile",
+        "invalid_graph",
+        "invalid_context",
+        "empty_context",
+        "invalid_conversation",
+        "long_parent",
+        "orphan_parent",
+        "empty_anchor",
+        "long_anchor",
+        "zero_hops",
+        "excess_hops",
+    ] {
+        let mut value = request();
+        value.obligations = envelope(vec![inventory('b')]);
+        match case {
+            "empty_question" => value.question = " ".into(),
+            "long_question" => value.question = "Q".repeat(MAX_QUESTION_BYTES + 1),
+            "nul_question" => value.question.push('\0'),
+            "empty_nonce" => value.request_nonce.clear(),
+            "long_nonce" => value.request_nonce = "n".repeat(129),
+            "invalid_nonce" => value.request_nonce.push('/'),
+            "unknown_profile" => value.limit_profile = "investigation-v2".into(),
+            "invalid_graph" => value.expected_graph_revision = Some("invalid".into()),
+            "invalid_context" => value.expected_context_id = "context-v1:invalid".into(),
+            "empty_context" => value.expected_context_id.clear(),
+            "invalid_conversation" => value.conversation_id = Some("/invalid".into()),
+            "long_parent" => {
+                value.conversation_id = Some("conversation".into());
+                value.parent_id = Some("p".repeat(129));
+            }
+            "orphan_parent" => value.parent_id = Some("parent".into()),
+            _ => {
+                value.scope = InvestigationScope::Neighborhood {
+                    anchor: match case {
+                        "empty_anchor" => String::new(),
+                        "long_anchor" => "a".repeat(1025),
+                        _ => "anchor".into(),
+                    },
+                    hops: match case {
+                        "zero_hops" => 0,
+                        "excess_hops" => 4,
+                        _ => 1,
+                    },
+                }
+            }
+        }
+        assert_eq!(
+            historical_projection(&value).validate(),
+            Err(InvestigationError::InvalidRequest),
+            "legacy {case}"
+        );
+        assert!(
+            matches!(value.normalized(), Err(InvestigationError::InvalidRequest)),
+            "staged {case}"
+        );
+    }
+}
+
+#[test]
+fn staged_obligations_projection_bound_is_dominated_by_whole_request() {
+    // AC-0264: every optional-field presence combination and both closed roles
+    // retain identical common encodings; the historical projection is smaller.
+    for role in ["domain-analyst@7", "evidence-auditor@7"] {
+        for presence in 0..8 {
+            let mut value = request();
+            value.specialist_id = role.into();
+            value.obligations = envelope(vec![inventory('b')]);
+            if presence & 1 == 0 {
+                value.expected_graph_revision = None;
+            }
+            if presence & 2 != 0 {
+                value.conversation_id = Some("conversation".into());
+            }
+            if presence & 4 != 0 {
+                value.parent_id = Some("parent".into());
+            }
+            let projected = historical_projection(&value);
+            assert!(
+                serde_json::to_vec(&projected).unwrap().len()
+                    < serde_json::to_vec(&value).unwrap().len()
+            );
+            assert_eq!(projected.validate().is_ok(), value.normalized().is_ok());
+            if value.normalized().is_ok() {
+                let wire = serde_json::to_vec(&value).unwrap();
+                assert_eq!(
+                    wire,
+                    serde_json::to_vec(&value.normalized().unwrap()).unwrap()
+                );
+            }
+        }
+    }
+}
+
 // AC-0264: raw bounds precede ownership, identity/order normalization is exact.
 #[test]
 fn staged_obligations_normalize_mixed_inventory_only_and_source_conflicts() {
@@ -209,6 +331,7 @@ fn staged_obligations_full_request_exact_byte_boundary_and_maximal_descriptors()
     assert!(base_bytes < 8192 && 8192 - base_bytes < MAX_QUESTION_BYTES);
     canonical.question.push_str(&"x".repeat(8192 - base_bytes));
     assert_eq!(serde_json::to_vec(&canonical).unwrap().len(), 8192);
+    historical_projection(&canonical).validate().unwrap();
     canonical.normalized().unwrap();
     canonical.question.push('x');
     assert!(matches!(
@@ -348,4 +471,78 @@ fn staged_obligations_legacy_literal_goldens() {
         "LEGACY_GOLDEN={}",
         serde_json::to_string(&actual).unwrap()
     );
+}
+
+#[test]
+fn opt_in_envelope_admits_raw_capacity_without_reinterpreting_v1() {
+    // AC-0281: opt-in admission has a separate identity and preserves legacy bounds.
+    let policy = &super::super::policy::INVESTIGATION_V2_POLICY;
+    let legacy = envelope(vec![inventory('b')]);
+    let legacy_id = legacy.fingerprint().unwrap();
+    assert!(legacy.normalized_with_policy(policy).is_err());
+    let mut opt_in = ObligationEnvelope {
+        schema_version: 2,
+        contract: "investigation-completion-obligations@2".into(),
+        obligations: vec![inventory('b'); 56],
+    };
+    assert!(opt_in.normalized().is_err());
+    let normalized = opt_in.normalized_with_policy(policy).unwrap();
+    assert_eq!(normalized.obligations.len(), 1);
+    assert_ne!(
+        normalized.fingerprint_with_policy(policy).unwrap(),
+        legacy_id
+    );
+    assert_eq!(
+        normalized.obligations[0].content_id().unwrap(),
+        legacy.obligations[0].content_id().unwrap()
+    );
+    opt_in.obligations.push(inventory('b'));
+    assert!(opt_in.normalized_with_policy(policy).is_err());
+    assert_eq!(
+        InvestigationPolicy::for_profile(policy.profile())
+            .unwrap()
+            .limits(),
+        policy.limits()
+    );
+    assert_eq!(
+        InvestigationPolicy::for_limits(&policy.limits())
+            .unwrap()
+            .profile(),
+        policy.profile()
+    );
+}
+
+#[test]
+fn opt_in_request_family_binds_policy_role_and_envelope() {
+    // AC-0281: selecting a larger policy never reinterprets a legacy request.
+    let policy = &super::super::policy::INVESTIGATION_V2_POLICY;
+    let legacy = request();
+    let old_hash = legacy.intent_hash().unwrap();
+    assert!(legacy.normalized_with_policy(policy).is_err());
+    let mut selected = legacy.clone();
+    selected.schema_version = 5;
+    selected.specialist_id = "domain-analyst@8".into();
+    selected.limit_profile = policy.profile().into();
+    selected.obligations.schema_version = 2;
+    selected.obligations.contract = "investigation-completion-obligations@2".into();
+    let raw = serde_json::to_string(&selected).unwrap();
+    assert!(StagedObligationRequest::decode(&raw).is_err());
+    let admitted = StagedObligationRequest::decode_with_policy(&raw, policy).unwrap();
+    assert_ne!(admitted.intent_hash_with_policy(policy).unwrap(), old_hash);
+    for field in [
+        "schema_version",
+        "specialist_id",
+        "limit_profile",
+        "obligations",
+    ] {
+        let mut mixed = serde_json::to_value(&selected).unwrap();
+        mixed[field] = serde_json::to_value(&legacy).unwrap()[field].clone();
+        assert!(
+            StagedObligationRequest::decode_with_policy(&mixed.to_string(), policy).is_err(),
+            "{field}"
+        );
+    }
+    let padded = format!("{}{}", raw, " ".repeat(policy.request_bytes()));
+    assert!(StagedObligationRequest::decode_with_policy(&padded, policy).is_err());
+    assert_eq!(legacy.intent_hash().unwrap(), old_hash);
 }

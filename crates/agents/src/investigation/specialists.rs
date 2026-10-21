@@ -33,6 +33,10 @@ pub enum SpecialistId {
     DomainAnalystV7,
     #[serde(rename = "evidence-auditor@7")]
     EvidenceAuditorV7,
+    #[serde(rename = "domain-analyst@8")]
+    DomainAnalystV8,
+    #[serde(rename = "evidence-auditor@8")]
+    EvidenceAuditorV8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +86,9 @@ inspection_requirements may be absent for a coverage-only investigation. If pres
 
 "#;
 
+const LEGACY_TARGET_LOCATION: &str = "inspection_requirements may be absent for a coverage-only investigation. If present, these are immutable caller-selected exact captured source targets.";
+const POLICY_TARGET_LOCATION: &str = "Exact captured source targets appear once in completion_contract.obligations: each source obligation's target is immutable and caller-selected. inspection_progress refers to these targets by target_id; there is no separate inspection_requirements array.";
+
 impl SpecialistId {
     pub fn uses_compact_disclosure(self) -> bool {
         matches!(
@@ -96,6 +103,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV6
                 | Self::DomainAnalystV7
                 | Self::EvidenceAuditorV7
+                | Self::DomainAnalystV8
+                | Self::EvidenceAuditorV8
         )
     }
 
@@ -110,6 +119,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV6
                 | Self::DomainAnalystV7
                 | Self::EvidenceAuditorV7
+                | Self::DomainAnalystV8
+                | Self::EvidenceAuditorV8
         )
     }
 
@@ -125,11 +136,23 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV6
                 | Self::DomainAnalystV7
                 | Self::EvidenceAuditorV7
+                | Self::DomainAnalystV8
+                | Self::EvidenceAuditorV8
         )
     }
 
     pub fn uses_completion_obligations(self) -> bool {
-        matches!(self, Self::DomainAnalystV7 | Self::EvidenceAuditorV7)
+        matches!(
+            self,
+            Self::DomainAnalystV7
+                | Self::EvidenceAuditorV7
+                | Self::DomainAnalystV8
+                | Self::EvidenceAuditorV8
+        )
+    }
+
+    pub fn uses_policy_selection(self) -> bool {
+        matches!(self, Self::DomainAnalystV8 | Self::EvidenceAuditorV8)
     }
 
     fn version(self) -> u32 {
@@ -141,6 +164,7 @@ impl SpecialistId {
             Self::DomainAnalystV5 | Self::EvidenceAuditorV5 => 5,
             Self::DomainAnalystV6 | Self::EvidenceAuditorV6 => 6,
             Self::DomainAnalystV7 | Self::EvidenceAuditorV7 => 7,
+            Self::DomainAnalystV8 | Self::EvidenceAuditorV8 => 8,
         }
     }
 
@@ -152,7 +176,8 @@ impl SpecialistId {
             | Self::DomainAnalystV4
             | Self::DomainAnalystV5
             | Self::DomainAnalystV6
-            | Self::DomainAnalystV7 => {
+            | Self::DomainAnalystV7
+            | Self::DomainAnalystV8 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -161,12 +186,13 @@ impl SpecialistId {
             | Self::EvidenceAuditorV4
             | Self::EvidenceAuditorV5
             | Self::EvidenceAuditorV6
-            | Self::EvidenceAuditorV7 => {
+            | Self::EvidenceAuditorV7
+            | Self::EvidenceAuditorV8 => {
                 "Audit the support and limits of existing claims within the question's scope. Identify missing links, unsupported interpretations and unresolved design evidence. Do not mistake missing evidence in a searched subset for proof of absence across the project."
             }
         };
         let discovery = match self.version() {
-            7 => COVERAGE_V6,
+            7 | 8 => COVERAGE_V6,
             6 => COVERAGE_V6,
             5 => DISCOVERY_V5,
             4 => DISCOVERY_V4,
@@ -185,8 +211,21 @@ impl SpecialistId {
                 r#"{"type":"query_context","query":{"scope""#,
                 r#"{"type":"query_context","context_id":"the exact context_id supplied by the host","query":{"scope""#,
             );
+            let common = if self.uses_policy_selection() {
+                common.replace(
+                    "at most8 model invocations and8 tool actions",
+                    "at most64 model invocations and56 tool actions",
+                )
+            } else {
+                common
+            };
             if self.uses_completion_obligations() {
                 let discovery = discovery.replace("A valid partial finish remains useful with outstanding targets; neither discharge nor citation proves whole-task correctness.", "A supported finish requires every mixed completion obligation exactly supplied; outstanding obligations cause a bounded refusal. Fulfillment does not prove semantic correctness.");
+                let discovery = if self.uses_policy_selection() {
+                    discovery.replace(LEGACY_TARGET_LOCATION, POLICY_TARGET_LOCATION)
+                } else {
+                    discovery
+                };
                 let common = common.replace(r#"{"type":"finish","findings"# , r#"{"schema_version":1,"outcome":"supported","action":{"type":"finish","findings"#).replace(r#"["Remaining coverage limitations."]}"#, r#"["Remaining coverage limitations."]}}"#);
                 format!(
                     "{role}\n\n{progress}{discovery}{common}\nCompletion obligations are mandatory. Return only the versioned finish wrapper with outcome supported or insufficient_evidence. Supported requires every obligation exactly supplied to this finishing invocation. Insufficient evidence requires an actual completed read attempt for every obligation, empty findings and explicit limitations. A refusal is not a read attempt; fixed completion_metadata feedback is not evidence. The host never chooses your next action."
@@ -208,7 +247,8 @@ impl SpecialistId {
             | Self::DomainAnalystV4
             | Self::DomainAnalystV5
             | Self::DomainAnalystV6
-            | Self::DomainAnalystV7 => (
+            | Self::DomainAnalystV7
+            | Self::DomainAnalystV8 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -218,7 +258,8 @@ impl SpecialistId {
             | Self::EvidenceAuditorV4
             | Self::EvidenceAuditorV5
             | Self::EvidenceAuditorV6
-            | Self::EvidenceAuditorV7 => (
+            | Self::EvidenceAuditorV7
+            | Self::EvidenceAuditorV8 => (
                 "Evidence auditor",
                 "Audit claim support, coverage limitations and unresolved evidence.",
             ),
@@ -245,5 +286,47 @@ impl SpecialistId {
             tier: Tier::Agentic,
             confidence_tier: ConfidenceTier::InferredWeak,
         })
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn opt_in_specialists_version_budget_text_without_mutating_legacy() {
+        // AC-0281: opt-in roles have distinct identities; legacy prompts retain limits.
+        for (old, new) in [
+            (SpecialistId::DomainAnalystV7, SpecialistId::DomainAnalystV8),
+            (
+                SpecialistId::EvidenceAuditorV7,
+                SpecialistId::EvidenceAuditorV8,
+            ),
+        ] {
+            let old_prompt = old.prompt();
+            let new_prompt = new.prompt();
+            assert!(old_prompt.contains("at most8 model invocations and8 tool actions"));
+            assert!(!new_prompt.contains("at most8 model invocations and8 tool actions"));
+            assert_eq!(
+                new_prompt,
+                old_prompt
+                    .replace(
+                        "at most8 model invocations and8 tool actions",
+                        "at most64 model invocations and56 tool actions"
+                    )
+                    .replace(LEGACY_TARGET_LOCATION, POLICY_TARGET_LOCATION)
+            );
+            assert_eq!(new.definition().unwrap().version, 8);
+            assert_ne!(
+                old.definition().unwrap().prompt_fingerprint,
+                new.definition().unwrap().prompt_fingerprint
+            );
+            assert!(new.uses_completion_obligations());
+            assert!(new.uses_coverage_qualification());
+            assert!(new.uses_turn_progress());
+            assert!(new.uses_compact_disclosure());
+            assert!(new.uses_policy_selection());
+            assert!(!old.uses_policy_selection());
+        }
     }
 }

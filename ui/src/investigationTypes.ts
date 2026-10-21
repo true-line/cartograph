@@ -6,7 +6,7 @@ import type { EgressPreview } from './components/EgressConsentDialog';
 import type { FactKey } from './primarySourceStore';
 import type { EvidenceRef, TaskSourceBasisV2 } from './store';
 
-export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5' | 'domain-analyst@6' | 'evidence-auditor@6' | 'domain-analyst@7' | 'evidence-auditor@7';
+export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5' | 'domain-analyst@6' | 'evidence-auditor@6' | 'domain-analyst@7' | 'evidence-auditor@7' | 'domain-analyst@8' | 'evidence-auditor@8';
 export type InvestigationProviderMode = 'local' | 'cloud';
 /** The existing context-hub QueryScope wire shape, not a filesystem scope. */
 export type InvestigationScope = { type: 'all' } |
@@ -53,11 +53,23 @@ export interface InvestigationLimits {
   wall_seconds: number;
 }
 
+export interface InvestigationPolicy {
+  limits: InvestigationLimits;
+  request_schema_version: 4 | 5;
+  envelope_schema_version: 1 | 2;
+  envelope_contract: string;
+  max_completion_obligations: number;
+  request_bytes: number;
+  envelope_bytes: number;
+  specialist_ids: SpecialistId[];
+}
+
 export interface InvestigationCatalog {
   schema_version: 1;
   specialists: InvestigationSpecialist[];
   providers: InvestigationProvider[];
   limits: InvestigationLimits;
+  policies?: InvestigationPolicy[];
 }
 
 export type InvestigationRangeRole = 'provenance' | 'rule_exit' | 'condition_branch' | 'condition_expression' |
@@ -128,7 +140,7 @@ export type StartInvestigationRequest = InvestigationStartFields & (
   { schema_version: 2; inspection_requirements: InvestigationInspectionTarget[]; expected_context_id?: never } |
   { schema_version: 3; inspection_requirements?: InvestigationInspectionTarget[]; expected_context_id?: string; obligations?: never }
 ) | (Omit<InvestigationStartFields, 'expected_graph_revision' | 'conversation_id' | 'parent_id'> & {
-  schema_version: 4; inspection_requirements?: never; obligations: InvestigationObligationEnvelope; expected_context_id: string;
+  schema_version: 4 | 5; inspection_requirements?: never; obligations: InvestigationObligationEnvelope; expected_context_id: string;
   expected_graph_revision: string | null; conversation_id: string | null; parent_id: string | null;
 });
 
@@ -167,7 +179,7 @@ export type InvestigationStatus = 'queued' | 'preparing' | 'running' |
 /** Bounded history summary. Question is the host's redacted saved representation. */
 export interface InvestigationSummary {
   /** V7 uses schema 4, V6 schema 3, V5 schema 2; V1–V4 history stays schema 1. */
-  schema_version: 1 | 2 | 3 | 4;
+  schema_version: 1 | 2 | 3 | 4 | 5;
   investigation_id: string;
   conversation_id: string;
   parent_id: string | null;
@@ -347,8 +359,8 @@ export type InvestigationObligation =
   { kind: 'source'; obligation_id: string; target: InvestigationInspectionTarget } |
   { kind: 'inventory'; obligation_id: string; target: { context_id: string; repo: string; inventory_hash: string } };
 export interface InvestigationObligationEnvelope {
-  schema_version: 1;
-  contract: 'investigation-completion-obligations@1';
+  schema_version: 1 | 2;
+  contract: 'investigation-completion-obligations@1' | 'investigation-completion-obligations@2';
   obligations: InvestigationObligation[];
 }
 export interface InvestigationObligationChoices {

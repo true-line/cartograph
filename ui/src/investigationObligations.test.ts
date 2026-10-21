@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { useInvestigationStore } from './investigationStore';
-import { completionChoices, inventoryObligation, sourceObligation } from './completionFixtures';
-import { obligationEnvelope, validObligationChoices } from './investigationObligations';
+import { expandedCompletionCatalog, completionChoices, inventoryObligation, sourceObligation } from './completionFixtures';
+import { obligationEnvelope, validObligationEnvelope, validObligationChoices } from './investigationObligations';
 import type { StartInvestigationRequest } from './investigationTypes';
 
 beforeEach(() => { vi.stubGlobal('window', {}); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); });
@@ -126,4 +126,16 @@ it('abandons source selection when scope changes during choice resolution', asyn
   expect(await pending).toBe(false);
   expect(sourceResolutions).toBe(0);
   expect(useInvestigationStore.getState().draftObligations).toEqual([]);
+});
+
+it('keeps expanded envelopes separate from legacy admission bounds (AC-0281)', () => {
+  const policy = expandedCompletionCatalog.policies![0];
+  const selections = Array.from({ length: 13 }, (_, index) => ({ ...inventoryObligation,
+    obligation_id: (index + 1).toString(16).padStart(64, '0'), target: { ...inventoryObligation.target, repo: `repo-${index}` } }));
+  const expanded = obligationEnvelope(selections, policy);
+  expect(expanded.schema_version).toBe(2);
+  expect(validObligationEnvelope(expanded, policy)).toBe(true);
+  expect(validObligationEnvelope(expanded)).toBe(false);
+  expect(validObligationEnvelope(obligationEnvelope(selections))).toBe(false);
+  expect(validObligationEnvelope({ ...expanded, schema_version: 1 }, policy)).toBe(false);
 });

@@ -22,6 +22,21 @@ fn fixture(source: bool, inventory: bool, secret: bool) -> PreparedFixture {
     fixture_version(source, inventory, secret, false)
 }
 fn fixture_version(source: bool, inventory: bool, secret: bool, v7: bool) -> PreparedFixture {
+    fixture_policy(
+        source,
+        inventory,
+        secret,
+        v7.then_some(&INVESTIGATION_V1_POLICY),
+    )
+}
+/// `completion` selects the v7 completion input under that exact policy.
+fn fixture_policy(
+    source: bool,
+    inventory: bool,
+    secret: bool,
+    completion: Option<&InvestigationPolicy>,
+) -> PreparedFixture {
+    let legacy = completion.is_none_or(|policy| policy.profile() == "investigation-v1");
     let (target, mut ledger, _) = super::inspection_tests::fixture();
     let repo = target.source.repo.clone();
     let inventory_json=json!({"inventory":context_hub::coverage::INVENTORY_VERSION,"repo":repo,"commit":"pinned-revision","layer_hints":[],"producers":[{"state":"not_selected","stopping_reason":if secret {"limit password=syntheticsecret123 bounded "}else{"optional input not selected"}}],"unsupported":[],"limited":true}).to_string();
@@ -139,22 +154,33 @@ fn fixture_version(source: bool, inventory: bool, secret: bool, v7: bool) -> Pre
         )
         .unwrap();
     let mut disclosure = input.seal_disclosure(&prepared).unwrap().unwrap();
+    let policy = completion.unwrap_or(&INVESTIGATION_V1_POLICY);
     let request = StagedObligationRequest {
-        schema_version: 4,
+        schema_version: if legacy { 4 } else { 5 },
         request_nonce: "staged-nonce".into(),
-        specialist_id: "domain-analyst@7".into(),
+        specialist_id: if legacy {
+            "domain-analyst@7"
+        } else {
+            "domain-analyst@8"
+        }
+        .into(),
         inspection_requirements: None,
         question: "Inspect selected evidence".into(),
         scope: InvestigationScope::All,
         provider_mode: InvestigationProviderMode::Local,
-        limit_profile: "investigation-v1".into(),
+        limit_profile: policy.profile().into(),
         expected_graph_revision: Some(target.graph_snapshot_id.clone()),
         expected_context_id: ledger.coverage.as_ref().unwrap().context_id.clone(),
         conversation_id: None,
         parent_id: None,
         obligations: ObligationEnvelope {
-            schema_version: 1,
-            contract: "investigation-completion-obligations@1".into(),
+            schema_version: if legacy { 1 } else { 2 },
+            contract: if legacy {
+                "investigation-completion-obligations@1"
+            } else {
+                "investigation-completion-obligations@2"
+            }
+            .into(),
             obligations: vec![
                 identified(Obligation::Source {
                     obligation_id: String::new(),
@@ -170,35 +196,40 @@ fn fixture_version(source: bool, inventory: bool, secret: bool, v7: bool) -> Pre
                 }),
             ],
         }
-        .normalized()
+        .normalized_with_policy(policy)
         .unwrap(),
     };
-    if v7 {
+    if completion.is_some() {
         let metadata = ProtectedCompletionMetadata {
             schema_version: 1,
-            request_hash: request.intent_hash().unwrap(),
-            obligations_hash: request.obligations.fingerprint().unwrap(),
+            request_hash: request.intent_hash_with_policy(policy).unwrap(),
+            obligations_hash: request.obligations.fingerprint_with_policy(policy).unwrap(),
             completed_attempt_ids: vec![],
             refusal_count: 0,
             last_refusal_id: None,
             feedback: None,
         };
-        input = InvestigationInput::prepare_v7(
+        input = InvestigationInput::prepare_v7_with_policy(
             &request.question,
-            SpecialistId::DomainAnalystV7,
+            if legacy {
+                SpecialistId::DomainAnalystV7
+            } else {
+                SpecialistId::DomainAnalystV8
+            },
             ledger.clone(),
             &pages,
             &evidence,
             &[],
             &InvestigationUsage::default(),
             &InvestigationTurnBasis {
-                input_ledger_hash: ledger.fingerprint().unwrap(),
+                input_ledger_hash: ledger.fingerprint_with_policy(policy).unwrap(),
                 previous_ledger: Some(previous),
                 completed_tool: Some(tool),
             },
             &request,
             &metadata,
             &details,
+            policy,
         )
         .unwrap();
         let prepared = EgressFirewall::new(EgressPolicy::default())
@@ -208,7 +239,10 @@ fn fixture_version(source: bool, inventory: bool, secret: bool, v7: bool) -> Pre
                 &CompletionLimits::default(),
             )
             .unwrap();
-        disclosure = input.seal_disclosure(&prepared).unwrap().unwrap();
+        disclosure = input
+            .seal_disclosure_with_policy(&prepared, policy)
+            .unwrap()
+            .unwrap();
     }
     PreparedFixture {
         request,
@@ -766,5 +800,230 @@ fn completion_v7_partial_and_metadata_tampering_are_distinct() {
                 "2026-10-20T12:00:00Z".into()
             )
             .is_err()
+    );
+}
+
+// AC-0266: policy-aware finish/refusal paths keep v1's literal bounds and
+// identities; the saved policy, not a static ceiling, sets every boundary.
+#[test]
+fn staged_policy_paths_preserve_v1_bounds_and_identities() {
+    let policy = &INVESTIGATION_V1_POLICY;
+    assert_eq!(
+        RefusalFeedback::max_bytes_with_policy(policy).unwrap(),
+        2048
+    );
+    let entries = |count: usize| RefusalFeedback {
+        schema_version: 1,
+        unmet: (0..count)
+            .map(|index| FeedbackEntry {
+                obligation_id: format!("{index:064x}"),
+                kind: "inventory".into(),
+                reason: RefusalReason::AcquiredNotSupplied,
+            })
+            .collect(),
+    };
+    let widest = entries(policy.max_completion_obligations());
+    assert_eq!(
+        widest.bytes().unwrap(),
+        widest.bytes_with_policy(policy).unwrap()
+    );
+    assert!(widest.bytes().unwrap().len() <= 2048);
+    assert_eq!(
+        widest.fingerprint().unwrap(),
+        widest.fingerprint_with_policy(policy).unwrap()
+    );
+    let over = entries(policy.max_completion_obligations() + 1);
+    assert_eq!(over.bytes(), Err(InvestigationError::InvalidInput));
+    assert_eq!(
+        over.bytes_with_policy(policy),
+        Err(InvestigationError::InvalidInput)
+    );
+
+    let metadata = |ids: usize| ProtectedCompletionMetadata {
+        schema_version: 1,
+        request_hash: "a".repeat(64),
+        obligations_hash: "b".repeat(64),
+        completed_attempt_ids: (0..ids).map(|index| format!("{index:064x}")).collect(),
+        refusal_count: 1,
+        last_refusal_id: Some("c".repeat(64)),
+        feedback: Some(widest.clone()),
+    };
+    let full = metadata(policy.max_completed_attempts());
+    assert_eq!(
+        full.fingerprint().unwrap(),
+        full.fingerprint_with_policy(policy).unwrap()
+    );
+    let excess = metadata(policy.max_completed_attempts() + 1);
+    assert_eq!(excess.validate(), Err(InvestigationError::InvalidInput));
+    assert_eq!(
+        excess.validate_with_policy(policy),
+        Err(InvestigationError::InvalidInput)
+    );
+
+    for (source, inventory) in [(true, true), (true, false), (false, false)] {
+        let fixture = fixture(source, inventory, false);
+        let legacy = decide(&fixture, &finish(false), &[]);
+        let ledger = fixture.input.ledger();
+        let scoped = admit_finish_with_policy(
+            &fixture.request,
+            "task",
+            "finish-step",
+            &fixture.input,
+            &fixture.disclosure,
+            &finish(false),
+            &[],
+            None,
+            "now".into(),
+            policy,
+        );
+        match (legacy, scoped) {
+            (Ok(FinishDecision::Accepted(a)), Ok(FinishDecision::Accepted(b))) => {
+                assert_eq!(a.assessment.len(), b.assessment.len());
+            }
+            (
+                Ok(FinishDecision::Refused { feedback: a, .. }),
+                Ok(FinishDecision::Refused { feedback: b, .. }),
+            ) => assert_eq!(a, b),
+            _ => panic!("policy-aware finish diverged from v1"),
+        }
+        let request = fixture.request.normalized().unwrap();
+        assert_eq!(
+            derive_assessment_for_binding(
+                &request.intent_hash().unwrap(),
+                &request.obligations,
+                "task",
+                "finish-step",
+                ledger,
+                &fixture.disclosure,
+                CompletionOutcome::Supported,
+                &[],
+            )
+            .unwrap(),
+            derive_assessment_for_binding_with_policy(
+                &request.intent_hash().unwrap(),
+                &request.obligations,
+                "task",
+                "finish-step",
+                ledger,
+                &fixture.disclosure,
+                CompletionOutcome::Supported,
+                &[],
+                policy,
+            )
+            .unwrap()
+        );
+    }
+}
+
+#[test]
+fn sealing_reconstructs_contract_sourced_targets_for_the_selected_policy() {
+    // AC-0281: a non-v1 completion prompt carries its inspection targets once,
+    // in the completion contract; sealing rebuilds and binds them.
+    let policy = &INVESTIGATION_V2_POLICY;
+    let fixture = fixture_policy(true, true, false, Some(policy));
+    let prompt: serde_json::Value = serde_json::from_str(
+        &fixture
+            .input
+            .action("task:finish".into())
+            .unwrap()
+            .payload
+            .prompt,
+    )
+    .unwrap();
+    assert_eq!(prompt["schema_version"], 7);
+    assert!(prompt.get("inspection_requirements").is_none());
+    assert_eq!(fixture.disclosure.schema_version, 4);
+    assert!(fixture.disclosure.inspection_requirements_hash.is_some());
+    let provider = OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test-model",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let seal = |input: &InvestigationInput,
+                change: &dyn Fn(&mut serde_json::Value),
+                policy: &InvestigationPolicy,
+                private: Option<&[InvestigationInspectionTarget]>| {
+        let mut action = input.action("task:finish".into()).unwrap();
+        let mut prompt: serde_json::Value = serde_json::from_str(&action.payload.prompt).unwrap();
+        change(&mut prompt);
+        action.payload.prompt = prompt.to_string();
+        let prepared = EgressFirewall::new(EgressPolicy::default())
+            .prepare_bounded(&provider, &action, &CompletionLimits::default())
+            .unwrap();
+        crate::investigation::sealing::seal_with_policy(
+            input.ledger(),
+            &action.payload,
+            &prepared,
+            policy,
+            private,
+        )
+    };
+    let private = Some(
+        fixture
+            .request
+            .obligations
+            .sources_with_policy(policy)
+            .unwrap(),
+    );
+    let unchanged = |_: &mut serde_json::Value| {};
+    assert_eq!(
+        serde_json::to_value(seal(&fixture.input, &unchanged, policy, private.as_deref()).unwrap())
+            .unwrap(),
+        serde_json::to_value(&fixture.disclosure).unwrap()
+    );
+    let refused = |change: &dyn Fn(&mut serde_json::Value)| {
+        seal(&fixture.input, change, policy, private.as_deref())
+            == Err(InvestigationError::InvalidInput)
+    };
+    // A second descriptor copy, a schema-6 relabel, or a changed binding fails.
+    assert!(refused(&|p| {
+        p["inspection_requirements"] = serde_json::to_value(&private).unwrap();
+    }));
+    assert!(refused(&|p| p["schema_version"] = 6.into()));
+    assert!(refused(&|p| {
+        p["inspection_requirements_hash"] = "0".repeat(64).into();
+    }));
+    assert!(refused(&|p| {
+        p["inspection_progress"]["requirements"][0]["target_id"] = "0".repeat(64).into();
+    }));
+    assert!(refused(&|p| {
+        p["inspection_progress"]["requirements"]
+            .as_array_mut()
+            .unwrap()
+            .clear();
+    }));
+    assert!(refused(&|p| {
+        for item in p["completion_contract"]["obligations"]["obligations"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if item
+                .get("target")
+                .is_some_and(|t| t.get("receipt_id").is_some())
+            {
+                item["target"]["receipt_inventory_index"] = 9.into();
+            }
+        }
+    }));
+    // The contract targets must also be the host's private admitted targets.
+    assert_eq!(
+        seal(&fixture.input, &unchanged, policy, None),
+        Err(InvestigationError::InvalidInput)
+    );
+    // v1 never accepts schema 7, even for an otherwise valid v1 prompt.
+    let legacy = fixture_version(true, true, false, true);
+    let legacy_private = Some(legacy.request.obligations.sources().unwrap());
+    assert_eq!(
+        seal(
+            &legacy.input,
+            &|p| {
+                p.as_object_mut().unwrap().remove("inspection_requirements");
+                p["schema_version"] = 7.into();
+            },
+            &INVESTIGATION_V1_POLICY,
+            legacy_private.as_deref(),
+        ),
+        Err(InvestigationError::InvalidInput)
     );
 }

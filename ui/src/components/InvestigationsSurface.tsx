@@ -7,7 +7,7 @@ import { InvestigationFindings } from './InvestigationFindings';
 import { EgressConsentDialog } from './EgressConsentDialog';
 import { InspectionAssessment } from './InspectionAssessment';
 import { CompletionAssessment } from './CompletionAssessment';
-import { obligationEnvelope } from '../investigationObligations';
+import { investigationPolicy, obligationEnvelope } from '../investigationObligations';
 import { InvestigationCoverage } from './InvestigationCoverage';
 
 export const INVESTIGATION_STATUS: Record<InvestigationStatus, string> = {
@@ -35,32 +35,36 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const provider = state.catalog?.providers.find((item) => item.mode === providerMode);
   const summary = state.detail ?? state.history.find((item) => item.investigation_id === state.selectedId);
-  const selectedSpecialistAvailable = Boolean(state.catalog?.specialists.some((item) => item.id === specialistId));
   const questionBytes = new TextEncoder().encode(question).length;
   const locked = state.starting || state.pendingStart !== null;
   const requirements = state.draftInspectionRequirements;
-  const completionVersion = specialistId.endsWith('@7');
+  const completionVersion = specialistId.endsWith('@7') || specialistId.endsWith('@8');
+  const profile = state.composer.limitProfile ?? 'investigation-v1';
+  const policy = investigationPolicy(state.catalog, profile, specialistId);
+  const selectedSpecialistAvailable = Boolean(policy && state.catalog?.specialists.some((item) => item.id === specialistId));
+  const limits = policy?.limits ?? (profile === 'investigation-v1' ? state.catalog?.limits : undefined);
+  const requestLimit = policy?.request_bytes ?? 8192;
   const choices = state.obligationChoices;
-  const obligations = obligationEnvelope(state.draftObligations);
-  const completionBound = Boolean(choices && obligations.obligations.length > 0 && obligations.obligations.length <= 12 &&
+  const obligations = obligationEnvelope(state.draftObligations, policy);
+  const completionBound = Boolean(choices && obligations.obligations.length > 0 && policy && obligations.obligations.length <= policy.max_completion_obligations &&
     obligations.obligations.every((item) => item.kind === 'source' ? item.target.graph_snapshot_id === choices.graph_snapshot_id : item.target.context_id === choices.context_id));
   const inspectionVersion = specialistId.endsWith('@5');
   const coverageVersion = specialistId.endsWith('@6');
   const supportsRequirements = inspectionVersion || coverageVersion;
   const scope: InvestigationScope = scopeType === 'all' ? { type: 'all' } : { type: 'neighborhood', anchor, hops };
-  const requestBytes = completionVersion ? new TextEncoder().encode(JSON.stringify({ schema_version: 4, request_nonce: '0'.repeat(36),
-    specialist_id: specialistId, obligations, question, scope, provider_mode: providerMode, limit_profile: state.catalog?.limits.profile ?? 'investigation-v1',
+  const requestBytes = completionVersion ? new TextEncoder().encode(JSON.stringify({ schema_version: policy?.request_schema_version ?? 4, request_nonce: '0'.repeat(36),
+    specialist_id: specialistId, obligations, question, scope, provider_mode: providerMode, limit_profile: profile,
     expected_graph_revision: choices?.graph_snapshot_id ?? null, expected_context_id: choices?.context_id ?? '',
     conversation_id: parent?.conversation_id ?? null, parent_id: parent?.parent_id ?? null })).length : new TextEncoder().encode(JSON.stringify({ schema_version: coverageVersion ? 3 : inspectionVersion ? 2 : 1,
     request_nonce: '0'.repeat(36), specialist_id: specialistId, question, scope, provider_mode: providerMode,
-    limit_profile: state.catalog?.limits.profile ?? 'investigation-v1', ...parent,
+    limit_profile: profile, ...parent,
     ...(supportsRequirements && requirements.length ? { inspection_requirements: requirements,
       expected_graph_revision: requirements[0].graph_snapshot_id } : {}) })).length;
   const startEnabled = canStart && !locked && !state.catalogLoading && Boolean(provider?.available) &&
-    selectedSpecialistAvailable && question.trim().length > 0 &&
+    selectedSpecialistAvailable && Boolean(policy) && question.trim().length > 0 &&
     questionBytes <= 2048 && (scopeType === 'all' || anchor.trim().length > 0) &&
     (completionVersion ? completionBound && requirements.length === 0 :
-      state.draftObligations.length === 0 && (inspectionVersion ? requirements.length > 0 : coverageVersion || requirements.length === 0)) && requestBytes <= 8192;
+      state.draftObligations.length === 0 && (inspectionVersion ? requirements.length > 0 : coverageVersion || requirements.length === 0)) && requestBytes <= requestLimit;
   const refresh = () => { void state.loadCatalog(); void state.loadHistory(); };
 
   return <section className="investigations-surface" aria-label="Investigations">
@@ -71,11 +75,24 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
     <form className="investigation-compose" aria-label="Start an investigation" onSubmit={(event) => {
       event.preventDefault();
       if (startEnabled && state.catalog) void state.start({ specialist_id: specialistId, question,
-        scope, provider_mode: providerMode, limit_profile: state.catalog.limits.profile, ...parent,
+        scope, provider_mode: providerMode, limit_profile: profile, ...parent,
         ...(completionVersion ? { obligations } : supportsRequirements && requirements.length ? { inspection_requirements: requirements } : {}) });
     }}>
+      {(state.catalog || state.pendingStart) && <label>Investigation budget<select value={profile} disabled={locked} onChange={(event) => {
+        const limitProfile = event.target.value;
+        const next = specialistId.replace(/@[78]$/, limitProfile === 'investigation-v2' ? '@8' : '@7') as SpecialistId;
+        state.updateComposer({ limitProfile, specialistId: next });
+      }}>
+        <option value="investigation-v1">Standard · {state.catalog?.limits.tool_actions ?? 8} tool actions, {state.catalog?.limits.model_invocations ?? 8} model calls</option>
+        {state.catalog?.policies?.filter((entry) => entry.limits.profile !== 'investigation-v1' &&
+          entry.specialist_ids.some((id) => investigationPolicy(state.catalog, entry.limits.profile, id))).map((entry) =>
+          <option key={entry.limits.profile} value={entry.limits.profile}>Expanded · {entry.limits.tool_actions} tool actions, {entry.limits.model_invocations} model calls</option>)}
+        {profile !== 'investigation-v1' && !state.catalog?.policies?.some((entry) => entry.limits.profile === profile) &&
+          <option value={profile}>Expanded · saved selection, unavailable for new starts</option>}
+      </select></label>}
+      {profile !== 'investigation-v1' && <p>Expanded investigations allow more evidence and model calls, which can increase runtime and provider cost. Completion is not guaranteed.</p>}
       <fieldset disabled={locked}><legend>Specialist</legend>
-        <div className="investigation-specialists">{state.catalog?.specialists.map((specialist) =>
+        <div className="investigation-specialists">{state.catalog?.specialists.filter((specialist) => profile === 'investigation-v2' ? specialist.id.endsWith('@8') : !specialist.id.endsWith('@8')).map((specialist) =>
           <label key={specialist.id} className={`investigation-specialist${specialistId === specialist.id ? ' selected' : ''}`}>
             <input type="radio" name="specialist" checked={specialistId === specialist.id} onChange={() => setSpecialistId(specialist.id)} />
             <span><strong>{specialist.name}</strong><span className="muted">{specialist.purpose}</span>
@@ -83,7 +100,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
           </label>)}</div>
       </fieldset>
       {state.catalog && !state.catalogLoading && !selectedSpecialistAvailable && <p role="status">
-        Selected specialist <code>{specialistId}</code> is unavailable. Choose an available specialist explicitly to continue.
+        Selected specialist <code>{specialistId}</code> is unavailable for this investigation budget. Choose an available specialist explicitly to continue.
         {parent && ' The saved parent keeps its original specialist version.'}
       </p>}
       {state.catalogLoading && <p role="status">Loading specialists…</p>}
@@ -91,7 +108,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
       {!state.catalog && !state.catalogLoading && <p className="muted">The app core supplies available specialists and provider limits.</p>}
       {completionVersion && <fieldset disabled={locked || state.obligationChoicesLoading} aria-label="Required completion evidence"><legend>Required completion evidence</legend>
         <p>Select captured sources in the evidence drawer or choose recorded inventories below. Viewing evidence does not discharge an obligation.</p>
-        <p>Choose 1–12 combined obligations within the complete 8,192-byte request. Follow-ups require fresh explicit selections.</p>
+        <p>Choose 1–{policy?.max_completion_obligations ?? 12} combined obligations within the complete {requestLimit.toLocaleString()}-byte request. Follow-ups require fresh explicit selections.</p>
         <button type="button" className="secondary-button" onClick={() => void state.loadObligationChoices(scope)}>Refresh completion choices</button>
         {state.obligationChoicesLoading && <p role="status">Resolving exact completion context…</p>}
         {choices && <><ul>{choices.inventories.map((item) => <li key={item.repo}>
@@ -161,11 +178,11 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
           onChange={(event) => setQuestion(event.target.value)} />
       </label>
       <p className={questionBytes > 2048 ? 'error-text' : 'muted'}>{questionBytes} / 2,048 UTF-8 bytes. Scope uses the recovered graph at preparation time.</p>
-      {requestBytes > 8192 && <p role="alert" className="error-text">This request exceeds the 8,192-byte limit. Shorten the question or remove required sources.</p>}
+      {requestBytes > requestLimit && <p role="alert" className="error-text">This request exceeds the {requestLimit.toLocaleString()}-byte limit. Shorten the question or remove required sources.</p>}
       {parent && <p className="muted">New task following <code>{parent.parent_id}</code>; earlier findings remain T3 history.
         <button type="button" className="secondary-button" disabled={locked} onClick={() => setParent(null)}>Start a separate conversation</button></p>}
-      {state.catalog && <p className="muted">Up to {state.catalog.limits.model_invocations} model invocations and {state.catalog.limits.tool_actions} tool actions;
-        {' '}{state.catalog.limits.active_seconds}s active execution. Source and byte limits apply. Missing evidence is not proof of absence.</p>}
+      {limits && <p className="muted">Up to {limits?.model_invocations} model invocations and {limits?.tool_actions} tool actions;
+        {' '}{limits?.active_seconds}s active execution. Source and byte limits apply. Missing evidence is not proof of absence.</p>}
       <button type="submit" disabled={!startEnabled}>{state.starting ? 'Saving investigation…' : parent ? 'Start follow-up' : 'Start investigation'}</button>
       {state.startError && <div role="alert" className="error-text"><p>{state.startError}</p>
         {state.pendingStart && <button type="button" className="secondary-button" disabled={state.starting} onClick={() => void state.retryStart()}>Retry same start request</button>}</div>}
@@ -202,7 +219,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
             <p className="muted">Scope: {summary.scope.type === 'all' ? 'Recovered system' : `${summary.scope.anchor} · ${summary.scope.hops} hop(s)`}</p>
             <p className="muted">Prepared graph: <code>{summary.graph_snapshot_id ?? 'Pending preparation'}</code></p>
             <div className="investigation-actions">
-              {summary.schema_version === 4 && <p>{summary.completion_outcome === 'obligations_unmet' ? 'Completion obligations unmet; no result admitted.' :
+              {[4, 5].includes(summary.schema_version) && <p>{summary.completion_outcome === 'obligations_unmet' ? 'Completion obligations unmet; no result admitted.' :
                 summary.completion_outcome === 'insufficient_evidence' ? 'Admitted insufficient-evidence completion.' : summary.completion_outcome === 'supported' ? 'Supported completion.' : 'No completion outcome recorded.'}</p>}
               {summary.actions.can_cancel && <button type="button" className="danger-button" disabled={state.actionBusy}
                 onClick={() => void state.cancel()}>Request cancellation</button>}
@@ -212,7 +229,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
                 state.clearObligations();
                 setParent({ conversation_id: summary.conversation_id, parent_id: summary.investigation_id });
                 setScopeType(summary.scope.type); if (summary.scope.type === 'neighborhood') { setAnchor(summary.scope.anchor); setHops(summary.scope.hops); }
-                setSpecialistId(summary.specialist_id);
+                state.updateComposer({ specialistId: summary.specialist_id, limitProfile: summary.specialist_id.endsWith('@8') ? 'investigation-v2' : 'investigation-v1' });
                 setProviderMode(summary.provider_mode); setQuestion(''); questionRef.current?.focus();
               }}>Ask a follow-up</button>}
               {state.consent && <button type="button" disabled={state.actionBusy || state.loading} onClick={state.showConsent}>Review next cloud action</button>}
@@ -222,10 +239,10 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
           {state.error && <p className="error-text" role="alert">{state.error}</p>}
           {state.actionError && <p className="error-text" role="alert">{state.actionError}</p>}
           {state.detail && <>
-            {(state.detail.schema_version === 3 || state.detail.schema_version === 4) && <InvestigationCoverage context={state.detail.coverage_context}
+            {[3, 4, 5].includes(state.detail.schema_version) && <InvestigationCoverage context={state.detail.coverage_context}
               attestation={state.result?.coverage} />}
-            {state.detail.schema_version === 4 && state.detail.completion && <CompletionAssessment completion={state.detail.completion} outcome={state.detail.completion_outcome} />}
-            {state.detail.schema_version !== 4 && <InspectionAssessment requirements={state.detail.inspection_requirements ?? []}
+            {[4, 5].includes(state.detail.schema_version) && state.detail.completion && <CompletionAssessment completion={state.detail.completion} outcome={state.detail.completion_outcome} />}
+            {![4, 5].includes(state.detail.schema_version) && <InspectionAssessment requirements={state.detail.inspection_requirements ?? []}
               awaitingAssessment={!['completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(state.detail.status) || state.detail.invocation_pending}
               assessment={state.detail.inspection_assessment} location={state.inspectionLocation}
               locationTargetId={state.inspectionLocationTargetId} locationLoading={state.inspectionLocationLoading}

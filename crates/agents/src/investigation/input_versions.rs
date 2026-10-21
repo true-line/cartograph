@@ -42,7 +42,7 @@ impl InvestigationInput {
         usage: &InvestigationUsage,
         basis: &InvestigationTurnBasis,
     ) -> Result<Self, InvestigationError> {
-        let mut input = Self::prepare_base(
+        Self::prepare_progress_with_policy(
             question,
             specialist,
             ledger,
@@ -50,10 +50,37 @@ impl InvestigationInput {
             evidence,
             supplied_history,
             usage,
+            basis,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_progress_with_policy(
+        question: &str,
+        specialist: SpecialistId,
+        ledger: InvestigationInputLedger,
+        query_pages: &[String],
+        evidence: &[AgentEvidence],
+        supplied_history: &[String],
+        usage: &InvestigationUsage,
+        basis: &InvestigationTurnBasis,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        let mut input = Self::prepare_base_with_policy(
+            question,
+            specialist,
+            ledger,
+            query_pages,
+            evidence,
+            supplied_history,
+            usage,
+            policy,
         )?;
         let mut prompt: Value = serde_json::from_str(&input.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
-        let progress = basis.progress(&input.ledger, &prompt["compact_context"])?;
+        let progress =
+            basis.progress_with_policy(&input.ledger, &prompt["compact_context"], policy)?;
         prompt["schema_version"] = 3.into();
         prompt["turn_progress"] =
             serde_json::to_value(progress).map_err(|_| InvestigationError::InvalidInput)?;
@@ -159,11 +186,43 @@ impl InvestigationInput {
         metadata: &staged_refusal::ProtectedCompletionMetadata,
         coverage_details: &[String],
     ) -> Result<Self, InvestigationError> {
+        Self::prepare_v7_with_policy(
+            question,
+            specialist,
+            ledger,
+            query_pages,
+            evidence,
+            supplied_history,
+            usage,
+            basis,
+            request,
+            metadata,
+            coverage_details,
+            &INVESTIGATION_V1_POLICY,
+        )
+    }
+
+    /// Trusted host route; the immutable policy must match the request family.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_v7_with_policy(
+        question: &str,
+        specialist: SpecialistId,
+        ledger: InvestigationInputLedger,
+        query_pages: &[String],
+        evidence: &[AgentEvidence],
+        supplied_history: &[String],
+        usage: &InvestigationUsage,
+        basis: &InvestigationTurnBasis,
+        request: &obligations::StagedObligationRequest,
+        metadata: &staged_refusal::ProtectedCompletionMetadata,
+        coverage_details: &[String],
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
         if !specialist.uses_completion_obligations() {
             return Err(InvestigationError::InvalidInput);
         }
-        let request = request.normalized()?;
-        request.validate_ledger(&ledger)?;
+        let request = request.normalized_with_policy(policy)?;
+        request.validate_ledger_with_policy(&ledger, policy)?;
         let selected: SpecialistId =
             serde_json::from_value(serde_json::Value::String(request.specialist_id.clone()))
                 .map_err(|_| InvestigationError::InvalidInput)?;
@@ -175,21 +234,21 @@ impl InvestigationInput {
         {
             return Err(InvestigationError::InvalidInput);
         }
-        metadata.validate()?;
+        metadata.validate_with_policy(policy)?;
         let contract = InvestigationCompletionContract {
             schema_version: 1,
-            request_hash: request.intent_hash()?,
-            obligations_hash: request.obligations.fingerprint()?,
+            request_hash: request.intent_hash_with_policy(policy)?,
+            obligations_hash: request.obligations.fingerprint_with_policy(policy)?,
             obligations: request.obligations.clone(),
         };
-        contract.validate()?;
+        contract.validate_with_policy(policy)?;
         if metadata.request_hash != contract.request_hash
             || metadata.obligations_hash != contract.obligations_hash
         {
             return Err(InvestigationError::InvalidInput);
         }
-        let targets = request.obligations.sources()?;
-        let mut input = Self::prepare_progress(
+        let targets = request.obligations.sources_with_policy(policy)?;
+        let mut input = Self::prepare_progress_with_policy(
             question,
             specialist,
             ledger,
@@ -198,9 +257,13 @@ impl InvestigationInput {
             supplied_history,
             usage,
             basis,
+            policy,
         )?;
         if !targets.is_empty() {
-            input.add_inspection_requirements(normalize_inspection_targets(&targets)?)?;
+            input.add_inspection_requirements_with_policy(
+                normalize_inspection_targets_with_policy(&targets, policy)?,
+                policy,
+            )?;
         }
         let mut prompt: Value = serde_json::from_str(&input.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
@@ -211,7 +274,11 @@ impl InvestigationInput {
         input.add_coverage_details(coverage_details)?;
         prompt = serde_json::from_str(&input.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
-        prompt["schema_version"] = 6.into();
+        prompt["schema_version"] = if policy.profile() == INVESTIGATION_V2_POLICY.profile() {
+            7.into()
+        } else {
+            6.into()
+        };
         prompt["completion_contract"] =
             serde_json::to_value(contract).map_err(|_| InvestigationError::InvalidInput)?;
         prompt["completion_metadata"] =
@@ -226,12 +293,24 @@ impl InvestigationInput {
         &mut self,
         targets: Vec<InvestigationInspectionTarget>,
     ) -> Result<(), InvestigationError> {
+        self.add_inspection_requirements_with_policy(targets, &INVESTIGATION_V1_POLICY)
+    }
+    fn add_inspection_requirements_with_policy(
+        &mut self,
+        targets: Vec<InvestigationInspectionTarget>,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
         let mut prompt: Value = serde_json::from_str(&self.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
         prompt["schema_version"] = 4.into();
-        prompt["inspection_requirements_hash"] = inspection_requirements_hash(&targets)?.into();
-        prompt["inspection_requirements"] =
-            serde_json::to_value(&targets).map_err(|_| InvestigationError::InvalidInput)?;
+        prompt["inspection_requirements_hash"] =
+            inspection_requirements_hash_with_policy(&targets, policy)?.into();
+        // V2 supplies these exact descriptors once in completion_contract.
+        // Keep the private targets and their hash for finishing disclosure.
+        if policy.profile() != INVESTIGATION_V2_POLICY.profile() {
+            prompt["inspection_requirements"] =
+                serde_json::to_value(&targets).map_err(|_| InvestigationError::InvalidInput)?;
+        }
         prompt["inspection_progress"] = serde_json::json!({"requirements":targets.iter().map(|target|serde_json::json!({
             "target_id":target.target_id,"acquired":self.ledger.citations.iter().any(|citation|target.matches(citation)),
             "exact_supply":"determined_by_finishing_disclosure"})).collect::<Vec<_>>()});
