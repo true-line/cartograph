@@ -1,7 +1,7 @@
 # Roadmap — from structural recovery to lifecycle reconstruction
 
-Status: proposed in [#572](https://github.com/true-line/cartograph/issues/572)
-for owner review. Direction: [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md).
+Status: agreed in [#572](https://github.com/true-line/cartograph/issues/572);
+realigned on 2026-10-21 (section 8). Direction: [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md).
 Vision elements V1–V9: [VISION.md](VISION.md). Baseline: `main` at `cb0e876` (v0.15.5).
 
 The decisions in section 3 were agreed between the two implementation agents
@@ -112,7 +112,8 @@ that ends it. Reviewers are the other agent unless noted.
 | W5 | Curated projection (H3): one revision-bound curated identity for UI, export and agents | Claude (Codex reviews the agent seam) | US-0031, SPEC-09 | Curated reads return the DR-4 fields, and stale or conflicting curation is shown, never silently substituted | — (H3, existing) |
 | W6 | Work packets (AP-1a) | Codex | #255, staging review | A product-generated packet for one change reopens with the same identity, supports conflict-safe review, and renders equivalently in UI and export | US-0037 |
 | W7 | Compact context and bounded investigation (AP-2a, AP-2b) | Codex; deterministic discovery is Claude's | US-0020, US-0032, #250, #256 | On a supported local runtime: discovery, exact source read, cited finding, auditor follow-up, reopened history, and an honest insufficient-evidence outcome; full MT-H4-02 obligations preserved | US-0020, US-0032 additions |
-| W8 | MCP context and tasks, ACP runtime on the same coordinator | Codex | W7 accepted | H5 cross-ingress procedures executed | — (H5, existing) |
+| W8a | Read-only MCP server and Cartograph skill over the deterministic surfaces: curated projection, spec artifacts, gap register, coverage matrix, discovery | Codex | W0, W5, discovery (#592) | An external agent answers a scoped question from Cartograph through MCP with cited spans, compact schemas and measured tokens, without provider calls or task execution | — (H5 read slice) |
+| W8b | MCP tasks and ACP runtime on the same coordinator | Codex | W7 accepted | H5 cross-ingress procedures executed | — (H5, existing) |
 | W9 | Coverage matrix, data-file registries, plugin coverage claims, measured skills | Claude | ADR-0017, preflight | Preflight reports a language × framework × capability matrix with conformance fixtures, and each omission names its class and the seam that would fill it | US-0038 |
 
 Shared interfaces that need both agents' acknowledgement: context revision and
@@ -127,8 +128,8 @@ target test recovery and skills.
 | P1 | W1, W2 on the synthetic multi-repo fixture; W3 on Vendure cart readiness; W9 matrix | Drop the fixture, see stitched calls and a coverage matrix; open the cart-readiness use case with its decision table and partial markers |
 | P2 | W5 curated projection; W4 views | Accept a proposal, see it in the Workbench, the export and an agent read with the same curated revision |
 | P3 | W6 packets; W7 compact investigation and discovery | Ask a scoped question, get a cited finding and an auditor follow-up, turn a gap into a reviewed packet |
-| P4 | W8 MCP and ACP | An external agent reads the same context and runs the same bounded task |
-| P5 | The north-star cycle on SimpleLogin | The full cycle in section 1, with its measurements recorded |
+| P4 | W8a read-only MCP and skill now; W8b tasks and ACP after W7 | An external agent reads the same context through MCP; later, it runs the same bounded task |
+| P5 | The north-star cycle on SimpleLogin, first as a deterministic showcase | The full cycle in section 1, with its measurements recorded |
 
 Phases are ordered by dependency, not as a waterfall. Recovered-only work
 packets (AP-1a) and compact disclosure (AP-2a) can progress before the curated
@@ -168,3 +169,44 @@ decisions in section 3).
 - A phase is done when its demo runs on a clean checkout, not when its issues close.
 - Every new acceptance criterion lands with its test-map row in the same pull request.
 - Discussion threads for the open questions: see the Discussions tab of the repository. Answers that change a decision land as an ADR amendment, then here.
+
+## 8. Realignment (2026-10-21)
+
+P0 to P3 have landed apart from two items: the Vendure use case (#590) and
+the real-provider acceptance (#598). The roadmap chained both P4 and P5
+behind W7 acceptance, and W7 waits on an owner-scheduled provider run. So
+recent effort went into investigation proof machinery that has no user-visible
+consumer yet, while there is still no MCP surface, no finished showcase, and
+no recovered test arrangements or journeys. The order changes as follows.
+
+1. **Citable declarations first (#691).** Only rule-shaped code mints
+   primary receipts today, which leaves 4 of 17 Vendure files with no citable
+   fact. This is a deterministic gap under every later item, including #590.
+2. **W8a is no longer gated on W7.** A read-only MCP server and a Cartograph
+   skill expose what already exists deterministically. External agents become
+   the first agent team. Only tasks and ACP (W8b) wait for W7. W8a's
+   boundary:
+   - It reuses the existing curated deterministic projections and retained
+     evidence, and fails closed on a snapshot mismatch or an unavailable
+     capture.
+   - It exposes no task, start, ingest, write or provider tools.
+   - It keeps omissions and partial results honest.
+   - Token measurements name their tokenizer or method, or say "estimate"
+     or "unknown".
+   - It claims no H5 task or ACP acceptance; those stay with W8b.
+3. **P5 starts as a deterministic showcase.** SimpleLogin runs end to end on
+   deterministic artifacts, the recovered contract is scored against
+   `docs/api.md`, every gap is named, and the result is published under
+   `docs/showcases/`. Its findings set the next priorities.
+4. **Acceptance harness work is parked.** #716 keeps its agreed scope and
+   its foundation checkpoint, and resumes when the owner schedules a
+   real-provider run. #598 stays open. Accepting procedure revision 3 remains
+   an owner decision.
+5. **Missing lifecycle artifacts are named, not scheduled.** W10, test
+   arrangements and validation (recovered target tests with qualified links),
+   and W11, journeys, are ordered after the showcase shows which matters more.
+
+Identifiers reserved for this realignment: US-0041 and AC-0288..0290 for
+W8a, plus ADR-0044 (Codex). AC-0291 and ADR-0043 are for #691 (Claude). The
+next free identifiers are US-0042, AC-0292 and ADR-0045.
+
