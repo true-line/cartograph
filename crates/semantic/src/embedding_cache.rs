@@ -358,6 +358,21 @@ pub struct CachedProvider<'a> {
     space: Option<String>,
     state: Mutex<Operation>,
 }
+/// Observed embedding space of a successfully sealed operation.
+/// This binds receipt compatibility, not label independence or model quality.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EmbeddingSpaceBinding {
+    namespace: String,
+    dimensions: usize,
+}
+impl EmbeddingSpaceBinding {
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+    pub fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+}
 impl<'a> CachedProvider<'a> {
     pub fn new(
         provider: &'a dyn LlmProvider,
@@ -437,6 +452,13 @@ impl<'a> CachedProvider<'a> {
         Ok(())
     }
     pub fn finish(&self) -> Result<CacheStats, ProviderError> {
+        self.finish_with_binding().map(|(stats, _)| stats)
+    }
+    /// Recheck identity and lease, then expose the exact cache namespace and
+    /// observed dimension. Unpinned or empty operations have no usable binding.
+    pub fn finish_with_binding(
+        &self,
+    ) -> Result<(CacheStats, Option<EmbeddingSpaceBinding>), ProviderError> {
         if self.provider.embedding_cache_identity()? != self.identity {
             // Conservative invalidation also removes rows sealed by this operation.
             self.cache.lock().map_err(error)?.invalidate()?;
@@ -447,7 +469,25 @@ impl<'a> CachedProvider<'a> {
         if !state.sealed || state.failed {
             return Err(error("unsealed operation"));
         }
-        Ok(state.stats.clone())
+        let binding = self.space.as_ref().and_then(|namespace| {
+            state
+                .vectors
+                .values()
+                .next()
+                .map(|(_, vector)| EmbeddingSpaceBinding {
+                    namespace: namespace.clone(),
+                    dimensions: vector.len(),
+                })
+        });
+        if let Some(binding) = &binding
+            && state
+                .vectors
+                .values()
+                .any(|(_, vector)| vector.len() != binding.dimensions)
+        {
+            return Err(error("inconsistent operation dimensions"));
+        }
+        Ok((state.stats.clone(), binding))
     }
 }
 impl LlmProvider for CachedProvider<'_> {

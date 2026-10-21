@@ -10,6 +10,19 @@ extern crate self as semantic;
 #[path = "../../../crates/semantic/src/eval_report.rs"]
 mod eval_report;
 pub use eval_report::EvalReport;
+// As with the production JobStore below, this harness imports the exact data
+// definitions without adopting the application API documentation surface.
+#[allow(missing_docs)]
+#[path = "../../../crates/semantic/src/family.rs"]
+mod family;
+pub use family::{FamilyKey, HopKind};
+#[allow(missing_docs)]
+#[path = "../../../crates/semantic/src/evaluation/report.rs"]
+pub mod evaluation_report;
+/// Preserve the production type path without linking the ANN resolver.
+pub mod evaluation {
+    pub use crate::evaluation_report as report;
+}
 
 // The small harness omits host callers and the app's public API documentation
 // surface. These allowances apply only to this test target; implementation

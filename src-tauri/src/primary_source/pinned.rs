@@ -45,6 +45,47 @@ pub(super) fn stored_receipt(conn: &Connection, id: &str) -> Result<Receipt, Pin
 }
 
 impl PrimarySourceStore {
+    /// Load one explicitly reviewer-selected corpus capture. This validates its
+    /// bytes and source ownership, but does not attest that a graph fact was
+    /// produced from it; that association belongs to the reviewed corpus.
+    pub(crate) fn evaluation_capture(
+        &self,
+        guard: &RetentionGuard,
+        capture_id: &str,
+        remaining_raw_bytes: usize,
+    ) -> Result<Capture, PinnedReadError> {
+        self.validate_task_guard(guard, &guard.source_id)?;
+        let store = self
+            .captures
+            .lock()
+            .map_err(|_| PinnedReadError::Operational)?;
+        let inventory = store
+            .source_inventory(&source_id(&guard.source_id).map_err(|_| PinnedReadError::Invalid)?)
+            .map_err(|_| PinnedReadError::Operational)?;
+        let selected = inventory
+            .iter()
+            .find(|c| c.capture_id == capture_id)
+            .ok_or(PinnedReadError::Unavailable)?;
+        if selected.byte_len > remaining_raw_bytes.min(32 * 1024 * 1024) as u64
+            || selected.file_count > 4096
+        {
+            return Err(PinnedReadError::Invalid);
+        }
+        let capture = store.load(capture_id).map_err(|error| match error {
+            CaptureError::Missing(_) => PinnedReadError::Unavailable,
+            CaptureError::Invalid(_)
+            | CaptureError::Limit(_)
+            | CaptureError::Corrupt(_)
+            | CaptureError::Encoding
+            | CaptureError::Json(_) => PinnedReadError::Invalid,
+            _ => PinnedReadError::Operational,
+        })?;
+        if capture.manifest().source_id.as_str() != guard.source_id {
+            return Err(PinnedReadError::Invalid);
+        }
+        Ok(capture)
+    }
+
     pub(crate) fn task_guard(&self, source: &str) -> Result<RetentionGuard, PinnedReadError> {
         self.guard(source, false)
             .map_err(|_| PinnedReadError::Operational)

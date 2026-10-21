@@ -4129,6 +4129,8 @@ dependencies = [
 name = "semantic"
 version = "0.15.5"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
  "core-graph",
  "core-prov",
  "core-redact",

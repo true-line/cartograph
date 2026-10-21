@@ -19,6 +19,26 @@ export interface ProvenanceSurfaceProps {
   history: IngestRecord[];
 }
 
+type Evaluation = NonNullable<EvalResult['evaluation']>;
+const REASON_LABELS: Record<Evaluation['families'][number]['reason'], string> = {
+  calibration_only: 'Calibration only',
+  missing_evidence: 'Missing independent evidence',
+  incompatible_evidence: 'Incompatible evidence',
+  insufficient_evidence: 'Insufficient evidence',
+  below_floor: 'Below precision floor',
+  independently_evaluated: 'Evaluation complete',
+};
+function evaluationLabel(evaluation: EvalResult['evaluation']): string {
+  if (evaluation?.mode === 'visible_mechanism_evaluation') return 'VISIBLE MECHANISM ONLY';
+  if (evaluation?.mode === 'independent_evaluation') return 'INDEPENDENT EVALUATION';
+  return 'CALIBRATION ONLY';
+}
+function familyStatus(evaluation: EvalResult['evaluation'], status: Evaluation['families'][number]['status']): string {
+  if (status === 'abstained') return 'ABSTAINED';
+  if (status === 'calibration_only') return 'CALIBRATION ONLY';
+  return evaluation?.mode === 'visible_mechanism_evaluation' ? 'MECHANISM EVALUATED' : 'INDEPENDENTLY EVALUATED';
+}
+
 const TIER_SEGMENTS = [
   { key: 'confirmed', label: 'Confirmed', className: 'seg-confirmed' },
   { key: 'inferredStrong', label: 'Inferred Strong', className: 'seg-inferred-strong' },
@@ -54,7 +74,7 @@ function pct(part: number, total: number): number {
 }
 
 /** Provenance & Eval (handoff screenshot 06): tier distribution, extractor
- *  coverage, paired-eval gates, and evidence health over re-ingests. Every
+ *  coverage, calibration and evaluation evidence, and evidence health over re-ingests. Every
  *  count reads the shared selectors/commands — no chart invents numbers,
  *  and none of them encodes by color alone (each carries text + aria). */
 export function ProvenanceSurface({
@@ -75,7 +95,7 @@ export function ProvenanceSurface({
       <header className="ingest-hero">
         <h2>Provenance &amp; Evaluation</h2>
         <p className="muted">
-          Tier distribution, extractor coverage, paired-eval quality gates, and evidence health
+          Tier distribution, extractor coverage, calibration, evaluation evidence, and evidence health
           over time.
         </p>
       </header>
@@ -150,32 +170,58 @@ export function ProvenanceSurface({
 
         <div>
           <h3 className="settings-section-title" role="heading" aria-level={3}>
-            Paired-eval quality gate (T2/T3)
+            Semantic calibration and evaluation
           </h3>
           {evals.length === 0 ? (
             <p className="muted">
-              No calibration recorded — the gate runs when a semantic overlay is staged.
+              No calibration recorded — semantic proposals remain staged until evaluated.
             </p>
           ) : (
             <ul className="eval-cards">
               {evals.slice(0, 4).map((result) => (
                 <li
                   key={result.id}
-                  className={`eval-card ${result.passed ? 'passed' : 'failed'}`}
+                  className="eval-card"
                 >
                   <span className="eval-provider">
                     <code>{result.provider}</code>
-                    <span className={`eval-badge ${result.passed ? 'passed' : 'failed'}`}>
-                      {result.passed ? 'GATE PASS' : 'BELOW FLOOR'}
-                    </span>
+                    <span className="eval-badge">{evaluationLabel(result.evaluation)}</span>
                   </span>
-                  <code className="eval-numbers">
-                    P {result.precision.toFixed(2)} · R {result.recall.toFixed(2)} · floor{' '}
+                  {(!result.evaluation || result.evaluation.mode === 'calibration_only') && <code className="eval-numbers">
+                    Calibration P {result.precision.toFixed(2)} · R {result.recall.toFixed(2)} · floor{' '}
                     {result.precision_floor.toFixed(2)}
-                  </code>
+                  </code>}
                   <span className="muted">
-                    {result.approved} of {result.proposals} proposals admitted
+                    {result.proposals} staged proposals · {result.approved} recorded admissions
                   </span>
+                  {result.evaluation?.mode === 'visible_mechanism_evaluation' && (
+                    <p className="muted">Visible public fixtures test the evaluation mechanism; they do not establish model quality.</p>
+                  )}
+                  {(!result.evaluation || result.evaluation.mode === 'calibration_only') && (
+                    <p className="muted">Calibration measurements do not establish independent evaluation quality.</p>
+                  )}
+                  {result.evaluation && result.evaluation.families.length === 0 && (
+                    <p className="muted">No proposal families assessed.</p>
+                  )}
+                  {result.evaluation && result.evaluation.families.length > 0 && (
+                    <ul aria-label="Per-family evaluation">
+                      {result.evaluation.families.map((family) => (
+                        <li key={JSON.stringify(family.family)}>
+                          <strong>{family.family.kind} · {family.family.subtype ?? 'no subtype'}</strong>
+                          {' · '}{familyStatus(result.evaluation, family.status)}
+                          {' · '}{REASON_LABELS[family.reason]}
+                          <div>{family.staged} staged · {family.admitted} admitted · {family.ambiguous} ambiguous</div>
+                          {family.metrics && (
+                            <div>P {family.metrics.precision.toFixed(2)} · R {family.metrics.recall.toFixed(2)}
+                              {' · '}{family.metrics.unknown} unknown
+                              {' · '}{family.metrics.no_match_false_admissions} no-match false admissions
+                              {family.metrics.retrieval_recall !== null && <> · retrieval R {family.metrics.retrieval_recall.toFixed(2)}</>}
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </li>
               ))}
             </ul>

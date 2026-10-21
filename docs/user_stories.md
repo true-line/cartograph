@@ -589,3 +589,19 @@
 - **Security:** No embeddings or model calls; the rule reads only the published graph.
 - **Performance:** One pass over Gap, Symbol, Component nodes and `CALLS` edges per load.
 - **Trace:** P1 (#257) · `semantic`, `app` · — · T-0270
+
+### US-0040 — Admit semantic fills only with compatible independent family evidence
+- **Actor:** Engineer or reviewer
+- **As a** reviewer **I want** semantic candidates admitted only by independently reviewed evidence for their exact family and embedding space **so that** calibration or public mechanism fixtures cannot masquerade as model quality.
+- **Priority:** Must · **Status:** Draft
+- **AC-0271** Given semantic candidates and a frozen dataset, when they are loaded or grouped, then exact hop kind and nullable subtype remain distinct, and malformed, inconsistent, unbounded or leaking source/label partitions fail closed.
+- **AC-0272** Given a frozen evaluation dataset, when it is admitted, then complete candidate sets, retained evidence, labels, partition identities and exact content digests are validated; consistency alone never establishes label truth.
+- **AC-0273** Given an explicit frozen family policy, when evaluation runs, then production retrieval predicts before scoring consumes evaluation labels, ties abstain, unknown labels are not negatives, and insufficient cases cannot pass.
+- **AC-0274** Given a reviewed independent dataset, when a receipt is constructed or consumed, then its policy, corpus, partition and observed sealed embedding namespace and dimension must match; visible fixtures and descriptive reports cannot construct independent authority.
+- **AC-0275** Given a production preview, when compatible independent evidence is missing, changed, insufficient or below its precision floor, then proposals remain staged with a family-specific reason and no inferred fill is admitted for that family.
+- **AC-0276** Given a persisted evaluation, when it is reopened, then its bounded summary agrees with scalar counts and malformed records fail closed; legacy rows remain calibration-only regardless of historical passing flags.
+- **AC-0277** Given calibration, visible mechanism or independent evaluation, when Provenance & Eval renders it, then purpose, family status, staged/admitted counts and reasons are explicit without promoting report data into authority.
+- **AC-0278** Given a scripted provider and independently authored visible fixtures, when the production evaluation path is exercised, then its loading, fixed-policy prediction, scoring, abstention and persistence are verified without making real-model quality claims.
+- **Security:** Host-controlled reviewed evidence only; browser flags and stored summaries grant no authority. No live-provider experiment or model download is authorized by this story.
+- **Performance:** Bounded manifests, retained source bytes, candidate plans and summaries; reuse the sealed embedding cache.
+- **Trace:** P3 · `semantic`, `app`, `ui` · ADR-0038 · T-0271..0278

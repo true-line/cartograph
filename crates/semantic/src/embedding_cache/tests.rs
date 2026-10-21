@@ -91,6 +91,38 @@ fn run(
     (result, wrapped.finish().unwrap())
 }
 #[test]
+fn evaluation_binding_requires_sealed_pinned_current_operation() {
+    // AC-0274: reuse the actual cache namespace, never approximate model identity.
+    let (_dir, cache, lease) = setup();
+    let provider = Scripted::new();
+    let operation = CachedProvider::new(&provider, cache.clone(), lease.clone()).unwrap();
+    assert!(operation.finish_with_binding().is_err());
+    operation.embed(&["query".into()]).unwrap();
+    operation.seal().unwrap();
+    let (_, binding) = operation.finish_with_binding().unwrap();
+    let binding = binding.unwrap();
+    assert_eq!(Some(binding.namespace()), operation.space.as_deref());
+    assert_eq!(binding.dimensions(), 2);
+
+    let warm = CachedProvider::new(&provider, cache.clone(), lease).unwrap();
+    warm.embed(&["query".into()]).unwrap();
+    warm.seal().unwrap();
+    assert_eq!(warm.finish_with_binding().unwrap().1, Some(binding));
+    provider.digest.fetch_add(1, Ordering::SeqCst);
+    assert!(warm.finish_with_binding().is_err());
+    assert!(operation.finish_with_binding().is_err());
+
+    let mut unpinned = Scripted::new();
+    unpinned.unpinned = true;
+    let lease = cache.lock().unwrap().lease().unwrap();
+    let operation = CachedProvider::new(&unpinned, cache.clone(), lease).unwrap();
+    operation.embed(&["query".into()]).unwrap();
+    operation.seal().unwrap();
+    assert!(operation.finish_with_binding().unwrap().1.is_none());
+    cache.lock().unwrap().invalidate().unwrap();
+    assert!(operation.finish_with_binding().is_err());
+}
+#[test]
 fn embedding_cache_reopens_deduplicates_redacts_and_reuses_exact_transmitted_text() {
     // AC-0269: persist exact post-redaction bytes, never raw source or labels.
     let (dir, cache, _) = setup();

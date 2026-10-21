@@ -3,7 +3,8 @@
 //! Only explicit `Gap` destinations are eligible. Candidate links first enter
 //! a staging [`SemanticProposal`] list, carry Semantic/InferredStrong
 //! provenance with evidence from both sides, and become an ephemeral graph
-//! overlay only after a paired eval clears its precision floor. Confirmed T0/T1
+//! overlay only through the host independent-family gate. Legacy pair evaluation
+//! is calibration, not production admission authority. Confirmed T0/T1
 //! facts are never mutation targets (R-INT-1).
 
 pub mod context;
@@ -11,6 +12,9 @@ pub mod embedding_cache;
 mod eval_report;
 pub use eval_report::EvalReport;
 pub mod name_unique;
+pub mod evaluation;
+mod family;
+pub use family::{FamilyKey, HopKind};
 
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, ProducingMethod, Provenance, Tier, may_overwrite};
@@ -22,16 +26,6 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 /// Stable semantic resolver identifier stored in proposal provenance.
 pub const EXTRACTOR_ID: &str = "t2.semantic-ann";
-
-/// Supported unresolved flow-hop families at the M7 exit gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum HopKind {
-    /// Producer/consumer to a channel whose runtime identity was unresolved.
-    Channel,
-    /// Caller to a callee that the deterministic type/import graph could not
-    /// establish.
-    Call,
-}
 
 /// A graph Gap plus the incoming edge slot that a higher tier may fill.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,6 +44,12 @@ pub struct UnresolvedHop {
     pub query: String,
     /// T0/T1 evidence that created the unresolved slot.
     pub evidence: Vec<EvidenceRef>,
+}
+
+impl UnresolvedHop {
+    pub fn family(&self) -> FamilyKey {
+        FamilyKey::new(self.kind, self.subtype.clone())
+    }
 }
 
 /// Searchable graph target.
@@ -71,9 +71,17 @@ pub struct Candidate {
     pub materialized_node: Option<Node>,
 }
 
+impl Candidate {
+    pub fn family(&self) -> FamilyKey {
+        FamilyKey::new(self.kind, self.subtype.clone())
+    }
+}
+
 /// Staged T2 link. It is not a graph fact until an eval gate approves it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SemanticProposal {
+    /// Originating candidate group, assigned by the proposal builder.
+    family: FamilyKey,
     /// Gap this proposal would fill.
     pub gap_id: String,
     /// Proposed edge source.
@@ -91,6 +99,10 @@ pub struct SemanticProposal {
 }
 
 impl SemanticProposal {
+    pub fn family(&self) -> &FamilyKey {
+        &self.family
+    }
+
     fn as_edge(&self, eval: &EvalReport) -> Edge {
         Edge {
             src: self.source_id.clone(),
@@ -112,7 +124,7 @@ impl SemanticProposal {
     }
 }
 
-/// One labeled semantic pair used for held-out evaluation.
+/// One labeled semantic pair used for legacy calibration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LabeledPair {
     /// Unresolved-side text.
@@ -363,13 +375,11 @@ fn evidence_from(props: &serde_json::Value) -> Vec<EvidenceRef> {
 }
 
 /// Produce staged ANN proposals. No graph mutation occurs here.
-fn candidate_groups(
-    candidates: &[Candidate],
-) -> BTreeMap<(HopKind, Option<String>), Vec<&Candidate>> {
+fn candidate_groups(candidates: &[Candidate]) -> BTreeMap<FamilyKey, Vec<&Candidate>> {
     let mut grouped: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for candidate in candidates {
         grouped
-            .entry((candidate.kind, candidate.subtype.clone()))
+            .entry(candidate.family())
             .or_default()
             .push(candidate);
     }
@@ -394,10 +404,7 @@ pub fn embedding_inputs(
         .flat_map(|pair| [&pair.query, &pair.candidate])
         .collect();
     for (key, compatible) in candidate_groups(candidates) {
-        let matching: Vec<_> = hops
-            .iter()
-            .filter(|hop| (hop.kind, hop.subtype.clone()) == key)
-            .collect();
+        let matching: Vec<_> = hops.iter().filter(|hop| hop.family() == key).collect();
         if matching.is_empty() {
             continue;
         }
@@ -427,10 +434,8 @@ pub fn propose(
     let grouped = candidate_groups(candidates);
     let mut proposals = Vec::new();
     for (key, compatible) in grouped {
-        let compatible_hops: Vec<&UnresolvedHop> = hops
-            .iter()
-            .filter(|hop| (hop.kind, hop.subtype.clone()) == key)
-            .collect();
+        let compatible_hops: Vec<&UnresolvedHop> =
+            hops.iter().filter(|hop| hop.family() == key).collect();
         if compatible_hops.is_empty() {
             continue;
         }
@@ -505,6 +510,7 @@ pub fn propose(
                     })
                     .transpose()?;
                 proposals.push(SemanticProposal {
+                    family: key.clone(),
                     gap_id: hop.gap_id.clone(),
                     source_id: hop.source_id.clone(),
                     target_id,
@@ -673,6 +679,15 @@ pub fn overlay(
     approved: &[SemanticProposal],
     eval: &EvalReport,
 ) -> Overlay {
+    overlay_with(nodes, edges, approved, |proposal| proposal.as_edge(eval))
+}
+
+pub(crate) fn overlay_with(
+    nodes: &[Node],
+    edges: &[Edge],
+    approved: &[SemanticProposal],
+    edge: impl Fn(&SemanticProposal) -> Edge,
+) -> Overlay {
     let gap_ids: HashSet<&str> = nodes
         .iter()
         .filter(|node| node.label == "Gap")
@@ -712,7 +727,7 @@ pub fn overlay(
         .filter(|edge| !resolved.contains(edge.dst.as_str()))
         .cloned()
         .collect();
-    overlay_edges.extend(approved.values().map(|proposal| proposal.as_edge(eval)));
+    overlay_edges.extend(approved.values().map(|proposal| edge(proposal)));
     overlay_edges.sort_by(|a, b| (&a.src, &a.dst, &a.label).cmp(&(&b.src, &b.dst, &b.label)));
     Overlay {
         nodes: overlay_nodes,
@@ -928,6 +943,59 @@ mod tests {
         assert_eq!(channel.props["prov"]["tier"], "Semantic");
         assert_eq!(channel.props["prov"]["confidence_tier"], "InferredStrong");
         assert!(nodes.iter().all(|node| node.label != "Channel"));
+    }
+
+    // AC-0271: family attribution comes from the exact matching group, not
+    // shared embedding text, and absent channel subtype never acts as wildcard.
+    #[test]
+    fn proposal_families_preserve_exact_hop_and_candidate_origin() {
+        let (nodes, edges) = graph();
+        let (hops, candidates) = graph_inputs(&nodes, &edges);
+        let keys = [
+            FamilyKey::new(HopKind::Call, None),
+            FamilyKey::new(HopKind::Channel, None),
+            FamilyKey::new(HopKind::Channel, Some("sqs-queue".into())),
+            FamilyKey::new(HopKind::Channel, Some("sns-topic".into())),
+        ];
+        let exact_call = FamilyKey::new(HopKind::Call, Some("unchanged".into()));
+        assert_ne!(exact_call, keys[0]);
+        let mut encoded = serde_json::to_value(&exact_call).unwrap();
+        assert_eq!(
+            serde_json::from_value::<FamilyKey>(encoded.clone()).unwrap(),
+            exact_call
+        );
+        encoded["authority"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<FamilyKey>(encoded).is_err());
+        let mut grouped_hops = Vec::new();
+        let mut grouped_candidates = Vec::new();
+        for (index, family) in keys.iter().enumerate() {
+            let mut hop = hops[0].clone();
+            hop.gap_id = format!("gap:{index}");
+            hop.kind = family.kind();
+            hop.subtype = family.subtype().map(str::to_owned);
+            hop.query = "identical order text".into();
+            let mut candidate = candidates[0].clone();
+            candidate.node_id = format!("target:{index}");
+            candidate.kind = family.kind();
+            candidate.subtype = family.subtype().map(str::to_owned);
+            candidate.text = hop.query.clone();
+            assert_eq!(hop.family(), *family);
+            assert_eq!(candidate.family(), *family);
+            grouped_hops.push(hop);
+            grouped_candidates.push(candidate);
+        }
+        let proposals = propose(&KeywordProvider, &grouped_hops, &grouped_candidates, 4).unwrap();
+        assert_eq!(proposals.len(), keys.len());
+        for (index, proposal) in proposals.iter().enumerate() {
+            assert_eq!(proposal.gap_id, format!("gap:{index}"));
+            assert_eq!(proposal.target_id, format!("target:{index}"));
+            assert_eq!(proposal.family(), &keys[index]);
+        }
+        // A second execution preserves family origin and deterministic order.
+        assert_eq!(
+            proposals,
+            propose(&KeywordProvider, &grouped_hops, &grouped_candidates, 4).unwrap()
+        );
     }
 
     #[test]
