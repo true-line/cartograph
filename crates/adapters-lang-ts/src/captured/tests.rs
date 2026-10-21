@@ -711,6 +711,7 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
                 capture.file(path).unwrap(),
                 &parser_id(),
                 Registries::builtin(),
+                FILE_DECLARATIONS,
             )
             .unwrap()
             .1
@@ -719,7 +720,7 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
     let size = |receipt: &Receipt| receipt.to_json().unwrap().len();
     let rules: Vec<_> = per_file.iter().flat_map(|file| &file.rules).collect();
     let rule_bytes: usize = rules.iter().map(|receipt| size(receipt)).sum();
-    let first = &per_file[0].declarations[0];
+    let first = &per_file[0].declarations[0].0;
     assert_eq!(per_file[0].declarations.len(), 1);
     assert_eq!(per_file[1].declarations.len(), 2);
     let run = |bytes, receipts| {
@@ -730,6 +731,7 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
             Registries::builtin(),
             &mut |_| {},
             ReceiptBudget { bytes, receipts },
+            FILE_DECLARATIONS,
         )
     };
     // Room for the rules and exactly the first declaration in manifest order.
@@ -752,4 +754,67 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
         run(rule_bytes - 1, usize::MAX),
         Err(CapturedError::Limit("extraction receipt metadata"))
     ));
+}
+
+// AC-0280: the producer itself stops minting at a file's own declaration bound,
+// so a file of many tiny callables cannot retain unbounded receipts before
+// directory admission; unminted declarations are named for that file.
+#[test]
+fn captured_declarations_are_bounded_per_file_before_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("many.ts"),
+        b"export function one() { return 1; }\nexport function two() { return 2; }\nexport function three() { return 3; }\n",
+    )
+    .unwrap();
+    let paths = enumerate_paths(directory.path()).unwrap();
+    let capture = capture(directory.path(), &paths);
+    let file = capture.file("many.ts").unwrap();
+    let produce = |bytes, receipts| {
+        extract_file_with(
+            file,
+            &parser_id(),
+            Registries::builtin(),
+            ReceiptBudget { bytes, receipts },
+        )
+        .unwrap()
+        .1
+    };
+    let all = produce(usize::MAX, usize::MAX);
+    assert_eq!((all.declarations.len(), all.omitted_declarations), (3, 0));
+    for (receipt, bytes) in &all.declarations {
+        assert_eq!(*bytes, receipt.to_json().unwrap().len());
+    }
+    let counted = produce(usize::MAX, 1);
+    assert_eq!(
+        (counted.declarations.len(), counted.omitted_declarations),
+        (1, 2)
+    );
+    let sized = produce(all.declarations[0].1 + all.declarations[1].1, usize::MAX);
+    assert_eq!(
+        (sized.declarations.len(), sized.omitted_declarations),
+        (2, 1)
+    );
+    // Producer omissions reach the directory stats under the file's name.
+    let (_, receipts, stats) = extract_captured_dir_bounded(
+        directory.path(),
+        &parser_id(),
+        &capture,
+        Registries::builtin(),
+        &mut |_| {},
+        ReceiptBudget {
+            bytes: usize::MAX,
+            receipts: usize::MAX,
+        },
+        ReceiptBudget {
+            bytes: usize::MAX,
+            receipts: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        stats.omitted_declaration_receipts,
+        BTreeMap::from([("many.ts".to_string(), 2)])
+    );
 }

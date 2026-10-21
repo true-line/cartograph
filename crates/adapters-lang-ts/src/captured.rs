@@ -28,6 +28,11 @@ pub const MAX_DIRECTORY_DEPTH: usize = 64;
 pub const MAX_EXTRACTION_RECEIPT_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum receipts returned by one captured directory extraction.
 pub const MAX_EXTRACTION_RECEIPTS: usize = 100_000;
+/// Maximum declaration receipts minted for one file (#691). Bounds what one
+/// parsed file and the ordered worker queue retain before directory admission.
+pub const MAX_FILE_DECLARATION_RECEIPTS: usize = 1024;
+/// Maximum serialized declaration receipt metadata minted for one file.
+pub const MAX_FILE_DECLARATION_BYTES: usize = 2 * 1024 * 1024;
 
 /// Fixed diagnostics never include parsed source or untrusted receipt values.
 #[derive(Debug, thiserror::Error)]
@@ -223,8 +228,14 @@ pub fn extract_file(
     file: &CapturedFile,
     id: &SourceId,
 ) -> Result<(Extraction, Vec<Receipt>), CapturedError> {
-    let (extraction, mut receipts) = extract_file_with(file, id, Registries::builtin())?;
-    receipts.rules.append(&mut receipts.declarations);
+    let (extraction, mut receipts) =
+        extract_file_with(file, id, Registries::builtin(), FILE_DECLARATIONS)?;
+    receipts.rules.extend(
+        receipts
+            .declarations
+            .into_iter()
+            .map(|(receipt, _)| receipt),
+    );
     receipts
         .rules
         .sort_by(|a, b| a.fact_key().cmp(b.fact_key()));
@@ -235,13 +246,22 @@ pub fn extract_file(
 /// original hard bounds; declaration receipts only use the remaining budget.
 struct FileReceipts {
     rules: Vec<Receipt>,
-    declarations: Vec<Receipt>,
+    /// Each declaration with its serialized size, in fact-key order.
+    declarations: Vec<(Receipt, usize)>,
+    /// Declarations never minted because this file reached its own bound.
+    omitted_declarations: u64,
 }
+
+const FILE_DECLARATIONS: ReceiptBudget = ReceiptBudget {
+    bytes: MAX_FILE_DECLARATION_BYTES,
+    receipts: MAX_FILE_DECLARATION_RECEIPTS,
+};
 
 fn extract_file_with(
     file: &CapturedFile,
     id: &SourceId,
     registries: &Registries,
+    file_declarations: ReceiptBudget,
 ) -> Result<(Extraction, FileReceipts), CapturedError> {
     if !supported(&file.reference().path) || !valid_path(&file.reference().path) {
         return Err(CapturedError::Invalid("unsupported captured path"));
@@ -271,24 +291,43 @@ fn extract_file_with(
     }
     // Callables that own no rule are still directly emitted declarations; a
     // provenance-only owner receipt makes their exact span citable (#691).
-    let mut declarations = BTreeMap::new();
+    // Minting stops at this file's own bound, so a file of many tiny callables
+    // cannot allocate unbounded receipts before directory admission; the rest
+    // are counted, never minted.
+    let mut declarations = Vec::new();
+    let mut declaration_bytes = 0;
+    let mut omitted_declarations = 0;
     for (id_key, node) in &direct.owners {
         let key = core_graph::source::FactKey::Node { id: id_key.clone() };
-        if !receipts.contains_key(&key)
-            && let Ok(receipt) = Receipt::for_node(file, id, node)
-        {
-            declarations.insert(key, receipt);
+        if receipts.contains_key(&key) {
+            continue;
+        }
+        if declarations.len() == file_declarations.receipts {
+            omitted_declarations += 1;
+            continue;
+        }
+        let Ok(receipt) = Receipt::for_node(file, id, node) else {
+            continue;
+        };
+        let bytes = receipt.to_json()?.len();
+        if declaration_bytes + bytes > file_declarations.bytes {
+            omitted_declarations += 1;
+        } else {
+            declaration_bytes += bytes;
+            declarations.push((receipt, bytes));
         }
     }
     let mut rules: Vec<_> = receipts.into_values().collect();
-    let mut declarations: Vec<_> = declarations.into_values().collect();
     retain_matching(&mut rules, &extraction);
-    retain_matching(&mut declarations, &extraction);
+    let matching = matcher(&extraction);
+    declarations.retain(|(receipt, _)| matching(receipt));
+    drop(matching);
     Ok((
         extraction,
         FileReceipts {
             rules,
             declarations,
+            omitted_declarations,
         },
     ))
 }
@@ -327,6 +366,7 @@ pub fn extract_captured_dir(
             bytes: MAX_EXTRACTION_RECEIPT_BYTES,
             receipts: MAX_EXTRACTION_RECEIPTS,
         },
+        FILE_DECLARATIONS,
     )
 }
 
@@ -344,6 +384,7 @@ fn extract_captured_dir_bounded(
     registries: &Registries,
     on_file: &mut dyn FnMut(&str),
     budget: ReceiptBudget,
+    file_declarations: ReceiptBudget,
 ) -> Result<(Extraction, Vec<Receipt>, IncrementalStats), CapturedError> {
     receipt::validate_source_repo(&capture.manifest().source_id, id.repo)?;
     let paths: Vec<String> = capture
@@ -364,7 +405,7 @@ fn extract_captured_dir_bounded(
     let mut stats = IncrementalStats::default();
     source_walk::parallel::map_ordered(
         &paths,
-        |path| extract_file_with(capture.file(path)?, id, registries),
+        |path| extract_file_with(capture.file(path)?, id, registries, file_declarations),
         |path, (facts, file_receipts)| {
             on_file(path);
             for receipt in &file_receipts.rules {
@@ -375,8 +416,13 @@ fn extract_captured_dir_bounded(
             {
                 return Err(CapturedError::Limit("extraction receipt metadata"));
             }
-            for receipt in file_receipts.declarations {
-                let bytes = receipt.to_json()?.len();
+            if file_receipts.omitted_declarations > 0 {
+                *stats
+                    .omitted_declaration_receipts
+                    .entry(path.to_owned())
+                    .or_default() += file_receipts.omitted_declarations;
+            }
+            for (receipt, bytes) in file_receipts.declarations {
                 if declaration_bytes + bytes > budget.bytes || declarations.len() == budget.receipts
                 {
                     *stats

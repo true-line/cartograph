@@ -107,7 +107,9 @@ logical limits. Within one extraction, rule, owner and GOVERNS receipts are admi
 first under those ceilings exactly as before; declaration receipts only use the
 remaining budget, admitted greedily in manifest order, so they never turn an
 extraction that fit into an extraction limit failure (the host's persistent store
-capacity remains separately authoritative). Every omitted declaration is counted under its file path in the
+capacity remains separately authoritative). Each file also stops minting declarations at its
+own bound (1,024 receipts / 2 MiB), so a file of many tiny callables cannot retain unbounded
+receipts before admission. Every omitted declaration is counted under its file path in the
 adapter's result (surfacing it in coverage is #693). SQLite/WAL overhead is additional. Capacity errors explain that
 the user can forget retained source before recovering again; no automatic eviction.
 Captured inspection validates manifest membership and the selected raw object
