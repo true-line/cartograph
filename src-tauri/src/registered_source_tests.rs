@@ -1719,3 +1719,51 @@ fn terraform_file_count_includes_explicitly_referenced_module_files() {
     // both explicitly referenced by the module block.
     assert_eq!(layers.tf.files, 2);
 }
+
+// AC-0282: a captured ingest whose file exceeds its declaration receipt bound
+// publishes a coverage inventory naming the uncitable declarations.
+#[test]
+fn captured_ingest_names_declaration_receipt_omissions_in_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let declarations = adapters_lang_ts::captured::MAX_FILE_DECLARATION_RECEIPTS + 76;
+    let source: String = (0..declarations)
+        .map(|index| format!("export const value{index} = {index};\n"))
+        .collect();
+    std::fs::write(root.join("many.ts"), source).unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+    let (_, coverage) = state
+        .graph
+        .lock()
+        .unwrap()
+        .read_snapshot_with_coverage_bounded(
+            core_graph::SnapshotReadLimits::default(),
+            core_graph::coverage::CoverageReadLimits {
+                max_records: 1,
+                max_bytes: 2 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+    let inventory: ingest::coverage::RepoCoverage =
+        serde_json::from_str(&coverage[0].record.inventory_json).unwrap();
+    let omitted = inventory
+        .unsupported
+        .iter()
+        .find(|entry| entry.capability == ingest::coverage::RECEIPT_OMISSION_CAPABILITY)
+        .expect("receipt omissions are named");
+    assert_eq!(
+        (omitted.occurrences, omitted.first_site.as_str()),
+        (76, "many.ts")
+    );
+    assert!(inventory.limited);
+}

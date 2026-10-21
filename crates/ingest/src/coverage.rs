@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 /// Versioned identity of the inventory rules, recorded on every inventory.
 pub const INVENTORY_ID: &str = "coverage@1";
 
+/// Capability naming declarations left without a primary receipt.
+pub const RECEIPT_OMISSION_CAPABILITY: &str = "ts-declaration-receipts";
+
 /// Layer hints that select application producers (SPEC-00 §3).
 pub const APPLICATION_LAYERS: &[&str] = &["server", "events", "client"];
 /// Layer hints that select server-language producers.
@@ -93,7 +96,8 @@ pub struct UnsupportedCapability {
     pub capability: String,
     /// Sites preflight found.
     pub occurrences: u64,
-    /// First occurrence as `path:line`.
+    /// First occurrence as `path:line`, or the path alone for a file-scoped
+    /// limit.
     pub first_site: String,
     /// Why it matters, and how to supply or cover it.
     pub reason: String,
@@ -380,6 +384,34 @@ impl RepoCoverage {
         }
         self.unsupported = unsupported;
         self.refresh_limited();
+        self
+    }
+
+    /// Add declarations the TypeScript adapter left without a primary receipt
+    /// because a receipt bound was reached (#691, #693), so an uncitable
+    /// declaration is a named limitation, never a silent omission. Apply after
+    /// [`RepoCoverage::with_unsupported`], which replaces the list.
+    pub fn with_receipt_omissions(
+        mut self,
+        omitted: &std::collections::BTreeMap<String, u64>,
+    ) -> Self {
+        let occurrences: u64 = omitted.values().sum();
+        if let Some(first) = omitted.keys().next()
+            && occurrences > 0
+        {
+            self.unsupported.push(UnsupportedCapability {
+                capability: RECEIPT_OMISSION_CAPABILITY.into(),
+                occurrences,
+                first_site: first.clone(),
+                reason: format!(
+                    "{occurrences} TypeScript declarations in {} files exceeded the \
+                     primary receipt bounds and cannot be cited from captured source: \
+                     a tool limitation, not a system gap",
+                    omitted.len()
+                ),
+            });
+            self.refresh_limited();
+        }
         self
     }
 

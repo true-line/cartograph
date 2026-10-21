@@ -315,13 +315,31 @@ impl FileCx<'_> {
         confidence: ConfidenceTier,
         fact: &str,
     ) -> serde_json::Value {
-        let evidence = nodes
+        let ranges: Vec<_> = nodes
             .iter()
-            .map(|node| EvidenceRef {
+            .map(|node| (node.start_byte(), node.end_byte()))
+            .collect();
+        self.prov_ranges(&ranges, confidence, fact)
+    }
+
+    /// Provenance over one exact byte range that no single syntax node spans.
+    fn prov_bytes(&self, start: usize, end: usize, fact: &str) -> serde_json::Value {
+        self.prov_ranges(&[(start, end)], ConfidenceTier::Confirmed, fact)
+    }
+
+    fn prov_ranges(
+        &self,
+        ranges: &[(usize, usize)],
+        confidence: ConfidenceTier,
+        fact: &str,
+    ) -> serde_json::Value {
+        let evidence = ranges
+            .iter()
+            .map(|&(start, end)| EvidenceRef {
                 repo: self.id.repo.into(),
                 path: self.path.into(),
-                byte_start: node.start_byte() as u64,
-                byte_end: node.end_byte() as u64,
+                byte_start: start as u64,
+                byte_end: end as u64,
                 commit_sha: self.id.commit.into(),
             })
             .collect();
@@ -1445,6 +1463,8 @@ fn extract_source_recording(
             props: serde_json::json!({ "prov": cx.prov(&evidence, &format!("DEFINED_IN {sid}")) }),
         });
     }
+
+    declarations::emit(&cx, root, &syntax_nodes, &mut out, direct.as_deref_mut());
 
     // --- Imports: IMPORTS edges + imported-name -> foreign symbol map -------
     let q_imports = Query::new(
@@ -3335,6 +3355,7 @@ mod callable;
 pub mod captured;
 pub mod chrome_messaging;
 pub(crate) mod const_resolution;
+pub mod declarations;
 pub mod indexeddb;
 mod local_definitions;
 pub(crate) mod resolution;
