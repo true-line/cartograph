@@ -1029,6 +1029,8 @@ struct ProducerReads {
     /// Gated plugins that ran: pinned extractor id and what each read and
     /// published.
     plugins: Vec<(String, ingest::coverage::ProducerCount)>,
+    /// Captured TypeScript declarations left without a receipt, by file.
+    omitted_declaration_receipts: std::collections::BTreeMap<String, u64>,
 }
 
 /// Identity of the plugin and registry basis an inventory was recorded
@@ -1316,6 +1318,7 @@ fn extract_tree_with_registries(
             )
             .map_err(|e| e.to_string())?;
             receipts.extend(produced);
+            reads.omitted_declaration_receipts = stats.omitted_declaration_receipts.clone();
             (extraction, stats)
         } else {
             adapters_lang_ts::extract_dir_incremental_with_progress(
@@ -3840,7 +3843,8 @@ fn run_ingest<R: tauri::Runtime>(
         &DeclaredInputs::default(),
         &reads,
     )
-    .with_unsupported(&preflight);
+    .with_unsupported(&preflight)
+    .with_receipt_omissions(&reads.omitted_declaration_receipts);
     let record =
         coverage_record(&coverage, source, job_id, &active_plugins, &registries).map_err(&fail)?;
     report_progress(app, state, execution, "load", 70.0)?;
@@ -4248,7 +4252,8 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &DeclaredInputs::default(),
         &reads,
     )
-    .with_unsupported(&preflight);
+    .with_unsupported(&preflight)
+    .with_receipt_omissions(&reads.omitted_declaration_receipts);
     let record =
         coverage_record(&coverage, &source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let mut published = OperationFacts::default();
@@ -4522,7 +4527,8 @@ fn add_system_blocking<R: tauri::Runtime>(
             },
             &reads,
         )
-        .with_unsupported(&report);
+        .with_unsupported(&report)
+        .with_receipt_omissions(&reads.omitted_declaration_receipts);
         let record = coverage_record(&coverage, source, job_id, &active_plugins, &registries)
             .map_err(&fail)?;
         files += repo_layers.files();

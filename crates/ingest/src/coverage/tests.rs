@@ -239,3 +239,49 @@ fn excluded_observation_reports_a_declared_input_as_unread() {
     assert!(coverage.missing_inputs.is_empty());
     assert!(coverage.limited);
 }
+
+// AC-0282: declarations the TypeScript adapter left without a primary receipt
+// are a named, limiting capability that survives preflight reconciliation;
+// none recorded leaves the inventory unchanged.
+#[test]
+fn receipt_omissions_are_a_named_limitation() {
+    let facts = CoverageFacts {
+        repo: "local/app",
+        commit: "workdir",
+        layer_hints: &[],
+        deterministic: vec![("t0.adapter-ts", count(3))],
+        plugins: Vec::new(),
+        observations: Vec::new(),
+    };
+    let full = RepoCoverage::from_facts(&facts).with_unsupported(&PreflightReport::default());
+    assert_eq!(
+        full.clone()
+            .with_receipt_omissions(&std::collections::BTreeMap::new()),
+        full
+    );
+    let omitted = std::collections::BTreeMap::from([
+        ("src/b.ts".to_string(), 2),
+        ("src/a.ts".to_string(), 3),
+    ]);
+    let limited = full.with_receipt_omissions(&omitted);
+    assert!(limited.limited);
+    let entry = &limited.unsupported[0];
+    assert_eq!(
+        (
+            entry.capability.as_str(),
+            entry.occurrences,
+            entry.first_site.as_str()
+        ),
+        (RECEIPT_OMISSION_CAPABILITY, 5, "src/a.ts")
+    );
+    assert!(
+        entry
+            .reason
+            .starts_with("5 TypeScript declarations in 2 files")
+    );
+    assert!(
+        entry
+            .reason
+            .ends_with("a tool limitation, not a system gap")
+    );
+}

@@ -191,7 +191,7 @@ pub(super) fn binding_name(cx: &FileCx<'_>, function: TsNode<'_>) -> Option<Stri
     .map(|name| cx.text(&name).to_owned())
 }
 
-fn property_name(cx: &FileCx<'_>, key: Option<TsNode<'_>>) -> String {
+pub(super) fn property_name(cx: &FileCx<'_>, key: Option<TsNode<'_>>) -> String {
     match key {
         Some(key)
             if matches!(

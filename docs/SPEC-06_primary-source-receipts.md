@@ -8,7 +8,9 @@ SPEC-00 integrity, SPEC-03 immutable staging, SPEC-04 capture and SPEC-05 regist
 The app retains the exact selected TypeScript/JavaScript bytes consumed by the
 production parser and supplies captured inspection for direct guarded-exit rule
 observations, their lexical owner nodes and lexical GOVERNS edges, and every other
-directly emitted callable declaration (#691). A declaration that owns no rule gets the
+directly emitted callable declaration (#691), plus top-level variables, first-level
+config-object properties, method decorators and oversized-callable headers (#693,
+ADR-0039). A declaration that owns no rule gets the
 same provenance-only inventory as an owner, so its exact span is citable. A receipt means
 `primary_source_only` with `input_closure_not_established`. It never establishes a
 complete business rule, execution predicate, caller interpretation, configuration

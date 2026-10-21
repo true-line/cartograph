@@ -818,3 +818,254 @@ fn captured_declarations_are_bounded_per_file_before_admission() {
         BTreeMap::from([("many.ts".to_string(), 2)])
     );
 }
+
+// AC-0282: top-level variables, the first-level properties of their object
+// initializers, member decorators and an oversized callable's header are each
+// citable within one inspection range, without touching Symbol identities.
+#[test]
+fn captured_declaration_facts_cite_config_decorators_and_headers() {
+    let body = "  const step = 1;\n".repeat(600);
+    let fields: String = (0..900)
+        .map(|index| format!("f{index}: {index}, "))
+        .collect();
+    let source = format!(
+        r#"export const config: Config = {{
+  catalogOptions: {{ stock: new DefaultStock() }},
+  'quoted-secret': 'value',
+  [computed]: 1,
+  handler: () => 1,
+  wrapped: (() => 2) as Handler,
+  orderOptions: {{ small: 1, big: {{ {fields} }} }},
+}} as const;
+let counter = 0, other = 1;
+var twice = 1;
+var twice = 2;
+export const process = configure({{}});
+class Resolver {{
+  @Transaction()
+  @Allow(Permission.Owner)
+  async transition(@Ctx() ctx: RequestContext) {{ return ctx; }}
+  @Nest.Get()
+  @Namespace /* private-sentinel */ .Guard()
+  read() {{ return 1; }}
+  @Allow() /* why */ run() {{ return 2; }}
+  @First() /* between */ @Second() go() {{ return 3; }}
+}}
+export function configure(options: Options) {{
+{body}  return options;
+}}
+"#
+    );
+    let (directory, capture) = fixture(source.as_bytes(), "config.ts");
+    let (facts, receipts) = extract_file(capture.file("config.ts").unwrap(), &parser_id()).unwrap();
+    let text = |node: &Node| {
+        let evidence = &receipts
+            .iter()
+            .find(|receipt| receipt.fact_key() == &FactKey::from_node(node))
+            .unwrap_or_else(|| panic!("{} is not citable", node.id))
+            .ranges()[0]
+            .evidence;
+        source[evidence.byte_start as usize..evidence.byte_end as usize].to_owned()
+    };
+    let named = |label: &str, name: &str| {
+        facts
+            .nodes
+            .iter()
+            .find(|node| node.label == label && node.props["name"] == name)
+            .unwrap_or_else(|| panic!("no {label} {name}"))
+    };
+    let catalog = named("Declaration", "config.catalogOptions");
+    assert_eq!(
+        catalog.id,
+        format!("decl:{REPO}@config.ts#config.catalogOptions")
+    );
+    assert_eq!(
+        text(catalog),
+        "catalogOptions: { stock: new DefaultStock() }"
+    );
+    assert!(text(named("Declaration", "config")).starts_with("config: Config = {"));
+    assert_eq!(named("Declaration", "config").props["exported"], true);
+    assert_eq!(text(named("Declaration", "counter")), "counter = 0");
+    assert_eq!(named("Declaration", "other").props["binding"], "let");
+    assert!(text(named("Declaration", "process")).starts_with("process = configure("));
+    // Quoted keys are position-named, never persisted; computed keys and
+    // callable values (already Symbols) emit no declaration.
+    let quoted = source.find("'quoted-secret'").unwrap();
+    assert!(
+        facts
+            .nodes
+            .iter()
+            .any(|node| node.props["name"] == format!("config.key@{quoted}"))
+    );
+    assert!(
+        !serde_json::to_string(&facts.nodes)
+            .unwrap()
+            .contains("quoted-secret")
+    );
+    assert!(
+        !facts
+            .nodes
+            .iter()
+            .any(|node| node.props["name"] == "config.computed")
+    );
+    assert!(
+        !facts
+            .nodes
+            .iter()
+            .any(|node| node.props["name"] == "config.handler")
+    );
+    assert!(
+        !facts
+            .nodes
+            .iter()
+            .any(|node| node.props["name"] == "config.wrapped")
+    );
+    // An oversized section is a flagged gap described one level deeper, until
+    // each member fits one inspection range.
+    let cap = crate::declarations::MAX_CITABLE_SPAN_BYTES;
+    let flagged = |name: &str| {
+        named("Declaration", name)
+            .props
+            .get("span_exceeds_range_cap")
+            .is_some()
+    };
+    assert!(
+        flagged("config") && flagged("config.orderOptions") && flagged("config.orderOptions.big")
+    );
+    assert!(!flagged("config.orderOptions.small") && !flagged("config.catalogOptions"));
+    assert_eq!(
+        text(named("Declaration", "config.orderOptions.big.f7")),
+        "f7: 7"
+    );
+    for node in facts
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Declaration")
+    {
+        assert!(text(node).len() <= cap || node.props["span_exceeds_range_cap"] == true);
+    }
+    // A repeated `var` keeps unique, position-qualified identities.
+    let twice: Vec<_> = facts
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Declaration" && node.id.contains("#twice@"))
+        .collect();
+    assert_eq!(twice.len(), 2);
+    // Decorators sit outside the method span and each become citable.
+    let method = named("Symbol", "Resolver.transition");
+    assert!(text(method).starts_with("async transition("));
+    let decorators: Vec<_> = facts
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Decorator" && node.props["target"] == method.id.as_str())
+        .collect();
+    assert_eq!(
+        decorators.iter().map(|node| text(node)).collect::<Vec<_>>(),
+        ["@Transaction()", "@Allow(Permission.Owner)"]
+    );
+    assert_eq!(decorators[1].props["name"], "Allow");
+    // Names are rebuilt from identifier tokens, never sliced from source, so a
+    // comment inside the callee path stays in captured source alone.
+    let read = named("Symbol", "Resolver.read");
+    let names: Vec<_> = facts
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Decorator" && node.props["target"] == read.id.as_str())
+        .map(|node| (node.props["name"].as_str().unwrap().to_owned(), text(node)))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("Nest.Get".to_string(), "@Nest.Get()".to_string()),
+            (
+                "Namespace.Guard".to_string(),
+                "@Namespace /* private-sentinel */ .Guard()".to_string()
+            ),
+        ]
+    );
+    // Comments after or between decorators never hide them.
+    let decorated = |method: &str| {
+        let target = named("Symbol", method).id.as_str();
+        facts
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Decorator" && node.props["target"] == target)
+            .map(&text)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(decorated("Resolver.run"), ["@Allow()"]);
+    assert_eq!(decorated("Resolver.go"), ["@First()", "@Second()"]);
+    let graph = serde_json::to_string(&(&facts.nodes, &facts.edges)).unwrap();
+    assert!(!graph.contains("private-sentinel"));
+    assert!(source.contains("private-sentinel"));
+    assert!(facts.edges.iter().any(|edge| edge.label == "DECORATES"
+        && edge.src == decorators[0].id
+        && edge.dst == method.id));
+    // The oversized callable keeps its Symbol span; a header fact is citable.
+    let configure = named("Symbol", "configure");
+    assert!(text(configure).len() > crate::declarations::MAX_CITABLE_SPAN_BYTES);
+    let header = named("Signature", "configure");
+    assert_eq!(text(header), "function configure(options: Options) ");
+    assert_eq!(header.props["symbol"], configure.id.as_str());
+    assert_eq!(header.props["header_exceeds_range_cap"], false);
+    assert!(
+        !facts
+            .nodes
+            .iter()
+            .any(|node| node.label == "Signature" && node.props["name"] == "Resolver.transition")
+    );
+    for node in facts.nodes.iter().filter(|node| {
+        matches!(
+            node.label.as_str(),
+            "Declaration" | "Decorator" | "Signature"
+        )
+    }) {
+        let receipt = receipts
+            .iter()
+            .find(|receipt| receipt.fact_key() == &FactKey::from_node(node))
+            .unwrap();
+        assert!(receipt.matches_node(node));
+        assert_eq!(receipt.ranges().len(), 1);
+        assert_eq!(receipt.ranges()[0].role, RangeRole::Provenance);
+    }
+    let (_, directory_receipts, stats) = extract_captured_dir(
+        directory.path(),
+        &parser_id(),
+        &capture,
+        Registries::builtin(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(by_fact(directory_receipts), receipts);
+    assert!(stats.omitted_declaration_receipts.is_empty());
+}
+
+// AC-0282: hostile nesting is described to a fixed depth on an ordinary worker
+// thread, with the deepest oversized section left as a flagged gap.
+#[test]
+fn captured_declaration_nesting_is_bounded() {
+    let depth = 2000;
+    let source = format!(
+        "const config = {}'{}'{};\n",
+        "{a: ".repeat(depth),
+        "x".repeat(9000),
+        "}".repeat(depth)
+    );
+    let facts = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || crate::extract_source(source.as_bytes(), "deep.ts", &parser_id()).unwrap())
+        .unwrap()
+        .join()
+        .expect("bounded nesting never overflows the stack");
+    let properties: Vec<_> = facts
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Declaration" && node.props["kind"] == "Property")
+        .collect();
+    assert_eq!(properties.len(), crate::declarations::MAX_PROPERTY_DEPTH);
+    assert!(
+        properties
+            .iter()
+            .all(|node| node.props["span_exceeds_range_cap"] == true)
+    );
+}
