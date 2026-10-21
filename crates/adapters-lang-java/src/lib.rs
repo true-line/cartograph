@@ -6,8 +6,11 @@
 //! Annotation-proven Spring Web mappings become Endpoint/HANDLES facts with
 //! class+method path composition. Adapters are per language, not per JDK
 //! version: the grammar parses current syntax and anything it cannot prove
-//! is simply not asserted. This tier never calls an LLM and every emitted
-//! fact carries exact source-span provenance.
+//! is simply not asserted. Import-proven JPA annotations become DataEntity
+//! nodes with REFERENCES relations, and Spring Data repositories bind to
+//! their entity with READS/WRITES from repository call sites (#239). This
+//! tier never calls an LLM and every emitted fact carries exact source-span
+//! provenance.
 
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
@@ -16,6 +19,7 @@ use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 
+mod jpa;
 pub mod jvm;
 
 use jvm::{classify_import, external_module_id, foreign_packages, in_system};
@@ -58,6 +62,14 @@ pub struct Extraction {
     /// Every declared method/constructor's owner type, name and arity,
     /// keyed for repo-wide overload resolution (#435).
     method_index: Vec<MethodSig>,
+    /// JPA entities declared in the repository, keyed by class FQN (#239).
+    entity_index: Vec<jpa::EntityDecl>,
+    /// Spring Data repository interfaces, keyed by FQN (#239).
+    repository_index: Vec<jpa::RepositoryDecl>,
+    /// Relation and repository-binding edges awaiting their target entity.
+    pending_links: Vec<jpa::PendingLink>,
+    /// Repository call sites awaiting the receiver type's resolution.
+    pending_repo_calls: Vec<jpa::PendingRepoCall>,
 }
 
 /// One declared method or constructor, indexed for overload resolution by
@@ -290,6 +302,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         retarget_props_commit(&mut pending.overload_gap.0.props, commit);
         retarget_props_commit(&mut pending.overload_gap.1.props, commit);
     }
+    jpa::retarget(extraction, commit);
 }
 
 const TYPE_KINDS: &[&str] = &[
@@ -1134,6 +1147,16 @@ pub fn extract_source(
         }
     }
 
+    jpa::extract(
+        &cx,
+        root,
+        &language,
+        &imports,
+        package.as_deref(),
+        &methods_by_start,
+        &mut out,
+    );
+
     Ok(out)
 }
 
@@ -1239,6 +1262,10 @@ pub fn extract_dir_incremental_with_progress(
             out.declared_types.extend(extraction.declared_types);
             out.packages.extend(extraction.packages);
             out.method_index.extend(extraction.method_index);
+            out.entity_index.extend(extraction.entity_index);
+            out.repository_index.extend(extraction.repository_index);
+            out.pending_links.extend(extraction.pending_links);
+            out.pending_repo_calls.extend(extraction.pending_repo_calls);
             Ok(())
         },
     );
@@ -1318,6 +1345,7 @@ pub fn extract_dir_incremental_with_progress(
         }
     }
     resolve_repo_imports(&mut out.edges, id.repo, &types_by_fqn, &known);
+    jpa::resolve(&mut out);
     // #464 (ADR-0033): an import proven external is re-keyed on its package
     // id rather than the imported type/member — `mod:jakarta.persistence`,
     // not `mod:jakarta.persistence.Entity` — with the original target kept

@@ -1,0 +1,47 @@
+{
+  "nodes": [
+    {
+      "label": "DataEntity",
+      "id": "data:local/p@jpa:Owner",
+      "props": {
+        "storage": "jpa",
+        "store": "owners"
+      }
+    },
+    {
+      "label": "DataEntity",
+      "id": "data:local/p@jpa:Pet",
+      "props": {
+        "storage": "jpa",
+        "store": "Pet"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "REFERENCES",
+      "src": "data:local/p@jpa:Owner",
+      "dst": "data:local/p@jpa:Pet"
+    },
+    {
+      "label": "REFERENCES",
+      "src": "data:local/p@jpa:Pet",
+      "dst": "data:local/p@jpa:Owner"
+    },
+    {
+      "label": "REFERENCES",
+      "src": "sym:local/p@OwnerRepository.java#OwnerRepository",
+      "dst": "data:local/p@jpa:Owner"
+    },
+    {
+      "label": "READS",
+      "src": "sym:local/p@OwnerService.java#OwnerService.rename(Integer)",
+      "dst": "data:local/p@jpa:Owner"
+    },
+    {
+      "label": "WRITES",
+      "src": "sym:local/p@OwnerService.java#OwnerService.rename(Integer)",
+      "dst": "data:local/p@jpa:Owner"
+    }
+  ]
+}

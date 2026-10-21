@@ -231,8 +231,9 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
         "Java",
         "jpa",
         DataModel,
-        Unsupported,
-        "JPA entities are not extracted (#239)",
+        Partial,
+        "fields inherited from @MappedSuperclass and @Embeddable types are not merged, \
+         and repository methods outside the Spring Data naming vocabulary assert no access",
     ),
     cell("Java", CORE, HttpClientCalls, Unsupported, NO_CLIENT),
     cell("Java", CORE, EventSites, Unsupported, NO_EVENTS),

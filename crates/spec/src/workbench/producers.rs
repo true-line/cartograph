@@ -29,6 +29,16 @@ fn strings<'a>(node: &'a Node, key: &str) -> Vec<&'a str> {
         .collect()
 }
 
+/// A relation field's metadata as text: a string as it is, a boolean (the
+/// owning side) as its JSON spelling, an absent value as nothing.
+fn relation_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
 pub(super) fn stories(nodes: &[&Node], max: Option<usize>) -> Result<Output, RenderLimit> {
     let budget = Budget::new(max)?;
     let mut assertions = Assertions::new(&budget);
@@ -205,6 +215,34 @@ pub(super) fn data(
                 e.label,
                 Safe(&e.dst)
             )?;
+        }
+    }
+    // One relation edge can carry several fields — several JPA relations to
+    // the same target are one fact — so every field it declares is listed.
+    let relation_fields: Vec<_> = mappings
+        .iter()
+        .filter_map(|e| {
+            let relations = e.props.get("relations")?.as_array()?;
+            Some((e, relations))
+        })
+        .collect();
+    if !relation_fields.is_empty() {
+        content.push_str(
+            "\n## Relation fields\n\n| Source | Field | Relation | Cardinality | Owning | Target |\n|---|---|---|---|---|---|\n",
+        )?;
+        for (e, relations) in relation_fields {
+            for relation in relations {
+                writeln!(
+                    content,
+                    "| `{}` | `{}` | {} | {} | {} | `{}` |",
+                    Safe(&e.src),
+                    Safe(relation_value(&relation["field"])),
+                    Safe(relation_value(&relation["relation"])),
+                    Safe(relation_value(&relation["cardinality"])),
+                    Safe(relation_value(&relation["owning"])),
+                    Safe(&e.dst)
+                )?;
+            }
         }
     }
     finish(content, assertions)
