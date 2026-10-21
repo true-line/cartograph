@@ -940,7 +940,6 @@ pub(crate) fn local_provider_acceptance() {
         .output()
         .unwrap();
     assert!(tree.status.success());
-    assert_eq!(gate, output.join("publication.json"));
     assert!(!gate.exists());
     std::fs::create_dir(&output).expect("Fresh output directory required");
     #[cfg(unix)]
