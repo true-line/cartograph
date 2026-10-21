@@ -279,7 +279,7 @@ the admitted ledger and exact query pages. Describe initial state, the last
 completed query or read, newly discovered typed facts, exact continuation and
 unchanged repeated results. A repeated representation can differ even when the
 fact identity is unchanged; do not call that identical evidence. Reopening must
-preserve the same basis. A follow-up starts its own progress; parent history does
+preserve the same basis. A follow-up retains its saved specialist version. If that version or the current composer selection is absent from the loaded catalog, show the unavailable version and require the caller to select an available replacement explicitly. Catalog refresh or recovery never selects a replacement; saved historical identity remains unchanged. Starting waits while the catalog loads. A follow-up starts its own progress; parent history does
 not become its own tool execution. Invalid or ambiguous bindings fail before a
 provider call rather than inventing an action order.
 
