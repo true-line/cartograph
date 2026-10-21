@@ -249,6 +249,33 @@ impl Fixture {
         required_role: Option<agents::TaskRangeRole>,
         original: &str,
     ) -> Self {
+        Self::with_prepared_contract(
+            provider,
+            directory,
+            question,
+            specialist_id,
+            required_role,
+            original,
+            None,
+            |_, _, _| {},
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_prepared_contract(
+        provider: &dyn LlmProvider,
+        directory: tempfile::TempDir,
+        question: &str,
+        specialist_id: SpecialistId,
+        required_role: Option<agents::TaskRangeRole>,
+        original: &str,
+        inventory_json: Option<fn(&str) -> String>,
+        before_start: impl FnOnce(
+            &tauri::AppHandle<tauri::test::MockRuntime>,
+            &AppState,
+            &mut StartInvestigationRequest,
+        ),
+    ) -> Self {
         let app_data = directory.path().join("private");
         std::fs::create_dir(&app_data).unwrap();
         let app_data = crate::paths::canonicalize(app_data).unwrap();
@@ -287,10 +314,15 @@ impl Fixture {
                 registered_source_id: Some(source.source_id.clone()),
                 ingest_id: "worker-fixture-ingest".into(),
                 config_hash: crate::coverage_config_hash(&[], crate::Registries::builtin()),
-                inventory_json: json!({"inventory":"coverage@1","repo":source.repo_key,
+                inventory_json: inventory_json.map_or_else(
+                    || {
+                        json!({"inventory":"coverage@1","repo":source.repo_key,
                 "commit":"workdir","layer_hints":[],"producers":[{"state":"missing_input"}],
                 "unsupported":[],"limited":true})
-                .to_string(),
+                        .to_string()
+                    },
+                    |inventory| inventory(&source.repo_key),
+                ),
             }
         });
         crate::load_into_graph_with_bindings(
@@ -340,7 +372,7 @@ impl Fixture {
         let expected_graph_revision = inspection_requirements
             .as_ref()
             .map(|targets| targets[0].graph_snapshot_id.clone());
-        let request = StartInvestigationRequest {
+        let mut request = StartInvestigationRequest {
             schema_version: if specialist_id.uses_coverage_qualification() {
                 3
             } else if inspection_requirements.is_some() {
@@ -360,6 +392,13 @@ impl Fixture {
             conversation_id: None,
             parent_id: None,
         };
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.manage(state);
+        let state = app.state::<AppState>();
+        before_start(app.handle(), &state, &mut request);
+        request.validate().unwrap();
         let start_time = Instant::now();
         let started = state
             .jobs
@@ -392,10 +431,6 @@ impl Fixture {
             .claim_execution(&plan, reservation)
             .unwrap();
         let live = state.investigations.insert(&id).unwrap();
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
-        app.manage(state);
         Self {
             _directory: directory,
             app_data,
