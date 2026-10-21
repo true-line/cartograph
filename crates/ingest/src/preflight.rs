@@ -13,7 +13,7 @@
 //! Detectors are a versioned registry ([`DETECTOR_ID`]): provenance on every
 //! finding records which detector produced it, so re-runs are attributable.
 
-use crate::matrix::{CoverageCell, cells_for};
+use crate::matrix::{ReportedCell, cells_for};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -50,9 +50,10 @@ pub struct LanguageDetection {
     /// Covering adapter id, or `None` when no adapter exists — in which case
     /// the whole language surfaces as an unsupported pattern.
     pub adapter: Option<String>,
-    /// Coverage-matrix cells for a compiled-in adapter (AC-0253); empty for
-    /// a plugin or an uncovered language.
-    pub coverage: Vec<CoverageCell>,
+    /// Coverage-matrix cells of the covering adapter: compiled-in cells
+    /// (AC-0253) or a gated plugin's declared cells (AC-0263); empty for an
+    /// uncovered language.
+    pub coverage: Vec<ReportedCell>,
 }
 
 /// One classified construct: where it is and why it was flagged.
@@ -241,6 +242,10 @@ pub struct PluginCoverage {
     pub plugin_id: String,
     /// Extensions the corpus declares, without the leading dot.
     pub extensions: Vec<String>,
+    /// Coverage cells the gated corpus declares (AC-0263).
+    pub cells: Vec<ReportedCell>,
+    /// Language names the corpus gives extensions the core cannot name.
+    pub languages: std::collections::BTreeMap<String, String>,
 }
 
 /// The TS adapter's AST-level classification of one `eval(` site (#214).
@@ -533,7 +538,7 @@ fn detect_manifest_adapter(language: &str, languages: &mut BTreeMap<String, Lang
             language: language.to_string(),
             files: 0,
             adapter: Some(adapter.id.to_string()),
-            coverage: cells_for(language).cloned().collect(),
+            coverage: cells_for(language).map(ReportedCell::from).collect(),
         })
         .files += 1;
 }
@@ -558,22 +563,33 @@ fn detect_language(
                 language: language.to_string(),
                 files: 0,
                 adapter: Some(adapter.to_string()),
-                coverage: cells_for(language).cloned().collect(),
+                coverage: cells_for(language).map(ReportedCell::from).collect(),
             });
         entry.files += 1;
     } else if let Some(plugin) = plugin_claim {
         // A gated plugin covers this extension (#201): report it as
         // covered under the plugin id — no unsupported finding.
+        // A new language the core cannot name takes the name the corpus
+        // gives its extension, else the bare extension.
         let language = uncovered_language(extension)
             .map(str::to_string)
+            .or_else(|| plugin.languages.get(extension).cloned())
             .unwrap_or_else(|| format!(".{extension}"));
+        // Only this language's cells: one plugin may declare several
+        // languages with differing support.
+        let coverage = plugin
+            .cells
+            .iter()
+            .filter(|cell| cell.language.eq_ignore_ascii_case(&language))
+            .cloned()
+            .collect();
         let entry = languages
             .entry(language.clone())
             .or_insert(LanguageDetection {
                 language,
                 files: 0,
                 adapter: Some(plugin.plugin_id.clone()),
-                coverage: Vec::new(),
+                coverage,
             });
         entry.files += 1;
     } else if let Some(language) = uncovered_language(extension) {
@@ -764,13 +780,15 @@ mod tests {
         assert!(
             go.coverage
                 .iter()
-                .any(|cell| cell.id() == "go.gin.http_endpoints"
+                .any(|cell| (cell.framework.as_str(), cell.capability.as_str())
+                    == ("gin", "http_endpoints")
                     && cell.support == crate::matrix::Support::Supported)
         );
         assert!(
             go.coverage
                 .iter()
-                .any(|cell| cell.id() == "go.core.http_client_calls"
+                .any(|cell| (cell.framework.as_str(), cell.capability.as_str())
+                    == ("core", "http_client_calls")
                     && cell.support == crate::matrix::Support::Unsupported
                     && !cell.note.is_empty())
         );
@@ -1167,9 +1185,18 @@ mod tests {
             .expect("Ruby surfaces as uncovered");
         assert_eq!(finding.request_adapter.as_deref(), Some("Ruby"));
 
+        let cell = ReportedCell {
+            language: "Ruby".into(),
+            framework: "rails".into(),
+            capability: "http_endpoints".into(),
+            support: crate::matrix::Support::Supported,
+            note: String::new(),
+        };
         let plugins = [PluginCoverage {
             plugin_id: "t0.plugin-ruby".into(),
             extensions: vec!["rb".into()],
+            cells: vec![cell.clone()],
+            languages: Default::default(),
         }];
         let after = preflight_with_plugins(dir.path(), &plugins).unwrap();
         let ruby = after
@@ -1178,6 +1205,8 @@ mod tests {
             .find(|l| l.language == "Ruby")
             .expect("Ruby still detected");
         assert_eq!(ruby.adapter.as_deref(), Some("t0.plugin-ruby"));
+        // The gated plugin's declared cells are reported with it (AC-0263).
+        assert_eq!(ruby.coverage, vec![cell]);
         assert!(
             !after
                 .unsupported
@@ -1191,6 +1220,8 @@ mod tests {
         let contested = [PluginCoverage {
             plugin_id: "t0.plugin-rogue".into(),
             extensions: vec!["ts".into()],
+            cells: vec![],
+            languages: Default::default(),
         }];
         let report = preflight_with_plugins(dir.path(), &contested).unwrap();
         let ts = report
@@ -1199,6 +1230,73 @@ mod tests {
             .find(|l| l.language == "TypeScript")
             .expect("TypeScript detected");
         assert_eq!(ts.adapter.as_deref(), Some("t0.adapter-ts"));
+    }
+
+    #[test]
+    fn a_multi_language_plugin_reports_each_language_only_its_own_cells() {
+        // AC-0263: one plugin declaring the same capability for two
+        // languages at differing support reports each language its own
+        // cells, never the other language's claim.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app.rb", "puts 'hi'\n");
+        write(dir.path(), "index.php", "<?php echo 'hi';\n");
+        let cell = |language: &str, support, note: &str| ReportedCell {
+            language: language.into(),
+            framework: "core".into(),
+            capability: "http_endpoints".into(),
+            support,
+            note: note.into(),
+        };
+        let ruby_cell = cell("ruby", crate::matrix::Support::Supported, "");
+        let php_cell = cell(
+            "PHP",
+            crate::matrix::Support::Partial,
+            "attribute routes only",
+        );
+        let plugins = [PluginCoverage {
+            plugin_id: "t0.plugin-scripts".into(),
+            extensions: vec!["rb".into(), "php".into()],
+            cells: vec![ruby_cell.clone(), php_cell.clone()],
+            languages: Default::default(),
+        }];
+        let report = preflight_with_plugins(dir.path(), &plugins).unwrap();
+        let coverage = |language: &str| {
+            report
+                .languages
+                .iter()
+                .find(|l| l.language == language)
+                .map(|l| l.coverage.clone())
+                .expect("language detected")
+        };
+        assert_eq!(coverage("Ruby"), vec![ruby_cell.clone()]);
+        assert_eq!(coverage("PHP"), vec![php_cell]);
+
+        // New languages the core cannot name take the corpus's names for
+        // their extensions, so two of them never share each other's cells.
+        write(dir.path(), "main.foo", "say hi\n");
+        write(dir.path(), "main.bar", "say hi\n");
+        let foo_cell = cell("Foo", crate::matrix::Support::Supported, "");
+        let bar_cell = cell("Bar", crate::matrix::Support::Partial, "no routes");
+        let plugins = [PluginCoverage {
+            plugin_id: "t0.plugin-foo".into(),
+            extensions: vec!["foo".into(), "bar".into(), "rb".into()],
+            cells: vec![foo_cell.clone(), bar_cell.clone(), ruby_cell.clone()],
+            languages: [("foo", "Foo"), ("bar", "Bar")]
+                .map(|(e, l)| (e.to_string(), l.to_string()))
+                .into(),
+        }];
+        let report = preflight_with_plugins(dir.path(), &plugins).unwrap();
+        let coverage = |language: &str| {
+            report
+                .languages
+                .iter()
+                .find(|l| l.language == language)
+                .map(|l| l.coverage.clone())
+                .expect("language detected")
+        };
+        assert_eq!(coverage("Foo"), vec![foo_cell]);
+        assert_eq!(coverage("Bar"), vec![bar_cell]);
+        assert_eq!(coverage("Ruby"), vec![ruby_cell]);
     }
 
     #[test]

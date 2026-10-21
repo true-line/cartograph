@@ -297,6 +297,7 @@ export const DiscoveredPluginsToggle: Story = {
         enabled: false,
         gate: 'ungated',
         gate_detail: null,
+        coverage: [],
       },
       {
         id: 't0.adapter-swift',
@@ -308,6 +309,29 @@ export const DiscoveredPluginsToggle: Story = {
         enabled: true,
         gate: 'passed',
         gate_detail: null,
+        coverage: [
+          {
+            language: 'Swift',
+            framework: 'core',
+            capability: 'types',
+            support: 'supported',
+            note: '',
+          },
+          {
+            language: 'Swift',
+            framework: 'vapor',
+            capability: 'http_endpoints',
+            support: 'unsupported',
+            note: 'route builders are not recognized yet',
+          },
+          {
+            language: 'Objective-C',
+            framework: 'core',
+            capability: 'types',
+            support: 'partial',
+            note: 'categories are not merged into their class',
+          },
+        ],
       },
       {
         id: 't0.adapter-crystal',
@@ -319,6 +343,7 @@ export const DiscoveredPluginsToggle: Story = {
         enabled: false,
         gate: 'failed',
         gate_detail: 'golden:src/main.cr: expected 3 fact(s), got 1',
+        coverage: [],
       },
     ],
     onTogglePlugin: fn(),
@@ -326,8 +351,9 @@ export const DiscoveredPluginsToggle: Story = {
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    const list = within(canvas.getByRole('list', { name: 'Discovered plugins' }));
-    await expect(list.getAllByRole('listitem')).toHaveLength(3);
+    const plugins = canvas.getByRole('list', { name: 'Discovered plugins' });
+    const list = within(plugins);
+    await expect(plugins.children).toHaveLength(3);
     // Fail-closed default is stated, plus discovery provenance.
     await expect(canvas.getByText(/off until you enable it here/)).toBeInTheDocument();
     await expect(list.getByText(/Project copy \(shadows a user-level copy\)/)).toBeInTheDocument();
@@ -352,6 +378,14 @@ export const DiscoveredPluginsToggle: Story = {
     await expect(
       list.getByText('golden:src/main.cr: expected 3 fact(s), got 1'),
     ).toBeInTheDocument();
+
+    // AC-0263: a gated plugin reports the cells its corpus declares.
+    await userEvent.click(list.getByText('1 supported · 1 partial · 1 unsupported'));
+    const swiftCells = canvas.getByRole('list', { name: 't0.adapter-swift coverage cells' });
+    // Cells spanning two languages name each one.
+    await expect(within(swiftCells).getByText('Swift · vapor · HTTP endpoints')).toBeInTheDocument();
+    await expect(within(swiftCells).getByText('Objective-C · language · types')).toBeInTheDocument();
+    await expect(within(swiftCells).getByText(/route builders are not recognized/)).toBeInTheDocument();
 
     await userEvent.click(
       list.getByRole('button', { name: 'Run conformance gate for t0.adapter-ruby' }),

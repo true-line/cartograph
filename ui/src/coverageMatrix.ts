@@ -9,9 +9,16 @@ export function supportCounts(cells: CoverageCell[]): SupportCounts {
   return counts;
 }
 
-/** `gin · HTTP endpoints`; language-level cells read `language · imports`. */
-export function cellLabel(cell: CoverageCell): string {
+/** `gin · HTTP endpoints`; language-level cells read `language · imports`.
+ *  `withLanguage` prefixes the language, for cell sets spanning several. */
+export function cellLabel(cell: CoverageCell, withLanguage = false): string {
   const capability = cell.capability.replace(/_/g, ' ').replace(/^http /, 'HTTP ');
   const framework = cell.framework === 'core' ? 'language' : cell.framework;
-  return `${framework} · ${capability}`;
+  const label = `${framework} · ${capability}`;
+  return withLanguage ? `${cell.language} · ${label}` : label;
+}
+
+/** True when the cells name more than one language (e.g. one plugin's). */
+export function spansLanguages(cells: CoverageCell[]): boolean {
+  return new Set(cells.map((cell) => cell.language.toLowerCase())).size > 1;
 }

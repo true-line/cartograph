@@ -102,6 +102,34 @@ impl CoverageCell {
     }
 }
 
+/// A cell as reported to Preflight and Settings: compiled-in cells and the
+/// cells a gated plugin declares share this owned shape (AC-0253, AC-0263).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReportedCell {
+    /// Language the cell is about.
+    pub language: String,
+    /// Framework or library, or [`CORE`].
+    pub framework: String,
+    /// Capability in snake_case; a plugin may name one the core does not.
+    pub capability: String,
+    /// How far the adapter covers it.
+    pub support: Support,
+    /// What is missed (partial) or absent (unsupported).
+    pub note: String,
+}
+
+impl From<&CoverageCell> for ReportedCell {
+    fn from(cell: &CoverageCell) -> Self {
+        Self {
+            language: cell.language.to_string(),
+            framework: cell.framework.to_string(),
+            capability: cell.capability.as_str().to_string(),
+            support: cell.support,
+            note: cell.note.to_string(),
+        }
+    }
+}
+
 const fn cell(
     language: &'static str,
     framework: &'static str,
