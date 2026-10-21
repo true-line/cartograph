@@ -163,6 +163,41 @@ pub fn measure_bounded_action(
     prepare_wire(profile, action, limits).map(|prepared| prepared.measurements)
 }
 
+/// Conservative wire bounds for replacing one empty source-text field. Every
+/// other field must already be the complete prospective representation (including
+/// continuation feedback). This proves only the five bounded-wire gates, never
+/// source authority, prompt closure, provider framing or permission to read.
+/// The source text is a direct JSON string in each measured representation.
+pub fn bound_unread_source_action(
+    profile: &ProviderProfile,
+    skeleton: &CompletionAction,
+    limits: &CompletionLimits,
+    span_index: usize,
+    source_bytes: usize,
+) -> Result<BoundedWireMeasurements, BoundedCallError> {
+    let span = skeleton.payload.spans.get(span_index)
+        .ok_or_else(|| not_sent(FailureCode::InvalidInput))?;
+    if !span.text.is_empty() {
+        return Err(not_sent(FailureCode::InvalidInput));
+    }
+    let mut sizes = measure_bounded_action(profile, skeleton, limits)?;
+    let escaped = core_redact::direct_source_json_content_bound(source_bytes)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| not_sent(FailureCode::InputTooLarge))?;
+    let raw = u64::try_from(source_bytes)
+        .map_err(|_| not_sent(FailureCode::InputTooLarge))?;
+    let add = |base: u64, delta: u64, ceiling: u64| {
+        base.checked_add(delta).filter(|value| *value <= ceiling)
+            .ok_or_else(|| not_sent(FailureCode::InputTooLarge))
+    };
+    sizes.raw_string_bytes = add(sizes.raw_string_bytes, raw, limits.0.input_bytes)?;
+    sizes.original_payload_bytes = add(sizes.original_payload_bytes, escaped, limits.0.input_bytes)?;
+    sizes.redacted_payload_bytes = add(sizes.redacted_payload_bytes, escaped, limits.0.input_bytes)?;
+    sizes.original_action_bytes = add(sizes.original_action_bytes, escaped, limits.0.input_bytes + 4096)?;
+    sizes.egress_fingerprint_bytes = add(sizes.egress_fingerprint_bytes, escaped, 512 * 1024)?;
+    Ok(sizes)
+}
+
 struct PreparedWire {
     payload: CompletionPayload,
     redaction_count: usize,

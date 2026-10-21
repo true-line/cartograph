@@ -117,3 +117,22 @@ fn progressive_storage_exact_family_rejects_legacy_intent_and_disclosure_version
     assert!(validate_legacy_evidence(&tx, &task).is_err());
     tx.commit().unwrap();
 }
+
+#[test]
+fn progressive_summary_reader_rejects_unactivated_admission_generation() {
+    // AC-0287: recognizing an internal specialist cannot admit a future saved UI record.
+    let fixture = progressive();
+    let before = fixture.store.investigation(&fixture.id).unwrap();
+    let tx = fixture.store.conn.unchecked_transaction().unwrap();
+    let mut task = load_task_base(&tx, &fixture.id).unwrap();
+    task.detail.summary.schema_version = 7;
+    task.detail.summary.specialist_id = SpecialistId::DomainAnalystV10;
+    let bytes = serde_json::to_vec(&task).unwrap();
+    tx.execute(
+        "UPDATE investigation_tasks SET record=?1, record_hash=?2 WHERE id=?3",
+        rusqlite::params![bytes, core_prov::content_hash(&bytes), fixture.id],
+    ).unwrap();
+    assert!(load_task_base(&tx, &fixture.id).is_err());
+    tx.rollback().unwrap();
+    assert_eq!(fixture.store.investigation(&fixture.id).unwrap(), before);
+}

@@ -251,3 +251,37 @@ fn bounded_wire_invalid_inputs_and_existing_firewall_gate_order_are_preserved() 
         not_sent(FailureCode::InvalidInput)
     );
 }
+
+#[test]
+fn unread_source_bound_covers_actual_firewall_representations_and_rejects_unknown_shape() {
+    // AC-0287: the complete skeleton includes real metadata and outer framing.
+    let mut skeleton = action();
+    skeleton.payload.spans[0].text.clear();
+    let profile = profile();
+    let limits = CompletionLimits::default();
+    for source in ["", "plain", "\u{0}\n\"\\é", "password=aaaa ", "Bearer tokenvalue1234567890"] {
+        let upper = bound_unread_source_action(&profile, &skeleton, &limits, 0, source.len()).unwrap();
+        let mut actual = skeleton.clone();
+        actual.payload.spans[0].text = source.into();
+        let measured = measure_bounded_action(&profile, &actual, &limits).unwrap();
+        assert!(measured.raw_string_bytes <= upper.raw_string_bytes);
+        assert!(measured.original_payload_bytes <= upper.original_payload_bytes);
+        assert!(measured.redacted_payload_bytes <= upper.redacted_payload_bytes);
+        assert!(measured.original_action_bytes <= upper.original_action_bytes);
+        assert!(measured.egress_fingerprint_bytes <= upper.egress_fingerprint_bytes);
+        prepare(&actual, &limits).unwrap();
+    }
+    assert!(bound_unread_source_action(&profile, &action(), &limits, 0, 1).is_err());
+    assert!(bound_unread_source_action(&profile, &skeleton, &limits, 1, 1).is_err());
+    assert!(bound_unread_source_action(&profile, &skeleton, &limits, 0, usize::MAX).is_err());
+    let upper = bound_unread_source_action(&profile, &skeleton, &limits, 0, 100).unwrap();
+    let exact = CompletionLimits::new(CompletionLimitValues {
+        input_bytes: upper.original_payload_bytes.max(upper.redacted_payload_bytes),
+        ..limits.values()
+    }).unwrap();
+    assert!(bound_unread_source_action(&profile, &skeleton, &exact, 0, 100).is_ok());
+    let short = CompletionLimits::new(CompletionLimitValues {
+        input_bytes: exact.values().input_bytes - 1, ..exact.values()
+    }).unwrap();
+    assert!(bound_unread_source_action(&profile, &skeleton, &short, 0, 100).is_err());
+}
