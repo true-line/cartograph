@@ -354,3 +354,34 @@ fn read_reservation_production_additional_claim_does_not_count_terminal_reserve_
     );
     tx.rollback().unwrap();
 }
+
+#[test]
+fn read_reservation_production_task_global_capacity_share_preflight_snapshot() {
+    // AC-0287: central capacity admission reuses the caller's coherent read
+    // snapshot for both bounds and detects subsequent namespace writes.
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = JobStore::open(dir.path().join("state.db")).unwrap();
+    let id = start(&mut store, "coherent-capacity");
+    let tx = store.conn.transaction().unwrap();
+    initialize(&tx).unwrap();
+    let r = reservation(&id, "step:capacity");
+    insert_reservation(&tx, &r).unwrap();
+    let mut reads = ReadTransaction::new(&tx).unwrap();
+    storage::check_task_capacity_with_reads(&tx, &id, false, &mut reads).unwrap();
+    storage::check_task_capacity_with_reads(&tx, &id, true, &mut reads).unwrap();
+    assert_eq!(reads.preflight_runs, 1);
+    assert_eq!(reads.snapshot_runs, 1);
+    assert_eq!(reads.validated_reads, 1);
+    let old = storage::stored_bytes_with_reads(&tx, Some(&id), &mut reads).unwrap();
+    let charge = ValidationCharge::for_reservation(&r).unwrap();
+    reads.insert_charge(&id, "step:capacity", &charge).unwrap();
+    let new = storage::stored_bytes_with_reads(&tx, Some(&id), &mut reads).unwrap();
+    assert!(new > old);
+    assert_eq!(reads.preflight_runs, 2);
+    assert_eq!(reads.snapshot_runs, 2);
+    let other = Connection::open_in_memory().unwrap();
+    assert_eq!(
+        storage::stored_bytes_with_reads(&other, Some(&id), &mut reads),
+        Err(InvestigationStoreError::Invalid)
+    );
+}

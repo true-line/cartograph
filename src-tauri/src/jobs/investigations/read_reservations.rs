@@ -5,6 +5,7 @@
 //! supplied here. Callers must authenticate saved task/response/ledger authority
 //! and account these rows and outstanding claims in the same writer transaction.
 use super::*;
+use std::collections::{BTreeMap, BTreeSet};
 
 const OWNED: &str = "name GLOB 'investigation_read_*' OR (tbl_name GLOB 'investigation_read_*' AND name NOT GLOB 'sqlite_*')";
 const MAX_RESERVATIONS_PER_TASK: usize = 64;
@@ -412,6 +413,38 @@ fn preflight(connection: &Connection) -> Result<(), InvestigationStoreError> {
     if orphan {
         return Err(InvestigationStoreError::Invalid);
     }
+    // Bound aggregate history before allocating any body, including malformed
+    // stores populated outside the supported writers. These are logical store
+    // limits, not claims about SQLite physical file/page allocation.
+    let distinct: i64 = connection.query_row(
+        "SELECT count(DISTINCT task_id) FROM investigation_read_reservations",
+        [],
+        |row| row.get(0),
+    )?;
+    if usize::try_from(distinct).ok().is_none_or(|n| n > MAX_TASKS) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let mut global = READ_NAMESPACE_ALLOWANCE_BYTES;
+    let mut tasks = BTreeMap::<String, usize>::new();
+    for table in TABLES {
+        let mut statement = connection.prepare(&format!("SELECT task_id,sum(length(body)+length(CAST(body_hash AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(step_id AS BLOB))+{READ_ROW_ALLOWANCE_BYTES}) FROM {table} GROUP BY task_id"))?;
+        for row in statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })? {
+            let (task, bytes) = row?;
+            let bytes = usize::try_from(bytes).map_err(|_| InvestigationStoreError::Capacity)?;
+            global = global
+                .checked_add(bytes)
+                .ok_or(InvestigationStoreError::Capacity)?;
+            let task_bytes = tasks.entry(task).or_default();
+            *task_bytes = task_bytes
+                .checked_add(bytes)
+                .ok_or(InvestigationStoreError::Capacity)?;
+            if *task_bytes > TASK_CAPACITY || global > STORE_CAPACITY {
+                return Err(InvestigationStoreError::Capacity);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -446,14 +479,14 @@ pub(super) struct SavedRead {
     pub charge: Option<ValidationCharge>,
     pub disposition: Option<Disposition>,
 }
-/// Reads only immutable saved records; never task_text or the current graph.
+/// Reads only immutable saved records; compatibility wrapper with a fresh
+/// preflight scope per call. Retain ReadTransaction for repeated operations.
 pub(super) fn load(
     connection: &Connection,
     task: &str,
     step: &str,
 ) -> Result<Option<SavedRead>, InvestigationStoreError> {
-    preflight(connection)?;
-    load_validated(connection, task, step)
+    ReadTransaction::compatible(connection)?.load(task, step)
 }
 fn load_validated(
     connection: &Connection,
@@ -506,40 +539,292 @@ fn insert(
         params![task, step, body, hash],
     )?)
 }
-/// Writes a validated record only. Does not update task usage/phase, capacity,
-/// execution, journal events or immutable response authority; caller must do all
-/// those atomically. At most one pending source reservation per task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MutationStamp {
+    changes: u64,
+    schema_version: i64,
+}
+impl MutationStamp {
+    fn read(connection: &Connection) -> Result<Self, InvestigationStoreError> {
+        Ok(Self {
+            changes: connection.total_changes(),
+            schema_version: connection.query_row("PRAGMA schema_version", [], |row| row.get(0))?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct CapacityCharge {
+    pub rows: usize,
+    pub claims: usize,
+}
+impl CapacityCharge {
+    pub(super) fn occupied(self) -> Result<usize, InvestigationStoreError> {
+        self.rows
+            .checked_add(self.claims)
+            .ok_or(InvestigationStoreError::Capacity)
+    }
+}
+#[derive(Default)]
+struct CapacitySnapshot {
+    global: CapacityCharge,
+    tasks: BTreeMap<String, CapacityCharge>,
+}
+
+/// Transaction-borrowed preflight and coherent accounting scope. No Clone,
+/// Deserialize, owned cache export or connection accessor. A fresh transaction
+/// gets a fresh handle and revalidates historical settlements: O(history),
+/// bounded by logical store caps, once per unchanged handle snapshot. Body hashes
+/// and bindings fail closed on corrupt/inconsistent rows; they do not detect a
+/// consistent forgery by a DDL-capable local writer.
+///
+/// Controlled writes invalidate first. total_changes also detects direct SQL
+/// writes (including rolled-back changes), and schema_version detects DDL. This
+/// deliberately invalidates on unrelated writes too. Another connection cannot
+/// alter this transaction's pinned read snapshot. Callers must not manually end
+/// and restart transactions through raw SQL while a handle is borrowed.
+pub(super) struct ReadTransaction<'tx> {
+    connection: &'tx Connection,
+    stamp: Option<MutationStamp>,
+    present: bool,
+    capacity: Option<CapacitySnapshot>,
+    #[cfg(test)]
+    preflight_runs: usize,
+    #[cfg(test)]
+    snapshot_runs: usize,
+    #[cfg(test)]
+    validated_reads: usize,
+}
+impl<'tx> ReadTransaction<'tx> {
+    pub(super) fn new(
+        transaction: &'tx rusqlite::Transaction<'_>,
+    ) -> Result<Self, InvestigationStoreError> {
+        require_transaction(transaction)?;
+        Self::compatible(transaction)
+    }
+    /// Only compatibility helpers use this constructor. They preserve old
+    /// absent-namespace autocommit metadata reads and drop the handle per call.
+    fn compatible(connection: &'tx Connection) -> Result<Self, InvestigationStoreError> {
+        let mut value = Self {
+            connection,
+            stamp: None,
+            present: false,
+            capacity: None,
+            #[cfg(test)]
+            preflight_runs: 0,
+            #[cfg(test)]
+            snapshot_runs: 0,
+            #[cfg(test)]
+            validated_reads: 0,
+        };
+        value.ensure_preflight()?;
+        Ok(value)
+    }
+    pub(super) fn matches_connection(&self, connection: &Connection) -> bool {
+        std::ptr::eq(self.connection, connection)
+    }
+    fn invalidate(&mut self) {
+        self.stamp = None;
+        self.capacity = None;
+    }
+    fn ensure_preflight(&mut self) -> Result<(), InvestigationStoreError> {
+        let stamp = MutationStamp::read(self.connection)?;
+        if self.stamp == Some(stamp) {
+            if self.present {
+                require_transaction(self.connection)?;
+            }
+            return Ok(());
+        }
+        self.invalidate();
+        self.present = namespace_count(self.connection)? != 0;
+        if self.present {
+            require_transaction(self.connection)?;
+            #[cfg(test)]
+            {
+                self.preflight_runs += 1;
+            }
+            preflight(self.connection)?;
+        }
+        self.stamp = Some(stamp);
+        Ok(())
+    }
+    pub(super) fn initialize(&mut self) -> Result<(), InvestigationStoreError> {
+        self.invalidate();
+        initialize(self.connection)
+    }
+    pub(super) fn load(
+        &mut self,
+        task: &str,
+        step: &str,
+    ) -> Result<Option<SavedRead>, InvestigationStoreError> {
+        self.ensure_preflight()?;
+        if !self.present {
+            return Err(InvestigationStoreError::Missing);
+        }
+        load_validated(self.connection, task, step)
+    }
+    /// Writes no task usage/phase, capacity admission, lease, journal event or
+    /// saved-response authority. Caller performs those atomically in this Tx.
+    pub(super) fn insert_reservation(
+        &mut self,
+        r: &Reservation,
+    ) -> Result<(), InvestigationStoreError> {
+        self.ensure_preflight()?;
+        if !self.present {
+            return Err(InvestigationStoreError::Missing);
+        }
+        r.validate()?;
+        let b = &r.binding;
+        let (count, pending): (i64, bool) = self.connection.query_row(
+            "SELECT count(*), EXISTS(SELECT 1 FROM investigation_read_reservations r LEFT JOIN investigation_read_dispositions d USING(task_id,step_id) WHERE r.task_id=?1 AND d.task_id IS NULL) FROM investigation_read_reservations WHERE task_id=?1",
+            [&b.task_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        if pending {
+            return Err(InvestigationStoreError::Conflict);
+        }
+        let global: i64 = self.connection.query_row(
+            "SELECT count(*) FROM investigation_read_reservations",
+            [],
+            |row| row.get(0),
+        )?;
+        if usize::try_from(global)
+            .ok()
+            .is_none_or(|n| n >= MAX_RESERVATIONS)
+            || usize::try_from(count)
+                .ok()
+                .is_none_or(|n| n >= MAX_RESERVATIONS_PER_TASK)
+        {
+            return Err(InvestigationStoreError::Capacity);
+        }
+        self.invalidate();
+        insert(self.connection, TABLES[0], &b.task_id, &b.step_id, r)
+    }
+    pub(super) fn insert_charge(
+        &mut self,
+        task: &str,
+        step: &str,
+        charge: &ValidationCharge,
+    ) -> Result<(), InvestigationStoreError> {
+        let saved = self
+            .load(task, step)?
+            .ok_or(InvestigationStoreError::Missing)?;
+        if saved.disposition.is_some() {
+            return Err(InvestigationStoreError::Conflict);
+        }
+        charge.validate(&saved.reservation)?;
+        self.invalidate();
+        insert(self.connection, TABLES[1], task, step, charge)
+    }
+    /// Kind is a caller attestation, not proof of read/no-access/owner loss.
+    pub(super) fn insert_disposition(
+        &mut self,
+        task: &str,
+        step: &str,
+        disposition: &Disposition,
+    ) -> Result<(), InvestigationStoreError> {
+        let saved = self
+            .load(task, step)?
+            .ok_or(InvestigationStoreError::Missing)?;
+        disposition.validate(&saved.reservation, saved.charge.as_ref())?;
+        self.invalidate();
+        insert(self.connection, TABLES[2], task, step, disposition)
+    }
+    fn derive_capacity(&mut self) -> Result<CapacitySnapshot, InvestigationStoreError> {
+        #[cfg(test)]
+        {
+            self.snapshot_runs += 1;
+        }
+        let mut snapshot = CapacitySnapshot::default();
+        if !self.present {
+            return Ok(snapshot);
+        }
+        snapshot.global.rows = READ_NAMESPACE_ALLOWANCE_BYTES;
+        for table in TABLES {
+            let mut statement = self.connection.prepare(&format!("SELECT task_id,sum(length(body)+length(CAST(body_hash AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(step_id AS BLOB))+{READ_ROW_ALLOWANCE_BYTES}) FROM {table} GROUP BY task_id"))?;
+            for row in statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })? {
+                let (task, bytes) = row?;
+                let bytes =
+                    usize::try_from(bytes).map_err(|_| InvestigationStoreError::Capacity)?;
+                let task_rows = &mut snapshot.tasks.entry(task).or_default().rows;
+                *task_rows = task_rows
+                    .checked_add(bytes)
+                    .ok_or(InvestigationStoreError::Capacity)?;
+                snapshot.global.rows = snapshot
+                    .global
+                    .rows
+                    .checked_add(bytes)
+                    .ok_or(InvestigationStoreError::Capacity)?;
+            }
+        }
+        // Do not trust disposition row presence to release a claim. Validate
+        // every settlement once in this snapshot; a pending-only index awaits
+        // the exact task3 pending-state integration.
+        let mut statement = self.connection.prepare(
+            "SELECT task_id,step_id FROM investigation_read_reservations ORDER BY task_id,step_id",
+        )?;
+        let mut pending_tasks = BTreeSet::new();
+        for row in statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (task, step) = row?;
+            let saved = load_validated(self.connection, &task, &step)?
+                .ok_or(InvestigationStoreError::Invalid)?;
+            #[cfg(test)]
+            {
+                self.validated_reads += 1;
+            }
+            if saved.disposition.is_none() {
+                if !pending_tasks.insert(task.clone()) {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+                let bytes = saved.reservation.storage_claim_bytes;
+                snapshot.tasks.entry(task).or_default().claims = bytes;
+                snapshot.global.claims = snapshot
+                    .global
+                    .claims
+                    .checked_add(bytes)
+                    .ok_or(InvestigationStoreError::Capacity)?;
+            }
+        }
+        Ok(snapshot)
+    }
+    pub(super) fn capacity_charge(
+        &mut self,
+        task: Option<&str>,
+    ) -> Result<CapacityCharge, InvestigationStoreError> {
+        self.ensure_preflight()?;
+        if self.capacity.is_none() {
+            self.capacity = Some(self.derive_capacity()?);
+        }
+        let snapshot = self
+            .capacity
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        Ok(match task {
+            None => snapshot.global,
+            Some(task) => snapshot.tasks.get(task).copied().unwrap_or_default(),
+        })
+    }
+}
+
+/// Compatibility scopes cannot export an owned handle/cache. Their fresh
+/// preflight is intentionally per call; retain new(&Transaction) in new code.
+pub(super) fn with_compatibility_scope<T>(
+    connection: &Connection,
+    body: impl for<'scope> FnOnce(&mut ReadTransaction<'scope>) -> Result<T, InvestigationStoreError>,
+) -> Result<T, InvestigationStoreError> {
+    let mut reads = ReadTransaction::compatible(connection)?;
+    body(&mut reads)
+}
+
+/// Compatibility wrappers create a fresh transaction-bound scope per call.
+/// Future atomic transition callers retain ReadTransaction across operations.
 pub(super) fn insert_reservation(
     connection: &Connection,
     r: &Reservation,
 ) -> Result<(), InvestigationStoreError> {
-    preflight(connection)?;
-    r.validate()?;
-    let b = &r.binding;
-    let (count, pending): (i64, bool) = connection.query_row(
-        "SELECT count(*), EXISTS(SELECT 1 FROM investigation_read_reservations r LEFT JOIN investigation_read_dispositions d USING(task_id,step_id) WHERE r.task_id=?1 AND d.task_id IS NULL) FROM investigation_read_reservations WHERE task_id=?1",
-        [&b.task_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    if pending {
-        return Err(InvestigationStoreError::Conflict);
-    }
-    let global: i64 = connection.query_row(
-        "SELECT count(*) FROM investigation_read_reservations",
-        [],
-        |row| row.get(0),
-    )?;
-    if usize::try_from(global)
-        .ok()
-        .is_none_or(|n| n >= MAX_RESERVATIONS)
-    {
-        return Err(InvestigationStoreError::Capacity);
-    }
-    if usize::try_from(count)
-        .ok()
-        .is_none_or(|n| n >= MAX_RESERVATIONS_PER_TASK)
-    {
-        return Err(InvestigationStoreError::Capacity);
-    }
-    insert(connection, TABLES[0], &b.task_id, &b.step_id, r)
+    ReadTransaction::compatible(connection)?.insert_reservation(r)
 }
 pub(super) fn insert_charge(
     connection: &Connection,
@@ -547,82 +832,32 @@ pub(super) fn insert_charge(
     step: &str,
     charge: &ValidationCharge,
 ) -> Result<(), InvestigationStoreError> {
-    let saved = load(connection, task, step)?.ok_or(InvestigationStoreError::Missing)?;
-    if saved.disposition.is_some() {
-        return Err(InvestigationStoreError::Conflict);
-    }
-    charge.validate(&saved.reservation)?;
-    insert(connection, TABLES[1], task, step, charge)
+    ReadTransaction::compatible(connection)?.insert_charge(task, step, charge)
 }
-/// Caller proves actual read/no-access/owner-loss disposition authority. A kind
-/// tag alone never establishes that source access did or did not happen.
 pub(super) fn insert_disposition(
     connection: &Connection,
     task: &str,
     step: &str,
     disposition: &Disposition,
 ) -> Result<(), InvestigationStoreError> {
-    let saved = load(connection, task, step)?.ok_or(InvestigationStoreError::Missing)?;
-    disposition.validate(&saved.reservation, saved.charge.as_ref())?;
-    insert(connection, TABLES[2], task, step, disposition)
+    ReadTransaction::compatible(connection)?.insert_disposition(task, step, disposition)
 }
-
-/// Actual stored rows only. Shared storage::stored_bytes adds these rows and
-/// pending_storage_claims exactly once to every task/global capacity admission.
+/// Actual logical row charges only. Shared storage adds rows and claims once.
 pub(super) fn stored_bytes(
     connection: &Connection,
     task: Option<&str>,
 ) -> Result<usize, InvestigationStoreError> {
-    if !validate_optional_schema(connection)? {
-        return Ok(0);
-    }
-    preflight(connection)?;
-    let mut bytes = READ_NAMESPACE_ALLOWANCE_BYTES; // charged once globally
-    if task.is_some() {
-        bytes = 0;
-    }
-    for table in TABLES {
-        let sum: i64 = connection.query_row(&format!("SELECT coalesce(sum(length(CAST(body AS BLOB))+length(CAST(body_hash AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(step_id AS BLOB))+{READ_ROW_ALLOWANCE_BYTES}),0) FROM {table} WHERE (?1 IS NULL OR task_id=?1)"),
-            [task], |row| row.get(0))?;
-        bytes = bytes
-            .checked_add(usize::try_from(sum).map_err(|_| InvestigationStoreError::Capacity)?)
-            .ok_or(InvestigationStoreError::Capacity)?;
-    }
-    Ok(bytes)
+    Ok(ReadTransaction::compatible(connection)?
+        .capacity_charge(task)?
+        .rows)
 }
-
-/// Validate each bounded saved body before trusting its claim. Settled unknown
-/// retains unknown tool debits but releases the storage claim, just like all
-/// other durable dispositions. No independent mutable claim counter can drift.
 pub(super) fn pending_storage_claims(
     connection: &Connection,
     task: Option<&str>,
 ) -> Result<usize, InvestigationStoreError> {
-    if !validate_optional_schema(connection)? {
-        return Ok(0);
-    }
-    preflight(connection)?;
-    let mut keys = connection.prepare("SELECT task_id,step_id FROM investigation_read_reservations WHERE (?1 IS NULL OR task_id=?1) ORDER BY task_id,step_id")?;
-    let rows = keys.query_map([task], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    let mut total = 0usize;
-    let mut prior_task = None;
-    for row in rows {
-        let (id, step) = row?;
-        let saved =
-            load_validated(connection, &id, &step)?.ok_or(InvestigationStoreError::Invalid)?;
-        if saved.disposition.is_none() {
-            if prior_task.as_ref() == Some(&id) {
-                return Err(InvestigationStoreError::Invalid);
-            }
-            prior_task = Some(id.clone());
-            total = total
-                .checked_add(saved.reservation.storage_claim_bytes)
-                .ok_or(InvestigationStoreError::Capacity)?;
-        }
-    }
-    Ok(total)
+    Ok(ReadTransaction::compatible(connection)?
+        .capacity_charge(task)?
+        .claims)
 }
 
 /// Audit deltas for one task, including permanently retained unknown debits.

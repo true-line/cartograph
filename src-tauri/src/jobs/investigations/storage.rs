@@ -735,13 +735,26 @@ pub(super) fn check_task_capacity(
     id: &str,
     terminal: bool,
 ) -> Result<(), InvestigationStoreError> {
+    super::read_reservations::with_compatibility_scope(connection, |reads| {
+        check_task_capacity_with_reads(connection, id, terminal, reads)
+    })
+}
+
+/// Reuse one caller-transaction-borrowed read snapshot across both bounds and
+/// repeated checks. Namespace writes invalidate/rederive it before the next use.
+pub(super) fn check_task_capacity_with_reads(
+    connection: &Connection,
+    id: &str,
+    terminal: bool,
+    reads: &mut super::read_reservations::ReadTransaction<'_>,
+) -> Result<(), InvestigationStoreError> {
     let maximum = if terminal {
         TASK_CAPACITY
     } else {
         TASK_CAPACITY - TERMINAL_RESERVE
     };
-    if stored_bytes(connection, Some(id))? > maximum
-        || stored_bytes(connection, None)? > STORE_CAPACITY
+    if stored_bytes_with_reads(connection, Some(id), reads)? > maximum
+        || stored_bytes_with_reads(connection, None, reads)? > STORE_CAPACITY
     {
         return Err(InvestigationStoreError::Capacity);
     }
@@ -767,10 +780,25 @@ pub(super) fn remaining_store_capacity(
         .ok_or(InvestigationStoreError::Capacity)
 }
 
+/// Compatibility wrapper: a fresh short-lived read preflight/snapshot per
+/// call. Existing absent-namespace autocommit metadata reads stay unchanged.
 pub(super) fn stored_bytes(
     connection: &Connection,
     id: Option<&str>,
 ) -> Result<usize, InvestigationStoreError> {
+    super::read_reservations::with_compatibility_scope(connection, |reads| {
+        stored_bytes_with_reads(connection, id, reads)
+    })
+}
+
+pub(super) fn stored_bytes_with_reads(
+    connection: &Connection,
+    id: Option<&str>,
+    reads: &mut super::read_reservations::ReadTransaction<'_>,
+) -> Result<usize, InvestigationStoreError> {
+    if !reads.matches_connection(connection) {
+        return Err(InvestigationStoreError::Invalid);
+    }
     // Effective occupied capacity: fixed allowances, every stored body, and
     // additional pending source-settlement claims. Claims are beyond the
     // existing TERMINAL_RESERVE; do not add that reserve here a second time.
@@ -808,8 +836,7 @@ pub(super) fn stored_bytes(
     // accounting without creating or migrating its private schema.
     let journal_bytes = super::staged::journal_bytes(connection, id)?;
     let completion_bytes = super::completion::stored_bytes(connection, id)?;
-    let read_bytes = super::read_reservations::stored_bytes(connection, id)?;
-    let read_claims = super::read_reservations::pending_storage_claims(connection, id)?;
+    let read_charge = reads.capacity_charge(id)?.occupied()?;
     let refs: i64 = connection.query_row(
         "SELECT coalesce(sum(length(CAST(task_id AS BLOB))+length(CAST(source_id AS BLOB))+length(CAST(repo_key AS BLOB))+length(CAST(receipt_id AS BLOB))+128),0) FROM investigation_refs WHERE (?1 IS NULL OR task_id=?1)",
         [id], |r| r.get(0),
@@ -818,8 +845,7 @@ pub(super) fn stored_bytes(
         .checked_add(usize::try_from(refs).map_err(|_| InvestigationStoreError::Invalid)?)
         .and_then(|bytes| bytes.checked_add(journal_bytes))
         .and_then(|bytes| bytes.checked_add(completion_bytes))
-        .and_then(|bytes| bytes.checked_add(read_bytes))
-        .and_then(|bytes| bytes.checked_add(read_claims))
+        .and_then(|bytes| bytes.checked_add(read_charge))
         .ok_or(InvestigationStoreError::Capacity)
 }
 

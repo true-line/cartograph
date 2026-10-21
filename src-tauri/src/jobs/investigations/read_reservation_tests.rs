@@ -519,3 +519,6 @@ fn read_reservation_storage_ceiling_covers_every_accepted_policy_budget() {
 
 #[path = "read_reservation_storage_tests.rs"]
 mod storage_tests;
+
+#[path = "read_reservation_preflight_tests.rs"]
+mod preflight_tests;
