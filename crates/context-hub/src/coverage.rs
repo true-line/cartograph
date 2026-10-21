@@ -388,9 +388,10 @@ impl CoverageContext {
         })
     }
 
-    /// Borrow the exact immutable graph projection used for qualified queries.
-    pub fn snapshot(&self) -> &ContextSnapshot {
-        &self.snapshot
+    /// Test whether this context shares the supplied graph projection allocation.
+    /// This exposes no graph facts or unqualified query access.
+    pub fn shares_snapshot(&self, snapshot: &Arc<ContextSnapshot>) -> bool {
+        Arc::ptr_eq(&self.snapshot, snapshot)
     }
 
     /// Graph-only snapshot identity, unchanged from [`ContextSnapshot::id`].

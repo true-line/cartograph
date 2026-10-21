@@ -340,7 +340,8 @@ fn shared_coverage_projection_preserves_owned_wire_identity_and_cursor_contract(
     let shared =
         CoverageContext::from_shared_snapshot(Arc::clone(&original), coverage.clone()).unwrap();
     let owned = graph().with_coverage(coverage).unwrap();
-    assert!(std::ptr::eq(original.as_ref(), shared.snapshot()));
+    assert!(shared.shares_snapshot(&original));
+    assert!(!shared.shares_snapshot(&Arc::new(graph())));
     assert_eq!(Arc::strong_count(&original), 2);
     assert_eq!(shared.snapshot_id(), owned.snapshot_id());
     assert_eq!(shared.context_id(), owned.context_id());
@@ -353,10 +354,6 @@ fn shared_coverage_projection_preserves_owned_wire_identity_and_cursor_contract(
         max_bytes: 4096,
         ..QueryRequest::default()
     };
-    assert_eq!(
-        serde_json::to_vec(&original.query(request.clone()).unwrap()).unwrap(),
-        serde_json::to_vec(&shared.snapshot().query(request.clone()).unwrap()).unwrap()
-    );
     let mut cursor = None;
     let mut facts = 0;
     loop {

@@ -673,10 +673,7 @@ fn qualified_preparation_shares_one_scoped_projection_and_halves_construction_wo
             FrozenContext::scoped_snapshot(&previous.graph, &requested.scope, complete).unwrap();
         let previous_qualified = scoped.with_coverage(qualification).unwrap();
         let before = take_projection_work();
-        assert!(!std::ptr::eq(
-            previous.snapshot.as_ref(),
-            previous_qualified.snapshot()
-        ));
+        assert!(!previous_qualified.shares_snapshot(&previous.snapshot));
         assert_eq!(Arc::strong_count(&previous.snapshot), 1);
         previous.ledger.schema_version = 2;
         previous.ledger.coverage = Some(previous_qualified.durable_proof().unwrap());
@@ -685,10 +682,7 @@ fn qualified_preparation_shares_one_scoped_projection_and_halves_construction_wo
         let prepared = fixture.prepare(&requested).unwrap();
         let after = take_projection_work();
         let qualified = prepared.qualified.as_ref().unwrap();
-        assert!(std::ptr::eq(
-            prepared.snapshot.as_ref(),
-            qualified.snapshot()
-        ));
+        assert!(qualified.shares_snapshot(&prepared.snapshot));
         assert_eq!(Arc::strong_count(&prepared.snapshot), 2);
         assert_eq!(before.constructions, 2 * after.constructions);
         assert_eq!(before.nodes, 2 * after.nodes);
