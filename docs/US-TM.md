@@ -11,7 +11,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0005 | AC-0013..0014 | adapters-lang-ts(tsx), adapters-fw | M4 | F-* | ADR-0003 | T-0013..0014 |
 | US-0006 | AC-0015..0017,AC-0083,AC-0219,AC-0257 | flowtracer | M3–M5 | F-* | ADR-0002, ADR-0032 | T-0015..0017,T-0083,T-0219,T-0257 |
 | US-0007 | AC-0018..0020,AC-0061 | core-prov, agents, ui | M0, M8 | — | ADR-0002, ADR-0006 | T-0018..0020,T-0061 |
-| US-0008 | AC-0021..0022, AC-0269 | adapters-lang-ts, iac, core-graph, semantic, llm, app | M7 | F-* | ADR-0002, ADR-0004, ADR-0010, ADR-0037 | T-0021..0022, T-0269 |
+| US-0008 | AC-0021..0022, AC-0269, AC-0285 | adapters-lang-ts, iac, core-graph, semantic, llm, app | M7 | F-* | ADR-0002, ADR-0004, ADR-0010, ADR-0037 | T-0021..0022, T-0269, T-0285 |
 | US-0009 | AC-0023..0025,AC-0055..0056,AC-0063,AC-0087,AC-0089,AC-0231 | agents, llm, ingest, app, ui | M8 | — | ADR-0004 | T-0023..0025,T-0055..0056,T-0063,T-0087,T-0089,T-0231 |
 | US-0010 | AC-0026..0028,AC-0062,AC-0064,AC-0081,AC-0086 | core-graph, app, ui | M9 | — | ADR-0001 | T-0026..0028,T-0062,T-0064,T-0081,T-0086 |
 | US-0011 | AC-0029..0031, AC-0065..0066, AC-0084 | app, flowtracer, ui | M9 | F-* | ADR-0002 | T-0029..0031, T-0065..0066, T-0084 |

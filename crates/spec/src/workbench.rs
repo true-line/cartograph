@@ -2424,6 +2424,49 @@ mod tests {
     }
 
     #[test]
+    fn interface_dispatch_gap_groups_under_its_exclusion_in_the_register() {
+        // AC-0285 (#711 review): the persisted Gap, not only the semantic
+        // overlay, groups under the dynamic dispatch exclusion.
+        let prov = review_gap_prov();
+        let nodes = vec![
+            Node {
+                id: "sym".into(),
+                label: "Symbol".into(),
+                props: serde_json::json!({"prov": prov}),
+            },
+            Node {
+                id: "gap".into(),
+                label: "Gap".into(),
+                props: serde_json::json!({"prov": prov, "callee": "IChannel.listen", "reason": "unresolved call target"}),
+            },
+        ];
+        let edges = vec![Edge {
+            src: "sym".into(),
+            dst: "gap".into(),
+            label: "CALLS".into(),
+            props: serde_json::json!({"prov": prov}),
+        }];
+        let flows = flowtracer::trace(&nodes, &edges);
+        let bundle = compile_spec(
+            &nodes,
+            &edges,
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        );
+        let (register, _) = gap_artifacts(&bundle);
+        let gap = register
+            .assertions
+            .iter()
+            .find(|a| a.subject_kind == "Gap")
+            .unwrap();
+        assert_eq!(
+            gap.omission.as_ref().unwrap().detail,
+            core_graph::omission::DYNAMIC_DISPATCH
+        );
+    }
+
+    #[test]
     fn reversed_subscribes_hop_keeps_its_source_edge_omission() {
         // #603 review (Codex reproduction): SUBSCRIBES is stored consumer →
         // channel but traced channel → consumer; the hop still finds its edge.

@@ -376,7 +376,8 @@ impl IndependentReceipt {
         // Ranking happens here, not in a caller-supplied proposal list: every family
         // uses its frozen top-k and both leaders are present for ambiguity admission.
         let mut groups: BTreeMap<FamilyKey, Vec<&UnresolvedHop>> = BTreeMap::new();
-        for h in hops {
+        // Excluded hops (e.g. interface dispatch, #259) never stage here.
+        for h in hops.iter().filter(|h| h.is_ann_candidate()) {
             groups.entry(h.family()).or_default().push(h);
         }
         if groups.len() > 256 {
@@ -731,6 +732,7 @@ mod tests {
                 subtype: c.family.subtype().map(str::to_owned),
                 query: c.hop.query.clone(),
                 evidence: ev(&c.hop.evidence),
+                exclusion: None,
             }],
             c.candidates
                 .iter()

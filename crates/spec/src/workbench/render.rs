@@ -449,16 +449,8 @@ struct Origin {
 }
 impl Origin {
     fn new(props: &serde_json::Value) -> Self {
-        let omission = serde_json::from_value::<Omission>(props["omission"].clone())
-            .ok()
-            .or_else(|| {
-                props["t1_reason"]
-                    .as_str()
-                    .or_else(|| props["reason"].as_str())
-                    .map(Omission::classify)
-            });
         Self {
-            cached: omission.map(|o| SharedOmission(std::sync::Arc::new(o))),
+            cached: Omission::recorded(props).map(|o| SharedOmission(std::sync::Arc::new(o))),
         }
     }
     fn resolve(&self, fallback: &str) -> SharedOmission {

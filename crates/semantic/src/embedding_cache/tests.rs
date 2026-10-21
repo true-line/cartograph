@@ -284,6 +284,7 @@ fn embedding_cache_whole_preview_reopens_zero_calls_and_recomputes_labels_and_me
         subtype: None,
         query: "same".into(),
         evidence,
+        exclusion: None,
     };
     let candidate = Candidate {
         node_id: "target".into(),

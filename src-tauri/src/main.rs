@@ -4757,7 +4757,7 @@ fn calibration_summary(
         DecisionReason, EvaluationSummary, FamilyDecision, FamilyStatus, SummaryMode,
     };
     let mut counts = std::collections::BTreeMap::new();
-    for hop in hops {
+    for hop in hops.iter().filter(|hop| hop.is_ann_candidate()) {
         counts.entry(hop.family()).or_insert(0_u64);
     }
     for proposal in proposals {
