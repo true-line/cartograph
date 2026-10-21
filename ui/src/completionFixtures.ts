@@ -44,3 +44,32 @@ export const expandedCompletionCatalog: InvestigationCatalog = {
     max_completion_obligations: 56, request_bytes: 65536, envelope_bytes: 65536,
     specialist_ids: ['domain-analyst@8', 'evidence-auditor@8'] }],
 };
+
+/** Current request family, with the same immutable expanded numeric policy. */
+export const queryHistoryCatalog: InvestigationCatalog = {
+  ...expandedCompletionCatalog,
+  specialists: expandedCompletionCatalog.specialists.map((item) => item.version === 8 ? {
+    ...item, id: item.id.replace('@8', '@9') as import('./investigationTypes').SpecialistId,
+    version: 9, prompt_fingerprint: `fixture-${item.id.replace('@8', '@9')}`,
+    operations: [...item.operations, 'replay_query'],
+  } : item),
+  policies: expandedCompletionCatalog.policies!.map((policy) => ({ ...policy, request_schema_version: 6,
+    specialist_ids: ['domain-analyst@9', 'evidence-auditor@9'] })),
+};
+
+export function queryHistoryDetail(id = 'inv-query-history'): InvestigationDetail {
+  const detail = completionDetail(id, { schema_version: 6, specialist_id: 'domain-analyst@9',
+    specialist: queryHistoryCatalog.specialists.find((item) => item.id === 'domain-analyst@9')!,
+    limits: queryHistoryCatalog.policies![0].limits });
+  detail.completion!.obligations.schema_version = 2;
+  detail.completion!.obligations.contract = 'investigation-completion-obligations@2';
+  if (detail.completion!.assessment_basis.kind === 'finishing_disclosure') {
+    detail.completion!.assessment_basis.disclosure_hash = `investigation-disclosure-v5:${'d'.repeat(64)}`;
+  }
+  return detail;
+}
+
+export function queryHistoryResult(id = 'inv-query-history'): InvestigationResult {
+  return completionResult(id, { schema_version: 6, result_id: `investigation-result-v6:${'7'.repeat(64)}`,
+    disclosure_hash: `investigation-disclosure-v5:${'d'.repeat(64)}` });
+}

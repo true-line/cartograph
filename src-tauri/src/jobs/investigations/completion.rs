@@ -26,8 +26,13 @@ impl CompletionIntent {
         let policy = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
         let request = request.normalized_with_policy(policy)?;
+        let specialist: SpecialistId =
+            serde_json::from_value(serde_json::Value::String(request.specialist_id.clone()))
+                .map_err(|_| InvestigationStoreError::Invalid)?;
         Ok(Self {
-            schema_version: if policy.profile() == "investigation-v1" {
+            schema_version: if specialist.uses_query_history_disclosure() {
+                3
+            } else if policy.profile() == "investigation-v1" {
                 1
             } else {
                 2
@@ -40,10 +45,7 @@ impl CompletionIntent {
             expected_context: request.expected_context_id.clone(),
             expected_graph: request.expected_graph_revision.clone(),
             nonce: request.request_nonce.clone(),
-            specialist: serde_json::from_value(serde_json::Value::String(
-                request.specialist_id.clone(),
-            ))
-            .map_err(|_| InvestigationStoreError::Invalid)?,
+            specialist,
             scope: request.scope.clone(),
             provider_mode: request.provider_mode,
             parent: request.parent_id.clone(),
@@ -57,7 +59,14 @@ impl CompletionIntent {
         let policy = saved_policy(task)?;
         let legacy = policy.profile() == "investigation-v1";
         let summary = &task.detail.summary;
-        if self.schema_version != if legacy { 1 } else { 2 }
+        if self.schema_version
+            != if summary.specialist_id.uses_query_history_disclosure() {
+                3
+            } else if legacy {
+                1
+            } else {
+                2
+            }
             || self.limit_profile.as_deref() != if legacy { None } else { Some(policy.profile()) }
             || summary.specialist_id.uses_policy_selection() == legacy
             || !hash_valid(&self.request_hash)
@@ -93,6 +102,36 @@ impl CompletionIntent {
                 .as_ref()
                 .is_none_or(|context| context.context_id != self.expected_context)
         {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        if let Some(detail) = &task.detail.completion {
+            self.validate_assessment_basis(&detail.assessment_basis)?;
+        }
+        Ok(())
+    }
+    // Numeric policy ceilings are shared by @8 and @9, but their disclosure
+    // identities retain the family admitted by the immutable completion intent.
+    fn validate_assessment_basis(
+        &self,
+        basis: &CompletionAssessmentBasis,
+    ) -> Result<(), InvestigationStoreError> {
+        let disclosure_hash = match basis {
+            CompletionAssessmentBasis::NotAssessed => None,
+            CompletionAssessmentBasis::FinishingDisclosure {
+                disclosure_hash, ..
+            } => Some(disclosure_hash),
+            CompletionAssessmentBasis::TerminalObservation {
+                last_refusal_basis, ..
+            } => last_refusal_basis
+                .as_ref()
+                .map(|basis| &basis.disclosure_hash),
+        };
+        let prefix = if self.schema_version == 3 {
+            "investigation-disclosure-v5:"
+        } else {
+            "investigation-disclosure-v4:"
+        };
+        if disclosure_hash.is_some_and(|hash| !hash.strip_prefix(prefix).is_some_and(hash_valid)) {
             return Err(InvestigationStoreError::Invalid);
         }
         Ok(())
@@ -792,7 +831,17 @@ pub(super) fn validate_step_metadata(
         .as_ref()
         .ok_or(InvestigationStoreError::Invalid)?;
     let metadata = metadata(connection, task, Some(&step.step_id))?;
-    if disclosure.schema_version != 4
+    let progressive = task
+        .detail
+        .summary
+        .specialist_id
+        .uses_query_history_disclosure();
+    if disclosure.schema_version != if progressive { 5 } else { 4 }
+        || disclosure
+            .query_history
+            .as_ref()
+            .map(|binding| binding.request_hash.as_str())
+            != progressive.then_some(intent.request_hash.as_str())
         || disclosure.completion_contract_hash.as_deref()
             != Some(intent.contract().fingerprint_with_policy(policy)?.as_str())
         || disclosure.completion_metadata_hash.as_deref()
@@ -1081,7 +1130,7 @@ fn validate_legacy_evidence(
         if step
             .disclosure
             .as_ref()
-            .is_some_and(|disclosure| disclosure.schema_version == 4)
+            .is_some_and(|disclosure| matches!(disclosure.schema_version, 4 | 5))
         {
             return Err(InvestigationStoreError::Invalid);
         }

@@ -244,7 +244,7 @@ impl StagedObligationRequest {
     ) -> Result<Self, InvestigationError> {
         // Whole request admission must precede envelope partition clones.
         bounded_bytes(self, policy.request_bytes())?;
-        let (schema, roles, _) = request_family(policy)?;
+        let (schema, roles, _) = request_family(policy, self.schema_version, &self.specialist_id)?;
         if self.schema_version != schema
             || self.inspection_requirements.is_some()
             || !roles.contains(&self.specialist_id.as_str())
@@ -341,35 +341,48 @@ impl StagedObligationRequest {
         &self,
         policy: &InvestigationPolicy,
     ) -> Result<String, InvestigationError> {
-        let (_, _, domain) = request_family(policy)?;
+        // Preserve the existing whole-request capacity error before family
+        // rejection, even if an oversized request also has a mismatched role.
+        let request = self.normalized_with_policy(policy)?;
+        let (_, _, domain) =
+            request_family(policy, request.schema_version, &request.specialist_id)?;
         Ok(crate::source_basis::domain_hash(
             domain,
-            &bounded_bytes(
-                &self.normalized_with_policy(policy)?,
-                policy.request_bytes(),
-            )?,
+            &bounded_bytes(&request, policy.request_bytes())?,
         ))
     }
 }
 
 fn request_family(
     policy: &InvestigationPolicy,
+    schema_version: u32,
+    specialist_id: &str,
 ) -> Result<(u32, [&'static str; 2], &'static [u8]), InvestigationError> {
-    match policy.profile() {
-        "investigation-v1" => Ok((
+    // V2 has two distinct immutable request/prompt families. Policy alone
+    // cannot select their meaning, including when hashing a saved request.
+    match (policy.profile(), schema_version, specialist_id) {
+        ("investigation-v1", 4, "domain-analyst@7" | "evidence-auditor@7") => Ok((
             4,
             ["domain-analyst@7", "evidence-auditor@7"],
             b"cartograph:investigation-client-intent:v4\0",
         )),
-        "investigation-v2" => Ok((
+        ("investigation-v2", 5, "domain-analyst@8" | "evidence-auditor@8") => Ok((
             5,
             ["domain-analyst@8", "evidence-auditor@8"],
             b"cartograph:investigation-client-intent:v5\0",
+        )),
+        ("investigation-v2", 6, "domain-analyst@9" | "evidence-auditor@9") => Ok((
+            6,
+            ["domain-analyst@9", "evidence-auditor@9"],
+            b"cartograph:investigation-client-intent:v6\0",
         )),
         _ => Err(InvestigationError::InvalidRequest),
     }
 }
 
+#[cfg(test)]
+#[path = "query_history_family_tests.rs"]
+mod query_history_family_tests;
 #[cfg(test)]
 #[path = "obligations_tests.rs"]
 mod tests;

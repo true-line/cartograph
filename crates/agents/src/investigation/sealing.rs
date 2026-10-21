@@ -27,7 +27,7 @@ pub(super) fn seal_with_policy(
     // non-v1 completion prompt never uses schema 6.
     let schema = before["schema_version"].as_u64();
     let legacy = policy.profile() == INVESTIGATION_V1_POLICY.profile();
-    if (schema == Some(7) && legacy) || (schema == Some(6) && !legacy) {
+    if (matches!(schema, Some(7 | 8)) && legacy) || (schema == Some(6) && !legacy) {
         return Err(InvestigationError::InvalidInput);
     }
     let limits =
@@ -38,7 +38,7 @@ pub(super) fn seal_with_policy(
     if let Some(proof) = &ledger.coverage {
         let public = serde_json::to_value(&proof.qualification)
             .map_err(|_| InvestigationError::InvalidInput)?;
-        if !matches!(schema, Some(5..=7))
+        if !matches!(schema, Some(5..=8))
             || before.get("coverage_qualification") != Some(&public)
             || before.get("context_id").and_then(Value::as_str) != Some(proof.context_id.as_str())
             || before.get("coverage_qualification") != after.get("coverage_qualification")
@@ -46,7 +46,7 @@ pub(super) fn seal_with_policy(
         {
             return Err(InvestigationError::InvalidInput);
         }
-    } else if matches!(schema, Some(5..=7)) {
+    } else if matches!(schema, Some(5..=8)) {
         return Err(InvestigationError::InvalidInput);
     }
     // Protocol/basis/citation identities must survive redaction exactly. Source
@@ -63,7 +63,7 @@ pub(super) fn seal_with_policy(
             return Err(InvestigationError::InvalidInput);
         }
     }
-    if matches!(schema, Some(3..=7))
+    if matches!(schema, Some(3..=8))
         && (before.get("turn_progress").is_none()
             || before.get("turn_progress") != after.get("turn_progress"))
     {
@@ -82,7 +82,7 @@ pub(super) fn seal_with_policy(
             }
         }
     }
-    if schema == Some(7) {
+    if matches!(schema, Some(7 | 8)) {
         if before.get("inspection_requirements").is_some()
             || after.get("inspection_requirements").is_some()
         {
@@ -94,7 +94,7 @@ pub(super) fn seal_with_policy(
             }
         }
     }
-    let (completion_contract_hash, completion_metadata_hash) = if matches!(schema, Some(6 | 7)) {
+    let (completion_contract_hash, completion_metadata_hash) = if matches!(schema, Some(6..=8)) {
         for field in ["completion_contract", "completion_metadata"] {
             if before.get(field).is_none() || before.get(field) != after.get(field) {
                 return Err(InvestigationError::InvalidInput);
@@ -115,7 +115,7 @@ pub(super) fn seal_with_policy(
             Some(contract.fingerprint_with_policy(policy)?),
             Some(metadata.fingerprint_with_policy(policy)?),
         );
-        if schema == Some(7) {
+        if matches!(schema, Some(7 | 8)) {
             contract_targets(&before, &contract, policy, private_targets)?;
         }
         hashes
@@ -136,15 +136,82 @@ pub(super) fn seal_with_policy(
     let facts = array(&after["compact_context"], "facts")?;
     let raw_options = array(&before["compact_context"], "evidence_options")?;
     let options = array(&after["compact_context"], "evidence_options")?;
-    let queries = array(&after["compact_context"], "queries")?;
+    let progressive = schema == Some(8);
+    let (query_history, progressive_queries) = if progressive {
+        if before["policy"] != QUERY_HISTORY_DISCLOSURE_POLICY {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let original_context: ProgressiveInvestigationContext =
+            serde_json::from_value(before["compact_context"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        let actual_context: ProgressiveInvestigationContext =
+            serde_json::from_value(after["compact_context"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        let request_hash = before["completion_contract"]["request_hash"]
+            .as_str()
+            .ok_or(InvestigationError::InvalidInput)?;
+        original_context
+            .query_history
+            .validate_registry(request_hash, ledger, policy)?;
+        if original_context.query_history != actual_context.query_history {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let mut queries = original_context
+            .query_history
+            .prior_queries
+            .iter()
+            .map(|reference| DisclosedInvestigationQuery {
+                query_index: reference.query_index,
+                representation: DisclosureRepresentation::Omitted {
+                    reason: DisclosureOmissionReason::ReferenceOnly,
+                },
+            })
+            .collect::<Vec<_>>();
+        if let Some(latest) = &actual_context.query_history.latest_query {
+            // Repeated acquisitions can share interned objects. The ledger's
+            // total returned-fact count is only a loose upper bound; a latest
+            // view must index representations actually supplied in this payload.
+            if latest
+                .context
+                .fact_indexes
+                .iter()
+                .any(|index| *index >= facts.len())
+                || latest
+                    .evidence_option_indexes
+                    .iter()
+                    .any(|index| *index >= options.len())
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+            queries.push(DisclosedInvestigationQuery {
+                query_index: latest.reference.query_index,
+                representation: supplied(latest)?,
+            });
+        }
+        (
+            Some(DisclosedQueryHistory::from_ledger(
+                request_hash,
+                ledger,
+                policy,
+            )?),
+            queries,
+        )
+    } else {
+        (None, Vec::new())
+    };
+    let queries: &[Value] = if progressive {
+        &[]
+    } else {
+        array(&after["compact_context"], "queries")?
+    };
     if facts.len() != raw_facts.len()
         || options.len() != raw_options.len()
-        || queries.len() != ledger.queries.len()
+        || (!progressive && queries.len() != ledger.queries.len())
         || egress.payload.spans.len() != original.spans.len()
     {
         return Err(InvestigationError::InvalidInput);
     }
-    if ledger.coverage.is_some() {
+    if ledger.coverage.is_some() && !progressive {
         let raw_queries = array(&before["compact_context"], "queries")?;
         for (original, supplied) in raw_queries.iter().zip(queries) {
             if original.get("qualification").is_none()
@@ -259,6 +326,7 @@ pub(super) fn seal_with_policy(
         }
     }
     let disclosure = InvestigationDisclosure {
+        query_history,
         completion_contract_hash,
         completion_metadata_hash,
         coverage_details,
@@ -275,7 +343,9 @@ pub(super) fn seal_with_policy(
                     .ok_or(InvestigationError::InvalidInput)
             })
             .transpose()?,
-        schema_version: if matches!(schema, Some(6 | 7)) {
+        schema_version: if progressive {
+            5
+        } else if matches!(schema, Some(6 | 7)) {
             4
         } else if before["schema_version"] == 5 {
             3
@@ -284,22 +354,31 @@ pub(super) fn seal_with_policy(
         } else {
             1
         },
-        policy: COMPACT_DISCLOSURE_POLICY.into(),
+        policy: if progressive {
+            QUERY_HISTORY_DISCLOSURE_POLICY
+        } else {
+            COMPACT_DISCLOSURE_POLICY
+        }
+        .into(),
         input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
         graph_snapshot_id: ledger.graph_snapshot_id.clone(),
         scope_snapshot_id: ledger.scope_snapshot_id.clone(),
         payload_hash: egress.payload_hash.clone(),
         facts: disclosed_facts,
-        queries: queries
-            .iter()
-            .enumerate()
-            .map(|(query_index, query)| {
-                Ok(DisclosedInvestigationQuery {
-                    query_index,
-                    representation: supplied(query)?,
+        queries: if progressive {
+            progressive_queries
+        } else {
+            queries
+                .iter()
+                .enumerate()
+                .map(|(query_index, query)| {
+                    Ok(DisclosedInvestigationQuery {
+                        query_index,
+                        representation: supplied(query)?,
+                    })
                 })
-            })
-            .collect::<Result<_, InvestigationError>>()?,
+                .collect::<Result<_, InvestigationError>>()?
+        },
         sources,
         history: ledger
             .supplied_history_hash
@@ -397,3 +476,7 @@ fn supplied(value: &impl serde::Serialize) -> Result<DisclosureRepresentation, I
         representation_hash: content_hash(&bounded_bytes(value, MAX_INPUT_BYTES)?),
     })
 }
+
+#[cfg(test)]
+#[path = "query_history_sealing_tests.rs"]
+mod query_history_tests;

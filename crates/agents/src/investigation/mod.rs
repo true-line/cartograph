@@ -116,3 +116,12 @@ pub fn decode_record<T: serde::de::DeserializeOwned + serde::Serialize>(
 
 #[cfg(test)]
 mod result_disclosure_tests;
+
+#[cfg(test)]
+mod expanded_capacity_witness_tests;
+
+mod query_history;
+pub use query_history::*;
+
+mod query_history_protocol;
+pub use query_history_protocol::*;

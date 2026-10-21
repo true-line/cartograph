@@ -45,9 +45,9 @@ function validSummary(value: InvestigationSummary | null, id?: string): value is
   if (value === null || typeof value.investigation_id !== 'string' || value.investigation_id.length === 0 ||
       (id && value.investigation_id !== id) || !Number.isSafeInteger(value.revision) || value.revision < 0 ||
       !Number.isSafeInteger(value.last_event_sequence) || value.last_event_sequence < 0 ||
-      value.last_event_sequence > (value.specialist_id.endsWith('@8') ? 512 : 96) || typeof value.actions?.can_cancel !== 'boolean' ||
+      value.last_event_sequence > (/@[89]$/.test(value.specialist_id) ? 512 : 96) || typeof value.actions?.can_cancel !== 'boolean' ||
       typeof value.actions?.can_follow_up !== 'boolean' || typeof value.has_result !== 'boolean') return false;
-  if ([4, 5].includes(value.schema_version)) return validCompletionSummary(value);
+  if ([4, 5, 6].includes(value.schema_version)) return validCompletionSummary(value);
   if (['completion_outcome', 'obligation_status', 'completion', 'completion_obligations'].some((key) => key in value)) return false;
   if (value.schema_version === 1) {
     return LEGACY_SPECIALISTS.has(value.specialist_id) && value.inspection_status === undefined &&
@@ -104,9 +104,9 @@ function validCoverageContext(value: InvestigationDetail['coverage_context']): b
 
 /** Host validates result content; the UI rejects incompatible version bindings. */
 function validResultBinding(result: InvestigationResult, maximum = 12): boolean {
-  if (result.schema_version === 5) return validCompletionResult(result.completion, result, maximum) &&
+  if (result.schema_version === 5 || result.schema_version === 6) return validCompletionResult(result.completion, result, maximum) &&
     typeof result.invocation_step_id === 'string' && /^[A-Za-z0-9_:-]{1,128}$/.test(result.invocation_step_id) &&
-    typeof result.disclosure_hash === 'string' && /^investigation-disclosure-v4:[0-9a-f]{64}$/.test(result.disclosure_hash) &&
+    typeof result.disclosure_hash === 'string' && (result.schema_version === 6 ? /^investigation-disclosure-v5:[0-9a-f]{64}$/ : /^investigation-disclosure-v4:[0-9a-f]{64}$/).test(result.disclosure_hash) &&
     Boolean(result.coverage && CONTEXT_ID.test(result.coverage.context_id) && COVERAGE_ID.test(result.coverage.coverage_id) && hash(result.coverage.representation_hash));
   if ('completion' in result || 'completion_outcome' in result) return false;
   if (result.schema_version === 1) {
@@ -237,7 +237,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       ? mergeHistory(state.history, [summary]) : [summary, ...state.history],
     // A summary that reports a result is merged into the detail only once that
     // result is held; otherwise the next consistent refresh supplies both.
-    detail: ![4, 5].includes(summary.schema_version) && state.detail?.investigation_id === summary.investigation_id && summary.revision >= state.detail.revision &&
+    detail: ![4, 5, 6].includes(summary.schema_version) && state.detail?.investigation_id === summary.investigation_id && summary.revision >= state.detail.revision &&
       (!summary.has_result || state.result !== null)
       ? { ...state.detail, ...summary } : state.detail,
   }));
@@ -259,7 +259,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           'definitive' in error && error.definitive === true) {
         set({ starting: false, pendingStart: null,
           startError: error.code === 'refresh_required'
-            ? [4, 5].includes(request.schema_version) ? 'The selected evidence or completion context changed before admission. No investigation was started. Refresh choices and remove stale obligations.'
+            ? [4, 5, 6].includes(request.schema_version) ? 'The selected evidence or completion context changed before admission. No investigation was started. Refresh choices and remove stale obligations.'
               : 'The selected captured source changed before admission. No investigation was started. Remove the stale requirement and select its source again.'
             : `The request was rejected before admission. No investigation was started.${'message' in error && typeof error.message === 'string' ? ` ${error.message}` : ''}` });
         return;
@@ -477,7 +477,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       if (get().pendingStart || get().starting) return;
       const request_nonce = crypto.randomUUID();
       const { obligations: completionObligations, ...legacyBase } = draft;
-      if (draft.specialist_id.endsWith('@7') || draft.specialist_id.endsWith('@8')) {
+      if (/@[789]$/.test(draft.specialist_id)) {
         const policy = investigationPolicy(get().catalog, draft.limit_profile, draft.specialist_id);
         if (!policy) return;
         const choices = get().obligationChoices;
@@ -547,9 +547,9 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         // Independent reads can straddle the result commit; refresh instead of
         // recording a task whose detail and findings disagree.
         if ((result !== null) !== detail.has_result) throw new Error('Result observation changed.');
-        if (result && (!validResultBinding(result, detail.schema_version === 5 ? 56 : 12) || result.investigation_id !== id ||
+        if (result && (!validResultBinding(result, [5, 6].includes(detail.schema_version) ? 56 : 12) || result.investigation_id !== id ||
             result.graph_snapshot_id !== detail.graph_snapshot_id)) throw new Error('Wrong result.');
-        if ([4, 5].includes(detail.schema_version)) {
+        if ([4, 5, 6].includes(detail.schema_version)) {
           if (!validCompletionDetail(detail.completion, detail, result) || (detail.coverage_context !== undefined && !validCoverageContext(detail.coverage_context)) ||
               (detail.graph_snapshot_id !== null && !detail.coverage_context) || (result && (!detail.coverage_context ||
                 result.coverage?.context_id !== detail.coverage_context.context_id || result.coverage.coverage_id !== detail.coverage_context.coverage.coverage_id))) throw new Error('Completion binding changed.');
@@ -567,7 +567,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           if (result && (result.schema_version !== 4 || !detail.coverage_context ||
               result.coverage?.context_id !== detail.coverage_context.context_id ||
               result.coverage.coverage_id !== detail.coverage_context.coverage.coverage_id)) throw new Error('Coverage binding changed.');
-        } else if (detail.coverage_context !== undefined || result?.schema_version === 4 || result?.schema_version === 5) throw new Error('Unexpected coverage version.');
+        } else if (detail.coverage_context !== undefined || result?.schema_version === 4 || result?.schema_version === 5 || result?.schema_version === 6) throw new Error('Unexpected coverage version.');
         if ((result?.schema_version === 3 || result?.schema_version === 4) &&
             JSON.stringify(detail.inspection_assessment) !== JSON.stringify(result.inspection_assessment)) {
           throw new Error('Inspection assessment observation changed.');
@@ -590,7 +590,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           if (!current()) return;
           if (!page || page.investigation_id !== id || !Array.isArray(page.items) || page.items.length > 50 ||
               !Number.isSafeInteger(page.next_sequence) || page.next_sequence < afterSequence) throw new Error('Invalid event page.');
-          events = mergeInvestigationEvents(id, events, page.items, detail.schema_version === 5 ? 512 : 96);
+          events = mergeInvestigationEvents(id, events, page.items, [5, 6].includes(detail.schema_version) ? 512 : 96);
           const last = events.at(-1)?.sequence ?? 0;
           if (page.next_sequence !== last || (page.has_more && page.next_sequence === afterSequence)) throw new Error('Invalid continuation.');
           afterSequence = page.next_sequence;
@@ -611,7 +611,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         }
         if (saved?.completion && detail.completion && saved.completion.refusal_count > detail.completion.refusal_count) throw new Error('Refusal count regressed.');
         const savedResult = get().result;
-        if (saved && [4, 5].includes(saved.schema_version) && savedResult && result === null) throw new Error('Completion result disappeared.');
+        if (saved && [4, 5, 6].includes(saved.schema_version) && savedResult && result === null) throw new Error('Completion result disappeared.');
         if (savedResult && result && JSON.stringify(savedResult) !== JSON.stringify(result)) throw new Error('Result changed.');
         updateSummary(detail);
         set((state) => ({ detail, result: result ?? savedResult, events, consent,

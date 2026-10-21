@@ -40,14 +40,15 @@ export function validObligationEnvelope(value: InvestigationObligationEnvelope, 
 export function investigationPolicy(catalog: InvestigationCatalog | null, profile: string, specialist: SpecialistId): (Omit<InvestigationPolicy, 'limits'> & { limits?: InvestigationPolicy['limits'] }) | undefined {
   const advertised = catalog?.policies?.find((policy) => policy.limits.profile === profile && policy.specialist_ids.includes(specialist));
   if (advertised) {
-    const modern = specialist.endsWith('@8');
-    if (advertised.request_schema_version !== (modern ? 5 : 4) || advertised.envelope_schema_version !== (modern ? 2 : 1) ||
+    const progressive = specialist.endsWith('@9');
+    const modern = specialist.endsWith('@8') || progressive;
+    if (advertised.request_schema_version !== (progressive ? 6 : modern ? 5 : 4) || advertised.envelope_schema_version !== (modern ? 2 : 1) ||
         advertised.envelope_contract !== `investigation-completion-obligations@${modern ? 2 : 1}` ||
         (modern && profile !== 'investigation-v2') || (!modern && profile !== 'investigation-v1') ||
         ![advertised.max_completion_obligations, advertised.request_bytes, advertised.envelope_bytes].every((value) => Number.isSafeInteger(value) && value > 0)) return undefined;
     return advertised;
   }
-  if (specialist.endsWith('@8') || profile !== 'investigation-v1') return undefined;
+  if (specialist.endsWith('@8') || specialist.endsWith('@9') || profile !== 'investigation-v1') return undefined;
   return { limits: catalog?.limits, request_schema_version: 4, envelope_schema_version: 1,
     envelope_contract: 'investigation-completion-obligations@1', max_completion_obligations: 12,
     request_bytes: 8192, envelope_bytes: 8192, specialist_ids: [specialist] };

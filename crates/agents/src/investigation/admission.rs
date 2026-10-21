@@ -544,11 +544,22 @@ impl InvestigationResult {
         else {
             return Err(InvestigationError::InvalidAction);
         };
-        if binding.is_some_and(|(_, d)| d.schema_version == 4) != completion.is_some() {
+        if binding.is_some_and(|(_, d)| matches!(d.schema_version, 4 | 5)) != completion.is_some() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        if binding.is_some_and(|(_, disclosure)| {
+            disclosure.query_history.as_ref().is_some_and(|history| {
+                completion
+                    .as_ref()
+                    .is_none_or(|value| value.request_hash != history.request_hash)
+            })
+        }) {
             return Err(InvestigationError::InvalidInput);
         }
         let mut result = Self {
-            schema_version: if completion.is_some() {
+            schema_version: if binding.is_some_and(|(_, d)| d.schema_version == 5) {
+                6
+            } else if completion.is_some() {
                 5
             } else if ledger.schema_version == 2 {
                 4
@@ -590,7 +601,7 @@ impl InvestigationResult {
         }
         result.result_id = result.content_id()?;
         match binding {
-            Some((_, disclosure)) if result.schema_version == 5 => {
+            Some((_, disclosure)) if matches!(result.schema_version, 5 | 6) => {
                 result.validate_bound(
                     ledger,
                     &disclosure.eligible_citations_with_policy(ledger, policy)?,
@@ -628,6 +639,10 @@ impl InvestigationResult {
             5 => (
                 "investigation-result-v5",
                 b"cartograph:investigation-result:v5\0",
+            ),
+            6 => (
+                "investigation-result-v6",
+                b"cartograph:investigation-result:v6\0",
             ),
             _ => return Err(InvestigationError::InvalidInput),
         };
@@ -688,7 +703,9 @@ impl InvestigationResult {
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
         if self.schema_version
-            != if disclosure.schema_version == 4 {
+            != if disclosure.schema_version == 5 {
+                6
+            } else if disclosure.schema_version == 4 {
                 5
             } else if ledger.schema_version == 2 {
                 4
@@ -697,7 +714,7 @@ impl InvestigationResult {
             } else {
                 2
             }
-            || (self.schema_version == 5) != self.completion.is_some()
+            || matches!(self.schema_version, 5 | 6) != self.completion.is_some()
             || self.coverage != disclosure.coverage
             || self.inspection_assessment.is_some()
                 != disclosure.inspection_requirements_hash.is_some()
@@ -706,6 +723,13 @@ impl InvestigationResult {
             || self.disclosure_hash.as_deref()
                 != Some(disclosure.fingerprint_with_policy(ledger, policy)?.as_str())
         {
+            return Err(InvestigationError::InvalidInput);
+        }
+        if disclosure.query_history.as_ref().is_some_and(|history| {
+            self.completion
+                .as_ref()
+                .is_none_or(|value| value.request_hash != history.request_hash)
+        }) {
             return Err(InvestigationError::InvalidInput);
         }
         if let Some(completion) = &self.completion {
@@ -775,3 +799,7 @@ impl InvestigationResult {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "query_history_result_tests.rs"]
+mod query_history_result_tests;

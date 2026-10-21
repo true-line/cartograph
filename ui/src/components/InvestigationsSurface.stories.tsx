@@ -1,4 +1,4 @@
-import { expandedCompletionCatalog, completionCatalog, completionChoices, completionDetail, completionResult, inventoryObligation, sourceObligation } from '../completionFixtures';
+import { queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionCatalog, completionChoices, completionDetail, completionResult, inventoryObligation, sourceObligation } from '../completionFixtures';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
@@ -549,5 +549,54 @@ export const ExpandedBudgetRequiresCompatibleSpecialist: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@8',
       limit_profile: 'investigation-v2', obligations: expect.objectContaining({ schema_version: 2 }) }));
+  },
+};
+
+
+export const ExplicitQueryHistoryFamily: Story = {
+  // AC-0286: current expanded choice starts @9; the numeric budget and Standard default stay unchanged.
+  args: { state: state({ catalog: queryHistoryCatalog, obligationChoices: completionChoices,
+    draftObligations: [inventoryObligation], detail: null, selectedId: null }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByLabelText('Investigation budget')).toHaveValue('investigation-v1');
+    await expect(canvas.getAllByRole('option', { name: /^Expanded/ })).toHaveLength(1);
+    await userEvent.click(canvas.getByRole('radio', { name: /evidence-auditor@7/ }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Audit the explicitly selected evidence.');
+    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
+    await expect(canvas.getByRole('radio', { name: /evidence-auditor@9/ })).toBeChecked();
+    await expect(canvas.queryByRole('radio', { name: /evidence-auditor@8/ })).not.toBeInTheDocument();
+    await expect(canvas.getByText(/Choose 1–56 combined obligations/)).toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'evidence-auditor@9',
+      limit_profile: 'investigation-v2', obligations: expect.objectContaining({ schema_version: 2 }) }));
+  },
+};
+
+export const HistoricalExpandedRoleNeedsExplicitReplacement: Story = {
+  // AC-0286: reopened @8 follow-up intent never silently becomes @9.
+  args: { state: state({ catalog: queryHistoryCatalog, obligationChoices: completionChoices,
+    draftObligations: [inventoryObligation], detail: null, selectedId: null }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@8', limitProfile: 'investigation-v2',
+      question: 'Follow the saved role.', parent: { conversation_id: 'old-conversation', parent_id: 'old-task' } });
+    await waitFor(() => expect(canvas.getByText(/is unavailable for this investigation budget/)).toBeVisible());
+    await expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@8');
+    await expect(canvas.getByRole('button', { name: 'Start follow-up' })).toBeDisabled();
+    await expect(args.state.start).not.toHaveBeenCalled();
+    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@9/ }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@9', parent_id: 'old-task' }));
+  },
+};
+
+export const QueryHistorySavedCompletion: Story = {
+  args: { state: state({ catalog: queryHistoryCatalog, detail: queryHistoryDetail(), result: queryHistoryResult(),
+    selectedId: 'inv-query-history', history: [queryHistoryDetail()] }) },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Supported completion.')).toBeVisible();
+    await expect(canvas.getByText('Completion obligations')).toBeVisible();
   },
 };

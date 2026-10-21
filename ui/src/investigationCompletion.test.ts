@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import supportedWire from './fixtures/completion-v7-supported.json';
+import queryHistoryWire from './fixtures/completion-v9-supported.json';
 import terminalWire from './fixtures/completion-v7-terminal.json';
 import insufficientWire from './fixtures/completion-v7-insufficient.json';
 import type { InvestigationDetail, InvestigationResult } from './investigationTypes';
-import { expandedCompletionCatalog, completionDetail, completionResult } from './completionFixtures';
+import { queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionDetail, completionResult } from './completionFixtures';
 import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
 
 describe('V7 completion wire coherence (AC-0266)', () => {
@@ -107,4 +108,30 @@ it('binds expanded saved history to its own role, envelope and profile (AC-0281)
   expect(validCompletionDetail(detail.completion, detail, result)).toBe(false);
   detail.schema_version = 4;
   expect(validCompletionSummary(detail)).toBe(false);
+});
+
+
+it('keeps query-history role, summary, result and disclosure domains distinct (AC-0286)', () => {
+  const detail = queryHistoryDetail(); const result = queryHistoryResult();
+  expect(validCompletionSummary(detail)).toBe(true);
+  expect(validCompletionResult(result.completion, result, 56)).toBe(true);
+  expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
+  expect(validCompletionSummary({ ...detail, specialist_id: 'domain-analyst@8' })).toBe(false);
+  expect(validCompletionSummary({ ...detail, schema_version: 5 })).toBe(false);
+  expect(validCompletionDetail(detail.completion, detail, completionResult(detail.investigation_id))).toBe(false);
+  expect(validCompletionResult(result.completion, { ...result, result_id: result.result_id.replace('-v6:', '-v5:') }, 56)).toBe(false);
+  expect(validCompletionResult(result.completion, { ...result, disclosure_hash: result.disclosure_hash!.replace('-v5:', '-v4:') }, 56)).toBe(false);
+});
+
+
+it('accepts actual production mock-worker query-history wire and rejects older disclosure reuse (AC-0286)', () => {
+  const detail = queryHistoryWire.detail as unknown as InvestigationDetail;
+  const result = queryHistoryWire.result as unknown as InvestigationResult;
+  expect(validCompletionSummary(detail)).toBe(true);
+  expect(validCompletionResult(result.completion, result, 56)).toBe(true);
+  expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
+  const changed = structuredClone(detail);
+  if (changed.completion!.assessment_basis.kind !== 'finishing_disclosure') throw new Error('Expected supported finishing wire');
+  changed.completion!.assessment_basis.disclosure_hash = changed.completion!.assessment_basis.disclosure_hash.replace('-v5:', '-v4:');
+  expect(validCompletionDetail(changed.completion, changed, result)).toBe(false);
 });

@@ -1,7 +1,8 @@
-import { expandedCompletionCatalog, completionChoices, inventoryObligation } from './completionFixtures';
+import { queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionChoices, inventoryObligation } from './completionFixtures';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC as mockTauriIPC } from '@tauri-apps/api/mocks';
 import backendInspection from './fixtures/investigation-inspection-backend.json';
+import queryHistoryWire from './fixtures/completion-v9-supported.json';
 import backendQualified from './fixtures/investigation-coverage-backend.json';
 import { mergeInvestigationEvents, useInvestigationStore } from './investigationStore';
 import { qualifiedCoverageContext, qualifiedDetail, qualifiedResult, inspectionAssessment, inspectionDetail, inspectionTarget, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from './investigationFixtures';
@@ -763,4 +764,70 @@ it('refuses expanded roles without an eligible policy (AC-0281)', async () => {
     question: 'Inspect evidence.', scope: { type: 'all' }, provider_mode: 'local', obligations: {
       schema_version: 2, contract: 'investigation-completion-obligations@2', obligations: [inventoryObligation] } });
   expect(start).not.toHaveBeenCalled();
+});
+
+
+it.each([['domain-analyst@9'], ['evidence-auditor@9']] as const)('serializes the explicitly advertised query-history role %s without changing V2 limits (AC-0286)', async (specialist) => {
+  useInvestigationStore.setState({ catalog: queryHistoryCatalog, obligationChoices: completionChoices });
+  const starts: unknown[] = [];
+  mockIPC((command, args) => { if (command === 'start_investigation') starts.push(args?.request); throw new Error('Uncertain transport'); });
+  await useInvestigationStore.getState().start({ specialist_id: specialist, limit_profile: 'investigation-v2', question: 'Inspect evidence.',
+    scope: { type: 'all' }, provider_mode: 'local', obligations: { schema_version: 2,
+      contract: 'investigation-completion-obligations@2', obligations: [inventoryObligation] } });
+  expect(starts).toHaveLength(1);
+  expect(starts[0]).toMatchObject({ schema_version: 6, specialist_id: specialist, limit_profile: 'investigation-v2',
+    obligations: { schema_version: 2 }, expected_context_id: completionChoices.context_id });
+  useInvestigationStore.setState({ catalog: expandedCompletionCatalog });
+  await useInvestigationStore.getState().retryStart();
+  expect(starts[1]).toEqual(starts[0]);
+});
+
+it('does not upgrade an uncertain @8 request when the host catalog moves to @9 (AC-0286)', async () => {
+  useInvestigationStore.setState({ catalog: expandedCompletionCatalog, obligationChoices: completionChoices });
+  const store = useInvestigationStore.getState();
+  store.updateComposer({ specialistId: 'domain-analyst@8', limitProfile: 'investigation-v2' });
+  const requests: unknown[] = [];
+  mockIPC((command, args) => { if (command === 'investigation_specialists') return queryHistoryCatalog;
+    if (command === 'start_investigation') requests.push(structuredClone(args?.request)); throw new Error('Uncertain transport'); });
+  await store.start({ specialist_id: 'domain-analyst@8', limit_profile: 'investigation-v2', question: 'Retain original intent.',
+    scope: { type: 'all' }, provider_mode: 'local', obligations: { schema_version: 2,
+      contract: 'investigation-completion-obligations@2', obligations: [inventoryObligation] } });
+  await store.loadCatalog();
+  store.updateComposer({ specialistId: 'domain-analyst@9' });
+  await store.retryStart();
+  expect(useInvestigationStore.getState().catalog).toEqual(queryHistoryCatalog);
+  expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@8');
+  expect(requests).toHaveLength(2);
+  expect(requests[0]).toMatchObject({ schema_version: 5, specialist_id: 'domain-analyst@8' });
+  expect(requests[1]).toEqual(requests[0]);
+});
+
+it('opens query-history saved results without a catalog and rejects a self-consistent older family result (AC-0286)', async () => {
+  const detail = queryHistoryDetail(); const result = queryHistoryResult();
+  mockIPC((command) => command === 'get_investigation' ? detail : command === 'investigation_result' ? result :
+    command === 'investigation_events' ? { investigation_id: detail.investigation_id, items: [], next_sequence: 0, has_more: false } : null);
+  detail.last_event_sequence = 0;
+  await useInvestigationStore.getState().open(detail.investigation_id);
+  expect(useInvestigationStore.getState().error).toBeNull();
+  expect(useInvestigationStore.getState().result?.schema_version).toBe(6);
+  result.schema_version = 5; result.result_id = result.result_id.replace('-v6:', '-v5:');
+  result.disclosure_hash = result.disclosure_hash!.replace('-v5:', '-v4:');
+  await useInvestigationStore.getState().refreshSelected();
+  expect(useInvestigationStore.getState().error).not.toBeNull();
+});
+
+
+it('reopens actual durable query-history worker history with its original journal (AC-0286)', async () => {
+  const detail = queryHistoryWire.detail as unknown as InvestigationDetail;
+  const result = queryHistoryWire.result as unknown as InvestigationResult;
+  const events = queryHistoryWire.events as unknown as InvestigationEvent[];
+  useInvestigationStore.setState({ catalog: queryHistoryCatalog });
+  mockIPC((command) => command === 'get_investigation' ? detail : command === 'investigation_result' ? result :
+    command === 'investigation_events' ? { investigation_id: detail.investigation_id, items: events,
+      next_sequence: events.at(-1)!.sequence, has_more: false } : null);
+  await useInvestigationStore.getState().open(detail.investigation_id);
+  expect(useInvestigationStore.getState().error).toBeNull();
+  expect(useInvestigationStore.getState().detail).toEqual(detail);
+  expect(useInvestigationStore.getState().result).toEqual(result);
+  expect(useInvestigationStore.getState().events).toEqual(events);
 });

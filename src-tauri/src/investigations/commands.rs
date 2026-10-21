@@ -27,8 +27,8 @@ fn available_specialists() -> Vec<SpecialistId> {
     let mut specialists = AVAILABLE_SPECIALISTS.to_vec();
     if InvestigationPolicy::for_profile("investigation-v2").is_some() {
         specialists.extend([
-            SpecialistId::DomainAnalystV8,
-            SpecialistId::EvidenceAuditorV8,
+            SpecialistId::DomainAnalystV9,
+            SpecialistId::EvidenceAuditorV9,
         ]);
     }
     specialists
@@ -42,7 +42,7 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
             let v2 = name == "investigation-v2";
             Some(InvestigationPolicyCatalogEntry {
                 limits: policy.limits(),
-                request_schema_version: if v2 { 5 } else { 4 },
+                request_schema_version: if v2 { 6 } else { 4 },
                 envelope_schema_version: if v2 { 2 } else { 1 },
                 envelope_contract: if v2 {
                     "investigation-completion-obligations@2"
@@ -55,8 +55,8 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
                 envelope_bytes: policy.envelope_bytes(),
                 specialist_ids: if v2 {
                     vec![
-                        SpecialistId::DomainAnalystV8,
-                        SpecialistId::EvidenceAuditorV8,
+                        SpecialistId::DomainAnalystV9,
+                        SpecialistId::EvidenceAuditorV9,
                     ]
                 } else {
                     vec![
@@ -460,22 +460,24 @@ mod staged_tests {
     use super::*;
 
     // AC-0266: shape-valid IPC arguments keep semantic errors on the structured
-    // rejection path, preserving the UI draft/retry contract for both generations.
+    // rejection path, preserving the UI draft/retry contract for all generations.
+    // AC-0286: the current schema-6 family must reach the same command boundary.
     #[test]
     fn completion_ipc_semantic_errors_reach_structured_invalid_input() {
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
-        for generation in [3, 4] {
+        for generation in [3, 4, 5, 6] {
             let mut raw = serde_json::json!({
                 "schema_version": generation, "request_nonce": "invalid-semantic",
-                "specialist_id": if generation == 4 { "domain-analyst@7" } else { "domain-analyst@6" },
+                "specialist_id": format!("domain-analyst@{}", generation + 3),
                 "question": "", "scope": {"type": "all"}, "provider_mode": "local",
-                "limit_profile": "investigation-v1", "expected_context_id": format!("context-v2:{}", "a".repeat(64))
+                "limit_profile": if generation >= 5 { "investigation-v2" } else { "investigation-v1" }, "expected_context_id": format!("context-v2:{}", "a".repeat(64))
             });
-            if generation == 4 {
-                raw["obligations"] = serde_json::json!({"schema_version": 1,
-                    "contract": "investigation-completion-obligations@1", "obligations": []});
+            if generation >= 4 {
+                let obligation_version = if generation >= 5 { 2 } else { 1 };
+                raw["obligations"] = serde_json::json!({"schema_version": obligation_version,
+                    "contract": format!("investigation-completion-obligations@{obligation_version}"), "obligations": []});
             }
             // Tauri supplies a parsed Value to this exact command argument type.
             let request = serde_json::from_value::<InvestigationStartRequest>(raw.clone()).unwrap();
@@ -587,6 +589,9 @@ mod policy_catalog_tests {
 
     #[test]
     fn investigation_policy_catalog_advertises_only_registered_exact_choices() {
+        // AC-0286: numeric v2 stays immutable while new starts use the @9 family.
+        assert!(!available_specialists().contains(&SpecialistId::DomainAnalystV8));
+        assert!(!available_specialists().contains(&SpecialistId::EvidenceAuditorV8));
         // AC-0281: catalog choices cannot activate an unregistered policy.
         assert_eq!(InvestigationLimits::default().profile, "investigation-v1");
         let choices = policy_catalog();
@@ -605,7 +610,7 @@ mod policy_catalog_tests {
                     .all(|id| available_specialists().contains(id))
             );
             let expanded = policy.profile() == "investigation-v2";
-            assert_eq!(choice.request_schema_version, if expanded { 5 } else { 4 });
+            assert_eq!(choice.request_schema_version, if expanded { 6 } else { 4 });
             assert_eq!(choice.envelope_schema_version, if expanded { 2 } else { 1 });
             assert!(
                 choice
@@ -621,7 +626,7 @@ mod policy_catalog_tests {
             InvestigationPolicy::for_profile("investigation-v2").is_some()
         );
         assert_eq!(
-            available_specialists().contains(&SpecialistId::DomainAnalystV8),
+            available_specialists().contains(&SpecialistId::DomainAnalystV9),
             InvestigationPolicy::for_profile("investigation-v2").is_some()
         );
     }

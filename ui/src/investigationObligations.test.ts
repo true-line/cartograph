@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { useInvestigationStore } from './investigationStore';
-import { expandedCompletionCatalog, completionChoices, inventoryObligation, sourceObligation } from './completionFixtures';
-import { obligationEnvelope, validObligationEnvelope, validObligationChoices } from './investigationObligations';
+import { queryHistoryCatalog, expandedCompletionCatalog, completionChoices, inventoryObligation, sourceObligation } from './completionFixtures';
+import { investigationPolicy, obligationEnvelope, validObligationEnvelope, validObligationChoices } from './investigationObligations';
 import type { StartInvestigationRequest } from './investigationTypes';
 
 beforeEach(() => { vi.stubGlobal('window', {}); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); });
@@ -138,4 +138,18 @@ it('keeps expanded envelopes separate from legacy admission bounds (AC-0281)', (
   expect(validObligationEnvelope(expanded)).toBe(false);
   expect(validObligationEnvelope(obligationEnvelope(selections))).toBe(false);
   expect(validObligationEnvelope({ ...expanded, schema_version: 1 }, policy)).toBe(false);
+});
+
+
+it('resolves request family from exact advertised role without reinterpreting the numeric profile (AC-0286)', () => {
+  expect(investigationPolicy(expandedCompletionCatalog, 'investigation-v2', 'domain-analyst@8')?.request_schema_version).toBe(5);
+  expect(investigationPolicy(queryHistoryCatalog, 'investigation-v2', 'domain-analyst@9')?.request_schema_version).toBe(6);
+  expect(queryHistoryCatalog.policies![0].limits).toEqual(expandedCompletionCatalog.policies![0].limits);
+  expect(investigationPolicy(queryHistoryCatalog, 'investigation-v2', 'domain-analyst@8')).toBeUndefined();
+  expect(investigationPolicy(expandedCompletionCatalog, 'investigation-v2', 'domain-analyst@9')).toBeUndefined();
+  expect(investigationPolicy(queryHistoryCatalog, 'investigation-v1', 'domain-analyst@9')).toBeUndefined();
+  const changed = structuredClone(queryHistoryCatalog); changed.policies![0].request_schema_version = 5;
+  expect(investigationPolicy(changed, 'investigation-v2', 'domain-analyst@9')).toBeUndefined();
+  const oldChanged = structuredClone(expandedCompletionCatalog); oldChanged.policies![0].request_schema_version = 6;
+  expect(investigationPolicy(oldChanged, 'investigation-v2', 'domain-analyst@8')).toBeUndefined();
 });
