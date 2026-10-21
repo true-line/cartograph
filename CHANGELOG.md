@@ -1,5 +1,12 @@
 # cartograph
 
+## 0.19.0
+
+### Minor Changes
+
+- 0508c8c: Add an explicit expanded investigation budget for larger evidence sets. The selected policy stays bound to requests, consent, execution and saved history; existing investigations retain their original limits. Expanded prompts avoid repeating source-target descriptions, and storage and input limits still fail closed before excess work.
+- bc0e913: Add a use-case projection with content acceptance: the guards recovered for a declared feature, such as Vendure cart readiness, become a decision table where every row cites its source. A check against an independently written expected set labels each expectation implemented, documented intent, inferred or unknown. An incomplete projection is marked partial and lists what is missing. Reading a row as a business guard stays a labeled, rule-derived T2 inference and is never promoted to a confirmed rule.
+
 ## 0.18.0
 
 ### Minor Changes
