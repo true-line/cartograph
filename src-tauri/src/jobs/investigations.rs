@@ -15,6 +15,10 @@ mod coverage;
 mod coverage_tests;
 #[path = "investigations/reads.rs"]
 mod reads;
+// Internal admission foundation; no historical runtime initializes these tables.
+#[allow(dead_code)]
+#[path = "investigations/read_reservations.rs"]
+mod read_reservations;
 #[allow(dead_code)]
 #[path = "investigations/staged.rs"]
 mod staged;
