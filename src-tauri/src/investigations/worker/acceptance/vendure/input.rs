@@ -114,15 +114,26 @@ fn membership(root: &Path) -> Result<BTreeSet<String>, String> {
                 pending.push((entry.path(), depth + 1));
             } else if kind.is_file() {
                 let path = entry.path();
+                // Manifest keys use '/' on every platform; normalize filesystem
+                // components without relaxing validation of manifest strings.
                 let name = path
                     .strip_prefix(root)
                     .ok()
-                    .and_then(Path::to_str)
-                    .ok_or("Source path is not a valid relative UTF-8 path.")?;
-                if !relative(name) || files.len() >= MAX_FILES {
+                    .and_then(|relative| {
+                        relative
+                            .components()
+                            .map(|component| match component {
+                                Component::Normal(name) => name.to_str(),
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .ok_or("Source path is not a valid relative UTF-8 path.")?
+                    .join("/");
+                if !relative(&name) || files.len() >= MAX_FILES {
                     return Err("Source path/count invalid.".into());
                 }
-                files.insert(name.to_owned());
+                files.insert(name);
             } else {
                 return Err("Source contains a symlink or nonregular entry.".into());
             }

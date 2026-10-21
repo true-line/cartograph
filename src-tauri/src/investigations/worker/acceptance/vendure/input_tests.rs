@@ -61,6 +61,37 @@ fn verified_input_binds_exact_bytes_in_both_hash_domains() {
     assert!(case.verify().is_err());
 }
 #[test]
+fn verified_input_normalizes_nested_filesystem_paths_but_requires_strict_manifest_paths() {
+    let case = Case::new();
+    let nested = case.root.join("packages").join("core");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::rename(case.root.join("rule.ts"), nested.join("rule.ts")).unwrap();
+    let path = "packages/core/rule.ts";
+    case.change_manifest(|body| body["source_files"] = json!([path]));
+    let mut proof: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&case.proof).unwrap()).unwrap();
+    let digest = proof["files_sha256"]["rule.ts"].take();
+    proof["files_sha256"] = json!({path: digest});
+    std::fs::write(&case.proof, serde_json::to_vec(&proof).unwrap()).unwrap();
+    assert_eq!(
+        case.verify().unwrap().files.keys().collect::<Vec<_>>(),
+        [path]
+    );
+    for invalid in [
+        r"packages\core\rule.ts",
+        "packages/../packages/core/rule.ts",
+        "packages/./core/rule.ts",
+        "packages//core/rule.ts",
+    ] {
+        case.change_manifest(|body| body["source_files"] = json!([invalid]));
+        let mut proof: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&case.proof).unwrap()).unwrap();
+        proof["files_sha256"] = json!({invalid: digest});
+        std::fs::write(&case.proof, serde_json::to_vec(&proof).unwrap()).unwrap();
+        assert!(case.verify().is_err(), "{invalid}");
+    }
+}
+#[test]
 fn verified_input_rejects_missing_extra_and_evaluator_documents() {
     for mutation in ["missing", "extra", "oracle", "manifest_inside"] {
         let case = Case::new();

@@ -104,6 +104,9 @@ fn captured_input(
     {
         return Err("capture source or working-tree identity differs".into());
     }
+    if capture.manifest().files.len() != input.files.len() {
+        return Err("capture membership differs from verified input".into());
+    }
     for file in &capture.manifest().files {
         let expected = input
             .files
