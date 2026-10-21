@@ -330,7 +330,9 @@ fn completed_attempts(
             .map(|attempt| saved_ledger(connection, id, attempt.input_revision))
             .collect();
     }
-    if attempts.len() > MAX_TOOL_ACTIONS as usize {
+    let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+        .ok_or(InvestigationStoreError::Invalid)?;
+    if attempts.len() > policy.limits().tool_actions as usize {
         return Err(InvestigationStoreError::Capacity);
     }
     let mut ledgers = Vec::new();
@@ -390,7 +392,7 @@ fn completed_attempts(
             return Err(InvestigationStoreError::Invalid);
         }
         let task = load_task_base(connection, id)?;
-        if task.detail.summary.last_event_sequence > MAX_EVENTS {
+        if task.detail.summary.last_event_sequence > journal_event_limit(&task)? {
             return Err(InvestigationStoreError::Invalid);
         }
         let mut admitted = false;

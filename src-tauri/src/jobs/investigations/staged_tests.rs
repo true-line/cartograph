@@ -413,6 +413,43 @@ fn staged_refusal_journal_rejects_binding_forged_attempt_and_tampered_assessment
         },
     };
     forged.attempt_id = forged.content_id().unwrap();
+    let mut boundary_fixture = Fixture::new();
+    let tx = boundary_fixture.store.conn.transaction().unwrap();
+    // AC-0188: replay uses the exact saved policy's tool-action boundary.
+    // At the boundary, witnesses still need validation; above it, capacity
+    // rejects the list before any claimed witness can be accepted.
+    let limit = InvestigationPolicy::for_limits(
+        &load_task_base(&tx, &boundary_fixture.id)
+            .unwrap()
+            .detail
+            .limits,
+    )
+    .unwrap()
+    .limits()
+    .tool_actions as usize;
+    assert!(matches!(
+        completed_attempts(&tx, &boundary_fixture.id, &vec![forged.clone(); limit]),
+        Err(InvestigationStoreError::Invalid)
+    ));
+    assert!(matches!(
+        completed_attempts(&tx, &boundary_fixture.id, &vec![forged.clone(); limit + 1]),
+        Err(InvestigationStoreError::Capacity)
+    ));
+    {
+        let mut task = load_task_base(&tx, &boundary_fixture.id).unwrap();
+        task.detail.limits.tool_actions += 1;
+        let bytes = encode(&task, MAX_RECORD_BYTES).unwrap();
+        tx.execute(
+            "UPDATE investigation_tasks SET record=?2,record_hash=?3 WHERE id=?1",
+            params![boundary_fixture.id, bytes, core_prov::content_hash(&bytes)],
+        )
+        .unwrap();
+        assert!(matches!(
+            completed_attempts(&tx, &boundary_fixture.id, &[]),
+            Err(InvestigationStoreError::Invalid)
+        ));
+        tx.rollback().unwrap();
+    }
     {
         let tx = fixture.store.conn.transaction().unwrap();
         assert!(

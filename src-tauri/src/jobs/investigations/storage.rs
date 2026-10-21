@@ -270,7 +270,7 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
         || detail.provider.mode != summary.provider_mode
         || InvestigationPolicy::for_limits(&detail.limits).is_none()
         || redacted_history_text(&summary.question, MAX_QUESTION_BYTES)? != summary.question
-        || summary.last_event_sequence > MAX_EVENTS
+        || summary.last_event_sequence > journal_event_limit(task)?
         || summary.actions.can_cancel
             != (task.phase != Phase::Terminal && !summary.cancel_requested)
         || !summary.actions.can_follow_up
@@ -760,6 +760,12 @@ pub(super) fn stored_bytes(
         .ok_or(InvestigationStoreError::Capacity)
 }
 
+pub(super) fn journal_event_limit(task: &StoredTask) -> Result<u64, InvestigationStoreError> {
+    InvestigationPolicy::for_limits(&task.detail.limits)
+        .map(InvestigationPolicy::journal_events)
+        .ok_or(InvestigationStoreError::Invalid)
+}
+
 pub(super) fn event(
     connection: &Connection,
     task: &mut StoredTask,
@@ -774,12 +780,13 @@ pub(super) fn event(
         .last_event_sequence
         .checked_add(1)
         .ok_or(InvestigationStoreError::Capacity)?;
+    let event_limit = journal_event_limit(task)?;
     let maximum = if task.phase == Phase::Terminal {
-        MAX_EVENTS
+        event_limit
     } else if kind == InvestigationEventKind::CancelRequested {
-        MAX_EVENTS - 2
+        event_limit - 2
     } else {
-        MAX_EVENTS - 3
+        event_limit - 3
     };
     if next > maximum {
         return Err(InvestigationStoreError::Capacity);

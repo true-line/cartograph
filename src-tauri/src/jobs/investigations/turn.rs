@@ -63,16 +63,17 @@ fn completed_tool(
     input_revision: u64,
 ) -> Result<Option<InvestigationTool>, InvestigationStoreError> {
     let id = &task.detail.summary.investigation_id;
+    let event_limit = journal_event_limit(task)?;
     let sequences = connection
         .prepare(
             "SELECT sequence FROM investigation_events WHERE task_id=?1 ORDER BY sequence LIMIT ?2",
         )?
-        .query_map(params![id, signed(MAX_EVENTS + 1)?], |row| {
+        .query_map(params![id, signed(event_limit + 1)?], |row| {
             row.get::<_, i64>(0)
         })?
         .collect::<Result<Vec<_>, _>>()?;
     if sequences.len() as u64 != task.detail.summary.last_event_sequence
-        || sequences.len() as u64 > MAX_EVENTS
+        || sequences.len() as u64 > event_limit
     {
         return Err(InvestigationStoreError::Invalid);
     }

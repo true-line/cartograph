@@ -39,7 +39,6 @@ const MAX_LIVE_TASKS: usize = 2;
 const TASK_CAPACITY: usize = 2 * 1024 * 1024;
 const TERMINAL_RESERVE: usize = 256 * 1024;
 const STORE_CAPACITY: usize = 256 * 1024 * 1024;
-const MAX_EVENTS: u64 = 96;
 // Inline metadata-only disclosure has its own bound plus the legacy step envelope.
 // Task/global capacity and MAX_RECORD_BYTES remain authoritative admission caps.
 const MAX_INVOCATION_BYTES: usize = MAX_DISCLOSURE_BYTES + 4096;

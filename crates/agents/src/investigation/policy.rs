@@ -7,6 +7,7 @@ use super::InvestigationLimits;
 pub struct InvestigationPolicy {
     profile: &'static str,
     request_bytes: usize,
+    journal_events: u64,
     max_completion_obligations: usize,
     model_invocations: u32,
     tool_actions: u32,
@@ -25,6 +26,7 @@ pub struct InvestigationPolicy {
 pub const INVESTIGATION_V1_POLICY: InvestigationPolicy = InvestigationPolicy {
     profile: "investigation-v1",
     request_bytes: 8 * 1024,
+    journal_events: 96,
     max_completion_obligations: 12,
     model_invocations: 8,
     tool_actions: 8,
@@ -52,6 +54,11 @@ impl InvestigationPolicy {
     /// Resolve only an exact immutable specification, including every counter.
     pub fn for_limits(limits: &InvestigationLimits) -> Option<&'static Self> {
         Self::for_profile(&limits.profile).filter(|policy| policy.limits() == *limits)
+    }
+
+    /// Durable event capacity; includes the host reserved terminal slots.
+    pub const fn journal_events(&self) -> u64 {
+        self.journal_events
     }
 
     pub const fn request_bytes(&self) -> usize {

@@ -6,11 +6,18 @@
 
 ## Context
 
-The actual Vendure preparation and measurement for #598 found that even an
-incomplete seven-range selection requires request bodies above 8 KiB and at
-least nine model invocations per role. The existing profile permits eight.
-Five required evidence families remain unavailable, so those measurements are
-lower bounds, not sufficient ceilings for the complete investigation.
+Vendure prep3 at merged `a023daacac7cd19112940d2f15df17b37cedc5ca`
+selects 27 source ranges plus coverage inventory per role. Production measurement
+requires at least 28 tool actions and 29 model invocations. Analyst and auditor
+requests are 37,773 and 37,684 bytes; each envelope is 36,753 bytes. The existing
+profile permits eight actions/invocations and 8 KiB requests/envelopes, and
+production normalization rejects both proposals.
+
+These remain incomplete lower bounds: all agreed evidence families have matches,
+but the function-local transition configuration still lacks an inspectable
+receipt (#699). The measurement does not establish semantic sufficiency,
+executable admission, or appropriate headroom. Its receipt is recorded in
+[#598](https://github.com/true-line/cartograph/issues/598#issuecomment-6317145122).
 
 Limits are enforced independently by request admission, task storage, replay,
 ledgers, prompts, worker dispatch and consent. Raising a harness counter or a
@@ -43,7 +50,14 @@ reinterpret a new request as a v1 request.
 
 Keep invocation and token reservations committed before dispatch. Validate
 journal capacity and terminal headroom before accepting a profile's promised
-work. Consent binds the actual per-call payload and limits; more aggregate calls
+work. The prep3 minimum of 28 successful reads already needs at least 112
+journal events: each read commits ModelStarted, ModelCompleted, ActionAdmitted
+and ToolStarted, before charging validation or recording ToolCompleted. The
+current 96-event store ceiling therefore blocks this path independently of the
+call counters. Event ceilings and reserved terminal slots must also resolve from
+the immutable policy; retain 96 and the current reservations for v1. This is a
+static lower bound, not a successful run or a recommended new ceiling.
+Consent binds the actual per-call payload and limits; more aggregate calls
 do not automatically enlarge the per-call transport contract. The UI must
 advertise explicit eligible policies and freeze the chosen request during an
 uncertain retry.

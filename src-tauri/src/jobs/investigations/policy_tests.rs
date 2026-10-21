@@ -127,3 +127,101 @@ fn investigation_policy_rejects_excess_before_reservation_and_reopens_exact_step
     let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
     assert_eq!(reopened.investigation(&id).unwrap().usage, started.usage);
 }
+
+#[test]
+fn investigation_policy_journal_reserves_cancel_and_terminal_events() {
+    // AC-0188: exercise the production journal primitive in isolation. Repeated
+    // admission metadata fills capacity; it does not model a provider/tool run.
+    let mut fixture = Fixture::new();
+    let (id, _execution) = fixture.start("policy-journal", InvestigationProviderMode::Local);
+    let append = |connection: &Connection, task: &mut StoredTask, kind| {
+        event(
+            connection,
+            task,
+            kind,
+            None,
+            None,
+            "Journal boundary fixture",
+        )
+    };
+    let limit;
+    {
+        let tx = fixture.store.conn.transaction().unwrap();
+        let mut task = load_task_base(&tx, &id).unwrap();
+        limit = journal_event_limit(&task).unwrap();
+        assert_eq!(limit, 96);
+        let mut forged = load_task_base(&tx, &id).unwrap();
+        forged.detail.limits.tool_actions += 1;
+        assert_eq!(
+            append(&tx, &mut forged, InvestigationEventKind::ActionAdmitted).unwrap_err(),
+            InvestigationStoreError::Invalid
+        );
+        assert_eq!(
+            forged.detail.summary.last_event_sequence,
+            task.detail.summary.last_event_sequence
+        );
+        let revision = task.detail.summary.revision;
+        while task.detail.summary.last_event_sequence < limit - 3 {
+            append(&tx, &mut task, InvestigationEventKind::ActionAdmitted).unwrap();
+        }
+        assert_eq!(
+            append(&tx, &mut task, InvestigationEventKind::ActionAdmitted).unwrap_err(),
+            InvestigationStoreError::Capacity
+        );
+        assert_eq!(task.detail.summary.last_event_sequence, 93);
+        save_task(&tx, &task, revision, false).unwrap();
+        tx.commit().unwrap();
+    }
+    {
+        let tx = fixture.store.conn.transaction().unwrap();
+        let mut task = load_task_base(&tx, &id).unwrap();
+        append(&tx, &mut task, InvestigationEventKind::CancelRequested).unwrap();
+        assert_eq!(task.detail.summary.last_event_sequence, 94);
+        assert_eq!(
+            append(&tx, &mut task, InvestigationEventKind::CancelRequested).unwrap_err(),
+            InvestigationStoreError::Capacity
+        );
+        // Isolate phase-specific reservation admission without synthesizing a
+        // terminal task/result. The transaction and these rows are rolled back.
+        task.phase = Phase::Terminal;
+        append(&tx, &mut task, InvestigationEventKind::ResultPersisted).unwrap();
+        append(&tx, &mut task, InvestigationEventKind::Cancelled).unwrap();
+        assert_eq!(task.detail.summary.last_event_sequence, limit);
+        assert_eq!(
+            append(&tx, &mut task, InvestigationEventKind::Cancelled).unwrap_err(),
+            InvestigationStoreError::Capacity
+        );
+        let rows: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM investigation_events WHERE task_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, signed(limit).unwrap());
+        tx.rollback().unwrap();
+    }
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(
+        reopened
+            .investigation(&id)
+            .unwrap()
+            .summary
+            .last_event_sequence,
+        93
+    );
+    let tail = reopened.investigation_events(&id, 92).unwrap();
+    assert_eq!(tail.items.len(), 1);
+    assert_eq!(tail.items[0].sequence, 93);
+    assert!(
+        reopened
+            .investigation_events(&id, limit)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert_eq!(
+        reopened.investigation_events(&id, limit + 1).unwrap_err(),
+        InvestigationStoreError::Invalid
+    );
+}

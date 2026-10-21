@@ -102,12 +102,12 @@ impl JobStore {
         id: &str,
         after_sequence: u64,
     ) -> Result<InvestigationEventPage, InvestigationStoreError> {
-        if after_sequence > MAX_EVENTS {
-            return Err(InvestigationStoreError::Invalid);
-        }
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let task = load_task(&tx, id)?;
+        if after_sequence > journal_event_limit(&task)? {
+            return Err(InvestigationStoreError::Invalid);
+        }
         let sequences=tx.prepare("SELECT sequence FROM investigation_events WHERE task_id=?1 AND sequence>?2 ORDER BY sequence LIMIT 51")?
             .query_map(params![id,signed(after_sequence)?],|r|r.get::<_,i64>(0))?.collect::<Result<Vec<_>,_>>()?;
         let mut items = Vec::new();
