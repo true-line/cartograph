@@ -143,7 +143,8 @@ pub(super) fn collect(
     let coverage = coverage.remove(0);
     if coverage.record.repo_key != source.repo_key
         || coverage.record.registered_source_id.as_deref() != Some(&source.source_id)
-        || coverage.record.config_hash != crate::coverage_config_hash(&[])
+        || coverage.record.config_hash
+            != crate::coverage_config_hash(&[], crate::Registries::builtin())
     {
         return Err("production coverage basis differs".into());
     }

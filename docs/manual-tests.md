@@ -811,7 +811,11 @@ adjacent evaluator files in the source tree.
 Use a clean checkout. All paths below must be absolute; use canonical paths
 without symlink aliases. The output directory must not exist, must have an
 existing canonical parent, and must be outside the source root and code checkout.
-The native-config JSON must be outside the source and profile roots and contain
+The source, disposable profile, output and code-checkout roots must be mutually
+disjoint canonical paths. The manifest, Git-blob proof and native-config JSON
+must be canonical external files outside source, profile and output roots; these
+boundaries are rechecked around ingestion and report collection.
+The native-config JSON must contain
 `productName`, an `identifier` beginning `com.qwtm.cartograph.acceptance598.`, and
 this explicit directory map:
 

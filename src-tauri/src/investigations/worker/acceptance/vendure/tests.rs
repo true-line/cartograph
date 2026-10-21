@@ -81,6 +81,7 @@ impl Case {
             &self.proof,
             &self.config,
             "fixture-code-revision".into(),
+            &self.root.parent().unwrap().join("report"),
             false,
         )
     }
@@ -167,6 +168,7 @@ fn vendure_preparation_rejects_input_before_creating_profile_or_jobs() {
             &case.proof,
             &case.config,
             "fixture".into(),
+            &case.root.parent().unwrap().join("report"),
             true
         )
         .is_err()
@@ -227,4 +229,84 @@ fn vendure_preparation_reports_are_exclusive_and_size_admitted() {
     let oversized = case._directory.path().join("oversized.json");
     assert!(report::write_new(&oversized, &"x".repeat(16 * 1024 * 1024)).is_err());
     assert!(!oversized.exists());
+}
+
+// AC-0191: evaluator and retained/native boundaries must be rejected before ingest.
+#[test]
+fn vendure_preparation_rejects_overlapping_and_aliased_roots() {
+    let case = Case::new();
+    let (profile, _) = profile::NativeProfile::read(&case.config).unwrap();
+    for output in [
+        &case.root,
+        &case.profile,
+        &case.root.join("reports"),
+        case.root.parent().unwrap(),
+    ] {
+        assert!(
+            validate_paths(
+                &case.root,
+                &case.manifest,
+                &case.proof,
+                &case.config,
+                &profile,
+                output
+            )
+            .is_err()
+        );
+    }
+    let nested = case.profile.join("proof.json");
+    std::fs::create_dir(&case.profile).unwrap();
+    std::fs::copy(&case.proof, &nested).unwrap();
+    assert!(
+        validate_paths(
+            &case.root,
+            &case.manifest,
+            &nested,
+            &case.config,
+            &profile,
+            &case.root.parent().unwrap().join("report")
+        )
+        .is_err()
+    );
+    assert!(!case.profile.join("data").exists());
+    #[cfg(unix)]
+    {
+        let alias = case.root.parent().unwrap().join("alias");
+        std::os::unix::fs::symlink(&case.root, &alias).unwrap();
+        assert!(
+            validate_paths(
+                &alias,
+                &case.manifest,
+                &case.proof,
+                &case.config,
+                &profile,
+                &case.root.parent().unwrap().join("report")
+            )
+            .is_err()
+        );
+    }
+}
+
+// AC-0191: failures must not write a receipt through a swapped output path.
+#[test]
+fn vendure_receipts_refuse_swapped_output_and_changed_native_config() {
+    let case = Case::new();
+    let output = case.root.parent().unwrap().join("output");
+    std::fs::create_dir(&output).unwrap();
+    let guard = OutputDirectory::pin(&output).unwrap();
+    let hash = profile::NativeProfile::read(&case.config).unwrap().1;
+    verify_config(&case.config, &hash).unwrap();
+    std::fs::write(&case.config, b"{}").unwrap();
+    assert!(verify_config(&case.config, &hash).is_err());
+    let original = output.with_extension("original");
+    std::fs::rename(&output, &original).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&case.root, &output).unwrap();
+    #[cfg(not(unix))]
+    std::fs::create_dir(&output).unwrap();
+    for name in ["preparation.json", "preparation-failed.json"] {
+        assert!(guard.write(name, &json!({"must_not_escape":true})).is_err());
+        assert!(!case.root.join(name).exists());
+        assert!(!original.join(name).exists());
+    }
 }
