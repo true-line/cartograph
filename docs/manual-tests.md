@@ -1111,7 +1111,9 @@ substitute a model. Observation is not a later dispatch identity guarantee.
    remain explicit null/unverified; version/tags do not prove active settings.
 3. Retain the exclusive `runtime-receipt.json`, `observation.json`, and any failure
    marker. They contain bounded identities/hashes, never raw responses, secrets
-   or the rubric. Never overwrite or delete partial output to retry. The helper pins the output
+   or the rubric. Failure receipts keep a closed diagnostic code (for example,
+   timeout versus identity mismatch) and only a short safe observed version token
+   or selected hexadecimal model digest; arbitrary exception text is omitted. Never overwrite or delete partial output to retry. The helper pins the output
    directory and rechecks paths around writes; a changed boundary refuses further
    receipts and preserves the original attempt. These checks do not provide an
    atomic filesystem capability against an arbitrary privileged racing writer.

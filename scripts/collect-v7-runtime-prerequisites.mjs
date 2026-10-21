@@ -1,5 +1,5 @@
 // AC-0279: operator-only observation; preparation never selects an execution role.
-import assert from 'node:assert/strict';
+import { isDeepStrictEqual } from 'node:util';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -13,7 +13,21 @@ export const LIMITS = Object.freeze({ response: 128 * 1024, artifact: 1024 * 102
 const PROTOCOL_SHA256 = '6f584efbfa7f91a002eea4735294096a87979e4e4ffff618d92d00f09ad911e7';
 const HOST = 'mac14x13-m2max-32g-60f1';
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const fail = (code) => { throw new Error(code); };
+const FAILURE_CODES = new Set([
+  'http_timeout', 'http_failure', 'http_redirect_refused', 'http_status_failure',
+  'response_too_large', 'invalid_http_response', 'invalid_response_payload',
+  'runtime_identity_mismatch', 'model_identity_mismatch', 'invalid_model_digest',
+  'invalid_model_inventory', 'output_directory_changed', 'exclusion_root_changed',
+  'preparation_path_changed', 'run_parent_changed', 'rubric_changed',
+  'invalid_artifact', 'artifact_too_large', 'prepare_failed', 'invalid_prepared_definition',
+]);
+class ClosedFailure extends Error {
+  constructor(code) { super(code); this.code = code; }
+}
+const fail = (code) => { throw new ClosedFailure(code); };
+const failureCode = (error) => error instanceof ClosedFailure && FAILURE_CODES.has(error.code) ? error.code : 'collector_failure';
+// Persist only a short version token, never arbitrary response text or URL material.
+const observedVersion = (value) => typeof value === 'string' && /^[vV]?\d{1,4}(?:\.\d{1,4}){1,3}(?:-(?:rc|beta|alpha)\.?\d{1,4})?$/u.test(value) ? value : null;
 const check = (value, code) => { if (!value) fail(code); };
 const text = (value) => typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= 256 && !/[\x00-\x1f\x7f]/u.test(value);
 export function normalizeDigest(value) {
@@ -65,23 +79,31 @@ export function getLocal(url, { timeoutMs = LIMITS.timeout, maxBytes = LIMITS.re
   const parsed = new URL(url); check(['/api/version', '/api/tags'].includes(parsed.pathname) && !parsed.search && !parsed.hash && !parsed.username && !parsed.password && !url.includes('@') && !url.includes('?') && !url.includes('#'), 'invalid_route');
   endpointOrigin(parsed.origin);
   return new Promise((resolve, reject) => {
-    const request = http.get(parsed, { signal: AbortSignal.timeout(timeoutMs), headers: { accept: 'application/json', 'accept-encoding': 'identity' }, lookup: (_host, options, callback) => options.all ? callback(null, [{ address: '127.0.0.1', family: 4 }]) : callback(null, '127.0.0.1', 4) }, (response) => {
+    const signal = AbortSignal.timeout(timeoutMs);
+    const request = http.get(parsed, { signal, headers: { accept: 'application/json', 'accept-encoding': 'identity' }, lookup: (_host, options, callback) => options.all ? callback(null, [{ address: '127.0.0.1', family: 4 }]) : callback(null, '127.0.0.1', 4) }, (response) => {
       const chunks = []; let size = 0;
-      response.on('data', (chunk) => { size += chunk.length; if (size > maxBytes) { response.destroy(); reject(new Error('response_too_large')); } else chunks.push(chunk); });
+      response.on('data', (chunk) => { size += chunk.length; if (size > maxBytes) { response.destroy(); reject(new ClosedFailure('response_too_large')); } else chunks.push(chunk); });
       response.on('end', () => resolve({ status: response.statusCode, bytes: Buffer.concat(chunks) }));
-      response.on('error', () => reject(new Error('http_failure')));
+      response.on('error', () => reject(new ClosedFailure(signal.aborted ? 'http_timeout' : 'http_failure')));
     });
-    request.on('error', () => reject(new Error('http_failure')));
+    request.on('error', () => reject(new ClosedFailure(signal.aborted ? 'http_timeout' : 'http_failure')));
   });
 }
 async function observedGet(origin, route, transport, timeoutMs) {
-  let timer;
+  let timer; let result;
   try {
-    const result = await Promise.race([transport(`${origin}${route}`, { timeoutMs, maxBytes: LIMITS.response }), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('http_timeout')), timeoutMs); })]);
-    check(result.status === 200 && Buffer.isBuffer(result.bytes) && result.bytes.length <= LIMITS.response, 'invalid_http_response');
+    result = await Promise.race([transport(`${origin}${route}`, { timeoutMs, maxBytes: LIMITS.response }), new Promise((_, reject) => { timer = setTimeout(() => reject(new ClosedFailure('http_timeout')), timeoutMs); })]);
+  } catch (error) {
+    fail(error instanceof ClosedFailure && FAILURE_CODES.has(error.code) ? error.code : 'http_failure');
+  } finally { clearTimeout(timer); }
+  check(result && Number.isInteger(result.status) && result.status >= 100 && result.status <= 599 && Buffer.isBuffer(result.bytes), 'invalid_http_response');
+  check(result.status < 300 || result.status >= 400, 'http_redirect_refused');
+  check(result.status === 200, 'http_status_failure');
+  check(result.bytes.length <= LIMITS.response, 'response_too_large');
+  try {
     const raw = new TextDecoder('utf-8', { fatal: true }).decode(result.bytes);
     return { value: strictJson(raw, LIMITS.response), hash: sha(result.bytes), byte_len: result.bytes.length };
-  } catch { fail('runtime_observation_failed'); } finally { clearTimeout(timer); }
+  } catch { fail('invalid_response_payload'); }
 }
 const scalarOptions = ['checkout', 'endpoint', 'model', 'expected-runtime-version', 'expected-model-digest', 'target-host', 'observation-path', 'confirm-target-path', 'output-dir', 'run-dir', 'rubric'];
 export function parseArguments(argv) {
@@ -165,12 +187,13 @@ export async function collect(options, { transport = getLocal, prepare = runPrep
     await writeExclusive(path.join(opts['output-dir'], name), value);
     await verifyPaths();
   };
-  const record = { schema_version: 1, kind: 'v7_runtime_prerequisites', target: { host: HOST, asserted_host: opts['target-host'], observation_path: opts['observation-path'], provenance: 'operator_asserted_not_attested' }, endpoint: origin, expected_identity: { model: opts.model, model_digest: digest, runtime_version: opts['expected-runtime-version'] }, phase: 'version', started_at: now(), completed_at: null, status: 'observing', observations: [], sampling_status: 'unset_or_unverified_not_observed', frozen_definition_sha256: null, delivery_pass: false };
+  const record = { schema_version: 1, kind: 'v7_runtime_prerequisites', target: { host: HOST, asserted_host: opts['target-host'], observation_path: opts['observation-path'], provenance: 'operator_asserted_not_attested' }, endpoint: origin, expected_identity: { model: opts.model, model_digest: digest, runtime_version: opts['expected-runtime-version'] }, observed_identity: { runtime_version: null, model_digest: null }, phase: 'version', started_at: now(), completed_at: null, status: 'observing', observations: [], sampling_status: 'unset_or_unverified_not_observed', frozen_definition_sha256: null, delivery_pass: false };
   try {
     await writeOutput('attempt.json', { schema_version: 1, kind: 'prerequisite_observation_attempt', delivery_pass: false });
     const version = await observedGet(origin, '/api/version', transport, timeoutMs);
     await verifyPaths();
     record.observations.push({ route: '/api/version', sha256: version.hash, byte_len: version.byte_len });
+    record.observed_identity.runtime_version = observedVersion(version.value?.version);
     check(text(version.value?.version) && version.value.version === opts['expected-runtime-version'], 'runtime_identity_mismatch');
     record.phase = 'tags';
     const tags = await observedGet(origin, '/api/tags', transport, timeoutMs);
@@ -178,7 +201,10 @@ export async function collect(options, { transport = getLocal, prepare = runPrep
     record.observations.push({ route: '/api/tags', sha256: tags.hash, byte_len: tags.byte_len });
     check(Array.isArray(tags.value?.models) && tags.value.models.length <= LIMITS.models, 'invalid_model_inventory');
     const selected = tags.value.models.filter((item) => item && item.name === opts.model);
-    check(selected.length === 1 && normalizeDigest(selected[0].digest) === digest, 'model_identity_mismatch');
+    check(selected.length === 1, 'model_identity_mismatch');
+    const selectedDigest = normalizeDigest(selected[0].digest);
+    record.observed_identity.model_digest = selectedDigest;
+    check(selectedDigest === digest, 'model_identity_mismatch');
     const runtime = { schema_version: 1, endpoint: `${origin}/`, model: opts.model, model_digest: digest, runtime_version: version.value.version, temperature: null, seed: null, context_length: null, verified_read_only: true };
     record.phase = 'write_runtime_receipt';
     const runtimePath = path.join(opts['output-dir'], 'runtime-receipt.json');
@@ -186,7 +212,7 @@ export async function collect(options, { transport = getLocal, prepare = runPrep
     record.runtime_receipt_sha256 = sha(await readBounded(runtimePath));
     record.status = 'observed';
     if (opts.prepareOnly) {
-      record.status = 'prepare_failed'; record.phase = 'prepare';
+      record.status = 'prepare_started'; record.phase = 'prepare';
       await verifyPaths();
       const outcome = await prepare(preparationCommand(opts, runtimePath));
       await verifyPaths();
@@ -196,14 +222,15 @@ export async function collect(options, { transport = getLocal, prepare = runPrep
       const definition = strictJson(new TextDecoder('utf-8', { fatal: true }).decode(definitionBytes), LIMITS.artifact);
       const definitionHash = (await readBounded(path.join(opts['run-dir'], 'frozen-definition.sha256'), 64)).toString('ascii');
       check(definitionHash === sha(definitionBytes) && definition.protocol_sha256 === PROTOCOL_SHA256 && definition.delivery_pass === false, 'invalid_prepared_definition');
-      assert.deepEqual(definition.runtime, runtime);
+      check(isDeepStrictEqual(definition.runtime, runtime), 'invalid_prepared_definition');
       record.frozen_definition_sha256 = definitionHash; record.status = 'prepared';
     }
     record.completed_at = now(); record.phase = 'complete';
     await writeOutput('observation.json', record);
     await verifyPaths();
     return record;
-  } catch {
+  } catch (error) {
+    record.failure_code = failureCode(error);
     record.status = 'failed'; record.completed_at = now();
     try { await writeOutput('failure.json', record); } catch { /* Preserve original directory and any partial files; never retry. */ }
     fail('prerequisite_collection_failed_artifacts_retained');

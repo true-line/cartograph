@@ -179,3 +179,29 @@ test('collector rejects changed run or rubric identity before prepare-only hando
     assert.deepEqual(await readdir(current['output-dir']), ['attempt.json']);
   }
 });
+
+test('collector retains closed failure diagnostics without raw exception or response disclosure', async (t) => {
+  const { options } = await fixture(t);
+  const secret = 'http://user:password@127.0.0.1/?token=withheld-secret';
+  const cases = [
+    { name: 'version', transport: transport({ '/api/version': { bytes: Buffer.from('{"version":"0.40.7"}') } }).fn, code: 'runtime_identity_mismatch', version: '0.40.7', selected: null },
+    { name: 'digest', transport: transport({ '/api/tags': { bytes: Buffer.from(JSON.stringify({ models: [{ name: options.model, digest: `sha256:${'B'.repeat(64)}` }] })) } }).fn, code: 'model_identity_mismatch', version: null, selected: 'b'.repeat(64) },
+    { name: 'timeout', transport: () => new Promise(() => {}), code: 'http_timeout', version: null, selected: null },
+    { name: 'exception', transport: async () => { throw new Error(secret); }, code: 'http_failure', version: null, selected: null },
+    { name: 'unsafe-version', transport: transport({ '/api/version': { bytes: Buffer.from(JSON.stringify({ version: secret })) } }).fn, code: 'runtime_identity_mismatch', version: null, selected: null },
+    { name: 'unsafe-version-suffix', transport: transport({ '/api/version': { bytes: Buffer.from('{\"version\":\"0.40.7-withheld-secret\"}') } }).fn, code: 'runtime_identity_mismatch', version: null, selected: null },
+    { name: 'redirect', transport: transport({ '/api/version': { status: 302 } }).fn, code: 'http_redirect_refused', version: null, selected: null },
+    { name: 'malformed', transport: transport({ '/api/version': { bytes: Buffer.from(`{"secret":"${secret}",`) } }).fn, code: 'invalid_response_payload', version: null, selected: null },
+  ];
+  for (const item of cases) {
+    const current = { ...options, 'output-dir': `${options['output-dir']}-${item.name}` };
+    await assert.rejects(collect(current, { transport: item.transport, timeoutMs: 10 }), /artifacts_retained/u);
+    const bytes = await readFile(path.join(current['output-dir'], 'failure.json'), 'utf8');
+    const failed = JSON.parse(bytes);
+    assert.equal(failed.failure_code, item.code); assert.equal(failed.observed_identity.runtime_version, item.version); assert.equal(failed.observed_identity.model_digest, item.selected);
+    assert.equal(failed.status, 'failed'); assert.equal(failed.delivery_pass, false); assert.ok(!bytes.includes('withheld-secret')); assert.ok(!bytes.includes('user:password'));
+    assert.deepEqual((await readdir(current['output-dir'])).sort(), ['attempt.json', 'failure.json']);
+    await assert.rejects(collect(current, { transport: item.transport, timeoutMs: 10 }));
+    assert.equal(await readFile(path.join(current['output-dir'], 'failure.json'), 'utf8'), bytes);
+  }
+});
