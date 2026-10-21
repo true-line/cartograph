@@ -259,8 +259,15 @@ fn unread_source_bound_covers_actual_firewall_representations_and_rejects_unknow
     skeleton.payload.spans[0].text.clear();
     let profile = profile();
     let limits = CompletionLimits::default();
-    for source in ["", "plain", "\u{0}\n\"\\é", "password=aaaa ", "Bearer tokenvalue1234567890"] {
-        let upper = bound_unread_source_action(&profile, &skeleton, &limits, 0, source.len()).unwrap();
+    for source in [
+        "",
+        "plain",
+        "\u{0}\n\"\\é",
+        "password=aaaa ",
+        "Bearer tokenvalue1234567890",
+    ] {
+        let upper =
+            bound_unread_source_action(&profile, &skeleton, &limits, 0, source.len()).unwrap();
         let mut actual = skeleton.clone();
         actual.payload.spans[0].text = source.into();
         let measured = measure_bounded_action(&profile, &actual, &limits).unwrap();
@@ -276,12 +283,41 @@ fn unread_source_bound_covers_actual_firewall_representations_and_rejects_unknow
     assert!(bound_unread_source_action(&profile, &skeleton, &limits, 0, usize::MAX).is_err());
     let upper = bound_unread_source_action(&profile, &skeleton, &limits, 0, 100).unwrap();
     let exact = CompletionLimits::new(CompletionLimitValues {
-        input_bytes: upper.original_payload_bytes.max(upper.redacted_payload_bytes),
+        input_bytes: upper
+            .original_payload_bytes
+            .max(upper.redacted_payload_bytes),
         ..limits.values()
-    }).unwrap();
+    })
+    .unwrap();
     assert!(bound_unread_source_action(&profile, &skeleton, &exact, 0, 100).is_ok());
     let short = CompletionLimits::new(CompletionLimitValues {
-        input_bytes: exact.values().input_bytes - 1, ..exact.values()
-    }).unwrap();
+        input_bytes: exact.values().input_bytes - 1,
+        ..exact.values()
+    })
+    .unwrap();
     assert!(bound_unread_source_action(&profile, &skeleton, &short, 0, 100).is_err());
+}
+
+#[test]
+fn bounded_wire_inspection_is_exact_without_preparation_authority() {
+    // AC-0287: pure production redaction, never provider dispatch.
+    let input = action();
+    let limits = CompletionLimits::default();
+    let inspected = inspect_bounded_action(&profile(), &input, &limits).unwrap();
+    let prepared = prepare(&input, &limits).unwrap();
+    assert_eq!(inspected.payload(), &prepared.preview().egress.payload);
+    assert_ne!(inspected.payload(), &input.payload);
+    assert_eq!(
+        inspected.measurements(),
+        measure_bounded_action(&profile(), &input, &limits).unwrap()
+    );
+    let mut invalid = profile();
+    invalid.protocol_version = "unproved-redactor".into();
+    assert_eq!(
+        inspect_bounded_action(&invalid, &input, &limits)
+            .err()
+            .unwrap()
+            .code,
+        FailureCode::InvalidProfile
+    );
 }

@@ -150,6 +150,7 @@ impl InvestigationInput {
             limits,
             policy,
             None,
+            false,
         )
     }
 
@@ -162,6 +163,7 @@ impl InvestigationInput {
         limits: &llm::bounded::CompletionLimits,
         policy: &InvestigationPolicy,
         unread_source: Option<(usize, usize)>,
+        protect: bool,
     ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
         if core_redact::TEXT_POLICY_VERSION != "redact-text@1" {
             return Err(InvestigationError::InvalidInput);
@@ -254,6 +256,20 @@ impl InvestigationInput {
                 &Some(&feedback),
             )?;
             wire::replace_prompt(&mut action.payload, &prompt, MAX_INPUT_BYTES)?;
+            if protect {
+                let inspected = llm::bounded::inspect_bounded_action(profile, &action, limits)
+                    .map_err(|error| {
+                        if error.code == llm::bounded::FailureCode::InputTooLarge {
+                            InvestigationError::LimitExceeded
+                        } else {
+                            InvestigationError::InvalidInput
+                        }
+                    })?;
+                super::source_preview::protected_representation(
+                    &action.payload,
+                    inspected.payload(),
+                )?;
+            }
             let measurements = match unread_source {
                 Some((index, bytes)) => {
                     llm::bounded::bound_unread_source_action(profile, &action, limits, index, bytes)
@@ -294,6 +310,19 @@ impl InvestigationInput {
         limits: &llm::bounded::CompletionLimits,
         action_id: &str,
         policy: &InvestigationPolicy,
+    ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
+        self.measure_source_projection(target, profile, limits, action_id, policy, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn measure_source_projection(
+        &self,
+        target: &InvestigationInspectionTarget,
+        profile: &llm::bounded::ProviderProfile,
+        limits: &llm::bounded::CompletionLimits,
+        action_id: &str,
+        policy: &InvestigationPolicy,
+        protect: bool,
     ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
         let (mut prompt, contract) = self.admission_reserve_basis(policy)?;
         target.validate()?;
@@ -523,6 +552,7 @@ impl InvestigationInput {
             limits,
             policy,
             Some((span_index, bytes)),
+            protect,
         )
     }
 

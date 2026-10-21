@@ -843,3 +843,7 @@ pub use admission_input::{
 #[path = "input_context_preview.rs"]
 mod context_preview;
 pub use context_preview::{ContextPreviewBound, ContextPreviewKind, ContextPreviewMeasurements};
+
+#[path = "input_source_preview.rs"]
+mod source_preview;
+pub use source_preview::UnreadSourcePreviewBound;

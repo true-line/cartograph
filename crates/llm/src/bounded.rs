@@ -163,6 +163,44 @@ pub fn measure_bounded_action(
     prepare_wire(profile, action, limits).map(|prepared| prepared.measurements)
 }
 
+/// Pure inspection of the exact bounded redaction/serialization path. This is
+/// neither policy authorization nor a provider preparation/dispatch capability.
+///
+/// ```compile_fail
+/// fn promote(value: llm::bounded::BoundedWireInspection) -> llm::bounded::PreparedBoundedCompletion {
+///     value.into()
+/// }
+/// ```
+pub struct BoundedWireInspection {
+    payload: CompletionPayload,
+    measurements: BoundedWireMeasurements,
+}
+impl BoundedWireInspection {
+    /// Exact transient redacted representation; it is not an execution receipt.
+    pub fn payload(&self) -> &CompletionPayload {
+        &self.payload
+    }
+    pub fn measurements(&self) -> BoundedWireMeasurements {
+        self.measurements
+    }
+}
+
+/// Inspect fixed protocol fields without constructing a provider or a sealable
+/// PreparedBoundedCompletion. Profile/redactor identity and all wire gates are
+/// identical to the real firewall's prepare_wire path.
+pub fn inspect_bounded_action(
+    profile: &ProviderProfile,
+    action: &CompletionAction,
+    limits: &CompletionLimits,
+) -> Result<BoundedWireInspection, BoundedCallError> {
+    profile.validate()?;
+    let wire = prepare_wire(profile, action, limits)?;
+    Ok(BoundedWireInspection {
+        payload: wire.payload,
+        measurements: wire.measurements,
+    })
+}
+
 /// Conservative wire bounds for replacing one empty source-text field. Every
 /// other field must already be the complete prospective representation (including
 /// continuation feedback). This proves only the five bounded-wire gates, never
@@ -175,7 +213,10 @@ pub fn bound_unread_source_action(
     span_index: usize,
     source_bytes: usize,
 ) -> Result<BoundedWireMeasurements, BoundedCallError> {
-    let span = skeleton.payload.spans.get(span_index)
+    let span = skeleton
+        .payload
+        .spans
+        .get(span_index)
         .ok_or_else(|| not_sent(FailureCode::InvalidInput))?;
     if !span.text.is_empty() {
         return Err(not_sent(FailureCode::InvalidInput));
@@ -184,16 +225,22 @@ pub fn bound_unread_source_action(
     let escaped = core_redact::direct_source_json_content_bound(source_bytes)
         .and_then(|value| u64::try_from(value).ok())
         .ok_or_else(|| not_sent(FailureCode::InputTooLarge))?;
-    let raw = u64::try_from(source_bytes)
-        .map_err(|_| not_sent(FailureCode::InputTooLarge))?;
+    let raw = u64::try_from(source_bytes).map_err(|_| not_sent(FailureCode::InputTooLarge))?;
     let add = |base: u64, delta: u64, ceiling: u64| {
-        base.checked_add(delta).filter(|value| *value <= ceiling)
+        base.checked_add(delta)
+            .filter(|value| *value <= ceiling)
             .ok_or_else(|| not_sent(FailureCode::InputTooLarge))
     };
     sizes.raw_string_bytes = add(sizes.raw_string_bytes, raw, limits.0.input_bytes)?;
-    sizes.original_payload_bytes = add(sizes.original_payload_bytes, escaped, limits.0.input_bytes)?;
-    sizes.redacted_payload_bytes = add(sizes.redacted_payload_bytes, escaped, limits.0.input_bytes)?;
-    sizes.original_action_bytes = add(sizes.original_action_bytes, escaped, limits.0.input_bytes + 4096)?;
+    sizes.original_payload_bytes =
+        add(sizes.original_payload_bytes, escaped, limits.0.input_bytes)?;
+    sizes.redacted_payload_bytes =
+        add(sizes.redacted_payload_bytes, escaped, limits.0.input_bytes)?;
+    sizes.original_action_bytes = add(
+        sizes.original_action_bytes,
+        escaped,
+        limits.0.input_bytes + 4096,
+    )?;
     sizes.egress_fingerprint_bytes = add(sizes.egress_fingerprint_bytes, escaped, 512 * 1024)?;
     Ok(sizes)
 }

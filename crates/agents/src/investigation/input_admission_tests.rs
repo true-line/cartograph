@@ -1022,3 +1022,6 @@ fn admission_reserve_redaction_boundary_witnesses_preserve_the_wire_bound() {
 
 #[path = "admission_sealing_tests.rs"]
 mod sealing_tests;
+
+#[path = "input_source_preview_tests.rs"]
+mod source_preview_tests;
