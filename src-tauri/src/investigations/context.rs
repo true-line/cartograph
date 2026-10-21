@@ -72,6 +72,42 @@ pub(super) struct FrozenContext {
     pub(super) policy: &'static InvestigationPolicy,
 }
 
+/// Owned local preparation, never a deserialized or cloneable publication token.
+/// Query preparation may acquire retention locks. This binds the frozen basis;
+/// it does not attest durable task ownership, cancellation or transaction state.
+pub(super) struct PreparedContextRead {
+    base_ledger: InvestigationInputLedger,
+    policy_profile: &'static str,
+    ledger: InvestigationInputLedger,
+    raw: String,
+    kind: PreparedContextReadKind,
+    guards: Option<EvidenceGuards>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreparedContextReadKind {
+    Query,
+    Inventory,
+}
+
+impl PreparedContextRead {
+    pub(super) fn base_ledger(&self) -> &InvestigationInputLedger {
+        &self.base_ledger
+    }
+    pub(super) fn policy_profile(&self) -> &'static str {
+        self.policy_profile
+    }
+    pub(super) fn ledger(&self) -> &InvestigationInputLedger {
+        &self.ledger
+    }
+    pub(super) fn raw(&self) -> &str {
+        &self.raw
+    }
+    pub(super) fn kind(&self) -> PreparedContextReadKind {
+        self.kind
+    }
+}
+
 #[derive(Serialize)]
 struct InvestigationQueryPage {
     context: InvestigationPageContext,
@@ -525,6 +561,17 @@ impl FrozenContext {
         query: InvestigationQuery,
         sink: &mut impl AcquisitionSink,
     ) -> Result<(), HostError> {
+        let prepared = self.prepare_query(state, query)?;
+        self.publish_context_read(prepared, sink)
+    }
+
+    /// Build exact prospective bytes and metadata under retained source guards.
+    /// This may touch lockfiles, but neither publishes input nor mutates self.
+    pub(super) fn prepare_query(
+        &self,
+        state: &AppState,
+        query: InvestigationQuery,
+    ) -> Result<PreparedContextRead, HostError> {
         query.validate()?;
         self.ledger.validate_with_policy(self.policy)?;
         match (
@@ -688,14 +735,15 @@ impl FrozenContext {
             has_more: response.context.page().next_cursor.is_some(),
         });
         ledger.validate_with_policy(self.policy)?;
-        let mut usage = sink.usage().clone();
-        usage.selected_facts = ledger.selected_facts.len();
-        sink.publish_input(&ledger, usage)?;
-        // The guard remains live through the durable receipt-reference commit.
-        self.ledger = ledger;
-        self.query_pages
-            .push(String::from_utf8(raw).map_err(|_| HostError::InvalidInput)?);
-        Ok(())
+        let raw = String::from_utf8(raw).map_err(|_| HostError::InvalidInput)?;
+        Ok(PreparedContextRead {
+            base_ledger: self.ledger.clone(),
+            policy_profile: self.policy.profile(),
+            ledger,
+            raw,
+            kind: PreparedContextReadKind::Query,
+            guards: Some(guards),
+        })
     }
 
     /// Acquire exact original inventory detail without consulting graph or
@@ -705,6 +753,16 @@ impl FrozenContext {
         request: InvestigationCoverageRead,
         sink: &mut impl AcquisitionSink,
     ) -> Result<(), HostError> {
+        let prepared = self.prepare_inventory(request)?;
+        self.publish_context_read(prepared, sink)
+    }
+
+    /// Prepare retained original inventory bytes without source or graph reads,
+    /// publication, or mutation of the frozen acquisition state.
+    pub(super) fn prepare_inventory(
+        &self,
+        request: InvestigationCoverageRead,
+    ) -> Result<PreparedContextRead, HostError> {
         self.ledger.validate_with_policy(self.policy)?;
         let archive = self
             .coverage_archive
@@ -740,9 +798,72 @@ impl FrozenContext {
             });
         ledger.validate_with_policy(self.policy)?;
         let raw = String::from_utf8(raw).map_err(|_| HostError::InvalidInput)?;
-        sink.publish_input(&ledger, sink.usage().clone())?;
+        Ok(PreparedContextRead {
+            base_ledger: self.ledger.clone(),
+            policy_profile: self.policy.profile(),
+            ledger,
+            raw,
+            kind: PreparedContextReadKind::Inventory,
+            guards: None,
+        })
+    }
+
+    /// Publish against the same in-memory acquisition basis. The sink still
+    /// owns durable task/lease/cancellation and transaction checks. Query guards
+    /// remain live through publication and installation of the prepared buffers.
+    pub(super) fn publish_context_read(
+        &mut self,
+        prepared: PreparedContextRead,
+        sink: &mut impl AcquisitionSink,
+    ) -> Result<(), HostError> {
+        if prepared.base_ledger() != &self.ledger
+            || prepared.policy_profile() != self.policy.profile()
+        {
+            return Err(HostError::InputChanged);
+        }
+        prepared.ledger().validate_with_policy(self.policy)?;
+        let (response_bytes, response_hash) = match prepared.kind() {
+            PreparedContextReadKind::Query => prepared
+                .ledger()
+                .queries
+                .last()
+                .map(|manifest| (manifest.response_bytes, &manifest.response_hash)),
+            PreparedContextReadKind::Inventory => prepared
+                .ledger()
+                .coverage_reads
+                .last()
+                .map(|manifest| (manifest.response_bytes, &manifest.response_hash)),
+        }
+        .ok_or(HostError::InvalidInput)?;
+        if response_bytes != prepared.raw().len()
+            || response_hash != &content_hash(prepared.raw().as_bytes())
+        {
+            return Err(HostError::InvalidInput);
+        }
+        // All allocation and UTF-8 conversion precede durable publication.
+        match prepared.kind() {
+            PreparedContextReadKind::Query => self.query_pages.try_reserve(1),
+            PreparedContextReadKind::Inventory => self.inventory_details.try_reserve(1),
+        }
+        .map_err(|_| HostError::LimitExceeded)?;
+        let mut usage = sink.usage().clone();
+        if prepared.kind() == PreparedContextReadKind::Query {
+            usage.selected_facts = prepared.ledger().selected_facts.len();
+        }
+        sink.publish_input(prepared.ledger(), usage)?;
+        let PreparedContextRead {
+            ledger,
+            raw,
+            kind,
+            guards,
+            ..
+        } = prepared;
         self.ledger = ledger;
-        self.inventory_details.push(raw);
+        match kind {
+            PreparedContextReadKind::Query => self.query_pages.push(raw),
+            PreparedContextReadKind::Inventory => self.inventory_details.push(raw),
+        }
+        drop(guards);
         Ok(())
     }
 
@@ -882,3 +1003,7 @@ pub(super) fn bounded_json(
 #[cfg(test)]
 #[path = "context_coverage_tests.rs"]
 mod coverage_tests;
+
+#[cfg(test)]
+#[path = "context_preparation_tests.rs"]
+mod preparation_tests;
