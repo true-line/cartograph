@@ -75,6 +75,8 @@ pub(in crate::investigation) fn basis() -> (
         representation_hash: content_hash(b"representation"),
     };
     let disclosure = InvestigationDisclosure {
+        completion_contract_hash: None,
+        completion_metadata_hash: None,
         coverage_details: vec![],
         coverage: None,
         inspection_requirements_hash: None,

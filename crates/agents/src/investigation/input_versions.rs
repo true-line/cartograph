@@ -111,7 +111,7 @@ impl InvestigationInput {
         targets: Option<&[InvestigationInspectionTarget]>,
         coverage_details: &[String],
     ) -> Result<Self, InvestigationError> {
-        if !specialist.uses_coverage_qualification() {
+        if !specialist.uses_coverage_qualification() || specialist.uses_completion_obligations() {
             return Err(InvestigationError::InvalidInput);
         }
         let targets = targets.map(normalize_inspection_targets).transpose()?;
@@ -141,6 +141,84 @@ impl InvestigationInput {
             .map_err(|_| InvestigationError::InvalidInput)?;
         bounded_bytes(&input.payload, MAX_INPUT_BYTES)?;
         input.add_coverage_details(coverage_details)?;
+        Ok(input)
+    }
+
+    /// V7 binds the immutable mixed contract and bounded durable feedback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_v7(
+        question: &str,
+        specialist: SpecialistId,
+        ledger: InvestigationInputLedger,
+        query_pages: &[String],
+        evidence: &[AgentEvidence],
+        supplied_history: &[String],
+        usage: &InvestigationUsage,
+        basis: &InvestigationTurnBasis,
+        request: &obligations::StagedObligationRequest,
+        metadata: &staged_refusal::ProtectedCompletionMetadata,
+        coverage_details: &[String],
+    ) -> Result<Self, InvestigationError> {
+        if !specialist.uses_completion_obligations() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let request = request.normalized()?;
+        request.validate_ledger(&ledger)?;
+        let selected: SpecialistId =
+            serde_json::from_value(serde_json::Value::String(request.specialist_id.clone()))
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        if selected != specialist
+            || ledger
+                .coverage
+                .as_ref()
+                .is_none_or(|proof| proof.context_id != request.expected_context_id)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        metadata.validate()?;
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: request.intent_hash()?,
+            obligations_hash: request.obligations.fingerprint()?,
+            obligations: request.obligations.clone(),
+        };
+        contract.validate()?;
+        if metadata.request_hash != contract.request_hash
+            || metadata.obligations_hash != contract.obligations_hash
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let targets = request.obligations.sources()?;
+        let mut input = Self::prepare_progress(
+            question,
+            specialist,
+            ledger,
+            query_pages,
+            evidence,
+            supplied_history,
+            usage,
+            basis,
+        )?;
+        if !targets.is_empty() {
+            input.add_inspection_requirements(normalize_inspection_targets(&targets)?)?;
+        }
+        let mut prompt: Value = serde_json::from_str(&input.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        // Coverage details validates the raw acquired responses before schema6.
+        prompt["schema_version"] = 5.into();
+        input.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        input.add_coverage_details(coverage_details)?;
+        prompt = serde_json::from_str(&input.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        prompt["schema_version"] = 6.into();
+        prompt["completion_contract"] =
+            serde_json::to_value(contract).map_err(|_| InvestigationError::InvalidInput)?;
+        prompt["completion_metadata"] =
+            serde_json::to_value(metadata).map_err(|_| InvestigationError::InvalidInput)?;
+        input.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        bounded_bytes(&input.payload, MAX_INPUT_BYTES)?;
         Ok(input)
     }
 

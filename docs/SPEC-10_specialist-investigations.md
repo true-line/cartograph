@@ -666,9 +666,9 @@ investigation path.
 
 ### Staged completion-obligation primitives (#645, AC-0264)
 
-The internal generation-4 request is preparation for the three-slice #633 contract;
-V7 remains absent from the catalog and refused by direct start. No new public
-specialist enum, prompt, finish behavior or result outcome is introduced here.
+The generation-4 request supplies the immutable intent for the three-slice #633
+contract. The first slice introduced these primitives with V7 unavailable;
+AC-0266 below connects their production start, prompt and result paths.
 A single `investigation-completion-obligations@1` envelope contains source or
 inventory entries, each with a kind-specific content ID. Source identity retains
 all captured-target fields and the existing fact/role/index conflict rule;
@@ -685,7 +685,7 @@ source, inventory and generation-4 request identities use respectively
 `cartograph:investigation-client-intent:v4`, each with a trailing NUL domain
 separator. Existing client-intent v1/v2/v3 and inspection-requirements-v1 remain
 unchanged. These pure identities attest caller intent; authoritative retained
-inventory/source resolution remains required before eventual exposure.
+inventory/source resolution is required before admitting a new task.
 
 
 ### Staged finish admission and refusal journal (#648, AC-0265)
@@ -703,8 +703,10 @@ obligation. Neither candidate publishes a legacy-shaped V7 result.
 Attempts bind immutable task/request intent, obligation, actual read action and
 invocation, and saved ledger basis. Unavailable outcomes are a closed set: pinned
 target absent, range/index out of bounds, and retained inventory exceeding caller
-`max_bytes`. Firewall refusal additionally requires the completed acquisition and
-its actual sealing observation. Operational, ownership, storage and provider
+`max_bytes`. `FirewallRefused` remains a reserved decoding variant; the host
+rejects its persistence until an actual per-read denial operation exists.
+Redaction of acquired evidence remains an acquired attempt. Operational,
+ownership, storage and provider
 failures retain terminal semantics; model claims and started reads are not
 completed attempts.
 
@@ -726,8 +728,43 @@ read-back does not claim raw response replay or complete V7 task recovery.
 
 The first refusal returns `Continue`; the second returns `TerminalRequired`, and
 no third continuation is admissible. This slice does not commit a second-refusal
-Ready task. The final integration slice must publish the second refusal and host
-`Failed/obligations_unmet` with no result in the same transaction, preserve charged
-usage across intervening reads, and verify cancellation, ownership loss, reopen,
-history and UI projections. V7 remains unavailable in catalog and direct start;
-these primitives neither dispatch providers nor activate worker continuation.
+Ready task. AC-0266 connects this decision to atomic second-refusal publication
+and host `Failed/obligations_unmet` with no result, preserves charged usage across
+intervening reads, and validates cancellation, ownership loss, reopen, history
+and UI projections. The pure primitives themselves dispatch no provider calls.
+
+### V7 production completion integration (#650, AC-0266)
+
+The final slice connects the single generation-4 request authority to input6,
+disclosure4 and result5. The IPC reads the generation before decoding exactly one
+closed request arm. A source obligation comes from the retained receipt resolver;
+an inventory obligation is selectable only for the exact Recorded context/repo/
+inventory identity. Start revalidates the selection before durable admission,
+while a committed nonce still recovers its original task before mutable state
+checks. No selection or envelope is inferred from the question.
+
+StoredTask2 retains the normalized completion intent and its original request
+hash. Actual completed reads and refusals supply ordered, hash-bound observations;
+a planned read never counts as acquired. Redaction of an acquired representation
+does not turn that read into a firewall refusal: it remains acquired, but cannot
+support the finishing claim. Whole-input firewall failure terminates execution
+without inventing a per-read observation. Legacy StoredTask1 rows are read without
+rewriting their bytes or interpreting them as completion tasks.
+
+A wrapped supported finish requires every obligation's exact disclosed
+representation. An empty insufficient-evidence finish requires a real completed
+attempt for every obligation. Security-invalid output fails before recoverable
+classification. The first unmet finish records the actual response, usage,
+refusal and bounded feedback atomically. The second records a host terminal
+obligations-unmet outcome in the same transaction, without a result or third
+continuation. Saved history distinguishes finishing-disclosure assessments from
+terminal observations and not-assessed state; cancellation and unknown invocation
+outcomes retain their independent execution status.
+
+The UI renders generation-4 summary/detail and generation-5 results as distinct
+contracts, rejects mixed-family responses, and clears explicit obligation
+selection for follow-ups and scope changes. Same-nonce retries retain the exact
+original request. This integration does not establish real-provider acceptance;
+the frozen V6 control remains immutable. Explicit V7 catalog entries and direct starts share the same availability
+gate, activated with the complete production path in this slice. Defaults stay
+unchanged.

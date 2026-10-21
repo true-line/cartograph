@@ -6,6 +6,8 @@ import { InvestigationActivity } from './InvestigationActivity';
 import { InvestigationFindings } from './InvestigationFindings';
 import { EgressConsentDialog } from './EgressConsentDialog';
 import { InspectionAssessment } from './InspectionAssessment';
+import { CompletionAssessment } from './CompletionAssessment';
+import { obligationEnvelope } from '../investigationObligations';
 import { InvestigationCoverage } from './InvestigationCoverage';
 
 export const INVESTIGATION_STATUS: Record<InvestigationStatus, string> = {
@@ -37,11 +39,19 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
   const questionBytes = new TextEncoder().encode(question).length;
   const locked = state.starting || state.pendingStart !== null;
   const requirements = state.draftInspectionRequirements;
+  const completionVersion = specialistId.endsWith('@7');
+  const choices = state.obligationChoices;
+  const obligations = obligationEnvelope(state.draftObligations);
+  const completionBound = Boolean(choices && obligations.obligations.length > 0 && obligations.obligations.length <= 12 &&
+    obligations.obligations.every((item) => item.kind === 'source' ? item.target.graph_snapshot_id === choices.graph_snapshot_id : item.target.context_id === choices.context_id));
   const inspectionVersion = specialistId.endsWith('@5');
   const coverageVersion = specialistId.endsWith('@6');
   const supportsRequirements = inspectionVersion || coverageVersion;
   const scope: InvestigationScope = scopeType === 'all' ? { type: 'all' } : { type: 'neighborhood', anchor, hops };
-  const requestBytes = new TextEncoder().encode(JSON.stringify({ schema_version: coverageVersion ? 3 : inspectionVersion ? 2 : 1,
+  const requestBytes = completionVersion ? new TextEncoder().encode(JSON.stringify({ schema_version: 4, request_nonce: '0'.repeat(36),
+    specialist_id: specialistId, obligations, question, scope, provider_mode: providerMode, limit_profile: state.catalog?.limits.profile ?? 'investigation-v1',
+    expected_graph_revision: choices?.graph_snapshot_id ?? null, expected_context_id: choices?.context_id ?? '',
+    conversation_id: parent?.conversation_id ?? null, parent_id: parent?.parent_id ?? null })).length : new TextEncoder().encode(JSON.stringify({ schema_version: coverageVersion ? 3 : inspectionVersion ? 2 : 1,
     request_nonce: '0'.repeat(36), specialist_id: specialistId, question, scope, provider_mode: providerMode,
     limit_profile: state.catalog?.limits.profile ?? 'investigation-v1', ...parent,
     ...(supportsRequirements && requirements.length ? { inspection_requirements: requirements,
@@ -49,7 +59,8 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
   const startEnabled = canStart && !locked && !state.catalogLoading && Boolean(provider?.available) &&
     selectedSpecialistAvailable && question.trim().length > 0 &&
     questionBytes <= 2048 && (scopeType === 'all' || anchor.trim().length > 0) &&
-    (inspectionVersion ? requirements.length > 0 : coverageVersion || requirements.length === 0) && requestBytes <= 8192;
+    (completionVersion ? completionBound && requirements.length === 0 :
+      state.draftObligations.length === 0 && (inspectionVersion ? requirements.length > 0 : coverageVersion || requirements.length === 0)) && requestBytes <= 8192;
   const refresh = () => { void state.loadCatalog(); void state.loadHistory(); };
 
   return <section className="investigations-surface" aria-label="Investigations">
@@ -61,7 +72,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
       event.preventDefault();
       if (startEnabled && state.catalog) void state.start({ specialist_id: specialistId, question,
         scope, provider_mode: providerMode, limit_profile: state.catalog.limits.profile, ...parent,
-        ...(supportsRequirements && requirements.length ? { inspection_requirements: requirements } : {}) });
+        ...(completionVersion ? { obligations } : supportsRequirements && requirements.length ? { inspection_requirements: requirements } : {}) });
     }}>
       <fieldset disabled={locked}><legend>Specialist</legend>
         <div className="investigation-specialists">{state.catalog?.specialists.map((specialist) =>
@@ -78,7 +89,31 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
       {state.catalogLoading && <p role="status">Loading specialists…</p>}
       {state.catalogError && <p className="error-text" role="alert">{state.catalogError}</p>}
       {!state.catalog && !state.catalogLoading && <p className="muted">The app core supplies available specialists and provider limits.</p>}
-      <fieldset disabled={locked} aria-label="Required source inspections"><legend>Required source inspections</legend>
+      {completionVersion && <fieldset disabled={locked || state.obligationChoicesLoading} aria-label="Required completion evidence"><legend>Required completion evidence</legend>
+        <p>Select captured sources in the evidence drawer or choose recorded inventories below. Viewing evidence does not discharge an obligation.</p>
+        <p>Choose 1–12 combined obligations within the complete 8,192-byte request. Follow-ups require fresh explicit selections.</p>
+        <button type="button" className="secondary-button" onClick={() => void state.loadObligationChoices(scope)}>Refresh completion choices</button>
+        {state.obligationChoicesLoading && <p role="status">Resolving exact completion context…</p>}
+        {choices && <><ul>{choices.inventories.map((item) => <li key={item.repo}>
+          <strong>{item.repo}</strong> · {item.status}
+          <button type="button" className="secondary-button" disabled={!item.obligation || state.draftObligations.some((selected) => selected.obligation_id === item.obligation?.obligation_id)}
+            onClick={() => item.obligation && state.addObligation(item.obligation)} aria-label={`Require inventory ${item.repo}`}>Require inventory</button>
+          {item.status !== 'recorded' && <span> Only recorded inventory from this exact context can be selected.</span>}
+        </li>)}</ul><details><summary>Selection context</summary><code>{choices.context_id}</code></details></>}
+        <ul>{state.draftObligations.map((item) => <li key={item.obligation_id}>
+          {item.kind === 'source' ? `${item.target.source.repo}/${item.target.source.path}` : `${item.target.repo} inventory`}
+          <button type="button" className="secondary-button" aria-label={`Remove obligation ${item.obligation_id}`} onClick={() => state.removeObligation(item.obligation_id)}>Remove</button>
+        </li>)}</ul>
+        {!completionBound && <p role="status">Select at least one obligation resolved from the current context. Refresh and remove stale selections if the context changed.</p>}
+        {requirements.length > 0 && <><p>Earlier source requirements are separate from V7 obligations.</p>
+          <button type="button" className="secondary-button" onClick={() => {
+            void (async () => { for (const target of requirements) if (!await state.addSourceObligation(target)) return; state.clearInspectionRequirements(); })();
+          }}>Require selected sources for completion</button></>}
+        {state.obligationDraftError && <p role="alert" className="error-text">{state.obligationDraftError}</p>}
+      </fieldset>}
+      {!completionVersion && state.draftObligations.length > 0 && <p role="status">Completion obligations require an explicit V7 specialist. Remove them before using another version.
+        <button type="button" onClick={state.clearObligations} disabled={locked}>Remove completion obligations</button></p>}
+      {!completionVersion && <fieldset disabled={locked} aria-label="Required source inspections"><legend>Required source inspections</legend>
         <p className="muted">Choose a captured range in the evidence drawer and select “Require this source in an investigation”.
           Viewing source does not satisfy a specialist requirement. Follow-ups do not inherit earlier inspections.</p>
         <p className="muted">Up to 12 required sources, within the 8,192-byte total request limit; long paths/questions reduce how many fit.</p>
@@ -99,7 +134,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
         {inspectionVersion && requirements.length === 0 && <p role="status">V5 requires at least one explicitly selected captured source.</p>}
         {coverageVersion && <p className="muted">V6 includes saved ingest coverage. Source inspection requirements are optional and stay separate.</p>}
         {state.inspectionDraftError && <p role="alert" className="error-text">{state.inspectionDraftError}</p>}
-      </fieldset>
+      </fieldset>}
       <div className="investigation-form-row">
         <label>Scope<select value={scopeType} disabled={locked} onChange={(event) => setScopeType(event.target.value as 'all' | 'neighborhood')}>
           <option value="all">Recovered system</option><option value="neighborhood">Fact neighborhood</option>
@@ -167,11 +202,14 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
             <p className="muted">Scope: {summary.scope.type === 'all' ? 'Recovered system' : `${summary.scope.anchor} · ${summary.scope.hops} hop(s)`}</p>
             <p className="muted">Prepared graph: <code>{summary.graph_snapshot_id ?? 'Pending preparation'}</code></p>
             <div className="investigation-actions">
+              {summary.schema_version === 4 && <p>{summary.completion_outcome === 'obligations_unmet' ? 'Completion obligations unmet; no result admitted.' :
+                summary.completion_outcome === 'insufficient_evidence' ? 'Admitted insufficient-evidence completion.' : summary.completion_outcome === 'supported' ? 'Supported completion.' : 'No completion outcome recorded.'}</p>}
               {summary.actions.can_cancel && <button type="button" className="danger-button" disabled={state.actionBusy}
                 onClick={() => void state.cancel()}>Request cancellation</button>}
               {summary.actions.can_follow_up && <button type="button" className="secondary-button" disabled={locked || state.catalogLoading || !state.catalog} onClick={() => {
                 if (state.catalogLoading || !state.catalog) return;
                 state.clearInspectionRequirements();
+                state.clearObligations();
                 setParent({ conversation_id: summary.conversation_id, parent_id: summary.investigation_id });
                 setScopeType(summary.scope.type); if (summary.scope.type === 'neighborhood') { setAnchor(summary.scope.anchor); setHops(summary.scope.hops); }
                 setSpecialistId(summary.specialist_id);
@@ -184,13 +222,14 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
           {state.error && <p className="error-text" role="alert">{state.error}</p>}
           {state.actionError && <p className="error-text" role="alert">{state.actionError}</p>}
           {state.detail && <>
-            {state.detail.schema_version === 3 && <InvestigationCoverage context={state.detail.coverage_context}
+            {(state.detail.schema_version === 3 || state.detail.schema_version === 4) && <InvestigationCoverage context={state.detail.coverage_context}
               attestation={state.result?.coverage} />}
-            <InspectionAssessment requirements={state.detail.inspection_requirements ?? []}
+            {state.detail.schema_version === 4 && state.detail.completion && <CompletionAssessment completion={state.detail.completion} outcome={state.detail.completion_outcome} />}
+            {state.detail.schema_version !== 4 && <InspectionAssessment requirements={state.detail.inspection_requirements ?? []}
               awaitingAssessment={!['completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(state.detail.status) || state.detail.invocation_pending}
               assessment={state.detail.inspection_assessment} location={state.inspectionLocation}
               locationTargetId={state.inspectionLocationTargetId} locationLoading={state.inspectionLocationLoading}
-              locationError={state.inspectionLocationError} onLocation={(target) => void state.readInspectionLocation(target)} />
+              locationError={state.inspectionLocationError} onLocation={(target) => void state.readInspectionLocation(target)} />}
             <details className="investigation-section"><summary>Specialist, provider and consumed limits</summary>
               <p>{state.detail.specialist.name} · <code>{state.detail.specialist.id}</code> · T3 / InferredWeak</p>
               <p>Prompt fingerprint: <code>{state.detail.specialist.prompt_fingerprint}</code></p>

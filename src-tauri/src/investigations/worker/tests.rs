@@ -27,6 +27,13 @@ enum Mode {
     MetadataFinish,
     InventoryFinish,
     WrongQualifiedContext,
+    CompletionSupported,
+    CompletionRepair,
+    CompletionCap,
+    CompletionInventoryUnavailable,
+    CompletionNoAttempt,
+    CompletionRedacted,
+    CompletionCancelRefused,
 }
 
 /// One deterministic provider action per actual host invocation. The fixture
@@ -95,7 +102,9 @@ impl LlmProvider for Scripted {
             !(call == 1 && matches!(self.mode, Mode::PanicAfterQuery)),
             "simulated owner loss"
         );
-        let mut action = if matches!(self.mode, Mode::InventoryFinish) {
+        let mut action = if prompt["schema_version"] == 6 {
+            completion_tests::scripted_action(self.mode, call, &prompt)
+        } else if matches!(self.mode, Mode::InventoryFinish) {
             if call == 0 {
                 let repo = &prompt["coverage_qualification"]["repos"][0];
                 json!({"type":"read_coverage_inventory","context_id":prompt["context_id"],
@@ -176,7 +185,7 @@ impl LlmProvider for Scripted {
             };
         }
         if (matches!(self.mode, Mode::CancelFinish) && call == 2)
-            || (matches!(self.mode, Mode::CancelTool) && call == 1)
+            || (matches!(self.mode, Mode::CancelTool | Mode::CompletionCancelRefused) && call == 1)
         {
             self.cancel.lock().unwrap().as_ref().unwrap()();
             // The response was already in flight: emulate its valid return
@@ -830,3 +839,6 @@ mod inspection_tests;
 
 #[path = "coverage_tests.rs"]
 mod coverage_tests;
+
+#[path = "completion_tests.rs"]
+mod completion_tests;

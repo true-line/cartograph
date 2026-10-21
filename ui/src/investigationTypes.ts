@@ -6,7 +6,7 @@ import type { EgressPreview } from './components/EgressConsentDialog';
 import type { FactKey } from './primarySourceStore';
 import type { EvidenceRef, TaskSourceBasisV2 } from './store';
 
-export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5' | 'domain-analyst@6' | 'evidence-auditor@6';
+export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5' | 'domain-analyst@6' | 'evidence-auditor@6' | 'domain-analyst@7' | 'evidence-auditor@7';
 export type InvestigationProviderMode = 'local' | 'cloud';
 /** The existing context-hub QueryScope wire shape, not a filesystem scope. */
 export type InvestigationScope = { type: 'all' } |
@@ -126,8 +126,11 @@ interface InvestigationStartFields {
 export type StartInvestigationRequest = InvestigationStartFields & (
   { schema_version: 1; inspection_requirements?: never; expected_context_id?: never } |
   { schema_version: 2; inspection_requirements: InvestigationInspectionTarget[]; expected_context_id?: never } |
-  { schema_version: 3; inspection_requirements?: InvestigationInspectionTarget[]; expected_context_id?: string }
-);
+  { schema_version: 3; inspection_requirements?: InvestigationInspectionTarget[]; expected_context_id?: string; obligations?: never }
+) | (Omit<InvestigationStartFields, 'expected_graph_revision' | 'conversation_id' | 'parent_id'> & {
+  schema_version: 4; inspection_requirements?: never; obligations: InvestigationObligationEnvelope; expected_context_id: string;
+  expected_graph_revision: string | null; conversation_id: string | null; parent_id: string | null;
+});
 
 /** Public preparation-time qualification; host-only proof fields are never UI authority. */
 export interface InvestigationCoverageQualification {
@@ -163,8 +166,8 @@ export type InvestigationStatus = 'queued' | 'preparing' | 'running' |
 
 /** Bounded history summary. Question is the host's redacted saved representation. */
 export interface InvestigationSummary {
-  /** V6 uses schema 3, V5 schema 2; V1–V4 history stays schema 1. */
-  schema_version: 1 | 2 | 3;
+  /** V7 uses schema 4, V6 schema 3, V5 schema 2; V1–V4 history stays schema 1. */
+  schema_version: 1 | 2 | 3 | 4;
   investigation_id: string;
   conversation_id: string;
   parent_id: string | null;
@@ -188,6 +191,8 @@ export interface InvestigationSummary {
   inspection_assessment?: InvestigationInspectionAssessment | null;
   inspection_status?: 'pending' | 'supplied' | 'unmet' | 'not_assessed';
   inspection_requirement_count?: number;
+  completion_outcome?: InvestigationCompletionOutcome;
+  obligation_status?: InvestigationObligationStatus;
 }
 
 export interface InvestigationUsage {
@@ -206,6 +211,7 @@ export interface InvestigationUsage {
 
 /** Definition/provider are the saved identities, not the current catalog entries. */
 export interface InvestigationDetail extends InvestigationSummary {
+  completion?: InvestigationCompletionDetail;
   coverage_context?: InvestigationCoverageContext;
   context_owner: string;
   origin: 'app';
@@ -226,7 +232,7 @@ export interface InvestigationPage {
 export type InvestigationEventKind = 'created' | 'preparation_started' |
   'context_prepared' | 'model_started' | 'model_completed' | 'action_admitted' |
   'tool_started' | 'tool_completed' | 'consent_required' | 'consent_approved' |
-  'evidence_validation_reserved' |
+  'evidence_validation_reserved' | 'finish_refused' | 'read_unavailable' |
   'consent_declined' | 'cancel_requested' | 'result_persisted' | 'completed' |
   'failed' | 'cancelled' | 'interrupted' | 'outcome_unknown';
 
@@ -272,7 +278,8 @@ export interface InvestigationFinding {
 }
 
 export interface InvestigationResult {
-  schema_version: 1 | 2 | 3 | 4;
+  schema_version: 1 | 2 | 3 | 4 | 5;
+  completion?: InvestigationCompletionResult;
   coverage?: InvestigationCoverageAttestation;
   investigation_id: string;
   result_id: string;
@@ -333,4 +340,56 @@ export interface InvestigationCitationRead {
     'unavailable' | 'invalid' | 'operational_failure';
   citation: InvestigationCitation;
   text: string | null;
+}
+
+/** Canonical host-resolved completion selections; browser display data is never authority. */
+export type InvestigationObligation =
+  { kind: 'source'; obligation_id: string; target: InvestigationInspectionTarget } |
+  { kind: 'inventory'; obligation_id: string; target: { context_id: string; repo: string; inventory_hash: string } };
+export interface InvestigationObligationEnvelope {
+  schema_version: 1;
+  contract: 'investigation-completion-obligations@1';
+  obligations: InvestigationObligation[];
+}
+export interface InvestigationObligationChoices {
+  schema_version: 1;
+  graph_snapshot_id: string;
+  context_id: string;
+  inventories: { repo: string; status: 'recorded' | 'stale' | 'unrecorded';
+    obligation?: Extract<InvestigationObligation, { kind: 'inventory' }> }[];
+}
+
+export type InvestigationCompletionOutcome = 'supported' | 'insufficient_evidence' | 'obligations_unmet';
+export type InvestigationObligationStatus = 'not_assessed' | 'satisfied' | 'unmet';
+export type InvestigationRefusalReason = 'not_attempted' | 'acquired_not_supplied' | 'redacted' | 'hash_mismatch' | 'unavailable';
+export interface InvestigationObligationObservation {
+  obligation_id: string;
+  kind: 'source' | 'inventory';
+  attempted: boolean;
+  acquired: boolean;
+  exactly_supplied: boolean;
+  unmet: InvestigationRefusalReason | null;
+  last_attempt_outcome?: 'acquired' | 'unavailable' | 'firewall_refused';
+}
+export type InvestigationCompletionBasis =
+  { kind: 'not_assessed' } |
+  { kind: 'finishing_disclosure'; step_id: string; input_ledger_hash: string; disclosure_hash: string; finishing_attempts_hash: string } |
+  { kind: 'terminal_observation'; finishing_attempts_hash: string; last_refusal_id: string | null;
+    last_refusal_basis: { step_id: string; input_ledger_hash: string; disclosure_hash: string; finish_hash: string } | null };
+export interface InvestigationCompletionDetail {
+  schema_version: 1;
+  request_hash: string;
+  obligations_hash: string;
+  obligations: InvestigationObligationEnvelope;
+  refusal_count: number;
+  assessment_basis: InvestigationCompletionBasis;
+  assessment: InvestigationObligationObservation[];
+}
+export interface InvestigationCompletionResult {
+  schema_version: 1;
+  outcome: 'supported' | 'insufficient_evidence';
+  request_hash: string;
+  obligations_hash: string;
+  finishing_attempts_hash: string;
+  assessment: InvestigationObligationObservation[];
 }

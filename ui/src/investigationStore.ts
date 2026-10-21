@@ -1,3 +1,5 @@
+import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
+import { obligationEnvelope, validObligation, validObligationChoices, validObligationEnvelope } from './investigationObligations';
 import { create } from 'zustand';
 import { invokeOr } from './tauri';
 import type {
@@ -5,10 +7,17 @@ import type {
   InvestigationConsent, InvestigationDetail, InvestigationEvent,
   InvestigationEventPage, InvestigationPage, InvestigationResult,
   InvestigationSummary, StartInvestigationRequest, InvestigationInspectionTarget, InvestigationCapturedLocation,
-  SpecialistId, InvestigationProviderMode,
+  SpecialistId, InvestigationProviderMode, InvestigationObligation, InvestigationObligationChoices, InvestigationScope,
 } from './investigationTypes';
 
-export type InvestigationDraft = Omit<StartInvestigationRequest, 'schema_version' | 'request_nonce'>;
+export interface InvestigationDraft {
+  specialist_id: SpecialistId; question: string; scope: InvestigationScope;
+  provider_mode: InvestigationProviderMode; limit_profile: string;
+  inspection_requirements?: InvestigationInspectionTarget[];
+  obligations?: import('./investigationTypes').InvestigationObligationEnvelope;
+  expected_graph_revision?: string; expected_context_id?: string;
+  conversation_id?: string; parent_id?: string;
+}
 export interface InvestigationComposer {
   specialistId: SpecialistId;
   providerMode: InvestigationProviderMode;
@@ -37,6 +46,8 @@ function validSummary(value: InvestigationSummary | null, id?: string): value is
       !Number.isSafeInteger(value.last_event_sequence) || value.last_event_sequence < 0 ||
       value.last_event_sequence > 96 || typeof value.actions?.can_cancel !== 'boolean' ||
       typeof value.actions?.can_follow_up !== 'boolean' || typeof value.has_result !== 'boolean') return false;
+  if (value.schema_version === 4) return validCompletionSummary(value);
+  if (['completion_outcome', 'obligation_status', 'completion', 'completion_obligations'].some((key) => key in value)) return false;
   if (value.schema_version === 1) {
     return LEGACY_SPECIALISTS.has(value.specialist_id) && value.inspection_status === undefined &&
       value.inspection_requirement_count === undefined && value.inspection_requirements === undefined &&
@@ -92,6 +103,11 @@ function validCoverageContext(value: InvestigationDetail['coverage_context']): b
 
 /** Host validates result content; the UI rejects incompatible version bindings. */
 function validResultBinding(result: InvestigationResult): boolean {
+  if (result.schema_version === 5) return validCompletionResult(result.completion, result) &&
+    typeof result.invocation_step_id === 'string' && /^[A-Za-z0-9_:-]{1,128}$/.test(result.invocation_step_id) &&
+    typeof result.disclosure_hash === 'string' && /^investigation-disclosure-v4:[0-9a-f]{64}$/.test(result.disclosure_hash) &&
+    Boolean(result.coverage && CONTEXT_ID.test(result.coverage.context_id) && COVERAGE_ID.test(result.coverage.coverage_id) && hash(result.coverage.representation_hash));
+  if ('completion' in result || 'completion_outcome' in result) return false;
   if (result.schema_version === 1) {
     return !('invocation_step_id' in result) && !('disclosure_hash' in result) &&
       !('inspection_assessment' in result) && !('coverage' in result);
@@ -169,6 +185,15 @@ export interface InvestigationState {
   updateComposer: (patch: Partial<InvestigationComposer>) => void;
   draftInspectionRequirements: InvestigationInspectionTarget[];
   inspectionDraftError: string | null;
+  draftObligations: InvestigationObligation[];
+  obligationChoices: InvestigationObligationChoices | null;
+  obligationChoicesLoading: boolean;
+  obligationDraftError: string | null;
+  loadObligationChoices: (scope: InvestigationScope) => Promise<void>;
+  addObligation: (value: InvestigationObligation) => boolean;
+  addSourceObligation: (target: InvestigationInspectionTarget) => Promise<boolean>;
+  removeObligation: (id: string) => void;
+  clearObligations: () => void;
   addInspectionRequirement: (target: InvestigationInspectionTarget) => boolean;
   removeInspectionRequirement: (targetId: string) => void;
   clearInspectionRequirements: () => void;
@@ -203,6 +228,7 @@ let detailRequest = 0;
 let citationRequest = 0;
 let actionRequest = 0;
 let locationRequest = 0;
+let choicesRequest = 0;
 
 export const useInvestigationStore = create<InvestigationState>((set, get) => {
   const updateSummary = (summary: InvestigationSummary) => set((state) => ({
@@ -210,7 +236,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       ? mergeHistory(state.history, [summary]) : [summary, ...state.history],
     // A summary that reports a result is merged into the detail only once that
     // result is held; otherwise the next consistent refresh supplies both.
-    detail: state.detail?.investigation_id === summary.investigation_id && summary.revision >= state.detail.revision &&
+    detail: summary.schema_version !== 4 && state.detail?.investigation_id === summary.investigation_id && summary.revision >= state.detail.revision &&
       (!summary.has_result || state.result !== null)
       ? { ...state.detail, ...summary } : state.detail,
   }));
@@ -224,14 +250,16 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       updateSummary(summary);
       set((state) => ({ starting: false, pendingStart: null,
         composer: { ...state.composer, question: '', parent: null },
-        draftInspectionRequirements: [], inspectionDraftError: null }));
+        draftInspectionRequirements: [], inspectionDraftError: null,
+    draftObligations: [], obligationChoices: null, obligationChoicesLoading: false, obligationDraftError: null }));
       await get().open(summary.investigation_id);
     } catch (error) {
       if (typeof error === 'object' && error !== null && 'code' in error && (error.code === 'refresh_required' || error.code === 'invalid_input') &&
           'definitive' in error && error.definitive === true) {
         set({ starting: false, pendingStart: null,
           startError: error.code === 'refresh_required'
-            ? 'The selected captured source changed before admission. No investigation was started. Remove the stale requirement and select its source again.'
+            ? request.schema_version === 4 ? 'The selected evidence or completion context changed before admission. No investigation was started. Refresh choices and remove stale obligations.'
+              : 'The selected captured source changed before admission. No investigation was started. Remove the stale requirement and select its source again.'
             : `The request was rejected before admission. No investigation was started.${'message' in error && typeof error.message === 'string' ? ` ${error.message}` : ''}` });
         return;
       }
@@ -271,13 +299,88 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     actionBusy: false, actionError: null, pendingStart: null, starting: false, startError: null,
     composer: initialComposer,
     draftInspectionRequirements: [], inspectionDraftError: null,
+    draftObligations: [], obligationChoices: null, obligationChoicesLoading: false, obligationDraftError: null,
     inspectionLocation: null, inspectionLocationTargetId: null, inspectionLocationLoading: false, inspectionLocationError: null,
     citationId: null, citationRead: null, citationLoading: false, citationError: null,
 
     updateComposer: (patch) => {
+      if (!get().starting && !get().pendingStart && ['scopeType', 'anchor', 'hops'].some((key) => key in patch && patch[key as keyof InvestigationComposer] !== get().composer[key as keyof InvestigationComposer])) {
+        ++choicesRequest;
+        set({ draftObligations: [], obligationChoices: null, obligationChoicesLoading: false,
+          obligationDraftError: get().draftObligations.length ? 'Scope changed. Select the evidence to inspect in this scope.' : null });
+      }
       if (!get().starting && !get().pendingStart) set((state) => ({
         composer: { ...state.composer, ...structuredClone(patch) },
       }));
+    },
+    loadObligationChoices: async (scope) => {
+      if (get().starting || get().pendingStart) return;
+      const request = ++choicesRequest;
+      set({ obligationChoicesLoading: true, obligationDraftError: null });
+      try {
+        const choices = await invokeOr<InvestigationObligationChoices | null>('investigation_obligation_choices', null, { scope });
+        if (request !== choicesRequest) return;
+        if (!validObligationChoices(choices)) throw new Error('Invalid choices');
+        set({ obligationChoices: choices, obligationChoicesLoading: false });
+      } catch {
+        if (request === choicesRequest) set({ obligationChoices: null, obligationChoicesLoading: false,
+          obligationDraftError: 'Completion choices could not be resolved. Refresh before selecting an obligation.' });
+      }
+    },
+    addObligation: (value) => {
+      const state = get();
+      if (state.starting || state.pendingStart || !validObligation(value) || !state.obligationChoices) return false;
+      const duplicate = state.draftObligations.find((item) => item.obligation_id === value.obligation_id);
+      if (duplicate) return JSON.stringify(duplicate) === JSON.stringify(value);
+      if (state.draftObligations.length >= 12 || state.draftObligations.some((item) => item.kind === 'source'
+        ? item.target.graph_snapshot_id !== state.obligationChoices!.graph_snapshot_id : item.target.context_id !== state.obligationChoices!.context_id) ||
+        (value.kind === 'inventory' && state.draftObligations.some((item) => item.kind === 'inventory' && item.target.context_id === value.target.context_id &&
+          item.target.repo === value.target.repo && item.target.inventory_hash !== value.target.inventory_hash)) ||
+        (value.kind === 'source' && state.draftObligations.some((item) => item.kind === 'source' && JSON.stringify(item.target.fact) === JSON.stringify(value.target.fact) &&
+          item.target.role === value.target.role && item.target.index === value.target.index && item.target.target_id !== value.target.target_id)) || (value.kind === 'source'
+        ? value.target.graph_snapshot_id !== state.obligationChoices.graph_snapshot_id
+        : value.target.context_id !== state.obligationChoices.context_id)) {
+        set({ obligationDraftError: 'Choose at most 12 obligations from one exact context. Remove stale selections before changing context.' });
+        return false;
+      }
+      set({ draftObligations: obligationEnvelope([...state.draftObligations, structuredClone(value)]).obligations, obligationDraftError: null });
+      return true;
+    },
+    addSourceObligation: async (target) => {
+      const state = get();
+      if (state.starting || state.pendingStart) return false;
+      const scope: InvestigationScope = state.composer.scopeType === 'all' ? { type: 'all' } :
+        { type: 'neighborhood', anchor: state.composer.anchor, hops: state.composer.hops };
+      if (!state.obligationChoices) {
+        const loading = get().loadObligationChoices(scope);
+        const loadingGeneration = choicesRequest;
+        await loading;
+        if (loadingGeneration !== choicesRequest) return false;
+      }
+      if (get().starting || get().pendingStart) return false;
+      const generation = choicesRequest;
+      try {
+        const obligation = await invokeOr<InvestigationObligation | null>('resolve_investigation_source_obligation', null, {
+          fact: target.fact, expectedGraphSnapshotId: target.graph_snapshot_id,
+          expectedReceiptId: target.receipt_id, inventoryIndex: target.receipt_inventory_index,
+        });
+        if (generation !== choicesRequest) return false;
+        if (!obligation || obligation.kind !== 'source' || JSON.stringify(obligation.target) !== JSON.stringify(target)) throw new Error('Source changed');
+        return get().addObligation(obligation);
+      } catch {
+        if (generation !== choicesRequest) return false;
+        set({ obligationDraftError: 'The captured source could not be resolved for this context. Select it again.' });
+        return false;
+      }
+    },
+    removeObligation: (id) => {
+      if (!get().starting && !get().pendingStart) set((state) => ({ draftObligations: state.draftObligations.filter((item) => item.obligation_id !== id), obligationDraftError: null }));
+    },
+    clearObligations: () => {
+      if (!get().starting && !get().pendingStart) {
+        ++choicesRequest;
+        set({ draftObligations: [], obligationChoices: null, obligationChoicesLoading: false, obligationDraftError: null });
+      }
     },
     addInspectionRequirement: (target) => {
       const state = get();
@@ -371,21 +474,37 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     start: async (draft) => {
       if (get().pendingStart || get().starting) return;
       const request_nonce = crypto.randomUUID();
-      if (draft.specialist_id.endsWith('@6')) {
-        const { inspection_requirements: requirements, ...qualified } = draft;
+      const { obligations: completionObligations, ...legacyBase } = draft;
+      if (draft.specialist_id.endsWith('@7')) {
+        const choices = get().obligationChoices;
+        if (!choices || !draft.obligations || !validObligationEnvelope(draft.obligations) || draft.inspection_requirements !== undefined ||
+            draft.obligations.obligations.some((item) => item.kind === 'source' ? item.target.graph_snapshot_id !== choices.graph_snapshot_id : item.target.context_id !== choices.context_id)) return;
+        const request: StartInvestigationRequest = { schema_version: 4, request_nonce, specialist_id: draft.specialist_id,
+          obligations: structuredClone(draft.obligations), question: draft.question, scope: draft.scope,
+          provider_mode: draft.provider_mode, limit_profile: draft.limit_profile,
+          expected_graph_revision: choices.graph_snapshot_id, expected_context_id: choices.context_id,
+          conversation_id: draft.conversation_id ?? null, parent_id: draft.parent_id ?? null };
+        if (new TextEncoder().encode(JSON.stringify(request)).length > 8192) {
+          set({ obligationDraftError: 'This complete request exceeds 8,192 bytes. Shorten it or remove an obligation.' });
+          return;
+        }
+        await startRequest(request);
+      } else if (completionObligations !== undefined) return;
+      else if (draft.specialist_id.endsWith('@6')) {
+        const { inspection_requirements: requirements, ...qualified } = legacyBase;
         if (requirements !== undefined && requirements.length === 0) return;
         await startRequest(structuredClone({ ...qualified, schema_version: 3, request_nonce,
           ...(requirements ? { expected_graph_revision: requirements[0].graph_snapshot_id,
             inspection_requirements: requirements } : {}) }));
       } else if (draft.specialist_id.endsWith('@5')) {
-        const { expected_context_id, ...inspectionDraft } = draft;
+        const { expected_context_id, ...inspectionDraft } = legacyBase;
         if (!draft.inspection_requirements?.length || expected_context_id !== undefined) return;
         await startRequest(structuredClone({ ...inspectionDraft, schema_version: 2, request_nonce,
           expected_graph_revision: draft.inspection_requirements[0].graph_snapshot_id,
           inspection_requirements: draft.inspection_requirements }));
       } else {
         // Preserve legacy schema bytes: requirements are absent, never an empty list.
-        const { inspection_requirements: requirements, expected_context_id, ...legacy } = draft;
+        const { inspection_requirements: requirements, expected_context_id, ...legacy } = legacyBase;
         if (requirements?.length || expected_context_id !== undefined) return;
         await startRequest(structuredClone({ ...legacy, schema_version: 1, request_nonce }));
       }
@@ -426,7 +545,11 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         if ((result !== null) !== detail.has_result) throw new Error('Result observation changed.');
         if (result && (!validResultBinding(result) || result.investigation_id !== id ||
             result.graph_snapshot_id !== detail.graph_snapshot_id)) throw new Error('Wrong result.');
-        if (detail.schema_version === 3) {
+        if (detail.schema_version === 4) {
+          if (!validCompletionDetail(detail.completion, detail, result) || (detail.coverage_context !== undefined && !validCoverageContext(detail.coverage_context)) ||
+              (detail.graph_snapshot_id !== null && !detail.coverage_context) || (result && (!detail.coverage_context ||
+                result.coverage?.context_id !== detail.coverage_context.context_id || result.coverage.coverage_id !== detail.coverage_context.coverage.coverage_id))) throw new Error('Completion binding changed.');
+        } else if (detail.schema_version === 3) {
           if (detail.inspection_requirement_count !== undefined &&
               (!Array.isArray(detail.inspection_requirements) || detail.inspection_requirements.length !== detail.inspection_requirement_count ||
                new Set(detail.inspection_requirements.map((target) => target.target_id)).size !== detail.inspection_requirements.length ||
@@ -440,7 +563,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           if (result && (result.schema_version !== 4 || !detail.coverage_context ||
               result.coverage?.context_id !== detail.coverage_context.context_id ||
               result.coverage.coverage_id !== detail.coverage_context.coverage.coverage_id)) throw new Error('Coverage binding changed.');
-        } else if (detail.coverage_context !== undefined || result?.schema_version === 4) throw new Error('Unexpected coverage version.');
+        } else if (detail.coverage_context !== undefined || result?.schema_version === 4 || result?.schema_version === 5) throw new Error('Unexpected coverage version.');
         if ((result?.schema_version === 3 || result?.schema_version === 4) &&
             JSON.stringify(detail.inspection_assessment) !== JSON.stringify(result.inspection_assessment)) {
           throw new Error('Inspection assessment observation changed.');
@@ -477,10 +600,14 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           return;
         }
         // A known immutable result cannot be replaced or disappear on a stale read.
+        if (saved?.completion && (saved.completion.request_hash !== detail.completion?.request_hash || saved.completion.obligations_hash !== detail.completion?.obligations_hash ||
+            JSON.stringify(saved.completion.obligations) !== JSON.stringify(detail.completion?.obligations))) throw new Error('Completion intent changed.');
         if (saved?.coverage_context && JSON.stringify(saved.coverage_context) !== JSON.stringify(detail.coverage_context)) {
           throw new Error('Saved coverage changed.');
         }
+        if (saved?.completion && detail.completion && saved.completion.refusal_count > detail.completion.refusal_count) throw new Error('Refusal count regressed.');
         const savedResult = get().result;
+        if (saved?.schema_version === 4 && savedResult && result === null) throw new Error('Completion result disappeared.');
         if (savedResult && result && JSON.stringify(savedResult) !== JSON.stringify(result)) throw new Error('Result changed.');
         updateSummary(detail);
         set((state) => ({ detail, result: result ?? savedResult, events, consent,

@@ -146,6 +146,14 @@ pub struct ProtectedCompletionMetadata {
     pub feedback: Option<RefusalFeedback>,
 }
 impl ProtectedCompletionMetadata {
+    pub fn fingerprint(&self) -> Result<String, InvestigationError> {
+        self.validate()?;
+        Ok(crate::source_basis::domain_hash(
+            b"cartograph:completion-metadata:v1\0",
+            &bounded_bytes(self, MAX_INPUT_BYTES)?,
+        ))
+    }
+
     pub fn validate(&self) -> Result<(), InvestigationError> {
         bounded_bytes(self, MAX_MANIFEST_BYTES)?;
         if self.schema_version != 1 || !crate::source_basis::hash(&self.request_hash) || !crate::source_basis::hash(&self.obligations_hash)
@@ -182,8 +190,8 @@ impl ProtectedCompletionMetadata {
         let before = parse(&original.payload.prompt)?;
         let after = parse(&prepared.preview().egress.payload.prompt)?;
         let expected = serde_json::to_value(self).map_err(|_| InvestigationError::InvalidInput)?;
-        if before.get("staged_completion_metadata") != Some(&expected)
-            || after.get("staged_completion_metadata") != Some(&expected)
+        if before.get("completion_metadata") != Some(&expected)
+            || after.get("completion_metadata") != Some(&expected)
         {
             return Err(InvestigationError::InvalidInput);
         }

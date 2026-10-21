@@ -1232,6 +1232,8 @@ fn investigation_compact_disclosure_is_durable_and_finishing_binding_is_revalida
         representation_hash: hash("representation"),
     };
     let disclosure = InvestigationDisclosure {
+        completion_contract_hash: None,
+        completion_metadata_hash: None,
         coverage_details: vec![],
         coverage: None,
         inspection_requirements_hash: None,
@@ -1347,6 +1349,8 @@ fn compact_step(ledger: &InvestigationInputLedger) -> PendingInvestigationStep {
         representation_hash: hash("representation"),
     };
     pending.disclosure = Some(InvestigationDisclosure {
+        completion_contract_hash: None,
+        completion_metadata_hash: None,
         coverage_details: vec![],
         coverage: None,
         inspection_requirements_hash: None,

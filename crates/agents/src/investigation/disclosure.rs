@@ -127,6 +127,10 @@ pub struct InvestigationDisclosure {
     pub coverage: Option<DisclosedInvestigationCoverage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub coverage_details: Vec<DisclosedInvestigationCoverageDetail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_contract_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_metadata_hash: Option<String>,
     pub policy: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspection_requirements_hash: Option<String>,
@@ -155,8 +159,25 @@ impl InvestigationDisclosure {
         if self.coverage != expected_coverage {
             return Err(InvestigationError::InvalidInput);
         }
+        let completion =
+            self.completion_contract_hash.is_some() || self.completion_metadata_hash.is_some();
+        if completion
+            && (self.coverage.is_none()
+                || self
+                    .completion_contract_hash
+                    .as_deref()
+                    .is_none_or(|hash| !crate::source_basis::hash(hash))
+                || self
+                    .completion_metadata_hash
+                    .as_deref()
+                    .is_none_or(|hash| !crate::source_basis::hash(hash)))
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
         if self.schema_version
-            != if self.coverage.is_some() {
+            != if completion {
+                4
+            } else if self.coverage.is_some() {
                 3
             } else if self.inspection_requirements_hash.is_some() {
                 2
@@ -260,7 +281,12 @@ impl InvestigationDisclosure {
         ledger: &InvestigationInputLedger,
     ) -> Result<String, InvestigationError> {
         self.validate(ledger)?;
-        let (prefix, domain): (&str, &[u8]) = if self.schema_version == 3 {
+        let (prefix, domain): (&str, &[u8]) = if self.schema_version == 4 {
+            (
+                "investigation-disclosure-v4",
+                b"cartograph:investigation-disclosure:v4\0",
+            )
+        } else if self.schema_version == 3 {
             (
                 "investigation-disclosure-v3",
                 b"cartograph:investigation-disclosure:v3\0",

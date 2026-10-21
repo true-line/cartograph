@@ -1,0 +1,238 @@
+//! Generation-four entrypoint: source validation precedes durable intent admission.
+use super::*;
+use crate::primary_source::RetentionGuard;
+
+fn validate_targets<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    request: &StagedObligationRequest,
+) -> Result<Vec<RetentionGuard>, String> {
+    // Refuse an impossible obligation before any durable start/provider lookup.
+    super::super::completion_choices::validate_request(app, state, request)?;
+    let mut guards = Vec::new();
+    for target in request
+        .obligations
+        .sources()
+        .map_err(|error| error.to_string())?
+    {
+        let (actual, guard) = super::super::inspection::resolve(
+            state,
+            &target.fact,
+            &target.graph_snapshot_id,
+            &target.receipt_id,
+            target.receipt_inventory_index as usize,
+        )?;
+        if actual != target {
+            return Err("Completion source changed; refresh the selection.".into());
+        }
+        guards.push(guard);
+    }
+    Ok(guards)
+}
+
+pub(super) fn start<R: tauri::Runtime>(
+    request: StagedObligationRequest,
+    app: tauri::AppHandle<R>,
+    started: Instant,
+) -> Result<InvestigationSummary, InvestigationStartError> {
+    let request = request
+        .normalized()
+        .map_err(|error| rejected("invalid_input", error))?;
+    let state = app.state::<AppState>();
+    // Recover a committed nonce before consulting mutable source/provider state.
+    if let Some(prior) = state
+        .jobs
+        .lock()
+        .map_err(|_| HostError::Operational.to_string())?
+        .existing_investigation_completion(&request)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(prior.summary);
+    }
+    let specialist = if request.specialist_id == "domain-analyst@7" {
+        SpecialistId::DomainAnalystV7
+    } else {
+        SpecialistId::EvidenceAuditorV7
+    };
+    if !AVAILABLE_SPECIALISTS.contains(&specialist) {
+        return Err(rejected(
+            "invalid_input",
+            "This specialist version is not available.",
+        ));
+    }
+    let _guards = match validate_targets(&app, &state, &request) {
+        Ok(guards) => guards,
+        Err(error) => {
+            if let Some(prior) = state
+                .jobs
+                .lock()
+                .map_err(|_| HostError::Operational.to_string())?
+                .existing_investigation_completion(&request)
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(prior.summary);
+            }
+            return Err(rejected("refresh_required", error));
+        }
+    };
+    // This resolves app-lifetime configuration only, without network activity.
+    // An unavailable provider is passed through: durable deduplication must win
+    // over a later configuration change for an already committed request.
+    let provider = state.investigations.provider(request.provider_mode).ok();
+    let descriptor = provider
+        .as_ref()
+        .and_then(|provider| runtime::descriptor(provider.as_ref(), request.provider_mode).ok());
+    let committed = state
+        .jobs
+        .lock()
+        .map_err(|e| e.to_string())?
+        .start_completion_investigation(&request, descriptor.as_ref())
+        .map_err(|e| e.to_string())?;
+    if !committed.created {
+        return Ok(committed.detail.summary);
+    }
+    emit_changed(&app, &committed.detail);
+    let id = committed.detail.summary.investigation_id.clone();
+    let provider = provider.ok_or_else(|| HostError::Operational.to_string())?;
+    let live = state
+        .investigations
+        .insert(&id)
+        .map_err(|e| e.to_string())?;
+    let claim = (|| {
+        let plan = state
+            .jobs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .claim_plan(committed.detail.summary.job_id, ClaimMode::StartQueued)
+            .map_err(|e| e.to_string())?;
+        crate::claim_job(&state, &plan)
+    })();
+    let (_, execution) = match claim {
+        Ok(claim) => claim,
+        Err(error) => {
+            state.investigations.remove(&id);
+            // The nonce still recovers the committed identity. No second worker
+            // or automatic re-claim is allowed after an uncertain start.
+            return Err(error.into());
+        }
+    };
+    // Keep the execution in the detached blocking worker even if the invoking
+    // async waiter goes away. Persisted history is the response authority.
+    let worker_app = app.clone();
+    let worker_id = id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        worker::run_completion(
+            worker_app, worker_id, request, execution, provider, live, started,
+        );
+    });
+    let detail = state
+        .jobs
+        .lock()
+        .map_err(|e| e.to_string())?
+        .investigation(&id)
+        .map_err(|e| e.to_string())?;
+    emit_changed(&app, &detail);
+    Ok(detail.summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use context_hub::{ContextSnapshot, coverage::CoverageQualification};
+    use core_graph::{GraphStore, Node};
+    use serde_json::json;
+
+    // AC-0266: a full-graph source target cannot authorize an unrelated scoped
+    // task. The real coordinator refuses before provider lookup or durable start.
+    #[test]
+    fn completion_start_rejects_source_outside_requested_neighborhood() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = crate::registered_source_tests::app_state(directory.path());
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../ui/src/fixtures/investigation-inspection-backend.json"
+        ))
+        .unwrap();
+        let mut target: InvestigationInspectionTarget =
+            serde_json::from_value(fixture["target"].clone()).unwrap();
+        let agents::TaskFactKey::Node { id: source_id } = &target.fact else {
+            panic!("node target fixture");
+        };
+        {
+            let mut graph = state.graph.lock().unwrap();
+            for id in [source_id.as_str(), "unrelated-anchor"] {
+                graph
+                    .put_node(&Node {
+                        id: id.into(),
+                        label: "BusinessRule".into(),
+                        props: json!({}),
+                    })
+                    .unwrap();
+            }
+        }
+        let graph = state.graph.lock().unwrap().read_snapshot().unwrap();
+        let complete = ContextSnapshot::new(graph.0.clone(), graph.1.clone()).unwrap();
+        target.graph_snapshot_id = complete.id().to_owned();
+        target.target_id = target.content_id().unwrap();
+        target.validate().unwrap();
+        let scope = InvestigationScope::Neighborhood {
+            anchor: "unrelated-anchor".into(),
+            hops: 1,
+        };
+        let scoped = crate::investigations::context::FrozenContext::scoped_snapshot(
+            &graph, &scope, complete,
+        )
+        .unwrap();
+        let context_id = scoped
+            .with_coverage(CoverageQualification::new(&[], &[]).unwrap())
+            .unwrap()
+            .context_id()
+            .to_owned();
+        let mut obligation = Obligation::Source {
+            obligation_id: String::new(),
+            target: Box::new(target.clone()),
+        };
+        let identity = obligation.content_id().unwrap();
+        if let Obligation::Source { obligation_id, .. } = &mut obligation {
+            *obligation_id = identity;
+        }
+        let request = StagedObligationRequest {
+            schema_version: 4,
+            request_nonce: "outside-scoped-source".into(),
+            specialist_id: "domain-analyst@7".into(),
+            question: "Inspect the explicitly selected source.".into(),
+            scope,
+            provider_mode: InvestigationProviderMode::Local,
+            limit_profile: "investigation-v1".into(),
+            expected_graph_revision: Some(target.graph_snapshot_id),
+            expected_context_id: context_id,
+            conversation_id: None,
+            parent_id: None,
+            inspection_requirements: None,
+            obligations: ObligationEnvelope {
+                schema_version: 1,
+                contract: "investigation-completion-obligations@1".into(),
+                obligations: vec![obligation],
+            },
+        }
+        .normalized()
+        .unwrap();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.manage(state);
+        let error = start(request, app.handle().clone(), Instant::now()).unwrap_err();
+        assert!(
+            matches!(error, InvestigationStartError::Rejected { code: "refresh_required", definitive: true, ref message } if message.contains("outside the requested scope"))
+        );
+        assert!(
+            app.state::<AppState>()
+                .jobs
+                .lock()
+                .unwrap()
+                .investigation_history(None, None)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+    }
+}

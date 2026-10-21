@@ -21,7 +21,7 @@ pub(super) fn seal(
     if let Some(proof) = &ledger.coverage {
         let public = serde_json::to_value(&proof.qualification)
             .map_err(|_| InvestigationError::InvalidInput)?;
-        if before["schema_version"] != 5
+        if !matches!(before["schema_version"].as_u64(), Some(5 | 6))
             || before.get("coverage_qualification") != Some(&public)
             || before.get("context_id").and_then(Value::as_str) != Some(proof.context_id.as_str())
             || before.get("coverage_qualification") != after.get("coverage_qualification")
@@ -29,7 +29,7 @@ pub(super) fn seal(
         {
             return Err(InvestigationError::InvalidInput);
         }
-    } else if before["schema_version"] == 5 {
+    } else if matches!(before["schema_version"].as_u64(), Some(5 | 6)) {
         return Err(InvestigationError::InvalidInput);
     }
     // Protocol/basis/citation identities must survive redaction exactly. Source
@@ -48,13 +48,14 @@ pub(super) fn seal(
     }
     if (before["schema_version"] == 3
         || before["schema_version"] == 4
-        || before["schema_version"] == 5)
+        || before["schema_version"] == 5
+        || before["schema_version"] == 6)
         && (before.get("turn_progress").is_none()
             || before.get("turn_progress") != after.get("turn_progress"))
     {
         return Err(InvestigationError::InvalidInput);
     }
-    if before["schema_version"] == 4 || before["schema_version"] == 5 {
+    if matches!(before["schema_version"].as_u64(), Some(4..=6)) {
         for field in [
             "inspection_requirements",
             "inspection_requirements_hash",
@@ -67,6 +68,34 @@ pub(super) fn seal(
             }
         }
     }
+    let (completion_contract_hash, completion_metadata_hash) = if before["schema_version"] == 6 {
+        for field in ["completion_contract", "completion_metadata"] {
+            if before.get(field).is_none() || before.get(field) != after.get(field) {
+                return Err(InvestigationError::InvalidInput);
+            }
+        }
+        let contract: InvestigationCompletionContract =
+            serde_json::from_value(before["completion_contract"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        let metadata: staged_refusal::ProtectedCompletionMetadata =
+            serde_json::from_value(before["completion_metadata"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        if contract.request_hash != metadata.request_hash
+            || contract.obligations_hash != metadata.obligations_hash
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        (Some(contract.fingerprint()?), Some(metadata.fingerprint()?))
+    } else {
+        if before.get("completion_contract").is_some()
+            || before.get("completion_metadata").is_some()
+            || after.get("completion_contract").is_some()
+            || after.get("completion_metadata").is_some()
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        (None, None)
+    };
     if before.get("omitted_sources") != after.get("omitted_sources") {
         return Err(InvestigationError::InvalidInput);
     }
@@ -197,6 +226,8 @@ pub(super) fn seal(
         }
     }
     let disclosure = InvestigationDisclosure {
+        completion_contract_hash,
+        completion_metadata_hash,
         coverage_details,
         coverage: ledger
             .coverage
@@ -211,7 +242,9 @@ pub(super) fn seal(
                     .ok_or(InvestigationError::InvalidInput)
             })
             .transpose()?,
-        schema_version: if before["schema_version"] == 5 {
+        schema_version: if before["schema_version"] == 6 {
+            4
+        } else if before["schema_version"] == 5 {
             3
         } else if before["schema_version"] == 4 {
             2

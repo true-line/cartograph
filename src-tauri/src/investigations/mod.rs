@@ -1,6 +1,7 @@
 //! Durable specialist investigations (SPEC-10). The coordinator owns execution;
 //! graph/source acquisition is short-lived and model payloads remain transient.
 pub(crate) mod commands;
+pub(crate) mod completion_choices;
 mod context;
 mod events;
 mod evidence;

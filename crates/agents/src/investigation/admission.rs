@@ -271,6 +271,7 @@ impl InvestigationResult {
             ledger,
             None,
             None,
+            None,
             action,
             supplied_strings,
             observed_response_model,
@@ -294,6 +295,7 @@ impl InvestigationResult {
             investigation_id,
             ledger,
             Some((step_id, disclosure)),
+            None,
             None,
             action,
             supplied_strings,
@@ -319,9 +321,36 @@ impl InvestigationResult {
             ledger,
             Some((step_id, disclosure)),
             Some(targets),
+            None,
             action,
             supplied_strings,
             observed_response_model,
+            created_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn admit_with_completion<'a>(
+        investigation_id: &str,
+        ledger: &InvestigationInputLedger,
+        step_id: &str,
+        disclosure: &InvestigationDisclosure,
+        targets: Option<&[InvestigationInspectionTarget]>,
+        completion: InvestigationCompletionResult,
+        action: &InvestigationAction,
+        supplied_strings: impl IntoIterator<Item = &'a str>,
+        model: Option<String>,
+        created_at: String,
+    ) -> Result<Self, InvestigationError> {
+        Self::admit_bound(
+            investigation_id,
+            ledger,
+            Some((step_id, disclosure)),
+            targets,
+            Some(completion),
+            action,
+            supplied_strings,
+            model,
             created_at,
         )
     }
@@ -332,6 +361,7 @@ impl InvestigationResult {
         ledger: &InvestigationInputLedger,
         binding: Option<(&str, &InvestigationDisclosure)>,
         inspection_targets: Option<&[InvestigationInspectionTarget]>,
+        completion: Option<InvestigationCompletionResult>,
         action: &InvestigationAction,
         supplied_strings: impl IntoIterator<Item = &'a str>,
         observed_response_model: Option<String>,
@@ -387,8 +417,13 @@ impl InvestigationResult {
         else {
             return Err(InvestigationError::InvalidAction);
         };
+        if binding.is_some_and(|(_, d)| d.schema_version == 4) != completion.is_some() {
+            return Err(InvestigationError::InvalidInput);
+        }
         let mut result = Self {
-            schema_version: if ledger.schema_version == 2 {
+            schema_version: if completion.is_some() {
+                5
+            } else if ledger.schema_version == 2 {
                 4
             } else if inspection_targets.is_some() {
                 3
@@ -399,6 +434,7 @@ impl InvestigationResult {
             },
             coverage: binding.and_then(|(_, disclosure)| disclosure.coverage.clone()),
             inspection_assessment: None,
+            completion,
             investigation_id: investigation_id.into(),
             result_id: String::new(),
             input_ledger_hash: ledger.fingerprint()?,
@@ -425,6 +461,9 @@ impl InvestigationResult {
         }
         result.result_id = result.content_id()?;
         match binding {
+            Some((_, disclosure)) if result.schema_version == 5 => {
+                result.validate_bound(ledger, &disclosure.eligible_citations(ledger)?)?;
+            }
             Some((step, disclosure)) => {
                 result.validate_with_disclosure(ledger, step, disclosure)?
             }
@@ -453,6 +492,10 @@ impl InvestigationResult {
                 "investigation-result-v4",
                 b"cartograph:investigation-result:v4\0",
             ),
+            5 => (
+                "investigation-result-v5",
+                b"cartograph:investigation-result:v5\0",
+            ),
             _ => return Err(InvestigationError::InvalidInput),
         };
         Ok(format!(
@@ -463,6 +506,7 @@ impl InvestigationResult {
 
     pub fn validate(&self, ledger: &InvestigationInputLedger) -> Result<(), InvestigationError> {
         if self.schema_version != 1
+            || self.completion.is_some()
             || ledger.schema_version != 1
             || self.coverage.is_some()
             || self.inspection_assessment.is_some()
@@ -487,13 +531,16 @@ impl InvestigationResult {
         disclosure: &InvestigationDisclosure,
     ) -> Result<(), InvestigationError> {
         if self.schema_version
-            != if ledger.schema_version == 2 {
+            != if disclosure.schema_version == 4 {
+                5
+            } else if ledger.schema_version == 2 {
                 4
             } else if self.inspection_assessment.is_some() {
                 3
             } else {
                 2
             }
+            || (self.schema_version == 5) != self.completion.is_some()
             || self.coverage != disclosure.coverage
             || self.inspection_assessment.is_some()
                 != disclosure.inspection_requirements_hash.is_some()
@@ -502,6 +549,13 @@ impl InvestigationResult {
             || self.disclosure_hash.as_deref() != Some(disclosure.fingerprint(ledger)?.as_str())
         {
             return Err(InvestigationError::InvalidInput);
+        }
+        if let Some(completion) = &self.completion {
+            completion.validate(
+                &self.findings,
+                self.knowledge_completeness,
+                &self.limitations,
+            )?;
         }
         if let Some(assessment) = &self.inspection_assessment {
             assessment.validate(ledger, step_id, disclosure, &self.findings)?;

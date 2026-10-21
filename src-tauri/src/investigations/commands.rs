@@ -1,5 +1,8 @@
 //! Thin IPC boundary. Durable reads and filesystem/provider preparation stay
 //! off the UI thread; callers supply IDs, never leases or source payloads.
+#[path = "completion_start.rs"]
+mod completion_start;
+
 use super::{HostError, emit_changed, history, runtime, worker};
 use crate::{AppState, jobs::ClaimMode};
 use agents::investigation::*;
@@ -7,7 +10,7 @@ use std::time::Instant;
 use tauri::Manager;
 
 // Shared by the production catalog and staged-version boundary test.
-const AVAILABLE_SPECIALISTS: [SpecialistId; 8] = [
+const AVAILABLE_SPECIALISTS: [SpecialistId; 10] = [
     SpecialistId::DomainAnalystV3,
     SpecialistId::EvidenceAuditorV3,
     SpecialistId::DomainAnalystV4,
@@ -16,6 +19,8 @@ const AVAILABLE_SPECIALISTS: [SpecialistId; 8] = [
     SpecialistId::EvidenceAuditorV5,
     SpecialistId::DomainAnalystV6,
     SpecialistId::EvidenceAuditorV6,
+    SpecialistId::DomainAnalystV7,
+    SpecialistId::EvidenceAuditorV7,
 ];
 
 #[tauri::command]
@@ -68,13 +73,18 @@ fn rejected(code: &'static str, message: impl ToString) -> InvestigationStartErr
 }
 #[tauri::command]
 pub(crate) async fn start_investigation(
-    request: StartInvestigationRequest,
+    request: InvestigationStartRequest,
     app: tauri::AppHandle,
 ) -> Result<InvestigationSummary, InvestigationStartError> {
     let started = Instant::now();
-    tauri::async_runtime::spawn_blocking(move || start(request, app, started))
-        .await
-        .map_err(|e| InvestigationStartError::Legacy(e.to_string()))?
+    tauri::async_runtime::spawn_blocking(move || match request {
+        InvestigationStartRequest::Legacy(request) => start(request, app, started),
+        InvestigationStartRequest::Completion(request) => {
+            completion_start::start(request, app, started)
+        }
+    })
+    .await
+    .map_err(|e| InvestigationStartError::Legacy(e.to_string()))?
 }
 
 pub(super) fn start<R: tauri::Runtime>(
@@ -402,23 +412,96 @@ pub(crate) async fn read_investigation_citation(
 mod staged_tests {
     use super::*;
 
-    // AC-0264: staging does not create a public catalog or direct-start capability.
+    // AC-0266: shape-valid IPC arguments keep semantic errors on the structured
+    // rejection path, preserving the UI draft/retry contract for both generations.
     #[test]
-    fn staged_v7_is_absent_from_catalog_and_direct_start_is_refused() {
+    fn completion_ipc_semantic_errors_reach_structured_invalid_input() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        for generation in [3, 4] {
+            let mut raw = serde_json::json!({
+                "schema_version": generation, "request_nonce": "invalid-semantic",
+                "specialist_id": if generation == 4 { "domain-analyst@7" } else { "domain-analyst@6" },
+                "question": "", "scope": {"type": "all"}, "provider_mode": "local",
+                "limit_profile": "investigation-v1", "expected_context_id": format!("context-v2:{}", "a".repeat(64))
+            });
+            if generation == 4 {
+                raw["obligations"] = serde_json::json!({"schema_version": 1,
+                    "contract": "investigation-completion-obligations@1", "obligations": []});
+            }
+            // Tauri supplies a parsed Value to this exact command argument type.
+            let request = serde_json::from_value::<InvestigationStartRequest>(raw.clone()).unwrap();
+            assert!(InvestigationStartRequest::decode(&raw.to_string()).is_err());
+            let result = match request {
+                InvestigationStartRequest::Legacy(request) => {
+                    start(request, app.handle().clone(), Instant::now())
+                }
+                InvestigationStartRequest::Completion(request) => {
+                    completion_start::start(request, app.handle().clone(), Instant::now())
+                }
+            };
+            assert!(
+                matches!(
+                    result,
+                    Err(InvestigationStartError::Rejected {
+                        code: "invalid_input",
+                        definitive: true,
+                        ..
+                    })
+                ),
+                "generation {generation}: {result:?}"
+            );
+            raw["unexpected_alias"] = serde_json::json!(true);
+            assert!(serde_json::from_value::<InvestigationStartRequest>(raw).is_err());
+        }
+    }
+
+    // AC-0264, AC-0266: final activation requires request4 authority; legacy starts remain closed.
+    #[test]
+    fn v7_catalog_requires_completion_contract_and_rejects_legacy_start() {
         for id in ["domain-analyst@7", "evidence-auditor@7"] {
             assert!(
-                !AVAILABLE_SPECIALISTS
+                AVAILABLE_SPECIALISTS
                     .iter()
                     .any(|specialist| serde_json::to_value(specialist).unwrap() == id)
             );
             let raw = serde_json::json!({"schema_version":4,"request_nonce":"staged-boundary",
                 "specialist_id":id,"question":"Inspect selected evidence","scope":{"type":"all"},
                 "provider_mode":"local","limit_profile":"investigation-v1"});
-            // This is the exact parameter decoder used by start_investigation IPC.
-            let error = serde_json::from_value::<StartInvestigationRequest>(raw.clone())
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("unknown variant") && error.contains(id));
+            // AC-0266: the generation-discriminated IPC cannot accept V7 without
+            // the required completion envelope/context; legacy start never gains
+            // completion authority just because SpecialistId recognizes V7.
+            assert!(serde_json::from_value::<InvestigationStartRequest>(raw.clone()).is_err());
+            let mut legacy = raw.clone();
+            legacy["schema_version"] = serde_json::json!(3);
+            assert!(
+                serde_json::from_value::<StartInvestigationRequest>(legacy)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+            let context = format!("context-v2:{}", "a".repeat(64));
+            let mut obligation = Obligation::Inventory {
+                obligation_id: String::new(),
+                target: InventoryTarget {
+                    context_id: context.clone(),
+                    repo: "app/service".into(),
+                    inventory_hash: "b".repeat(64),
+                },
+            };
+            let identity = obligation.content_id().unwrap();
+            if let Obligation::Inventory { obligation_id, .. } = &mut obligation {
+                *obligation_id = identity;
+            }
+            let mut complete = raw.clone();
+            complete["expected_context_id"] = serde_json::json!(context);
+            complete["obligations"] = serde_json::json!({"schema_version":1,
+                "contract":"investigation-completion-obligations@1", "obligations":[obligation]});
+            assert!(matches!(
+                serde_json::from_value::<InvestigationStartRequest>(complete),
+                Ok(InvestigationStartRequest::Completion(_))
+            ));
             let mut known = raw;
             known["specialist_id"] = serde_json::json!("domain-analyst@6");
             known["schema_version"] = serde_json::json!(3);

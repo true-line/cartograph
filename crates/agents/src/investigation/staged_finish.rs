@@ -124,6 +124,8 @@ pub struct ObligationObservation {
     pub acquired: bool,
     pub exactly_supplied: bool,
     pub unmet: Option<RefusalReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_outcome: Option<CompletionAttemptOutcome>,
 }
 pub struct AcceptedCandidate {
     pub outcome: CompletionOutcome,
@@ -155,6 +157,9 @@ pub fn admit_finish(
     finish.validate()?;
     let request = request.normalized()?;
     let ledger = input.ledger();
+    if disclosure.schema_version == 4 {
+        input.validate_completion_binding(&request, disclosure, attempts)?;
+    }
     if request
         .expected_graph_revision
         .as_deref()
@@ -183,16 +188,6 @@ pub fn admit_finish(
         }
     }
     input.validate_response_metadata(model.as_deref())?;
-    // Full production security/citation/replay admission precedes recoverable
-    // classification. Its legacy result wrapper is transient and never published.
-    let admitted = input.admit_result_for_step(
-        task,
-        step,
-        Some(disclosure),
-        &finish.action,
-        model,
-        timestamp,
-    )?;
     let mut ids = BTreeSet::new();
     for evidence in attempts {
         evidence.record.validate(&request, task, evidence.ledger)?;
@@ -226,6 +221,28 @@ pub fn admit_finish(
         disclosure,
         finish.outcome,
         attempts,
+    )?;
+    let completion = if disclosure.schema_version == 4 {
+        Some(InvestigationCompletionResult {
+            schema_version: 1,
+            outcome: finish.outcome,
+            request_hash: request.intent_hash()?,
+            obligations_hash: request.obligations.fingerprint()?,
+            finishing_attempts_hash: completed_attempts_hash(attempts)?,
+            assessment: assessment.clone(),
+        })
+    } else {
+        None
+    };
+    // All security/citation/prose replay admission precedes a recoverable decision.
+    let admitted = input.admit_result_bound(
+        task,
+        step,
+        Some(disclosure),
+        &finish.action,
+        model,
+        timestamp,
+        completion,
     )?;
     let unmet = assessment
         .iter()
@@ -419,6 +436,18 @@ pub fn derive_assessment_for_binding(
             acquired,
             exactly_supplied: supplied,
             unmet: reason,
+            last_attempt_outcome: matching
+                .last()
+                .map(|evidence| match evidence.record.outcome {
+                    AttemptOutcome::SourceAcquired { .. }
+                    | AttemptOutcome::InventoryAcquired { .. } => {
+                        CompletionAttemptOutcome::Acquired
+                    }
+                    AttemptOutcome::Unavailable { .. } => CompletionAttemptOutcome::Unavailable,
+                    AttemptOutcome::FirewallRefused { .. } => {
+                        CompletionAttemptOutcome::FirewallRefused
+                    }
+                }),
         });
     }
     Ok(assessment)

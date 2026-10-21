@@ -5,12 +5,13 @@
 //! store, filesystem, network dispatch or target-code mutation authority.
 
 mod admission;
+mod completion;
 mod coverage;
 mod coverage_protocol;
 mod disclosure;
 mod input;
 mod inspection;
-// Internal primitives remain unreachable until all three #633 slices are complete.
+// Separate completion families preserve every legacy generation and identity.
 #[doc(hidden)]
 pub mod obligations;
 mod privacy;
@@ -28,11 +29,13 @@ pub mod staged_refusal;
 mod strict;
 mod turn;
 
+pub use completion::*;
 pub use coverage::*;
 pub use coverage_protocol::*;
 pub use disclosure::*;
 pub use input::*;
 pub use inspection::*;
+pub use obligations::*;
 pub use privacy::{redacted_history_text, reject_prose_replay};
 pub use projection::*;
 pub use protocol::*;
