@@ -113,7 +113,7 @@ that ends it. Reviewers are the other agent unless noted.
 | W6 | Work packets (AP-1a) | Codex | #255, staging review | A product-generated packet for one change reopens with the same identity, supports conflict-safe review, and renders equivalently in UI and export | US-0037 |
 | W7 | Compact context and bounded investigation (AP-2a, AP-2b) | Codex; deterministic discovery is Claude's | US-0020, US-0032, #250, #256 | On a supported local runtime: discovery, exact source read, cited finding, auditor follow-up, reopened history, and an honest insufficient-evidence outcome; full MT-H4-02 obligations preserved | US-0020, US-0032 additions |
 | W8a | Read-only MCP server and Cartograph skill over the deterministic surfaces: curated projection, spec artifacts, gap register, coverage matrix, discovery | Codex | W0, W5, discovery (#592) | An external agent answers a scoped question from Cartograph through MCP with cited spans, compact schemas and measured tokens, without provider calls or task execution | — (H5 read slice) |
-| W8b | MCP tasks and ACP runtime on the same coordinator | Codex | W7 accepted | H5 cross-ingress procedures executed | — (H5, existing) |
+| W8b | Agent team: durable coordinator and roster, ACP host with harness adapters and bridges, local-model agents, and the in-app human seat (#251, #252, #255) | Codex | W8a, W6 packets, SPEC-03 staging | A human and at least one ACP-hosted agent and one local-model agent work one gap in the app: the agent raises it, the human reviews, and a work packet goes to the other agent, with every agent output staged for review | — (H5, existing) |
 | W9 | Coverage matrix, data-file registries, plugin coverage claims, measured skills | Claude | ADR-0017, preflight | Preflight reports a language × framework × capability matrix with conformance fixtures, and each omission names its class and the seam that would fill it | US-0038 |
 
 Shared interfaces that need both agents' acknowledgement: context revision and
@@ -128,7 +128,7 @@ target test recovery and skills.
 | P1 | W1, W2 on the synthetic multi-repo fixture; W3 on Vendure cart readiness; W9 matrix | Drop the fixture, see stitched calls and a coverage matrix; open the cart-readiness use case with its decision table and partial markers |
 | P2 | W5 curated projection; W4 views | Accept a proposal, see it in the Workbench, the export and an agent read with the same curated revision |
 | P3 | W6 packets; W7 compact investigation and discovery | Ask a scoped question, get a cited finding and an auditor follow-up, turn a gap into a reviewed packet |
-| P4 | W8a read-only MCP and skill now; W8b tasks and ACP after W7 | An external agent reads the same context through MCP; later, it runs the same bounded task |
+| P4 | W8a read-only MCP and skill, then the W8b agent team | An agent reads Cartograph through MCP, then a human and ACP-hosted and local-model agents work a gap together in the app |
 | P5 | The north-star cycle on SimpleLogin, first as a deterministic showcase | The full cycle in section 1, with its measurements recorded |
 
 Phases are ordered by dependency, not as a waterfall. Recovered-only work
@@ -182,10 +182,9 @@ no recovered test arrangements or journeys. The order changes as follows.
 1. **Citable declarations first (#691).** Only rule-shaped code mints
    primary receipts today, which leaves 4 of 17 Vendure files with no citable
    fact. This is a deterministic gap under every later item, including #590.
-2. **W8a is no longer gated on W7.** A read-only MCP server and a Cartograph
-   skill expose what already exists deterministically. External agents become
-   the first agent team. Only tasks and ACP (W8b) wait for W7. W8a's
-   boundary:
+2. **W8 is no longer gated on W7.** A read-only MCP server and a Cartograph
+   skill (W8a) expose what already exists deterministically, and become the
+   agent team's read path. W8a's boundary:
    - It reuses the existing curated deterministic projections and retained
      evidence, and fails closed on a snapshot mismatch or an unavailable
      capture.
@@ -194,6 +193,12 @@ no recovered test arrangements or journeys. The order changes as follows.
    - Token measurements name their tokenizer or method, or say "estimate"
      or "unknown".
    - It claims no H5 task or ACP acceptance; those stay with W8b.
+
+   W8b, the agent team, no longer waits for W7 either (ADR-0036 decision 7
+   as amended). The desktop app is the human seat. Agents run on local models
+   or through ACP in any harness, directly or through an adapter or bridge,
+   and every agent output is staged for human review. W7 acceptance now gates
+   only the claim that a specialist run is accepted evidence.
 3. **P5 starts as a deterministic showcase.** SimpleLogin runs end to end on
    deterministic artifacts, the recovered contract is scored against
    `docs/api.md`, every gap is named, and the result is published under
