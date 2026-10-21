@@ -520,6 +520,8 @@
 - **Trace:** H4 · `agents`, `llm`, `core-graph`, `context-hub`, `app`, `ui` · — · T-0180..0191,T-0204,T-0234..0236,T-0260..0262,T-0267,T-0279
 
 
+- **AC-0281** Given an explicitly selected immutable investigation-v2 policy, when request generation 5 and @8 specialists are admitted, executed, replayed or reopened, then the exact policy binds request/envelope identity, nonce reuse, prompt, consent, ledger, attempts, feedback, completion and storage checks. The approved 56 tool actions, 64 invocations, 64 KiB request/envelope/evidence, 56 obligations/items, 512 journal events and 131,072 output-token reservations apply consistently; unchanged per-call, task/global storage and time limits still fail closed before excess dispatch. V1 remains default with unchanged legacy bytes, hashes and role prompts. The UI freezes the explicit policy across uncertain retries. Registration requires complete policy propagation and capacity tests; policy approval does not authorize provider execution.
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.
