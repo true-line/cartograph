@@ -1079,6 +1079,8 @@ fn captured_oversized_callable_locals_are_citable() {
         r#"export function configureDefaultOrderProcess(options: Options) {{
     let connection: TransactionalConnection;
     let eventBus: EventBus;
+    var twice = 1;
+    var twice = 2;
     const orderProcess: OrderProcess<OrderState> = {{
         transitions: {{
             Created: {{ to: ['AddingItems', 'Draft'] }},
@@ -1132,6 +1134,13 @@ export function small() {{ const inner = 1; return inner; }}
         text(named("configureDefaultOrderProcess/eventBus").unwrap()),
         "eventBus: EventBus"
     );
+    let twice: Vec<_> = facts
+        .nodes
+        .iter()
+        .filter(|node| node.id.contains("#configureDefaultOrderProcess/twice@"))
+        .map(text)
+        .collect();
+    assert_eq!(twice, ["twice = 1", "twice = 2"]);
     // The oversized object is a flagged gap; its sections are citable.
     let process = named("configureDefaultOrderProcess/orderProcess").unwrap();
     assert_eq!(process.props["span_exceeds_range_cap"], true);
@@ -1190,7 +1199,7 @@ export function small() {{ const inner = 1; return inner; }}
         .iter()
         .filter(|(receipt, _)| local(receipt))
         .count();
-    assert_eq!(locals, 4);
+    assert_eq!(locals, 6);
     let rest = produce(all.declarations.len() - locals);
     assert_eq!(rest.omitted_declarations, locals as u64);
     assert!(!rest.declarations.iter().any(|(receipt, _)| local(receipt)));
