@@ -73,6 +73,7 @@ fn captured_graph_with_source(
             commit: &revision,
         },
         capture,
+        crate::Registries::builtin(),
         &mut |_| {},
     )
     .unwrap();
