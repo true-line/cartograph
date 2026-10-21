@@ -162,13 +162,11 @@ jobs:
     # A hung mirror must fail the job in minutes, never hold its runner
     # slot to the 6-hour kill (#343; cold cargo builds finish well inside).
     timeout-minutes: 59
-    # One PR-triggered Rust lane at a time: a main push that updates every
-    # open PR must not stampede the apt mirrors with identical concurrent
-    # installs (#347). A superseded pending lane is cancelled and reruns on
-    # the PR's next update; non-PR events keep a unique group.
-    concurrency:
-      group: ${{ github.event_name == 'pull_request' && 'ci-lane-rust' || format('ci-lane-rust-{0}', github.run_id) }}
-      cancel-in-progress: false
+    # No repo-wide lane group: GitHub keeps one pending job per group, so a
+    # third queued PR cancelled the one already waiting (#669). The
+    # workflow-level group supersedes a PR's own older run; across PRs the
+    # self-hosted pool is the backpressure, and apt waits for the shared
+    # host's dpkg lock instead of failing.
     # Several runners share one host's memory; cargo's default of one rustc
     # per CPU exhausts it while compiling the workspace.
     env:
@@ -192,7 +190,7 @@ jobs:
         with:
           task: Refresh Tauri apt metadata
           executable: sudo
-          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
+          arguments-json: '["apt-get","-o","DPkg::Lock::Timeout=120","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
           timeout-seconds: '240'
           attempts: '2'
           retry-delay-seconds: '5'
@@ -202,7 +200,7 @@ jobs:
         with:
           task: Install Tauri system dependencies
           executable: sudo
-          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
+          arguments-json: '["apt-get","-o","DPkg::Lock::Timeout=210","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
           timeout-seconds: '420'
 
       # The runners share one user's home. rust-cache's post-job cleanup
@@ -241,7 +239,7 @@ jobs:
         with:
           task: Install pinned-runtime archive support
           executable: sudo
-          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","zstd"]'
+          arguments-json: '["apt-get","-o","DPkg::Lock::Timeout=60","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","zstd"]'
           timeout-seconds: '120'
 
       - name: Run explicit local-provider acceptance
@@ -360,7 +358,7 @@ jobs:
         with:
           task: Refresh rustup apt metadata
           executable: sudo
-          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
+          arguments-json: '["apt-get","-o","DPkg::Lock::Timeout=60","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
           timeout-seconds: '120'
           attempts: '2'
           retry-delay-seconds: '5'
@@ -370,7 +368,7 @@ jobs:
         with:
           task: Install rustup
           executable: sudo
-          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","rustup"]'
+          arguments-json: '["apt-get","-o","DPkg::Lock::Timeout=90","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","rustup"]'
           timeout-seconds: '180'
 
       - name: Install cargo-about
@@ -441,11 +439,7 @@ jobs:
     # Playwright's --with-deps runs apt + a CDN download — same hang risk
     # as the Tauri dependency step (#343).
     timeout-minutes: 30
-    # Same backpressure as the Rust lane: never more than one PR-triggered
-    # Playwright/apt install in flight (#347).
-    concurrency:
-      group: ${{ github.event_name == 'pull_request' && 'ci-lane-frontend' || format('ci-lane-frontend-{0}', github.run_id) }}
-      cancel-in-progress: false
+    # No repo-wide lane group, as for the Rust lane (#669).
     defaults:
       run:
         working-directory: ui

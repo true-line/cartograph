@@ -81,23 +81,22 @@ test('required Advanced CodeQL contexts report on every non-draft PR run, even o
   assert.match(full, /test "\$CODEQL" = success/u);
 });
 
-test('a main-push fan-out cannot run identical heavy lanes concurrently (#347)', () => {
+test('queued PR lanes never cancel each other, and apt waits for the shared lock (#669)', () => {
   const workflow = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
-  for (const lane of ['rust', 'frontend']) {
-    // PR-triggered lanes share one repo-wide group; other events keep a
-    // unique per-run group so evidence lanes are never superseded.
-    assert.match(
-      workflow,
-      new RegExp(
-        `github\\.event_name == 'pull_request' && 'ci-lane-${lane}' \\|\\| ` +
-          `format\\('ci-lane-${lane}-\\{0\\}', github\\.run_id\\)`,
-        'u',
-      ),
-    );
+  // A repo-wide lane group keeps one pending job, so a third queued PR
+  // cancelled the waiting one. Only the workflow-level per-PR group may
+  // supersede a run.
+  assert.doesNotMatch(workflow, /ci-lane-/u);
+  assert.match(workflow, /format\('pr-\{0\}', github\.event\.pull_request\.number\)/u);
+  // Concurrent lanes share one runner host's dpkg lock: every apt-get call
+  // waits for it, within its bounded step timeout.
+  const calls = [...workflow.matchAll(/"apt-get",(.*?)\]'\n\s+timeout-seconds: '(\d+)'/gu)];
+  assert.ok(calls.length >= 5);
+  for (const [, args, step] of calls) {
+    const wait = Number(args.match(/"DPkg::Lock::Timeout=(\d+)"/u)?.[1]);
+    assert.ok(wait > 0 && wait < Number(step), args);
   }
-  // A running suite is never cancelled by lane backpressure — pending runs
-  // are superseded instead, and rerun on the PR's next update.
-  assert.equal(workflow.match(/cancel-in-progress: false/gu)?.length, 2);
+  assert.equal([...workflow.matchAll(/"apt-get"/gu)].length, calls.length);
 });
 
 test('direct non-CI entrypoints authorize before checkout and reusable calls inherit policy', () => {
