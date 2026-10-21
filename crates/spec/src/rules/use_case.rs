@@ -320,6 +320,7 @@ pub fn project_use_case(
     documented.sort_by(|left, right| (&left.owner_id, &left.id).cmp(&(&right.owner_id, &right.id)));
     documented.dedup_by(|left, right| left.owner_id == right.owner_id && left.id == right.id);
 
+    let mut seen_owners: BTreeSet<&str> = BTreeSet::new();
     let declared = scope
         .entry_owners
         .iter()
@@ -328,9 +329,9 @@ pub fn project_use_case(
             scope
                 .supporting_owners
                 .iter()
-                .filter(|owner| !scope.entry_owners.contains(*owner))
                 .map(|owner| (owner, RowRole::Supporting)),
-        );
+        )
+        .filter(|(owner, _)| seen_owners.insert(owner.as_str()));
     let owners: Vec<OwnerCoverage> = declared
         .map(|(owner, role)| OwnerCoverage {
             owner_id: owner.clone(),
@@ -587,7 +588,7 @@ fn render(
             if owner.documented_by.is_empty() {
                 "—".to_owned()
             } else {
-                owner.documented_by.join(", ")
+                text(owner.documented_by.join(", ")).to_string()
             }
         )?;
     }
@@ -1042,13 +1043,24 @@ pub fn check_use_case_acceptance(
             let weakest = case
                 .rule_ids
                 .iter()
-                .map(|id| by_id[id.as_str()])
+                .map(|id| {
+                    by_id
+                        .get(id.as_str())
+                        .copied()
+                        .unwrap_or(ExpectationLabel::Unknown)
+                })
                 .min()
                 .unwrap_or(ExpectationLabel::Unknown);
             let mut missing: Vec<String> = case
                 .rule_ids
                 .iter()
-                .filter(|id| by_id[id.as_str()] < ExpectationLabel::Inferred)
+                .filter(|id| {
+                    by_id
+                        .get(id.as_str())
+                        .copied()
+                        .unwrap_or(ExpectationLabel::Unknown)
+                        < ExpectationLabel::Inferred
+                })
                 .map(|id| format!("{id} has no recovered row"))
                 .collect();
             missing.push("decision outcome not executed or evaluated".into());
@@ -1168,7 +1180,7 @@ impl AcceptanceReport {
                 if result.row_ids.is_empty() {
                     "—".to_owned()
                 } else {
-                    result.row_ids.join("; ")
+                    text(result.row_ids.join("; ")).to_string()
                 },
                 text(result.missing.join("; "))
             )?;

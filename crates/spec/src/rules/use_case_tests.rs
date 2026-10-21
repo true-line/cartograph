@@ -431,3 +431,60 @@ fn expected_set_rejects_unknown_schema_and_dangling_references() {
         (8, 41, 10)
     );
 }
+
+#[test]
+fn duplicate_owners_collapse_and_unknown_case_rule_labels_unknown() {
+    // A duplicated declared owner yields exactly one OwnerCoverage row:
+    // entry owners first, then supporting owners not already listed.
+    let mut duplicated = scope();
+    duplicated.entry_owners = vec![ENTRY.into(), ENTRY.into()];
+    duplicated.supporting_owners = vec![
+        SALEABLE.into(),
+        CHANNEL.into(),
+        SALEABLE.into(),
+        ENTRY.into(),
+    ];
+    let projection = project_use_case(
+        &vendure_nodes(),
+        &[],
+        ExportMode::BestEffort,
+        &BTreeSet::new(),
+        &duplicated,
+    );
+    assert_eq!(projection.owners.len(), 3);
+    assert_eq!(
+        projection
+            .owners
+            .iter()
+            .map(|owner| (owner.owner_id.as_str(), owner.role))
+            .collect::<Vec<_>>(),
+        [
+            (ENTRY, RowRole::Entry),
+            (SALEABLE, RowRole::Supporting),
+            (CHANNEL, RowRole::Supporting),
+        ]
+    );
+
+    // A hand-built ExpectedSet case naming an unknown rule labels the case
+    // Unknown instead of panicking on the missing lookup.
+    let expected = ExpectedSet {
+        benchmark_id: "synthetic".into(),
+        rules: vec![],
+        cases: vec![ExpectedCase {
+            id: "C-ghost".into(),
+            name: "ghost rule".into(),
+            rule_ids: vec!["R-ghost".into()],
+        }],
+        negative_claim_ids: vec![],
+    };
+    let report = check_use_case_acceptance(&projection, &expected);
+    assert_eq!(report.cases.len(), 1);
+    assert_eq!(report.cases[0].id, "C-ghost");
+    assert_eq!(report.cases[0].label, ExpectationLabel::Unknown);
+    assert!(
+        report.cases[0]
+            .missing
+            .iter()
+            .any(|m| m == "R-ghost has no recovered row")
+    );
+}
