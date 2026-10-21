@@ -425,3 +425,75 @@ fn prepared_query_holds_retention_guards_through_sink_and_releases_on_return() {
         );
     }
 }
+
+#[test]
+fn prepared_context_reads_require_exactly_one_manifest_extension() {
+    // AC-0287: a locally corrupted candidate cannot replace prior history or
+    // publish two acquisitions through a single prepared-read boundary.
+    let fixture = Fixture::new();
+    for kind in [
+        PreparedContextReadKind::Query,
+        PreparedContextReadKind::Inventory,
+    ] {
+        for corruption in 0..5 {
+            let mut context = fixture.prepare();
+            let first = fixture.candidate(&context, kind);
+            context
+                .publish_context_read(first, &mut Sink::default())
+                .unwrap();
+            let mut candidate = fixture.candidate(&context, kind);
+            match corruption {
+                0 => candidate.ledger.revision += 1,
+                1 => match kind {
+                    PreparedContextReadKind::Query => {
+                        candidate.ledger.queries.pop();
+                    }
+                    PreparedContextReadKind::Inventory => {
+                        candidate.ledger.coverage_reads.pop();
+                    }
+                },
+                2 => match kind {
+                    PreparedContextReadKind::Query => {
+                        candidate.ledger.queries[0].response_hash = content_hash(b"changed")
+                    }
+                    PreparedContextReadKind::Inventory => {
+                        candidate.ledger.coverage_reads[0].response_hash = content_hash(b"changed")
+                    }
+                },
+                3 => match kind {
+                    PreparedContextReadKind::Query => candidate
+                        .ledger
+                        .queries
+                        .push(candidate.ledger.queries.last().unwrap().clone()),
+                    PreparedContextReadKind::Inventory => candidate
+                        .ledger
+                        .coverage_reads
+                        .push(candidate.ledger.coverage_reads.last().unwrap().clone()),
+                },
+                _ => {
+                    let opposite = match kind {
+                        PreparedContextReadKind::Query => PreparedContextReadKind::Inventory,
+                        PreparedContextReadKind::Inventory => PreparedContextReadKind::Query,
+                    };
+                    let other = fixture.candidate(&context, opposite);
+                    match kind {
+                        PreparedContextReadKind::Query => {
+                            candidate.ledger.coverage_reads = other.ledger.coverage_reads
+                        }
+                        PreparedContextReadKind::Inventory => {
+                            candidate.ledger.queries = other.ledger.queries
+                        }
+                    }
+                }
+            }
+            let before = snapshot(&context);
+            let mut sink = Sink::default();
+            assert_eq!(
+                context.publish_context_read(candidate, &mut sink),
+                Err(HostError::InvalidInput)
+            );
+            assert_eq!(sink.calls, 0);
+            assert_eq!(snapshot(&context), before);
+        }
+    }
+}

@@ -821,6 +821,25 @@ impl FrozenContext {
         {
             return Err(HostError::InputChanged);
         }
+        // A candidate publishes exactly one acquisition of its declared kind.
+        // Retain every prior manifest verbatim, including replay history.
+        let base = prepared.base_ledger();
+        let next = prepared.ledger();
+        let one_manifest = match prepared.kind() {
+            PreparedContextReadKind::Query => {
+                base.queries.len().checked_add(1) == Some(next.queries.len())
+                    && next.queries.starts_with(&base.queries)
+                    && next.coverage_reads == base.coverage_reads
+            }
+            PreparedContextReadKind::Inventory => {
+                base.coverage_reads.len().checked_add(1) == Some(next.coverage_reads.len())
+                    && next.coverage_reads.starts_with(&base.coverage_reads)
+                    && next.queries == base.queries
+            }
+        };
+        if !one_manifest || base.revision.checked_add(1) != Some(next.revision) {
+            return Err(HostError::InvalidInput);
+        }
         prepared.ledger().validate_with_policy(self.policy)?;
         let (response_bytes, response_hash) = match prepared.kind() {
             PreparedContextReadKind::Query => prepared
