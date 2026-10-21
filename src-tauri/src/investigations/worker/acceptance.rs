@@ -2,6 +2,8 @@
 //! The independent oracle is deliberately absent from all request construction.
 
 use super::*;
+#[path = "acceptance/admission.rs"]
+mod admission;
 #[path = "acceptance/completion.rs"]
 mod completion;
 #[path = "acceptance/inspection.rs"]

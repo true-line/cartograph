@@ -10,6 +10,7 @@ mod coverage;
 mod coverage_protocol;
 mod disclosure;
 mod input;
+mod input_workflow_capacity;
 mod inspection;
 // Separate completion families preserve every legacy generation and identity.
 #[doc(hidden)]
@@ -35,6 +36,7 @@ pub use coverage::*;
 pub use coverage_protocol::*;
 pub use disclosure::*;
 pub use input::*;
+pub use input_workflow_capacity::WorkflowCoverageDetailBound;
 pub use inspection::*;
 pub use obligations::*;
 pub use policy::{

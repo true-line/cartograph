@@ -111,3 +111,5 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0041 | Bounded query history with explicit runtime families (proposed) |
 
 | ADR-0042 | Prove continuation capacity before tool admission (proposed) |
+
+The AC-0191/T-0191 [@10 acceptance-harness supplement](acceptance/716-admission-harness-2026-10-21.md) records the #716 implementation test plan. AC-0191 is unchanged; real-provider and H4/H5 operator acceptance remain unexecuted.
