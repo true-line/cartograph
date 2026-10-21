@@ -1060,6 +1060,41 @@ mod tests {
             .unwrap()
     }
 
+    // AC-0274: evaluation corpus identity comes from validated retained bytes,
+    // not a dataset's claimed capture hash or a current working-tree read.
+    #[test]
+    fn evaluation_capture_manifest_revalidates_retained_objects_and_guard() {
+        let (directory, source, capture, _, _) = fixture();
+        let store = PrimarySourceStore::open(directory.path()).unwrap();
+        store.captures.lock().unwrap().persist(&capture).unwrap();
+        let guard = store.task_guard(&source.source_id).unwrap();
+        assert_eq!(
+            store
+                .evaluation_capture(&guard, capture.id(), 32 * 1024 * 1024)
+                .unwrap()
+                .manifest()
+                .clone(),
+            *capture.manifest()
+        );
+        assert!(matches!(
+            store.evaluation_capture(&guard, capture.id(), 0),
+            Err(PinnedReadError::Invalid)
+        ));
+        let other_directory = tempfile::tempdir().unwrap();
+        let other = PrimarySourceStore::open(other_directory.path()).unwrap();
+        let wrong_guard = other.task_guard(&source.source_id).unwrap();
+        assert!(matches!(
+            store.evaluation_capture(&wrong_guard, capture.id(), 32 * 1024 * 1024),
+            Err(PinnedReadError::Invalid)
+        ));
+        let conn = Connection::open(store.storage.path("captures.sqlite")).unwrap();
+        conn.execute("UPDATE objects SET bytes=X'00'", []).unwrap();
+        assert!(matches!(
+            store.evaluation_capture(&guard, capture.id(), 32 * 1024 * 1024),
+            Err(PinnedReadError::Invalid)
+        ));
+    }
+
     // AC-0153: schema/version validation remains active after open, and a
     // suppressed insert never becomes successful source-retention evidence.
     #[test]

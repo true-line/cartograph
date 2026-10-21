@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "kind": "leakage",
+  "purpose": "visible_mechanism_fixture",
+  "dataset_id": "t2-visible-mechanism-v1",
+  "inputs_hash": "d0ab80d3370c4d1efe837f7477ba6e50c4c9608ecb513edf5268656f80104b2a",
+  "partition_policy": {
+    "version": "sha256-group-bucket@1",
+    "salt": "cartograph-661-visible-mechanism-v1",
+    "calibration_buckets": 5000
+  },
+  "groups": [
+    {
+      "group_id": "g-billing",
+      "case_ids": [
+        "c-call-no-match",
+        "c-call-unique",
+        "c-call-unique-r2"
+      ],
+      "split": "evaluation",
+      "related_source_ids": [
+        "s-billing-charge",
+        "s-billing-charge-r2",
+        "s-billing-refund",
+        "s-billing-refund-r2",
+        "s-checkout-caller",
+        "s-checkout-caller-r2",
+        "s-ledger-caller"
+      ],
+      "grouping_basis": [
+        "same_revision_lineage",
+        "same_target_definition"
+      ],
+      "review_note": "c-call-unique and c-call-unique-r2 are one call site across two revisions; c-call-no-match ranks the same chargeCard/refundCard definitions. All three stay together so neither split sees a target definition the other was tuned on. Limitation: lineage is declared by the author, not detected."
+    },
+    {
+      "group_id": "g-catalog-plugins",
+      "case_ids": [
+        "c-call-unknown"
+      ],
+      "split": "calibration",
+      "related_source_ids": [
+        "s-plugin-caller",
+        "s-plugin-export",
+        "s-plugin-import"
+      ],
+      "grouping_basis": [
+        "independent"
+      ],
+      "review_note": "The candidate definitions appear in no other case. Independence is an authoring claim for this visible fixture."
+    },
+    {
+      "group_id": "g-i18n",
+      "case_ids": [
+        "c-call-multi-acceptable"
+      ],
+      "split": "evaluation",
+      "related_source_ids": [
+        "s-i18n-format",
+        "s-i18n-legacy-format",
+        "s-pricing-caller"
+      ],
+      "grouping_basis": [
+        "independent"
+      ],
+      "review_note": "The currency definition and its re-export appear only here. Independence is an authoring claim."
+    },
+    {
+      "group_id": "g-legacy-bus",
+      "case_ids": [
+        "c-channel-null-subtype"
+      ],
+      "split": "calibration",
+      "related_source_ids": [
+        "s-legacy-bus-publisher",
+        "s-legacy-route-inventory",
+        "s-legacy-route-pricing"
+      ],
+      "grouping_basis": [
+        "independent"
+      ],
+      "review_note": "Null-subtype Channel family; its routes appear only here. Independence is an authoring claim."
+    },
+    {
+      "group_id": "g-notify",
+      "case_ids": [
+        "c-call-same-name"
+      ],
+      "split": "calibration",
+      "related_source_ids": [
+        "s-audit-send",
+        "s-email-send",
+        "s-notifier-caller",
+        "s-sms-send"
+      ],
+      "grouping_basis": [
+        "independent"
+      ],
+      "review_note": "The three same-name send definitions appear only here. Independence is an authoring claim."
+    },
+    {
+      "group_id": "g-orders-queue",
+      "case_ids": [
+        "c-channel-sqs"
+      ],
+      "split": "calibration",
+      "related_source_ids": [
+        "s-orders-publisher",
+        "s-tf-orders-cancelled",
+        "s-tf-orders-created",
+        "s-tf-orders-env"
+      ],
+      "grouping_basis": [
+        "independent"
+      ],
+      "review_note": "The queue resources and env binding appear only here. Independence is an authoring claim."
+    },
+    {
+      "group_id": "g-payments-topic",
+      "case_ids": [
+        "c-channel-sns"
+      ],
+      "split": "calibration",
+      "related_source_ids": [
+        "s-payments-subscriber",
+        "s-tf-refunds-topic",
+        "s-tf-settled-env",
+        "s-tf-settled-topic"
+      ],
+      "grouping_basis": [
+        "independent"
+      ],
+      "review_note": "The topic resources and env binding appear only here. Independence is an authoring claim."
+    },
+    {
+      "group_id": "g-webhooks",
+      "case_ids": [
+        "c-call-empty-universe"
+      ],
+      "split": "evaluation",
+      "related_source_ids": [
+        "s-webhook-caller"
+      ],
+      "grouping_basis": [
+        "independent"
+      ],
+      "review_note": "Empty frozen universe; the caller appears only here."
+    }
+  ]
+}

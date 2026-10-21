@@ -124,11 +124,11 @@ export const FullPicture: Story = {
       }),
     ).toBeInTheDocument();
 
-    // Eval gate: pass and below-floor states, with the numbers visible.
-    await expect(canvas.getByText('GATE PASS')).toBeInTheDocument();
-    await expect(canvas.getByText('BELOW FLOOR')).toBeInTheDocument();
-    await expect(canvas.getByText('P 0.86 · R 0.79 · floor 0.80')).toBeInTheDocument();
-    await expect(canvas.getByText('0 of 12 proposals admitted')).toBeInTheDocument();
+    // AC-0277: historical scalar passed=true remains calibration, never a gate grant.
+    await expect(canvas.getAllByText('CALIBRATION ONLY')).toHaveLength(2);
+    await expect(canvas.queryByText('GATE PASS')).not.toBeInTheDocument();
+    await expect(canvas.getByText('Calibration P 0.86 · R 0.79 · floor 0.80')).toBeInTheDocument();
+    await expect(canvas.getByText('12 staged proposals · 0 recorded admissions')).toBeInTheDocument();
   },
 };
 
@@ -238,8 +238,58 @@ export const EmptyState: Story = {
       canvas.getByText('No ingest recorded yet — coverage lands with the first run.'),
     ).toBeInTheDocument();
     await expect(
-      canvas.getByText('No calibration recorded — the gate runs when a semantic overlay is staged.'),
+      canvas.getByText('No calibration recorded — semantic proposals remain staged until evaluated.'),
     ).toBeInTheDocument();
     await expect(canvas.getByText('No ingest history yet.')).toBeInTheDocument();
+  },
+};
+
+const EVALUATED: NonNullable<EvalResult['evaluation']> = {
+  schema_version: 1,
+  mode: 'independent_evaluation',
+  families: [
+    {
+      family: { kind: 'Channel', subtype: 'sqs-queue' },
+      status: 'independently_evaluated', reason: 'independently_evaluated',
+      staged: 3, admitted: 2, ambiguous: 1,
+      receipt_digest: 'a'.repeat(64),
+      metrics: { precision: 1, recall: 0.8, true_positives: 4, false_positives: 0, false_negatives: 1, unknown: 2, no_match_false_admissions: 0, retrieval_recall: 0.9 },
+    },
+    {
+      family: { kind: 'Call', subtype: null },
+      status: 'abstained', reason: 'missing_evidence', staged: 4, admitted: 0, ambiguous: 0,
+      receipt_digest: null, metrics: null,
+    },
+  ],
+};
+export const PerFamilyEvaluationAndAbstention: Story = {
+  // AC-0277: an evaluated family never lends its receipt to another family.
+  args: { evals: [{ ...EVALS[0], proposals: 7, approved: 2, evaluation: EVALUATED }] },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('INDEPENDENT EVALUATION')).toBeInTheDocument();
+    await expect(canvas.getByText('3 staged · 2 admitted · 1 ambiguous')).toBeInTheDocument();
+    await expect(canvas.getByText('4 staged · 0 admitted · 0 ambiguous')).toBeInTheDocument();
+    await expect(canvas.getByText(/ABSTAINED.*Missing independent evidence/)).toBeInTheDocument();
+    await expect(canvas.queryByText('GATE PASS')).not.toBeInTheDocument();
+  },
+};
+export const VisibleFixturesAreMechanismOnly: Story = {
+  args: { evals: [{ ...EVALS[0], proposals: 7, approved: 2, evaluation: { ...EVALUATED, mode: 'visible_mechanism_evaluation' } }] },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('VISIBLE MECHANISM ONLY')).toBeInTheDocument();
+    await expect(canvas.getByText(/they do not establish model quality/)).toBeInTheDocument();
+    await expect(canvas.queryByText('INDEPENDENT EVALUATION')).not.toBeInTheDocument();
+    await expect(canvas.queryByText('GATE PASS')).not.toBeInTheDocument();
+  },
+};
+export const EvaluatedFamilyBelowFloor: Story = {
+  args: { evals: [{ ...EVALS[1], proposals: 3, approved: 0, evaluation: { schema_version: 1, mode: 'independent_evaluation', families: [{ ...EVALUATED.families[0], staged: 3, admitted: 0, ambiguous: 0, reason: 'below_floor', metrics: { precision: 0.5, recall: 0.5, true_positives: 1, false_positives: 1, false_negatives: 1, unknown: 0, no_match_false_admissions: 1, retrieval_recall: null } }] } }] },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText(/Below precision floor/)).toBeInTheDocument();
+    await expect(canvas.getByText('3 staged · 0 admitted · 0 ambiguous')).toBeInTheDocument();
+    await expect(canvas.queryByText('GATE PASS')).not.toBeInTheDocument();
   },
 };

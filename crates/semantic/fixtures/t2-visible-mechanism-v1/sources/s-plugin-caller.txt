@@ -1,0 +1,1 @@
+export const run = (name, ctx) => registry[name](ctx);

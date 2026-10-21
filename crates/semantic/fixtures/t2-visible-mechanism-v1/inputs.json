@@ -1,0 +1,1146 @@
+{
+  "schema_version": 1,
+  "kind": "inputs",
+  "purpose": "visible_mechanism_fixture",
+  "dataset_id": "t2-visible-mechanism-v1",
+  "corpora": [
+    {
+      "corpus_id": "storefront-r1",
+      "repo_id": "fixture/storefront",
+      "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+      "graph_snapshot_hash": "1f5922c91f653221038ebef387e9d1de3f9f8e4947e88d2266f151c660b6b956",
+      "capture_manifest_hash": "3dd89643498e562e60921d9bcd50315a4f74299d08f89212483eef0804699bc4"
+    },
+    {
+      "corpus_id": "storefront-r2",
+      "repo_id": "fixture/storefront",
+      "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2",
+      "graph_snapshot_hash": "639825325cbbcede2cf713e7426795a4fcb3670794d34ec9402cc978448b31f1",
+      "capture_manifest_hash": "9f8f00fe6ef757ee7f5cf7c4460898654bf8b736561ce803da3ef142828b84f2"
+    }
+  ],
+  "sources": [
+    {
+      "source_id": "s-audit-send",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/audit/sink.ts",
+        "byte_start": 0,
+        "byte_end": 65,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-audit-send.txt",
+      "byte_len": 65,
+      "content_hash": "84a05b2b5cb58f50afff94da222501a39f31ec6bf13197121f4b00e73205a393"
+    },
+    {
+      "source_id": "s-billing-charge",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/billing/charge.ts",
+        "byte_start": 16,
+        "byte_end": 93,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-billing-charge.txt",
+      "byte_len": 77,
+      "content_hash": "4a7536a0fbdee14a37de0db9d118333b872ddba4429ced15ca8f1f13d360684f"
+    },
+    {
+      "source_id": "s-billing-charge-r2",
+      "corpus_id": "storefront-r2",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/billing/charge.ts",
+        "byte_start": 16,
+        "byte_end": 93,
+        "commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2"
+      },
+      "bytes_path": "sources/s-billing-charge-r2.txt",
+      "byte_len": 77,
+      "content_hash": "4a7536a0fbdee14a37de0db9d118333b872ddba4429ced15ca8f1f13d360684f"
+    },
+    {
+      "source_id": "s-billing-refund",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/billing/refund.ts",
+        "byte_start": 15,
+        "byte_end": 91,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-billing-refund.txt",
+      "byte_len": 76,
+      "content_hash": "e196b3efad325f1522e753a5f74ea2ad9b9eeb9f915416fd895ff0f4c45ef052"
+    },
+    {
+      "source_id": "s-billing-refund-r2",
+      "corpus_id": "storefront-r2",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/billing/refund.ts",
+        "byte_start": 15,
+        "byte_end": 91,
+        "commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2"
+      },
+      "bytes_path": "sources/s-billing-refund-r2.txt",
+      "byte_len": 76,
+      "content_hash": "e196b3efad325f1522e753a5f74ea2ad9b9eeb9f915416fd895ff0f4c45ef052"
+    },
+    {
+      "source_id": "s-checkout-caller",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/checkout/place.ts",
+        "byte_start": 39,
+        "byte_end": 119,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-checkout-caller.txt",
+      "byte_len": 80,
+      "content_hash": "c38a2d3f09d8e8b59f0b96c3b295a7eb13422f9cd1cec4deaceff7c02ff59f5c"
+    },
+    {
+      "source_id": "s-checkout-caller-r2",
+      "corpus_id": "storefront-r2",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/checkout/place.ts",
+        "byte_start": 39,
+        "byte_end": 152,
+        "commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2"
+      },
+      "bytes_path": "sources/s-checkout-caller-r2.txt",
+      "byte_len": 113,
+      "content_hash": "29a4844bf746ff9292a0c5ac421b9bf6b089a263d62f91ba0e9ead9b77edfa9a"
+    },
+    {
+      "source_id": "s-email-send",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/channels/email.ts",
+        "byte_start": 0,
+        "byte_end": 78,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-email-send.txt",
+      "byte_len": 78,
+      "content_hash": "d68ef8b4aa76d017c7f6f72f10b088bc7019fad79bda32b649f79364d964fa34"
+    },
+    {
+      "source_id": "s-i18n-format",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/i18n/currency.ts",
+        "byte_start": 0,
+        "byte_end": 110,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-i18n-format.txt",
+      "byte_len": 110,
+      "content_hash": "0a3482ca04d5947a7d833dff30ef864ef23311aaa7d30c705afebd5cf32bf101"
+    },
+    {
+      "source_id": "s-i18n-legacy-format",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/i18n/index.ts",
+        "byte_start": 24,
+        "byte_end": 69,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-i18n-legacy-format.txt",
+      "byte_len": 45,
+      "content_hash": "4450ea8cd67ffff0bc691ca48ed55dc433b6830e9f98fc82817db66587714836"
+    },
+    {
+      "source_id": "s-ledger-caller",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/finance/close.ts",
+        "byte_start": 46,
+        "byte_end": 115,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-ledger-caller.txt",
+      "byte_len": 69,
+      "content_hash": "38b39795e4ad6ec0ad96e3930c1624a8bb06294d88600540f1cd52ec734faf48"
+    },
+    {
+      "source_id": "s-legacy-bus-publisher",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/legacy/bridge.ts",
+        "byte_start": 0,
+        "byte_end": 60,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-legacy-bus-publisher.txt",
+      "byte_len": 60,
+      "content_hash": "cc0eb4576505ee10901971c063835ea3d4cb73ecc9edd754eb879670e26ef503"
+    },
+    {
+      "source_id": "s-legacy-route-inventory",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/legacy/routes.ts",
+        "byte_start": 0,
+        "byte_end": 59,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-legacy-route-inventory.txt",
+      "byte_len": 59,
+      "content_hash": "1a727de3785eb61fe26dcef2e335b95040a61d65f1221b31b5e66bd8d16b21bd"
+    },
+    {
+      "source_id": "s-legacy-route-pricing",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/legacy/routes.ts",
+        "byte_start": 59,
+        "byte_end": 114,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-legacy-route-pricing.txt",
+      "byte_len": 55,
+      "content_hash": "9eb8386248668cf15decb2079ded83b2c3ff1f90d9874d7f8216f0893f26224a"
+    },
+    {
+      "source_id": "s-notifier-caller",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/notify/receipt.ts",
+        "byte_start": 43,
+        "byte_end": 126,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-notifier-caller.txt",
+      "byte_len": 83,
+      "content_hash": "444b24f785c8c119ca1caf47649358bc58c96dc67bcb4668447cc3f386fc3fd8"
+    },
+    {
+      "source_id": "s-orders-publisher",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/orders/events.ts",
+        "byte_start": 69,
+        "byte_end": 216,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-orders-publisher.txt",
+      "byte_len": 147,
+      "content_hash": "b3223ba2f358c3303b716485d86a771fe7fdeb186f670bc48a88124f2e2a3f4e"
+    },
+    {
+      "source_id": "s-payments-subscriber",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/payments/listen.ts",
+        "byte_start": 0,
+        "byte_end": 73,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-payments-subscriber.txt",
+      "byte_len": 73,
+      "content_hash": "31eabaf9c6f94e2ee467a5a4143ccbb677ec095b23bbb6fa4b766002e7187984"
+    },
+    {
+      "source_id": "s-plugin-caller",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/plugins/run.ts",
+        "byte_start": 0,
+        "byte_end": 55,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-plugin-caller.txt",
+      "byte_len": 55,
+      "content_hash": "5884ca7d4f841265b17cfd1da6514646301a73cc38b7ceb93c97c71749e82c6c"
+    },
+    {
+      "source_id": "s-plugin-export",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/plugins/export.ts",
+        "byte_start": 0,
+        "byte_end": 65,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-plugin-export.txt",
+      "byte_len": 65,
+      "content_hash": "94409acf32b9393bf7b2832e95f52f583d67bf21b0178b873c927a27236b871d"
+    },
+    {
+      "source_id": "s-plugin-import",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/plugins/import.ts",
+        "byte_start": 0,
+        "byte_end": 64,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-plugin-import.txt",
+      "byte_len": 64,
+      "content_hash": "50a6f4b6846b11faa213daa951b2dd123291ac4d9063aa075dc2065b2c1fd73e"
+    },
+    {
+      "source_id": "s-pricing-caller",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/pricing/label.ts",
+        "byte_start": 43,
+        "byte_end": 129,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-pricing-caller.txt",
+      "byte_len": 86,
+      "content_hash": "b5db4478f8c95e2428128329a1ed606076935678cf6d205354694199f63e272c"
+    },
+    {
+      "source_id": "s-sms-send",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/channels/sms.ts",
+        "byte_start": 0,
+        "byte_end": 76,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-sms-send.txt",
+      "byte_len": 76,
+      "content_hash": "ae9a101f57733b20e283f146b7579c6b84e78f511bcc294e4de7c46068b9e439"
+    },
+    {
+      "source_id": "s-tf-orders-cancelled",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "infra/queues.tf",
+        "byte_start": 72,
+        "byte_end": 148,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-tf-orders-cancelled.txt",
+      "byte_len": 76,
+      "content_hash": "c32061b1d61c8f4f559f4e30d6eef15978973bb23e15daf5b8af1f5e9b7f0ee5"
+    },
+    {
+      "source_id": "s-tf-orders-created",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "infra/queues.tf",
+        "byte_start": 0,
+        "byte_end": 72,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-tf-orders-created.txt",
+      "byte_len": 72,
+      "content_hash": "2b3e36b93dfd4c5339fa8af6c040bf81c618be1553707d11c8fb1f30b364203e"
+    },
+    {
+      "source_id": "s-tf-orders-env",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "infra/service.tf",
+        "byte_start": 0,
+        "byte_end": 54,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-tf-orders-env.txt",
+      "byte_len": 54,
+      "content_hash": "ab73ed01e57f45d5ad00d7ae8484131cd2cea5303339689261038d695f3bc713"
+    },
+    {
+      "source_id": "s-tf-refunds-topic",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "infra/topics.tf",
+        "byte_start": 76,
+        "byte_end": 148,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-tf-refunds-topic.txt",
+      "byte_len": 72,
+      "content_hash": "bc121dc1616199fad2fa4a658c81681a1a7439985b469cfa9d961e686a062db2"
+    },
+    {
+      "source_id": "s-tf-settled-env",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "infra/service.tf",
+        "byte_start": 54,
+        "byte_end": 111,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-tf-settled-env.txt",
+      "byte_len": 57,
+      "content_hash": "bec6c19595f2a969e3e34b4c26229d25793ff492422859652a4259ad16f82725"
+    },
+    {
+      "source_id": "s-tf-settled-topic",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "infra/topics.tf",
+        "byte_start": 0,
+        "byte_end": 76,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-tf-settled-topic.txt",
+      "byte_len": 76,
+      "content_hash": "e503a9a2911da6bcb6c4a3b0390691e3f0c776d93f041b42b530f9caed619f11"
+    },
+    {
+      "source_id": "s-webhook-caller",
+      "corpus_id": "storefront-r1",
+      "evidence": {
+        "repo": "fixture/storefront",
+        "path": "src/webhooks/dispatch.ts",
+        "byte_start": 0,
+        "byte_end": 77,
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "bytes_path": "sources/s-webhook-caller.txt",
+      "byte_len": 77,
+      "content_hash": "3d8a3527ed17fa7f932defdd8cfc2f5215ccbb8248a0294247d52b2aa5a4c0d9"
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "c-call-empty-universe",
+      "corpus_id": "storefront-r1",
+      "family": {
+        "kind": "Call",
+        "subtype": null
+      },
+      "hop": {
+        "gap_id": "gap:call:webhooks/dispatch.ts#dispatch:fetch",
+        "source_id": "fn:webhooks/dispatch.ts#dispatch",
+        "edge_label": "CALLS",
+        "query": "dispatch POSTs body to a caller-supplied url",
+        "query_hash": "77fdbd2e219a0eae8c99c0ac8c7f45b6fb0304688c14e1fdd7e704dc16b49e1f",
+        "evidence": [
+          {
+            "repo": "fixture/storefront",
+            "path": "src/webhooks/dispatch.ts",
+            "byte_start": 0,
+            "byte_end": 77,
+            "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+          }
+        ]
+      },
+      "source_ids": [
+        "s-webhook-caller"
+      ],
+      "candidates": [],
+      "candidate_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "case_id": "c-call-multi-acceptable",
+      "corpus_id": "storefront-r1",
+      "family": {
+        "kind": "Call",
+        "subtype": null
+      },
+      "hop": {
+        "gap_id": "gap:call:pricing/label.ts#priceLabel:formatCurrency",
+        "source_id": "fn:pricing/label.ts#priceLabel",
+        "edge_label": "CALLS",
+        "query": "priceLabel calls formatCurrency(cents, locale) imported from ../i18n",
+        "query_hash": "9ff768df8f66db7b1ee1b92a9ffb485c5839fee257c5dde71719178f2aa2634f",
+        "evidence": [
+          {
+            "repo": "fixture/storefront",
+            "path": "src/pricing/label.ts",
+            "byte_start": 43,
+            "byte_end": 129,
+            "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+          }
+        ]
+      },
+      "source_ids": [
+        "s-pricing-caller"
+      ],
+      "candidates": [
+        {
+          "node_id": "fn:i18n/currency.ts#formatCurrency",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "function formatCurrency(cents, locale) in i18n/currency.ts: formats cents with Intl.NumberFormat",
+          "text_hash": "e62de24ebd41fb4c75fad197b2bd65fdc43fef872f526893143d2ec8a8b3165c",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/i18n/currency.ts",
+              "byte_start": 0,
+              "byte_end": 110,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-i18n-format"
+          ]
+        },
+        {
+          "node_id": "reexport:i18n/index.ts#formatCurrency",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "re-export formatCurrency from i18n/index.ts of ./currency",
+          "text_hash": "7593984ec463c0d715df6c67cd0c96678d31dfdafad2db919587377673f283fe",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/i18n/index.ts",
+              "byte_start": 24,
+              "byte_end": 69,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-i18n-legacy-format"
+          ]
+        }
+      ],
+      "candidate_set_hash": "6ff4e63b85d38f178d61762a19dfb03cc0989ba952b976627c8527cbfea8dcf6"
+    },
+    {
+      "case_id": "c-call-no-match",
+      "corpus_id": "storefront-r1",
+      "family": {
+        "kind": "Call",
+        "subtype": null
+      },
+      "hop": {
+        "gap_id": "gap:call:finance/close.ts#closeDay:ledgerSdk.reconcileLedger",
+        "source_id": "fn:finance/close.ts#closeDay",
+        "edge_label": "CALLS",
+        "query": "closeDay calls ledgerSdk.reconcileLedger()",
+        "query_hash": "f133636a03c268c2d44f677ee49796d820ae41dbc6b106854bef5904499d3d62",
+        "evidence": [
+          {
+            "repo": "fixture/storefront",
+            "path": "src/finance/close.ts",
+            "byte_start": 46,
+            "byte_end": 115,
+            "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+          }
+        ]
+      },
+      "source_ids": [
+        "s-ledger-caller"
+      ],
+      "candidates": [
+        {
+          "node_id": "fn:billing/charge.ts#chargeCard",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "function chargeCard(order) in billing/charge.ts: captures order.total through the card gateway",
+          "text_hash": "3d548a2aacc9221b28c7beaec0884acb8bf9ce4aadff9d48db6e88281fe61102",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/billing/charge.ts",
+              "byte_start": 16,
+              "byte_end": 93,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-billing-charge"
+          ]
+        },
+        {
+          "node_id": "fn:billing/refund.ts#refundCard",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "function refundCard(order) in billing/refund.ts: refunds order.total through the card gateway",
+          "text_hash": "7947ced272e7b39a327915aab811f70b0e90750c3a4b77f307f87d9e430a30e3",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/billing/refund.ts",
+              "byte_start": 15,
+              "byte_end": 91,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-billing-refund"
+          ]
+        }
+      ],
+      "candidate_set_hash": "d645aa35be38ac4decff5dbc04998518c6484e301cc3a5926c66994ae2e84432"
+    },
+    {
+      "case_id": "c-call-same-name",
+      "corpus_id": "storefront-r1",
+      "family": {
+        "kind": "Call",
+        "subtype": null
+      },
+      "hop": {
+        "gap_id": "gap:call:notify/receipt.ts#sendReceipt:send",
+        "source_id": "fn:notify/receipt.ts#sendReceipt",
+        "edge_label": "CALLS",
+        "query": "sendReceipt calls send(user.email, receipt)",
+        "query_hash": "1028d648901f4293f24026220c8bbcdb040c0d1bcef70c7f169f4adb8fd1dfac",
+        "evidence": [
+          {
+            "repo": "fixture/storefront",
+            "path": "src/notify/receipt.ts",
+            "byte_start": 43,
+            "byte_end": 126,
+            "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+          }
+        ]
+      },
+      "source_ids": [
+        "s-notifier-caller"
+      ],
+      "candidates": [
+        {
+          "node_id": "fn:audit/sink.ts#send",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "function send(event) in audit/sink.ts: appends to the audit log",
+          "text_hash": "8ea4d7f00942346d44d07eeac62512e4ef4fd3b2008a173977ddc9fecb710697",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/audit/sink.ts",
+              "byte_start": 0,
+              "byte_end": 65,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-audit-send"
+          ]
+        },
+        {
+          "node_id": "fn:channels/email.ts#send",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "function send(address, body) in channels/email.ts: delivers mail over smtp",
+          "text_hash": "86edd3386ced38a6614899911902ff7bb7b7fc852c938a9a8cd2fbcca39d1604",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/channels/email.ts",
+              "byte_start": 0,
+              "byte_end": 78,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-email-send"
+          ]
+        },
+        {
+          "node_id": "fn:channels/sms.ts#send",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "function send(number, body) in channels/sms.ts: sends a text through the carrier",
+          "text_hash": "a887778932e435183d6834b87b615ff7a5bb098812518371b87dae9fd76b5383",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/channels/sms.ts",
+              "byte_start": 0,
+              "byte_end": 76,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-sms-send"
+          ]
+        }
+      ],
+      "candidate_set_hash": "71162483c7c51a1c19cc7b707187d0761978d4ce6eb4073d5f215eeee697aca9"
+    },
+    {
+      "case_id": "c-call-unique",
+      "corpus_id": "storefront-r1",
+      "family": {
+        "kind": "Call",
+        "subtype": null
+      },
+      "hop": {
+        "gap_id": "gap:call:checkout/place.ts#placeOrder:billing.chargeCard",
+        "source_id": "fn:checkout/place.ts#placeOrder",
+        "edge_label": "CALLS",
+        "query": "placeOrder calls billing.chargeCard(order)",
+        "query_hash": "424e0df04a92d8b85ad7df592a289f3cc676f35bbe4d5d48d907cf9dfff7aeec",
+        "evidence": [
+          {
+            "repo": "fixture/storefront",
+            "path": "src/checkout/place.ts",
+            "byte_start": 39,
+            "byte_end": 119,
+            "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+          }
+        ]
+      },
+      "source_ids": [
+        "s-checkout-caller"
+      ],
+      "candidates": [
+        {
+          "node_id": "fn:billing/charge.ts#chargeCard",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "function chargeCard(order) in billing/charge.ts: captures order.total through the card gateway",
+          "text_hash": "3d548a2aacc9221b28c7beaec0884acb8bf9ce4aadff9d48db6e88281fe61102",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/billing/charge.ts",
+              "byte_start": 16,
+              "byte_end": 93,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-billing-charge"
+          ]
+        },
+        {
+          "node_id": "fn:billing/refund.ts#refundCard",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "function refundCard(order) in billing/refund.ts: refunds order.total through the card gateway",
+          "text_hash": "7947ced272e7b39a327915aab811f70b0e90750c3a4b77f307f87d9e430a30e3",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/billing/refund.ts",
+              "byte_start": 15,
+              "byte_end": 91,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-billing-refund"
+          ]
+        }
+      ],
+      "candidate_set_hash": "d645aa35be38ac4decff5dbc04998518c6484e301cc3a5926c66994ae2e84432"
+    },
+    {
+      "case_id": "c-call-unique-r2",
+      "corpus_id": "storefront-r2",
+      "family": {
+        "kind": "Call",
+        "subtype": null
+      },
+      "hop": {
+        "gap_id": "gap:call:checkout/place.ts#placeOrder:billing.chargeCard",
+        "source_id": "fn:checkout/place.ts#placeOrder",
+        "edge_label": "CALLS",
+        "query": "placeOrder awaits billing.chargeCard(order) and returns the receipt",
+        "query_hash": "7f8d412cc1b2892b3a0390782bb9da254f7b2a6dd3c5a76139f16d78b83bcb37",
+        "evidence": [
+          {
+            "repo": "fixture/storefront",
+            "path": "src/checkout/place.ts",
+            "byte_start": 39,
+            "byte_end": 152,
+            "commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2"
+          }
+        ]
+      },
+      "source_ids": [
+        "s-checkout-caller-r2"
+      ],
+      "candidates": [
+        {
+          "node_id": "fn:billing/charge.ts#chargeCard",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "function chargeCard(order) in billing/charge.ts: captures order.total through the card gateway",
+          "text_hash": "3d548a2aacc9221b28c7beaec0884acb8bf9ce4aadff9d48db6e88281fe61102",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/billing/charge.ts",
+              "byte_start": 16,
+              "byte_end": 93,
+              "commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2"
+            }
+          ],
+          "source_ids": [
+            "s-billing-charge-r2"
+          ]
+        },
+        {
+          "node_id": "fn:billing/refund.ts#refundCard",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "function refundCard(order) in billing/refund.ts: refunds order.total through the card gateway",
+          "text_hash": "7947ced272e7b39a327915aab811f70b0e90750c3a4b77f307f87d9e430a30e3",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/billing/refund.ts",
+              "byte_start": 15,
+              "byte_end": 91,
+              "commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2"
+            }
+          ],
+          "source_ids": [
+            "s-billing-refund-r2"
+          ]
+        }
+      ],
+      "candidate_set_hash": "ef08769d72f2f9199edae8d8bf8eb126823f47366d4b3857efadb022e43a2c86"
+    },
+    {
+      "case_id": "c-call-unknown",
+      "corpus_id": "storefront-r1",
+      "family": {
+        "kind": "Call",
+        "subtype": null
+      },
+      "hop": {
+        "gap_id": "gap:call:plugins/run.ts#run:registry[name]",
+        "source_id": "fn:plugins/run.ts#run",
+        "edge_label": "CALLS",
+        "query": "run calls registry[name](ctx) for a runtime plugin name",
+        "query_hash": "edf9553adfc05bbd39db1f3109afb0d4794a95f98bf6e120ae37395be2d23d54",
+        "evidence": [
+          {
+            "repo": "fixture/storefront",
+            "path": "src/plugins/run.ts",
+            "byte_start": 0,
+            "byte_end": 55,
+            "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+          }
+        ]
+      },
+      "source_ids": [
+        "s-plugin-caller"
+      ],
+      "candidates": [
+        {
+          "node_id": "fn:plugins/export.ts#exportCsv",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "function exportCsv(ctx) in plugins/export.ts: writes ctx.rows as csv",
+          "text_hash": "6b0b2cf781e32270b2869dd6f9397c5c4ede6ddce3c8c557dc58bd0efd519ced",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/plugins/export.ts",
+              "byte_start": 0,
+              "byte_end": 65,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-plugin-export"
+          ]
+        },
+        {
+          "node_id": "fn:plugins/import.ts#importCsv",
+          "family": {
+            "kind": "Call",
+            "subtype": null
+          },
+          "text": "function importCsv(ctx) in plugins/import.ts: reads ctx.file as csv",
+          "text_hash": "b6bafbc59bf5d8bc32a9ab83b06406c3d9a21d55ae73098637e3facbcd377f4e",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/plugins/import.ts",
+              "byte_start": 0,
+              "byte_end": 64,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-plugin-import"
+          ]
+        }
+      ],
+      "candidate_set_hash": "86d010e56ee4e6354819361f6a7bdcb6e5a2ddc95a17615e87d94cbbd2a861b0"
+    },
+    {
+      "case_id": "c-channel-null-subtype",
+      "corpus_id": "storefront-r1",
+      "family": {
+        "kind": "Channel",
+        "subtype": null
+      },
+      "hop": {
+        "gap_id": "gap:channel:legacy/bridge.ts#forward:resolveRoute",
+        "source_id": "fn:legacy/bridge.ts#forward",
+        "edge_label": "PUBLISHES",
+        "query": "forward emits on bus route resolveRoute(m)",
+        "query_hash": "97eff35330874a7dbcaac5cbb10bcde233756d10321c8fe564a57c2607b87b98",
+        "evidence": [
+          {
+            "repo": "fixture/storefront",
+            "path": "src/legacy/bridge.ts",
+            "byte_start": 0,
+            "byte_end": 60,
+            "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+          }
+        ]
+      },
+      "source_ids": [
+        "s-legacy-bus-publisher"
+      ],
+      "candidates": [
+        {
+          "node_id": "channel:legacy.inventory.changed",
+          "family": {
+            "kind": "Channel",
+            "subtype": null
+          },
+          "text": "bus route legacy.inventory.changed (INVENTORY_ROUTE)",
+          "text_hash": "1c7c97dd93a539ae6f3cd8a67db698ae6d66d3c6b911dcd6a0743648d05f9c17",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/legacy/routes.ts",
+              "byte_start": 0,
+              "byte_end": 59,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-legacy-route-inventory"
+          ]
+        },
+        {
+          "node_id": "channel:legacy.pricing.changed",
+          "family": {
+            "kind": "Channel",
+            "subtype": null
+          },
+          "text": "bus route legacy.pricing.changed (PRICING_ROUTE)",
+          "text_hash": "8db3c8fed2c40e91fdec5932c5af744a259c4024fcef35522cd988a2fe48ed92",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "src/legacy/routes.ts",
+              "byte_start": 59,
+              "byte_end": 114,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-legacy-route-pricing"
+          ]
+        }
+      ],
+      "candidate_set_hash": "cf291a8462d48ab374e1a75e215ad8e771a8392dea5a1415944d29b9499c6b84"
+    },
+    {
+      "case_id": "c-channel-sns",
+      "corpus_id": "storefront-r1",
+      "family": {
+        "kind": "Channel",
+        "subtype": "sns-topic"
+      },
+      "hop": {
+        "gap_id": "gap:channel:payments/listen.ts#onSettled:SETTLED_TOPIC_ARN",
+        "source_id": "fn:payments/listen.ts#onSettled",
+        "edge_label": "SUBSCRIBES",
+        "query": "onSettled subscribes a handler to process.env.SETTLED_TOPIC_ARN",
+        "query_hash": "edcf957487729ab2601cc84890815978af59aad1f272ec6e4d6038fa29d4650f",
+        "evidence": [
+          {
+            "repo": "fixture/storefront",
+            "path": "src/payments/listen.ts",
+            "byte_start": 0,
+            "byte_end": 73,
+            "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+          }
+        ]
+      },
+      "source_ids": [
+        "s-payments-subscriber"
+      ],
+      "candidates": [
+        {
+          "node_id": "channel:sns-topic:payments-settled",
+          "family": {
+            "kind": "Channel",
+            "subtype": "sns-topic"
+          },
+          "text": "sns topic payments-settled declared as aws_sns_topic.payments_settled",
+          "text_hash": "4befacaad5c9ff09a415ef70bc68dab9710b360b7a2cc46ccde2ec808c8cf17c",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "infra/service.tf",
+              "byte_start": 54,
+              "byte_end": 111,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            },
+            {
+              "repo": "fixture/storefront",
+              "path": "infra/topics.tf",
+              "byte_start": 0,
+              "byte_end": 76,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-tf-settled-env",
+            "s-tf-settled-topic"
+          ]
+        },
+        {
+          "node_id": "channel:sns-topic:refunds-issued",
+          "family": {
+            "kind": "Channel",
+            "subtype": "sns-topic"
+          },
+          "text": "sns topic refunds-issued declared as aws_sns_topic.refunds_issued",
+          "text_hash": "d9d7243ae16057355df4610d55149c83295423c3967b0a01de351ede3d75d9fa",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "infra/topics.tf",
+              "byte_start": 76,
+              "byte_end": 148,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-tf-refunds-topic"
+          ]
+        }
+      ],
+      "candidate_set_hash": "56b42f5d91b3f35facf80e52a5793467c1d382b97384ceeee0fd6b4490501c07"
+    },
+    {
+      "case_id": "c-channel-sqs",
+      "corpus_id": "storefront-r1",
+      "family": {
+        "kind": "Channel",
+        "subtype": "sqs-queue"
+      },
+      "hop": {
+        "gap_id": "gap:channel:orders/events.ts#publishCreated:ORDERS_QUEUE_URL",
+        "source_id": "fn:orders/events.ts#publishCreated",
+        "edge_label": "PUBLISHES",
+        "query": "publishCreated sends SendMessageCommand to QueueUrl process.env.ORDERS_QUEUE_URL",
+        "query_hash": "35f2333b99e0f72ccab4d6dfee296c393a5a8f1f9d947f8950f41100b0c850c6",
+        "evidence": [
+          {
+            "repo": "fixture/storefront",
+            "path": "src/orders/events.ts",
+            "byte_start": 69,
+            "byte_end": 216,
+            "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+          }
+        ]
+      },
+      "source_ids": [
+        "s-orders-publisher"
+      ],
+      "candidates": [
+        {
+          "node_id": "channel:sqs-queue:orders-cancelled",
+          "family": {
+            "kind": "Channel",
+            "subtype": "sqs-queue"
+          },
+          "text": "sqs queue orders-cancelled declared as aws_sqs_queue.orders_cancelled",
+          "text_hash": "49b810d811ed7bdda351e1acc65b249615ef7340984cdd1ff137d487da9b5abf",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "infra/queues.tf",
+              "byte_start": 72,
+              "byte_end": 148,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-tf-orders-cancelled"
+          ]
+        },
+        {
+          "node_id": "channel:sqs-queue:orders-created",
+          "family": {
+            "kind": "Channel",
+            "subtype": "sqs-queue"
+          },
+          "text": "sqs queue orders-created declared as aws_sqs_queue.orders_created",
+          "text_hash": "e99bfe46c80509c871fcb4f789f985edf44aa435a0f3cf5ceca440d7373a4dc2",
+          "evidence": [
+            {
+              "repo": "fixture/storefront",
+              "path": "infra/queues.tf",
+              "byte_start": 0,
+              "byte_end": 72,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            },
+            {
+              "repo": "fixture/storefront",
+              "path": "infra/service.tf",
+              "byte_start": 0,
+              "byte_end": 54,
+              "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+            }
+          ],
+          "source_ids": [
+            "s-tf-orders-created",
+            "s-tf-orders-env"
+          ]
+        }
+      ],
+      "candidate_set_hash": "c27c8c06c34c28cbba3eb3e89dca015034570e4aa97a4508ba4e3af30b786c0c"
+    }
+  ]
+}

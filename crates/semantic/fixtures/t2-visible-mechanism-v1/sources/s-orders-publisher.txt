@@ -1,0 +1,1 @@
+export const publishCreated = (o) => sqs.send(new SendMessageCommand({ QueueUrl: process.env.ORDERS_QUEUE_URL, MessageBody: JSON.stringify(o) }));

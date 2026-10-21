@@ -10,6 +10,8 @@
 use crate::job_execution::ExecutionNamespace;
 use rusqlite::{Connection, TransactionBehavior, params};
 
+#[path = "jobs/evaluation.rs"]
+mod evaluation;
 #[path = "jobs/execution.rs"]
 mod execution;
 #[path = "jobs/investigations.rs"]
@@ -60,6 +62,9 @@ pub enum ExecutionTracking {
 /// Durable paired-eval result on the state spine (SPEC-00 §8.3, §13).
 #[derive(Debug, Clone, Serialize)]
 pub struct EvalResult {
+    /// Descriptive family evidence, absent for legacy calibration rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evaluation: Option<semantic::evaluation::report::EvaluationSummary>,
     /// Row id.
     pub id: i64,
     /// Provider and model identity used for calibration.
@@ -119,6 +124,7 @@ impl JobStore {
                  created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
              ) STRICT;",
         )?;
+        evaluation::initialize(&mut conn)?;
         migrate_v1_jobs(&conn)?;
         let namespace = execution::initialize(&mut conn, path.as_ref())?;
         investigations::initialize(&mut conn, &namespace)?;
@@ -296,7 +302,9 @@ impl JobStore {
         Ok(jobs)
     }
 
-    /// Persist one paired-eval operating point and its staging counts.
+    /// Create a legacy record for compatibility tests. Production always writes
+    /// a bounded purpose/family summary; historical rows remain readable.
+    #[cfg(test)]
     pub fn record_eval(
         &mut self,
         provider: &str,
@@ -304,33 +312,60 @@ impl JobStore {
         proposals: usize,
         approved: usize,
     ) -> rusqlite::Result<EvalResult> {
-        self.conn.execute(
-            "INSERT INTO eval_results (
-                 provider, precision_floor, similarity_threshold, precision,
-                 recall, passed, proposals, approved
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                provider,
-                f64::from(report.precision_floor),
-                f64::from(report.similarity_threshold),
-                f64::from(report.precision),
-                f64::from(report.recall),
-                report.passed,
-                proposals as i64,
-                approved as i64,
-            ],
-        )?;
-        self.get_eval(self.conn.last_insert_rowid())
+        self.record_eval_optional(provider, report, proposals, approved, None)
     }
 
-    /// Eval results, newest first.
+    /// Atomically persist scalar calibration data and validated descriptive summary.
+    pub fn record_eval_with_summary(
+        &mut self,
+        provider: &str,
+        report: &semantic::EvalReport,
+        proposals: usize,
+        approved: usize,
+        summary: &semantic::evaluation::report::EvaluationSummary,
+    ) -> rusqlite::Result<EvalResult> {
+        self.record_eval_optional(provider, report, proposals, approved, Some(summary))
+    }
+    fn record_eval_optional(
+        &mut self,
+        provider: &str,
+        report: &semantic::EvalReport,
+        proposals: usize,
+        approved: usize,
+        summary: Option<&semantic::evaluation::report::EvaluationSummary>,
+    ) -> rusqlite::Result<EvalResult> {
+        let proposals = i64::try_from(proposals).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let approved = i64::try_from(approved).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        evaluation::validate(&tx)?;
+        tx.execute("INSERT INTO eval_results(provider,precision_floor,similarity_threshold,precision,recall,passed,proposals,approved) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![provider,f64::from(report.precision_floor),f64::from(report.similarity_threshold),f64::from(report.precision),f64::from(report.recall),report.passed,proposals,approved])?;
+        let id = tx.last_insert_rowid();
+        if let Some(summary) = summary {
+            evaluation::insert(&tx, id, summary, proposals as u64, approved as u64)?;
+        }
+        let mut result=tx.query_row("SELECT id,provider,precision_floor,similarity_threshold,precision,recall,passed,proposals,approved,created_at FROM eval_results WHERE id=?1",[id],eval_row)?;
+        result.evaluation = evaluation::read(&tx, id, result.proposals, result.approved)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Eval results, newest first, with metadata from the same read snapshot.
     pub fn list_evals(&self) -> rusqlite::Result<Vec<EvalResult>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, provider, precision_floor, similarity_threshold,
-                    precision, recall, passed, proposals, approved, created_at
-             FROM eval_results ORDER BY id DESC",
-        )?;
-        stmt.query_map([], eval_row)?.collect::<Result<Vec<_>, _>>()
+        let tx = self.conn.unchecked_transaction()?;
+        evaluation::validate(&tx)?;
+        let mut rows = {
+            let mut stmt=tx.prepare("SELECT id,provider,precision_floor,similarity_threshold,precision,recall,passed,proposals,approved,created_at FROM eval_results ORDER BY id DESC")?;
+            stmt.query_map([], eval_row)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for result in &mut rows {
+            result.evaluation =
+                evaluation::read(&tx, result.id, result.proposals, result.approved)?;
+        }
+        tx.commit()?;
+        Ok(rows)
     }
 
     /// One job by id.
@@ -340,16 +375,6 @@ impl JobStore {
         let job = execution::read_job(&tx, id)?;
         tx.commit()?;
         Ok(job)
-    }
-
-    fn get_eval(&self, id: i64) -> rusqlite::Result<EvalResult> {
-        self.conn.query_row(
-            "SELECT id, provider, precision_floor, similarity_threshold,
-                    precision, recall, passed, proposals, approved, created_at
-             FROM eval_results WHERE id = ?1",
-            params![id],
-            eval_row,
-        )
     }
 }
 
@@ -452,6 +477,7 @@ fn job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
 
 fn eval_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EvalResult> {
     Ok(EvalResult {
+        evaluation: None,
         id: row.get(0)?,
         provider: row.get(1)?,
         precision_floor: row.get(2)?,

@@ -1,0 +1,737 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cartograph:semantic:visible-fixture-manifest:1",
+  "title": "#258 visible mechanism fixture manifests v1",
+  "description": "Editor: Codex. State: proposed. Three separate documents validated against this schema: inputs, leakage, labels. Visible mechanism fixtures only; no independent quality/holdout acceptance claim.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/InputsManifest"
+    },
+    {
+      "$ref": "#/$defs/LeakageManifest"
+    },
+    {
+      "$ref": "#/$defs/LabelsManifest"
+    }
+  ],
+  "$defs": {
+    "FamilyKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "subtype"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "Call",
+            "Channel"
+          ]
+        },
+        "subtype": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "EvidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "path",
+        "byte_start",
+        "byte_end",
+        "commit_sha"
+      ],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*\\u0000)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^:]+$"
+        },
+        "byte_start": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777216
+        },
+        "byte_end": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "commit_sha": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^[a-f0-9]{40}$"
+        }
+      }
+    },
+    "RetainedSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "corpus_id",
+        "evidence",
+        "bytes_path",
+        "byte_len",
+        "content_hash"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "corpus_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "evidence": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "bytes_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*\\u0000)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^:]+$"
+        },
+        "byte_len": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "content_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "Candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "family",
+        "text",
+        "text_hash",
+        "evidence",
+        "source_ids"
+      ],
+      "properties": {
+        "node_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "family": {
+          "$ref": "#/$defs/FamilyKey"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "text_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "source_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true
+        }
+      }
+    },
+    "CaseInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "corpus_id",
+        "family",
+        "hop",
+        "source_ids",
+        "candidates",
+        "candidate_set_hash"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "corpus_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "family": {
+          "$ref": "#/$defs/FamilyKey"
+        },
+        "hop": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "gap_id",
+            "source_id",
+            "edge_label",
+            "query",
+            "query_hash",
+            "evidence"
+          ],
+          "properties": {
+            "gap_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "source_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "edge_label": {
+              "enum": [
+                "CALLS",
+                "PUBLISHES",
+                "SUBSCRIBES"
+              ]
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "query_hash": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/EvidenceRef"
+              },
+              "minItems": 1,
+              "maxItems": 16
+            }
+          }
+        },
+        "source_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Candidate"
+          },
+          "minItems": 0,
+          "maxItems": 256
+        },
+        "candidate_set_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "Truth": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "target_ids"
+          ],
+          "properties": {
+            "kind": {
+              "const": "acceptable_targets"
+            },
+            "target_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "uniqueItems": true
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "no_match"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "properties": {
+            "kind": {
+              "const": "unknown"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          }
+        }
+      ]
+    },
+    "LabelOrigin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "author",
+        "reviewer",
+        "procedure_version",
+        "source_ids",
+        "rationale",
+        "exclusivity_basis"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "scripted_truth",
+            "source_proof",
+            "independent_adjudication"
+          ]
+        },
+        "author": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "reviewer": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "procedure_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "source_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "exclusivity_basis": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CaseLabel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "truth",
+        "hard_negative_target_ids",
+        "origin"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "truth": {
+          "$ref": "#/$defs/Truth"
+        },
+        "hard_negative_target_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "minItems": 0,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "origin": {
+          "$ref": "#/$defs/LabelOrigin"
+        }
+      }
+    },
+    "InputsManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "purpose",
+        "dataset_id",
+        "corpora",
+        "sources",
+        "cases"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "inputs"
+        },
+        "purpose": {
+          "const": "visible_mechanism_fixture"
+        },
+        "dataset_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "corpora": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "corpus_id",
+              "repo_id",
+              "revision",
+              "graph_snapshot_hash",
+              "capture_manifest_hash"
+            ],
+            "properties": {
+              "corpus_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+              },
+              "repo_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40,
+                "pattern": "^[a-f0-9]{40}$"
+              },
+              "graph_snapshot_hash": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "capture_manifest_hash": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RetainedSource"
+          },
+          "minItems": 1,
+          "maxItems": 1024
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CaseInput"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        }
+      }
+    },
+    "LeakageManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "purpose",
+        "dataset_id",
+        "inputs_hash",
+        "partition_policy",
+        "groups"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "leakage"
+        },
+        "purpose": {
+          "const": "visible_mechanism_fixture"
+        },
+        "dataset_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "inputs_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "partition_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "salt",
+            "calibration_buckets"
+          ],
+          "properties": {
+            "version": {
+              "const": "sha256-group-bucket@1"
+            },
+            "salt": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "calibration_buckets": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9999
+            }
+          }
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "group_id",
+              "case_ids",
+              "split",
+              "related_source_ids",
+              "grouping_basis",
+              "review_note"
+            ],
+            "properties": {
+              "group_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+              },
+              "case_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                },
+                "minItems": 1,
+                "maxItems": 256,
+                "uniqueItems": true
+              },
+              "split": {
+                "enum": [
+                  "calibration",
+                  "evaluation"
+                ]
+              },
+              "related_source_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                },
+                "minItems": 1,
+                "maxItems": 1024,
+                "uniqueItems": true
+              },
+              "grouping_basis": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "same_source",
+                    "same_target_definition",
+                    "same_revision_lineage",
+                    "duplicate_text",
+                    "near_duplicate_text",
+                    "independent"
+                  ]
+                },
+                "minItems": 1,
+                "maxItems": 6
+              },
+              "review_note": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              }
+            }
+          },
+          "minItems": 1,
+          "maxItems": 256
+        }
+      }
+    },
+    "LabelsManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "purpose",
+        "dataset_id",
+        "inputs_hash",
+        "leakage_hash",
+        "labels"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "labels"
+        },
+        "purpose": {
+          "const": "visible_mechanism_fixture"
+        },
+        "dataset_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "inputs_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "leakage_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CaseLabel"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        }
+      }
+    }
+  }
+}

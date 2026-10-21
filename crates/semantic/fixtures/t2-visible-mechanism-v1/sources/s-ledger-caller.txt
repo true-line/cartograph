@@ -1,0 +1,3 @@
+export function closeDay() {
+  return ledgerSdk.reconcileLedger();
+}

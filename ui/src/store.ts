@@ -475,6 +475,30 @@ export interface ExtractorCoverage {
 
 /** One paired-eval calibration record (`list_evals`, M7/M10 gates). */
 export interface EvalResult {
+  /** Descriptive evaluation evidence, absent on legacy calibration rows. */
+  evaluation?: {
+    schema_version: 1;
+    mode: 'calibration_only' | 'independent_evaluation' | 'visible_mechanism_evaluation';
+    families: {
+      family: { kind: 'Call' | 'Channel'; subtype: string | null };
+      status: 'calibration_only' | 'independently_evaluated' | 'abstained';
+      reason: 'calibration_only' | 'missing_evidence' | 'incompatible_evidence' | 'insufficient_evidence' | 'below_floor' | 'independently_evaluated';
+      staged: number;
+      admitted: number;
+      ambiguous: number;
+      receipt_digest: string | null;
+      metrics: {
+        precision: number;
+        recall: number;
+        true_positives: number;
+        false_positives: number;
+        false_negatives: number;
+        unknown: number;
+        no_match_false_admissions: number;
+        retrieval_recall: number | null;
+      } | null;
+    }[];
+  };
   id: number;
   provider: string;
   precision_floor: number;

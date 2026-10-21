@@ -33,6 +33,7 @@ mod registered_source_tests;
 mod registry_tests;
 #[cfg(test)]
 mod semantic_cache_tests;
+mod semantic_evaluation;
 mod settings;
 mod source_access;
 mod sources;
@@ -4684,6 +4685,8 @@ struct SemanticPreview {
     eval_id: Option<i64>,
     provider: String,
     eval: semantic::EvalReport,
+    calibration_available: bool,
+    evaluation: semantic::evaluation::report::EvaluationSummary,
     proposals: Vec<semantic::SemanticProposal>,
     approved: Vec<semantic::SemanticProposal>,
     gaps_filled: usize,
@@ -4698,12 +4701,30 @@ fn build_semantic_preview(
     eval_pairs: &[semantic::LabeledPair],
     precision_floor: f32,
 ) -> Result<SemanticPreview, String> {
-    let eval = semantic::evaluate(provider, eval_pairs, precision_floor)
-        .map_err(|error| error.to_string())?;
+    // Zero-valued legacy storage columns are explicitly unavailable, never a
+    // synthetic evaluation. Independent admission does not require caller labels.
+    let eval = if eval_pairs.is_empty() {
+        semantic::EvalReport {
+            precision_floor: 1.0,
+            similarity_threshold: 1.0,
+            precision: 0.0,
+            recall: 0.0,
+            passed: false,
+            true_positives: 0,
+            false_positives: 0,
+            false_negatives: 0,
+        }
+    } else {
+        semantic::evaluate(provider, eval_pairs, precision_floor)
+            .map_err(|error| error.to_string())?
+    };
     let (hops, candidates) = semantic::graph_inputs(nodes, edges);
     let proposals =
         semantic::propose(provider, &hops, &candidates, 3).map_err(|error| error.to_string())?;
-    let approved = semantic::gated_proposals(&proposals, &eval);
+    // Caller-supplied calibration pairs are never independent admission evidence.
+    // The trusted independent path is separate; these candidates remain staged.
+    let approved = Vec::new();
+    let evaluation = calibration_summary(&proposals, &hops)?;
     let overlay = semantic::overlay(nodes, edges, &approved, &eval);
     let flows = flowtracer::trace(&overlay.nodes, &overlay.edges);
     let dossier = spec::flow_dossier(&flows);
@@ -4711,7 +4732,9 @@ fn build_semantic_preview(
         embedding_cache: None,
         eval_id: None,
         provider: provider.id().to_string(),
+        calibration_available: !eval_pairs.is_empty(),
         eval,
+        evaluation,
         proposals,
         approved,
         gaps_filled: overlay.gaps_filled,
@@ -4720,6 +4743,45 @@ fn build_semantic_preview(
     })
 }
 
+fn calibration_summary(
+    proposals: &[semantic::SemanticProposal],
+    hops: &[semantic::UnresolvedHop],
+) -> Result<semantic::evaluation::report::EvaluationSummary, String> {
+    use semantic::evaluation::report::{
+        DecisionReason, EvaluationSummary, FamilyDecision, FamilyStatus, SummaryMode,
+    };
+    let mut counts = std::collections::BTreeMap::new();
+    for hop in hops {
+        counts.entry(hop.family()).or_insert(0_u64);
+    }
+    for proposal in proposals {
+        let count = counts.entry(proposal.family().clone()).or_insert(0_u64);
+        *count = count
+            .checked_add(1)
+            .ok_or("calibration family count overflow")?;
+    }
+    let summary = EvaluationSummary {
+        schema_version: 1,
+        mode: SummaryMode::CalibrationOnly,
+        families: counts
+            .into_iter()
+            .map(|(family, staged)| FamilyDecision {
+                family,
+                status: FamilyStatus::CalibrationOnly,
+                reason: DecisionReason::CalibrationOnly,
+                staged,
+                admitted: 0,
+                ambiguous: 0,
+                receipt_digest: None,
+                metrics: None,
+            })
+            .collect(),
+    };
+    summary.validate()?;
+    Ok(summary)
+}
+
+#[cfg(test)]
 fn build_cached_semantic_preview(
     provider: &dyn LlmProvider,
     cache: Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>,
@@ -4729,29 +4791,87 @@ fn build_cached_semantic_preview(
     eval_pairs: &[semantic::LabeledPair],
     precision_floor: f32,
 ) -> Result<SemanticPreview, String> {
+    build_reviewed_semantic_preview(
+        provider,
+        cache,
+        lease,
+        nodes,
+        edges,
+        eval_pairs,
+        precision_floor,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_reviewed_semantic_preview(
+    provider: &dyn LlmProvider,
+    cache: Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>,
+    lease: semantic::embedding_cache::Lease,
+    nodes: &[Node],
+    edges: &[Edge],
+    eval_pairs: &[semantic::LabeledPair],
+    precision_floor: f32,
+    reviewed: Option<&semantic_evaluation::PreparedEvaluation>,
+) -> Result<SemanticPreview, String> {
     let cached = semantic::embedding_cache::CachedProvider::new(provider, cache, lease)
         .map_err(|e| e.to_string())?;
-    if !(0.0..=1.0).contains(&precision_floor)
-        || !eval_pairs.iter().any(|p| p.is_match)
-        || !eval_pairs.iter().any(|p| !p.is_match)
+    if !eval_pairs.is_empty()
+        && (!(0.0..=1.0).contains(&precision_floor)
+            || !eval_pairs.iter().any(|p| p.is_match)
+            || !eval_pairs.iter().any(|p| !p.is_match))
     {
         return Err("invalid semantic evaluation inputs".into());
     }
     let (hops, candidates) = semantic::graph_inputs(nodes, edges);
-    let inputs =
+    let mut inputs =
         semantic::embedding_inputs(&hops, &candidates, eval_pairs).map_err(|e| e.to_string())?;
+    if let Some(reviewed) = reviewed {
+        inputs.extend(reviewed.planned_texts()?);
+    }
     cached.embed(&inputs).map_err(|e| e.to_string())?;
     cached.seal().map_err(|e| e.to_string())?;
     let mut preview = build_semantic_preview(&cached, nodes, edges, eval_pairs, precision_floor)?;
+    if let Some(reviewed) = reviewed {
+        match reviewed.run(&cached, &hops, &candidates) {
+            Ok(admission) => {
+                let overlay = admission.overlay(nodes, edges);
+                preview.flows = flowtracer::trace(&overlay.nodes, &overlay.edges);
+                preview.dossier = spec::flow_dossier(&preview.flows);
+                preview.gaps_filled = overlay.gaps_filled;
+                let (staged, admitted, summary) = admission.into_parts();
+                preview.proposals = staged;
+                preview.approved = admitted;
+                preview.evaluation = summary;
+            }
+            Err(_) => mark_independent_abstention(
+                &mut preview,
+                semantic::evaluation::report::DecisionReason::IncompatibleEvidence,
+            ),
+        }
+    }
     preview.embedding_cache = Some(cached.finish().map_err(|e| e.to_string())?);
     Ok::<_, String>(preview)
 }
 
-/// Run the local-only T2 resolver as a best-effort preview. Confirmed graph
-/// facts are read into an ephemeral overlay; only eval-approved Gap fills are
-/// reflected in the returned flows and dossier.
+fn mark_independent_abstention(
+    preview: &mut SemanticPreview,
+    reason: semantic::evaluation::report::DecisionReason,
+) {
+    use semantic::evaluation::report::{FamilyStatus, SummaryMode};
+    preview.evaluation.mode = SummaryMode::IndependentEvaluation;
+    for family in &mut preview.evaluation.families {
+        family.status = FamilyStatus::Abstained;
+        family.reason = reason;
+        family.admitted = 0;
+    }
+}
+
+/// Run the local-only T2 preview. Only compatible host-reviewed independent
+/// evidence can admit inferred Gap fills; caller calibration never authorizes them.
 #[tauri::command]
 async fn semantic_preview(
+    app: tauri::AppHandle,
     eval_pairs: Vec<semantic::LabeledPair>,
     precision_floor: f32,
     state: State<'_, AppState>,
@@ -4776,11 +4896,25 @@ async fn semantic_preview(
             read_filtered_graph(&*graph, &node_labels, flowtracer::FLOW_EDGE_LABELS)?;
         (nodes, edges, cache, lease)
     };
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let worker_cache = Arc::clone(&cache);
     let worker_lease = lease.clone();
-    let preview = tauri::async_runtime::spawn_blocking(move || {
+    let (mut preview, reviewed, unavailable) = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let prepared = semantic_evaluation::prepare(&data_dir, &state, &nodes, &edges);
+        let (reviewed, unavailable) = match prepared {
+            Ok(Some(reviewed)) => (Some(reviewed), None),
+            Ok(None) => (
+                None,
+                Some(semantic::evaluation::report::DecisionReason::MissingEvidence),
+            ),
+            Err(_) => (
+                None,
+                Some(semantic::evaluation::report::DecisionReason::IncompatibleEvidence),
+            ),
+        };
         let provider = llm::OllamaProvider::local_default().map_err(|error| error.to_string())?;
-        build_cached_semantic_preview(
+        let preview = build_reviewed_semantic_preview(
             &provider,
             worker_cache,
             worker_lease,
@@ -4788,22 +4922,51 @@ async fn semantic_preview(
             &edges,
             &eval_pairs,
             precision_floor,
-        )
+            reviewed.as_ref(),
+        )?;
+        Ok::<_, String>((preview, reviewed, unavailable))
     })
     .await
     .map_err(|error| error.to_string())??;
-    record_semantic_preview(&state.graph, &state.jobs, &cache, &lease, preview)
+    if let Some(reason) = unavailable {
+        mark_independent_abstention(&mut preview, reason);
+    }
+    record_reviewed_semantic_preview(&state, &cache, &lease, preview, reviewed.as_ref())
 }
 
+#[cfg(test)]
 fn record_semantic_preview(
     graph: &Mutex<SqliteGraphStore>,
     jobs: &Mutex<JobStore>,
     cache: &Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>,
     lease: &semantic::embedding_cache::Lease,
-    mut preview: SemanticPreview,
+    preview: SemanticPreview,
 ) -> Result<SemanticPreview, String> {
     // No provider work under this guard. Clear and forget use the same graph lock.
     let _graph = graph.lock().map_err(|e| e.to_string())?;
+    persist_semantic_preview(jobs, cache, lease, preview)
+}
+
+fn record_reviewed_semantic_preview(
+    state: &AppState,
+    cache: &Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>,
+    lease: &semantic::embedding_cache::Lease,
+    preview: SemanticPreview,
+    reviewed: Option<&semantic_evaluation::PreparedEvaluation>,
+) -> Result<SemanticPreview, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    if let Some(reviewed) = reviewed {
+        reviewed.revalidate(state, &graph)?;
+    }
+    persist_semantic_preview(&state.jobs, cache, lease, preview)
+}
+
+fn persist_semantic_preview(
+    jobs: &Mutex<JobStore>,
+    cache: &Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>,
+    lease: &semantic::embedding_cache::Lease,
+    mut preview: SemanticPreview,
+) -> Result<SemanticPreview, String> {
     if cache
         .lock()
         .map_err(|e| e.to_string())?
@@ -4815,11 +4978,12 @@ fn record_semantic_preview(
     }
     let mut jobs = jobs.lock().map_err(|error| error.to_string())?;
     let eval = jobs
-        .record_eval(
+        .record_eval_with_summary(
             &preview.provider,
             &preview.eval,
             preview.proposals.len(),
             preview.approved.len(),
+            &preview.evaluation,
         )
         .map_err(|error| error.to_string())?;
     preview.eval_id = Some(eval.id);
@@ -5632,9 +5796,9 @@ mod tests {
     }
 
     #[test]
-    fn semantic_preview_fills_only_eval_gated_gap_overlay() {
-        // AC-0021/AC-0022: app path stages T2 links, gates them on paired
-        // precision, and traces an inferred overlay without mutating T0 input.
+    fn semantic_preview_keeps_calibration_only_candidates_staged() {
+        // AC-0278: even passing caller calibration stages candidates only;
+        // no independent receipt means no admitted overlay or promoted Gap.
         let nodes = vec![
             Node {
                 id: "ep:shop@POST:/orders".into(),
@@ -5716,18 +5880,65 @@ mod tests {
         let preview =
             crate::build_semantic_preview(&M7KeywordProvider, &nodes, &edges, &eval_pairs, 0.95)
                 .unwrap();
-        assert_eq!(preview.gaps_filled, 1);
-        assert_eq!(preview.approved[0].target_id, "chan:sqs-queue:orders");
-        assert_eq!(preview.flows[0].status, flowtracer::FlowStatus::Inferred);
-        assert!(preview.dossier.contains("InferredStrong"));
+        assert!(preview.eval.passed);
+        assert!(preview.calibration_available);
+        let uncalibrated =
+            crate::build_semantic_preview(&M7KeywordProvider, &nodes, &edges, &[], 0.95).unwrap();
+        assert!(!uncalibrated.calibration_available);
+        assert!(!uncalibrated.eval.passed);
+        assert_eq!(uncalibrated.proposals.len(), preview.proposals.len());
+        assert!(uncalibrated.approved.is_empty());
+        assert!(!preview.proposals.is_empty());
+        assert!(
+            preview
+                .proposals
+                .iter()
+                .any(|proposal| proposal.target_id == "chan:sqs-queue:orders")
+        );
+        assert_eq!(preview.gaps_filled, 0);
+        assert!(preview.approved.is_empty());
+        assert_eq!(preview.flows[0].status, flowtracer::FlowStatus::Partial);
+        assert!(!preview.dossier.contains("InferredStrong"));
         assert!(nodes.iter().any(|node| node.label == "Gap"));
+        assert_eq!(
+            preview.evaluation.mode,
+            semantic::evaluation::report::SummaryMode::CalibrationOnly
+        );
+        assert_eq!(preview.evaluation.families.len(), 1);
+        assert_eq!(
+            preview.evaluation.families[0].staged,
+            preview.proposals.len() as u64
+        );
+        assert_eq!(preview.evaluation.families[0].admitted, 0);
+        // Persist exactly what the host displayed, through the real lease/journal path.
+        let dir = tempfile::tempdir().unwrap();
+        let graph =
+            std::sync::Mutex::new(SqliteGraphStore::open(dir.path().join("graph.db")).unwrap());
+        let cache = std::sync::Arc::new(std::sync::Mutex::new(
+            semantic::embedding_cache::EmbeddingCache::open_disposable(dir.path()).unwrap(),
+        ));
+        let lease = cache
+            .lock()
+            .unwrap()
+            .bind_instance(&graph.lock().unwrap().instance_id().unwrap())
+            .unwrap();
+        let path = dir.path().join("state.db");
+        let jobs = std::sync::Mutex::new(crate::jobs::JobStore::open(&path).unwrap());
+        let recorded =
+            crate::record_semantic_preview(&graph, &jobs, &cache, &lease, preview).unwrap();
+        drop(jobs);
+        let reopened = crate::jobs::JobStore::open(path)
+            .unwrap()
+            .list_evals()
+            .unwrap();
+        assert_eq!(reopened[0].evaluation.as_ref(), Some(&recorded.evaluation));
+        assert_eq!(reopened[0].approved, 0);
     }
 
     #[test]
     fn semantic_preview_uses_real_ingested_resource_and_call_gaps() {
-        // AC-0021 / #67: exercise the production extractors, not synthetic
-        // graph fixtures. Computed SQS identity + IaC and an unresolved
-        // relative-import call both reach the eval-gated T2 preview.
+        // AC-0278 / #67: production extractor inputs still stage SQS and
+        // unresolved relative-import candidates, without calibration-only admission.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("publisher.ts"),
@@ -5818,20 +6029,37 @@ resource "aws_sqs_queue" "orders" {
         )
         .unwrap();
         assert_eq!(
-            preview.gaps_filled, 2,
+            preview.gaps_filled, 0,
             "proposals: {:#?}",
             preview.proposals
         );
-        assert!(preview.approved.iter().any(|proposal| {
+        assert!(preview.proposals.iter().any(|proposal| {
             proposal.edge_label == "PUBLISHES"
                 && proposal.target_node.as_ref().is_some_and(|node| {
                     node.props["backing_resource"] == "res:local/shop@aws_sqs_queue.orders"
                 })
         }));
-        assert!(preview.approved.iter().any(|proposal| {
+        assert!(preview.proposals.iter().any(|proposal| {
             proposal.edge_label == "CALLS"
                 && proposal.target_id == "sym:local/shop@orders.ts#processOrder"
         }));
+        assert!(preview.eval.passed);
+        assert!(preview.approved.is_empty());
+        assert_eq!(preview.evaluation.families.len(), 2);
+        assert!(
+            preview
+                .evaluation
+                .families
+                .iter()
+                .all(|family| family.admitted == 0
+                    && family.status
+                        == semantic::evaluation::report::FamilyStatus::CalibrationOnly)
+        );
+        assert_eq!(
+            serde_json::to_value(&preview.flows).unwrap(),
+            serde_json::to_value(flowtracer::trace(&extraction.nodes, &extraction.edges)).unwrap(),
+            "calibration-only preview preserves the original graph's flow projection"
+        );
         assert!(
             extraction
                 .nodes
