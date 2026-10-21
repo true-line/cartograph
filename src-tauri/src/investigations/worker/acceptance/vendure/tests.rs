@@ -3,17 +3,17 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
-struct Case {
+pub(super) struct Case {
     _directory: tempfile::TempDir,
-    root: PathBuf,
+    pub(super) root: PathBuf,
     manifest: PathBuf,
     proof: PathBuf,
-    config: PathBuf,
+    pub(super) config: PathBuf,
     profile: PathBuf,
 }
 
 impl Case {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let base = crate::paths::canonicalize(directory.path()).unwrap();
         let root = base.join("source");
@@ -74,7 +74,7 @@ impl Case {
             profile,
         }
     }
-    fn prepare(&self) -> Result<Preparation, String> {
+    pub(super) fn prepare(&self) -> Result<Preparation, String> {
         prepare(
             &self.root,
             &self.manifest,

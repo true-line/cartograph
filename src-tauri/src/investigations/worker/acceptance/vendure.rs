@@ -8,6 +8,8 @@ use tauri::Manager;
 
 #[path = "vendure/input.rs"]
 mod input;
+#[path = "vendure/measurement.rs"]
+mod measurement;
 #[path = "vendure/profile.rs"]
 mod profile;
 #[path = "vendure/report.rs"]

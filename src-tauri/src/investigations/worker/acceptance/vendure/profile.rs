@@ -85,7 +85,34 @@ impl NativeProfile {
         Ok(())
     }
 
-    fn paths(&self) -> [&Path; 5] {
+    pub(super) fn verify_existing(&self) -> Result<(), String> {
+        let root = self.data().parent().ok_or("invalid prepared profile")?;
+        if !root.is_absolute()
+            || root.parent().is_none()
+            || !self
+                .identifier
+                .starts_with("com.qwtm.cartograph.acceptance598.")
+            || self.identifier.len() > 128
+            || self.product_name.len() > 128
+        {
+            return Err("invalid disposable prepared profile".into());
+        }
+        for (path, name) in
+            self.paths()
+                .into_iter()
+                .zip(["data", "config", "local-data", "cache", "logs"])
+        {
+            if path != root.join(name)
+                || !path.is_dir()
+                || crate::paths::canonicalize(path).map_err(|_| "prepared profile missing")? != path
+            {
+                return Err("prepared profile directory map changed".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn paths(&self) -> [&Path; 5] {
         let paths = &self.app.app_directories_override;
         [
             &paths.data,
