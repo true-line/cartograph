@@ -122,7 +122,7 @@ fn extract_file(
     id: &SourceId,
     index: &mut RepoIndex,
 ) -> Result<(), ExtractError> {
-    let is_tsx = path.ends_with(".tsx");
+    let is_tsx = crate::vue::component_tsx(source, path).unwrap_or(path.ends_with(".tsx"));
     let language: tree_sitter::Language = if is_tsx {
         tree_sitter_typescript::LANGUAGE_TSX.into()
     } else {
@@ -130,6 +130,8 @@ fn extract_file(
     };
     let mut parser = Parser::new();
     parser.set_language(&language)?;
+    let view = crate::vue::parse_view(source, path);
+    let source: &[u8] = &view;
     let tree = parser
         .parse(source, None)
         .ok_or_else(|| ExtractError::NoTree(path.into()))?;

@@ -517,9 +517,10 @@
 - **AC-0237** Given one or more folders dropped on the Connect surface, when they are accepted, then they ingest through the same path as a typed path or system manifest, each repo is listed with its commit identity, and each folder reports an explicit accepted, rejected or failed outcome; completed sources and unresolved intake stay visible and the set is never reported as fully ingested while any folder is unresolved.
 - **AC-0238** Given a completed ingest, when its coverage inventory is shown, then each repo reports which deterministic and observational producers ran, which inputs were missing and which capabilities are unsupported, with a scoped stopping reason for each, before any interpretation is offered.
 - **AC-0239** Given a scope with missing producers, when an interpretation or graph read is requested, then it proceeds explicitly qualified by the recorded coverage limitations and never claims exhaustive coverage.
+- **AC-0268** Given a repo containing Vue single-file components, when it is ingested, then the `<script>` and `<script setup>` blocks of each `.vue` file are parsed by the JavaScript/TypeScript extractor with every span naming its place in the `.vue` file, template, style and custom-block text is never read as code, an explicit `.vue` import resolves to the component, re-extraction of unchanged files is byte-identical, and Preflight reports `.vue` as covered for script content while stating that templates are not parsed, with its risky-construct findings raised from script blocks only at the component's own lines.
 - **Security:** Read-only intake of local folders the user chose; no target writes, no network fetch beyond existing GitHub intake.
 - **Performance:** Existing ingest limits apply per repo; the inventory is built from facts already recorded during ingest.
-- **Trace:** P1 (ROADMAP W1) · `ingest`, `app`, `ui` · — · T-0237..0239
+- **Trace:** P1 (ROADMAP W1) · `ingest`, `app`, `ui`, `adapters-lang-ts` · — · T-0237..0239, T-0268
 
 ### US-0034 — Stitch calls across repos only on binding evidence
 - **Actor:** Engineer

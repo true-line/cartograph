@@ -6,6 +6,7 @@
 pub mod client;
 pub mod events;
 pub mod tsconfig;
+pub mod vue;
 
 /// HTTP framework registry for factory-created routers (Express/Fastify).
 ///

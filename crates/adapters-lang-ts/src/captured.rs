@@ -59,6 +59,7 @@ pub(super) struct DirectFacts {
 fn supported(path: &str) -> bool {
     super::SOURCE_EXTENSIONS
         .iter()
+        .chain(&super::vue::COMPONENT_EXTENSIONS)
         .any(|extension| path.ends_with(extension))
         && !path.ends_with(".d.ts")
 }

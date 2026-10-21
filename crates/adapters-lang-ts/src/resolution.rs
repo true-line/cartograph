@@ -358,12 +358,16 @@ fn apply_pattern(pattern: &str, target: &str, spec: &str) -> Option<String> {
 }
 
 /// A candidate repo-relative path, proven against the real file set: an
-/// explicit source extension must match a known file; anything else tries
+/// explicit source or component extension must match a known file; anything else tries
 /// every source extension, then `index.<ext>` under the path as a
 /// directory. Returns the real rel path, or `None` — never a guess.
 fn prove_candidate(candidate: &str, repo: &str, known_files: &HashSet<String>) -> Option<String> {
     let file_id = |rel: &str| format!("file:{repo}@{rel}");
-    if SOURCE_EXTENSIONS.iter().any(|ext| candidate.ends_with(ext)) {
+    if SOURCE_EXTENSIONS
+        .iter()
+        .chain(&crate::vue::COMPONENT_EXTENSIONS)
+        .any(|ext| candidate.ends_with(ext))
+    {
         return known_files
             .contains(&file_id(candidate))
             .then(|| candidate.to_string());

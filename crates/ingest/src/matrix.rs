@@ -194,6 +194,16 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("JavaScript", "fetch", HttpClientCalls, Supported, ""),
     cell("JavaScript", "chrome-messaging", EventSites, Supported, ""),
     cell("JavaScript", "indexeddb", DataModel, Supported, ""),
+    cell("Vue", CORE, Imports, Supported, ""),
+    cell("Vue", CORE, Calls, Supported, ""),
+    cell("Vue", "fetch", HttpClientCalls, Supported, ""),
+    cell(
+        "Vue",
+        "vue-router",
+        ClientRoutes,
+        Unsupported,
+        "templates are not parsed and vue-router route tables are not recognized",
+    ),
     cell(
         "Python",
         CORE,

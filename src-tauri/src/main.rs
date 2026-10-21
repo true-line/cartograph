@@ -5180,7 +5180,8 @@ mod tests {
     fn adapter_inventory_matches_what_the_ts_walker_ingests() {
         // AC-0095 (#247): the Settings adapter cards derive their "Files:"
         // copy from ingest::preflight's registry, while the walker ingests
-        // adapters_lang_ts::SOURCE_EXTENSIONS. One assertion binds the two
+        // adapters_lang_ts::SOURCE_EXTENSIONS plus its Vue component
+        // extensions (AC-0268). One assertion binds the two
         // hand-maintained lists so coverage and inventory cannot disagree.
         let registry: std::collections::BTreeSet<String> = ingest::preflight::INSTALLED_ADAPTERS
             .iter()
@@ -5189,6 +5190,7 @@ mod tests {
             .collect();
         let walker: std::collections::BTreeSet<String> = adapters_lang_ts::SOURCE_EXTENSIONS
             .iter()
+            .chain(&adapters_lang_ts::vue::COMPONENT_EXTENSIONS)
             .map(|ext| (*ext).to_string())
             .collect();
         assert_eq!(
