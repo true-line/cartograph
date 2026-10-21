@@ -798,6 +798,51 @@ That file is never supplied to either model. The report always leaves independen
 citation review, native restart and destructive forgetting checks pending. A
 passing harness assertion alone does not execute all of MT-H4-02 or pass AC-0191.
 
+**Vendure capture preparation only (#598).** The ignored
+`vendure_capture_preparation` entrypoint registers the frozen 17-file production
+source closure at Vendure `2cc309deb5394af176314552ac7320a7b26a0104` and runs the
+production capture/ingest pipeline. It verifies the exact
+`docs/evals/vendure-cart-readiness.input.json` manifest and separately retained
+Git-blob input proof, then records actual capture hashes, receipt/range candidates
+and producer coverage. Keep the proof, oracle, review material and reports outside
+the registered source root. Do not point it at the Git object cache or include
+adjacent evaluator files in the source tree.
+
+Use a clean checkout. All paths below must be absolute; use canonical paths
+without symlink aliases. The output directory must not exist, must have an
+existing canonical parent, and must be outside the source root and code checkout.
+The native-config JSON must be outside the source and profile roots and contain
+`productName`, an `identifier` beginning `com.qwtm.cartograph.acceptance598.`, and
+this explicit directory map:
+
+```json
+{"productName":"Cartograph Acceptance 598 Isolated","identifier":"com.qwtm.cartograph.acceptance598.isolated","app":{"appDirectoriesOverride":{"data":"/absolute/new-profile/data","config":"/absolute/new-profile/config","localData":"/absolute/new-profile/local-data","cache":"/absolute/new-profile/cache","log":"/absolute/new-profile/logs"}}}
+```
+
+The canonical disposable profile root must be separate from the source and code
+checkout, with an existing parent; it may be absent or an empty directory. Its five
+mapped subdirectories must not exist. Never reuse normal app data or another run's
+profile. No provider environment variables or installed model are needed.
+
+```sh
+CARTOGRAPH_VENDURE_SOURCE='/absolute/staged/source' \
+CARTOGRAPH_VENDURE_MANIFEST='/absolute/evaluator/vendure-cart-readiness.input.json' \
+CARTOGRAPH_VENDURE_PROOF='/absolute/evaluator/input-proof.json' \
+CARTOGRAPH_VENDURE_NATIVE_CONFIG='/absolute/evaluator/native-config.json' \
+CARTOGRAPH_VENDURE_PREPARATION_OUTPUT='/absolute/new-preparation-directory' \
+cargo test -p app vendure_capture_preparation -- --ignored --nocapture
+```
+
+Retain the exclusive `preparation.json` or `preparation-failed.json` and the
+disposable profile in place. No provider is constructed or called; no native app
+is launched. Candidate metadata requires later caller selection and establishes
+no input closure. This preparation does not pass AC-0191. Discovery/frozen-dispatch
+review, actual analyst and independent auditor runs, withheld-oracle semantic and
+negative-case review, native restart/source-removal checks and disposable capture
+forgetting remain pending. A later native handoff must use the same recorded
+directory map and databases after harness handles close, without copying or
+rebasing databases.
+
 For a governed remote run, dispatch the existing CI workflow on the exact branch
 with purpose `exact-sha-preflight` and `local_provider_acceptance=true`. This
 explicit opt-in still runs the legacy @2 control after the full Rust suite, on the same
