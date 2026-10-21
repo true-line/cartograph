@@ -59,6 +59,12 @@ Saved-step validation requires the exact existing invocation and its cutoff;
 a missing invocation cannot mean all current journal entries. Shape validation
 cannot authenticate a plausible invented count or feedback hash: the durable
 capacity-refusal journal and acquisition order must prove those values.
+Ordering uses explicit immutable invocation ordinals derived from the saved
+pre-call model-invocation count plus one. Refusals and accepted input publications
+resolve to that same ordinal domain; cross-table rowids, timestamps and table
+sequences cannot establish ordering. Historical lookups exclude later
+publications. The journal count must equal its sequence, and the previous-entry
+hash chain is validated independently.
 
 A tool proposal during finish-only mode is a distinct terminal protocol failure.
 It preserves the model-call charge, causes no tool debit or source read, and

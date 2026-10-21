@@ -177,6 +177,7 @@ pub(crate) enum InvestigationStopReason {
     InputChanged,
     SourceUnavailable,
     InvalidResponse,
+    FinishOnlyToolProposal,
     LimitExceeded,
     ProviderFailure,
     OutcomeUnknown,
@@ -194,6 +195,9 @@ impl InvestigationStopReason {
             Self::SourceUnavailable => "Selected source evidence is unavailable.",
             Self::InvalidResponse => {
                 "The completed provider response was not an admissible action."
+            }
+            Self::FinishOnlyToolProposal => {
+                "The provider proposed a tool when only a finishing response was permitted."
             }
             Self::LimitExceeded => "An investigation work or storage limit was reached.",
             Self::ProviderFailure => "The provider call failed without a usable response.",

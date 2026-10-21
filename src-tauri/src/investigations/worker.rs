@@ -284,6 +284,22 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             } else {
                 None
             };
+            // Preserve the mode from the coherent PRE-call snapshot. Recomputing
+            // after BeginInvocation charges usage could turn Choice into FinishOnly.
+            // The new family remains closed until its durable saved-call binding
+            // and complete admission transitions are integrated.
+            let admission_mode = if request.specialist_id.uses_next_prompt_admission() {
+                let snapshot = completion_snapshot
+                    .as_ref()
+                    .ok_or(HostError::InvalidInput)?;
+                Some(
+                    snapshot
+                        .metadata()
+                        .next_call_mode_with_policy(&snapshot.detail().usage, policy)?,
+                )
+            } else {
+                None
+            };
             let input = if let Some(completion_request) = completion_request {
                 let snapshot = completion_snapshot
                     .as_ref()
@@ -477,6 +493,16 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 let value: serde_json::Value = serde_json::from_str(&completion.text)
                     .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
                 let hash = content_hash(&bounded_json(&value, 32 * 1024)?);
+                // A finish-only tool proposal terminates before ActionAdmitted,
+                // BeginTool, query replay publication or source access. It is not
+                // a capacity refusal and cannot buy another model iteration.
+                if admission_mode == Some(staged_refusal::CompletionCallMode::FinishOnly)
+                    && matches!(&action, CompletionInvestigationAction::Read(_))
+                {
+                    return Err(Failure::Stop(
+                        InvestigationStopReason::FinishOnlyToolProposal,
+                    ));
+                }
                 match action {
                     CompletionInvestigationAction::Finish(finish) => {
                         completion_finish = Some(finish);

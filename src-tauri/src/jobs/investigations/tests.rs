@@ -1232,6 +1232,7 @@ fn investigation_compact_disclosure_is_durable_and_finishing_binding_is_revalida
         representation_hash: hash("representation"),
     };
     let disclosure = InvestigationDisclosure {
+        admission: None,
         query_history: None,
         completion_contract_hash: None,
         completion_metadata_hash: None,
@@ -1352,6 +1353,7 @@ fn compact_step(ledger: &InvestigationInputLedger) -> PendingInvestigationStep {
         representation_hash: hash("representation"),
     };
     pending.disclosure = Some(InvestigationDisclosure {
+        admission: None,
         query_history: None,
         completion_contract_hash: None,
         completion_metadata_hash: None,
@@ -1526,3 +1528,44 @@ mod policy_tests;
 
 #[path = "input_storage_helper_tests.rs"]
 mod input_storage_helper_tests;
+
+#[test]
+fn finish_only_tool_stop_preserves_call_charge_without_tool_or_input_publication() {
+    // AC-0287: durable stop primitive used by the new-family worker guard.
+    // This does not activate @10 or prove its saved-call/journal binding.
+    let mut fixture = Fixture::new();
+    let (id, execution) = fixture.start("finish-only-stop", InvestigationProviderMode::Local);
+    let ledger = fixture.prepare(&id, &execution, false);
+    let pending = begin(&mut fixture, &id, &execution, step(&ledger, 1));
+    let stopped = fixture
+        .store
+        .advance_investigation(
+            &execution,
+            pending.summary.revision,
+            InvestigationTransition::StopWithElapsed {
+                reason: InvestigationStopReason::FinishOnlyToolProposal,
+                active_milliseconds: pending.usage.active_milliseconds,
+            },
+        )
+        .unwrap();
+    assert_eq!(stopped.summary.status, InvestigationStatus::Failed);
+    assert_eq!(
+        stopped.usage.model_invocations,
+        pending.usage.model_invocations
+    );
+    assert_eq!(
+        stopped.usage.generated_token_reservations,
+        pending.usage.generated_token_reservations
+    );
+    assert_eq!(stopped.usage.tool_actions, 0);
+    assert_eq!(stopped.usage.evidence_requests, 0);
+    assert_eq!(
+        fixture.store.investigation_ledger(&id).unwrap(),
+        Some(ledger)
+    );
+    assert_eq!(fixture.store.investigation(&id).unwrap(), stopped);
+    assert_eq!(
+        stopped.error.as_deref(),
+        Some(InvestigationStopReason::FinishOnlyToolProposal.message())
+    );
+}
