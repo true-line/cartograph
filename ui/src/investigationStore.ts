@@ -306,7 +306,8 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     updateComposer: (patch) => {
       if (!get().starting && !get().pendingStart && ['scopeType', 'anchor', 'hops'].some((key) => key in patch && patch[key as keyof InvestigationComposer] !== get().composer[key as keyof InvestigationComposer])) {
         ++choicesRequest;
-        set({ obligationChoices: null, obligationChoicesLoading: false });
+        set({ draftObligations: [], obligationChoices: null, obligationChoicesLoading: false,
+          obligationDraftError: get().draftObligations.length ? 'Scope changed. Select the evidence to inspect in this scope.' : null });
       }
       if (!get().starting && !get().pendingStart) set((state) => ({
         composer: { ...state.composer, ...structuredClone(patch) },
@@ -350,7 +351,12 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       if (state.starting || state.pendingStart) return false;
       const scope: InvestigationScope = state.composer.scopeType === 'all' ? { type: 'all' } :
         { type: 'neighborhood', anchor: state.composer.anchor, hops: state.composer.hops };
-      if (!state.obligationChoices) await get().loadObligationChoices(scope);
+      if (!state.obligationChoices) {
+        const loading = get().loadObligationChoices(scope);
+        const loadingGeneration = choicesRequest;
+        await loading;
+        if (loadingGeneration !== choicesRequest) return false;
+      }
       if (get().starting || get().pendingStart) return false;
       const generation = choicesRequest;
       try {

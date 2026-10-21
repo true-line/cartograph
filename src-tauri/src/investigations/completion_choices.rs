@@ -4,11 +4,12 @@ use crate::AppState;
 use agents::TaskFactKey;
 use agents::investigation::{InventoryTarget, InvestigationScope, MAX_MANIFEST_BYTES, Obligation};
 use context_hub::{
-    ContextSnapshot,
+    ContextSnapshot, FactReference, QueryRequest, QueryScope,
     coverage::{CoverageQualification, CoverageStatus},
 };
 use core_graph::{SnapshotReadLimits, coverage::CoverageReadLimits};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use tauri::Manager;
 
 #[derive(Debug, Serialize)]
@@ -24,6 +25,8 @@ pub(crate) struct ObligationChoices {
     graph_snapshot_id: String,
     context_id: String,
     inventories: Vec<InventoryChoice>,
+    #[serde(skip)]
+    scoped_facts: BTreeSet<FactReference>,
 }
 
 fn choices(
@@ -39,6 +42,44 @@ fn choices(
     let graph_snapshot_id = complete.id().to_owned();
     let scoped = FrozenContext::scoped_snapshot(&graph, scope, complete)
         .map_err(|error| error.to_string())?;
+    // Keep membership from this exact authorized projection, not merely its
+    // full-graph identity. This metadata never enters the selection wire.
+    let scoped_facts = match scope {
+        InvestigationScope::All => graph
+            .0
+            .iter()
+            .map(|node| FactReference::Node {
+                id: node.id.clone(),
+            })
+            .chain(graph.1.iter().map(|edge| FactReference::Edge {
+                source: edge.src.clone(),
+                label: edge.label.clone(),
+                destination: edge.dst.clone(),
+            }))
+            .collect(),
+        InvestigationScope::Neighborhood { .. } => {
+            let mut facts = BTreeSet::new();
+            let mut cursor = None;
+            loop {
+                let page = scoped
+                    .query(QueryRequest {
+                        scope: QueryScope::All,
+                        kind: None,
+                        labels: vec![],
+                        max_facts: context_hub::MAX_FACTS,
+                        max_bytes: context_hub::MAX_RESPONSE_BYTES,
+                        cursor,
+                    })
+                    .map_err(|error| error.to_string())?;
+                facts.extend(page.facts.into_iter().map(|fact| fact.reference));
+                let Some(next) = page.next_cursor else {
+                    break;
+                };
+                cursor = Some(next);
+            }
+            facts
+        }
+    };
     let qualified = scoped
         .with_coverage(coverage)
         .map_err(|error| error.to_string())?;
@@ -82,6 +123,7 @@ fn choices(
         graph_snapshot_id,
         context_id: proof.context_id,
         inventories,
+        scoped_facts,
     };
     // Never truncate choices or reinterpret omitted entries as unavailable.
     super::context::bounded_json(&result, MAX_MANIFEST_BYTES).map_err(|error| error.to_string())?;
@@ -182,10 +224,25 @@ fn validate_selection(
             {
                 return Err("Completion inventory changed; refresh the selection.".into());
             }
-            Obligation::Source { target, .. }
-                if target.graph_snapshot_id != current.graph_snapshot_id =>
-            {
-                return Err("Completion source graph changed; refresh the selection.".into());
+            Obligation::Source { target, .. } => {
+                if target.graph_snapshot_id != current.graph_snapshot_id {
+                    return Err("Completion source graph changed; refresh the selection.".into());
+                }
+                let fact = match &target.fact {
+                    TaskFactKey::Node { id } => FactReference::Node { id: id.clone() },
+                    TaskFactKey::Edge {
+                        source,
+                        label,
+                        destination,
+                    } => FactReference::Edge {
+                        source: source.clone(),
+                        label: label.clone(),
+                        destination: destination.clone(),
+                    },
+                };
+                if !current.scoped_facts.contains(&fact) {
+                    return Err("Completion source is outside the requested scope; select an in-scope source or change the scope.".into());
+                }
             }
             _ => {}
         }
@@ -217,6 +274,126 @@ mod tests {
         assert!(result.inventories[0].obligation.is_none());
         let json = serde_json::to_value(result).unwrap();
         assert!(json["inventories"][0].get("obligation").is_none());
+    }
+
+    // AC-0266: membership is the exact node/edge projection, not just the full
+    // graph hash or presence of an edge's endpoints.
+    #[test]
+    fn completion_source_selection_checks_exact_scoped_nodes_and_edges() {
+        use core_graph::{Edge, Node};
+        let graph = (
+            (["a", "b", "c", "d"]
+                .into_iter()
+                .map(|id| Node {
+                    id: id.into(),
+                    label: "Rule".into(),
+                    props: serde_json::json!({}),
+                })
+                .collect()),
+            vec![
+                Edge {
+                    src: "a".into(),
+                    dst: "b".into(),
+                    label: "CALLS".into(),
+                    props: serde_json::json!({}),
+                },
+                Edge {
+                    src: "c".into(),
+                    dst: "d".into(),
+                    label: "CALLS".into(),
+                    props: serde_json::json!({}),
+                },
+            ],
+        );
+        let scope = InvestigationScope::Neighborhood {
+            anchor: "a".into(),
+            hops: 1,
+        };
+        let current =
+            choices(graph, CoverageQualification::new(&[], &[]).unwrap(), &scope).unwrap();
+        assert!(
+            serde_json::to_value(&current)
+                .unwrap()
+                .get("scoped_facts")
+                .is_none()
+        );
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../ui/src/fixtures/investigation-inspection-backend.json"
+        ))
+        .unwrap();
+        for (fact, allowed) in [
+            (TaskFactKey::Node { id: "a".into() }, true),
+            (TaskFactKey::Node { id: "c".into() }, false),
+            (
+                TaskFactKey::Edge {
+                    source: "a".into(),
+                    label: "CALLS".into(),
+                    destination: "b".into(),
+                },
+                true,
+            ),
+            (
+                TaskFactKey::Edge {
+                    source: "c".into(),
+                    label: "CALLS".into(),
+                    destination: "d".into(),
+                },
+                false,
+            ),
+            (
+                TaskFactKey::Edge {
+                    source: "a".into(),
+                    label: "OTHER".into(),
+                    destination: "b".into(),
+                },
+                false,
+            ),
+        ] {
+            let mut target: agents::investigation::InvestigationInspectionTarget =
+                serde_json::from_value(fixture["target"].clone()).unwrap();
+            target.fact_digest = format!(
+                "{}:{}",
+                if matches!(fact, TaskFactKey::Node { .. }) {
+                    "node-v1"
+                } else {
+                    "edge-v1"
+                },
+                "a".repeat(64)
+            );
+            target.fact = fact;
+            target.graph_snapshot_id = current.graph_snapshot_id.clone();
+            target.target_id = target.content_id().unwrap();
+            let mut obligation = Obligation::Source {
+                obligation_id: String::new(),
+                target: Box::new(target),
+            };
+            let identity = obligation.content_id().unwrap();
+            if let Obligation::Source { obligation_id, .. } = &mut obligation {
+                *obligation_id = identity;
+            }
+            let request = StagedObligationRequest {
+                schema_version: 4,
+                request_nonce: "scope-membership".into(),
+                specialist_id: "domain-analyst@7".into(),
+                question: "Inspect a scoped source.".into(),
+                scope: scope.clone(),
+                provider_mode: InvestigationProviderMode::Local,
+                limit_profile: "investigation-v1".into(),
+                expected_graph_revision: Some(current.graph_snapshot_id.clone()),
+                expected_context_id: current.context_id.clone(),
+                conversation_id: None,
+                parent_id: None,
+                inspection_requirements: None,
+                obligations: ObligationEnvelope {
+                    schema_version: 1,
+                    contract: "investigation-completion-obligations@1".into(),
+                    obligations: vec![obligation],
+                },
+            }
+            .normalized()
+            .unwrap();
+            assert_eq!(validate_selection(&current, &request).is_ok(), allowed);
+        }
     }
 
     // AC-0266: selectable inventory identity is compared in full at start.
@@ -265,6 +442,7 @@ mod tests {
             schema_version: 1,
             context_id: context,
             graph_snapshot_id: "c".repeat(64),
+            scoped_facts: BTreeSet::new(),
             inventories: vec![InventoryChoice {
                 repo: "app/service".into(),
                 status: CoverageStatus::Recorded,

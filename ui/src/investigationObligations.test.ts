@@ -39,9 +39,11 @@ describe('explicit mixed obligations (AC-0266)', () => {
     await useInvestigationStore.getState().start({ ...draft(), question: 'x'.repeat(8192) });
     expect(starts).toBe(0); expect(useInvestigationStore.getState().obligationDraftError).toContain('8,192');
     useInvestigationStore.getState().addObligation(inventoryObligation);
+    useInvestigationStore.getState().addObligation(sourceObligation);
     useInvestigationStore.getState().updateComposer({ scopeType: 'neighborhood', anchor: 'fact:1' });
     expect(useInvestigationStore.getState().obligationChoices).toBeNull();
-    expect(useInvestigationStore.getState().draftObligations).toHaveLength(1);
+    expect(useInvestigationStore.getState().draftObligations).toEqual([]);
+    expect(useInvestigationStore.getState().obligationDraftError).toContain('Scope changed');
     await useInvestigationStore.getState().start(draft()); expect(starts).toBe(0);
   });
   it('rejects stale/unrecorded selection claims and malformed choices without legacy fallback', () => {
@@ -105,4 +107,23 @@ it('never decodes a generation5 result as legacy history (AC-0266)', async () =>
   await useInvestigationStore.getState().open('legacy');
   expect(useInvestigationStore.getState().result).toBeNull();
   expect(useInvestigationStore.getState().error).toContain('consistently');
+});
+
+// AC-0266: changing scope while resolving choices cannot admit an old source
+// into the newly selected neighborhood, even if fresh choices arrive first.
+it('abandons source selection when scope changes during choice resolution', async () => {
+  let release!: (value: typeof completionChoices) => void;
+  let sourceResolutions = 0;
+  mockIPC((command) => {
+    if (command === 'investigation_obligation_choices') return new Promise((resolve) => { release = resolve; });
+    if (command === 'resolve_investigation_source_obligation') { sourceResolutions++; return sourceObligation; }
+    return null;
+  });
+  const pending = useInvestigationStore.getState().addSourceObligation(sourceObligation.target);
+  useInvestigationStore.getState().updateComposer({ scopeType: 'neighborhood', anchor: 'other-fact' });
+  useInvestigationStore.setState({ obligationChoices: structuredClone(completionChoices) });
+  release(completionChoices);
+  expect(await pending).toBe(false);
+  expect(sourceResolutions).toBe(0);
+  expect(useInvestigationStore.getState().draftObligations).toEqual([]);
 });
