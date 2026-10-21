@@ -15,6 +15,9 @@ pub enum DisclosureOmissionReason {
     /// Reserved; compact projections currently share supplied representations.
     DuplicateRepresentation,
     NotSelected,
+    /// Disclosure5 prior query identity is supplied, while its full view is omitted.
+    /// Never supplies evidence or makes a citation eligible.
+    ReferenceOnly,
     WorkingSetBudget,
 }
 
@@ -37,6 +40,7 @@ impl DisclosureRepresentation {
             self,
             Self::Omitted {
                 reason: DisclosureOmissionReason::DuplicateRepresentation
+                    | DisclosureOmissionReason::ReferenceOnly
             }
         ) {
             return Err(InvestigationError::InvalidInput);
@@ -291,14 +295,17 @@ impl InvestigationDisclosure {
             if entry.query_index != index {
                 return Err(InvestigationError::InvalidInput);
             }
-            entry.representation.validate()?;
+            let prior_reference = progressive && index + 1 < self.queries.len();
+            if !prior_reference {
+                entry.representation.validate()?;
+            }
             if progressive {
                 let latest = index + 1 == self.queries.len();
                 if (latest && !entry.representation.is_supplied())
                     || (!latest
                         && entry.representation
                             != DisclosureRepresentation::Omitted {
-                                reason: DisclosureOmissionReason::NotSelected,
+                                reason: DisclosureOmissionReason::ReferenceOnly,
                             })
                 {
                     return Err(InvestigationError::InvalidInput);

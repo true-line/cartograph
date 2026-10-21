@@ -203,3 +203,32 @@ fn disclosure_rejects_reserved_duplicate_omission_in_every_representation() {
         );
     }
 }
+
+#[test]
+fn reference_only_never_omits_legacy_facts_queries_sources_or_parent_history() {
+    // AC-0286: the new prior-query marker grants no legacy disclosure authority.
+    let basis = basis_with_source();
+    let valid = manifest(&basis);
+    let reference = DisclosureRepresentation::Omitted {
+        reason: DisclosureOmissionReason::ReferenceOnly,
+    };
+    assert!(!reference.is_supplied());
+    let mut parent_basis = basis.clone();
+    parent_basis.supplied_history_hash = Some(content_hash(b"parent history"));
+    parent_basis.supplied_history_bytes = b"parent history".len();
+    let mut parent = manifest(&parent_basis);
+    parent.history = Some(reference.clone());
+    assert!(parent.validate(&parent_basis).is_err());
+    for slot in 0..3 {
+        let mut changed = valid.clone();
+        match slot {
+            0 => changed.facts[0].representation = reference.clone(),
+            1 => changed.queries[0].representation = reference.clone(),
+            _ => {
+                changed.sources[0].representation = reference.clone();
+                changed.sources[0].disclosed_text_hash = None;
+            }
+        }
+        assert!(changed.validate(&basis).is_err());
+    }
+}

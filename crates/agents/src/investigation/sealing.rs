@@ -163,11 +163,26 @@ pub(super) fn seal_with_policy(
             .map(|reference| DisclosedInvestigationQuery {
                 query_index: reference.query_index,
                 representation: DisclosureRepresentation::Omitted {
-                    reason: DisclosureOmissionReason::NotSelected,
+                    reason: DisclosureOmissionReason::ReferenceOnly,
                 },
             })
             .collect::<Vec<_>>();
         if let Some(latest) = &actual_context.query_history.latest_query {
+            // Repeated acquisitions can share interned objects. The ledger's
+            // total returned-fact count is only a loose upper bound; a latest
+            // view must index representations actually supplied in this payload.
+            if latest
+                .context
+                .fact_indexes
+                .iter()
+                .any(|index| *index >= facts.len())
+                || latest
+                    .evidence_option_indexes
+                    .iter()
+                    .any(|index| *index >= options.len())
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
             queries.push(DisclosedInvestigationQuery {
                 query_index: latest.reference.query_index,
                 representation: supplied(latest)?,
@@ -461,3 +476,7 @@ fn supplied(value: &impl serde::Serialize) -> Result<DisclosureRepresentation, I
         representation_hash: content_hash(&bounded_bytes(value, MAX_INPUT_BYTES)?),
     })
 }
+
+#[cfg(test)]
+#[path = "query_history_sealing_tests.rs"]
+mod query_history_tests;

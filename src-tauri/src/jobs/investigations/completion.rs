@@ -104,6 +104,36 @@ impl CompletionIntent {
         {
             return Err(InvestigationStoreError::Invalid);
         }
+        if let Some(detail) = &task.detail.completion {
+            self.validate_assessment_basis(&detail.assessment_basis)?;
+        }
+        Ok(())
+    }
+    // Numeric policy ceilings are shared by @8 and @9, but their disclosure
+    // identities retain the family admitted by the immutable completion intent.
+    fn validate_assessment_basis(
+        &self,
+        basis: &CompletionAssessmentBasis,
+    ) -> Result<(), InvestigationStoreError> {
+        let disclosure_hash = match basis {
+            CompletionAssessmentBasis::NotAssessed => None,
+            CompletionAssessmentBasis::FinishingDisclosure {
+                disclosure_hash, ..
+            } => Some(disclosure_hash),
+            CompletionAssessmentBasis::TerminalObservation {
+                last_refusal_basis, ..
+            } => last_refusal_basis
+                .as_ref()
+                .map(|basis| &basis.disclosure_hash),
+        };
+        let prefix = if self.schema_version == 3 {
+            "investigation-disclosure-v5:"
+        } else {
+            "investigation-disclosure-v4:"
+        };
+        if disclosure_hash.is_some_and(|hash| !hash.strip_prefix(prefix).is_some_and(hash_valid)) {
+            return Err(InvestigationStoreError::Invalid);
+        }
         Ok(())
     }
     pub(super) fn contract(&self) -> InvestigationCompletionContract {

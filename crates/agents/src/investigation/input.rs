@@ -357,7 +357,13 @@ impl InvestigationInput {
         selected: &std::collections::BTreeSet<String>,
         reason: DisclosureOmissionReason,
     ) -> Result<Self, InvestigationError> {
-        if !self.compact || reason == DisclosureOmissionReason::DuplicateRepresentation {
+        if !self.compact
+            || matches!(
+                reason,
+                DisclosureOmissionReason::DuplicateRepresentation
+                    | DisclosureOmissionReason::ReferenceOnly
+            )
+        {
             return Err(InvestigationError::InvalidInput);
         }
         let available = self.payload.spans.iter().map(|s| s.id.clone()).collect();

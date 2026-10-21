@@ -1480,3 +1480,6 @@ fn completion_v2_nine_durable_reads_finish_and_reopen_without_v1_fallback() {
         result_id
     );
 }
+
+#[path = "assessment_basis_tests.rs"]
+mod assessment_basis_tests;

@@ -235,3 +235,94 @@ fn query_history_result_rejects_self_consistent_foreign_registry_and_missing_com
     );
     assert!(json!(foreign).get("query_history").is_some());
 }
+
+#[test]
+fn reference_only_is_exactly_the_prior_query_disclosure5_reason() {
+    // AC-0286: supplied identities are distinct from full query views and evidence.
+    let (mut ledger, mut disclosure, _) = fixture(true);
+    ledger.revision = 2;
+    ledger.queries = (0..2)
+        .map(|_| InvestigationQueryManifest {
+            query: InvestigationQuery {
+                scope: InvestigationScope::All,
+                kind: None,
+                labels: vec![],
+                max_facts: MAX_QUERY_FACTS,
+                max_bytes: MAX_QUERY_BYTES,
+                cursor: None,
+            },
+            response_hash: "a".repeat(64),
+            response_bytes: 100,
+            returned_facts: 0,
+            total_selected: 0,
+            has_more: false,
+        })
+        .collect();
+    disclosure.input_ledger_hash = ledger
+        .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+        .unwrap();
+    disclosure.query_history = Some(
+        DisclosedQueryHistory::from_ledger(&"a".repeat(64), &ledger, &INVESTIGATION_V2_POLICY)
+            .unwrap(),
+    );
+    disclosure.queries = vec![
+        DisclosedInvestigationQuery {
+            query_index: 0,
+            representation: DisclosureRepresentation::Omitted {
+                reason: DisclosureOmissionReason::ReferenceOnly,
+            },
+        },
+        DisclosedInvestigationQuery {
+            query_index: 1,
+            representation: DisclosureRepresentation::Supplied {
+                representation_hash: "b".repeat(64),
+            },
+        },
+    ];
+    disclosure
+        .validate_with_policy(&ledger, &INVESTIGATION_V2_POLICY)
+        .unwrap();
+    assert!(!disclosure.queries[0].representation.is_supplied());
+    assert!(
+        disclosure
+            .eligible_citations_with_policy(&ledger, &INVESTIGATION_V2_POLICY)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        serde_json::to_value(&disclosure.queries[0].representation).unwrap(),
+        json!({"state":"omitted","reason":"reference_only"})
+    );
+    for reason in [
+        DisclosureOmissionReason::NotSelected,
+        DisclosureOmissionReason::WorkingSetBudget,
+    ] {
+        let mut changed = disclosure.clone();
+        changed.queries[0].representation = DisclosureRepresentation::Omitted { reason };
+        assert!(
+            changed
+                .validate_with_policy(&ledger, &INVESTIGATION_V2_POLICY)
+                .is_err()
+        );
+    }
+    let mut latest = disclosure.clone();
+    latest.queries[1].representation = disclosure.queries[0].representation.clone();
+    assert!(
+        latest
+            .validate_with_policy(&ledger, &INVESTIGATION_V2_POLICY)
+            .is_err()
+    );
+    let mut old = disclosure;
+    old.schema_version = 4;
+    old.policy = COMPACT_DISCLOSURE_POLICY.into();
+    old.query_history = None;
+    assert!(
+        old.validate_with_policy(&ledger, &INVESTIGATION_V2_POLICY)
+            .is_err()
+    );
+    old.queries[0].representation = DisclosureRepresentation::Omitted {
+        reason: DisclosureOmissionReason::NotSelected,
+    };
+    old.validate_with_policy(&ledger, &INVESTIGATION_V2_POLICY)
+        .unwrap();
+}
