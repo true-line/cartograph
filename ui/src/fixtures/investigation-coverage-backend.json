@@ -1,0 +1,135 @@
+{
+  "detail": {
+    "actions": {
+      "can_cancel": false,
+      "can_follow_up": true
+    },
+    "cancel_requested": false,
+    "citations": [],
+    "context_owner": "84c4c14697173b0f2e4a7d965768ec2e",
+    "conversation_id": "conversation:3dc9a8559c4ba5588050874c6b210eee",
+    "coverage_context": {
+      "context_id": "context-v2:069074bc7012360e29aaa2e37448443f6c3d14c6e0e521bc9b3c2dbb70ad09cd",
+      "coverage": {
+        "contract": "coverage-qualification@1",
+        "coverage_id": "coverage-context-v1:e8942d7ad5f7a363d9f040164bcc3ad0df7f9874ad1b5858a208b7e8ef241cfb",
+        "exhaustive": false,
+        "repos": [
+          {
+            "commit": "workdir",
+            "compared": [
+              "registration",
+              "plugins"
+            ],
+            "counts": {
+              "missing_input": 1,
+              "not_applicable": 0,
+              "not_selected": 0,
+              "unsupported": 0
+            },
+            "inventory_hash": "240a15500374a316d3f7b11c354c879f91ac2b154b504f2b8bd805873f9c301f",
+            "layer_hints": [],
+            "limited": true,
+            "repo": "local/src_fc3821bc4c2d50dd388430e5cbcdbe0b",
+            "status": "recorded"
+          }
+        ]
+      }
+    },
+    "created_at": "2026-10-20T02:25:13Z",
+    "error": null,
+    "graph_snapshot_id": "context-v1:59430a8192672b9ef5d77ed4b6c9a00dceaf179f23394f8af71e41c4fd199a35",
+    "has_result": true,
+    "investigation_id": "investigation:630c96d7d20121573ef0242679fa94cf",
+    "invocation_pending": false,
+    "job_id": 1,
+    "last_event_sequence": 11,
+    "limits": {
+      "active_seconds": 600,
+      "captured_validation_bytes": 134217728,
+      "consent_wait_seconds": 900,
+      "evidence_bytes": 49152,
+      "evidence_items": 12,
+      "evidence_requests": 64,
+      "generated_token_reservations": 16384,
+      "generated_tokens_per_invocation": 2048,
+      "model_invocations": 8,
+      "profile": "investigation-v1",
+      "selected_facts": 64,
+      "tool_actions": 8,
+      "wall_seconds": 3600
+    },
+    "origin": "app",
+    "parent_id": null,
+    "provider": {
+      "available": true,
+      "deployment": null,
+      "endpoint": "http://127.0.0.1:11434/api/chat",
+      "mode": "local",
+      "model": "scripted-model",
+      "protocol_version": "bounded-json-completion@2",
+      "provider_id": "local-scripted",
+      "unavailable_reason": null
+    },
+    "provider_mode": "local",
+    "question": "Explain the recorded analysis limits.",
+    "revision": 8,
+    "schema_version": 3,
+    "scope": {
+      "type": "all"
+    },
+    "scope_snapshot_id": "context-v1:59430a8192672b9ef5d77ed4b6c9a00dceaf179f23394f8af71e41c4fd199a35",
+    "specialist": {
+      "confidence_tier": "InferredWeak",
+      "id": "domain-analyst@6",
+      "name": "Domain analyst",
+      "operations": [
+        "query_context",
+        "read_evidence",
+        "read_coverage_inventory",
+        "finish"
+      ],
+      "prompt_fingerprint": "235648d22c87b361dc32669531a0d4c00c1fc9e2843e172f08c60f91c42275e3",
+      "purpose": "Investigate scoped business behavior, features and design evidence.",
+      "tier": "Agentic",
+      "version": 6
+    },
+    "specialist_id": "domain-analyst@6",
+    "status": "completed",
+    "updated_at": "2026-10-20T02:25:13Z",
+    "usage": {
+      "active_milliseconds": 193,
+      "captured_validation_bytes": 0,
+      "evidence_bytes": 0,
+      "evidence_items": 0,
+      "evidence_requests": 0,
+      "generated_token_reservations": 4096,
+      "model_invocations": 2,
+      "reported_input_tokens": 200,
+      "reported_output_tokens": 80,
+      "selected_facts": 0,
+      "tool_actions": 1
+    }
+  },
+  "result": {
+    "coverage": {
+      "context_id": "context-v2:069074bc7012360e29aaa2e37448443f6c3d14c6e0e521bc9b3c2dbb70ad09cd",
+      "coverage_id": "coverage-context-v1:e8942d7ad5f7a363d9f040164bcc3ad0df7f9874ad1b5858a208b7e8ef241cfb",
+      "representation_hash": "8bde43043626c9d21796c2eb8aa440fb6dcea9bc95f0d2e72ef5c54324fb5bfc"
+    },
+    "created_at": "2026-10-20T02:25:13Z",
+    "disclosure_hash": "investigation-disclosure-v3:64b381df0b401f143cdf2aa1099bd6c4e4bbd20ddd95a3220b5602a3a55d8305",
+    "findings": [],
+    "graph_snapshot_id": "context-v1:59430a8192672b9ef5d77ed4b6c9a00dceaf179f23394f8af71e41c4fd199a35",
+    "input_ledger_hash": "b11bd9e19bf21eb6a9be74ba6b66d12aff56292c642be6985b306d5544298be4",
+    "investigation_id": "investigation:630c96d7d20121573ef0242679fa94cf",
+    "invocation_step_id": "step-2",
+    "knowledge_completeness": "insufficient_evidence",
+    "limitations": [
+      "Coverage records cannot establish source behavior."
+    ],
+    "observed_response_model": "scripted-model-observed",
+    "result_id": "investigation-result-v4:62b6b12fd7e9a952b757f904332d6d3bb3d2f854bbeffc08c77e670b4b064b6b",
+    "schema_version": 4
+  }
+}

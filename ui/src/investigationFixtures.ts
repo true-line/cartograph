@@ -149,3 +149,40 @@ export function inspectionDetail(id = 'inv-fixture', overrides: Partial<Investig
     inspection_requirements: [inspectionTarget], inspection_requirement_count: 1,
     inspection_status: 'unmet', inspection_assessment: inspectionAssessment(), ...overrides });
 }
+
+/** Scripted V6 public wire; private host proof is deliberately absent. */
+export const qualifiedCoverageContext: import('./investigationTypes').InvestigationCoverageContext = {
+  context_id: `context-v2:${'1'.repeat(64)}`,
+  coverage: { contract: 'coverage-qualification@1', exhaustive: false,
+    coverage_id: `coverage-context-v1:${'2'.repeat(64)}`, repos: [
+      { repo: 'acme/api', status: 'recorded', commit: 'recorded-revision-A', inventory_hash: '3'.repeat(64),
+        limited: true, counts: { not_selected: 1, missing_input: 1, not_applicable: 2, unsupported: 3 },
+        layer_hints: ['server'], compared: ['registration', 'plugins', 'layer_hints'] },
+      { repo: 'acme/old', status: 'stale', commit: null, inventory_hash: '4'.repeat(64), limited: null,
+        counts: null, layer_hints: null, compared: ['registration', 'plugins'] },
+      { repo: 'acme/unread', status: 'unrecorded', commit: null, inventory_hash: null, limited: null,
+        counts: null, layer_hints: null, compared: [] },
+    ] },
+};
+
+export const qualifiedCatalog: InvestigationCatalog = { ...inspectionCatalog,
+  specialists: [...inspectionCatalog.specialists,
+    { ...investigationCatalog.specialists[0], id: 'domain-analyst@6', version: 6,
+      operations: ['query_context', 'read_evidence', 'read_coverage_inventory', 'finish'],
+      purpose: 'Inspect recovered context with saved ingest coverage.', prompt_fingerprint: 'prompt:domain-v6' },
+    { ...investigationCatalog.specialists[1], id: 'evidence-auditor@6', version: 6,
+      operations: ['query_context', 'read_evidence', 'read_coverage_inventory', 'finish'],
+      purpose: 'Audit evidence with saved ingest coverage.', prompt_fingerprint: 'prompt:audit-v6' }] };
+
+export function qualifiedDetail(id = 'inv-qualified', overrides: Partial<InvestigationDetail> = {}): InvestigationDetail {
+  return investigationDetail(id, { schema_version: 3, specialist_id: 'domain-analyst@6',
+    specialist: qualifiedCatalog.specialists.find((item) => item.id === 'domain-analyst@6')!,
+    coverage_context: qualifiedCoverageContext, ...overrides });
+}
+
+export function qualifiedResult(id = 'inv-qualified', overrides: Partial<InvestigationResult> = {}): InvestigationResult {
+  return { ...investigationResult(id), schema_version: 4,
+    disclosure_hash: `investigation-disclosure-v3:${'5'.repeat(64)}`,
+    coverage: { context_id: qualifiedCoverageContext.context_id,
+      coverage_id: qualifiedCoverageContext.coverage.coverage_id, representation_hash: '6'.repeat(64) }, ...overrides };
+}

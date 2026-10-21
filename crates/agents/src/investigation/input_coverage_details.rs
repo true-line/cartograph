@@ -1,0 +1,36 @@
+//! Exact acquired detail representations for the qualified prompt.
+use super::*;
+
+impl InvestigationInput {
+    pub(super) fn add_coverage_details(
+        &mut self,
+        raw_details: &[String],
+    ) -> Result<(), InvestigationError> {
+        let proof = self
+            .ledger
+            .coverage
+            .as_ref()
+            .ok_or(InvestigationError::InvalidInput)?;
+        if raw_details.len() != self.ledger.coverage_reads.len() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let mut details = Vec::with_capacity(raw_details.len());
+        for (manifest, raw) in self.ledger.coverage_reads.iter().zip(raw_details) {
+            let detail = manifest.admit_response(proof, raw)?;
+            strict::preflight(&detail.inventory_json, MAX_QUERY_BYTES, 32, 16384, 16384)?;
+            let inventory: Value = serde_json::from_str(&detail.inventory_json)
+                .map_err(|_| InvestigationError::InvalidInput)?;
+            collect_strings(&inventory, &mut self.graph_strings);
+            self.supplied_strings.push(detail.inventory_json.clone());
+            details.push(detail);
+        }
+        let mut prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        prompt["coverage_details"] =
+            serde_json::to_value(details).map_err(|_| InvestigationError::InvalidInput)?;
+        self.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        bounded_bytes(&self.payload, MAX_INPUT_BYTES)?;
+        Ok(())
+    }
+}

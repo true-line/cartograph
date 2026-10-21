@@ -14,6 +14,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod validation;
+pub use validation::{
+    CoverageBasis, CoverageProof, MAX_COVERAGE_IDENTITY_BYTES, MAX_COVERAGE_REPOS,
+};
+
 /// Version of the qualification block.
 pub const COVERAGE_CONTRACT: &str = "coverage-qualification@1";
 
@@ -59,6 +64,7 @@ pub struct ScopedRepo {
 
 /// Producer states counted from a recorded inventory.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoverageCounts {
     /// Producers the layer hints excluded.
     pub not_selected: usize,
@@ -74,13 +80,14 @@ impl CoverageCounts {
     /// Exclusions, missing inputs and unsupported capabilities limit coverage;
     /// a producer with nothing to read does not.
     pub fn limited(&self) -> bool {
-        self.not_selected + self.missing_input + self.unsupported > 0
+        self.not_selected != 0 || self.missing_input != 0 || self.unsupported != 0
     }
 }
 
 /// One repo's qualification. Fields derived from an inventory are `None`
 /// unless it is [`CoverageStatus::Recorded`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepoQualification {
     /// Repo identity.
     pub repo: String,
@@ -104,6 +111,7 @@ pub struct RepoQualification {
 
 /// The block every coverage-qualified response carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoverageQualification {
     /// [`COVERAGE_CONTRACT`].
     pub contract: String,
@@ -115,15 +123,8 @@ pub struct CoverageQualification {
     pub repos: Vec<RepoQualification>,
     #[serde(skip)]
     inventories: BTreeMap<String, (String, String)>,
-}
-
-#[derive(Serialize)]
-struct Basis<'a> {
-    repo: &'a str,
-    registered_source_id: Option<&'a str>,
-    ingest_id: &'a str,
-    config_hash: &'a str,
-    inventory_hash: &'a str,
+    #[serde(skip)]
+    basis: Vec<CoverageBasis>,
 }
 
 #[derive(Serialize)]
@@ -131,7 +132,7 @@ struct QualificationIdentity<'a> {
     contract: &'a str,
     exhaustive: bool,
     repos: &'a [RepoQualification],
-    basis: &'a [Basis<'a>],
+    basis: &'a [CoverageBasis],
 }
 
 /// Count producer states from an inventory body and check the fields the
@@ -218,12 +219,12 @@ impl CoverageQualification {
                 continue;
             };
             let record = &stored.record;
-            basis.push(Basis {
-                repo,
-                registered_source_id: record.registered_source_id.as_deref(),
-                ingest_id: &record.ingest_id,
-                config_hash: &record.config_hash,
-                inventory_hash: &stored.inventory_hash,
+            basis.push(CoverageBasis {
+                repo: repo.to_string(),
+                registered_source_id: record.registered_source_id.clone(),
+                ingest_id: record.ingest_id.clone(),
+                config_hash: record.config_hash.clone(),
+                inventory_hash: stored.inventory_hash.clone(),
             });
             // Fail closed: an unregistered repo, a different registration, a
             // changed plugin basis or a different requested layer selection
@@ -296,6 +297,7 @@ impl CoverageQualification {
             coverage_id,
             repos: qualified,
             inventories,
+            basis,
         })
     }
 

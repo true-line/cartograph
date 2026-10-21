@@ -73,7 +73,7 @@ pub(crate) fn coverage_scope<R: tauri::Runtime>(
 /// whose registration or plugin basis changed in between, or that was
 /// registered only during the read, keeps no current registration and so can
 /// never qualify as recorded; a repo removed during the read is unregistered.
-fn stable_scope(before: &[ScopedRepo], after: Vec<ScopedRepo>) -> Vec<ScopedRepo> {
+pub(crate) fn stable_scope(before: &[ScopedRepo], after: Vec<ScopedRepo>) -> Vec<ScopedRepo> {
     after
         .into_iter()
         .map(|repo| {

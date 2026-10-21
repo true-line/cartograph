@@ -21,6 +21,8 @@ pub(crate) async fn investigation_specialists(
                 SpecialistId::EvidenceAuditorV4,
                 SpecialistId::DomainAnalystV5,
                 SpecialistId::EvidenceAuditorV5,
+                SpecialistId::DomainAnalystV6,
+                SpecialistId::EvidenceAuditorV6,
             ]
             .into_iter()
             .map(|id| id.definition())
@@ -77,10 +79,11 @@ pub(super) fn start<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     started: Instant,
 ) -> Result<InvestigationSummary, InvestigationStartError> {
-    let schema2 =
-        request.schema_version == 2 || request.specialist_id.uses_inspection_requirements();
+    let structured_errors = request.schema_version >= 2
+        || request.specialist_id.uses_inspection_requirements()
+        || request.specialist_id.uses_coverage_qualification();
     let request = request.normalized().map_err(|e| {
-        if schema2 {
+        if structured_errors {
             rejected("invalid_input", e)
         } else {
             InvestigationStartError::Legacy(e.to_string())

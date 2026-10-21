@@ -6,6 +6,8 @@ publish.workspace = true
 license-file.workspace = true
 
 [dependencies]
+context-hub = { workspace = true }
+core-graph = { workspace = true }
 core-prov = { workspace = true }
 core-redact = { workspace = true }
 llm = { workspace = true }

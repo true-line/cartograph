@@ -66,6 +66,7 @@ impl Fixture {
                 execution,
                 detail.summary.revision,
                 InvestigationTransition::InputPrepared {
+                    coverage_archive: None,
                     ledger: Box::new(ledger.clone()),
                     usage,
                 },
@@ -86,6 +87,7 @@ fn request(nonce: &str, mode: InvestigationProviderMode) -> StartInvestigationRe
         provider_mode: mode,
         limit_profile: "investigation-v1".into(),
         expected_graph_revision: None,
+        expected_context_id: None,
         conversation_id: None,
         parent_id: None,
     }
@@ -120,7 +122,9 @@ fn ledger(with_receipt: bool) -> InvestigationInputLedger {
     let digest = format!("node-v1:{}", hash("fact"));
     let receipt = format!("ts-primary-v2:{}", hash("receipt"));
     let mut ledger = InvestigationInputLedger {
+        coverage_reads: vec![],
         schema_version: 1,
+        coverage: None,
         graph_snapshot_id: format!("context-v1:{}", hash("graph")),
         scope_snapshot_id: format!("context-v1:{}", hash("scope")),
         revision: 0,
@@ -1228,6 +1232,8 @@ fn investigation_compact_disclosure_is_durable_and_finishing_binding_is_revalida
         representation_hash: hash("representation"),
     };
     let disclosure = InvestigationDisclosure {
+        coverage_details: vec![],
+        coverage: None,
         inspection_requirements_hash: None,
         schema_version: 1,
         policy: COMPACT_DISCLOSURE_POLICY.into(),
@@ -1341,6 +1347,8 @@ fn compact_step(ledger: &InvestigationInputLedger) -> PendingInvestigationStep {
         representation_hash: hash("representation"),
     };
     pending.disclosure = Some(InvestigationDisclosure {
+        coverage_details: vec![],
+        coverage: None,
         inspection_requirements_hash: None,
         schema_version: 1,
         policy: COMPACT_DISCLOSURE_POLICY.into(),

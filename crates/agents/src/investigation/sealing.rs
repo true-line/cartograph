@@ -18,6 +18,20 @@ pub(super) fn seal(
     let egress = &prepared.preview().egress;
     let before = parse_prompt(&original.prompt)?;
     let after = parse_prompt(&egress.payload.prompt)?;
+    if let Some(proof) = &ledger.coverage {
+        let public = serde_json::to_value(&proof.qualification)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        if before["schema_version"] != 5
+            || before.get("coverage_qualification") != Some(&public)
+            || before.get("context_id").and_then(Value::as_str) != Some(proof.context_id.as_str())
+            || before.get("coverage_qualification") != after.get("coverage_qualification")
+            || before.get("context_id") != after.get("context_id")
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+    } else if before["schema_version"] == 5 {
+        return Err(InvestigationError::InvalidInput);
+    }
     // Protocol/basis/citation identities must survive redaction exactly. Source
     // and graph property values can change, and are hashed as actually supplied.
     for field in [
@@ -32,19 +46,23 @@ pub(super) fn seal(
             return Err(InvestigationError::InvalidInput);
         }
     }
-    if (before["schema_version"] == 3 || before["schema_version"] == 4)
+    if (before["schema_version"] == 3
+        || before["schema_version"] == 4
+        || before["schema_version"] == 5)
         && (before.get("turn_progress").is_none()
             || before.get("turn_progress") != after.get("turn_progress"))
     {
         return Err(InvestigationError::InvalidInput);
     }
-    if before["schema_version"] == 4 {
+    if before["schema_version"] == 4 || before["schema_version"] == 5 {
         for field in [
             "inspection_requirements",
             "inspection_requirements_hash",
             "inspection_progress",
         ] {
-            if before.get(field).is_none() || before.get(field) != after.get(field) {
+            if (before["schema_version"] == 4 && before.get(field).is_none())
+                || before.get(field) != after.get(field)
+            {
                 return Err(InvestigationError::InvalidInput);
             }
         }
@@ -63,6 +81,16 @@ pub(super) fn seal(
         || egress.payload.spans.len() != original.spans.len()
     {
         return Err(InvestigationError::InvalidInput);
+    }
+    if ledger.coverage.is_some() {
+        let raw_queries = array(&before["compact_context"], "queries")?;
+        for (original, supplied) in raw_queries.iter().zip(queries) {
+            if original.get("qualification").is_none()
+                || original.get("qualification") != supplied.get("qualification")
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+        }
     }
     for (raw, supplied) in raw_facts.iter().zip(facts) {
         if key(raw, "reference")? != key(supplied, "reference")? {
@@ -130,7 +158,51 @@ pub(super) fn seal(
             disclosed_text_hash: Some(text_hash),
         });
     }
+    let mut coverage_details = Vec::new();
+    if ledger.coverage.is_some() {
+        let originals = array(&before, "coverage_details")?;
+        let actuals = array(&after, "coverage_details")?;
+        if originals.len() != ledger.coverage_reads.len() || actuals.len() != originals.len() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        for (index, ((original, actual), read)) in originals
+            .iter()
+            .zip(actuals)
+            .zip(&ledger.coverage_reads)
+            .enumerate()
+        {
+            let original: InvestigationCoverageDetail = serde_json::from_value(original.clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+            let actual_detail: InvestigationCoverageDetail = serde_json::from_value(actual.clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+            if original.schema_version != 1
+                || original.context_id != read.request.context_id
+                || original.repo != read.request.repo
+                || original.inventory_hash != read.request.inventory_hash
+                || content_hash(original.inventory_json.as_bytes()) != read.request.inventory_hash
+                || actual_detail.schema_version != original.schema_version
+                || actual_detail.context_id != original.context_id
+                || actual_detail.repo != original.repo
+                || actual_detail.inventory_hash != original.inventory_hash
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+            let disclosed_body_hash = content_hash(actual_detail.inventory_json.as_bytes());
+            coverage_details.push(DisclosedInvestigationCoverageDetail {
+                read_index: index,
+                representation_hash: content_hash(&bounded_bytes(actual, MAX_INPUT_BYTES)?),
+                redacted: disclosed_body_hash != read.request.inventory_hash,
+                disclosed_body_hash,
+            });
+        }
+    }
     let disclosure = InvestigationDisclosure {
+        coverage_details,
+        coverage: ledger
+            .coverage
+            .as_ref()
+            .map(DisclosedInvestigationCoverage::from_proof)
+            .transpose()?,
         inspection_requirements_hash: after
             .get("inspection_requirements_hash")
             .map(|v| {
@@ -139,7 +211,13 @@ pub(super) fn seal(
                     .ok_or(InvestigationError::InvalidInput)
             })
             .transpose()?,
-        schema_version: if before["schema_version"] == 4 { 2 } else { 1 },
+        schema_version: if before["schema_version"] == 5 {
+            3
+        } else if before["schema_version"] == 4 {
+            2
+        } else {
+            1
+        },
         policy: COMPACT_DISCLOSURE_POLICY.into(),
         input_ledger_hash: ledger.fingerprint()?,
         graph_snapshot_id: ledger.graph_snapshot_id.clone(),

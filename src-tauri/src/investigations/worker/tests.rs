@@ -25,6 +25,8 @@ enum Mode {
     UnavailableRead,
     PanicAfterQuery,
     MetadataFinish,
+    InventoryFinish,
+    WrongQualifiedContext,
 }
 
 /// One deterministic provider action per actual host invocation. The fixture
@@ -93,7 +95,18 @@ impl LlmProvider for Scripted {
             !(call == 1 && matches!(self.mode, Mode::PanicAfterQuery)),
             "simulated owner loss"
         );
-        let action = if call == 0 || matches!(self.mode, Mode::RepeatQuery) {
+        let mut action = if matches!(self.mode, Mode::InventoryFinish) {
+            if call == 0 {
+                let repo = &prompt["coverage_qualification"]["repos"][0];
+                json!({"type":"read_coverage_inventory","context_id":prompt["context_id"],
+                    "repo":repo["repo"],"inventory_hash":repo["inventory_hash"],"max_bytes":32768})
+            } else {
+                assert_eq!(call, 1, "inventory finish has no hidden extra invocation");
+                assert_eq!(prompt["coverage_details"].as_array().unwrap().len(), 1);
+                json!({"type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence",
+                    "limitations":["Coverage records cannot establish source behavior."]})
+            }
+        } else if call == 0 || matches!(self.mode, Mode::RepeatQuery) {
             if matches!(self.mode, Mode::RepeatQuery) {
                 json!({ "type":"query_context", "query": { "scope":{"type":"all"}, "kind":null,
                     "labels":[], "max_facts":12, "max_bytes":16384, "cursor":null } })
@@ -155,6 +168,13 @@ impl LlmProvider for Scripted {
                 "citation_ids":[citation["citation_id"]], "limitations":["Runtime inputs and broader feature coverage remain unknown."] }],
                 "knowledge_completeness":"partial", "limitations":["This scoped result establishes no complete business policy."] })
         };
+        if action["type"] == "query_context" && !prompt["context_id"].is_null() {
+            action["context_id"] = if matches!(self.mode, Mode::WrongQualifiedContext) {
+                json!(format!("context-v2:{}", "f".repeat(64)))
+            } else {
+                prompt["context_id"].clone()
+            };
+        }
         if (matches!(self.mode, Mode::CancelFinish) && call == 2)
             || (matches!(self.mode, Mode::CancelTool) && call == 1)
         {
@@ -261,6 +281,18 @@ impl Fixture {
             .unwrap();
         let bindings = crate::primary_source::matching_bindings(&extraction, &receipts);
         assert!(!bindings.is_empty());
+        let coverage = specialist_id.uses_coverage_qualification().then(|| {
+            core_graph::coverage::CoverageRecord {
+                repo_key: source.repo_key.clone(),
+                registered_source_id: Some(source.source_id.clone()),
+                ingest_id: "worker-fixture-ingest".into(),
+                config_hash: crate::coverage_config_hash(&[], crate::Registries::builtin()),
+                inventory_json: json!({"inventory":"coverage@1","repo":source.repo_key,
+                "commit":"workdir","layer_hints":[],"producers":[{"state":"missing_input"}],
+                "unsupported":[],"limited":true})
+                .to_string(),
+            }
+        });
         crate::load_into_graph_with_bindings(
             &mut state.graph.lock().unwrap(),
             &extraction,
@@ -268,7 +300,7 @@ impl Fixture {
             source.root(),
             "workdir",
             &bindings,
-            None,
+            coverage.as_ref(),
         )
         .unwrap();
         drop(input);
@@ -309,7 +341,9 @@ impl Fixture {
             .as_ref()
             .map(|targets| targets[0].graph_snapshot_id.clone());
         let request = StartInvestigationRequest {
-            schema_version: if inspection_requirements.is_some() {
+            schema_version: if specialist_id.uses_coverage_qualification() {
+                3
+            } else if inspection_requirements.is_some() {
                 2
             } else {
                 1
@@ -322,6 +356,7 @@ impl Fixture {
             provider_mode: InvestigationProviderMode::Local,
             limit_profile: "investigation-v1".into(),
             expected_graph_revision,
+            expected_context_id: None,
             conversation_id: None,
             parent_id: None,
         };
@@ -757,3 +792,6 @@ mod turn_tests;
 
 #[path = "inspection_tests.rs"]
 mod inspection_tests;
+
+#[path = "coverage_tests.rs"]
+mod coverage_tests;

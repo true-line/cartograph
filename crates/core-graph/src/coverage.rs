@@ -10,7 +10,8 @@ use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-const MAX_IDENTITY_BYTES: usize = 256;
+/// Maximum UTF-8 bytes in a coverage repo, registration, ingest or configuration identity.
+pub const MAX_IDENTITY_BYTES: usize = 256;
 /// Maximum stored inventory body, in UTF-8 bytes.
 pub const MAX_INVENTORY_BYTES: usize = 1024 * 1024;
 

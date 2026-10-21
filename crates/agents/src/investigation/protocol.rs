@@ -84,6 +84,7 @@ impl InvestigationQuery {
 pub enum InvestigationTool {
     QueryContext,
     ReadEvidence,
+    ReadCoverageInventory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

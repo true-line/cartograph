@@ -189,7 +189,9 @@ fn retain_investigation_selection(
     let raw = serde_json::to_vec(&page).unwrap();
     let fact = crate::task_evidence::task_fact(&binding.fact);
     let ledger = InvestigationInputLedger {
+        coverage_reads: vec![],
         schema_version: 1,
+        coverage: None,
         graph_snapshot_id: snapshot.id().into(),
         scope_snapshot_id: snapshot.id().into(),
         revision: 1,
@@ -246,6 +248,7 @@ fn retain_investigation_selection(
         provider_mode: InvestigationProviderMode::Local,
         limit_profile: "investigation-v1".into(),
         expected_graph_revision: Some(snapshot.id().into()),
+        expected_context_id: None,
         conversation_id: None,
         parent_id: None,
     };
@@ -295,6 +298,7 @@ fn retain_investigation_selection(
                 &execution,
                 detail.summary.revision,
                 InvestigationTransition::InputPrepared {
+                    coverage_archive: None,
                     ledger: Box::new(ledger.clone()),
                     usage: InvestigationUsage {
                         selected_facts: 1,

@@ -582,3 +582,83 @@ requirements are not inherited from that parent. Saved detail/history shows
 per-target assessment independently of execution and knowledge completeness.
 Discovery-selected promotion, generic open-ended task certification and automatic
 migration of old controls are outside this first slice.
+
+
+## Coverage-qualified investigations (@6; #588, AC-0239)
+
+Implementation contract; delivery remains unproven until the host, persistence,
+model input, disclosure and application tests below pass together. Explicit
+`domain-analyst@6` and `evidence-auditor@6` use the frozen coverage API from
+SPEC-01. V1–V5 definitions, serialized records and fingerprints remain unchanged;
+the application's current default does not change.
+
+Before the first provider call, preparation reads a bounded graph and coverage
+inventories in one transaction and captures registration/plugin scope before and
+after that read. A changed scope is qualified stale, never recorded. Requested
+layer hints, when supplied, participate in qualification. Registered or recorded
+repos with no graph facts remain represented. The scoped graph identity, complete
+graph identity and qualified context identity have separate meanings.
+
+Coverage remains per repository: a neighborhood-scoped investigation retains the
+qualification for every repository in the prepared scope, including repositories
+with no facts in that neighborhood. It is not per-neighborhood coverage.
+
+The entire public qualification is mandatory in every model invocation, including
+the initial invocation and the invocation that produces a finish. It states the
+per-repo status, recorded counts, layer hints, compared checks and
+`exhaustive: false`. It is not a count-only summary or a pointer to current metrics.
+Budgets may reduce graph facts, but never remove qualification. If qualification
+cannot fit or egress preparation changes it, fail before provider dispatch.
+
+The host saves a separate durable proof containing the recorded identity basis
+used by the shared coverage hash algorithm. This permits verification after
+restart without adding host-only basis fields to the public qualification wire.
+The proof establishes internal consistency of the preparation-time record; it
+does not establish current registration truth or exhaustive extractor support.
+The original inventory bodies are retained immutably under exact hashes before
+provider activity, within an explicit bounded investigation archive. Later graph
+publication, removal or clearing cannot replace the saved qualification or detail. Preparation derives its
+raw inventory-read ceiling from remaining task and global storage capacity,
+reserving proof/envelope space before the graph store copies inventory bodies.
+A count-only serialization check then rejects escaping or metadata expansion
+that would exceed archive capacity. Publication rechecks capacity transactionally;
+concurrent storage growth can still refuse the write. Capacity refusal is an
+explicit limit failure before model dispatch, never an unrecorded fallback.
+
+Inventory details are progressively disclosed by an explicit
+`read_coverage_inventory` operation naming the frozen context ID, repo, exact
+inventory hash and response byte budget. Only recorded entries are readable;
+stale/unrecorded entries, wrong hashes, wrong contexts and over-budget bodies
+fail explicitly. There is no latest lookup or path-based read. Detail responses
+consume acquisition, prompt and durable storage budgets and appear in the actual
+finishing disclosure. Paths and reason strings are untrusted source-derived data
+subject to existing redaction and egress policy. Inventory details never become
+source citations or discharge source inspection requirements. The aggregate
+qualification alone does not supply named stopping reasons.
+
+An @6 request may omit inspection targets for a coverage-only investigation. If
+present, targets must be the existing normalized nonempty set of exact targets;
+null and an explicitly empty list are invalid. No target is silently selected by
+the host. @5 continues to require targets. Optional source obligations retain
+their separate acquisition/supply/citation assessment and do not attest coverage
+or semantic correctness.
+
+The saved ledger, finishing disclosure and result bind the same qualification,
+context identity and representation. History renders that saved preparation-time
+basis, never a newly queried inventory or a current freshness claim. A restart
+must verify those bindings and retained inventory hashes before exposing detail. The public
+`InvestigationDetail.coverage_context` contains only `{ context_id, coverage }`,
+where `coverage` is the frozen public qualification. It is absent before
+preparation and on legacy tasks, required on prepared @6 tasks, and validated
+against the retained proof when reading history. Host-only basis and inventory
+bodies are not included in this history DTO.
+
+Required verification includes: unchanged legacy serialization/fingerprints;
+mandatory qualification on initial and every later mocked provider call;
+qualification-only oversize and egress mutation refusal; wrong-context query and
+inventory refusal; inventory A retained after publication of B with identical
+graph facts; restart after current inventory removal; independent hash/basis
+mutation rejection; coverage-only and explicit-target runs; and UI rendering of
+saved stale/unrecorded/limited states without an exhaustive or live-freshness
+claim. These extend T-0239; static shared-read tests alone do not prove the
+investigation path.

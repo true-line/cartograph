@@ -6,12 +6,12 @@ import type { EgressPreview } from './components/EgressConsentDialog';
 import type { FactKey } from './primarySourceStore';
 import type { EvidenceRef, TaskSourceBasisV2 } from './store';
 
-export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5';
+export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5' | 'domain-analyst@6' | 'evidence-auditor@6';
 export type InvestigationProviderMode = 'local' | 'cloud';
 /** The existing context-hub QueryScope wire shape, not a filesystem scope. */
 export type InvestigationScope = { type: 'all' } |
   { type: 'neighborhood'; anchor: string; hops: number };
-export type InvestigationTool = 'query_context' | 'read_evidence';
+export type InvestigationTool = 'query_context' | 'read_evidence' | 'read_coverage_inventory';
 
 export interface InvestigationSpecialist {
   id: SpecialistId;
@@ -124,9 +124,38 @@ interface InvestigationStartFields {
 }
 
 export type StartInvestigationRequest = InvestigationStartFields & (
-  { schema_version: 1; inspection_requirements?: never } |
-  { schema_version: 2; inspection_requirements: InvestigationInspectionTarget[] }
+  { schema_version: 1; inspection_requirements?: never; expected_context_id?: never } |
+  { schema_version: 2; inspection_requirements: InvestigationInspectionTarget[]; expected_context_id?: never } |
+  { schema_version: 3; inspection_requirements?: InvestigationInspectionTarget[]; expected_context_id?: string }
 );
+
+/** Public preparation-time qualification; host-only proof fields are never UI authority. */
+export interface InvestigationCoverageQualification {
+  contract: 'coverage-qualification@1';
+  exhaustive: false;
+  coverage_id: string;
+  repos: {
+    repo: string;
+    status: 'recorded' | 'stale' | 'unrecorded';
+    commit: string | null;
+    inventory_hash: string | null;
+    limited: boolean | null;
+    counts: { not_selected: number; missing_input: number; not_applicable: number; unsupported: number } | null;
+    layer_hints: string[] | null;
+    compared: string[];
+  }[];
+}
+
+export interface InvestigationCoverageContext {
+  context_id: string;
+  coverage: InvestigationCoverageQualification;
+}
+
+export interface InvestigationCoverageAttestation {
+  context_id: string;
+  coverage_id: string;
+  representation_hash: string;
+}
 
 export type InvestigationStatus = 'queued' | 'preparing' | 'running' |
   'awaiting_consent' | 'completed' | 'failed' | 'cancelled' | 'interrupted' |
@@ -134,8 +163,8 @@ export type InvestigationStatus = 'queued' | 'preparing' | 'running' |
 
 /** Bounded history summary. Question is the host's redacted saved representation. */
 export interface InvestigationSummary {
-  /** V5 inspection tasks use schema 2; V1–V4 history stays schema 1. */
-  schema_version: 1 | 2;
+  /** V6 uses schema 3, V5 schema 2; V1–V4 history stays schema 1. */
+  schema_version: 1 | 2 | 3;
   investigation_id: string;
   conversation_id: string;
   parent_id: string | null;
@@ -177,6 +206,7 @@ export interface InvestigationUsage {
 
 /** Definition/provider are the saved identities, not the current catalog entries. */
 export interface InvestigationDetail extends InvestigationSummary {
+  coverage_context?: InvestigationCoverageContext;
   context_owner: string;
   origin: 'app';
   specialist: InvestigationSpecialist;
@@ -242,12 +272,13 @@ export interface InvestigationFinding {
 }
 
 export interface InvestigationResult {
-  schema_version: 1 | 2 | 3;
+  schema_version: 1 | 2 | 3 | 4;
+  coverage?: InvestigationCoverageAttestation;
   investigation_id: string;
   result_id: string;
   input_ledger_hash: string;
   graph_snapshot_id: string;
-  /** Present only for schema-2 results; absence preserves legacy history. */
+  /** Schema 2+ binds the exact finishing invocation; legacy history stays absent. */
   invocation_step_id?: string;
   disclosure_hash?: string;
   inspection_assessment?: InvestigationInspectionAssessment;

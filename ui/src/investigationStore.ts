@@ -42,25 +42,69 @@ function validSummary(value: InvestigationSummary | null, id?: string): value is
       value.inspection_requirement_count === undefined && value.inspection_requirements === undefined &&
       value.inspection_assessment === undefined;
   }
+  const v5 = value.schema_version === 2 &&
+    (value.specialist_id === 'domain-analyst@5' || value.specialist_id === 'evidence-auditor@5');
+  const v6 = value.schema_version === 3 &&
+    (value.specialist_id === 'domain-analyst@6' || value.specialist_id === 'evidence-auditor@6');
+  if (!v5 && !v6) return false;
   const requirementCount = value.inspection_requirement_count;
-  return value.schema_version === 2 &&
-    (value.specialist_id === 'domain-analyst@5' || value.specialist_id === 'evidence-auditor@5') &&
-    typeof requirementCount === 'number' && Number.isSafeInteger(requirementCount) && requirementCount >= 1 &&
+  if (v6 && requirementCount === undefined) return value.inspection_status === undefined &&
+    value.inspection_requirements === undefined && value.inspection_assessment === undefined;
+  return typeof requirementCount === 'number' && Number.isSafeInteger(requirementCount) && requirementCount >= 1 &&
     requirementCount <= 12 && (value.has_result
       ? value.inspection_status === 'supplied' || value.inspection_status === 'unmet'
       : value.inspection_status === (investigationIsActive(value) ? 'pending' : 'not_assessed'));
 }
 
-/** Host validates result content; the UI also rejects malformed version bindings. */
+const HEX_HASH = /^[0-9a-f]{64}(?![\s\S])/;
+const CONTEXT_ID = /^context-v2:[0-9a-f]{64}(?![\s\S])/;
+const COVERAGE_ID = /^coverage-context-v1:[0-9a-f]{64}(?![\s\S])/;
+const identity = (value: unknown): value is string => typeof value === 'string' && value.length > 0 &&
+  new TextEncoder().encode(value).length <= 256 && !value.includes('\0');
+const hash = (value: unknown): value is string => typeof value === 'string' && HEX_HASH.test(value);
+const closedFields = (value: object, fields: string[]) => Object.keys(value).length === fields.length &&
+  Object.keys(value).every((key) => fields.includes(key));
+
+/** Check the public saved wire. The host verifies its private identity proof. */
+function validCoverageContext(value: InvestigationDetail['coverage_context']): boolean {
+  if (!value || !closedFields(value, ['context_id', 'coverage']) || !CONTEXT_ID.test(value.context_id) || !value.coverage ||
+      !closedFields(value.coverage, ['contract', 'exhaustive', 'coverage_id', 'repos']) ||
+      value.coverage.contract !== 'coverage-qualification@1' || value.coverage.exhaustive !== false ||
+      !COVERAGE_ID.test(value.coverage.coverage_id) || !Array.isArray(value.coverage.repos) ||
+      value.coverage.repos.length > 4096) return false;
+  const repos = value.coverage.repos;
+  return new Set(repos.map((repo) => repo.repo)).size === repos.length && repos.every((repo) => {
+    if (!closedFields(repo, ['repo', 'status', 'commit', 'inventory_hash', 'limited', 'counts', 'layer_hints', 'compared']) ||
+        !identity(repo.repo) || !Array.isArray(repo.compared)) return false;
+    const derivedAbsent = repo.commit === null && repo.limited === null && repo.counts === null && repo.layer_hints === null;
+    if (repo.status === 'unrecorded') return derivedAbsent && repo.inventory_hash === null && repo.compared.length === 0;
+    if (!hash(repo.inventory_hash) || (JSON.stringify(repo.compared) !== '["registration","plugins"]' &&
+        JSON.stringify(repo.compared) !== '["registration","plugins","layer_hints"]')) return false;
+    if (repo.status === 'stale') return derivedAbsent;
+    if (repo.status !== 'recorded' || !identity(repo.commit) || !repo.counts || !Array.isArray(repo.layer_hints) ||
+        !repo.layer_hints.every(identity)) return false;
+    if (!closedFields(repo.counts, ['not_selected', 'missing_input', 'not_applicable', 'unsupported'])) return false;
+    const counts = [repo.counts.not_selected, repo.counts.missing_input, repo.counts.not_applicable, repo.counts.unsupported];
+    return counts.every((count) => Number.isSafeInteger(count) && count >= 0) &&
+      repo.limited === (repo.counts.not_selected > 0 || repo.counts.missing_input > 0 || repo.counts.unsupported > 0);
+  });
+}
+
+/** Host validates result content; the UI rejects incompatible version bindings. */
 function validResultBinding(result: InvestigationResult): boolean {
   if (result.schema_version === 1) {
-    return !('invocation_step_id' in result) && !('disclosure_hash' in result) && !('inspection_assessment' in result);
+    return !('invocation_step_id' in result) && !('disclosure_hash' in result) &&
+      !('inspection_assessment' in result) && !('coverage' in result);
   }
-  const disclosureBound = (result.schema_version === 2 || result.schema_version === 3) && typeof result.invocation_step_id === 'string' &&
-    /^[A-Za-z0-9_:-]{1,128}(?![\s\S])/.test(result.invocation_step_id) &&
-    typeof result.disclosure_hash === 'string' &&
-    /^investigation-disclosure-v1:[0-9a-f]{64}(?![\s\S])/.test(result.disclosure_hash);
-  if (!disclosureBound) return false;
+  if (![2, 3, 4].includes(result.schema_version) || typeof result.invocation_step_id !== 'string' ||
+      !/^[A-Za-z0-9_:-]{1,128}(?![\s\S])/.test(result.invocation_step_id) || typeof result.disclosure_hash !== 'string' ||
+      !(result.schema_version === 4 ? /^investigation-disclosure-v3:[0-9a-f]{64}(?![\s\S])/ :
+        /^investigation-disclosure-v1:[0-9a-f]{64}(?![\s\S])/).test(result.disclosure_hash)) return false;
+  if (result.schema_version === 4) {
+    if (!result.coverage || !closedFields(result.coverage, ['context_id', 'coverage_id', 'representation_hash']) || !CONTEXT_ID.test(result.coverage.context_id) ||
+        !COVERAGE_ID.test(result.coverage.coverage_id) || !hash(result.coverage.representation_hash)) return false;
+    if (!('inspection_assessment' in result)) return true;
+  } else if ('coverage' in result) return false;
   if (result.schema_version === 2) return !('inspection_assessment' in result);
   const assessment = result.inspection_assessment;
   return assessment?.schema_version === 1 && assessment.input_ledger_hash === result.input_ledger_hash &&
@@ -327,15 +371,22 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     start: async (draft) => {
       if (get().pendingStart || get().starting) return;
       const request_nonce = crypto.randomUUID();
-      if (draft.specialist_id.endsWith('@5')) {
-        if (!draft.inspection_requirements?.length) return;
-        await startRequest(structuredClone({ ...draft, schema_version: 2, request_nonce,
+      if (draft.specialist_id.endsWith('@6')) {
+        const { inspection_requirements: requirements, ...qualified } = draft;
+        if (requirements !== undefined && requirements.length === 0) return;
+        await startRequest(structuredClone({ ...qualified, schema_version: 3, request_nonce,
+          ...(requirements ? { expected_graph_revision: requirements[0].graph_snapshot_id,
+            inspection_requirements: requirements } : {}) }));
+      } else if (draft.specialist_id.endsWith('@5')) {
+        const { expected_context_id, ...inspectionDraft } = draft;
+        if (!draft.inspection_requirements?.length || expected_context_id !== undefined) return;
+        await startRequest(structuredClone({ ...inspectionDraft, schema_version: 2, request_nonce,
           expected_graph_revision: draft.inspection_requirements[0].graph_snapshot_id,
           inspection_requirements: draft.inspection_requirements }));
       } else {
         // Preserve legacy schema bytes: requirements are absent, never an empty list.
-        const { inspection_requirements: requirements, ...legacy } = draft;
-        if (requirements?.length) return;
+        const { inspection_requirements: requirements, expected_context_id, ...legacy } = draft;
+        if (requirements?.length || expected_context_id !== undefined) return;
         await startRequest(structuredClone({ ...legacy, schema_version: 1, request_nonce }));
       }
     },
@@ -375,7 +426,22 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         if ((result !== null) !== detail.has_result) throw new Error('Result observation changed.');
         if (result && (!validResultBinding(result) || result.investigation_id !== id ||
             result.graph_snapshot_id !== detail.graph_snapshot_id)) throw new Error('Wrong result.');
-        if (result?.schema_version === 3 &&
+        if (detail.schema_version === 3) {
+          if (detail.inspection_requirement_count !== undefined &&
+              (!Array.isArray(detail.inspection_requirements) || detail.inspection_requirements.length !== detail.inspection_requirement_count ||
+               new Set(detail.inspection_requirements.map((target) => target.target_id)).size !== detail.inspection_requirements.length ||
+               (detail.has_result ? !detail.inspection_assessment : detail.inspection_assessment !== undefined) ||
+               detail.inspection_requirements.some((target) => target.schema_version !== 1 || !hash(target.target_id)) ||
+               (result && (!result.inspection_assessment || result.inspection_assessment.requirements.length !== detail.inspection_requirements.length ||
+                 detail.inspection_requirements.some((target) => !result.inspection_assessment?.requirements.some((row) =>
+                   JSON.stringify(row.target) === JSON.stringify(target))))))) throw new Error('Inspection targets changed.');
+          if (detail.coverage_context !== undefined && !validCoverageContext(detail.coverage_context)) throw new Error('Invalid saved coverage.');
+          if (detail.graph_snapshot_id !== null && !detail.coverage_context) throw new Error('Missing prepared coverage.');
+          if (result && (result.schema_version !== 4 || !detail.coverage_context ||
+              result.coverage?.context_id !== detail.coverage_context.context_id ||
+              result.coverage.coverage_id !== detail.coverage_context.coverage.coverage_id)) throw new Error('Coverage binding changed.');
+        } else if (detail.coverage_context !== undefined || result?.schema_version === 4) throw new Error('Unexpected coverage version.');
+        if ((result?.schema_version === 3 || result?.schema_version === 4) &&
             JSON.stringify(detail.inspection_assessment) !== JSON.stringify(result.inspection_assessment)) {
           throw new Error('Inspection assessment observation changed.');
         }
@@ -411,6 +477,9 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           return;
         }
         // A known immutable result cannot be replaced or disappear on a stale read.
+        if (saved?.coverage_context && JSON.stringify(saved.coverage_context) !== JSON.stringify(detail.coverage_context)) {
+          throw new Error('Saved coverage changed.');
+        }
         const savedResult = get().result;
         if (savedResult && result && JSON.stringify(savedResult) !== JSON.stringify(result)) throw new Error('Result changed.');
         updateSummary(detail);

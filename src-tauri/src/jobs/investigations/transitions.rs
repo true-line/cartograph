@@ -37,7 +37,11 @@ impl JobStore {
             return Err(InvestigationStoreError::Cancelled);
         }
         match transition {
-            InvestigationTransition::InputPrepared { ledger, usage } => {
+            InvestigationTransition::InputPrepared {
+                ledger,
+                usage,
+                coverage_archive,
+            } => {
                 if task.phase != Phase::Preparing || task.ledger_revision.is_some() {
                     return Err(InvestigationStoreError::Stale);
                 }
@@ -47,6 +51,13 @@ impl JobStore {
                     .is_some_and(|expected| expected != &ledger.graph_snapshot_id)
                 {
                     return Err(InvestigationStoreError::Conflict);
+                }
+                match (&ledger.coverage, coverage_archive) {
+                    (None, None) => {}
+                    (Some(proof), Some(archive)) if proof == archive.proof() => {
+                        coverage::insert(&tx, &task.detail.summary.investigation_id, &archive)?;
+                    }
+                    _ => return Err(InvestigationStoreError::Invalid),
                 }
                 admit_input(&tx, &mut task, &ledger, usage, true)?;
             }
@@ -145,6 +156,15 @@ impl JobStore {
             } => {
                 if task.phase != Phase::Invocation || tool.is_some() == result.is_some() {
                     return Err(InvestigationStoreError::Stale);
+                }
+                if tool == Some(InvestigationTool::ReadCoverageInventory)
+                    && !task
+                        .detail
+                        .summary
+                        .specialist_id
+                        .uses_coverage_qualification()
+                {
+                    return Err(InvestigationStoreError::Invalid);
                 }
                 let pending = task
                     .pending
@@ -562,6 +582,14 @@ fn admit_input(
     first: bool,
 ) -> Result<(), InvestigationStoreError> {
     ledger.validate()?;
+    let archive = coverage::load(connection, &task.detail.summary.investigation_id)?;
+    match (&ledger.coverage, archive.as_ref()) {
+        (None, None) => {}
+        (Some(proof), Some(archive)) if proof == archive.proof() => {
+            archive.validate_reads(&ledger.coverage_reads)?;
+        }
+        _ => return Err(InvestigationStoreError::Invalid),
+    }
     validate_usage(&usage, &task.detail.limits)?;
     let prior = &task.detail.usage;
     if usage.model_invocations != prior.model_invocations
@@ -610,7 +638,9 @@ fn admit_input(
         return Err(InvestigationStoreError::Invalid);
     }
     if let Some(previous) = load_ledger(connection, task)?
-        && (ledger.revision <= previous.revision
+        && (ledger.schema_version != previous.schema_version
+            || ledger.coverage != previous.coverage
+            || ledger.revision <= previous.revision
             || ledger.graph_snapshot_id != previous.graph_snapshot_id
             || ledger.scope_snapshot_id != previous.scope_snapshot_id
             || ledger.supplied_history_hash != previous.supplied_history_hash
@@ -623,6 +653,7 @@ fn admit_input(
                 .citations
                 .iter()
                 .all(|citation| ledger.citations.contains(citation))
+            || !ledger.coverage_reads.starts_with(&previous.coverage_reads)
             || !ledger.queries.starts_with(&previous.queries)
             || !previous
                 .receipt_references
@@ -630,6 +661,14 @@ fn admit_input(
                 .all(|reference| ledger.receipt_references.contains(reference)))
     {
         return Err(InvestigationStoreError::Conflict);
+    }
+    if ledger.schema_version == 2 {
+        InvestigationTurnBasis {
+            input_ledger_hash: ledger.fingerprint()?,
+            previous_ledger: load_ledger(connection, task)?,
+            completed_tool: task.action_tool,
+        }
+        .validate(ledger)?;
     }
     let id = &task.detail.summary.investigation_id;
     insert_body(
@@ -659,6 +698,14 @@ fn admit_input(
     task.ledger_hash = Some(ledger.fingerprint()?);
     task.detail.summary.graph_snapshot_id = Some(ledger.graph_snapshot_id.clone());
     task.detail.scope_snapshot_id = Some(ledger.scope_snapshot_id.clone());
+    task.detail.coverage_context =
+        ledger
+            .coverage
+            .as_ref()
+            .map(|proof| InvestigationCoverageContext {
+                context_id: proof.context_id.clone(),
+                coverage: proof.qualification.clone(),
+            });
     task.detail.citations = ledger.citations.clone();
     task.detail.usage = usage;
     let tool = task.action_tool.take();

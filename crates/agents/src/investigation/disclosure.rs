@@ -80,6 +80,42 @@ pub struct DisclosedInvestigationSource {
     pub redacted: bool,
 }
 
+/// One actual supplied inventory detail; never a graph/source citation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisclosedInvestigationCoverageDetail {
+    pub read_index: usize,
+    pub representation_hash: String,
+    pub disclosed_body_hash: String,
+    pub redacted: bool,
+}
+
+/// Exact mandatory public qualification supplied in a qualified invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisclosedInvestigationCoverage {
+    pub context_id: String,
+    pub coverage_id: String,
+    pub representation_hash: String,
+}
+
+impl DisclosedInvestigationCoverage {
+    pub(super) fn from_proof(
+        proof: &context_hub::coverage::CoverageProof,
+    ) -> Result<Self, InvestigationError> {
+        proof
+            .validate()
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let public = serde_json::to_value(&proof.qualification)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        Ok(Self {
+            context_id: proof.context_id.clone(),
+            coverage_id: proof.qualification.coverage_id.clone(),
+            representation_hash: core_prov::content_hash(&bounded_bytes(&public, MAX_INPUT_BYTES)?),
+        })
+    }
+}
+
 /// A complete accounting in acquisition order. Each acquired fact, query and
 /// source citation has exactly one supplied/omitted entry, including uncited
 /// evidence. Original source bindings are resolved through input_ledger_hash.
@@ -87,6 +123,10 @@ pub struct DisclosedInvestigationSource {
 #[serde(deny_unknown_fields)]
 pub struct InvestigationDisclosure {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<DisclosedInvestigationCoverage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage_details: Vec<DisclosedInvestigationCoverageDetail>,
     pub policy: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspection_requirements_hash: Option<String>,
@@ -107,8 +147,18 @@ impl InvestigationDisclosure {
     /// sealing this record; metadata does not attest unavailable old source.
     pub fn validate(&self, ledger: &InvestigationInputLedger) -> Result<(), InvestigationError> {
         ledger.validate()?;
+        let expected_coverage = ledger
+            .coverage
+            .as_ref()
+            .map(DisclosedInvestigationCoverage::from_proof)
+            .transpose()?;
+        if self.coverage != expected_coverage {
+            return Err(InvestigationError::InvalidInput);
+        }
         if self.schema_version
-            != if self.inspection_requirements_hash.is_some() {
+            != if self.coverage.is_some() {
+                3
+            } else if self.inspection_requirements_hash.is_some() {
                 2
             } else {
                 1
@@ -127,6 +177,23 @@ impl InvestigationDisclosure {
             || self.history.is_some() != ledger.supplied_history_hash.is_some()
         {
             return Err(InvestigationError::InvalidInput);
+        }
+        if self.coverage_details.len() != ledger.coverage_reads.len() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        for (index, (entry, read)) in self
+            .coverage_details
+            .iter()
+            .zip(&ledger.coverage_reads)
+            .enumerate()
+        {
+            if entry.read_index != index
+                || !crate::source_basis::hash(&entry.representation_hash)
+                || !crate::source_basis::hash(&entry.disclosed_body_hash)
+                || entry.redacted != (entry.disclosed_body_hash != read.request.inventory_hash)
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
         }
         for (entry, acquired) in self.facts.iter().zip(&ledger.selected_facts) {
             if entry.fact != acquired.fact {
@@ -193,12 +260,20 @@ impl InvestigationDisclosure {
         ledger: &InvestigationInputLedger,
     ) -> Result<String, InvestigationError> {
         self.validate(ledger)?;
-        Ok(format!(
-            "investigation-disclosure-v1:{}",
-            crate::source_basis::domain_hash(
-                b"cartograph:investigation-disclosure:v1\0",
-                &bounded_bytes(self, MAX_DISCLOSURE_BYTES)?,
+        let (prefix, domain): (&str, &[u8]) = if self.schema_version == 3 {
+            (
+                "investigation-disclosure-v3",
+                b"cartograph:investigation-disclosure:v3\0",
             )
+        } else {
+            (
+                "investigation-disclosure-v1",
+                b"cartograph:investigation-disclosure:v1\0",
+            )
+        };
+        Ok(format!(
+            "{prefix}:{}",
+            crate::source_basis::domain_hash(domain, &bounded_bytes(self, MAX_DISCLOSURE_BYTES)?,)
         ))
     }
 

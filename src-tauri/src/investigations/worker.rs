@@ -144,11 +144,29 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         let history = self.parent_history(request)?;
         let _inspection_guards = super::inspection::validate_targets(self.state, request)
             .map_err(|_| Failure::Stop(InvestigationStopReason::InputChanged))?;
-        let mut context = FrozenContext::prepare(self.state, request, &history)?;
+        let archive_capacity = if request.specialist_id.uses_coverage_qualification() {
+            Some(
+                self.state
+                    .jobs
+                    .lock()
+                    .map_err(|_| HostError::Operational)?
+                    .investigation_coverage_archive_capacity(self.id)?,
+            )
+        } else {
+            None
+        };
+        let mut context = FrozenContext::prepare_with_app(
+            self.app,
+            self.state,
+            request,
+            &history,
+            archive_capacity,
+        )?;
         self.check_new_work()?;
         let mut usage = self.detail.usage.clone();
         usage.active_milliseconds = self.clock.active_milliseconds();
         self.transition(InvestigationTransition::InputPrepared {
+            coverage_archive: context.coverage_archive.clone().map(Box::new),
             ledger: Box::new(context.ledger.clone()),
             usage,
         })?;
@@ -168,7 +186,20 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .lock()
                     .map_err(|_| HostError::Operational)?
                     .investigation_turn_basis(self.id)?;
-                if let Some(targets) = &request.inspection_requirements {
+                if request.specialist_id.uses_coverage_qualification() {
+                    InvestigationInput::prepare_v6(
+                        &request.question,
+                        request.specialist_id,
+                        context.ledger.clone(),
+                        &context.query_pages,
+                        &context.evidence,
+                        &history,
+                        &self.detail.usage,
+                        &basis,
+                        request.inspection_requirements.as_deref(),
+                        &context.inventory_details,
+                    )?
+                } else if let Some(targets) = &request.inspection_requirements {
                     InvestigationInput::prepare_v5(
                         &request.question,
                         request.specialist_id,
@@ -265,12 +296,39 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             input
                 .validate_response_metadata(completion.response_model.as_deref())
                 .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
-            let action = InvestigationAction::decode(&completion.text)
-                .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+            let (action, inventory_read, action_hash) =
+                if let Some(proof) = &context.ledger.coverage {
+                    let qualified =
+                        QualifiedInvestigationAction::decode(&completion.text, &proof.context_id)
+                            .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+                    // Hash the entire admitted qualified envelope, including its
+                    // context identity, rather than its legacy projection.
+                    let value: serde_json::Value = serde_json::from_str(&completion.text)
+                        .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+                    let hash = content_hash(&bounded_json(&value, 32 * 1024)?);
+                    match qualified {
+                        QualifiedInvestigationAction::QueryContext { query, .. } => (
+                            Some(InvestigationAction::QueryContext { query }),
+                            None,
+                            hash,
+                        ),
+                        QualifiedInvestigationAction::ReadCoverageInventory(read) => {
+                            (None, Some(read), hash)
+                        }
+                        QualifiedInvestigationAction::SourceOrFinish(action) => {
+                            (Some(action), None, hash)
+                        }
+                    }
+                } else {
+                    let action = InvestigationAction::decode(&completion.text)
+                        .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+                    let hash = content_hash(&bounded_json(&action, 32 * 1024)?);
+                    (Some(action), None, hash)
+                };
             let response = InvestigationResponseMeta {
                 step_id: step_id.clone(),
                 response_hash: content_hash(completion.text.as_bytes()),
-                action_hash: content_hash(&bounded_json(&action, 32 * 1024)?),
+                action_hash,
                 observed_model: completion.response_model.clone(),
                 reported_input_tokens: completion
                     .usage
@@ -282,7 +340,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .and_then(|usage| usage.output_tokens),
                 active_milliseconds: self.clock.active_milliseconds(),
             };
-            if matches!(action, InvestigationAction::Finish { .. }) {
+            if let Some(action @ InvestigationAction::Finish { .. }) = &action {
                 let timestamp = self
                     .state
                     .jobs
@@ -294,7 +352,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                         self.id,
                         &step_id,
                         disclosure.as_ref(),
-                        &action,
+                        action,
                         completion.response_model,
                         timestamp,
                     )
@@ -306,9 +364,14 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             }
             // Late tools do not run or acquire new source after cancellation.
             self.check_new_work()?;
-            let tool = action
-                .tool()
-                .ok_or(Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+            let tool = if inventory_read.is_some() {
+                InvestigationTool::ReadCoverageInventory
+            } else {
+                action
+                    .as_ref()
+                    .and_then(InvestigationAction::tool)
+                    .ok_or(Failure::Stop(InvestigationStopReason::InvalidResponse))?
+            };
             self.transition(InvestigationTransition::ActionAdmitted {
                 response,
                 tool: Some(tool),
@@ -318,14 +381,15 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             self.transition(InvestigationTransition::BeginTool { tool })?;
             let state = self.state;
             let mut sink = WorkerSink { worker: self };
-            match action {
-                InvestigationAction::QueryContext { query } => {
+            match (action, inventory_read) {
+                (Some(InvestigationAction::QueryContext { query }), None) => {
                     context.query(state, query, &mut sink)?
                 }
-                InvestigationAction::ReadEvidence { fact, role, index } => {
+                (Some(InvestigationAction::ReadEvidence { fact, role, index }), None) => {
                     context.read_evidence(state, fact, role, index, &mut sink)?
                 }
-                InvestigationAction::Finish { .. } => unreachable!(),
+                (None, Some(read)) => context.read_inventory(read, &mut sink)?,
+                _ => return Err(Failure::Stop(InvestigationStopReason::InvalidResponse)),
             }
             self.check_new_work()?;
         }

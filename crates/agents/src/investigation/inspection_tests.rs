@@ -63,6 +63,8 @@ fn fixture() -> (
         representation_hash: content_hash(b"representation"),
     };
     let disclosure = InvestigationDisclosure {
+        coverage_details: vec![],
+        coverage: None,
         schema_version: 2,
         policy: COMPACT_DISCLOSURE_POLICY.into(),
         inspection_requirements_hash: Some(

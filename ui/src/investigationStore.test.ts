@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC as mockTauriIPC } from '@tauri-apps/api/mocks';
 import backendInspection from './fixtures/investigation-inspection-backend.json';
+import backendQualified from './fixtures/investigation-coverage-backend.json';
 import { mergeInvestigationEvents, useInvestigationStore } from './investigationStore';
-import { inspectionAssessment, inspectionDetail, inspectionTarget, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from './investigationFixtures';
-import type { InvestigationCapturedLocation, InvestigationCitationRead, InvestigationDetail, InvestigationEvent, InvestigationInspectionTarget, StartInvestigationRequest } from './investigationTypes';
+import { qualifiedCoverageContext, qualifiedDetail, qualifiedResult, inspectionAssessment, inspectionDetail, inspectionTarget, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from './investigationFixtures';
+import type { InvestigationCapturedLocation, InvestigationCitationRead, InvestigationDetail, InvestigationEvent, InvestigationInspectionTarget, InvestigationResult, StartInvestigationRequest } from './investigationTypes';
 
 // These commands use named JSON arguments; Tauri also supports unrelated binary payloads.
 function mockIPC(handler: (command: string, args?: Record<string, unknown>) => unknown) {
@@ -598,4 +599,139 @@ it.each([
   await useInvestigationStore.getState().loadHistory();
   expect(useInvestigationStore.getState().historyError).toBeNull();
   expect(useInvestigationStore.getState().history).toEqual([summary]);
+});
+
+/** Replay actual saved DTOs; activity is a bounded transport stub, not provider evidence. */
+function qualifiedTransport(detail: InvestigationDetail, result: InvestigationResult | null) {
+  mockIPC((command, args) => {
+    if (command === 'get_investigation') return detail;
+    if (command === 'list_investigations') return { items: [detail], next_cursor: null };
+    if (command === 'investigation_result') return result;
+    if (command === 'investigation_consent') return null;
+    if (command === 'investigation_events') return { investigation_id: detail.investigation_id,
+      items: Array.from({ length: detail.last_event_sequence }, (_, index) => ({
+        investigation_id: detail.investigation_id, sequence: index + 1, revision: detail.revision,
+        kind: 'created', step_id: null, tool: null, summary: 'Saved activity transport fixture.', created_at: detail.created_at,
+      })).filter((event) => event.sequence > Number(args?.afterSequence ?? 0)),
+      next_sequence: detail.last_event_sequence, has_more: false };
+    throw new Error('Unexpected qualified command');
+  });
+}
+
+describe('saved coverage-qualified investigations (AC-0239)', () => {
+  it('accepts actual Rust worker/firewall/store V6 detail and result without source obligations', async () => {
+    const fixture = backendQualified as { detail: InvestigationDetail; result: InvestigationResult };
+    qualifiedTransport(fixture.detail, fixture.result);
+    await useInvestigationStore.getState().loadHistory();
+    await useInvestigationStore.getState().open(fixture.detail.investigation_id);
+    const state = useInvestigationStore.getState();
+    expect(state.historyError).toBeNull();
+    expect(state.error).toBeNull();
+    expect(state.detail).toEqual(fixture.detail);
+    expect(state.result).toEqual(fixture.result);
+    expect(state.detail?.inspection_requirements).toBeUndefined();
+    expect(state.result?.inspection_assessment).toBeUndefined();
+  });
+
+  it('freezes schema-3 context expectation and nonce while leaving implicit targets absent', async () => {
+    const starts: StartInvestigationRequest[] = [];
+    mockIPC((command, args) => { expect(command).toBe('start_investigation');
+      starts.push(structuredClone(args?.request as StartInvestigationRequest)); throw new Error('Uncertain'); });
+    useInvestigationStore.getState().addInspectionRequirement(inspectionTarget);
+    const draft = { specialist_id: 'domain-analyst@6' as const, question: 'Qualify this context.',
+      scope: { type: 'all' as const }, provider_mode: 'local' as const, limit_profile: 'investigation-v1',
+      expected_context_id: qualifiedCoverageContext.context_id };
+    await useInvestigationStore.getState().start(draft);
+    draft.expected_context_id = `context-v2:${'9'.repeat(64)}`;
+    await useInvestigationStore.getState().retryStart();
+    expect(starts).toHaveLength(2);
+    expect(starts[1]).toEqual(starts[0]);
+    expect(starts[0].schema_version).toBe(3);
+    expect(starts[0].expected_context_id).toBe(qualifiedCoverageContext.context_id);
+    expect('inspection_requirements' in starts[0]).toBe(false);
+  });
+
+  it('supports explicit V6 targets without conflating their assessment with coverage', async () => {
+    const assessment = { ...inspectionAssessment(), disclosure_hash: qualifiedResult().disclosure_hash! };
+    const detail = qualifiedDetail('targeted', { inspection_requirements: [inspectionTarget],
+      inspection_assessment: assessment, inspection_status: 'unmet', inspection_requirement_count: 1 });
+    const result = qualifiedResult('targeted', { inspection_assessment: assessment });
+    qualifiedTransport(detail, result);
+    await useInvestigationStore.getState().open('targeted');
+    expect(useInvestigationStore.getState().error).toBeNull();
+    expect(useInvestigationStore.getState().result?.coverage).toEqual(result.coverage);
+    expect(useInvestigationStore.getState().result?.inspection_assessment?.requirements[0].status).toBe('unmet');
+  });
+
+  it('sends explicit V6 targets only when present and preserves their graph expectation', async () => {
+    let sent: StartInvestigationRequest | null = null;
+    mockIPC((command, args) => { expect(command).toBe('start_investigation'); sent = args?.request as StartInvestigationRequest;
+      throw new Error('Uncertain'); });
+    await useInvestigationStore.getState().start({ specialist_id: 'evidence-auditor@6', question: 'Inspect.',
+      scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1', inspection_requirements: [inspectionTarget] });
+    expect(sent).toMatchObject({ schema_version: 3, inspection_requirements: [inspectionTarget],
+      expected_graph_revision: inspectionTarget.graph_snapshot_id });
+  });
+
+  it('accepts queued V6 before coverage preparation without inventing a basis', async () => {
+    const detail = qualifiedDetail('queued', { status: 'queued', has_result: false, graph_snapshot_id: null,
+      coverage_context: undefined, scope_snapshot_id: null });
+    qualifiedTransport(detail, null);
+    await useInvestigationStore.getState().open('queued');
+    expect(useInvestigationStore.getState().error).toBeNull();
+    expect(useInvestigationStore.getState().detail?.coverage_context).toBeUndefined();
+  });
+
+  it('retains original prepared qualification when a later response substitutes inventory over identical graph', async () => {
+    const detail = qualifiedDetail('live', { status: 'running', has_result: false });
+    qualifiedTransport(detail, null);
+    await useInvestigationStore.getState().open('live');
+    const replacement = structuredClone(detail);
+    replacement.revision += 1;
+    replacement.coverage_context!.context_id = `context-v2:${'9'.repeat(64)}`;
+    replacement.coverage_context!.coverage.coverage_id = `coverage-context-v1:${'8'.repeat(64)}`;
+    qualifiedTransport(replacement, null);
+    await useInvestigationStore.getState().refreshSelected();
+    expect(useInvestigationStore.getState().error).not.toBeNull();
+    expect(useInvestigationStore.getState().detail?.coverage_context).toEqual(detail.coverage_context);
+  });
+
+  it.each([
+    { schema_version: 1 }, { schema_version: 2 }, { specialist_id: 'domain-analyst@5' },
+    { inspection_requirement_count: 0 }, { inspection_requirement_count: 1 },
+    { inspection_status: 'supplied' },
+  ])('rejects incompatible V6 summary wire: %j', async (override) => {
+    qualifiedTransport({ ...qualifiedDetail(), ...override } as InvestigationDetail, qualifiedResult());
+    await useInvestigationStore.getState().loadHistory();
+    expect(useInvestigationStore.getState().historyError).not.toBeNull();
+  });
+
+  it.each(['absent', 'exhaustive', 'stale_counts', 'unrecorded_inventory', 'wrong_context', 'wrong_coverage', 'old_disclosure', 'bad_hash', 'missing_attestation'])(
+    'refuses inconsistent saved coverage: %s', async (mutation) => {
+      const detail = structuredClone(qualifiedDetail());
+      const result = structuredClone(qualifiedResult());
+      if (mutation === 'absent') delete detail.coverage_context;
+      if (mutation === 'exhaustive') Object.assign(detail.coverage_context!.coverage, { exhaustive: true });
+      if (mutation === 'stale_counts') detail.coverage_context!.coverage.repos[1].counts = { missing_input: 1, not_selected: 0, not_applicable: 0, unsupported: 0 };
+      if (mutation === 'unrecorded_inventory') detail.coverage_context!.coverage.repos[2].inventory_hash = '7'.repeat(64);
+      if (mutation === 'wrong_context') result.coverage!.context_id = `context-v2:${'7'.repeat(64)}`;
+      if (mutation === 'wrong_coverage') result.coverage!.coverage_id = `coverage-context-v1:${'7'.repeat(64)}`;
+      if (mutation === 'old_disclosure') result.disclosure_hash = `investigation-disclosure-v1:${'7'.repeat(64)}`;
+      if (mutation === 'bad_hash') result.coverage!.representation_hash += '\n';
+      if (mutation === 'missing_attestation') delete result.coverage;
+      qualifiedTransport(detail, result);
+      await useInvestigationStore.getState().open(detail.investigation_id);
+      expect(useInvestigationStore.getState().error).not.toBeNull();
+      expect(useInvestigationStore.getState().result).toBeNull();
+    });
+});
+
+it('rejects a premature V6 inspection assessment before a finishing result (AC-0239)', async () => {
+  const detail = qualifiedDetail('pending', { status: 'running', has_result: false,
+    inspection_requirement_count: 1, inspection_status: 'pending', inspection_requirements: [inspectionTarget],
+    inspection_assessment: inspectionAssessment() });
+  qualifiedTransport(detail, null);
+  await useInvestigationStore.getState().open('pending');
+  expect(useInvestigationStore.getState().error).not.toBeNull();
+  expect(useInvestigationStore.getState().detail).toBeNull();
 });
