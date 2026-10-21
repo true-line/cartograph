@@ -114,7 +114,16 @@ jobs:
             exit 1
           fi
 
-          git fetch origin main
+          # A stalled transport once held this step until the job timeout
+          # (#689). Bound each attempt, retry once, then fail visibly.
+          for attempt in 1 2; do
+            timeout 120 git fetch --no-tags origin main && break
+            if [ "$attempt" = 2 ]; then
+              echo "::error::Could not fetch origin/main to verify $TAG."
+              exit 1
+            fi
+            sleep 10
+          done
           if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
             echo "::error::$TAG does not resolve to a commit on main."
             exit 1
