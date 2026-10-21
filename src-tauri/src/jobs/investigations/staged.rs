@@ -402,6 +402,62 @@ fn read_action_hash(read: &ReadIntent) -> Result<String, InvestigationStoreError
 }
 /// Replay only immutable, ordered journal and actual saved production witnesses.
 /// Rejected finding prose/raw responses are deliberately not stored or replayed.
+struct ResponseUsage {
+    response: InvestigationResponseMeta,
+    invocations: u32,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+}
+
+// Invocation order is authoritative: a missing response cannot be skipped to
+// turn a later response into the first measured call, or restore unknown usage.
+fn response_usage(
+    connection: &Connection,
+    id: &str,
+    step_id: &str,
+    max_invocations: u32,
+) -> Result<ResponseUsage, InvestigationStoreError> {
+    let steps = connection.prepare("SELECT CASE WHEN typeof(step_id)='text' AND length(CAST(step_id AS BLOB))<=128 THEN step_id END FROM investigation_invocations WHERE task_id=?1 AND rowid<=(SELECT rowid FROM investigation_invocations WHERE task_id=?1 AND step_id=?2) ORDER BY rowid LIMIT ?3")?
+        .query_map(params![id, step_id, i64::from(max_invocations) + 1], |row| row.get::<_, Option<String>>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if steps.is_empty()
+        || steps.len() > max_invocations as usize
+        || steps.last().and_then(|step| step.as_deref()) != Some(step_id)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let count = u32::try_from(steps.len()).map_err(|_| InvestigationStoreError::Invalid)?;
+    let (mut input_tokens, mut output_tokens) = (None, None);
+    let mut last = None;
+    for (ordinal, step) in steps.into_iter().enumerate() {
+        let step = step.ok_or(InvestigationStoreError::Invalid)?;
+        let response: InvestigationResponseMeta =
+            read_body(connection, "investigation_responses", "step_id", id, &step)?
+                .ok_or(InvestigationStoreError::Invalid)?;
+        if response.step_id != step
+            || !hash_valid(&response.response_hash)
+            || !hash_valid(&response.action_hash)
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        encode(&response, 4096)?;
+        input_tokens =
+            transitions::add_reported(input_tokens, response.reported_input_tokens, ordinal == 0)?;
+        output_tokens = transitions::add_reported(
+            output_tokens,
+            response.reported_output_tokens,
+            ordinal == 0,
+        )?;
+        last = Some(response);
+    }
+    Ok(ResponseUsage {
+        response: last.ok_or(InvestigationStoreError::Invalid)?,
+        invocations: count,
+        input_tokens,
+        output_tokens,
+    })
+}
+
 pub(super) fn load(
     connection: &Connection,
     id: &str,
@@ -515,8 +571,17 @@ pub(super) fn load(
         {
             return Err(InvestigationStoreError::Invalid);
         }
-        let invocation_count:i64=connection.query_row("SELECT count(*) FROM investigation_invocations WHERE task_id=?1 AND rowid<=(SELECT rowid FROM investigation_invocations WHERE task_id=?1 AND step_id=?2)",params![id,entry.record.step_id],|row|row.get(0))?;
-        if invocation_count != i64::from(entry.usage.model_invocations) {
+        let replay = response_usage(
+            connection,
+            id,
+            &entry.record.step_id,
+            task.detail.limits.model_invocations,
+        )?;
+        if replay.response != entry.response
+            || replay.invocations != entry.usage.model_invocations
+            || replay.input_tokens != entry.usage.reported_input_tokens
+            || replay.output_tokens != entry.usage.reported_output_tokens
+        {
             return Err(InvestigationStoreError::Invalid);
         }
         if let Some(previous) = entries.last()
@@ -652,8 +717,15 @@ pub(super) fn append(
         ledger_revision: ledger.revision,
     };
     entry.entry_id = entry.content_id()?;
-    let bytes =
-        encode(&entry, MAX_RECORD_BYTES)?.len() + entry.record.feedback.bytes()?.len() + 1024;
+    // Include the actual ordinary response body and its row allowance before
+    // writing it. Shared accounting will charge that row once after commit.
+    let response_body = encode(&entry.response, 4096)?;
+    let bytes = encode(&entry, MAX_RECORD_BYTES)?.len()
+        + entry.record.feedback.bytes()?.len()
+        + 1024
+        + response_body.len()
+        + 64
+        + 256;
     let task_bytes = stored_bytes(tx, Some(&id))?
         .checked_add(bytes)
         .ok_or(InvestigationStoreError::Capacity)?;
@@ -662,6 +734,28 @@ pub(super) fn append(
         .ok_or(InvestigationStoreError::Capacity)?;
     if task_bytes > TASK_CAPACITY - TERMINAL_RESERVE || global > STORE_CAPACITY {
         return Err(InvestigationStoreError::Capacity);
+    }
+    one(tx.execute(
+        "INSERT INTO investigation_responses VALUES (?1,?2,?3,?4)",
+        params![
+            id,
+            entry.response.step_id,
+            response_body,
+            core_prov::content_hash(&response_body)
+        ],
+    )?)?;
+    let replay = response_usage(
+        tx,
+        &id,
+        &entry.record.step_id,
+        task.detail.limits.model_invocations,
+    )?;
+    if replay.response != entry.response
+        || replay.invocations != entry.usage.model_invocations
+        || replay.input_tokens != entry.usage.reported_input_tokens
+        || replay.output_tokens != entry.usage.reported_output_tokens
+    {
+        return Err(InvestigationStoreError::Invalid);
     }
     insert(
         tx,

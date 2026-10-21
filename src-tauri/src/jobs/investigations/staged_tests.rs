@@ -274,6 +274,7 @@ fn staged_refusal_journal_commit_rollback_and_fresh_store_replay_are_atomic() {
         "staged_completion_intents",
         "staged_completion_refusals",
         "staged_completion_feedback",
+        "investigation_responses",
     ] {
         let count: i64 = fixture
             .store
@@ -467,6 +468,7 @@ fn staged_refusal_journal_rejects_response_usage_tampering() {
         "action_hash",
         "observed_model",
         "reported_tokens",
+        "response_and_reported_tokens",
         "active_time",
     ] {
         let mut fixture = Fixture::new();
@@ -491,8 +493,15 @@ fn staged_refusal_journal_rejects_response_usage_tampering() {
             "action_hash" => entry.response.action_hash = "a".repeat(64),
             "observed_model" => entry.response.observed_model = Some("changed-model".into()),
             "reported_tokens" => entry.usage.reported_input_tokens = Some(11),
+            "response_and_reported_tokens" => {
+                entry.response.reported_input_tokens = Some(11);
+                entry.usage.reported_input_tokens = Some(11);
+            }
             _ => entry.usage.active_milliseconds += 1,
         };
+        // Recompute both identity layers: replay must use the independent
+        // immutable ordinary response row, not a self-consistent journal body.
+        entry.entry_id = entry.content_id().unwrap();
         let body = encode(&entry, MAX_RECORD_BYTES).unwrap();
         fixture
             .store
@@ -519,7 +528,8 @@ fn staged_refusal_journal_rejects_response_usage_tampering() {
                     .unwrap(),
             )
             .unwrap();
-        assert!(load(&fixture.store.conn, &fixture.id).is_err(), "{field}");
+        let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+        assert!(load(&reopened.conn, &fixture.id).is_err(), "{field}");
     }
 }
 
@@ -737,7 +747,21 @@ fn staged_refusal_journal_second_refusal_requires_terminal_and_rolls_back() {
             .unwrap(),
             RefusalDisposition::TerminalRequired
         );
-        assert_eq!(load(&tx, &fixture.id).unwrap().len(), 2);
+        let replayed = load(&tx, &fixture.id).unwrap();
+        assert_eq!(replayed.len(), 2);
+        // First refusal + actual read + second refusal: each admitted response
+        // contributes exactly once, including the intervening tool response.
+        assert_eq!(replayed[1].usage.model_invocations, 3);
+        assert_eq!(replayed[1].usage.reported_input_tokens, Some(30));
+        assert_eq!(replayed[1].usage.reported_output_tokens, Some(15));
+        let responses: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM investigation_responses WHERE task_id=?1",
+                [&fixture.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(responses, 3);
         assert!(
             append(
                 &tx,
@@ -766,6 +790,19 @@ fn staged_refusal_journal_second_refusal_requires_terminal_and_rolls_back() {
         )
         .unwrap();
     assert_eq!(count, 1);
+    let responses: i64 = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT count(*) FROM investigation_responses WHERE task_id=?1",
+            [&fixture.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        responses, 2,
+        "second refusal response rolls back with its journal"
+    );
 }
 
 // AC-0265: original request identity cannot be replaced by its redacted display.
@@ -854,6 +891,8 @@ fn staged_refusal_journal_counts_toward_ordinary_capacity_after_commit() {
         charged += usize::try_from(bytes).unwrap();
     }
     assert!(charged > 0);
+    let response_charge = encode(&fixture.response, 4096).unwrap().len() + 64 + 256;
+    charged += response_charge;
     assert_eq!(
         stored_bytes(&fixture.store.conn, Some(&fixture.id)).unwrap(),
         task_before + charged
@@ -878,7 +917,7 @@ fn staged_refusal_journal_counts_toward_ordinary_capacity_after_commit() {
     };
     // This ordinary-body padding fits exactly under the old journal-blind
     // accounting. SQLite supplies its bytes, without a large owned Rust buffer.
-    let padding = TASK_CAPACITY - TERMINAL_RESERVE - task_before - 64 - 256;
+    let padding = TASK_CAPACITY - TERMINAL_RESERVE - task_before - response_charge - 64 - 256;
     fixture
         .store
         .conn
@@ -888,7 +927,7 @@ fn staged_refusal_journal_counts_toward_ordinary_capacity_after_commit() {
         )
         .unwrap();
     assert_eq!(
-        task_before + padding + 64 + 256,
+        task_before + response_charge + padding + 64 + 256,
         TASK_CAPACITY - TERMINAL_RESERVE
     );
     assert_eq!(
@@ -972,4 +1011,81 @@ fn staged_refusal_journal_capacity_preserves_legacy_without_optional_tables() {
         global_before
     );
     fixture.store.cancel_investigation(&fixture.id).unwrap();
+}
+
+// AC-0265: token replay follows invocation order, requires every ordinary
+// response and preserves unknown totals across intervening admitted reads.
+#[test]
+fn staged_refusal_response_replay_requires_complete_history_and_preserves_unknown() {
+    for unknown_at in [None, Some(0), Some(1)] {
+        let mut fixture = Fixture::new();
+        let tx = fixture.store.conn.transaction().unwrap();
+        let mut step: PendingInvestigationStep = read_body(
+            &tx,
+            "investigation_invocations",
+            "step_id",
+            &fixture.id,
+            &"finish-step",
+        )
+        .unwrap()
+        .unwrap();
+        for ordinal in 0..3 {
+            let mut response = fixture.response.clone();
+            if ordinal > 0 {
+                step.step_id = format!("history-step-{ordinal}");
+                insert_body(
+                    &tx,
+                    "investigation_invocations",
+                    &fixture.id,
+                    &step.step_id,
+                    &step,
+                    MAX_INVOCATION_BYTES,
+                )
+                .unwrap();
+            }
+            response.step_id = step.step_id.clone();
+            response.reported_input_tokens = if unknown_at == Some(ordinal) {
+                None
+            } else {
+                Some(10 * (ordinal as u64 + 1))
+            };
+            response.reported_output_tokens = Some(ordinal as u64 + 1);
+            insert_body(
+                &tx,
+                "investigation_responses",
+                &fixture.id,
+                &response.step_id,
+                &response,
+                4096,
+            )
+            .unwrap();
+        }
+        let replay = response_usage(&tx, &fixture.id, "history-step-2", 8).unwrap();
+        assert_eq!(replay.invocations, 3);
+        assert_eq!(
+            replay.input_tokens,
+            if unknown_at.is_some() { None } else { Some(60) }
+        );
+        assert_eq!(replay.output_tokens, Some(6));
+        assert!(
+            insert_body(
+                &tx,
+                "investigation_responses",
+                &fixture.id,
+                &fixture.response.step_id,
+                &fixture.response,
+                4096
+            )
+            .is_err()
+        );
+        tx.execute_batch("DROP TRIGGER investigation_responses_no_delete")
+            .unwrap();
+        tx.execute(
+            "DELETE FROM investigation_responses WHERE task_id=?1 AND step_id='finish-step'",
+            [&fixture.id],
+        )
+        .unwrap();
+        assert!(response_usage(&tx, &fixture.id, "history-step-2", 8).is_err());
+        tx.rollback().unwrap();
+    }
 }
