@@ -2,6 +2,9 @@
 //! The independent oracle is deliberately absent from all request construction.
 
 use super::*;
+#[path = "acceptance/inspection.rs"]
+mod inspection;
+use inspection::local_provider_acceptance;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -195,6 +198,11 @@ impl AcceptanceSpecialists {
         auditor: SpecialistId::EvidenceAuditorV4,
     };
 
+    const SOURCE_INSPECTION_V5: Self = Self {
+        analyst: SpecialistId::DomainAnalystV5,
+        auditor: SpecialistId::EvidenceAuditorV5,
+    };
+
     // Explicit immutable definitions, recorded even if the first call fails and
     // the auditor is never started. No capability lookup selects a latest role.
     fn intended_definitions(self) -> Value {
@@ -205,6 +213,16 @@ impl AcceptanceSpecialists {
     }
 
     fn analyst_fixture(self, provider: &dyn LlmProvider, directory: tempfile::TempDir) -> Fixture {
+        if self.analyst == SpecialistId::DomainAnalystV5 {
+            return Fixture::with_contract(
+                provider,
+                directory,
+                "Inspect the available guard evidence and its limits. Query context, inspect retained source, and explain only behavior supported by citations.",
+                self.analyst,
+                Some(agents::TaskRangeRole::DefinitionInitializer),
+                ORIGINAL,
+            );
+        }
         Fixture::with_specialist(
             provider,
             directory,
@@ -219,6 +237,13 @@ fn auditor(
     provider: Arc<dyn LlmProvider>,
     specialists: AcceptanceSpecialists,
 ) -> (String, u128) {
+    run_auditor(fixture, provider, auditor_request(fixture, specialists))
+}
+
+fn auditor_request(
+    fixture: &Fixture,
+    specialists: AcceptanceSpecialists,
+) -> StartInvestigationRequest {
     let state = fixture.app.state::<AppState>();
     let parent = state
         .jobs
@@ -226,14 +251,22 @@ fn auditor(
         .unwrap()
         .investigation(&fixture.id)
         .unwrap();
-    let request = StartInvestigationRequest {
+    StartInvestigationRequest {
         request_nonce: "local-acceptance-auditor".into(),
         specialist_id: specialists.auditor,
         question: "Audit the selected parent's findings against available context and retained evidence. Query context, inspect source, and explain unsupported claims and scope limits.".into(),
         conversation_id: Some(parent.summary.conversation_id),
         parent_id: Some(fixture.id.clone()),
         ..fixture.request.clone()
-    };
+    }
+}
+
+fn run_auditor(
+    fixture: &Fixture,
+    provider: Arc<dyn LlmProvider>,
+    request: StartInvestigationRequest,
+) -> (String, u128) {
+    let state = fixture.app.state::<AppState>();
     let start_time = Instant::now();
     let started = state
         .jobs
@@ -296,79 +329,10 @@ fn investigation_turn_progress_local_provider_acceptance() {
     local_provider_acceptance(AcceptanceSpecialists::TURN_V4);
 }
 
-fn local_provider_acceptance(specialists: AcceptanceSpecialists) {
-    // AC-0191: a real provider chooses every action through the production loop.
-    // Compiling this test or passing its mechanical checks does not pass H4/H5.
-    let url = required("CARTOGRAPH_ACCEPTANCE_URL");
-    let model = required("CARTOGRAPH_ACCEPTANCE_MODEL");
-    let digest = required("CARTOGRAPH_ACCEPTANCE_MODEL_DIGEST");
-    let runtime = required("CARTOGRAPH_ACCEPTANCE_RUNTIME");
-    let output = PathBuf::from(required("CARTOGRAPH_ACCEPTANCE_OUTPUT"));
-    let source_revision = source_revision();
-    assert!(
-        output.is_absolute(),
-        "The artifact directory must be absolute"
-    );
-    std::fs::create_dir(&output)
-        .expect("The artifact directory must be new, with an existing parent");
-    let mut report = json!({
-        "schema_version": 1,
-        "procedure": "MT-H4-02 production-module local-provider harness",
-        "application_version": env!("CARGO_PKG_VERSION"),
-        "source_revision": source_revision,
-        "phase": "preparation",
-        "intended_specialists": specialists.intended_definitions(),
-        "mechanical_pass": false,
-        "operator_supplied_identity": {
-            "endpoint": url, "requested_model": model, "model_digest": digest, "runtime": runtime,
-            "independently_verified": false,
-        },
-        "fixture": { "path": "rule.ts", "content_hash": content_hash(ORIGINAL.as_bytes()), "byte_len": ORIGINAL.len() },
-        "independent_citation_review": "pending",
-        "native_restart_check": "pending",
-        "destructive_forgetting_check": "pending",
-        "delivery_gate_pass": false,
-    });
-    write_report(&output, &report);
-    let provider =
-        Arc::new(llm::OllamaProvider::new(&url, &model, Duration::from_secs(180)).unwrap());
-    // This calls the real bounded Ollama implementation. No mock, retry wrapper,
-    // cloud fallback, shell or model download is installed by the harness.
-    let mut directory = tempfile::tempdir_in(&output).unwrap();
-    directory.disable_cleanup(true);
-    report["retained_fixture_directory"] = json!(directory.path());
-    write_report(&output, &report);
-    let fixture = specialists.analyst_fixture(provider.as_ref(), directory);
-    std::fs::write(output.join("rule.ts"), ORIGINAL).unwrap();
-    report["analyst_id"] = json!(fixture.id);
-    report["analyst_coordinator_start_milliseconds"] = json!(fixture.start_milliseconds);
-    report["phase"] = json!("analyst_running");
-    write_report(&output, &report);
-    fixture.run(provider.clone());
-    let (analyst, analyst_pass) = task_evidence(&fixture, &fixture.id, false);
-    report["analyst"] = analyst;
-    report["phase"] = json!("analyst_recorded");
-    write_report(&output, &report);
-    let mut auditor_pass = false;
-    if analyst_pass {
-        report["phase"] = json!("auditor_running");
-        write_report(&output, &report);
-        let (id, start_milliseconds) = auditor(&fixture, provider, specialists);
-        let (evidence, passed) = task_evidence(&fixture, &id, true);
-        report["auditor_id"] = json!(id);
-        report["auditor_coordinator_start_milliseconds"] = json!(start_milliseconds);
-        report["auditor"] = evidence;
-        auditor_pass = passed;
-    } else {
-        report["auditor"] = json!({ "status": "skipped_after_failed_analyst_mechanical_checks" });
-    }
-    report["phase"] = json!("recorded");
-    report["mechanical_pass"] = json!(analyst_pass && auditor_pass);
-    write_report(&output, &report);
-    assert!(
-        analyst_pass && auditor_pass,
-        "Real-provider mechanical acceptance failed; inspect run.json and retained state. No repair/replay was attempted."
-    );
+#[test]
+#[ignore = "MT-H4-02: requires an installed local model and explicit fresh artifact directory"]
+fn investigation_source_inspection_local_provider_acceptance() {
+    local_provider_acceptance(AcceptanceSpecialists::SOURCE_INSPECTION_V5);
 }
 
 #[test]
