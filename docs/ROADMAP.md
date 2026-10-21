@@ -112,7 +112,7 @@ that ends it. Reviewers are the other agent unless noted.
 | W5 | Curated projection (H3): one revision-bound curated identity for UI, export and agents | Claude (Codex reviews the agent seam) | US-0031, SPEC-09 | Curated reads return the DR-4 fields, and stale or conflicting curation is shown, never silently substituted | — (H3, existing) |
 | W6 | Work packets (AP-1a) | Codex | #255, staging review | A product-generated packet for one change reopens with the same identity, supports conflict-safe review, and renders equivalently in UI and export | US-0037 |
 | W7 | Compact context and bounded investigation (AP-2a, AP-2b) | Codex; deterministic discovery is Claude's | US-0020, US-0032, #250, #256 | On a supported local runtime: discovery, exact source read, cited finding, auditor follow-up, reopened history, and an honest insufficient-evidence outcome; full MT-H4-02 obligations preserved | US-0020, US-0032 additions |
-| W8a | Read-only MCP server and Cartograph skill over the deterministic surfaces: curated projection, spec artifacts, gap register, coverage matrix, discovery | Codex | W0, W5, discovery (#592) | An external agent answers a scoped question from Cartograph through MCP with cited spans, compact schemas and measured tokens, without provider calls or task execution | — (H5 read slice) |
+| W8a | Read-only MCP server and Cartograph skill over the deterministic surfaces: curated projection, spec artifacts, gap register, coverage matrix, discovery | Codex | W0, discovery (#592); W5 adds curated reads when it lands | An external agent answers a scoped question from Cartograph through MCP with cited spans, compact schemas and measured tokens, without provider calls or task execution | — (H5 read slice) |
 | W8b | Agent team: durable coordinator and roster, ACP host with harness adapters and bridges, local-model agents, and the in-app human seat (#251, #252, #255) | Codex | W8a, W6 packets, SPEC-03 staging | A human and at least one ACP-hosted agent and one local-model agent work one gap in the app: the agent raises it, the human reviews, and a work packet goes to the other agent, with every agent output staged for review | — (H5, existing) |
 | W9 | Coverage matrix, data-file registries, plugin coverage claims, measured skills | Claude | ADR-0017, preflight | Preflight reports a language × framework × capability matrix with conformance fixtures, and each omission names its class and the seam that would fill it | US-0038 |
 
@@ -172,9 +172,11 @@ decisions in section 3).
 
 ## 8. Realignment (2026-10-21)
 
-P0 to P3 have landed apart from two items: the Vendure use case (#590) and
-the real-provider acceptance (#598). The roadmap chained both P4 and P5
-behind W7 acceptance, and W7 waits on an owner-scheduled provider run. So
+P0, P1, W4 views and the deterministic parts of P3 have landed, except the
+Vendure use case (#590). P2 has not: the H3 curated projection is still
+unavailable, and the context query does not yet project accepted proposals.
+The real-provider acceptance (#598) is open. The roadmap chained both P4 and
+P5 behind W7 acceptance, and W7 waits on an owner-scheduled provider run. So
 recent effort went into investigation proof machinery that has no user-visible
 consumer yet, while there is still no MCP surface, no finished showcase, and
 no recovered test arrangements or journeys. The order changes as follows.
@@ -185,9 +187,11 @@ no recovered test arrangements or journeys. The order changes as follows.
 2. **W8 is no longer gated on W7.** A read-only MCP server and a Cartograph
    skill (W8a) expose what already exists deterministically, and become the
    agent team's read path. W8a's boundary:
-   - It reuses the existing curated deterministic projections and retained
-     evidence, and fails closed on a snapshot mismatch or an unavailable
-     capture.
+   - Its initial scope is recovered and qualified evidence with rejected
+     proposals filtered out. Curated (H3) capabilities report as unavailable
+     until W5 lands, so W5 adds curated reads to W8a rather than gating it.
+   - It reuses the existing deterministic projections and retained evidence,
+     and fails closed on a snapshot mismatch or an unavailable capture.
    - It exposes no task, start, ingest, write or provider tools.
    - It keeps omissions and partial results honest.
    - Token measurements name their tokenizer or method, or say "estimate"
@@ -207,10 +211,28 @@ no recovered test arrangements or journeys. The order changes as follows.
    its foundation checkpoint, and resumes when the owner schedules a
    real-provider run. #598 stays open. Accepting procedure revision 3 remains
    an owner decision.
-5. **Missing lifecycle artifacts are named, not scheduled.** W10, test
-   arrangements and validation (recovered target tests with qualified links),
-   and W11, journeys, are ordered after the showcase shows which matters more.
-6. **v2 horizon: targets without source.** After v1 works on source,
+5. **Recorded business flows and journeys follow the showcase.** Enterprise
+   estates typically have outdated or missing documentation, no recorded
+   journeys, and no recorded business flows to test against. Those are the
+   artifacts this product exists to recover, so W10, test arrangements and
+   validation (recovered business flows and target tests with qualified
+   links), and W11, journeys, are next after the showcase rather than
+   unscheduled. The showcase decides which goes first. Each also reports
+   drift: where existing documentation disagrees with what the code shows,
+   as the showcase does against `docs/api.md`.
+6. **An explorable estate view (W12).** The user-facing goal is one
+   interactive surface over a whole estate, in the spirit of a live globe of
+   public signals but over software: move from the estate to a system,
+   service, flow, rule and source line; select a flow and follow it across
+   repos and infrastructure; switch layers for infrastructure roles, flows,
+   journeys, rules, tests, ownership, gaps and documentation drift; ask the
+   agent team about what is in view; and share a link that restores the
+   view and selection. Every layer shows its evidence tier and says when it
+   is partial, stale or unavailable, and each layer is a module that a plugin
+   can add. W12 builds on W4 views, the W8a read surface and the W8b human
+   seat. It is planned after the showcase, with scale tested on the larger
+   lanes.
+7. **v2 horizon: targets without source.** After v1 works on source,
    Cartograph should take a website, mobile app, desktop app or similar
    artifact, such as an old site of the owner's, and break it down the way
    REA-style reverse engineering does: page structure, bundles, network

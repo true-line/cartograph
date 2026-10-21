@@ -18,6 +18,17 @@ questions, have them raise issues, hand work to other agents with issues and
 requirements detailed enough to execute. Then let humans and agents find the
 holes together and fill them, with updates to Cartograph or plugins for it.
 
+## Who it is for
+
+Enterprise estates are the hardest case and the main one: many repositories,
+documentation that is outdated or missing, journeys nobody recorded, and
+business flows that exist only in code, so there is nothing to test against.
+Cartograph should give such a team an explorable view of the whole estate,
+from systems down to the line that implements a rule, with every layer
+labeled by its evidence and the agent team on hand to answer questions about
+what is in view. Consumer apps and single repos are the same problem at a
+smaller scale. See ROADMAP §8.
+
 ## Vision elements
 
 These ids are the shared vocabulary of the plan, the discussions, and the
