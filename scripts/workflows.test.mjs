@@ -37,6 +37,10 @@ test('version-cut preserves review, evidence, and immutable-tag gates', () => {
   assert.match(workflow, /git diff-tree -p HEAD \| git patch-id --stable/u);
   assert.match(workflow, /git diff-tree -p "\$open_sha" \| git patch-id --stable/u);
   assert.match(workflow, /skipping the force-push/u);
+  // checkout removes its credentials, so the open-PR fetch must authenticate
+  // per command and never wait on a prompt (#667).
+  assert.match(workflow, /GIT_TERMINAL_PROMPT: "0"/u);
+  assert.match(workflow, /git -c "http\.https:\/\/github\.com\/\.extraheader=AUTHORIZATION: basic \$auth" \\\n\s+fetch origin "\$open_sha"/u);
 });
 
 test('CI enforces the governed lifecycle without draft jobs', () => {

@@ -121,6 +121,9 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.chores.outputs.token }}
           BRANCH: changeset-release/main
+          # A credential problem must fail the step, not wait on a prompt the
+          # runner can never answer (#667).
+          GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
           version=$(node -p "require('./package.json').version")
@@ -133,7 +136,13 @@ jobs:
           open_sha=$(gh pr list --head "$BRANCH" --base main --state open --json headRefOid --jq '.[0].headRefOid // empty')
           if [ -n "$open_sha" ]; then
             new_patch_id=$(git diff-tree -p HEAD | git patch-id --stable | awk '{print $1}')
-            git fetch origin "$open_sha" --depth=2 --quiet
+            # actions/checkout removed its credentials, so this one fetch
+            # authenticates with the chores-dumb token for this command only;
+            # nothing is written to .git/config (#667).
+            auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+            echo "::add-mask::$auth"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+              fetch origin "$open_sha" --depth=2 --quiet
             old_patch_id=$(git diff-tree -p "$open_sha" | git patch-id --stable | awk '{print $1}')
             if [ -n "$new_patch_id" ] && [ "$new_patch_id" = "$old_patch_id" ]; then
               echo "Regenerated release patch matches the open Version packages PR ($open_sha); skipping the force-push."
