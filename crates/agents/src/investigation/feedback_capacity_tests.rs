@@ -114,6 +114,69 @@ fn dominates(actual: [usize; 4], upper: [usize; 4]) {
 }
 
 #[test]
+fn feedback_capacity_mixed_envelope_preserves_exact_sorted_kind_and_id_output() {
+    // AC-0287 / T-0287: obligation normalization orders mixed entries by the
+    // same (kind,id) contract required by feedback validation and serialization.
+    for policy in [&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY] {
+        let obligations = envelope(policy, 3);
+        let source_id = obligations
+            .obligations
+            .iter()
+            .find_map(|item| match item {
+                Obligation::Source { obligation_id, .. } => Some(obligation_id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let mut inventory_ids = obligations
+            .obligations
+            .iter()
+            .filter_map(|item| match item {
+                Obligation::Inventory { obligation_id, .. } => Some(obligation_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        inventory_ids.sort();
+        assert_eq!(inventory_ids.len(), 2);
+        let expected = RefusalFeedback {
+            schema_version: 1,
+            unmet: vec![
+                FeedbackEntry {
+                    kind: "inventory".into(),
+                    obligation_id: inventory_ids[0].clone(),
+                    reason: RefusalReason::AcquiredNotSupplied,
+                },
+                FeedbackEntry {
+                    kind: "inventory".into(),
+                    obligation_id: inventory_ids[1].clone(),
+                    reason: RefusalReason::AcquiredNotSupplied,
+                },
+                FeedbackEntry {
+                    kind: "source".into(),
+                    obligation_id: source_id,
+                    reason: RefusalReason::AcquiredNotSupplied,
+                },
+            ],
+        };
+        let upper =
+            RefusalFeedback::sizing_upper_envelope_with_policy(&obligations, policy).unwrap();
+        assert_eq!(upper.feedback, expected);
+        assert_eq!(
+            upper
+                .feedback
+                .unmet
+                .iter()
+                .map(|entry| entry.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["inventory", "inventory", "source"]
+        );
+        assert_eq!(
+            serde_json::to_vec(&upper).unwrap(),
+            expected.bytes_with_policy(policy).unwrap()
+        );
+    }
+}
+
+#[test]
 fn feedback_capacity_upper_envelope_covers_every_reason_and_mixed_subset() {
     // AC-0287 / T-0287: sizing envelopes never assert actual unmet obligations.
     for policy in [&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY] {

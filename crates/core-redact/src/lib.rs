@@ -383,4 +383,117 @@ mod tests {
         assert_eq!(direct_source_json_content_bound(largest + 1), None);
         assert_eq!(direct_source_json_content_bound(usize::MAX), None);
     }
+
+    #[test]
+    fn direct_source_bound_pins_exact_redaction_policy_definition() {
+        // #708: changing patterns, replacements, categories or their order requires
+        // an explicit reproof/repin of the direct-source bound, not just safe examples.
+        assert_eq!(TEXT_POLICY_VERSION, "redact-text@1");
+        let definition = patterns()
+            .iter()
+            .map(|(pattern, replacement, kind)| {
+                // Exhaustive on purpose: adding a SecretKind must revisit this guard.
+                let category = match kind {
+                    SecretKind::PrivateKey => "private_key",
+                    SecretKind::BearerToken => "bearer_token",
+                    SecretKind::ProviderToken => "provider_token",
+                    SecretKind::AwsAccessKey => "aws_access_key",
+                    SecretKind::CredentialAssignment => "credential_assignment",
+                };
+                (pattern.as_str(), *replacement, category)
+            })
+            .collect::<Vec<_>>();
+        // Domain-separated BLAKE3 of compact JSON [policy, ordered triples of
+        // exact regex source, replacement template and explicit category name].
+        let bytes = serde_json::to_vec(&(TEXT_POLICY_VERSION, definition)).unwrap();
+        let mut digest = blake3::Hasher::new();
+        digest.update(b"cartograph:direct-source-json-bound-policy:v1\0");
+        digest.update(&bytes);
+        assert_eq!(
+            digest.finalize().to_hex().as_str(),
+            "c604786b5ee1cfd308845302ce70eff5f6e56612e9b5ba4c91fb554eb561bd06"
+        );
+    }
+
+    #[test]
+    fn direct_source_bound_covers_deterministic_seeded_pattern_fragment_corpus() {
+        // #708: supplementary exploration, not a substitute for the provenance
+        // proof or exact policy pin. Fixed xorshift64 seed/steps make it reproducible.
+        fn next(state: &mut u64) -> u64 {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            *state
+        }
+        let fragments = [
+            "secret",
+            "password",
+            "api_key",
+            "ACCESS_TOKEN",
+            "auth-token",
+            "ſecret",
+            "=",
+            ":",
+            "'",
+            "\"",
+            "\\",
+            " ",
+            "\t",
+            "\r\n",
+            "\u{85}",
+            "\u{2003}",
+            "Bearer",
+            "bearer abcdefgh",
+            "Bearer\u{2003}abcdefgh",
+            "abcdefgh",
+            "aaaa",
+            "sk-",
+            "ghp_",
+            "github_pat_",
+            "AKIA",
+            "0000000000000000",
+            "sk-abcdefgh",
+            "-----BEGIN ",
+            "PRIVATE KEY-----",
+            "-----END ",
+            "-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----",
+            "secret=Bearer abcdefgh",
+            "[REDACTED]",
+            "[REDACTED AWS ACCESS KEY]",
+            "[",
+            "]",
+            ",",
+            ";",
+            "}",
+            "é",
+            "漢",
+            "🦀",
+            "\u{2028}",
+            "\u{2029}",
+            "\0",
+            "\u{1}",
+            "\u{8}",
+            "\u{b}",
+            "\u{c}",
+            "\u{1f}",
+        ];
+        let mut seed = 0x708d_1aec_5eed_2026_u64;
+        let mut expanding_cases = 0;
+        let mut redacting_cases = 0;
+        for _ in 0..512 {
+            let count = 2 + next(&mut seed) % 39;
+            let mut text = String::new();
+            for _ in 0..count {
+                let index = (next(&mut seed) % fragments.len() as u64) as usize;
+                text.push_str(fragments[index]);
+            }
+            let (redacted, replacements) = redact_text(&text);
+            redacting_cases += usize::from(replacements > 0);
+            expanding_cases += usize::from(redacted.len() > text.len());
+            assert_direct_source_content_bound(&text);
+        }
+        // Ensure the seed still exercises replacements and actual expansion.
+        assert!(redacting_cases > 100);
+        assert!(expanding_cases > 0);
+    }
 }
