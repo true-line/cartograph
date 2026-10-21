@@ -46,7 +46,7 @@ jobs:
       # toolchain from rust-toolchain.toml, as in the CI Rust lane.
       - name: Refresh apt metadata
         if: matrix.language == 'rust'
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Refresh rustup apt metadata
           executable: sudo
@@ -57,7 +57,7 @@ jobs:
 
       - name: Install rustup
         if: matrix.language == 'rust'
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@87c6b301057992f79a723f63c64624bf40c9d06a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Install rustup
           executable: sudo

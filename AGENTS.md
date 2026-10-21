@@ -112,7 +112,7 @@ the agreed suite runs; it does not reduce the gate list below.
   never approved or run.
 - The immutable CI-policy action validates both `github.actor` and
   `github.triggering_actor`. Repository Actions Policy allows only `qwts`,
-  `chores-dumb[bot]`, `dependabot[bot]`, and active Apps in the governed agent
+  `trueline-chores-dumb[bot]`, `dependabot[bot]`, and active Apps in the governed agent
   roster. Authorization does not imply that a credential must exist.
 - Advanced CodeQL is lifecycle-called for Actions, JavaScript/TypeScript, and
   Rust. Default setup must remain disabled after the workflow is enabled.
@@ -139,7 +139,7 @@ enabled, the exact-commit `main` fallback protects merge/squash SHA rewrites.
 - Version application is automation-owned. Do not run `changeset version`,
   edit version mirrors, or create release tags by hand. The version-cut
   workflow keeps a **Version packages** PR current while Changesets are
-  pending; its commit is API-written as `chores-dumb` so it is
+  pending; its commit is API-written as `trueline-chores-dumb` so it is
   signature-verified under the default-branch ruleset. Merging that reviewed
   PR is the release decision: it creates the
   exact annotated `vX.Y.Z` tag and dispatches the release handoff. A failed
