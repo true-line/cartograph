@@ -1,6 +1,7 @@
 //! Internal prompt9 construction. This representation grants no dispatch or
 //! acquisition authority; the host must bind it to its saved admission state.
 use super::*;
+use crate::{InputClosureStatus, PrimarySourceScope};
 use serde::{Deserialize, Serialize};
 use staged_refusal::{CompletionCallMode, ProtectedCompletionMetadata};
 
@@ -120,6 +121,8 @@ pub struct AdmissionReserveMeasurements {
 
 impl InvestigationInput {
     /// Measure both instruction variants through the actual bounded wire path.
+    /// This bound names the exact immediate action_id/profile/limits supplied;
+    /// a later call with a changed step ID must be measured again.
     /// Graph, query, source, history, target and system strings remain exact.
     /// New acquisitions (including optional cursor/action transitions) require a
     /// fresh prospective input; this is not a bound on their unknown contents.
@@ -139,6 +142,30 @@ impl InvestigationInput {
         policy: &InvestigationPolicy,
     ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
         let (prompt, contract) = self.admission_reserve_basis(policy)?;
+        Self::measure_reserved_projection(
+            prompt,
+            contract,
+            self.action(action_id.into())?,
+            profile,
+            limits,
+            policy,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn measure_reserved_projection(
+        prompt: Value,
+        contract: InvestigationCompletionContract,
+        mut action: CompletionAction,
+        profile: &llm::bounded::ProviderProfile,
+        limits: &llm::bounded::CompletionLimits,
+        policy: &InvestigationPolicy,
+        unread_source: Option<(usize, usize)>,
+    ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
+        if core_redact::TEXT_POLICY_VERSION != "redact-text@1" {
+            return Err(InvestigationError::InvalidInput);
+        }
         let metadata: ProtectedCompletionMetadata =
             serde_json::from_value(prompt["completion_metadata"].clone())
                 .map_err(|_| InvestigationError::InvalidInput)?;
@@ -151,6 +178,14 @@ impl InvestigationInput {
             .checked_add(metadata.refusal_count)
             .and_then(|calls| calls.checked_sub(1))
             .ok_or(InvestigationError::LimitExceeded)?;
+        // redact-text@1 proof for controlled replacements: decimal/lowerhex
+        // fields and finite underscore-separated codes contain no recognizer
+        // prefix, whitespace or quote. Every replacement is in its own JSON
+        // value; token/assignment recognizers stop at quotes/separators. Only
+        // private-key matching spans fields; its delimiters occur solely in
+        // unchanged authored strings, so the same regions collapse to the same
+        // marker. No controlled replacement can introduce another delimiter.
+        // Re-prove this if the redactor or these field classes change.
         let mut reserved = prompt;
         let completion = reserved["completion_metadata"]
             .as_object_mut()
@@ -210,7 +245,6 @@ impl InvestigationInput {
             action_hash: "f".repeat(64),
             reason: CapacityRefusalReason::UnprovenContribution,
         };
-        let mut action = self.action(action_id.into())?;
         let mut measure = |mode| -> Result<_, InvestigationError> {
             let mut prompt = reserved.clone();
             apply_admission_progress(
@@ -220,18 +254,276 @@ impl InvestigationInput {
                 &Some(&feedback),
             )?;
             wire::replace_prompt(&mut action.payload, &prompt, MAX_INPUT_BYTES)?;
-            llm::bounded::measure_bounded_action(profile, &action, limits).map_err(|error| {
+            let measurements = match unread_source {
+                Some((index, bytes)) => {
+                    llm::bounded::bound_unread_source_action(profile, &action, limits, index, bytes)
+                }
+                None => llm::bounded::measure_bounded_action(profile, &action, limits),
+            }
+            .map_err(|error| {
                 if error.code == llm::bounded::FailureCode::InputTooLarge {
                     InvestigationError::LimitExceeded
                 } else {
                     InvestigationError::InvalidInput
                 }
-            })
+            })?;
+            // The actual agents serializer has its own original-payload cap,
+            // independent of the firewall's configurable input ceiling.
+            if measurements.original_payload_bytes > MAX_INPUT_BYTES as u64 {
+                return Err(InvestigationError::LimitExceeded);
+            }
+            Ok(measurements)
         };
         Ok(AdmissionReserveMeasurements {
             choice: measure(CompletionCallMode::Choice)?,
             finish_only: measure(CompletionCallMode::FinishOnly)?,
         })
+    }
+
+    /// Bound one captured read before source access, including both complete
+    /// continuation envelopes for the given exact immediate action ID/profile/
+    /// limits. A changed later step ID requires a fresh measurement. Only a
+    /// private serialization projection is made:
+    /// no fabricated evidence, citation ledger, acquired input or action escapes.
+    /// The host must separately bind this descriptor to retained source guards,
+    /// saved authority, usage/storage reservations and the actual read result.
+    pub fn measure_unread_source_v9_with_policy(
+        &self,
+        target: &InvestigationInspectionTarget,
+        profile: &llm::bounded::ProviderProfile,
+        limits: &llm::bounded::CompletionLimits,
+        action_id: &str,
+        policy: &InvestigationPolicy,
+    ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
+        let (mut prompt, contract) = self.admission_reserve_basis(policy)?;
+        target.validate()?;
+        // First closed slice supports descriptors already pinned by the exact
+        // immutable completion contract. A merely self-consistent descriptor
+        // for a different receipt range is not source authority.
+        if !contract
+            .obligations
+            .sources_with_policy(policy)?
+            .iter()
+            .any(|item| item == target)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        if target.graph_snapshot_id != self.ledger.graph_snapshot_id
+            || prompt.get("omitted_sources").is_some()
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let selected = self
+            .ledger
+            .selected_facts
+            .iter()
+            .find(|item| item.fact == target.fact)
+            .ok_or(InvestigationError::InvalidInput)?;
+        let binding = selected
+            .binding
+            .as_ref()
+            .ok_or(InvestigationError::InvalidInput)?;
+        if selected.fact_digest != target.fact_digest
+            || binding.repo_key != target.source.repo
+            || binding.receipt_id != target.receipt_id
+            || binding.emitted_fact_digest != target.fact_digest
+            || !self.ledger.receipt_references.iter().any(|receipt| {
+                receipt.repo_key == target.source.repo
+                    && receipt.source_id == target.registered_source_id
+                    && receipt.receipt_id == target.receipt_id
+            })
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let source_citations: Vec<_> = self
+            .ledger
+            .citations
+            .iter()
+            .filter(|citation| {
+                !matches!(citation.origin, InvestigationEvidenceOrigin::GraphMetadata)
+            })
+            .collect();
+        // Complete current source set only. A changed working set needs its own
+        // explicit prospective projection and cannot inherit this certificate.
+        if source_citations.len() != self.payload.spans.len()
+            || source_citations.iter().any(|citation| {
+                self.payload
+                    .spans
+                    .iter()
+                    .filter(|span| {
+                        span.id == citation.citation_id
+                            && citation.source.as_ref().is_some_and(|source| {
+                                span.repo == source.repo
+                                    && span.path == source.path
+                                    && span.commit_sha == source.commit_sha
+                                    && span.byte_start == source.byte_start
+                                    && span.byte_end == source.byte_end
+                            })
+                            && citation.text_hash.as_deref()
+                                == Some(content_hash(span.text.as_bytes()).as_str())
+                    })
+                    .count()
+                    != 1
+            })
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let expected_handles = serde_json::to_value(
+            self.ledger
+                .citations
+                .iter()
+                .map(CitationPromptHandle::from)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| InvestigationError::InvalidInput)?;
+        if prompt["citations"] != expected_handles {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let bytes = usize::try_from(target.source.byte_end - target.source.byte_start)
+            .map_err(|_| InvestigationError::LimitExceeded)?;
+        let retained_bytes = self
+            .supplied_strings
+            .iter()
+            .chain(&self.graph_strings)
+            .try_fold(0usize, |sum, text| sum.checked_add(text.len()))
+            .and_then(|sum| sum.checked_add(bytes))
+            .ok_or(InvestigationError::LimitExceeded)?;
+        if source_citations.len() >= policy.limits().evidence_items
+            || source_citations
+                .iter()
+                .try_fold(bytes, |sum, citation| {
+                    sum.checked_add(
+                        (citation.source.as_ref()?.byte_end - citation.source.as_ref()?.byte_start)
+                            as usize,
+                    )
+                })
+                .is_none_or(|sum| sum > policy.limits().evidence_bytes)
+            || retained_bytes > MAX_INPUT_BYTES
+            || self
+                .supplied_strings
+                .len()
+                .checked_add(self.graph_strings.len())
+                .and_then(|count| count.checked_add(1))
+                .is_none_or(|count| count > 16384)
+        {
+            return Err(InvestigationError::LimitExceeded);
+        }
+        // Production read_evidence appends a fresh ordinal even for repeated
+        // successful reads; it never deduplicates acquired source citations.
+        let id = format!(
+            "evidence-{}",
+            source_citations
+                .len()
+                .checked_add(1)
+                .ok_or(InvestigationError::LimitExceeded)?
+        );
+        if self
+            .ledger
+            .citations
+            .iter()
+            .any(|citation| citation.citation_id == id)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        self.ledger
+            .revision
+            .checked_add(1)
+            .ok_or(InvestigationError::LimitExceeded)?;
+        let origin = InvestigationEvidenceOrigin::CapturedPrimarySource {
+            registered_source_id: target.registered_source_id.clone(),
+            receipt_id: target.receipt_id.clone(),
+            receipt_inventory_index: target.receipt_inventory_index,
+            captured: target.captured.clone(),
+            scope: PrimarySourceScope::PrimarySourceOnly,
+            input_closure: InputClosureStatus::InputClosureNotEstablished,
+        };
+        let role = Some(target.role);
+        let index = Some(target.index);
+        let handle = CitationPromptHandle {
+            citation_id: &id,
+            fact: &target.fact,
+            origin: &origin,
+            role: &role,
+            index: &index,
+        };
+        prompt["citations"]
+            .as_array_mut()
+            .ok_or(InvestigationError::InvalidInput)?
+            .push(serde_json::to_value(handle).map_err(|_| InvestigationError::InvalidInput)?);
+        // Both recipes emit bare lower64hex (no prefix); their input domains
+        // change with the new text hash, their encoded widths do not. Query IDs
+        // exclude source citations and therefore remain unchanged.
+        if !prompt["input_ledger_hash"]
+            .as_str()
+            .is_some_and(crate::source_basis::hash)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        prompt["input_ledger_hash"] = "f".repeat(64).into();
+        let registry = &mut prompt["compact_context"]["query_history"]["registry_hash"];
+        if !registry.as_str().is_some_and(crate::source_basis::hash) {
+            return Err(InvestigationError::InvalidInput);
+        }
+        *registry = "f".repeat(64).into();
+        prompt["turn_progress"]["last_completed_action"] =
+            serde_json::to_value(InvestigationCompletedAction::ReadEvidence {
+                fact: target.fact.clone(),
+                role: target.role,
+                index: target.index,
+                citation_id: id.clone(),
+                source_range_bytes: bytes as u64,
+                // Unknown equality with a prior text hash: false is the longer
+                // JSON spelling, including at every subsequent embedding.
+                previously_acquired: false,
+            })
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        if let Some(requirements) = prompt.get_mut("inspection_progress") {
+            let targets = self
+                .inspection_requirements
+                .as_ref()
+                .ok_or(InvestigationError::InvalidInput)?;
+            let expected = serde_json::json!({"requirements":targets.iter().map(|item| serde_json::json!({
+                "target_id":item.target_id,
+                "acquired":self.ledger.citations.iter().any(|citation| item.matches(citation)),
+                "exact_supply":"determined_by_finishing_disclosure",
+            })).collect::<Vec<_>>()});
+            if *requirements != expected {
+                return Err(InvestigationError::InvalidInput);
+            }
+            for (entry, item) in requirements["requirements"]
+                .as_array_mut()
+                .ok_or(InvestigationError::InvalidInput)?
+                .iter_mut()
+                .zip(targets)
+            {
+                // Matching requires no unknown source-text hash.
+                if item == target {
+                    entry["acquired"] = true.into();
+                }
+            }
+        } else if self.inspection_requirements.is_some() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let mut action = self.action(action_id.into())?;
+        let span_index = action.payload.spans.len();
+        action.payload.spans.push(PayloadSpan {
+            id,
+            repo: target.source.repo.clone(),
+            path: target.source.path.clone(),
+            byte_start: target.source.byte_start,
+            byte_end: target.source.byte_end,
+            commit_sha: target.source.commit_sha.clone(),
+            text: String::new(),
+        });
+        Self::measure_reserved_projection(
+            prompt,
+            contract,
+            action,
+            profile,
+            limits,
+            policy,
+            Some((span_index, bytes)),
+        )
     }
 
     fn admission_reserve_basis(

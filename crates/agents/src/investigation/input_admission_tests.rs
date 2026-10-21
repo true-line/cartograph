@@ -614,3 +614,408 @@ fn admission_prompt_borrowed_pages_preserve_exact_query_projection_and_progress(
         );
     }
 }
+
+fn source_fixture(
+    role: SpecialistId,
+    text: &str,
+) -> (
+    Fixture,
+    String,
+    InvestigationInspectionTarget,
+    InvestigationCitation,
+) {
+    let policy = &INVESTIGATION_V2_POLICY;
+    let mut fixture = Fixture::new(role, 7);
+    let (mut target, mut ledger, _) = crate::investigation::tests::inspection_tests::fixture();
+    target.source.byte_end = target.source.byte_start + text.len() as u64;
+    target.captured.byte_end = target.source.byte_end;
+    target.captured.file.byte_len = target.source.byte_end;
+    target.captured.file.digest = content_hash(text.as_bytes());
+    target.target_id = target.content_id().unwrap();
+    let mut source = Obligation::Source {
+        obligation_id: String::new(),
+        target: Box::new(target.clone()),
+    };
+    let id = source.content_id().unwrap();
+    if let Obligation::Source { obligation_id, .. } = &mut source {
+        *obligation_id = id;
+    }
+    fixture.request.obligations.obligations = vec![source];
+    fixture.metadata.request_hash = fixture.request.intent_hash_with_policy(policy).unwrap();
+    fixture.metadata.obligations_hash = fixture
+        .request
+        .obligations
+        .fingerprint_with_policy(policy)
+        .unwrap();
+    let prototype = ledger.citations[1].clone();
+    ledger.schema_version = 2;
+    ledger.coverage = fixture.ledger.coverage.clone();
+    ledger.revision = 1;
+    ledger.citations.truncate(1);
+    ledger.queries.clear();
+    let raw=json!({"context":{"context_id":fixture.request.expected_context_id,
+        "coverage":ledger.coverage.as_ref().unwrap().qualification,
+        "response":{"snapshot_id":ledger.scope_snapshot_id,"view":"recovered_graph","total_selected":1,
+            "facts":[{"reference":target.fact,"label":"BusinessRule"}],"next_cursor":null}},
+        "evidence_options":[{"fact":target.fact,"origin":"captured_primary_source_metadata","ranges":[]}]}).to_string();
+    ledger.queries.push(InvestigationQueryManifest {
+        query: InvestigationQuery {
+            scope: InvestigationScope::All,
+            kind: None,
+            labels: vec![],
+            max_facts: 12,
+            max_bytes: 16384,
+            cursor: None,
+        },
+        response_hash: content_hash(raw.as_bytes()),
+        response_bytes: raw.len(),
+        returned_facts: 1,
+        total_selected: 1,
+        has_more: false,
+    });
+    fixture.basis = InvestigationTurnBasis {
+        input_ledger_hash: ledger.fingerprint_with_policy(policy).unwrap(),
+        previous_ledger: Some(fixture.ledger),
+        completed_tool: Some(InvestigationTool::QueryContext),
+    };
+    fixture.ledger = ledger;
+    (fixture, raw, target, prototype)
+}
+fn build_source(
+    fixture: &Fixture,
+    raw: &str,
+    evidence: &[AgentEvidence],
+    role: SpecialistId,
+    mode: CompletionCallMode,
+) -> InvestigationInput {
+    InvestigationInput::prepare_v9_with_policy(
+        &fixture.request.question,
+        role,
+        fixture.ledger.clone(),
+        &[raw],
+        evidence,
+        &[],
+        &usage(mode),
+        &fixture.basis,
+        &fixture.request,
+        &fixture.metadata,
+        &[],
+        mode,
+        0,
+        None,
+        &INVESTIGATION_V2_POLICY,
+    )
+    .unwrap()
+}
+fn acquire_source(
+    fixture: &mut Fixture,
+    target: &InvestigationInspectionTarget,
+    prototype: &InvestigationCitation,
+    evidence: &mut Vec<AgentEvidence>,
+    text: &str,
+) {
+    let previous = fixture.ledger.clone();
+    let id = format!("evidence-{}", evidence.len() + 1);
+    let mut citation = prototype.clone();
+    citation.citation_id = id.clone();
+    citation.source = Some(target.source.clone());
+    citation.text_hash = Some(content_hash(text.as_bytes()));
+    citation.origin = InvestigationEvidenceOrigin::CapturedPrimarySource {
+        registered_source_id: target.registered_source_id.clone(),
+        receipt_id: target.receipt_id.clone(),
+        receipt_inventory_index: target.receipt_inventory_index,
+        captured: target.captured.clone(),
+        scope: PrimarySourceScope::PrimarySourceOnly,
+        input_closure: InputClosureStatus::InputClosureNotEstablished,
+    };
+    fixture.ledger.citations.push(citation);
+    fixture.ledger.revision += 1;
+    fixture.basis = InvestigationTurnBasis {
+        input_ledger_hash: fixture
+            .ledger
+            .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap(),
+        previous_ledger: Some(previous),
+        completed_tool: Some(InvestigationTool::ReadEvidence),
+    };
+    evidence.push(AgentEvidence {
+        id,
+        source: target.source.clone(),
+        text: text.into(),
+    });
+}
+
+#[test]
+fn admission_unread_source_bound_dominates_actual_first_and_repeated_read_inputs() {
+    // AC-0287: production input construction and wire/redaction; no source I/O.
+    use llm::{LlmProvider, OllamaProvider};
+    let provider = OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test",
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    let profile = provider.bounded_profile().unwrap();
+    let limits = llm::bounded::CompletionLimits::default();
+    for text in [
+        "private text".into(),
+        "é中🙂".into(),
+        "ghp_abcdefgh".into(),
+        "\"\\\n\t\u{0}".into(),
+        "secret=Bearer abcdefgh".into(),
+        "\u{1}".repeat(8192),
+    ] {
+        for role in [
+            SpecialistId::DomainAnalystV10,
+            SpecialistId::EvidenceAuditorV10,
+        ] {
+            let (mut fixture, raw, target, prototype) = source_fixture(role, &text);
+            let mut evidence = vec![];
+            let mut current =
+                build_source(&fixture, &raw, &evidence, role, CompletionCallMode::Choice);
+            for repeated in [false, true] {
+                let bound = current
+                    .measure_unread_source_v9_with_policy(
+                        &target,
+                        &profile,
+                        &limits,
+                        "inv:unread-source",
+                        &INVESTIGATION_V2_POLICY,
+                    )
+                    .unwrap();
+                acquire_source(&mut fixture, &target, &prototype, &mut evidence, &text);
+                for mode in [CompletionCallMode::Choice, CompletionCallMode::FinishOnly] {
+                    let actual = build_source(&fixture, &raw, &evidence, role, mode);
+                    let body = prompt(&actual);
+                    assert_eq!(
+                        body["turn_progress"]["last_completed_action"]["previously_acquired"],
+                        repeated
+                    );
+                    let measured = llm::bounded::measure_bounded_action(
+                        &profile,
+                        &actual.action("inv:unread-source".into()).unwrap(),
+                        &limits,
+                    )
+                    .unwrap();
+                    assert_dominates(
+                        if mode == CompletionCallMode::Choice {
+                            bound.choice
+                        } else {
+                            bound.finish_only
+                        },
+                        measured,
+                    );
+                    assert_eq!(
+                        body["inspection_progress"]["requirements"][0]["acquired"],
+                        true
+                    );
+                    if mode == CompletionCallMode::Choice {
+                        current = actual;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn admission_unread_source_refuses_rebound_or_unproven_descriptors_and_shapes() {
+    use llm::{LlmProvider, OllamaProvider};
+    let provider = OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test",
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    let profile = provider.bounded_profile().unwrap();
+    let limits = llm::bounded::CompletionLimits::default();
+    let role = SpecialistId::DomainAnalystV10;
+    let (fixture, raw, target, _) = source_fixture(role, "private text");
+    let input = build_source(&fixture, &raw, &[], role, CompletionCallMode::Choice);
+    for field in ["receipt", "context", "digest", "schema"] {
+        let mut changed = target.clone();
+        match field {
+            "receipt" => changed.receipt_id = format!("ts-primary-v2:{}", "f".repeat(64)),
+            "context" => changed.graph_snapshot_id = format!("context-v1:{}", "f".repeat(64)),
+            "digest" => changed.captured.file.digest = "f".repeat(64),
+            "schema" => changed.schema_version = 2,
+            _ => unreachable!(),
+        }
+        changed.target_id = changed.content_id().unwrap();
+        assert!(
+            input
+                .measure_unread_source_v9_with_policy(
+                    &changed,
+                    &profile,
+                    &limits,
+                    "inv:unread-source",
+                    &INVESTIGATION_V2_POLICY
+                )
+                .is_err(),
+            "{field}"
+        );
+    }
+    for field in [
+        "unknown_progress",
+        "unknown_usage",
+        "omitted",
+        "citations",
+        "registry",
+    ] {
+        let mut changed = input.clone();
+        let mut body = prompt(&changed);
+        match field {
+            "unknown_progress" => body["turn_progress"]["future"] = Value::Null,
+            "unknown_usage" => body["consumed_budgets"]["future"] = Value::Null,
+            "omitted" => body["omitted_sources"] = json!([]),
+            "citations" => body["citations"] = json!([]),
+            "registry" => {
+                body["compact_context"]["query_history"]["registry_hash"] =
+                    "new-prefix:unexpected".into()
+            }
+            _ => unreachable!(),
+        }
+        changed.payload.prompt = body.to_string();
+        assert!(
+            changed
+                .measure_unread_source_v9_with_policy(
+                    &target,
+                    &profile,
+                    &limits,
+                    "inv:unread-source",
+                    &INVESTIGATION_V2_POLICY
+                )
+                .is_err(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn admission_reserve_redaction_boundary_witnesses_preserve_the_wire_bound() {
+    // AC-0287: redact-text@1 quote barriers and private-key cross-field spans.
+    // These are byte-capacity witnesses, not proof protected fields still seal.
+    use llm::{LlmProvider, OllamaProvider};
+    let provider = OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test",
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    let profile = provider.bounded_profile().unwrap();
+    let limits = llm::bounded::CompletionLimits::default();
+    let role = SpecialistId::DomainAnalystV10;
+    for (question, cross_fields) in [
+        ("secret=", false),
+        ("password:", false),
+        ("Bearer ", false),
+        ("sk-", false),
+        ("AKIA", false),
+        ("-----END PRIVATE KEY-----", true),
+    ] {
+        let mut fixture = Fixture::new(role, 7);
+        fixture.request.question = question.into();
+        if cross_fields {
+            let Obligation::Source {
+                obligation_id,
+                target,
+            } = &mut fixture.request.obligations.obligations[0]
+            else {
+                unreachable!()
+            };
+            target.source.path = "-----BEGIN PRIVATE KEY-----".into();
+            target.captured.file.path = target.source.path.clone();
+            target.target_id = target.content_id().unwrap();
+            *obligation_id = Obligation::Source {
+                obligation_id: String::new(),
+                target: target.clone(),
+            }
+            .content_id()
+            .unwrap();
+        }
+        fixture.metadata.request_hash = fixture
+            .request
+            .intent_hash_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap();
+        fixture.metadata.obligations_hash = fixture
+            .request
+            .obligations
+            .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap();
+        let initial = fixture
+            .build(
+                role,
+                &usage(CompletionCallMode::Choice),
+                CompletionCallMode::Choice,
+                0,
+                None,
+            )
+            .unwrap();
+        let bound = initial
+            .measure_v9_reserve_with_policy(
+                &profile,
+                &limits,
+                "inv:boundary",
+                &INVESTIGATION_V2_POLICY,
+            )
+            .unwrap();
+        fixture.metadata.refusal_count = 1;
+        fixture.metadata.last_refusal_id = Some("d".repeat(64));
+        fixture.metadata.completed_attempt_ids = (0..INVESTIGATION_V2_POLICY
+            .max_completed_attempts())
+            .map(|index| format!("{index:064x}"))
+            .collect();
+        for completion_reason in [
+            staged_finish::RefusalReason::NotAttempted,
+            staged_finish::RefusalReason::AcquiredNotSupplied,
+            staged_finish::RefusalReason::Redacted,
+            staged_finish::RefusalReason::HashMismatch,
+            staged_finish::RefusalReason::Unavailable,
+        ] {
+            let item = &fixture.request.obligations.obligations[0];
+            let (kind, id) = item.key();
+            fixture.metadata.feedback = Some(staged_finish::RefusalFeedback {
+                schema_version: 1,
+                unmet: vec![staged_finish::FeedbackEntry {
+                    obligation_id: id.into(),
+                    kind: kind.into(),
+                    reason: completion_reason,
+                }],
+            });
+            for capacity_reason in [
+                CapacityRefusalReason::PromptCapacity,
+                CapacityRefusalReason::FinishCallReserve,
+                CapacityRefusalReason::FinishTokenReserve,
+                CapacityRefusalReason::UnprovenContribution,
+            ] {
+                for mode in [CompletionCallMode::Choice, CompletionCallMode::FinishOnly] {
+                    let mut consumed = usage(mode);
+                    if mode == CompletionCallMode::FinishOnly {
+                        consumed.model_invocations += 1;
+                        consumed.generated_token_reservations += 2048;
+                    }
+                    let input = fixture
+                        .build(role, &consumed, mode, 1, Some(&feedback(capacity_reason)))
+                        .unwrap();
+                    let actual = llm::bounded::measure_bounded_action(
+                        &profile,
+                        &input.action("inv:boundary".into()).unwrap(),
+                        &limits,
+                    )
+                    .unwrap();
+                    if cross_fields {
+                        assert!(actual.redacted_payload_bytes < actual.original_payload_bytes);
+                    }
+                    assert_dominates(
+                        if mode == CompletionCallMode::Choice {
+                            bound.choice
+                        } else {
+                            bound.finish_only
+                        },
+                        actual,
+                    );
+                }
+            }
+        }
+    }
+}

@@ -19,6 +19,28 @@ pub struct InvestigationInput {
     inspection_requirements: Option<Vec<InvestigationInspectionTarget>>,
 }
 
+/// Shared compact citation representation. It contains complete source origin
+/// metadata but no source text or text hash; sizing views reuse this serializer.
+#[derive(serde::Serialize)]
+struct CitationPromptHandle<'a> {
+    citation_id: &'a str,
+    fact: &'a crate::TaskFactKey,
+    origin: &'a InvestigationEvidenceOrigin,
+    role: &'a Option<crate::TaskRangeRole>,
+    index: &'a Option<u32>,
+}
+impl<'a> From<&'a InvestigationCitation> for CitationPromptHandle<'a> {
+    fn from(citation: &'a InvestigationCitation) -> Self {
+        Self {
+            citation_id: &citation.citation_id,
+            fact: &citation.fact,
+            origin: &citation.origin,
+            role: &citation.role,
+            index: &citation.index,
+        }
+    }
+}
+
 impl InvestigationInput {
     /// Provider-observed identity fields are untrusted output too. Tool steps
     /// may retain them only after the same source/metadata admission policy.
@@ -269,15 +291,7 @@ impl InvestigationInput {
             let citations: Vec<_> = ledger
                 .citations
                 .iter()
-                .map(|citation| {
-                    serde_json::json!({
-                        "citation_id": citation.citation_id,
-                        "fact": citation.fact,
-                        "origin": citation.origin,
-                        "role": citation.role,
-                        "index": citation.index,
-                    })
-                })
+                .map(CitationPromptHandle::from)
                 .collect();
             serde_json::json!({
                 "schema_version": 2,
