@@ -296,3 +296,21 @@ fn investigation_inspection_acceptance_keeps_legacy_report_and_requests_unchange
         );
     }
 }
+
+#[test]
+fn investigation_inspection_acceptance_rejects_ambiguous_fixture_before_calls() {
+    let provider = Arc::new(Scripted::new(Mode::Finish));
+    let fixture = AcceptanceSpecialists::SOURCE_INSPECTION_V5
+        .analyst_fixture(provider.as_ref(), tempfile::tempdir().unwrap());
+    let state = fixture.app.state::<AppState>();
+    let mut graph = state.graph.lock().unwrap();
+    let mut duplicate = graph.nodes_with_label("BusinessRule").unwrap().remove(0);
+    duplicate.id.push_str("-ambiguous");
+    graph.put_node(&duplicate).unwrap();
+    drop(graph);
+    assert_eq!(
+        range_target(&fixture, TaskRangeRole::DefinitionInitializer).unwrap_err(),
+        "Control fixture must contain exactly one recovered BusinessRule."
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}

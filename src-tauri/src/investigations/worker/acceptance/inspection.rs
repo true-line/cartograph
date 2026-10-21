@@ -152,15 +152,16 @@ fn range_target(
     role: TaskRangeRole,
 ) -> Result<InvestigationInspectionTarget, String> {
     let state = fixture.app.state::<AppState>();
-    let node = state
+    let mut nodes = state
         .graph
         .lock()
         .unwrap()
         .nodes_with_label("BusinessRule")
-        .unwrap()
-        .into_iter()
-        .next()
-        .ok_or("Control fixture has no recovered BusinessRule.")?;
+        .unwrap();
+    if nodes.len() != 1 {
+        return Err("Control fixture must contain exactly one recovered BusinessRule.".into());
+    }
+    let node = nodes.pop().unwrap();
     let fact = agents::TaskFactKey::Node { id: node.id };
     let description =
         crate::primary_source::describe(&state, &crate::task_evidence::graph_fact(&fact))?;
