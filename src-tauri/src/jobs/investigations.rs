@@ -22,17 +22,31 @@ mod completion;
 mod metadata_admission;
 #[allow(unused_imports)] // Used by the separately integrated internal host adapter.
 pub(crate) use metadata_admission::MetadataAdmission;
+#[allow(dead_code)] // Internal first-context publication; task creation remains closed.
+#[path = "investigations/next_prompt_initial.rs"]
+mod next_prompt_initial;
+#[allow(dead_code)] // Internal pre-call writer; public @10 routes remain closed.
+#[path = "investigations/next_prompt_invocation.rs"]
+mod next_prompt_invocation;
+#[allow(unused_imports)]
+pub(crate) use next_prompt_invocation::NextPromptInvocation;
 #[path = "investigations/coverage.rs"]
 mod coverage;
 #[cfg(test)]
 #[path = "investigations/coverage_tests.rs"]
 mod coverage_tests;
+#[cfg(test)]
+#[path = "investigations/metadata_host_fixture.rs"]
+pub(crate) mod metadata_host_fixture;
 #[path = "investigations/reads.rs"]
 mod reads;
 // Internal admission foundation; no historical runtime initializes these tables.
 #[allow(dead_code)]
 #[path = "investigations/read_reservations.rs"]
 mod read_reservations;
+#[allow(dead_code)] // Internal settlement projection; public @10 remains closed.
+#[path = "investigations/source_settlement.rs"]
+mod source_settlement;
 #[allow(dead_code)] // Internal issuer; reservation admission/public activation remain closed.
 #[path = "investigations/source_validation.rs"]
 mod source_validation;
@@ -281,7 +295,7 @@ struct StoredExecution {
     owner: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredTask {
     schema_version: u32,

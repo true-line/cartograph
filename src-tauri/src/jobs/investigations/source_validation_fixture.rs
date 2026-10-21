@@ -7,9 +7,26 @@ use query_fixture::*;
 
 /// Explicit internal records only: real saved invocation, disclosure, journal,
 /// owner lock and charge transaction; no actual parser/source-read assertion.
-pub(super) fn fixture() -> (completion::InternalFixture, Reservation) {
+pub(in crate::jobs::investigations) fn fixture() -> (completion::InternalFixture, Reservation) {
+    fixture_with_obligation(false)
+}
+pub(in crate::jobs::investigations) fn fixture_with_source_obligation()
+-> (completion::InternalFixture, Reservation) {
+    fixture_with_obligation(true)
+}
+fn fixture_with_obligation(source_obligation: bool) -> (completion::InternalFixture, Reservation) {
+    let (f, source) = invocation_fixture(source_obligation);
+    reserve_fixture(f, source)
+}
+pub(in crate::jobs::investigations) fn source_invocation_fixture()
+-> (completion::InternalFixture, InvestigationInspectionTarget) {
+    invocation_fixture(true)
+}
+fn invocation_fixture(
+    source_obligation: bool,
+) -> (completion::InternalFixture, InvestigationInspectionTarget) {
     let mut target = None;
-    let mut f = completion::internal_fixture_with_initial_ledger(|store, task, ledger, _| {
+    let mut f = completion::internal_fixture_with_initial_ledger(|store, task, ledger, request| {
         let mut source:InvestigationInspectionTarget=serde_json::from_value(json!({
             "schema_version":1,"target_id":"","graph_snapshot_id":ledger.graph_snapshot_id,
             "fact":{"kind":"node","id":"node:checkout"},"fact_digest":format!("node-v1:{}","b".repeat(64)),
@@ -21,6 +38,19 @@ pub(super) fn fixture() -> (completion::InternalFixture, Reservation) {
         })).unwrap();
         source.target_id = source.content_id().unwrap();
         source.validate().unwrap();
+        if source_obligation {
+            request.expected_graph_revision = Some(source.graph_snapshot_id.clone());
+            task.expected_graph_revision = request.expected_graph_revision.clone();
+            let mut obligation = Obligation::Source {
+                obligation_id: String::new(),
+                target: Box::new(source.clone()),
+            };
+            let id = obligation.content_id().unwrap();
+            if let Obligation::Source { obligation_id, .. } = &mut obligation {
+                *obligation_id = id;
+            }
+            request.obligations.obligations = vec![obligation];
+        }
         ledger.selected_facts.push(agents::TaskFactSelection {
             fact: source.fact.clone(),
             fact_digest: source.fact_digest.clone(),
@@ -100,7 +130,7 @@ pub(super) fn fixture() -> (completion::InternalFixture, Reservation) {
     });
     let (source, acquired, raw) = target.unwrap();
     publish_query_and_start_source_call(&mut f, acquired, raw);
-    reserve_fixture(f, source)
+    (f, source)
 }
 
 fn reserve_fixture(
@@ -131,9 +161,15 @@ fn reserve_fixture(
         )
         .unwrap();
     let r = Reservation {
-        schema_version: 1,
+        schema_version: 2,
         source,
-        storage_claim_bytes: 32 * 1024,
+        storage_claim: read_reservations::StorageClaim {
+            validation_bytes: 8 * 1024,
+            settlement_bytes: 24 * 1024,
+            validation_events: 1,
+            settlement_events: 2,
+            settlement_attempts: 1,
+        },
         binding: ReadBinding {
             task_id: f.basis.task_id.clone(),
             step_id: f.step.step_id.clone(),

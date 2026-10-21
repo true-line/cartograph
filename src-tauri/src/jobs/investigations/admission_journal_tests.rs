@@ -128,7 +128,7 @@ pub(in crate::jobs::investigations) fn start_call(
     )
     .unwrap();
     let id = format!("journal-step:{}", f.task.detail.usage.model_invocations + 1);
-    let action = input.action(id.clone()).unwrap();
+    let action = input.action(format!("{}:{id}", f.basis.task_id)).unwrap();
     let provider = OllamaProvider::new(
         "http://127.0.0.1:11434",
         "test-model",

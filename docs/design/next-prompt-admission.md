@@ -129,3 +129,41 @@ passed with these changes. These counts describe separate runs, not a claimed
 full-suite run at the combined head. Atomic metadata publication, source
 reservation/settlement and worker integration remain incomplete, and public
 @10 routing remains disabled. No provider execution was performed.
+
+
+## Staged storage and first-context integration checkpoint
+
+Source reservations now carry separate validation and settlement allocations.
+Pending logical occupancy includes both until the validation witness commits,
+then only settlement, then neither after a validated disposition. Each writer
+measures its actual task and global logical growth against its own allocation;
+this includes task-body growth and the existing logical row/index allowance.
+These are logical accounting bounds, not physical SQLite disk bounds.
+
+Validation sizing and publication share one projection of the actual task,
+witness and event. Event claims likewise retain three slots before validation
+and two afterward. The persistence guard preserves those slots for both ordinary
+and cancellation events. Focused tests cover exact task capacity, a validation
+allocation one byte too small with unchanged durable state after reopening,
+and exact event-slot boundaries. Independent review found no blocking defects
+in this claim kernel; it does not establish source-admission authority.
+
+The initial-context writer publishes the archive, initial ledger and Ready state
+inside the owner transaction, after checking the genuine prepared input and
+retained-source callback. The invocation writer separately authenticates Choice
+or FinishOnly mode, saved metadata and actual preparation; cloud Consent replay
+is validated before an invocation exists without relaxing saved-call validation.
+Tests exercise Preparing through the first invocation and rollback boundaries.
+
+Source settlement now has shared pure projections and a production-serialized
+maximum for acquired, unavailable, released, discarded, invariant-defect and
+unknown outcomes. Actual settlement persists those same projections and checks
+its allocated bytes and counts. Component tests cover successful source and
+unavailable continuations and terminal accounting. This does not complete the
+production source-reservation admission, host/controller integration or recovery
+acceptance. Public @10 remains disabled and no provider was executed.
+
+Combined local checkpoint: all 197 native ownership tests pass, including the
+21 reservation and 10 validation tests, and strict all-target Clippy passes for
+both the app and native harness. Formatting passes. These results do not prove
+Windows runtime behavior, real-provider acceptance, or public runtime readiness.

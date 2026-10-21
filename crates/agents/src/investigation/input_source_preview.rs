@@ -93,8 +93,17 @@ impl InvestigationInput {
         // checks real production redaction in both modes. Controlled values
         // cannot create regex prefixes, JSON separators, or private-key
         // delimiters; any cross-field private-key regions thus remain fixed.
-        let continuation =
+        let acquired =
             self.measure_source_projection(target, profile, limits, next_action_id, policy, true)?;
+        // A genuinely unavailable read advances usage/attempt metadata without
+        // acquiring a citation or revising the ledger. Bound that complete
+        // protected representation independently; no size ordering is assumed.
+        let unavailable =
+            self.measure_unchanged_protected_reserve(profile, limits, next_action_id, policy)?;
+        let continuation = AdmissionReserveMeasurements {
+            choice: maximum(acquired.choice, unavailable.choice),
+            finish_only: maximum(acquired.finish_only, unavailable.finish_only),
+        };
         let disclosure_upper_bytes = disclosure_upper_bound(
             disclosure.clone(),
             self.payload.spans.len(),
@@ -200,4 +209,17 @@ pub(super) fn disclosure_upper_bound(
     // These values intentionally cannot validate as a receipt. They never leave
     // this function; only the serialized upper size does.
     Ok(bounded_bytes(&sizing, max_bytes)?.len())
+}
+
+fn maximum(
+    a: llm::bounded::BoundedWireMeasurements,
+    b: llm::bounded::BoundedWireMeasurements,
+) -> llm::bounded::BoundedWireMeasurements {
+    llm::bounded::BoundedWireMeasurements {
+        raw_string_bytes: a.raw_string_bytes.max(b.raw_string_bytes),
+        original_payload_bytes: a.original_payload_bytes.max(b.original_payload_bytes),
+        redacted_payload_bytes: a.redacted_payload_bytes.max(b.redacted_payload_bytes),
+        original_action_bytes: a.original_action_bytes.max(b.original_action_bytes),
+        egress_fingerprint_bytes: a.egress_fingerprint_bytes.max(b.egress_fingerprint_bytes),
+    }
 }

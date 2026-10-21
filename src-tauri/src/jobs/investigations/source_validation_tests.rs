@@ -263,3 +263,168 @@ fn source_validation_archive_identity_classifies_missing_and_corrupt_rows() {
         reservation.binding.archive_hash
     );
 }
+
+#[test]
+fn source_validation_storage_projection_bounds_actual_committed_growth() {
+    // AC-0287: allocation sizing and the real writer use one production projection.
+    // Unspent claim bytes are excluded; the delta is the real write, including
+    // task growth and the same logical row overhead as capacity accounting.
+    let (mut f, reservation) = fixture();
+    let (bound, task_before, global_before) = {
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        let bound = validation_storage_bound(&tx, &f.task, &reservation).unwrap();
+        let values = (
+            bound,
+            actual_stored_bytes(&tx, Some(&f.basis.task_id)).unwrap(),
+            actual_stored_bytes(&tx, None).unwrap(),
+        );
+        tx.commit().unwrap();
+        values
+    };
+    let receipt = charge(&mut f, &reservation).unwrap();
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    let task_after = actual_stored_bytes(&tx, Some(&f.basis.task_id)).unwrap();
+    let global_after = actual_stored_bytes(&tx, None).unwrap();
+    assert!(bound > 0);
+    assert_eq!(task_after - task_before, bound);
+    assert_eq!(global_after - global_before, bound);
+    assert_eq!(
+        receipt.detail().usage.captured_validation_bytes,
+        reservation.binding.base_usage.captured_validation_bytes
+            + reservation.source.captured.file.byte_len
+    );
+}
+
+#[test]
+fn source_validation_spends_own_claim_at_exact_task_capacity() {
+    // AC-0287: seed a valid internal reservation whose remaining settlement
+    // allocation fills the logical ceiling. This tests stage spending; the
+    // production reservation-admission derivation is outside this fixture.
+    let (mut f, mut reservation) = fixture();
+    let maximum = TASK_CAPACITY - TERMINAL_RESERVE;
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    reservation.storage_claim.validation_bytes =
+        validation_storage_bound(&tx, &f.task, &reservation).unwrap();
+    tx.execute_batch("DROP TRIGGER investigation_read_reservations_no_update")
+        .unwrap();
+    for _ in 0..8 {
+        f.task
+            .pending_source_read
+            .as_mut()
+            .unwrap()
+            .reservation_hash = reservation.fingerprint().unwrap();
+        let body = encode(&reservation, MAX_MANIFEST_BYTES).unwrap();
+        tx.execute(
+            "UPDATE investigation_read_reservations SET body=?2,body_hash=?3 WHERE task_id=?1",
+            params![f.basis.task_id, body, core_prov::content_hash(&body)],
+        )
+        .unwrap();
+        let task_bytes = encode(&f.task, MAX_RECORD_BYTES).unwrap();
+        tx.execute(
+            "UPDATE investigation_tasks SET record=?2,record_hash=?3 WHERE id=?1",
+            params![
+                f.basis.task_id,
+                task_bytes,
+                core_prov::content_hash(&task_bytes)
+            ],
+        )
+        .unwrap();
+        // Restore the exact namespace before each coherent capacity snapshot.
+        tx.execute_batch("CREATE TRIGGER investigation_read_reservations_no_update BEFORE UPDATE ON investigation_read_reservations BEGIN SELECT RAISE(ABORT, 'immutable investigation read record'); END").unwrap();
+        let occupied = stored_bytes(&tx, Some(&f.basis.task_id)).unwrap();
+        if occupied == maximum {
+            break;
+        }
+        if occupied < maximum {
+            reservation.storage_claim.settlement_bytes += maximum - occupied;
+        } else {
+            reservation.storage_claim.settlement_bytes -= occupied - maximum;
+        }
+        tx.execute_batch("DROP TRIGGER investigation_read_reservations_no_update")
+            .unwrap();
+    }
+    assert_eq!(stored_bytes(&tx, Some(&f.basis.task_id)).unwrap(), maximum);
+    validate_saved_pending(&tx, &f.task).unwrap();
+    tx.commit().unwrap();
+    charge(&mut f, &reservation).unwrap();
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    assert_eq!(stored_bytes(&tx, Some(&f.basis.task_id)).unwrap(), maximum);
+    assert_eq!(
+        read_reservations::pending_storage_claims(&tx, Some(&f.basis.task_id)).unwrap(),
+        reservation.storage_claim.settlement_bytes
+    );
+    assert_eq!(
+        read_reservations::pending_event_claims(&tx, &f.basis.task_id).unwrap(),
+        2
+    );
+}
+
+#[test]
+fn source_validation_one_byte_short_refuses_without_durable_changes() {
+    // AC-0287: an authentic reservation with an insufficient stage allocation
+    // cannot issue a receipt, charge usage, or consume settlement headroom.
+    let (mut f, mut reservation) = fixture();
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    reservation.storage_claim.validation_bytes =
+        validation_storage_bound(&tx, &f.task, &reservation).unwrap() - 1;
+    f.task
+        .pending_source_read
+        .as_mut()
+        .unwrap()
+        .reservation_hash = reservation.fingerprint().unwrap();
+    let body = encode(&reservation, MAX_MANIFEST_BYTES).unwrap();
+    tx.execute_batch("DROP TRIGGER investigation_read_reservations_no_update")
+        .unwrap();
+    tx.execute(
+        "UPDATE investigation_read_reservations SET body=?2,body_hash=?3 WHERE task_id=?1",
+        params![f.basis.task_id, body, core_prov::content_hash(&body)],
+    )
+    .unwrap();
+    tx.execute_batch("CREATE TRIGGER investigation_read_reservations_no_update BEFORE UPDATE ON investigation_read_reservations BEGIN SELECT RAISE(ABORT, 'immutable investigation read record'); END").unwrap();
+    let task_body = encode(&f.task, MAX_RECORD_BYTES).unwrap();
+    tx.execute(
+        "UPDATE investigation_tasks SET record=?2,record_hash=?3 WHERE id=?1",
+        params![
+            f.basis.task_id,
+            task_body,
+            core_prov::content_hash(&task_body)
+        ],
+    )
+    .unwrap();
+    validate_saved_pending(&tx, &f.task).unwrap();
+    let before_bytes = stored_bytes(&tx, Some(&f.basis.task_id)).unwrap();
+    let before_events: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM investigation_events WHERE task_id=?1",
+            [&f.basis.task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    tx.commit().unwrap();
+    assert!(matches!(
+        charge(&mut f, &reservation),
+        Err(InvestigationStoreError::Capacity)
+    ));
+    assert!(saved(&f).charge.is_none());
+    assert!(saved(&f).disposition.is_none());
+    let reopened = JobStore::open(f.directory.path().join("state.db")).unwrap();
+    let tx = reopened.conn.unchecked_transaction().unwrap();
+    let task = load_next_prompt_task_base(&tx, &f.basis.task_id).unwrap();
+    assert_eq!(encode(&task, MAX_RECORD_BYTES).unwrap(), task_body);
+    assert_eq!(
+        stored_bytes(&tx, Some(&f.basis.task_id)).unwrap(),
+        before_bytes
+    );
+    let after_events: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM investigation_events WHERE task_id=?1",
+            [&f.basis.task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after_events, before_events);
+    assert_eq!(
+        read_reservations::pending_event_claims(&tx, &f.basis.task_id).unwrap(),
+        3
+    );
+}

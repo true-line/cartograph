@@ -19,7 +19,7 @@ fn reservation(task: &str, step: &str) -> Reservation {
         index: source.index,
     };
     let r = Reservation {
-        schema_version: 1,
+        schema_version: 2,
         binding: ReadBinding {
             task_id: task.into(),
             step_id: step.into(),
@@ -46,7 +46,13 @@ fn reservation(task: &str, step: &str) -> Reservation {
             certification_basis_hash: content_hash(b"future-certification-basis"),
         },
         source,
-        storage_claim_bytes: 32 * 1024,
+        storage_claim: read_reservations::StorageClaim {
+            validation_bytes: 8 * 1024,
+            settlement_bytes: 24 * 1024,
+            validation_events: 1,
+            settlement_events: 2,
+            settlement_attempts: 1,
+        },
     };
     r.validate().unwrap();
     r
@@ -178,7 +184,7 @@ fn read_reservation_rows_rollback_reopen_and_reject_duplicate_replacement() {
     assert_eq!(raw, (body.clone(), content_hash(&body)));
     assert_eq!(
         pending_storage_claims(&tx, Some("task:1")).unwrap(),
-        r.storage_claim_bytes
+        r.storage_claim.bytes(true).unwrap()
     );
     insert_disposition(&tx, "task:1", "step:1", &acquired).unwrap();
     assert_eq!(
@@ -231,7 +237,7 @@ fn read_reservation_unknown_settlement_retains_identical_unknown_debits() {
             assert_eq!(projected.validation_bytes, if charged { 12 } else { 0 });
             assert_eq!(
                 pending_storage_claims(&tx, None).unwrap(),
-                r.storage_claim_bytes
+                r.storage_claim.bytes(charged).unwrap()
             );
             let before = stored_bytes(&tx, None).unwrap();
             let unknown =
@@ -295,7 +301,7 @@ fn read_reservation_identity_shape_capacity_and_charge_binding_reject_tampering(
     changed.binding.original_response_hash = content_hash(b"other-response");
     assert_ne!(changed.fingerprint().unwrap(), fingerprint); // saved authority checked by future caller
     for change in [
-        |r: &mut Reservation| r.schema_version = 2,
+        |r: &mut Reservation| r.schema_version = 1,
         |r: &mut Reservation| r.binding.specialist_id = SpecialistId::DomainAnalystV9,
         |r: &mut Reservation| r.binding.policy_profile = "investigation-v1".into(),
         |r: &mut Reservation| r.binding.original_action_hash = content_hash(b"wrong-action"),
@@ -303,8 +309,8 @@ fn read_reservation_identity_shape_capacity_and_charge_binding_reject_tampering(
         |r: &mut Reservation| r.binding.archive_hash = "X".repeat(64),
         |r: &mut Reservation| r.binding.context_id = "context-v2:invalid".into(),
         |r: &mut Reservation| r.binding.execution_job = 0,
-        |r: &mut Reservation| r.storage_claim_bytes = 0,
-        |r: &mut Reservation| r.storage_claim_bytes = TASK_CAPACITY + 1,
+        |r: &mut Reservation| r.storage_claim.validation_bytes = 0,
+        |r: &mut Reservation| r.storage_claim.validation_bytes = TASK_CAPACITY + 1,
         |r: &mut Reservation| r.source.captured.file.byte_len += 1,
     ] {
         let mut bad = r.clone();
@@ -467,7 +473,7 @@ fn read_reservation_accounting_charges_all_rows_and_bounds_record_counts() {
     assert_eq!(stored_bytes(&tx, None).unwrap(), bytes + 256);
     assert_eq!(
         pending_storage_claims(&tx, None).unwrap(),
-        r.storage_claim_bytes
+        r.storage_claim.bytes(false).unwrap()
     );
     let d = Disposition::for_reservation(&r, None, DispositionKind::ReleasedBeforeRead).unwrap();
     insert_disposition(&tx, "task:1", "step:0", &d).unwrap();
@@ -491,7 +497,7 @@ fn read_reservation_accounting_charges_all_rows_and_bounds_record_counts() {
     insert_reservation(&tx, &r).unwrap();
     assert_eq!(
         pending_storage_claims(&tx, None).unwrap(),
-        r.storage_claim_bytes
+        r.storage_claim.bytes(false).unwrap()
     );
     assert_eq!(pending_storage_claims(&tx, Some("task:1")).unwrap(), 0);
 }
@@ -522,3 +528,27 @@ mod storage_tests;
 
 #[path = "read_reservation_preflight_tests.rs"]
 mod preflight_tests;
+
+#[test]
+fn read_reservation_stage_claims_release_only_the_committed_stage() {
+    let mut conn = connection();
+    init(&mut conn);
+    let tx = conn.transaction().unwrap();
+    let r = reservation("task:1", "step:1");
+    insert_reservation(&tx, &r).unwrap();
+    assert_eq!(pending_event_claims(&tx, "task:1").unwrap(), 3);
+    let before = pending_storage_claims(&tx, Some("task:1")).unwrap();
+    let charge = ValidationCharge::for_reservation(&r).unwrap();
+    insert_charge(&tx, "task:1", "step:1", &charge).unwrap();
+    assert_eq!(pending_event_claims(&tx, "task:1").unwrap(), 2);
+    assert_eq!(
+        pending_storage_claims(&tx, Some("task:1")).unwrap(),
+        before - r.storage_claim.validation_bytes
+    );
+    let disposition =
+        Disposition::for_reservation(&r, Some(&charge), DispositionKind::OutcomeUnknown).unwrap();
+    insert_disposition(&tx, "task:1", "step:1", &disposition).unwrap();
+    assert_eq!(pending_event_claims(&tx, "task:1").unwrap(), 0);
+    assert_eq!(pending_storage_claims(&tx, Some("task:1")).unwrap(), 0);
+    tx.rollback().unwrap();
+}

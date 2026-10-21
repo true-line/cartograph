@@ -31,7 +31,7 @@ fn read_reservation_preflight_handle_reuses_one_coherent_snapshot() {
         global.rows,
         a.rows + b.rows + READ_NAMESPACE_ALLOWANCE_BYTES
     );
-    assert_eq!(global.claims, first.storage_claim_bytes);
+    assert_eq!(global.claims, first.storage_claim.bytes(false).unwrap());
     assert_eq!(b.claims, 0);
     assert_eq!(reads.preflight_runs, 1);
     assert_eq!(reads.snapshot_runs, 1);
@@ -58,12 +58,15 @@ fn read_reservation_preflight_handle_invalidates_after_each_controlled_namespace
     let r = reservation("task:1", "step:1");
     reads.insert_reservation(&r).unwrap();
     let reserved = reads.capacity_charge(None).unwrap();
-    assert_eq!(reserved.claims, r.storage_claim_bytes);
+    assert_eq!(reserved.claims, r.storage_claim.bytes(false).unwrap());
     assert!(reserved.rows > empty.rows);
     let charge = ValidationCharge::for_reservation(&r).unwrap();
     reads.insert_charge("task:1", "step:1", &charge).unwrap();
     let charged = reads.capacity_charge(None).unwrap();
-    assert_eq!(charged.claims, reserved.claims);
+    assert_eq!(
+        charged.claims,
+        reserved.claims - r.storage_claim.validation_bytes
+    );
     assert!(charged.rows > reserved.rows);
     let d =
         Disposition::for_reservation(&r, Some(&charge), DispositionKind::OutcomeUnknown).unwrap();
@@ -94,7 +97,7 @@ fn read_reservation_preflight_handle_detects_same_row_and_rolled_back_sql_mutati
     insert_reservation(&tx, &r).unwrap();
     let mut reads = ReadTransaction::new(&tx).unwrap();
     let original = reads.capacity_charge(None).unwrap();
-    r.storage_claim_bytes += 1;
+    r.storage_claim.settlement_bytes += 1;
     let changed = encode(&r, MAX_MANIFEST_BYTES).unwrap();
     replace_body(
         &tx,

@@ -290,6 +290,37 @@ impl SavedCallBasis {
         }
         validate_usage(current, &task.detail.limits)
     }
+    /// Consent retains an exact PRE-call witness but has neither an immutable
+    /// invocation nor a model/token debit. Replay it against current journals,
+    /// rather than treating approval as an already-started call.
+    pub(super) fn validate_pending_consent(
+        &self,
+        connection: &Connection,
+        task: &StoredTask,
+    ) -> Result<(), InvestigationStoreError> {
+        let state = task
+            .admission_state
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        state.validate_task_binding(task)?;
+        if task.phase != Phase::Consent
+            || task.detail.provider.mode != InvestigationProviderMode::Cloud
+            || state.current_call.as_ref() != Some(self)
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let step = task
+            .pending
+            .as_ref()
+            .ok_or(InvestigationStoreError::Missing)?;
+        let ledger =
+            storage::load_ledger(connection, task)?.ok_or(InvestigationStoreError::Missing)?;
+        let metadata = completion::metadata_current_next_prompt(connection, task)?;
+        if Self::from_pre_call_saved(connection, task, step, &ledger, &metadata)? != *self {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        Ok(())
+    }
     /// Full current-call check against the authentic capacity journal strictly
     /// before this exact saved invocation. Journal replay uses only the core
     /// loader, so this comparison cannot recurse through validate_saved.

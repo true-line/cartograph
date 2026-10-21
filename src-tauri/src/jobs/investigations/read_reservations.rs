@@ -48,6 +48,41 @@ pub(super) struct ReadBinding {
     pub certification_basis_hash: String,
 }
 
+/// Stage allocations, additional to the existing terminal byte/event reserves.
+/// Shape validation is not sizing authority: admission derives these from the
+/// production validation/settlement projections before storing a reservation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StorageClaim {
+    pub validation_bytes: usize,
+    pub settlement_bytes: usize,
+    pub validation_events: usize,
+    pub settlement_events: usize,
+    pub settlement_attempts: usize,
+}
+impl StorageClaim {
+    pub(super) fn validate(&self) -> Result<(), InvestigationStoreError> {
+        if self.validation_bytes == 0
+            || self.settlement_bytes == 0
+            || self.validation_events != 1
+            || self.settlement_events != 2
+            || self.settlement_attempts > INVESTIGATION_V2_POLICY.max_completed_attempts()
+            || self.bytes(false)? > TASK_CAPACITY
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        Ok(())
+    }
+    pub(super) fn bytes(&self, charged: bool) -> Result<usize, InvestigationStoreError> {
+        self.settlement_bytes
+            .checked_add(if charged { 0 } else { self.validation_bytes })
+            .ok_or(InvestigationStoreError::Capacity)
+    }
+    pub(super) fn events(&self, charged: bool) -> usize {
+        self.settlement_events + if charged { 0 } else { self.validation_events }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Reservation {
@@ -55,12 +90,7 @@ pub(super) struct Reservation {
     pub binding: ReadBinding,
     /// Exact retained descriptor; public validation proves consistency only.
     pub source: InvestigationInspectionTarget,
-    /// ADDITIONAL headroom beyond the preexisting TERMINAL_RESERVE, checked by
-    /// admission against a production-derived maximal settlement plan. Already
-    /// written rows are charged separately. This format validator bounds the
-    /// claim; it does not size/certify that plan or add the terminal reserve a
-    /// second time.
-    pub storage_claim_bytes: usize,
+    pub storage_claim: StorageClaim,
 }
 impl Reservation {
     pub(super) fn validate(&self) -> Result<(), InvestigationStoreError> {
@@ -80,7 +110,7 @@ impl Reservation {
         let read_matches = matches!(&b.original_read,
             ReadIntent::Source { fact, role, index }
             if fact == &self.source.fact && role == &self.source.role && index == &self.source.index);
-        if self.schema_version != 1
+        if self.schema_version != 2
             || !b.specialist_id.uses_next_prompt_admission()
             || b.policy_profile != policy.profile()
             || !id_valid(&b.task_id)
@@ -94,13 +124,12 @@ impl Reservation {
             || i64::try_from(b.base_ledger_revision).is_err()
             || hashes.iter().any(|h| !hash_valid(h))
             || !read_matches
-            || self.storage_claim_bytes == 0
-            || self.storage_claim_bytes > TASK_CAPACITY
             || b.original_action_hash != staged::read_action_hash(&b.original_read)?
             || b.resolved_read_hash != b.original_read.fingerprint()?
         {
             return Err(InvestigationStoreError::Invalid);
         }
+        self.storage_claim.validate()?;
         self.source.validate()?;
         validate_usage(&b.base_usage, &policy.limits())?;
         // Reserve eventual tool debits against the immutable admission base.
@@ -119,7 +148,7 @@ impl Reservation {
     }
     pub(super) fn fingerprint(&self) -> Result<String, InvestigationStoreError> {
         self.validate()?;
-        domain_hash(b"cartograph:source-read-reservation:v1\0", self)
+        domain_hash(b"cartograph:source-read-reservation:v2\0", self)
     }
 }
 
@@ -517,6 +546,22 @@ fn load_validated(
     }))
 }
 
+/// The same logical row accounting used by preflight and capacity snapshots.
+/// This does not estimate physical SQLite pages or allocate a storage claim.
+pub(super) fn logical_row_bytes(
+    task: &str,
+    step: &str,
+    value: &impl Serialize,
+) -> Result<usize, InvestigationStoreError> {
+    encode(value, MAX_MANIFEST_BYTES)?
+        .len()
+        .checked_add(64)
+        .and_then(|n| n.checked_add(task.len()))
+        .and_then(|n| n.checked_add(step.len()))
+        .and_then(|n| n.checked_add(READ_ROW_ALLOWANCE_BYTES))
+        .ok_or(InvestigationStoreError::Capacity)
+}
+
 fn insert(
     connection: &Connection,
     table: &str,
@@ -557,6 +602,7 @@ impl MutationStamp {
 pub(super) struct CapacityCharge {
     pub rows: usize,
     pub claims: usize,
+    pub event_claims: usize,
 }
 impl CapacityCharge {
     pub(super) fn occupied(self) -> Result<usize, InvestigationStoreError> {
@@ -778,7 +824,20 @@ impl<'tx> ReadTransaction<'tx> {
                 if !pending_tasks.insert(task.clone()) {
                     return Err(InvestigationStoreError::Invalid);
                 }
-                let bytes = saved.reservation.storage_claim_bytes;
+                let bytes = saved
+                    .reservation
+                    .storage_claim
+                    .bytes(saved.charge.is_some())?;
+                let events = saved
+                    .reservation
+                    .storage_claim
+                    .events(saved.charge.is_some());
+                snapshot.tasks.entry(task.clone()).or_default().event_claims = events;
+                snapshot.global.event_claims = snapshot
+                    .global
+                    .event_claims
+                    .checked_add(events)
+                    .ok_or(InvestigationStoreError::Capacity)?;
                 snapshot.tasks.entry(task).or_default().claims = bytes;
                 snapshot.global.claims = snapshot
                     .global
@@ -858,6 +917,15 @@ pub(super) fn pending_storage_claims(
     Ok(ReadTransaction::compatible(connection)?
         .capacity_charge(task)?
         .claims)
+}
+
+pub(super) fn pending_event_claims(
+    connection: &Connection,
+    task: &str,
+) -> Result<usize, InvestigationStoreError> {
+    Ok(ReadTransaction::compatible(connection)?
+        .capacity_charge(Some(task))?
+        .event_claims)
 }
 
 /// Audit deltas for one task, including permanently retained unknown debits.

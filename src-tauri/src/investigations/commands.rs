@@ -595,7 +595,12 @@ mod policy_catalog_tests {
         }
         for policy in policy_catalog() {
             assert!(policy.request_schema_version <= 6);
-            assert!(policy.specialist_ids.iter().all(|id| !id.uses_next_prompt_admission()));
+            assert!(
+                policy
+                    .specialist_ids
+                    .iter()
+                    .all(|id| !id.uses_next_prompt_admission())
+            );
         }
     }
 

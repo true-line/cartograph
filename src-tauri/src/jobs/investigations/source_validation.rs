@@ -239,6 +239,84 @@ pub(super) fn validate_saved_pending(
     Ok(saved)
 }
 
+pub(super) struct ValidationProjection {
+    pub(super) task: StoredTask,
+    pub(super) charge: ValidationCharge,
+    pub(super) event: InvestigationEvent,
+    pub(super) additional_bytes: usize,
+}
+
+/// Project the production validation write before changing any durable row.
+/// Timestamp content varies, but SQLite's pinned UTC format has fixed width.
+/// The writer persists these exact values rather than constructing them twice.
+pub(super) fn project_validation(
+    connection: &Connection,
+    task: &StoredTask,
+    reservation: &read_reservations::Reservation,
+) -> Result<ValidationProjection, InvestigationStoreError> {
+    if task.phase != Phase::Reservation
+        || task.detail.summary.investigation_id != reservation.binding.task_id
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let before_bytes = encode(task, MAX_RECORD_BYTES)?.len();
+    let mut next = task.clone();
+    let charge = ValidationCharge::for_reservation(reservation)?;
+    next.detail.usage.captured_validation_bytes = next
+        .detail
+        .usage
+        .captured_validation_bytes
+        .checked_add(charge.validation_bytes)
+        .ok_or(InvestigationStoreError::Capacity)?;
+    validate_usage(&next.detail.usage, &next.detail.limits)?;
+    bump(connection, &mut next)?;
+    let created_at = timestamp(connection)?;
+    if created_at.len() != 20 || next.detail.summary.updated_at.len() != 20 {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let event = prepare_event(
+        &mut next,
+        InvestigationEventKind::EvidenceValidationReserved,
+        Some(&reservation.binding.step_id),
+        Some(InvestigationTool::ReadEvidence),
+        "Exact captured-file validation charge committed before source access.",
+        created_at,
+    )?;
+    let task_growth = encode(&next, MAX_RECORD_BYTES)?
+        .len()
+        .saturating_sub(before_bytes);
+    let event_bytes = encode(&event, 16 * 1024)?
+        .len()
+        .checked_add(64 + 256)
+        .ok_or(InvestigationStoreError::Capacity)?;
+    let additional_bytes = read_reservations::logical_row_bytes(
+        &reservation.binding.task_id,
+        &reservation.binding.step_id,
+        &charge,
+    )?
+    .checked_add(event_bytes)
+    .and_then(|n| n.checked_add(task_growth))
+    .ok_or(InvestigationStoreError::Capacity)?;
+    Ok(ValidationProjection {
+        task: next,
+        charge,
+        event,
+        additional_bytes,
+    })
+}
+
+/// Derive validation's allocation from the same production projection the
+/// writer consumes. This is a sizing result, not reservation/owner authority;
+/// source admission must separately certify every settlement alternative.
+#[allow(dead_code)] // Consumed by the structured reservation admission slice.
+pub(super) fn validation_storage_bound(
+    connection: &Connection,
+    task: &StoredTask,
+    reservation: &read_reservations::Reservation,
+) -> Result<usize, InvestigationStoreError> {
+    Ok(project_validation(connection, task, reservation)?.additional_bytes)
+}
+
 impl JobStore {
     /// Last owner/cancellation fence after charge COMMIT and before source IO.
     /// This read-only snapshot performs no retry or settlement and releases its
@@ -320,28 +398,28 @@ impl JobStore {
             return Err(InvestigationStoreError::Conflict);
         }
         transitions::available_time(&task)?;
-        let charge = ValidationCharge::for_reservation(&reservation)?;
-        task.detail.usage.captured_validation_bytes = task
-            .detail
-            .usage
-            .captured_validation_bytes
-            .checked_add(charge.validation_bytes)
-            .ok_or(InvestigationStoreError::Capacity)?;
-        validate_usage(&task.detail.usage, &task.detail.limits)?;
+        let task_before = actual_stored_bytes(&tx, Some(&id))?;
+        let global_before = actual_stored_bytes(&tx, None)?;
+        let projection = project_validation(&tx, &task, &reservation)?;
+        if projection.additional_bytes > reservation.storage_claim.validation_bytes {
+            return Err(InvestigationStoreError::Capacity);
+        }
+        let charge = projection.charge;
+        task = projection.task;
         let mut reads = read_reservations::ReadTransaction::new(&tx)?;
         reads.insert_charge(&id, &reservation.binding.step_id, &charge)?;
         #[cfg(test)]
         inject_failure(ChargeFailure::AfterWitness)?;
-        bump(&tx, &mut task)?;
-        event(
-            &tx,
-            &mut task,
-            InvestigationEventKind::EvidenceValidationReserved,
-            Some(&reservation.binding.step_id),
-            Some(InvestigationTool::ReadEvidence),
-            "Exact captured-file validation charge committed before source access.",
-        )?;
+        persist_event(&tx, &projection.event)?;
         save_next_prompt_task(&tx, &task, basis.revision, false)?;
+        for (before, after) in [
+            (task_before, actual_stored_bytes(&tx, Some(&id))?),
+            (global_before, actual_stored_bytes(&tx, None)?),
+        ] {
+            if after.saturating_sub(before) > reservation.storage_claim.validation_bytes {
+                return Err(InvestigationStoreError::Capacity);
+            }
+        }
         #[cfg(test)]
         inject_failure(ChargeFailure::AfterTaskSave)?;
         validate_saved_pending(&tx, &task)?;
@@ -390,3 +468,6 @@ fn inject_failure(at: ChargeFailure) -> Result<(), InvestigationStoreError> {
 mod tests;
 #[cfg(test)]
 pub(crate) use tests::fixture_data::{SourceValidationInitialData, captured_source_fixture};
+
+#[cfg(test)]
+pub(super) use tests::fixture_data::fixture_with_source_obligation as internal_source_obligation_fixture;

@@ -154,6 +154,26 @@ impl InvestigationInput {
         )
     }
 
+    pub(super) fn measure_unchanged_protected_reserve(
+        &self,
+        profile: &llm::bounded::ProviderProfile,
+        limits: &llm::bounded::CompletionLimits,
+        action_id: &str,
+        policy: &InvestigationPolicy,
+    ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
+        let (prompt, contract) = self.admission_reserve_basis(policy)?;
+        Self::measure_reserved_projection(
+            prompt,
+            contract,
+            self.action(action_id.into())?,
+            profile,
+            limits,
+            policy,
+            None,
+            true,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn measure_reserved_projection(
         prompt: Value,

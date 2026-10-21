@@ -160,6 +160,13 @@ impl CompletionIntent {
         }
     }
 }
+#[cfg(test)]
+pub(super) fn host_fixture_intent(
+    request: &StagedObligationRequest,
+) -> Result<CompletionIntent, InvestigationStoreError> {
+    CompletionIntent::new(request)
+}
+
 pub(super) fn initial_detail(intent: &CompletionIntent) -> InvestigationCompletionDetail {
     InvestigationCompletionDetail {
         schema_version: 1,
@@ -409,7 +416,7 @@ pub(super) fn stored_bytes(
     let bytes:i64=connection.query_row("SELECT coalesce(sum(length(CAST(body AS BLOB))+length(CAST(body_hash AS BLOB))+256),0) FROM completion_attempts WHERE (?1 IS NULL OR task_id=?1)",[id],|r|r.get(0))?;
     usize::try_from(bytes).map_err(|_| InvestigationStoreError::Capacity)
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AttemptEntry {
     pub record: AttemptRecord,
@@ -617,7 +624,7 @@ pub(super) fn attempts(
     }
     Ok(entries)
 }
-fn unavailable_message(reason: &UnavailableReason) -> &'static str {
+pub(super) fn unavailable_message(reason: &UnavailableReason) -> &'static str {
     match reason {
         UnavailableReason::PinnedTargetAbsent => "Pinned completion target was unavailable.",
         UnavailableReason::RangeOutOfBounds => "Completion source range was unavailable.",
@@ -851,18 +858,8 @@ pub(super) fn append_next_prompt_attempt_at_step(
     if records != expected_records {
         return Err(InvestigationStoreError::Invalid);
     }
-    let entries = records
-        .into_iter()
-        .map(|record| AttemptEntry {
-            record,
-            response_hash: response.response_hash.clone(),
-            action_hash: response.action_hash.clone(),
-            event_sequence: task.detail.summary.last_event_sequence,
-        })
-        .collect::<Vec<_>>();
-    for entry in &entries {
-        encode(entry, MAX_RECORD_BYTES)?;
-    }
+    let entries =
+        project_attempt_entries(records, response, task.detail.summary.last_event_sequence)?;
     for (offset, entry) in entries.iter().enumerate() {
         insert_body(
             tx,
@@ -1324,10 +1321,17 @@ fn observation_detail(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<InvestigationCompletionDetail, InvestigationStoreError> {
-    let policy = saved_policy(task)?;
-    let intent = validated_intent(task)?;
     let entries = attempts(connection, task)?;
     let refusals = raw_refusals(connection, task)?;
+    observation_from_entries(task, &entries, &refusals)
+}
+fn observation_from_entries(
+    task: &StoredTask,
+    entries: &[AttemptEntry],
+    refusals: &[staged::JournalEntry],
+) -> Result<InvestigationCompletionDetail, InvestigationStoreError> {
+    let policy = saved_policy(task)?;
+    let intent = validated_intent(task)?;
     let last = refusals.last();
     if task.phase != Phase::Terminal && last.is_none() {
         return Ok(initial_detail(intent));
@@ -1378,7 +1382,7 @@ fn observation_detail(
             .assessment
             .clone()
     } else {
-        observed_assessment(intent, &entries)
+        observed_assessment(intent, entries)
     };
     Ok(InvestigationCompletionDetail {
         schema_version: 1,
@@ -1800,3 +1804,13 @@ pub(super) use tests::next_prompt_contract_tests::{
     InternalFixture, internal_fixture as internal_next_prompt_fixture,
     internal_fixture_with_initial_ledger, internal_fixture_with_step_preparer,
 };
+
+#[path = "completion_settlement_projection.rs"]
+mod settlement_projection;
+pub(super) use settlement_projection::{
+    persist_projected_entries, project_attempt_entries, project_observation,
+    size_attempt_event_sequence,
+};
+
+#[cfg(test)]
+pub(super) use tests::next_prompt_initial_fixture::{InitialFixture, initial_fixture};

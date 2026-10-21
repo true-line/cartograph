@@ -1,0 +1,198 @@
+//! Private source settlement validation kernel.
+use super::*;
+
+pub(super) fn usage_for(
+    saved: &SavedRead,
+    kind: DispositionKind,
+    active: u64,
+) -> Result<InvestigationUsage, InvestigationStoreError> {
+    let mut usage = saved.reservation.binding.base_usage.clone();
+    if let Some(charge) = &saved.charge {
+        usage.captured_validation_bytes = usage
+            .captured_validation_bytes
+            .checked_add(charge.validation_bytes)
+            .ok_or(InvestigationStoreError::Capacity)?;
+    }
+    if !matches!(
+        kind,
+        DispositionKind::ReleasedBeforeRead | DispositionKind::OutcomeUnknown
+    ) {
+        usage.tool_actions = usage
+            .tool_actions
+            .checked_add(1)
+            .ok_or(InvestigationStoreError::Capacity)?;
+        usage.evidence_requests = usage
+            .evidence_requests
+            .checked_add(1)
+            .ok_or(InvestigationStoreError::Capacity)?;
+    }
+    if kind == DispositionKind::Acquired {
+        usage.evidence_items = usage
+            .evidence_items
+            .checked_add(1)
+            .ok_or(InvestigationStoreError::Capacity)?;
+        usage.evidence_bytes = usage
+            .evidence_bytes
+            .checked_add(
+                usize::try_from(
+                    saved.reservation.source.source.byte_end
+                        - saved.reservation.source.source.byte_start,
+                )
+                .map_err(|_| InvestigationStoreError::Capacity)?,
+            )
+            .ok_or(InvestigationStoreError::Capacity)?;
+    }
+    usage.active_milliseconds = active;
+    validate_usage(&usage, &INVESTIGATION_V2_POLICY.limits())?;
+    Ok(usage)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn validate_continuation(
+    before: &StoredTask,
+    saved: &SavedRead,
+    base: &InvestigationInputLedger,
+    metadata: &ProtectedCompletionMetadata,
+    step: &PendingInvestigationStep,
+    response: &InvestigationResponseMeta,
+    c: &SourceContinuation<'_>,
+    kind: DispositionKind,
+    reason: Option<&UnavailableReason>,
+    active: u64,
+) -> Result<InvestigationInputLedger, InvestigationStoreError> {
+    let policy = &INVESTIGATION_V2_POLICY;
+    if before.detail.summary.cancel_requested
+        || saved.charge.is_none()
+        || c.current.ledger() != base
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let b = &saved.reservation.binding;
+    let next_id = format!(
+        "{}:step-{}",
+        b.task_id,
+        b.base_usage
+            .model_invocations
+            .checked_add(1)
+            .ok_or(InvestigationStoreError::Capacity)?
+    );
+    if !c
+        .current_prepared
+        .matches_action(&c.current.action(format!("{}:{}", b.task_id, b.step_id))?)
+        || c.current_prepared.preview().egress.payload_hash != step.payload_hash
+        || c.current
+            .seal_disclosure_with_policy(c.current_prepared, policy)?
+            != step.disclosure
+        || !c
+            .candidate_prepared
+            .matches_action(&c.candidate.action(next_id.clone())?)
+        || c.current_prepared.profile() != c.candidate_prepared.profile()
+        || c.current_prepared.limits() != c.candidate_prepared.limits()
+        || c.proof.basis_hash() != b.certification_basis_hash
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    c.proof.verify_with_policy(
+        c.current,
+        c.current_prepared,
+        &saved.reservation.source,
+        c.current_prepared.profile(),
+        c.current_prepared.limits(),
+        &next_id,
+        policy,
+    )?;
+    let ledger = c.candidate.ledger();
+    if kind == DispositionKind::Acquired {
+        InvestigationTurnBasis {
+            input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
+            previous_ledger: Some(base.clone()),
+            completed_tool: Some(InvestigationTool::ReadEvidence),
+        }
+        .validate_with_policy(ledger, policy)?;
+        if ledger.receipt_references != base.receipt_references
+            || ledger.citations.len() != base.citations.len() + 1
+            || !saved.reservation.source.matches(
+                ledger
+                    .citations
+                    .last()
+                    .ok_or(InvestigationStoreError::Invalid)?,
+            )
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+    } else if ledger != base {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let records = completion::derive_attempt_records(
+        before,
+        &b.step_id,
+        response,
+        &b.original_read,
+        &if kind == DispositionKind::Acquired {
+            AttemptOutcome::SourceAcquired {
+                citation_id: ledger
+                    .citations
+                    .last()
+                    .ok_or(InvestigationStoreError::Invalid)?
+                    .citation_id
+                    .clone(),
+            }
+        } else {
+            AttemptOutcome::Unavailable {
+                reason: reason.cloned().ok_or(InvestigationStoreError::Invalid)?,
+            }
+        },
+        Some(ledger),
+        metadata.completed_attempt_ids.len(),
+    )?;
+    let disclosure = c
+        .candidate
+        .seal_disclosure_with_policy(c.candidate_prepared, policy)?
+        .ok_or(InvestigationStoreError::Invalid)?;
+    if encode(&disclosure, MAX_DISCLOSURE_BYTES)?.len() > c.proof.disclosure_upper_bytes() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let mut next_metadata = metadata.clone();
+    next_metadata
+        .completed_attempt_ids
+        .extend(records.iter().map(|r| r.attempt_id.clone()));
+    let state = disclosure
+        .admission
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    if state.consumed_budgets != usage_for(saved, kind, active)?
+        || state.capacity_feedback.is_some()
+        || state.capacity_refusal_count
+            != before
+                .admission_state
+                .as_ref()
+                .and_then(|s| s.current_call.as_ref())
+                .ok_or(InvestigationStoreError::Invalid)?
+                .admission
+                .capacity_refusal_count
+        || disclosure.completion_metadata_hash.as_deref()
+            != Some(next_metadata.fingerprint_with_policy(policy)?.as_str())
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let measured = llm::bounded::measure_bounded_action(
+        c.candidate_prepared.profile(),
+        &c.candidate.action(next_id)?,
+        c.candidate_prepared.limits(),
+    )
+    .map_err(|_| InvestigationStoreError::Invalid)?;
+    let bound = if state.mode == CompletionCallMode::Choice {
+        c.proof.continuation().choice
+    } else {
+        c.proof.continuation().finish_only
+    };
+    if measured.raw_string_bytes > bound.raw_string_bytes
+        || measured.original_payload_bytes > bound.original_payload_bytes
+        || measured.redacted_payload_bytes > bound.redacted_payload_bytes
+        || measured.original_action_bytes > bound.original_action_bytes
+        || measured.egress_fingerprint_bytes > bound.egress_fingerprint_bytes
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(ledger.clone())
+}

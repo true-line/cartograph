@@ -50,6 +50,12 @@ impl JobStore {
         }
         let next = publish(&tx, task, input, raw_response, validate_retained)?;
         tx.commit()?;
+        #[cfg(test)]
+        if FAIL_AFTER_METADATA_COMMIT_ACK.with(|fault| fault.replace(false)) {
+            // Test-only lost acknowledgement: the transaction did commit, but
+            // the host must not install prepared state on the returned error.
+            return Err(InvestigationStoreError::Storage);
+        }
         Ok(next.detail)
     }
 }
@@ -205,16 +211,15 @@ fn publish(
         }
         _ => return Err(InvestigationStoreError::Invalid),
     };
-    let outcome = AttemptOutcome::InventoryAcquired {
-        read_index: core.ledger.coverage_reads.len(),
-    };
     let records = match &read {
         Some(read) => completion::derive_attempt_records(
             &task,
             &call.step_id,
             input.response,
             read,
-            &outcome,
+            &AttemptOutcome::InventoryAcquired {
+                read_index: core.ledger.coverage_reads.len(),
+            },
             Some(ledger),
             core.metadata.completed_attempt_ids.len(),
         )?,
@@ -311,7 +316,9 @@ fn publish(
             &call,
             input.response,
             read,
-            &outcome,
+            &AttemptOutcome::InventoryAcquired {
+                read_index: core.ledger.coverage_reads.len(),
+            },
             ledger,
             &records,
         )?;
@@ -329,6 +336,12 @@ fn publish(
 #[cfg(test)]
 thread_local! {
     static FAIL_AFTER_METADATA_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_AFTER_METADATA_COMMIT_ACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn lose_next_commit_ack() {
+    FAIL_AFTER_METADATA_COMMIT_ACK.with(|fault| fault.set(true));
 }
 
 #[cfg(test)]

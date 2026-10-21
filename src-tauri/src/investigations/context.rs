@@ -21,6 +21,10 @@ use std::sync::Arc;
 #[path = "context_metadata_admission.rs"]
 pub(super) mod metadata_admission;
 
+#[cfg(test)]
+#[path = "context_metadata_admission_tests.rs"]
+mod metadata_admission_tests;
+
 /// Validated acquisition authority, separate from every public request family.
 /// Completion requests retain their actual role and selected immutable policy.
 #[derive(Clone)]

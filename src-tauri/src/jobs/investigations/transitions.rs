@@ -556,7 +556,7 @@ pub(super) fn available_time(task: &StoredTask) -> Result<(), InvestigationStore
     }
 }
 
-fn admit_input(
+pub(super) fn admit_input(
     connection: &Connection,
     task: &mut StoredTask,
     ledger: &InvestigationInputLedger,

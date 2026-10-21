@@ -731,7 +731,11 @@ fn load_task_base_contract(
             .as_ref()
             .and_then(|state| state.current_call.as_ref())
         {
-            call.validate_saved(connection, &task)?;
+            if task.phase == Phase::Consent {
+                call.validate_pending_consent(connection, &task)?;
+            } else {
+                call.validate_saved(connection, &task)?;
+            }
         }
     } else if let Some(pending) = &task.pending {
         validate_step_basis(connection, &task, pending)?;
@@ -894,6 +898,19 @@ pub(super) fn stored_bytes(
     })
 }
 
+/// Actual logical occupancy excludes unspent allocations, using one coherent
+/// read snapshot. Used to verify that an own-stage write fits its allocation.
+pub(super) fn actual_stored_bytes(
+    connection: &Connection,
+    id: Option<&str>,
+) -> Result<usize, InvestigationStoreError> {
+    super::read_reservations::with_compatibility_scope(connection, |reads| {
+        stored_bytes_with_reads(connection, id, reads)?
+            .checked_sub(reads.capacity_charge(id)?.claims)
+            .ok_or(InvestigationStoreError::Invalid)
+    })
+}
+
 pub(super) fn stored_bytes_with_reads(
     connection: &Connection,
     id: Option<&str>,
@@ -968,6 +985,20 @@ pub(super) fn event(
     tool: Option<InvestigationTool>,
     summary: &'static str,
 ) -> Result<(), InvestigationStoreError> {
+    let event = prepare_event(task, kind, step, tool, summary, timestamp(connection)?)?;
+    persist_event(connection, &event)
+}
+
+/// Shared production event projection. Sizing callers can serialize this exact
+/// record before a writer publishes it; this function performs no SQL mutation.
+pub(super) fn prepare_event(
+    task: &mut StoredTask,
+    kind: InvestigationEventKind,
+    step: Option<&str>,
+    tool: Option<InvestigationTool>,
+    summary: &'static str,
+    created_at: String,
+) -> Result<InvestigationEvent, InvestigationStoreError> {
     let next = task
         .detail
         .summary
@@ -990,7 +1021,7 @@ pub(super) fn event(
         return Err(InvestigationStoreError::Capacity);
     }
     task.detail.summary.last_event_sequence = next;
-    let event = InvestigationEvent {
+    Ok(InvestigationEvent {
         investigation_id: task.detail.summary.investigation_id.clone(),
         sequence: next,
         revision: task.detail.summary.revision,
@@ -998,14 +1029,40 @@ pub(super) fn event(
         step_id: step.map(str::to_owned),
         tool,
         summary: summary.into(),
-        created_at: timestamp(connection)?,
-    };
-    let body = encode(&event, 16 * 1024)?;
+        created_at,
+    })
+}
+
+pub(super) fn persist_event(
+    connection: &Connection,
+    event: &InvestigationEvent,
+) -> Result<(), InvestigationStoreError> {
+    let reserved =
+        super::read_reservations::pending_event_claims(connection, &event.investigation_id)?;
+    if reserved != 0 {
+        let terminal_slots = if event.kind == InvestigationEventKind::CancelRequested {
+            2
+        } else {
+            3
+        };
+        let maximum = INVESTIGATION_V2_POLICY
+            .journal_events()
+            .checked_sub(terminal_slots)
+            .ok_or(InvestigationStoreError::Invalid)?;
+        if event
+            .sequence
+            .checked_add(reserved as u64)
+            .is_none_or(|n| n > maximum)
+        {
+            return Err(InvestigationStoreError::Capacity);
+        }
+    }
+    let body = encode(event, 16 * 1024)?;
     one(connection.execute(
         "INSERT INTO investigation_events VALUES (?1,?2,?3,?4)",
         params![
             event.investigation_id,
-            signed(next)?,
+            signed(event.sequence)?,
             body,
             core_prov::content_hash(&body)
         ],
