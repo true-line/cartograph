@@ -184,6 +184,10 @@ no recovered test arrangements or journeys. The order changes as follows.
 1. **Citable declarations first (#691).** Only rule-shaped code mints
    primary receipts today, which leaves 4 of 17 Vendure files with no citable
    fact. This is a deterministic gap under every later item, including #590.
+   Receipts must also scale: a 4,337-file TypeScript repo produces 319 MB
+   of rule receipts against a 64 MiB ceiling and fails ingest outright
+   (#722). That is fixed alongside, by naming omissions instead of failing,
+   compacting the receipt schema, and scaling ceilings per source.
 2. **W8 is no longer gated on W7.** A read-only MCP server and a Cartograph
    skill (W8a) expose what already exists deterministically, and become the
    agent team's read path. W8a's boundary:
@@ -201,7 +205,11 @@ no recovered test arrangements or journeys. The order changes as follows.
    W8b, the agent team, no longer waits for W7 either (ADR-0036 decision 7
    as amended). The desktop app is the human seat. Agents run on local models
    or through ACP in any harness, directly or through an adapter or bridge,
-   and every agent output is staged for human review. W7 acceptance now gates
+   and every agent output is staged for human review. The human reaches the
+   team from anywhere in the app with one shortcut (Shift+Cmd+Space): pick
+   an agent, or let the app pick one for the question. The agent receives
+   the current view and selection, answers with citations, and can act in
+   the interface only through staged proposals. W7 acceptance now gates
    only the claim that a specialist run is accepted evidence.
 3. **P5 starts as a deterministic showcase.** SimpleLogin runs end to end on
    deterministic artifacts, the recovered contract is scored against
@@ -229,7 +237,9 @@ no recovered test arrangements or journeys. The order changes as follows.
    agent team about what is in view; and share a link that restores the
    view and selection. Every layer shows its evidence tier and says when it
    is partial, stale or unavailable, and each layer is a module that a plugin
-   can add. W12 builds on W4 views, the W8a read surface and the W8b human
+   can add. Today's Atlas falls short of this: its Infrastructure layer shows
+   rule gaps rather than what the code runs on or talks to (#723).
+   W12 builds on W4 views, the W8a read surface and the W8b human
    seat. It is planned after the showcase, with scale tested on the larger
    lanes.
 7. **v2 horizon: targets without source.** After v1 works on source,
