@@ -4,7 +4,7 @@ use core_prov::{ConfidenceTier, Tier, content_hash};
 use serde_json::json;
 use std::collections::BTreeSet;
 
-fn request() -> StartInvestigationRequest {
+pub(super) fn request() -> StartInvestigationRequest {
     StartInvestigationRequest {
         inspection_requirements: None,
         schema_version: 1,
@@ -43,7 +43,7 @@ fn action() -> InvestigationAction {
         limitations: vec!["The investigation covers selected evidence only.".into()],
     }
 }
-fn ledger() -> InvestigationInputLedger {
+pub(super) fn ledger() -> InvestigationInputLedger {
     let fact = TaskFactKey::Node {
         id: "node:checkout".into(),
     };
@@ -573,10 +573,10 @@ mod disclosure_tests;
 mod projection_tests;
 
 #[path = "sealing_tests.rs"]
-mod sealing_tests;
+pub(super) mod sealing_tests;
 
 #[path = "turn_tests.rs"]
 mod turn_tests;
 
 #[path = "inspection_tests.rs"]
-mod inspection_tests;
+pub(super) mod inspection_tests;

@@ -6,6 +6,18 @@ use agents::investigation::*;
 use std::time::Instant;
 use tauri::Manager;
 
+// Shared by the production catalog and staged-version boundary test.
+const AVAILABLE_SPECIALISTS: [SpecialistId; 8] = [
+    SpecialistId::DomainAnalystV3,
+    SpecialistId::EvidenceAuditorV3,
+    SpecialistId::DomainAnalystV4,
+    SpecialistId::EvidenceAuditorV4,
+    SpecialistId::DomainAnalystV5,
+    SpecialistId::EvidenceAuditorV5,
+    SpecialistId::DomainAnalystV6,
+    SpecialistId::EvidenceAuditorV6,
+];
+
 #[tauri::command]
 pub(crate) async fn investigation_specialists(
     app: tauri::AppHandle,
@@ -14,20 +26,11 @@ pub(crate) async fn investigation_specialists(
         let state = app.state::<AppState>();
         Ok(InvestigationCatalog {
             schema_version: 1,
-            specialists: [
-                SpecialistId::DomainAnalystV3,
-                SpecialistId::EvidenceAuditorV3,
-                SpecialistId::DomainAnalystV4,
-                SpecialistId::EvidenceAuditorV4,
-                SpecialistId::DomainAnalystV5,
-                SpecialistId::EvidenceAuditorV5,
-                SpecialistId::DomainAnalystV6,
-                SpecialistId::EvidenceAuditorV6,
-            ]
-            .into_iter()
-            .map(|id| id.definition())
-            .collect::<Result<_, _>>()
-            .map_err(|e| e.to_string())?,
+            specialists: AVAILABLE_SPECIALISTS
+                .into_iter()
+                .map(|id| id.definition())
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?,
             providers: [
                 InvestigationProviderMode::Local,
                 InvestigationProviderMode::Cloud,
@@ -393,4 +396,57 @@ pub(crate) async fn read_investigation_citation(
         history::read(&state, &investigation_id, &ledger, &citation_id).map_err(|e| e.to_string())
     })
     .await
+}
+
+#[cfg(test)]
+mod staged_tests {
+    use super::*;
+
+    // AC-0264: staging does not create a public catalog or direct-start capability.
+    #[test]
+    fn staged_v7_is_absent_from_catalog_and_direct_start_is_refused() {
+        for id in ["domain-analyst@7", "evidence-auditor@7"] {
+            assert!(
+                !AVAILABLE_SPECIALISTS
+                    .iter()
+                    .any(|specialist| serde_json::to_value(specialist).unwrap() == id)
+            );
+            let raw = serde_json::json!({"schema_version":4,"request_nonce":"staged-boundary",
+                "specialist_id":id,"question":"Inspect selected evidence","scope":{"type":"all"},
+                "provider_mode":"local","limit_profile":"investigation-v1"});
+            // This is the exact parameter decoder used by start_investigation IPC.
+            let error = serde_json::from_value::<StartInvestigationRequest>(raw.clone())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("unknown variant") && error.contains(id));
+            let mut known = raw;
+            known["specialist_id"] = serde_json::json!("domain-analyst@6");
+            known["schema_version"] = serde_json::json!(3);
+            serde_json::from_value::<StartInvestigationRequest>(known)
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
+        // Even a recognized role cannot smuggle staged request generation 4
+        // through the actual coordinator entrypoint. It rejects before AppState.
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let request: StartInvestigationRequest = serde_json::from_value(serde_json::json!({
+            "schema_version":4,"request_nonce":"staged-boundary","specialist_id":"domain-analyst@6",
+            "question":"Inspect selected evidence","scope":{"type":"all"},"provider_mode":"local",
+            "limit_profile":"investigation-v1"}))
+        .unwrap();
+        let mut known = request.clone();
+        known.schema_version = 3;
+        known.validate().unwrap();
+        assert!(matches!(
+            start(request, app.handle().clone(), Instant::now()),
+            Err(InvestigationStartError::Rejected {
+                code: "invalid_input",
+                definitive: true,
+                ..
+            })
+        ));
+    }
 }

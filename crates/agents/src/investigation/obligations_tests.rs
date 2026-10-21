@@ -1,0 +1,342 @@
+use super::*;
+use serde_json::json;
+
+fn source() -> Obligation {
+    let target = super::super::tests::inspection_tests::fixture().0;
+    identified(Obligation::Source {
+        obligation_id: String::new(),
+        target: Box::new(target),
+    })
+}
+fn inventory(context: char) -> Obligation {
+    identified(Obligation::Inventory {
+        obligation_id: String::new(),
+        target: InventoryTarget {
+            context_id: format!("context-v2:{}", context.to_string().repeat(64)),
+            repo: "example/app".into(),
+            inventory_hash: "a".repeat(64),
+        },
+    })
+}
+fn identified(mut value: Obligation) -> Obligation {
+    let id = value.content_id().unwrap();
+    match &mut value {
+        Obligation::Source { obligation_id, .. } | Obligation::Inventory { obligation_id, .. } => {
+            *obligation_id = id
+        }
+    }
+    value
+}
+fn envelope(values: Vec<Obligation>) -> ObligationEnvelope {
+    ObligationEnvelope {
+        schema_version: 1,
+        contract: CONTRACT.into(),
+        obligations: values,
+    }
+}
+fn request() -> StagedObligationRequest {
+    let target = source();
+    let snapshot = match &target {
+        Obligation::Source { target, .. } => target.graph_snapshot_id.clone(),
+        _ => unreachable!(),
+    };
+    StagedObligationRequest {
+        schema_version: 4,
+        request_nonce: "request-1".into(),
+        specialist_id: "domain-analyst@7".into(),
+        obligations: envelope(vec![target, inventory('b')]),
+        inspection_requirements: None,
+        question: "Inspect selected evidence".into(),
+        scope: InvestigationScope::All,
+        provider_mode: InvestigationProviderMode::Local,
+        limit_profile: "investigation-v1".into(),
+        expected_graph_revision: Some(snapshot),
+        expected_context_id: format!("context-v2:{}", "b".repeat(64)),
+        conversation_id: None,
+        parent_id: None,
+    }
+}
+
+// AC-0264: raw bounds precede ownership, identity/order normalization is exact.
+#[test]
+fn staged_obligations_normalize_mixed_inventory_only_and_source_conflicts() {
+    let first = source();
+    let second = inventory('b');
+    let a = envelope(vec![first.clone(), second.clone(), first.clone()]);
+    let b = envelope(vec![second.clone(), first.clone()]);
+    assert_eq!(a.fingerprint().unwrap(), b.fingerprint().unwrap());
+    assert_eq!(a.normalized().unwrap().obligations.len(), 2);
+    assert_eq!(a.sources().unwrap().len(), 1);
+    assert!(envelope(vec![second.clone()]).sources().unwrap().is_empty());
+    assert_eq!(
+        envelope(vec![second, inventory('c')])
+            .normalized()
+            .unwrap()
+            .obligations
+            .len(),
+        2
+    );
+    assert_eq!(
+        envelope(vec![inventory('b'); 12])
+            .normalized()
+            .unwrap()
+            .obligations
+            .len(),
+        1
+    );
+    assert!(envelope(vec![]).normalized().is_err());
+    assert!(envelope(vec![first.clone(); 13]).normalized().is_err());
+    assert!(envelope(vec![first.clone(); 12]).normalized().is_err()); // descriptors exceed aggregate bytes even when duplicate
+    let mut conflict = first.clone();
+    if let Obligation::Source { target, .. } = &mut conflict {
+        target.receipt_inventory_index += 1;
+        target.target_id = target.content_id().unwrap();
+    }
+    assert!(
+        envelope(vec![first.clone(), identified(conflict)])
+            .normalized()
+            .is_err()
+    );
+    let mut forged = first;
+    if let Obligation::Source { obligation_id, .. } = &mut forged {
+        *obligation_id = "0".repeat(64);
+    }
+    assert!(envelope(vec![forged]).normalized().is_err());
+}
+
+#[test]
+fn staged_obligations_request_rejects_dual_authority_null_and_unknown_fields() {
+    let valid = request();
+    let raw = serde_json::to_string(&valid).unwrap();
+    let parsed = StagedObligationRequest::decode(&raw).unwrap();
+    assert_eq!(parsed.intent_hash().unwrap(), valid.intent_hash().unwrap());
+    assert!(!raw.contains("inspection_requirements"));
+    let value = serde_json::to_value(&valid).unwrap();
+    for field in ["inspection_requirements", "obligations"] {
+        let mut changed = value.clone();
+        changed[field] = serde_json::Value::Null;
+        assert!(StagedObligationRequest::decode(&changed.to_string()).is_err());
+    }
+    let mut both = valid.clone();
+    both.inspection_requirements = Some(valid.obligations.sources().unwrap());
+    assert!(both.normalized().is_err());
+    let mut unknown = value.clone();
+    unknown["obligations"]["obligations"][0]["unexpected"] = json!(true);
+    assert!(StagedObligationRequest::decode(&unknown.to_string()).is_err());
+    unknown = value;
+    unknown["obligations"]["obligations"][0]["kind"] = json!("history");
+    assert!(StagedObligationRequest::decode(&unknown.to_string()).is_err());
+    assert!(StagedObligationRequest::decode(&format!("{}{}", raw, " ".repeat(8192))).is_err());
+    assert!(
+        StagedObligationRequest::decode(&raw.replacen(
+            "\"schema_version\":4",
+            "\"schema_version\":4,\"schema_version\":4",
+            1
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn staged_obligations_every_inventory_component_and_request_intent_are_bound() {
+    let original = inventory('b');
+    for field in ["context", "repo", "hash"] {
+        let mut changed = original.clone();
+        if let Obligation::Inventory { target, .. } = &mut changed {
+            match field {
+                "context" => target.context_id = format!("context-v2:{}", "c".repeat(64)),
+                "repo" => target.repo = "example/other".into(),
+                _ => target.inventory_hash = "c".repeat(64),
+            }
+        }
+        assert_ne!(
+            original.content_id().unwrap(),
+            changed.content_id().unwrap()
+        );
+        assert_ne!(
+            envelope(vec![original.clone()]).fingerprint().unwrap(),
+            envelope(vec![identified(changed)]).fingerprint().unwrap()
+        );
+    }
+    let original = request();
+    let hash = original.intent_hash().unwrap();
+    let mut changed = original.clone();
+    changed.question.push('?');
+    assert_ne!(hash, changed.intent_hash().unwrap());
+    changed = original.clone();
+    changed.request_nonce.push('2');
+    assert_ne!(hash, changed.intent_hash().unwrap());
+    changed = original.clone();
+    changed.specialist_id = "evidence-auditor@7".into();
+    assert_ne!(hash, changed.intent_hash().unwrap());
+    changed = original;
+    changed.expected_context_id = format!("context-v2:{}", "c".repeat(64));
+    assert!(changed.normalized().is_err());
+}
+
+#[test]
+fn staged_obligations_full_request_exact_byte_boundary_and_maximal_descriptors() {
+    let mut value = request();
+    // Whitespace is charged by strict decoding even when canonical request is shorter.
+    let raw = serde_json::to_string(&value).unwrap();
+    let padded = format!("{}{}", raw, " ".repeat(8192 - raw.len()));
+    StagedObligationRequest::decode(&padded).unwrap();
+    assert!(StagedObligationRequest::decode(&(padded + " ")).is_err());
+    // Canonical complete request boundary, not just raw whitespace admission.
+    let mut canonical = request();
+    canonical.obligations = envelope(
+        (0..12)
+            .map(|index| {
+                let mut item = inventory('b');
+                if let Obligation::Inventory { target, .. } = &mut item {
+                    target.repo = format!("{index:02}{}", "r".repeat(254));
+                }
+                identified(item)
+            })
+            .collect(),
+    );
+    canonical.question = "Q".into();
+    let base_bytes = serde_json::to_vec(&canonical).unwrap().len();
+    assert!(base_bytes < 8192 && 8192 - base_bytes < MAX_QUESTION_BYTES);
+    canonical.question.push_str(&"x".repeat(8192 - base_bytes));
+    assert_eq!(serde_json::to_vec(&canonical).unwrap().len(), 8192);
+    canonical.normalized().unwrap();
+    canonical.question.push('x');
+    assert!(matches!(
+        canonical.normalized(),
+        Err(InvestigationError::LimitExceeded)
+    ));
+    let mut maximal = source();
+    if let Obligation::Source { target, .. } = &mut maximal {
+        target.source.path = "x".repeat(1024);
+        target.captured.file.path = target.source.path.clone();
+        target.source.repo = "r".repeat(256);
+        target.source.commit_sha = "c".repeat(256);
+        target.target_id = target.content_id().unwrap();
+    }
+    value.question = "Q".into();
+    value.obligations = envelope(vec![identified(maximal); 12]);
+    assert!(matches!(
+        value.normalized(),
+        Err(InvestigationError::LimitExceeded)
+    ));
+}
+
+#[test]
+fn staged_obligations_source_identity_and_pinned_request_basis_are_bound() {
+    let original = source();
+    let original_id = original.content_id().unwrap();
+    for field in [
+        "graph",
+        "digest",
+        "receipt",
+        "occurrence",
+        "range",
+        "capture",
+        "path",
+    ] {
+        let mut changed = original.clone();
+        if let Obligation::Source { target, .. } = &mut changed {
+            match field {
+                "graph" => target.graph_snapshot_id = format!("context-v1:{}", "c".repeat(64)),
+                "digest" => target.fact_digest = format!("node-v1:{}", "c".repeat(64)),
+                "receipt" => target.receipt_id = format!("ts-primary-v2:{}", "a".repeat(64)),
+                "occurrence" => target.receipt_inventory_index += 1,
+                "range" => {
+                    target.source.byte_end -= 1;
+                    target.captured.byte_end -= 1;
+                }
+                "capture" => {
+                    target.captured.file.capture_id = format!("capture-v1:{}", "a".repeat(64))
+                }
+                _ => {
+                    target.source.path = "other.ts".into();
+                    target.captured.file.path = "other.ts".into();
+                }
+            }
+            target.target_id = target.content_id().unwrap();
+        }
+        assert_ne!(original_id, changed.content_id().unwrap(), "{field}");
+    }
+    let mut value = request();
+    value.expected_graph_revision = Some(format!("context-v1:{}", "a".repeat(64)));
+    assert!(value.normalized().is_err());
+    let mut value = request();
+    value.specialist_id = "evidence-auditor@7".into();
+    value.normalized().unwrap();
+    value.specialist_id = "domain-analyst@6".into();
+    assert!(value.normalized().is_err());
+}
+
+// AC-0264: these literal bytes/identities freeze the pre-staging public contracts.
+#[test]
+fn staged_obligations_legacy_literal_goldens() {
+    let (target, _, _) = super::super::tests::inspection_tests::fixture();
+    let mut legacy = super::super::tests::request();
+    let mut requests = Vec::new();
+    for generation in 1..=3 {
+        legacy.schema_version = generation;
+        legacy.specialist_id = match generation {
+            1 => SpecialistId::DomainAnalyst,
+            2 => SpecialistId::DomainAnalystV5,
+            _ => SpecialistId::DomainAnalystV6,
+        };
+        if generation == 2 {
+            legacy.inspection_requirements = Some(vec![target.clone()]);
+            legacy.expected_graph_revision = Some(target.graph_snapshot_id.clone());
+        }
+        if generation == 3 {
+            legacy.inspection_requirements = None;
+            legacy.expected_context_id = Some(format!("context-v2:{}", "b".repeat(64)));
+        }
+        requests.push(json!({"wire":serde_json::to_string(&legacy).unwrap(),"intent_hash":legacy.intent_hash().unwrap()}));
+    }
+    let definitions: Vec<_> = [
+        SpecialistId::DomainAnalystV1,
+        SpecialistId::EvidenceAuditorV1,
+        SpecialistId::DomainAnalyst,
+        SpecialistId::EvidenceAuditor,
+        SpecialistId::DomainAnalystV3,
+        SpecialistId::EvidenceAuditorV3,
+        SpecialistId::DomainAnalystV4,
+        SpecialistId::EvidenceAuditorV4,
+        SpecialistId::DomainAnalystV5,
+        SpecialistId::EvidenceAuditorV5,
+        SpecialistId::DomainAnalystV6,
+        SpecialistId::EvidenceAuditorV6,
+    ]
+    .into_iter()
+    .map(|id| {
+        let definition = id.definition().unwrap();
+        json!({"id":definition.id,"prompt_fingerprint":definition.prompt_fingerprint})
+    })
+    .collect();
+    let ledger = super::super::tests::ledger();
+    // Use the existing valid compact input fixture for its sealed representation.
+    let prepared_input = super::super::tests::sealing_tests::input(SpecialistId::DomainAnalystV3);
+    let payload = prepared_input
+        .action("golden:step-1".into())
+        .unwrap()
+        .payload;
+    let (result_ledger, disclosure, action) = super::super::result_disclosure_tests::basis();
+    let result = InvestigationResult::admit(
+        "investigation-1",
+        &result_ledger,
+        &action,
+        std::iter::empty(),
+        None,
+        "2026-10-19T00:00:00Z".into(),
+    )
+    .unwrap();
+    let actual = json!({"requests":requests,"definitions":definitions,"input_payload_hash":core_prov::content_hash(&serde_json::to_vec(&payload).unwrap()),
+        "ledger_hash":ledger.fingerprint().unwrap(),"disclosure_hash":disclosure.fingerprint(&result_ledger).unwrap(),"result_id":result.result_id,
+        "result_wire":serde_json::to_string(&result).unwrap()});
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/legacy-obligation-goldens.json")).unwrap();
+    assert_eq!(
+        actual,
+        expected,
+        "LEGACY_GOLDEN={}",
+        serde_json::to_string(&actual).unwrap()
+    );
+}

@@ -4,7 +4,7 @@ use crate::{
     TaskSourceAssociation,
 };
 
-fn fixture() -> (
+pub(in crate::investigation) fn fixture() -> (
     InvestigationInspectionTarget,
     InvestigationInputLedger,
     InvestigationDisclosure,

@@ -3,7 +3,7 @@ use llm::bounded::CompletionLimits;
 use llm::{EgressFirewall, EgressPolicy, OllamaProvider};
 use std::time::Duration;
 
-fn input(specialist: SpecialistId) -> InvestigationInput {
+pub(in crate::investigation) fn input(specialist: SpecialistId) -> InvestigationInput {
     input_with_history(specialist, &[])
 }
 
