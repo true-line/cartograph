@@ -26,7 +26,7 @@ pub(crate) struct ObligationChoices {
     context_id: String,
     inventories: Vec<InventoryChoice>,
     #[serde(skip)]
-    scoped_facts: BTreeSet<FactReference>,
+    scoped_facts: Option<BTreeSet<FactReference>>,
 }
 
 fn choices(
@@ -45,18 +45,9 @@ fn choices(
     // Keep membership from this exact authorized projection, not merely its
     // full-graph identity. This metadata never enters the selection wire.
     let scoped_facts = match scope {
-        InvestigationScope::All => graph
-            .0
-            .iter()
-            .map(|node| FactReference::Node {
-                id: node.id.clone(),
-            })
-            .chain(graph.1.iter().map(|edge| FactReference::Edge {
-                source: edge.src.clone(),
-                label: edge.label.clone(),
-                destination: edge.dst.clone(),
-            }))
-            .collect(),
+        // Full-graph source existence is already checked by inspection::resolve
+        // before start. Only a narrower scope needs its own membership index.
+        InvestigationScope::All => None,
         InvestigationScope::Neighborhood { .. } => {
             let mut facts = BTreeSet::new();
             let mut cursor = None;
@@ -77,7 +68,7 @@ fn choices(
                 };
                 cursor = Some(next);
             }
-            facts
+            Some(facts)
         }
     };
     let qualified = scoped
@@ -240,7 +231,11 @@ fn validate_selection(
                         destination: destination.clone(),
                     },
                 };
-                if !current.scoped_facts.contains(&fact) {
+                if current
+                    .scoped_facts
+                    .as_ref()
+                    .is_some_and(|facts| !facts.contains(&fact))
+                {
                     return Err("Completion source is outside the requested scope; select an in-scope source or change the scope.".into());
                 }
             }
@@ -309,8 +304,16 @@ mod tests {
             anchor: "a".into(),
             hops: 1,
         };
+        let all = choices(
+            graph.clone(),
+            CoverageQualification::new(&[], &[]).unwrap(),
+            &InvestigationScope::All,
+        )
+        .unwrap();
+        assert!(all.scoped_facts.is_none());
         let current =
             choices(graph, CoverageQualification::new(&[], &[]).unwrap(), &scope).unwrap();
+        assert!(current.scoped_facts.is_some());
         assert!(
             serde_json::to_value(&current)
                 .unwrap()
@@ -393,6 +396,16 @@ mod tests {
             .normalized()
             .unwrap();
             assert_eq!(validate_selection(&current, &request).is_ok(), allowed);
+            // AC-0266: All adds no membership index; exact source existence is
+            // still resolved by the production start path before admission.
+            if !matches!(request.obligations.sources().unwrap()[0].fact,
+                TaskFactKey::Edge { ref label, .. } if label == "OTHER")
+            {
+                let mut all_request = request.clone();
+                all_request.scope = InvestigationScope::All;
+                all_request.expected_context_id = all.context_id.clone();
+                assert!(validate_selection(&all, &all_request).is_ok());
+            }
         }
     }
 
@@ -442,7 +455,7 @@ mod tests {
             schema_version: 1,
             context_id: context,
             graph_snapshot_id: "c".repeat(64),
-            scoped_facts: BTreeSet::new(),
+            scoped_facts: None,
             inventories: vec![InventoryChoice {
                 repo: "app/service".into(),
                 status: CoverageStatus::Recorded,
