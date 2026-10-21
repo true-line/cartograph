@@ -887,3 +887,54 @@ record, scored rubric, measurements, and improvement artifacts. This procedure
 records one pilot; broader market readiness still requires the several external
 users and launch requirements named in SPEC-01, rather than extrapolating from
 one successful participant.
+
+
+## MT-H4-03 — Explicit captured-source inspection requirements
+
+**Status: PLANNED / UNEXECUTED.** This procedure covers AC-0261; it does not
+replace real-provider acceptance or certify the truth of generated prose.
+
+1. In a disposable captured-source project, select a known Atlas fact and range.
+   Add that range as a required inspection; verify its human-readable path/range,
+   remove and re-add it, and explicitly choose a V5 specialist. Merely viewing
+   source must not discharge the requirement. Confirm the 8,192-byte total request
+   limit can prevent adding/submitting fewer than the maximum 12 targets; sources
+   must not be silently dropped to fit.
+2. Submit the request, retain its immutable target and task identities, and inspect
+   acquired/supplied/cited assessment independently of execution status. A model
+   that finishes without source inspection must retain its partial result with an
+   unmet requirement. Do not retry or force its next action.
+3. With scripted boundary tests separately, verify wrong-range and withheld
+   evidence remain unmet, supplied-but-uncited is distinguished, and repeated reads
+   do not inflate unique coverage. Scripted checks are not real-model acceptance.
+4. Reopen saved detail and follow-up history. Confirm stable original assessment,
+   legacy not_assessed, terminal V5 not_assessed when no result was produced, and
+   no silent inheritance of requirements. Begin a V5
+   follow-up, enter a question, navigate to Atlas to select a new required range,
+   and return: parent, conversation, question and explicit specialist selection
+   must survive, while old requirements are not inherited. Change a source
+   binding between selection and submission: admission must require refreshing,
+   never retarget the requirement silently.
+
+**Pass:** all observed identity and assessment boundaries hold, with evidence
+recorded for the exact source revision. **Fail:** metadata, user viewing, another
+range or parent history is presented as a current source inspection.
+
+## MT-H4-04 — Exact captured-source structured locations
+
+**Status: PLANNED / UNEXECUTED.** This procedure covers AC-0262.
+
+1. Select retained source with known byte offsets and multiple lines, including a
+   UTF-8 multibyte character. Compare structured byte/line/column locations with
+   that exact captured buffer and document the declared indexing convention.
+2. Alter or remove the working-tree file and reopen the captured source. Locations
+   must stay tied to the original retained source and receipt identity.
+3. Exercise a receipt whose inventory ordinal differs from its original role
+   index. The selected target must resolve the actual role/index; the ordinal
+   must not be sent as a tool index.
+4. Verify malformed/out-of-range references fail closed. An opaque identifier
+   suffix such as @132 cannot become line132. A model's arbitrary prose location
+   claim still needs independent quality review.
+
+**Pass:** structured locations and selected target identities match the exact
+captured source. **Fail:** live file text or opaque IDs determine the locations.

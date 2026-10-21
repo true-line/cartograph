@@ -5,6 +5,7 @@ mod context;
 mod events;
 mod evidence;
 mod history;
+pub(crate) mod inspection;
 mod recovery;
 mod runtime;
 mod worker;

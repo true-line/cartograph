@@ -88,6 +88,8 @@ pub struct DisclosedInvestigationSource {
 pub struct InvestigationDisclosure {
     pub schema_version: u32,
     pub policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection_requirements_hash: Option<String>,
     pub input_ledger_hash: String,
     pub graph_snapshot_id: String,
     pub scope_snapshot_id: String,
@@ -105,7 +107,16 @@ impl InvestigationDisclosure {
     /// sealing this record; metadata does not attest unavailable old source.
     pub fn validate(&self, ledger: &InvestigationInputLedger) -> Result<(), InvestigationError> {
         ledger.validate()?;
-        if self.schema_version != 1
+        if self.schema_version
+            != if self.inspection_requirements_hash.is_some() {
+                2
+            } else {
+                1
+            }
+            || self
+                .inspection_requirements_hash
+                .as_deref()
+                .is_some_and(|hash| !crate::source_basis::hash(hash))
             || self.policy != COMPACT_DISCLOSURE_POLICY
             || self.input_ledger_hash != ledger.fingerprint()?
             || self.graph_snapshot_id != ledger.graph_snapshot_id

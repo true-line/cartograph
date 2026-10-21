@@ -4,6 +4,7 @@ import { CapturedSource } from './CapturedSource';
 import type { CapturedDescription } from '../primarySourceStore';
 
 const captureDescription: CapturedDescription = {
+  graph_snapshot_id: 'snapshot:fixture',
   fact: { kind: 'node', id: 'rule:local/src_example@rules.ts#exit' },
   receipt_id: 'ts-primary-v1:fixture', emitted_fact_digest: 'fact-digest',
   source_id: 'src_example', repo_key: 'local/src_example',
@@ -49,5 +50,19 @@ export const ForgottenSource: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByRole('status')).toHaveTextContent('Captured source is unavailable');
     await expect(canvas.queryByTestId('captured-source-text')).not.toBeInTheDocument();
+  },
+};
+
+export const RequirementNeedsExplicitAction: Story = {
+  args: { onRequire: fn() },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const require = canvas.getByRole('button', { name: 'Require this source in an investigation' });
+    await expect(require).toBeDisabled();
+    await userEvent.selectOptions(canvas.getByLabelText('Captured cited range'), '0');
+    await expect(args.onRead).toHaveBeenCalledWith(0);
+    await expect(args.onRequire).not.toHaveBeenCalled();
+    await userEvent.click(require);
+    await expect(args.onRequire).toHaveBeenCalledWith(0);
   },
 };

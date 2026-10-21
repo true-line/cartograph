@@ -194,6 +194,7 @@ impl JobStore {
                     let ledger =
                         load_ledger(&tx, &task)?.ok_or(InvestigationStoreError::Invalid)?;
                     validate_result_basis(result, &ledger, &invoked)?;
+                    validate_inspection_result(&task, result)?;
                     if result.investigation_id != id
                         || result.observed_response_model != response.observed_model
                     {
@@ -204,6 +205,15 @@ impl JobStore {
                         "INSERT INTO investigation_results VALUES (?1,?2,?3)",
                         params![id, body, core_prov::content_hash(&body)],
                     )?)?;
+                    task.detail.inspection_assessment = result.inspection_assessment.clone();
+                    if let Some(assessment) = &result.inspection_assessment {
+                        task.detail.summary.inspection_status =
+                            Some(if assessment.requirements.iter().all(|r| r.supplied) {
+                                InvestigationInspectionStatus::Supplied
+                            } else {
+                                InvestigationInspectionStatus::Unmet
+                            });
+                    }
                     task.detail.summary.status = InvestigationStatus::Completed;
                     task.detail.summary.has_result = true;
                     task.phase = Phase::Terminal;
@@ -473,6 +483,7 @@ impl JobStore {
             clear_unmeasured_usage(&mut task);
         }
         task.phase = Phase::Terminal;
+        mark_inspection_not_assessed(&mut task);
         task.pending = None;
         task.approved = false;
         task.action_tool = None;
@@ -728,6 +739,7 @@ fn stop(
         );
     let unknown = reason == InvestigationStopReason::OutcomeUnknown;
     task.phase = Phase::Terminal;
+    mark_inspection_not_assessed(task);
     task.pending = None;
     task.approved = false;
     task.action_tool = None;
@@ -762,6 +774,13 @@ fn stop(
     sync_terminal_job(connection, task)
 }
 
+fn mark_inspection_not_assessed(task: &mut StoredTask) {
+    if task.detail.inspection_requirements.is_some() && task.detail.inspection_assessment.is_none()
+    {
+        task.detail.summary.inspection_status = Some(InvestigationInspectionStatus::NotAssessed);
+    }
+}
+
 fn clear_unmeasured_usage(task: &mut StoredTask) {
     // A prior measured response cannot establish the complete total when a
     // later invocation has no admitted usage report, including owner death.
@@ -776,6 +795,7 @@ fn request_cancel(
     task.detail.summary.cancel_requested = true;
     if task.phase == Phase::Queued {
         task.phase = Phase::Terminal;
+        mark_inspection_not_assessed(task);
         task.detail.summary.status = InvestigationStatus::Cancelled;
     }
     bump(connection, task)?;

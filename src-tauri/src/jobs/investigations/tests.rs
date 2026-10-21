@@ -77,6 +77,7 @@ impl Fixture {
 
 fn request(nonce: &str, mode: InvestigationProviderMode) -> StartInvestigationRequest {
     StartInvestigationRequest {
+        inspection_requirements: None,
         schema_version: 1,
         request_nonce: nonce.into(),
         specialist_id: SpecialistId::DomainAnalyst,
@@ -1227,6 +1228,7 @@ fn investigation_compact_disclosure_is_durable_and_finishing_binding_is_revalida
         representation_hash: hash("representation"),
     };
     let disclosure = InvestigationDisclosure {
+        inspection_requirements_hash: None,
         schema_version: 1,
         policy: COMPACT_DISCLOSURE_POLICY.into(),
         input_ledger_hash: ledger.fingerprint().unwrap(),
@@ -1339,6 +1341,7 @@ fn compact_step(ledger: &InvestigationInputLedger) -> PendingInvestigationStep {
         representation_hash: hash("representation"),
     };
     pending.disclosure = Some(InvestigationDisclosure {
+        inspection_requirements_hash: None,
         schema_version: 1,
         policy: COMPACT_DISCLOSURE_POLICY.into(),
         input_ledger_hash: ledger.fingerprint().unwrap(),

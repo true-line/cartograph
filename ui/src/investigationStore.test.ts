@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC as mockTauriIPC } from '@tauri-apps/api/mocks';
+import backendInspection from './fixtures/investigation-inspection-backend.json';
 import { mergeInvestigationEvents, useInvestigationStore } from './investigationStore';
-import { investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from './investigationFixtures';
-import type { InvestigationCitationRead, InvestigationDetail, InvestigationEvent, StartInvestigationRequest } from './investigationTypes';
+import { inspectionAssessment, inspectionDetail, inspectionTarget, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from './investigationFixtures';
+import type { InvestigationCapturedLocation, InvestigationCitationRead, InvestigationDetail, InvestigationEvent, InvestigationInspectionTarget, StartInvestigationRequest } from './investigationTypes';
 
 // These commands use named JSON arguments; Tauri also supports unrelated binary payloads.
 function mockIPC(handler: (command: string, args?: Record<string, unknown>) => unknown) {
@@ -367,4 +368,234 @@ describe('result version binding admission (AC-0235)', () => {
     expect(useInvestigationStore.getState().result).toBeNull();
     expect(useInvestigationStore.getState().error).toContain('consistently');
   });
+});
+
+describe('explicit source inspection intent (AC-0261/0262)', () => {
+  it('freezes schema-2 requirements and nonce across an uncertain admission retry', async () => {
+    const starts: StartInvestigationRequest[] = [];
+    mockIPC((command, args) => {
+      if (command === 'start_investigation') {
+        starts.push(structuredClone(args?.request as StartInvestigationRequest));
+        throw new Error('Transport uncertain');
+      }
+      return response(command, args);
+    });
+    const target = structuredClone(inspectionTarget);
+    const draft = { specialist_id: 'domain-analyst@5' as const, question: 'Inspect the exact source.',
+      scope: { type: 'all' as const }, provider_mode: 'local' as const, limit_profile: 'investigation-v1',
+      inspection_requirements: [target] };
+    await useInvestigationStore.getState().start(draft);
+    target.index = 999;
+    draft.question = 'Changed after submission';
+    await useInvestigationStore.getState().retryStart();
+    expect(starts).toHaveLength(2);
+    expect(starts[0]).toEqual(starts[1]);
+    expect(starts[0].schema_version).toBe(2);
+    expect(starts[0].inspection_requirements?.[0].index).toBe(2);
+    expect(starts[0].question).toBe('Inspect the exact source.');
+  });
+
+  it('unlocks stale selections only after a definitive pre-admission rejection', async () => {
+    mockIPC(() => { throw { code: 'refresh_required', definitive: true, message: 'Stale' }; });
+    await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@5', question: 'Inspect.',
+      scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1', inspection_requirements: [inspectionTarget] });
+    expect(useInvestigationStore.getState().pendingStart).toBeNull();
+    expect(useInvestigationStore.getState().startError).toContain('No investigation was started');
+  });
+
+  it('rejects mixed graph drafts without rebinding earlier targets', () => {
+    expect(useInvestigationStore.getState().addInspectionRequirement(inspectionTarget)).toBe(true);
+    expect(useInvestigationStore.getState().addInspectionRequirement({ ...inspectionTarget,
+      target_id: 'c'.repeat(64), graph_snapshot_id: 'snapshot:new' })).toBe(false);
+    expect(useInvestigationStore.getState().draftInspectionRequirements).toEqual([inspectionTarget]);
+  });
+
+  it('shows a valid partial schema-3 result independently of unmet requirements', async () => {
+    const assessment = inspectionAssessment();
+    mockIPC((command, args) => {
+      if (command === 'get_investigation') return inspectionDetail('required', {
+        inspection_requirements: [inspectionTarget], inspection_assessment: assessment });
+      if (command === 'investigation_result') return { ...investigationResult('required'), schema_version: 3,
+        inspection_assessment: assessment };
+      return response(command, args);
+    });
+    await useInvestigationStore.getState().open('required');
+    expect(useInvestigationStore.getState().error).toBeNull();
+    expect(useInvestigationStore.getState().result?.findings).toHaveLength(2);
+    expect(useInvestigationStore.getState().detail?.inspection_assessment?.requirements[0].status).toBe('unmet');
+  });
+
+  it('rejects an assessment from a different finishing disclosure', async () => {
+    const assessment = { ...inspectionAssessment(), finishing_step_id: 'another-step' };
+    mockIPC((command, args) => {
+      if (command === 'get_investigation') return inspectionDetail('required', { inspection_assessment: assessment });
+      if (command === 'investigation_result') return { ...investigationResult('required'), schema_version: 3,
+        inspection_assessment: assessment };
+      return response(command, args);
+    });
+    await useInvestigationStore.getState().open('required');
+    expect(useInvestigationStore.getState().result).toBeNull();
+    expect(useInvestigationStore.getState().error).not.toBeNull();
+  });
+
+  it('ignores exact-location responses after selecting another saved task', async () => {
+    const location = deferred<InvestigationCapturedLocation>();
+    mockIPC((command, args) => command === 'inspection_captured_location' ? location.promise : response(command, args));
+    useInvestigationStore.setState({ selectedId: 'required', detail: inspectionDetail('required', {
+      inspection_requirements: [inspectionTarget] }) });
+    const reading = useInvestigationStore.getState().readInspectionLocation(inspectionTarget);
+    await useInvestigationStore.getState().open('different');
+    location.resolve({ target_id: inspectionTarget.target_id, captured: inspectionTarget.captured,
+      byte_start: 12, byte_end: 54, start_line: 1, start_column: 13, end_line: 2, end_column: 23,
+      column_unit: 'utf8_bytes', end_exclusive: true });
+    await reading;
+    expect(useInvestigationStore.getState().inspectionLocation).toBeNull();
+  });
+});
+
+it('cannot edit draft requirements while the original nonce outcome is uncertain (AC-0261)', async () => {
+  useInvestigationStore.getState().addInspectionRequirement(inspectionTarget);
+  mockIPC(() => { throw new Error('Uncertain transport'); });
+  await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@5', question: 'Inspect.',
+    scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1', inspection_requirements: [inspectionTarget] });
+  useInvestigationStore.getState().removeInspectionRequirement(inspectionTarget.target_id);
+  useInvestigationStore.getState().clearInspectionRequirements();
+  expect(useInvestigationStore.getState().addInspectionRequirement({ ...inspectionTarget, target_id: 'd'.repeat(64) })).toBe(false);
+  expect(useInvestigationStore.getState().draftInspectionRequirements).toEqual([inspectionTarget]);
+  expect(useInvestigationStore.getState().pendingStart?.inspection_requirements).toEqual([inspectionTarget]);
+});
+
+
+it('keeps the composer frozen with its exact pending nonce until admission is resolved (AC-0261)', async () => {
+  const store = useInvestigationStore.getState();
+  store.updateComposer({ specialistId: 'evidence-auditor@5', question: 'Keep this explicit follow-up.',
+    providerMode: 'cloud', scopeType: 'neighborhood', anchor: 'rule:stock', hops: 2,
+    parent: { parent_id: 'parent', conversation_id: 'conversation-parent' } });
+  store.addInspectionRequirement(inspectionTarget);
+  const composer = structuredClone(useInvestigationStore.getState().composer);
+  mockIPC(() => { throw new Error('Uncertain transport'); });
+  await store.start({ specialist_id: 'evidence-auditor@5', question: composer.question,
+    provider_mode: 'cloud', scope: { type: 'neighborhood', anchor: 'rule:stock', hops: 2 },
+    limit_profile: 'investigation-v1', ...composer.parent!, inspection_requirements: [inspectionTarget] });
+  const pending = structuredClone(useInvestigationStore.getState().pendingStart);
+  store.updateComposer({ question: 'Cannot change unresolved intent', parent: null });
+  expect(useInvestigationStore.getState().composer).toEqual(composer);
+  expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
+  const confirmed = inspectionDetail('confirmed', { specialist_id: 'evidence-auditor@5',
+    specialist: { ...inspectionDetail().specialist, id: 'evidence-auditor@5' } });
+  mockIPC((command, args) => {
+    if (command === 'start_investigation' || command === 'get_investigation') return confirmed;
+    if (command === 'investigation_result') return { ...investigationResult('confirmed'), schema_version: 3,
+      inspection_assessment: inspectionAssessment() };
+    return response(command, args);
+  });
+  await store.retryStart();
+  expect(useInvestigationStore.getState().pendingStart).toBeNull();
+  expect(useInvestigationStore.getState().composer.parent).toBeNull();
+  expect(useInvestigationStore.getState().composer.question).toBe('');
+  expect(useInvestigationStore.getState().draftInspectionRequirements).toEqual([]);
+});
+
+it('unlocks a definitive validation rejection but retains editable explicit intent (AC-0261)', async () => {
+  const store = useInvestigationStore.getState();
+  store.updateComposer({ question: 'Inspect this source.', parent: { parent_id: 'parent', conversation_id: 'conversation-parent' } });
+  store.addInspectionRequirement(inspectionTarget);
+  mockIPC(() => { throw { code: 'invalid_input', definitive: true, message: 'Invalid captured requirement.' }; });
+  await store.start({ specialist_id: 'domain-analyst@5', question: 'Inspect this source.',
+    provider_mode: 'local', scope: { type: 'all' }, limit_profile: 'investigation-v1', inspection_requirements: [inspectionTarget] });
+  expect(useInvestigationStore.getState().pendingStart).toBeNull();
+  expect(useInvestigationStore.getState().startError).toContain('No investigation was started. Invalid captured requirement.');
+  expect(useInvestigationStore.getState().composer.parent?.parent_id).toBe('parent');
+  store.updateComposer({ question: 'Corrected request.' });
+  expect(useInvestigationStore.getState().composer.question).toBe('Corrected request.');
+  expect(useInvestigationStore.getState().draftInspectionRequirements).toEqual([inspectionTarget]);
+});
+
+
+// Generated by the native TS-capture/production-host test. These are actual DTO
+// bytes, not a hand-written schema-1 approximation of a V5 response.
+it('accepts actual schema-2 V5 start/history/detail and schema-3 result/location DTOs (AC-0261/0262)', async () => {
+  const fixture = backendInspection;
+  const detail = fixture.detail;
+  // This UI test supplies only the journal transport required for refresh; it
+  // does not claim these placeholder events as native execution receipts.
+  const events = Array.from({ length: detail.last_event_sequence }, (_, index) => ({
+    investigation_id: detail.investigation_id, sequence: index + 1, revision: detail.revision,
+    kind: 'created', step_id: null, tool: null, summary: 'Journal transport fixture.', created_at: detail.created_at,
+  }));
+  mockIPC((command, args) => {
+    if (command === 'start_investigation' || command === 'get_investigation') return detail;
+    if (command === 'list_investigations') return { items: [detail], next_cursor: null };
+    if (command === 'investigation_result') return fixture.result;
+    if (command === 'investigation_consent') return null;
+    if (command === 'inspection_captured_location') return fixture.location;
+    if (command === 'investigation_events') {
+      const items = events.filter((event) => event.sequence > Number(args?.afterSequence ?? 0));
+      return { investigation_id: detail.investigation_id, items, next_sequence: detail.last_event_sequence, has_more: false };
+    }
+    throw new Error('Unexpected fixture command.');
+  });
+  const store = useInvestigationStore.getState();
+  await store.loadHistory();
+  expect(useInvestigationStore.getState().history).toEqual([detail]);
+  const target = fixture.target as InvestigationInspectionTarget;
+  await store.start({ specialist_id: 'domain-analyst@5', question: detail.question,
+    provider_mode: 'local', scope: { type: 'all' }, limit_profile: 'investigation-v1', inspection_requirements: [target] });
+  expect(useInvestigationStore.getState().pendingStart).toBeNull();
+  expect(useInvestigationStore.getState().startError).toBeNull();
+  expect(useInvestigationStore.getState().error).toBeNull();
+  expect(useInvestigationStore.getState().result).toEqual(fixture.result);
+  expect(useInvestigationStore.getState().detail?.inspection_assessment).toEqual(fixture.detail.inspection_assessment);
+  expect(target.index).toBe(0);
+  expect(target.receipt_inventory_index).toBe(12);
+  await store.readInspectionLocation(target);
+  expect(useInvestigationStore.getState().inspectionLocation).toEqual(fixture.location);
+});
+
+it.each([
+  { schema_version: 1 },
+  { schema_version: 2, specialist_id: 'domain-analyst@4' },
+  { schema_version: 3 },
+  { inspection_requirement_count: 0 },
+  { inspection_requirement_count: 13 },
+  { inspection_requirement_count: 1.5 },
+  { inspection_requirement_count: undefined },
+  { inspection_status: undefined },
+  { inspection_status: 'pending' },
+  { inspection_status: 'unknown' },
+  { has_result: false, inspection_status: 'supplied' },
+  { has_result: false, status: 'running', inspection_status: 'not_assessed' },
+  { has_result: false, status: 'cancelled', invocation_pending: true, inspection_status: 'not_assessed' },
+  { inspection_status: 'not_assessed' },
+])('rejects inconsistent V5 summary schema/count/status: %j', async (override) => {
+  mockIPC(() => ({ items: [{ ...backendInspection.detail, ...override }], next_cursor: null }));
+  await useInvestigationStore.getState().loadHistory();
+  expect(useInvestigationStore.getState().history).toEqual([]);
+  expect(useInvestigationStore.getState().historyError).not.toBeNull();
+});
+
+it.each(['domain-analyst@1', 'evidence-auditor@1', 'domain-analyst@2', 'evidence-auditor@2',
+  'domain-analyst@3', 'evidence-auditor@3', 'domain-analyst@4', 'evidence-auditor@4'] as const)(
+  'retains schema-1 history for %s', async (specialist_id) => {
+    const summary = investigationDetail('legacy', { specialist_id });
+    mockIPC(() => ({ items: [summary], next_cursor: null }));
+    await useInvestigationStore.getState().loadHistory();
+    expect(useInvestigationStore.getState().history).toEqual([summary]);
+    expect(useInvestigationStore.getState().historyError).toBeNull();
+  });
+
+
+it.each([
+  { status: 'running', invocation_pending: false, inspection_status: 'pending' },
+  { status: 'cancelled', invocation_pending: true, inspection_status: 'pending' },
+  { status: 'failed', invocation_pending: false, inspection_status: 'not_assessed' },
+  { status: 'cancelled', invocation_pending: false, inspection_status: 'not_assessed' },
+  { status: 'interrupted', invocation_pending: false, inspection_status: 'not_assessed' },
+  { status: 'outcome_unknown', invocation_pending: false, inspection_status: 'not_assessed' },
+])('accepts V5 no-result lifecycle assessment state: %j', async (lifecycle) => {
+  const summary = { ...backendInspection.detail, ...lifecycle, has_result: false };
+  mockIPC(() => ({ items: [summary], next_cursor: null }));
+  await useInvestigationStore.getState().loadHistory();
+  expect(useInvestigationStore.getState().historyError).toBeNull();
+  expect(useInvestigationStore.getState().history).toEqual([summary]);
 });

@@ -2,6 +2,27 @@
 use super::*;
 
 impl JobStore {
+    pub(crate) fn existing_investigation(
+        &self,
+        request: &StartInvestigationRequest,
+    ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
+        let hash = request.intent_hash()?;
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let id:Option<Option<String>>=tx.query_row("SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE nonce=?1",[&request.request_nonce],|r|r.get(0)).optional()?;
+        let detail = if let Some(id) = id {
+            let task = load_task(&tx, &id.ok_or(InvestigationStoreError::Invalid)?)?;
+            if task.intent_hash != hash {
+                return Err(InvestigationStoreError::Conflict);
+            }
+            Some(task.detail)
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(detail)
+    }
+
     pub(crate) fn investigation_turn_basis(
         &self,
         id: &str,

@@ -32,11 +32,22 @@ pub(super) fn seal(
             return Err(InvestigationError::InvalidInput);
         }
     }
-    if before["schema_version"] == 3
+    if (before["schema_version"] == 3 || before["schema_version"] == 4)
         && (before.get("turn_progress").is_none()
             || before.get("turn_progress") != after.get("turn_progress"))
     {
         return Err(InvestigationError::InvalidInput);
+    }
+    if before["schema_version"] == 4 {
+        for field in [
+            "inspection_requirements",
+            "inspection_requirements_hash",
+            "inspection_progress",
+        ] {
+            if before.get(field).is_none() || before.get(field) != after.get(field) {
+                return Err(InvestigationError::InvalidInput);
+            }
+        }
     }
     if before.get("omitted_sources") != after.get("omitted_sources") {
         return Err(InvestigationError::InvalidInput);
@@ -120,7 +131,15 @@ pub(super) fn seal(
         });
     }
     let disclosure = InvestigationDisclosure {
-        schema_version: 1,
+        inspection_requirements_hash: after
+            .get("inspection_requirements_hash")
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .ok_or(InvestigationError::InvalidInput)
+            })
+            .transpose()?,
+        schema_version: if before["schema_version"] == 4 { 2 } else { 1 },
         policy: COMPACT_DISCLOSURE_POLICY.into(),
         input_ledger_hash: ledger.fingerprint()?,
         graph_snapshot_id: ledger.graph_snapshot_id.clone(),

@@ -1,10 +1,11 @@
-import { useRef, useState } from 'react';
+import { useRef } from 'react';
 import type { InvestigationState } from '../investigationStore';
 import type { GraphNode } from '../store';
 import type { InvestigationProviderMode, InvestigationScope, InvestigationStatus, SpecialistId } from '../investigationTypes';
 import { InvestigationActivity } from './InvestigationActivity';
 import { InvestigationFindings } from './InvestigationFindings';
 import { EgressConsentDialog } from './EgressConsentDialog';
+import { InspectionAssessment } from './InspectionAssessment';
 
 export const INVESTIGATION_STATUS: Record<InvestigationStatus, string> = {
   queued: 'Queued', preparing: 'Preparing context', running: 'Running', awaiting_consent: 'Awaiting cloud consent',
@@ -20,22 +21,31 @@ export interface InvestigationsSurfaceProps {
 
 /** Props/callbacks only: the coordinator and dedicated store own task lifecycle. */
 export function InvestigationsSurface({ state, anchors, canStart }: InvestigationsSurfaceProps) {
-  const [specialistId, setSpecialistId] = useState<SpecialistId>('domain-analyst@3');
-  const [providerMode, setProviderMode] = useState<InvestigationProviderMode>('local');
-  const [question, setQuestion] = useState('');
-  const [scopeType, setScopeType] = useState<'all' | 'neighborhood'>('all');
-  const [anchor, setAnchor] = useState('');
-  const [hops, setHops] = useState(1);
-  const [parent, setParent] = useState<{ conversation_id: string; parent_id: string } | null>(null);
+  const { specialistId, providerMode, question, scopeType, anchor, hops, parent } = state.composer;
+  const setSpecialistId = (specialistId: SpecialistId) => state.updateComposer({ specialistId });
+  const setProviderMode = (providerMode: InvestigationProviderMode) => state.updateComposer({ providerMode });
+  const setQuestion = (question: string) => state.updateComposer({ question });
+  const setScopeType = (scopeType: 'all' | 'neighborhood') => state.updateComposer({ scopeType });
+  const setAnchor = (anchor: string) => state.updateComposer({ anchor });
+  const setHops = (hops: number) => state.updateComposer({ hops });
+  const setParent = (parent: typeof state.composer.parent) => state.updateComposer({ parent });
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const provider = state.catalog?.providers.find((item) => item.mode === providerMode);
   const summary = state.detail ?? state.history.find((item) => item.investigation_id === state.selectedId);
   const questionBytes = new TextEncoder().encode(question).length;
   const locked = state.starting || state.pendingStart !== null;
+  const requirements = state.draftInspectionRequirements;
+  const inspectionVersion = specialistId.endsWith('@5');
   const scope: InvestigationScope = scopeType === 'all' ? { type: 'all' } : { type: 'neighborhood', anchor, hops };
+  const requestBytes = new TextEncoder().encode(JSON.stringify({ schema_version: inspectionVersion ? 2 : 1,
+    request_nonce: '0'.repeat(36), specialist_id: specialistId, question, scope, provider_mode: providerMode,
+    limit_profile: state.catalog?.limits.profile ?? 'investigation-v1', ...parent,
+    ...(inspectionVersion && requirements.length ? { inspection_requirements: requirements,
+      expected_graph_revision: requirements[0].graph_snapshot_id } : {}) })).length;
   const startEnabled = canStart && !locked && Boolean(provider?.available) &&
     Boolean(state.catalog?.specialists.some((item) => item.id === specialistId)) && question.trim().length > 0 &&
-    questionBytes <= 2048 && (scopeType === 'all' || anchor.trim().length > 0);
+    questionBytes <= 2048 && (scopeType === 'all' || anchor.trim().length > 0) &&
+    (inspectionVersion ? requirements.length > 0 : requirements.length === 0) && requestBytes <= 8192;
   const refresh = () => { void state.loadCatalog(); void state.loadHistory(); };
 
   return <section className="investigations-surface" aria-label="Investigations">
@@ -46,7 +56,8 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
     <form className="investigation-compose" aria-label="Start an investigation" onSubmit={(event) => {
       event.preventDefault();
       if (startEnabled && state.catalog) void state.start({ specialist_id: specialistId, question,
-        scope, provider_mode: providerMode, limit_profile: state.catalog.limits.profile, ...parent });
+        scope, provider_mode: providerMode, limit_profile: state.catalog.limits.profile, ...parent,
+        ...(inspectionVersion ? { inspection_requirements: requirements } : {}) });
     }}>
       <fieldset disabled={locked}><legend>Specialist</legend>
         <div className="investigation-specialists">{state.catalog?.specialists.map((specialist) =>
@@ -59,6 +70,27 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
       {state.catalogLoading && <p role="status">Loading specialists…</p>}
       {state.catalogError && <p className="error-text" role="alert">{state.catalogError}</p>}
       {!state.catalog && !state.catalogLoading && <p className="muted">The app core supplies available specialists and provider limits.</p>}
+      <fieldset disabled={locked} aria-label="Required source inspections"><legend>Required source inspections</legend>
+        <p className="muted">Choose a captured range in the evidence drawer and select “Require this source in an investigation”.
+          Viewing source does not satisfy a specialist requirement. Follow-ups do not inherit earlier inspections.</p>
+        <p className="muted">Up to 12 required sources, within the 8,192-byte total request limit; long paths/questions reduce how many fit.</p>
+        {requirements.length === 0 ? <p>No source requirements selected.</p> : <>
+          <ul>{requirements.map((target) => <li key={target.target_id}>
+            <strong>{target.source.repo}/{target.source.path}</strong> · bytes {target.captured.byte_start}–{target.captured.byte_end}
+            {' · '}{target.role.replaceAll('_', ' ')}
+            <button type="button" className="secondary-button" aria-label={`Remove required source ${target.source.path}`}
+              onClick={() => state.removeInspectionRequirement(target.target_id)}>Remove</button>
+            <details><summary>Exact source binding</summary><p>Graph <code>{target.graph_snapshot_id}</code></p>
+              <p>Fact <code>{target.fact.kind === 'node' ? target.fact.id : `${target.fact.source} ${target.fact.label} ${target.fact.destination}`}</code></p>
+              <p>Role <code>{target.role}</code> · index {target.index}; receipt occurrence {target.receipt_inventory_index}</p>
+              <p>Target <code>{target.target_id}</code> · digest <code>{target.fact_digest}</code></p>
+            </details>
+          </li>)}</ul>
+          {!inspectionVersion && <p role="status">Select an explicit V5 specialist to use these source requirements, or remove them to use the selected specialist.</p>}
+        </>}
+        {inspectionVersion && requirements.length === 0 && <p role="status">V5 requires at least one explicitly selected captured source.</p>}
+        {state.inspectionDraftError && <p role="alert" className="error-text">{state.inspectionDraftError}</p>}
+      </fieldset>
       <div className="investigation-form-row">
         <label>Scope<select value={scopeType} disabled={locked} onChange={(event) => setScopeType(event.target.value as 'all' | 'neighborhood')}>
           <option value="all">Recovered system</option><option value="neighborhood">Fact neighborhood</option>
@@ -85,13 +117,14 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
           onChange={(event) => setQuestion(event.target.value)} />
       </label>
       <p className={questionBytes > 2048 ? 'error-text' : 'muted'}>{questionBytes} / 2,048 UTF-8 bytes. Scope uses the recovered graph at preparation time.</p>
+      {requestBytes > 8192 && <p role="alert" className="error-text">This request exceeds the 8,192-byte limit. Shorten the question or remove required sources.</p>}
       {parent && <p className="muted">New task following <code>{parent.parent_id}</code>; earlier findings remain T3 history.
         <button type="button" className="secondary-button" disabled={locked} onClick={() => setParent(null)}>Start a separate conversation</button></p>}
       {state.catalog && <p className="muted">Up to {state.catalog.limits.model_invocations} model invocations and {state.catalog.limits.tool_actions} tool actions;
         {' '}{state.catalog.limits.active_seconds}s active execution. Source and byte limits apply. Missing evidence is not proof of absence.</p>}
       <button type="submit" disabled={!startEnabled}>{state.starting ? 'Saving investigation…' : parent ? 'Start follow-up' : 'Start investigation'}</button>
       {state.startError && <div role="alert" className="error-text"><p>{state.startError}</p>
-        <button type="button" className="secondary-button" disabled={state.starting} onClick={() => void state.retryStart()}>Retry same start request</button></div>}
+        {state.pendingStart && <button type="button" className="secondary-button" disabled={state.starting} onClick={() => void state.retryStart()}>Retry same start request</button>}</div>}
     </form>
 
     <div className="investigation-layout">
@@ -104,6 +137,9 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
           <button type="button" className={`investigation-history-item${item.investigation_id === state.selectedId ? ' selected' : ''}`}
             aria-pressed={item.investigation_id === state.selectedId} onClick={() => void state.open(item.investigation_id)}>
             <strong>{item.question}</strong><span>{item.specialist_id}</span><span>{INVESTIGATION_STATUS[item.status]}</span>
+            <span>Source inspections: {item.inspection_status === 'pending' ? 'Awaiting assessment' : item.inspection_status === 'supplied'
+              ? 'Required sources available' : item.inspection_status === 'unmet' ? 'Required sources missing' : 'Not assessed'}
+              {item.inspection_requirement_count !== undefined && ` · ${item.inspection_requirement_count} required`}</span>
             <time>{item.created_at}</time>{item.cancel_requested && <span>Cancellation requested</span>}
           </button></li>)}</ul>
         {state.nextCursor && <button type="button" className="secondary-button" disabled={state.historyLoading} onClick={() => void state.loadHistory(true)}>Load older investigations</button>}
@@ -125,6 +161,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
                 onClick={() => void state.cancel()}>Request cancellation</button>}
               {summary.actions.can_follow_up && <button type="button" className="secondary-button" disabled={locked || state.catalogLoading || !state.catalog} onClick={() => {
                 if (state.catalogLoading || !state.catalog) return;
+                state.clearInspectionRequirements();
                 setParent({ conversation_id: summary.conversation_id, parent_id: summary.investigation_id });
                 setScopeType(summary.scope.type); if (summary.scope.type === 'neighborhood') { setAnchor(summary.scope.anchor); setHops(summary.scope.hops); }
                 setSpecialistId(state.catalog?.specialists.some((item) => item.id === summary.specialist_id)
@@ -138,6 +175,11 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
           {state.error && <p className="error-text" role="alert">{state.error}</p>}
           {state.actionError && <p className="error-text" role="alert">{state.actionError}</p>}
           {state.detail && <>
+            <InspectionAssessment requirements={state.detail.inspection_requirements ?? []}
+              awaitingAssessment={!['completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(state.detail.status) || state.detail.invocation_pending}
+              assessment={state.detail.inspection_assessment} location={state.inspectionLocation}
+              locationTargetId={state.inspectionLocationTargetId} locationLoading={state.inspectionLocationLoading}
+              locationError={state.inspectionLocationError} onLocation={(target) => void state.readInspectionLocation(target)} />
             <details className="investigation-section"><summary>Specialist, provider and consumed limits</summary>
               <p>{state.detail.specialist.name} · <code>{state.detail.specialist.id}</code> · T3 / InferredWeak</p>
               <p>Prompt fingerprint: <code>{state.detail.specialist.prompt_fingerprint}</code></p>

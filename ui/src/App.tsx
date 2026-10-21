@@ -783,10 +783,21 @@ export default function App() {
             node={selected.node}
             source={selected.source}
             evidenceIndex={selected.evidenceIndex}
-            captured={<CapturedSource description={capturedSelectionMatches ? primarySource.description : null}
+            captured={<CapturedSource key={primarySource.selection} description={capturedSelectionMatches ? primarySource.description : null}
               text={capturedSelectionMatches ? primarySource.text : null}
               loading={!capturedSelectionMatches || primarySource.loading} error={capturedSelectionMatches ? primarySource.error : null}
-              onRead={(index) => void primarySource.readRange(index)} />}
+              onRead={(index) => void primarySource.readRange(index)}
+              requirementBusy={primarySource.requirementBusy}
+              requirementError={primarySource.requirementError ?? investigations.inspectionDraftError}
+              onRequire={(index) => {
+                if (!capturedSelectionMatches) return;
+                void primarySource.resolveInspectionTarget(index).then((target) => {
+                  if (target && useInvestigationStore.getState().addInspectionRequirement(target)) {
+                    clearSelection();
+                    navigate('investigations');
+                  }
+                });
+              }} />}
             onAddToPacket={selected.fact || atlas.nodes.some((node) => node.id === selected.node.id)
               ? () => void packets.addFact(selected.fact ?? { kind: 'node', id: selected.node.id }) : undefined}
             packetBusy={packets.busy}

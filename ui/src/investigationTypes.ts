@@ -6,7 +6,7 @@ import type { EgressPreview } from './components/EgressConsentDialog';
 import type { FactKey } from './primarySourceStore';
 import type { EvidenceRef, TaskSourceBasisV2 } from './store';
 
-export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4';
+export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5';
 export type InvestigationProviderMode = 'local' | 'cloud';
 /** The existing context-hub QueryScope wire shape, not a filesystem scope. */
 export type InvestigationScope = { type: 'all' } |
@@ -60,8 +60,58 @@ export interface InvestigationCatalog {
   limits: InvestigationLimits;
 }
 
-export interface StartInvestigationRequest {
+export type InvestigationRangeRole = 'provenance' | 'rule_exit' | 'condition_branch' | 'condition_expression' |
+  'return_value' | 'throw_value' | 'dependency' | 'dependency_declaration' | 'redaction' |
+  'definition_declaration' | 'definition_use' | 'definition_initializer' | 'definition_expression' |
+  'definition_dependency' | 'definition_dependency_declaration';
+
+/** Host-resolved immutable target. The viewer inventory ordinal is not role/index. */
+export interface InvestigationInspectionTarget {
   schema_version: 1;
+  target_id: string;
+  graph_snapshot_id: string;
+  fact: FactKey;
+  fact_digest: string;
+  registered_source_id: string;
+  receipt_id: string;
+  receipt_inventory_index: number;
+  role: InvestigationRangeRole;
+  index: number;
+  source: EvidenceRef;
+  captured: Extract<TaskSourceBasisV2['evidence'][number]['origin'], { kind: 'captured_primary_source' }>['captured'];
+}
+
+export interface InvestigationInspectionAssessment {
+  schema_version: 1;
+  requirements_hash: string;
+  input_ledger_hash: string;
+  finishing_step_id: string;
+  disclosure_hash: string;
+  requirements: {
+    target_id: string;
+    target: InvestigationInspectionTarget;
+    status: 'supplied' | 'unmet';
+    acquired: boolean;
+    supplied: boolean;
+    cited: boolean;
+  }[];
+}
+
+/** Host-computed coordinates from the exact retained file. Never checkout lines. */
+export interface InvestigationCapturedLocation {
+  target_id: string;
+  captured: InvestigationInspectionTarget['captured'];
+  byte_start: number;
+  byte_end: number;
+  start_line: number;
+  start_column: number;
+  end_line: number;
+  end_column: number;
+  column_unit: 'utf8_bytes';
+  end_exclusive: true;
+}
+
+interface InvestigationStartFields {
   request_nonce: string;
   specialist_id: SpecialistId;
   question: string;
@@ -73,13 +123,19 @@ export interface StartInvestigationRequest {
   parent_id?: string;
 }
 
+export type StartInvestigationRequest = InvestigationStartFields & (
+  { schema_version: 1; inspection_requirements?: never } |
+  { schema_version: 2; inspection_requirements: InvestigationInspectionTarget[] }
+);
+
 export type InvestigationStatus = 'queued' | 'preparing' | 'running' |
   'awaiting_consent' | 'completed' | 'failed' | 'cancelled' | 'interrupted' |
   'outcome_unknown';
 
 /** Bounded history summary. Question is the host's redacted saved representation. */
 export interface InvestigationSummary {
-  schema_version: 1;
+  /** V5 inspection tasks use schema 2; V1–V4 history stays schema 1. */
+  schema_version: 1 | 2;
   investigation_id: string;
   conversation_id: string;
   parent_id: string | null;
@@ -98,6 +154,11 @@ export interface InvestigationSummary {
   has_result: boolean;
   created_at: string;
   updated_at: string;
+  /** Absent on legacy history: never synthesize an assessed pass. */
+  inspection_requirements?: InvestigationInspectionTarget[];
+  inspection_assessment?: InvestigationInspectionAssessment | null;
+  inspection_status?: 'pending' | 'supplied' | 'unmet' | 'not_assessed';
+  inspection_requirement_count?: number;
 }
 
 export interface InvestigationUsage {
@@ -181,7 +242,7 @@ export interface InvestigationFinding {
 }
 
 export interface InvestigationResult {
-  schema_version: 1 | 2;
+  schema_version: 1 | 2 | 3;
   investigation_id: string;
   result_id: string;
   input_ledger_hash: string;
@@ -189,6 +250,7 @@ export interface InvestigationResult {
   /** Present only for schema-2 results; absence preserves legacy history. */
   invocation_step_id?: string;
   disclosure_hash?: string;
+  inspection_assessment?: InvestigationInspectionAssessment;
   findings: InvestigationFinding[];
   knowledge_completeness: 'partial' | 'insufficient_evidence';
   limitations: string[];

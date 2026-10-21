@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 
 fn request() -> StartInvestigationRequest {
     StartInvestigationRequest {
+        inspection_requirements: None,
         schema_version: 1,
         request_nonce: "request-1".into(),
         specialist_id: SpecialistId::DomainAnalyst,
@@ -424,7 +425,11 @@ fn investigation_short_graph_names_remain_usable_but_raw_excerpts_do_not() {
 fn investigation_detail_roundtrip_closes_flattened_and_nested_unknown_fields() {
     // AC-0188: reusable public DTOs have a strict new storage contract.
     let detail = InvestigationDetail {
+        inspection_requirements: None,
+        inspection_assessment: None,
         summary: InvestigationSummary {
+            inspection_status: None,
+            inspection_requirement_count: None,
             schema_version: 1,
             investigation_id: "inv-one".into(),
             conversation_id: "conversation-one".into(),
@@ -562,3 +567,6 @@ mod sealing_tests;
 
 #[path = "turn_tests.rs"]
 mod turn_tests;
+
+#[path = "inspection_tests.rs"]
+mod inspection_tests;

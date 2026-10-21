@@ -15,6 +15,7 @@ pub struct InvestigationInput {
     supplied_strings: Vec<String>,
     graph_strings: Vec<String>,
     compact: bool,
+    inspection_requirements: Option<Vec<InvestigationInspectionTarget>>,
 }
 
 impl InvestigationInput {
@@ -60,43 +61,6 @@ impl InvestigationInput {
             supplied_history,
             usage,
         )
-    }
-
-    /// V4 requires a coherently read durable turn basis; legacy inputs never
-    /// acquire progress fields or change their serialized representation.
-    #[allow(clippy::too_many_arguments)]
-    pub fn prepare_v4(
-        question: &str,
-        specialist: SpecialistId,
-        ledger: InvestigationInputLedger,
-        query_pages: &[String],
-        evidence: &[AgentEvidence],
-        supplied_history: &[String],
-        usage: &InvestigationUsage,
-        basis: &InvestigationTurnBasis,
-    ) -> Result<Self, InvestigationError> {
-        if !specialist.uses_turn_progress() {
-            return Err(InvestigationError::InvalidInput);
-        }
-        let mut input = Self::prepare_base(
-            question,
-            specialist,
-            ledger,
-            query_pages,
-            evidence,
-            supplied_history,
-            usage,
-        )?;
-        let mut prompt: Value = serde_json::from_str(&input.payload.prompt)
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        let progress = basis.progress(&input.ledger, &prompt["compact_context"])?;
-        prompt["schema_version"] = 3.into();
-        prompt["turn_progress"] =
-            serde_json::to_value(progress).map_err(|_| InvestigationError::InvalidInput)?;
-        input.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        bounded_bytes(&input.payload, MAX_INPUT_BYTES)?;
-        Ok(input)
     }
 
     fn prepare_base(
@@ -278,6 +242,7 @@ impl InvestigationInput {
             supplied_strings,
             graph_strings,
             compact,
+            inspection_requirements: None,
         })
     }
 
@@ -413,6 +378,19 @@ impl InvestigationInput {
             self.graph_strings.iter().map(String::as_str),
         )?;
         if let Some(disclosure) = disclosure {
+            if let Some(targets) = &self.inspection_requirements {
+                return InvestigationResult::admit_with_inspection(
+                    investigation_id,
+                    &self.ledger,
+                    step_id,
+                    disclosure,
+                    action,
+                    self.supplied_strings.iter().map(String::as_str),
+                    observed_response_model,
+                    created_at,
+                    targets,
+                );
+            }
             return InvestigationResult::admit_with_disclosure(
                 investigation_id,
                 &self.ledger,
@@ -468,3 +446,6 @@ fn collect_strings(value: &Value, out: &mut Vec<String>) {
     }
     visit(value, out, false);
 }
+
+#[path = "input_versions.rs"]
+mod versions;

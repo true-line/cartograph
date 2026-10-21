@@ -5242,6 +5242,8 @@ fn main() {
             investigations::commands::decline_investigation_step,
             investigations::commands::cancel_investigation,
             investigations::commands::read_investigation_citation,
+            investigations::inspection::resolve_investigation_inspection_target,
+            investigations::inspection::inspection_captured_location,
             ping,
             graph_stats,
             clear_graph,

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { invokeOr } from './tauri';
 import type { GraphNode } from './store';
+import type { InvestigationInspectionTarget } from './investigationTypes';
 
 export type FactKey = { kind: 'node'; id: string } |
   { kind: 'edge'; source: string; label: string; destination: string };
@@ -12,6 +13,7 @@ export function sameFactKey(left: FactKey | null, right: FactKey): boolean {
 }
 
 export interface CapturedDescription {
+  graph_snapshot_id?: string;
   fact: FactKey;
   receipt_id: string;
   emitted_fact_digest: string;
@@ -58,8 +60,11 @@ interface PrimarySourceState {
   rangeIndex: number | null;
   loading: boolean;
   error: string | null;
+  requirementBusy: boolean;
+  requirementError: string | null;
   inspect: (node: GraphNode, fact?: FactKey) => Promise<void>;
   readRange: (index: number) => Promise<void>;
+  resolveInspectionTarget: (index: number) => Promise<InvestigationInspectionTarget | null>;
   clear: () => void;
   sources: RetainedSource[];
   preview: RetentionPreview | null;
@@ -78,11 +83,13 @@ let inventoryRequest = 0;
 
 export const usePrimarySourceStore = create<PrimarySourceState>((set, get) => ({
   selection: 0, subject: null, subjectFact: null, description: null, text: null, rangeIndex: null, loading: false, error: null,
+  requirementBusy: false, requirementError: null,
   sources: [], preview: null, retentionSelection: 0, retentionBusy: false,
   retentionError: null, retentionMessage: null,
   inspect: async (node, fact = { kind: 'node', id: node.id }) => {
     const selection = get().selection + 1;
-    set({ selection, subject: node, subjectFact: fact, description: null, text: null, rangeIndex: null, loading: true, error: null });
+    set({ selection, subject: node, subjectFact: fact, description: null, text: null, rangeIndex: null, loading: true, error: null,
+      requirementBusy: false, requirementError: null });
     try {
       const description = await invokeOr<CapturedDescription | null>('describe_captured_source', null, {
         fact,
@@ -121,7 +128,34 @@ export const usePrimarySourceStore = create<PrimarySourceState>((set, get) => ({
       }
     }
   },
-  clear: () => set((state) => ({ selection: state.selection + 1, subject: null, subjectFact: null, description: null, text: null, rangeIndex: null, loading: false, error: null })),
+  resolveInspectionTarget: async (index) => {
+    const { selection, description, requirementBusy } = get();
+    const range = description?.ranges.find((item) => item.index === index);
+    if (!description?.graph_snapshot_id || !range || requirementBusy) return null;
+    const current = () => get().selection === selection && get().description === description;
+    set({ requirementBusy: true, requirementError: null });
+    try {
+      const target = await invokeOr<InvestigationInspectionTarget | null>('resolve_investigation_inspection_target', null, {
+        fact: description.fact, expectedGraphSnapshotId: description.graph_snapshot_id,
+        expectedReceiptId: description.receipt_id, inventoryIndex: index,
+      });
+      if (!current()) return null;
+      if (!target || target.schema_version !== 1 || !/^[0-9a-f]{64}$/.test(target.target_id) ||
+          target.graph_snapshot_id !== description.graph_snapshot_id || !sameFactKey(target.fact, description.fact) ||
+          target.fact_digest !== description.emitted_fact_digest || target.receipt_id !== description.receipt_id ||
+          target.receipt_inventory_index !== index || target.registered_source_id !== description.source_id ||
+          target.source.path !== range.path || target.captured.byte_start !== range.byte_start ||
+          target.captured.byte_end !== range.byte_end) throw new Error('Stale source selection');
+      set({ requirementBusy: false });
+      return target;
+    } catch {
+      if (current()) set({ requirementBusy: false,
+        requirementError: 'This captured selection could not be bound. Select the fact again if recovery changed.' });
+      return null;
+    }
+  },
+  clear: () => set((state) => ({ selection: state.selection + 1, subject: null, subjectFact: null, description: null, text: null, rangeIndex: null, loading: false, error: null,
+    requirementBusy: false, requirementError: null })),
   loadSources: async () => {
     const request = ++inventoryRequest;
     if (get().retentionError === INVENTORY_ERROR) set({ retentionError: null });

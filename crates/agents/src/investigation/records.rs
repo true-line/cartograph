@@ -85,6 +85,12 @@ pub struct StartInvestigationRequest {
     /// Caller-supplied idempotency key, not a cryptographic nonce or execution authority.
     pub request_nonce: String,
     pub specialist_id: SpecialistId,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_inspection_requirements"
+    )]
+    pub inspection_requirements: Option<Vec<InvestigationInspectionTarget>>,
     pub question: String,
     pub scope: InvestigationScope,
     pub provider_mode: InvestigationProviderMode,
@@ -97,12 +103,20 @@ pub struct StartInvestigationRequest {
     pub parent_id: Option<String>,
 }
 
+fn present_inspection_requirements<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<InvestigationInspectionTarget>>, D::Error> {
+    Vec::<InvestigationInspectionTarget>::deserialize(deserializer).map(Some)
+}
+
 impl StartInvestigationRequest {
     /// Cheap immutable validation; mutable availability and capacity checks must
     /// run after the durable deduplication lookup, not inside this method.
     pub fn validate(&self) -> Result<(), InvestigationError> {
         self.scope.validate()?;
-        if self.schema_version != 1
+        let v5 = self.specialist_id.uses_inspection_requirements();
+        if (self.schema_version != if v5 { 2 } else { 1 })
+            || self.inspection_requirements.is_some() != v5
             || !text(&self.question, MAX_QUESTION_BYTES)
             || !opaque_id(&self.request_nonce)
             || self.limit_profile != "investigation-v1"
@@ -116,14 +130,38 @@ impl StartInvestigationRequest {
         {
             return Err(InvestigationError::InvalidRequest);
         }
+        if let Some(targets) = &self.inspection_requirements {
+            let targets = normalize_inspection_targets(targets)?;
+            if self.expected_graph_revision.as_deref()
+                != Some(targets[0].graph_snapshot_id.as_str())
+            {
+                return Err(InvestigationError::InvalidRequest);
+            }
+        }
         bounded_bytes(self, 8 * 1024)?;
         Ok(())
     }
 
     /// Hash binds original question bytes without storing them. Changing host
     /// provider/role availability must not change an identical nonce's identity.
+    pub fn normalized(&self) -> Result<Self, InvestigationError> {
+        self.validate()?;
+        let mut request = self.clone();
+        request.inspection_requirements = self
+            .inspection_requirements
+            .as_ref()
+            .map(|targets| normalize_inspection_targets(targets))
+            .transpose()?;
+        Ok(request)
+    }
     pub fn intent_hash(&self) -> Result<String, InvestigationError> {
         self.validate()?;
+        if self.schema_version == 2 {
+            return Ok(crate::source_basis::domain_hash(
+                b"cartograph:investigation-client-intent:v2\0",
+                &bounded_bytes(&self.normalized()?, 8 * 1024)?,
+            ));
+        }
         Ok(crate::source_basis::domain_hash(
             b"cartograph:investigation-client-intent:v1\0",
             &bounded_bytes(self, 8 * 1024)?,
@@ -185,6 +223,10 @@ pub struct InvestigationSummary {
     pub graph_snapshot_id: Option<String>,
     pub last_event_sequence: u64,
     pub has_result: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection_status: Option<InvestigationInspectionStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection_requirement_count: Option<usize>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -218,6 +260,10 @@ pub struct InvestigationDetail {
     pub usage: InvestigationUsage,
     pub citations: Vec<InvestigationCitation>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection_requirements: Option<Vec<InvestigationInspectionTarget>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection_assessment: Option<InvestigationInspectionAssessment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,6 +337,8 @@ pub struct InvestigationResult {
     pub invocation_step_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disclosure_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection_assessment: Option<InvestigationInspectionAssessment>,
     pub findings: Vec<InvestigationFinding>,
     pub knowledge_completeness: KnowledgeCompleteness,
     pub limitations: Vec<String>,

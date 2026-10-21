@@ -3,7 +3,7 @@ import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { InvestigationsSurface } from './InvestigationsSurface';
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
-import { investigationCatalog, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from '../investigationFixtures';
+import { inspectionAssessment, inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from '../investigationFixtures';
 import type { InvestigationDetail } from '../investigationTypes';
 
 const state = (overrides: Partial<InvestigationState> = {}): InvestigationState => ({
@@ -16,6 +16,14 @@ const state = (overrides: Partial<InvestigationState> = {}): InvestigationState 
 });
 
 const meta = { title: 'Surfaces/InvestigationsSurface', component: InvestigationsSurface,
+  beforeEach: () => {
+    useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+    return () => useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  },
+  render: function ComposerStory(args) {
+    const { composer, updateComposer } = useInvestigationStore();
+    return <InvestigationsSurface {...args} state={{ ...args.state, composer, updateComposer }} />;
+  },
   args: { state: state(), anchors: [], canStart: true } } satisfies Meta<typeof InvestigationsSurface>;
 export default meta;
 type Story = StoryObj<typeof meta>;
@@ -236,5 +244,83 @@ export const TurnProgressFollowUpWaitsForCatalog: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up' }));
     await expect(useInvestigationStore.getState().start).toHaveBeenCalledWith(expect.objectContaining({
       specialist_id: 'domain-analyst@4', parent_id: 'inv-fixture' }));
+  },
+};
+
+export const ExplicitRequiredSourcesUseV5: Story = {
+  // AC-0261: adding a target never silently upgrades the default V3 specialist.
+  args: { state: state({ catalog: inspectionCatalog, draftInspectionRequirements: [inspectionTarget] }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
+    await userEvent.type(canvas.getByLabelText('Question'), 'Inspect the required stock source.');
+    await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled();
+    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@5/ }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@5',
+      inspection_requirements: [inspectionTarget] }));
+  },
+};
+
+export const CompletedExecutionCanHaveUnmetRequirements: Story = {
+  args: { state: state({ detail: inspectionDetail('inv-fixture', { specialist_id: 'domain-analyst@5',
+    inspection_requirements: [inspectionTarget], inspection_assessment: inspectionAssessment(),
+    inspection_status: 'unmet', inspection_requirement_count: 1 }),
+  history: [inspectionDetail('inv-fixture')], result: { ...investigationResult(), schema_version: 3, inspection_assessment: inspectionAssessment() } }) },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('status')).toHaveTextContent('Execution completed');
+    await expect(canvas.getByText(/Requirement unmet:/)).toBeVisible();
+    await expect(canvas.getByText('A local stock guard is present')).toBeVisible();
+    await expect(canvas.getByText(/Source inspections: Required sources missing · 1 required/)).toBeVisible();
+  },
+};
+
+export const RemoveRequirementsAndFollowUpExplicitly: Story = {
+  beforeEach: () => {
+    useInvestigationStore.setState({ ...state(), catalog: inspectionCatalog,
+      draftInspectionRequirements: [inspectionTarget] }, true);
+    return () => useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  },
+  render: function RequiredSourcesStory() {
+    return <InvestigationsSurface state={useInvestigationStore()} anchors={[]} canStart />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Remove required source src/stock.ts' }));
+    await expect(canvas.getByText('No source requirements selected.')).toBeVisible();
+    useInvestigationStore.getState().addInspectionRequirement(inspectionTarget);
+    await waitFor(() => expect(useInvestigationStore.getState().draftInspectionRequirements).toHaveLength(1));
+    await userEvent.click(canvas.getByRole('button', { name: 'Ask a follow-up' }));
+    await expect(canvas.getByText('No source requirements selected.')).toBeVisible();
+  },
+};
+
+export const RequiredSourcesKeepExistingRequestBudget: Story = {
+  args: { state: state({ catalog: inspectionCatalog, draftInspectionRequirements: [{ ...inspectionTarget,
+    fact: { kind: 'node', id: 'large-fact-id:'.repeat(700) } }] }) },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@5/ }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Inspect the required source.');
+    await expect(canvas.getByText(/This request exceeds the 8,192-byte limit/)).toBeVisible();
+    await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled();
+  },
+};
+
+
+export const TerminalInspectionWithoutResultIsNotAssessed: Story = {
+  args: { state: state({ result: null,
+    detail: inspectionDetail('inv-fixture', { status: 'failed', has_result: false,
+      inspection_status: 'not_assessed', inspection_assessment: undefined }),
+    history: [inspectionDetail('inv-fixture', { status: 'failed', has_result: false,
+      inspection_status: 'not_assessed', inspection_assessment: undefined })] }) },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('status')).toHaveTextContent('Failed');
+    await expect(canvas.getByText('Source inspections: Not assessed · 1 required')).toBeVisible();
+    await expect(canvas.getByText('Source inspections: Assessment unavailable')).toBeVisible();
+    await expect(canvas.queryByText(/Requirement met:/)).not.toBeInTheDocument();
+    await expect(canvas.queryByText(/Requirement unmet:/)).not.toBeInTheDocument();
   },
 };
