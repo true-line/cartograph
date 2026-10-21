@@ -2,6 +2,10 @@
 use super::*;
 use rusqlite::Transaction;
 
+#[path = "saved_metadata_history.rs"]
+mod saved_metadata_history;
+pub(super) use saved_metadata_history::SavedMetadataHistory;
+
 #[allow(dead_code)] // Internal worker snapshot; public next-family routes stay closed.
 #[path = "next_prompt_snapshot.rs"]
 mod next_prompt_snapshot;
@@ -1133,6 +1137,8 @@ pub(super) fn next_prompt_invocations(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<(u32, PendingInvestigationStep)>, InvestigationStoreError> {
+    #[cfg(test)]
+    saved_metadata_history::note_invocation_sweep();
     if connection.is_autocommit() {
         return Err(InvestigationStoreError::Invalid);
     }

@@ -1,7 +1,7 @@
 //! Immutable @10 capacity refusals. The caller owns one writer transaction,
 //! execution/lease checks, response/event/phase publication and central capacity
 //! admission. This module never commits, advances input or creates a read attempt.
-use super::admission_contract::{SavedCallBasis, load_saved_call_basis_core};
+use super::admission_contract::{SavedCallBasis, SavedCallCore};
 use super::*;
 use agents::investigation::staged_refusal::CompletionCallMode;
 use rusqlite::Transaction;
@@ -172,7 +172,7 @@ pub(super) struct CapacityState {
 }
 struct CallWitness {
     call: SavedCallBasis,
-    step: PendingInvestigationStep,
+    core: SavedCallCore,
     action_admitted: bool,
 }
 struct Publication {
@@ -226,6 +226,9 @@ fn timeline(
             return Err(InvestigationStoreError::Invalid);
         }
     }
+    // Local read-only replay epoch: all named invocation/attempt/refusal bodies
+    // and the retained archive are validated once, then reused at exact cutoffs.
+    let history = completion::SavedMetadataHistory::load(connection, task)?;
     let mut result = Timeline {
         calls: BTreeMap::new(),
         publications: vec![],
@@ -286,14 +289,7 @@ fn timeline(
                     .step_id
                     .as_ref()
                     .ok_or(InvestigationStoreError::Invalid)?;
-                let step: PendingInvestigationStep = read_body(
-                    connection,
-                    "investigation_invocations",
-                    "step_id",
-                    id,
-                    step_id,
-                )?
-                .ok_or(InvestigationStoreError::Invalid)?;
+                let step = history.step(step_id)?;
                 let ledger = current.as_ref().ok_or(InvestigationStoreError::Invalid)?;
                 let disclosure = step
                     .disclosure
@@ -325,15 +321,15 @@ fn timeline(
                         .ok_or(InvestigationStoreError::Invalid)?,
                     admission,
                 };
-                let core = load_saved_call_basis_core(connection, task, &call)?;
-                if core.step != step || core.ledger != *ledger || core.ordinal != ordinal {
+                let core = history.validate_timeline_call(&call, ledger)?;
+                if core.step != *step || core.ledger != *ledger || core.ordinal != ordinal {
                     return Err(InvestigationStoreError::Invalid);
                 }
                 result.calls.insert(
                     ordinal,
                     CallWitness {
                         call,
-                        step,
+                        core,
                         action_admitted: false,
                     },
                 );
@@ -584,14 +580,18 @@ fn read_entries(
                     .iter()
                     .any(|publication| publication.ordinal == ordinal)
                 || entry.invocation_hash
-                    != core_prov::content_hash(&encode(&witness.step, MAX_INVOCATION_BYTES)?)
+                    != core_prov::content_hash(&encode(&witness.core.step, MAX_INVOCATION_BYTES)?)
                 || !hash_valid(&entry.entry_id)
                 || entry.entry_id != entry.content_id()?
             {
                 return Err(InvestigationStoreError::Invalid);
             }
-            let core = load_saved_call_basis_core(connection, task, &entry.call)?;
-            validate_proposal(&entry.proposal, &entry.response, &core.ledger, &entry.call)?;
+            validate_proposal(
+                &entry.proposal,
+                &entry.response,
+                &witness.core.ledger,
+                &entry.call,
+            )?;
             let response: InvestigationResponseMeta = read_body(
                 connection,
                 "investigation_responses",
@@ -744,7 +744,14 @@ pub(super) fn append(
     }
     let line = timeline(tx, task)?;
     let entries = read_entries(tx, task, &line)?;
-    let core = load_saved_call_basis_core(tx, task, call)?;
+    let witness = line
+        .calls
+        .get(&call.invocation_ordinal)
+        .ok_or(InvestigationStoreError::Missing)?;
+    if witness.call != *call {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let core = &witness.core;
     let current = project(&entries, &line, None);
     if line.calls.last_key_value().map(|(ordinal, _)| *ordinal) != Some(call.invocation_ordinal)
         || entries
