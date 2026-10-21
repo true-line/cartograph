@@ -316,10 +316,14 @@ jobs:
           arguments-json: '["toolchain","install","${{ steps.toolchain.outputs.channel }}","--profile","minimal","--component","rustfmt","--component","clippy"]'
           timeout-seconds: '300'
 
+      # CARGO_HOME here is the runner's machine-wide installation. With
+      # cache-bin, the post step deletes every file it saw in CARGO_HOME\bin
+      # at start, rustup.exe and cargo.exe included, breaking the next job.
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: windows-job-ownership
+          cache-bin: "false"
 
       - name: Test production job ownership on Windows
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
