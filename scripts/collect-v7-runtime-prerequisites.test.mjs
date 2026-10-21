@@ -1,7 +1,7 @@
 // AC-0279: all transports/processes are scripted; no HTTP, Ollama or Cargo calls.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, readdir, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, readdir, symlink, rename, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -136,4 +136,46 @@ test('collector rejects rubric leakage and tampered preparation seals without re
   const failure = await json(path.join(options['output-dir'], 'failure.json'));
   assert.equal(failure.phase, 'read_prepared_definition'); assert.equal(failure.frozen_definition_sha256, null);
   assert.ok((await readdir(options['output-dir'])).includes('runtime-receipt.json'));
+});
+
+
+test('collector pins output directory and ancestor identities across HTTP awaits', async (t) => {
+  const { root, options } = await fixture(t);
+  for (const ancestor of [false, true]) {
+    const parent = path.join(root, ancestor ? 'swapped-parent' : 'ordinary-parent'); await mkdir(parent);
+    const output = path.join(parent, 'observation'); const moved = path.join(root, ancestor ? 'retained-parent' : 'retained-output');
+    const current = { ...options, 'output-dir': output };
+    let calls = 0;
+    await assert.rejects(collect(current, { transport: async (...args) => {
+      const result = await transport().fn(...args);
+      if (++calls === 1) {
+        if (ancestor) { await rename(parent, moved); await symlink(options.modelVisibleRoots[0], parent, 'dir'); await mkdir(path.join(options.modelVisibleRoots[0], 'observation')); }
+        else { await rename(output, moved); await symlink(options.captureRoots[0], output, 'dir'); }
+      }
+      return result;
+    } }), /artifacts_retained/u);
+    assert.equal((await json(path.join(moved, ...(ancestor ? ['observation'] : []), 'attempt.json'))).kind, 'prerequisite_observation_attempt');
+    assert.deepEqual(await readdir(options.captureRoots[0]), []);
+    const visible = ancestor ? path.join(options.modelVisibleRoots[0], 'observation') : options.modelVisibleRoots[0];
+    assert.deepEqual(await readdir(visible), []);
+  }
+});
+
+test('collector rejects changed run or rubric identity before prepare-only handoff', async (t) => {
+  const { root, options } = await fixture(t);
+  for (const change of ['run', 'rubric']) {
+    const rubric = path.join(root, 'external', `rubric-${change}`); await writeFile(rubric, 'frozen-rubric');
+    const current = { ...options, 'output-dir': `${options['output-dir']}-${change}`, 'run-dir': `${options['run-dir']}-${change}`, rubric, prepareOnly: true };
+    let prepared = false;
+    await assert.rejects(collect(current, { transport: async (...args) => {
+      const result = await transport().fn(...args);
+      if (new URL(args[0]).pathname === '/api/tags') {
+        if (change === 'run') await symlink(options.captureRoots[0], current['run-dir'], 'dir');
+        else await writeFile(rubric, 'changed-rubric');
+      }
+      return result;
+    }, prepare: async () => { prepared = true; } }), /artifacts_retained/u);
+    assert.equal(prepared, false); assert.deepEqual(await readdir(options.captureRoots[0]), []);
+    assert.deepEqual(await readdir(current['output-dir']), ['attempt.json']);
+  }
 });

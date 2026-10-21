@@ -132,22 +132,49 @@ export async function collect(options, { transport = getLocal, prepare = runPrep
   check(roots.length >= 2 && roots.every((root) => disjoint(opts['output-dir'], root)), 'output_overlaps_visible_root');
   check(disjoint(opts['output-dir'], opts['run-dir']) && disjoint(opts['output-dir'], opts.checkout) && disjoint(opts['run-dir'], opts.checkout), 'overlapping_artifact_roots');
   check(/^[A-Za-z0-9._-]{1,100}$/u.test(path.basename(opts['output-dir'])) && !['.', '..'].includes(path.basename(opts['output-dir'])), 'invalid_run_id');
+  let rubricHash;
   if (opts.prepareOnly) {
     opts.rubric = await realpath(opts.rubric);
     check([opts['output-dir'], opts['run-dir'], opts.checkout, ...roots].every((root) => !within(opts.rubric, root)), 'rubric_overlaps_visible_root');
-    await readBounded(opts.rubric);
+    rubricHash = sha(await readBounded(opts.rubric));
   }
   await mkdir(opts['output-dir'], { mode: 0o700 });
   const outputParent = await open(path.dirname(opts['output-dir']), 'r');
   try { await outputParent.sync(); } finally { await outputParent.close(); }
+  const outputDirectory = await open(opts['output-dir'], constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0));
+  const pinnedOutput = await outputDirectory.stat();
+  const runParentPath = path.dirname(opts['run-dir']);
+  const pinnedRunParent = opts.prepareOnly ? await lstat(runParentPath) : null;
+  const verifyPaths = async () => {
+    const current = await lstat(opts['output-dir']);
+    const held = await outputDirectory.stat();
+    check(current.isDirectory() && !current.isSymbolicLink() && current.dev === pinnedOutput.dev && current.ino === pinnedOutput.ino && held.dev === pinnedOutput.dev && held.ino === pinnedOutput.ino && await realpath(opts['output-dir']) === opts['output-dir'], 'output_directory_changed');
+    const currentRoots = await Promise.all([...options.captureRoots, ...options.modelVisibleRoots].map(canonicalFuture));
+    check(currentRoots.every((root, index) => root === roots[index] && disjoint(opts['output-dir'], root)), 'exclusion_root_changed');
+    check(await canonicalFuture(options['run-dir']) === opts['run-dir'] && await canonicalFuture(options.checkout) === opts.checkout, 'preparation_path_changed');
+    if (pinnedRunParent) {
+      const parent = await lstat(runParentPath);
+      check(parent.isDirectory() && !parent.isSymbolicLink() && parent.dev === pinnedRunParent.dev && parent.ino === pinnedRunParent.ino, 'run_parent_changed');
+    }
+    if (opts.prepareOnly) check(await realpath(options.rubric) === opts.rubric && sha(await readBounded(opts.rubric)) === rubricHash, 'rubric_changed');
+  };
+  const writeOutput = async (name, value) => {
+    // Node has no portable openat API. Pin and recheck the directory around
+    // pathname writes; this detects boundary changes, not a privileged racing writer.
+    await verifyPaths();
+    await writeExclusive(path.join(opts['output-dir'], name), value);
+    await verifyPaths();
+  };
   const record = { schema_version: 1, kind: 'v7_runtime_prerequisites', target: { host: HOST, asserted_host: opts['target-host'], observation_path: opts['observation-path'], provenance: 'operator_asserted_not_attested' }, endpoint: origin, expected_identity: { model: opts.model, model_digest: digest, runtime_version: opts['expected-runtime-version'] }, phase: 'version', started_at: now(), completed_at: null, status: 'observing', observations: [], sampling_status: 'unset_or_unverified_not_observed', frozen_definition_sha256: null, delivery_pass: false };
   try {
-    await writeExclusive(path.join(opts['output-dir'], 'attempt.json'), { schema_version: 1, kind: 'prerequisite_observation_attempt', delivery_pass: false });
+    await writeOutput('attempt.json', { schema_version: 1, kind: 'prerequisite_observation_attempt', delivery_pass: false });
     const version = await observedGet(origin, '/api/version', transport, timeoutMs);
+    await verifyPaths();
     record.observations.push({ route: '/api/version', sha256: version.hash, byte_len: version.byte_len });
     check(text(version.value?.version) && version.value.version === opts['expected-runtime-version'], 'runtime_identity_mismatch');
     record.phase = 'tags';
     const tags = await observedGet(origin, '/api/tags', transport, timeoutMs);
+    await verifyPaths();
     record.observations.push({ route: '/api/tags', sha256: tags.hash, byte_len: tags.byte_len });
     check(Array.isArray(tags.value?.models) && tags.value.models.length <= LIMITS.models, 'invalid_model_inventory');
     const selected = tags.value.models.filter((item) => item && item.name === opts.model);
@@ -155,12 +182,14 @@ export async function collect(options, { transport = getLocal, prepare = runPrep
     const runtime = { schema_version: 1, endpoint: `${origin}/`, model: opts.model, model_digest: digest, runtime_version: version.value.version, temperature: null, seed: null, context_length: null, verified_read_only: true };
     record.phase = 'write_runtime_receipt';
     const runtimePath = path.join(opts['output-dir'], 'runtime-receipt.json');
-    await writeExclusive(runtimePath, runtime);
+    await writeOutput('runtime-receipt.json', runtime);
     record.runtime_receipt_sha256 = sha(await readBounded(runtimePath));
     record.status = 'observed';
     if (opts.prepareOnly) {
       record.status = 'prepare_failed'; record.phase = 'prepare';
+      await verifyPaths();
       const outcome = await prepare(preparationCommand(opts, runtimePath));
+      await verifyPaths();
       check(outcome?.code === 0, 'prepare_failed');
       record.phase = 'read_prepared_definition';
       const definitionBytes = await readBounded(path.join(opts['run-dir'], 'frozen-definition.json'));
@@ -171,13 +200,14 @@ export async function collect(options, { transport = getLocal, prepare = runPrep
       record.frozen_definition_sha256 = definitionHash; record.status = 'prepared';
     }
     record.completed_at = now(); record.phase = 'complete';
-    await writeExclusive(path.join(opts['output-dir'], 'observation.json'), record);
+    await writeOutput('observation.json', record);
+    await verifyPaths();
     return record;
   } catch {
     record.status = 'failed'; record.completed_at = now();
-    try { await writeExclusive(path.join(opts['output-dir'], 'failure.json'), record); } catch { /* Preserve original directory and any partial files; never retry. */ }
+    try { await writeOutput('failure.json', record); } catch { /* Preserve original directory and any partial files; never retry. */ }
     fail('prerequisite_collection_failed_artifacts_retained');
-  }
+  } finally { await outputDirectory.close(); }
 }
 export async function main(argv, dependencies) { return collect(parseArguments(argv), dependencies); }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2)).then((record) => {

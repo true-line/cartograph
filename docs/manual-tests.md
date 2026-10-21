@@ -1111,7 +1111,10 @@ substitute a model. Observation is not a later dispatch identity guarantee.
    remain explicit null/unverified; version/tags do not prove active settings.
 3. Retain the exclusive `runtime-receipt.json`, `observation.json`, and any failure
    marker. They contain bounded identities/hashes, never raw responses, secrets
-   or the rubric. Never overwrite or delete partial output to retry.
+   or the rubric. Never overwrite or delete partial output to retry. The helper pins the output
+   directory and rechecks paths around writes; a changed boundary refuses further
+   receipts and preserves the original attempt. These checks do not provide an
+   atomic filesystem capability against an arbitrary privileged racing writer.
 4. Only an explicitly selected `--prepare-only --rubric /absolute/external/path`
    may invoke the existing Cargo preparation entrypoint. This performs local
    capture/state mutation and queues an analyst, but makes no model call. Rust
