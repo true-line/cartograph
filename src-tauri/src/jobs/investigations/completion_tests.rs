@@ -382,10 +382,18 @@ fn completion_v7_unavailable_attempt_is_durable_without_acquisition_revision() {
         .unwrap();
     fixture
         .advance(InvestigationTransition::ReadUnavailable {
-            read,
+            read: read.clone(),
             reason: UnavailableReason::InventoryExceedsMaxBytes,
         })
         .unwrap();
+    // Retrying the same completed step cannot append an identical attempt.
+    assert!(matches!(
+        fixture.advance(InvestigationTransition::ReadUnavailable {
+            read,
+            reason: UnavailableReason::InventoryExceedsMaxBytes,
+        }),
+        Err(InvestigationStoreError::Stale)
+    ));
     assert_eq!(
         fixture
             .store
@@ -859,4 +867,113 @@ fn completion_attempt_journal_resolves_saved_policy_before_bounded_replay() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn completion_attempt_schema_upgrade_preserves_records_and_rolls_back() {
+    // AC-0266: retained attempt bytes survive an atomic schema upgrade.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("attempts.db");
+    let mut connection = Connection::open(&path).unwrap();
+    connection.execute_batch(LEGACY_ATTEMPT_TABLE).unwrap();
+    for sql in &ATTEMPT_SCHEMA[1..] {
+        connection.execute_batch(sql).unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO completion_attempts VALUES (?1,1,?2,?3)",
+            params![
+                "old-task",
+                b"opaque historical body".as_slice(),
+                "original hash"
+            ],
+        )
+        .unwrap();
+    assert!(validate_schema_version(&connection).unwrap());
+    {
+        let tx = connection.transaction().unwrap();
+        initialize(&tx).unwrap();
+        assert!(!validate_schema_version(&tx).unwrap());
+        // Dropping the transaction restores old table and protections.
+    }
+    assert!(validate_schema_version(&connection).unwrap());
+    {
+        let tx = connection.transaction().unwrap();
+        initialize(&tx).unwrap();
+        tx.commit().unwrap();
+    }
+    drop(connection);
+    let connection = Connection::open(path).unwrap();
+    assert!(!validate_schema_version(&connection).unwrap());
+    let stored: (Vec<u8>, String) = connection
+        .query_row(
+            "SELECT body,body_hash FROM completion_attempts WHERE task_id='old-task'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        (b"opaque historical body".to_vec(), "original hash".into())
+    );
+    assert!(
+        connection
+            .execute("UPDATE completion_attempts SET body=x'00'", [])
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute("DELETE FROM completion_attempts", [])
+            .is_err()
+    );
+    // The database's structural cap supports the new policy. Runtime admission
+    // still independently enforces each saved policy's lower exact bound.
+    for sequence in 1..=112 {
+        connection
+            .execute(
+                "INSERT INTO completion_attempts VALUES ('new-task',?1,x'00','hash')",
+                [sequence],
+            )
+            .unwrap();
+    }
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO completion_attempts VALUES ('new-task',113,x'00','hash')",
+                []
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn completion_attempt_schema_upgrade_rejects_unknown_schema_without_repair() {
+    // AC-0266: an upgrade is not permission to repair a tampered historical store.
+    let mut connection = Connection::open_in_memory().unwrap();
+    connection.execute_batch(LEGACY_ATTEMPT_TABLE).unwrap();
+    connection.execute_batch(ATTEMPT_SCHEMA[1]).unwrap();
+    // Missing immutable-delete protection is not the recognized legacy schema.
+    {
+        let tx = connection.transaction().unwrap();
+        assert!(matches!(
+            initialize(&tx),
+            Err(InvestigationStoreError::Invalid)
+        ));
+    }
+    let count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'completion_*'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
+    let sql: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='completion_attempts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sql, LEGACY_ATTEMPT_TABLE);
 }

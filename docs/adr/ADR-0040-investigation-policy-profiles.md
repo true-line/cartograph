@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-10-21
-- **Deciders:** Cartograph maintainers (owner profile decision pending)
+- **Deciders:** Cartograph maintainers (owner numeric/time decision approved; integration pending)
 
 ## Context
 
@@ -64,8 +64,19 @@ do not automatically enlarge the per-call transport contract. The UI must
 advertise explicit eligible policies and freeze the chosen request during an
 uncertain retry.
 
-Numerical ceilings and headroom require the complete evidence measurement after
-#691 and #693 and the owner's decision. Do not enable the new route until all
+The owner approved the measured opt-in proposal and retention of v1 time caps on
+2026-10-21: Claude conversation `9e891118-de11-45fd-9e91-92d266702eee`, proposal
+`d3cdd3a6-e50e-4e22-8c9d-c966207b3387`, human reply
+`da696a3f-5d7d-4552-bdcf-a24ae2f012e6` at 13:54:21 UTC ("approve").
+The approved profile is `investigation-v2`: 56 tool actions, 64 model invocations,
+64 KiB requests and envelopes, 56 raw obligations and evidence items, 64 evidence
+requests, 64 KiB acquired evidence, 512 journal events and 131,072 aggregate
+output-token reservations. Individual source reads remain 8,192 bytes, inventory
+32,768 bytes, repeated validation 128 MiB, selected facts 64, per-call output
+2,048 tokens and input 128 KiB. Task storage stays 2 MiB with 256 KiB terminal
+reserve; global storage stays 256 MiB. Active/consent/wall time caps remain
+600/900/3,600 seconds. These values are capacity ceilings, not completion promises.
+The specification remains unregistered during integration. Do not enable the new route until all
 admission, persistence and execution boundaries support it. The remaining global
 MAX_MODEL_CALLS and MAX_TOOL_ACTIONS bounds in investigation/mod.rs feed admission,
 coverage and staged finish/refusal validators (including doubled bounds). They
@@ -80,6 +91,14 @@ Existing tasks retain their original limits and remain readable. New policies
 require deliberate compatibility and boundary tests, including exact serialized
 legacy goldens, rehashed saved-policy tampering, replay reservations, nonce
 conflicts, raw oversized inputs and refusal before an excess dispatch.
+
+The completion-attempt table migrates its structural sequence ceiling from 32
+to 112 in the transaction that initializes a new completion investigation.
+Only the exact historical schema is eligible; opaque record bodies and hashes
+are copied unchanged, and rollback restores the original table and protections.
+Historical tables remain readable before migration. Per-task policy admission
+remains authoritative (16 attempt records for v1), independent of this larger
+structural ceiling. Unknown or tampered schemas are rejected without repair.
 
 Each role acquires its own required source and inventory evidence. Larger limits
 must not be substituted for missing receipts, source preloading, hidden retries,

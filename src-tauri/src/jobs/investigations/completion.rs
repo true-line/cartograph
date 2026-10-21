@@ -194,8 +194,9 @@ impl JobStore {
         Ok(metadata)
     }
 }
+const LEGACY_ATTEMPT_TABLE: &str = "CREATE TABLE completion_attempts(task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 32), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence)) STRICT";
 const ATTEMPT_SCHEMA: &[&str] = &[
-    "CREATE TABLE completion_attempts(task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 32), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence)) STRICT",
+    "CREATE TABLE completion_attempts(task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 112), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence)) STRICT",
     "CREATE TRIGGER completion_attempts_no_update BEFORE UPDATE ON completion_attempts BEGIN SELECT RAISE(ABORT,'immutable completion attempt'); END",
     "CREATE TRIGGER completion_attempts_no_delete BEFORE DELETE ON completion_attempts BEGIN SELECT RAISE(ABORT,'immutable completion attempt'); END",
 ];
@@ -210,21 +211,41 @@ pub(super) fn initialize(tx: &Transaction<'_>) -> Result<(), InvestigationStoreE
             tx.execute_batch(sql)?;
         }
     }
+    let legacy = validate_schema_version(tx)?;
+    if legacy {
+        // Migrate only the exact known schema, in the caller's transaction.
+        // Copy opaque bodies and hashes byte-for-byte; policy remains authoritative.
+        tx.execute_batch("DROP TRIGGER completion_attempts_no_update; DROP TRIGGER completion_attempts_no_delete; ALTER TABLE completion_attempts RENAME TO completion_attempts_legacy")?;
+        for sql in ATTEMPT_SCHEMA {
+            tx.execute_batch(sql)?;
+        }
+        tx.execute_batch("INSERT INTO completion_attempts(task_id,sequence,body,body_hash) SELECT task_id,sequence,body,body_hash FROM completion_attempts_legacy; DROP TABLE completion_attempts_legacy")?;
+    }
     validate_schema(tx)
 }
 fn validate_schema(connection: &Connection) -> Result<(), InvestigationStoreError> {
+    validate_schema_version(connection).map(|_| ())
+}
+/// Both historical and current schemas remain readable; only initialization
+/// upgrades a historical table, atomically with the new investigation.
+fn validate_schema_version(connection: &Connection) -> Result<bool, InvestigationStoreError> {
     let (count,bounded):(i64,bool)=connection.query_row("SELECT count(*),coalesce(min(typeof(sql)='text' AND length(CAST(sql AS BLOB))<=4096),0) FROM sqlite_schema WHERE name GLOB 'completion_*' OR (tbl_name='completion_attempts' AND name NOT GLOB 'sqlite_*')",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
     if count != ATTEMPT_SCHEMA.len() as i64 || !bounded {
         return Err(InvestigationStoreError::Invalid);
     }
     let actual=connection.prepare("SELECT sql FROM sqlite_schema WHERE name GLOB 'completion_*' OR (tbl_name='completion_attempts' AND name NOT GLOB 'sqlite_*')")?.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-    if ATTEMPT_SCHEMA
-        .iter()
-        .any(|sql| !actual.iter().any(|actual| actual == sql))
-    {
+    let legacy = actual.iter().any(|sql| sql == LEGACY_ATTEMPT_TABLE);
+    if ATTEMPT_SCHEMA.iter().enumerate().any(|(index, sql)| {
+        let expected = if legacy && index == 0 {
+            LEGACY_ATTEMPT_TABLE
+        } else {
+            sql
+        };
+        !actual.iter().any(|actual| actual == expected)
+    }) {
         return Err(InvestigationStoreError::Invalid);
     }
-    Ok(())
+    Ok(legacy)
 }
 pub(super) fn stored_bytes(
     connection: &Connection,
