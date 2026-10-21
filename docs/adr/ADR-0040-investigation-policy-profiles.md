@@ -1,0 +1,75 @@
+# ADR-0040 — Immutable investigation budget and admission policies
+
+- **Status:** Proposed
+- **Date:** 2026-10-21
+- **Deciders:** Cartograph maintainers (owner profile decision pending)
+
+## Context
+
+The actual Vendure preparation and measurement for #598 found that even an
+incomplete seven-range selection requires request bodies above 8 KiB and at
+least nine model invocations per role. The existing profile permits eight.
+Five required evidence families remain unavailable, so those measurements are
+lower bounds, not sufficient ceilings for the complete investigation.
+
+Limits are enforced independently by request admission, task storage, replay,
+ledgers, prompts, worker dispatch and consent. Raising a harness counter or a
+single default would leave contradictory enforcement and could invalidate
+retained tasks. Existing immutable specialist prompts also state the old
+limits explicitly.
+
+## Decision
+
+Use a closed registry of immutable named policies. Callers select a known
+identity; they cannot submit arbitrary numeric limits. Keep admission bounds
+(request bytes, envelope bytes and raw obligation counts) distinct from
+runtime counters and per-invocation transport limits. The exact selected
+policy must be bound into task intent, consent and durable evidence.
+
+Keep investigation-v1, existing request and envelope encodings, role definitions,
+fingerprints and frozen acceptance controls unchanged. The initial registry
+contains only v1. A future opt-in policy uses a separately versioned request
+and envelope family when larger admission bounds would change the old contract.
+Mint domain-analyst@8 and evidence-auditor@8 for that policy rather than editing
+@7 in place. Preserve target identities if their individual semantics and bounds
+remain unchanged. Do not version unrelated records solely for symmetry.
+
+Resolve the selected policy consistently at raw admission, normalization,
+staging, nonce reuse, task creation, retained-task validation, replay, prompt
+construction and dispatch. Reject unknown identities and saved limit values
+that differ from their immutable specification. Admit complete raw requests
+before deduplication or partition cloning. Legacy projection helpers must not
+reinterpret a new request as a v1 request.
+
+Keep invocation and token reservations committed before dispatch. Validate
+journal capacity and terminal headroom before accepting a profile's promised
+work. Consent binds the actual per-call payload and limits; more aggregate calls
+do not automatically enlarge the per-call transport contract. The UI must
+advertise explicit eligible policies and freeze the chosen request during an
+uncertain retry.
+
+Numerical ceilings and headroom require the complete evidence measurement after
+#691 and #693 and the owner's decision. Do not enable the new route until all
+admission, persistence and execution boundaries support it. This decision does
+not authorize a provider run or establish semantic acceptance under #598.
+
+## Consequences
+
+Existing tasks retain their original limits and remain readable. New policies
+require deliberate compatibility and boundary tests, including exact serialized
+legacy goldens, rehashed saved-policy tampering, replay reservations, nonce
+conflicts, raw oversized inputs and refusal before an excess dispatch.
+
+Each role acquires its own required source and inventory evidence. Larger limits
+must not be substituted for missing receipts, source preloading, hidden retries,
+budget resets or auditor reliance on undisclosed parent history.
+
+## Alternatives (≤3)
+
+- **Raise global defaults:** changes old histories and immutable prompt meanings;
+  rejected in favor of explicit opt-in policy identities.
+- **Relax only the acceptance harness:** does not exercise production admission,
+  restart or consent and cannot prove a usable investigation.
+- **Batch source reads:** may reduce calls but requires its own exact-target,
+  per-item charging and disclosure contract; it does not remove request admission
+  or missing-evidence constraints.

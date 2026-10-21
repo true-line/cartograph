@@ -6,9 +6,9 @@ use std::collections::BTreeMap;
 
 // Share the existing request/inspection admission bounds without changing old encodings.
 /// Generation-4 whole-request, envelope and individual target encoding cap.
-pub const COMPLETION_REQUEST_BYTES: usize = 8 * 1024;
+pub const COMPLETION_REQUEST_BYTES: usize = INVESTIGATION_V1_POLICY.request_bytes();
 /// Raw mixed-obligation admission cap, applied before ordering or deduplication.
-pub const MAX_COMPLETION_OBLIGATIONS: usize = 12;
+pub const MAX_COMPLETION_OBLIGATIONS: usize = INVESTIGATION_V1_POLICY.max_completion_obligations();
 const CONTRACT: &str = "investigation-completion-obligations@1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -51,21 +51,7 @@ pub struct InvestigationLimits {
 
 impl Default for InvestigationLimits {
     fn default() -> Self {
-        Self {
-            profile: "investigation-v1".into(),
-            model_invocations: 8,
-            tool_actions: 8,
-            selected_facts: 64,
-            evidence_requests: 64,
-            evidence_items: 12,
-            evidence_bytes: 48 * 1024,
-            captured_validation_bytes: 128 * 1024 * 1024,
-            generated_tokens_per_invocation: 2048,
-            generated_token_reservations: 16384,
-            active_seconds: 600,
-            consent_wait_seconds: 900,
-            wall_seconds: 3600,
-        }
+        INVESTIGATION_V1_POLICY.limits()
     }
 }
 

@@ -105,3 +105,5 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0038 | Independent evaluation for semantic families |
 
 | ADR-0039 | Citable TS/JS declaration facts |
+
+| ADR-0040 | Immutable investigation budget and admission policies (proposed) |

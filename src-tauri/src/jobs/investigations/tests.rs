@@ -1516,3 +1516,6 @@ fn investigation_compact_consent_binds_exact_manifest_across_reopen() {
             .is_err()
     );
 }
+
+#[path = "policy_tests.rs"]
+mod policy_tests;
