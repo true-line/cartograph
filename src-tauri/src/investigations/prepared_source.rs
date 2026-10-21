@@ -2,6 +2,7 @@
 //! here. The owning worker must bind the callback to an exact durable validation
 //! charge and keep the returned guards until its commit acknowledgement.
 use super::*;
+use crate::jobs::investigations::{CommittedSourceValidation, SourceValidationBasis};
 
 /// Not Clone/Deserialize: preparation owns the actual retained-source leases.
 pub(in crate::investigations) struct PreparedCapturedSource {
@@ -14,6 +15,7 @@ pub(in crate::investigations) struct PreparedCapturedSource {
     selected: BTreeMap<FactKey, TaskFactSelection>,
     receipt: Receipt,
     guards: EvidenceGuards,
+    validation: Option<CommittedSourceValidation>,
 }
 
 /// Borrowed exact charge request, not a charge receipt. An Ok callback is trusted
@@ -94,6 +96,7 @@ impl FrozenContext {
             selected,
             receipt,
             guards,
+            validation: None,
         };
         prepared.revalidate(self, state)?;
         Ok(prepared)
@@ -182,22 +185,98 @@ impl PreparedCapturedSource {
             .task_capture_present(guard, &self.target.captured)
             .map_err(pinned_error)
     }
-    pub(in crate::investigations) fn read(
+    /// Bind charge and immediate access checks to the real execution owner.
+    /// The supplied expected identities are rechecked against saved authority;
+    /// no receipt from a different task/step/reservation can authorize access.
+    pub(in crate::investigations) fn read_reserved(
+        self,
+        context: &FrozenContext,
+        state: &AppState,
+        execution: &crate::job_execution::JobExecution,
+        basis: &SourceValidationBasis<'_>,
+    ) -> Result<PreparedSourceCandidate, PreparedSourceFailure> {
+        self.read_after_charge(
+            context,
+            state,
+            |request| {
+                let receipt = state
+                    .jobs
+                    .lock()
+                    .map_err(|_| HostError::Operational)?
+                    .charge_prepared_source_validation(
+                        execution,
+                        basis,
+                        request.target,
+                        request.base_ledger_hash,
+                    )
+                    .map_err(|_| HostError::Operational)?;
+                if !receipt.matches(
+                    basis,
+                    request.target,
+                    request.base_ledger_hash,
+                    request.validation_bytes,
+                ) {
+                    return Err(HostError::InputChanged);
+                }
+                #[cfg(test)]
+                AFTER_CHARGE.with(|slot| {
+                    if let Some(hook) = slot.borrow_mut().take() {
+                        hook();
+                    }
+                });
+                Ok(Some(receipt))
+            },
+            |receipt| {
+                let receipt = receipt.ok_or(HostError::InvalidInput)?;
+                state
+                    .jobs
+                    .lock()
+                    .map_err(|_| HostError::Operational)?
+                    .verify_source_validation_access(execution, receipt)
+                    .map_err(|_| HostError::Operational)
+            },
+        )
+    }
+
+    // Stage/byte-equivalence tests do not fabricate production charge receipts.
+    #[cfg(test)]
+    fn read(
         self,
         context: &FrozenContext,
         state: &AppState,
         charge: impl FnOnce(SourceValidationRequest<'_>) -> Result<(), HostError>,
     ) -> Result<PreparedSourceCandidate, PreparedSourceFailure> {
+        self.read_after_charge(
+            context,
+            state,
+            |request| charge(request).map(|()| None),
+            |_| Ok(()),
+        )
+    }
+
+    fn read_after_charge(
+        mut self,
+        context: &FrozenContext,
+        state: &AppState,
+        charge: impl FnOnce(
+            SourceValidationRequest<'_>,
+        ) -> Result<Option<CommittedSourceValidation>, HostError>,
+        before_access: impl FnOnce(Option<&CommittedSourceValidation>) -> Result<(), HostError>,
+    ) -> Result<PreparedSourceCandidate, PreparedSourceFailure> {
         if let Err(error) = self.revalidate(context, state) {
             return Err(self.failed(SourceReadFailureKind::BeforeAccess(error)));
         }
-        if let Err(error) = charge(self.validation_request()) {
-            return Err(self.failed(SourceReadFailureKind::BeforeAccess(error)));
+        match charge(self.validation_request()) {
+            Ok(receipt) => self.validation = receipt,
+            Err(error) => return Err(self.failed(SourceReadFailureKind::BeforeAccess(error))),
         }
         // A charge may have committed even when a subsequent check fails. The
         // failure stage does not release/refund it; durable settlement must query
         // its actual witness instead of treating worker memory as authority.
         if let Err(error) = self.revalidate(context, state) {
+            return Err(self.failed(SourceReadFailureKind::BeforeAccess(error)));
+        }
+        if let Err(error) = before_access(self.validation.as_ref()) {
             return Err(self.failed(SourceReadFailureKind::BeforeAccess(error)));
         }
         let Some(guard) = self.guards.guards.get(&self.target.registered_source_id) else {
@@ -291,6 +370,11 @@ fn source_headroom(
     Ok(bytes)
 }
 impl PreparedSourceFailure {
+    pub(in crate::investigations) fn validation_receipt(
+        &self,
+    ) -> Option<&CommittedSourceValidation> {
+        self.prepared.validation.as_ref()
+    }
     pub(in crate::investigations) fn kind(&self) -> SourceReadFailureKind {
         self.kind
     }
@@ -312,6 +396,11 @@ impl PreparedSourceFailure {
     }
 }
 impl PreparedSourceCandidate {
+    pub(in crate::investigations) fn validation_receipt(
+        &self,
+    ) -> Option<&CommittedSourceValidation> {
+        self.prepared.validation.as_ref()
+    }
     pub(in crate::investigations) fn ledger(&self) -> &InvestigationInputLedger {
         &self.ledger
     }
@@ -334,6 +423,8 @@ impl PreparedSourceCandidate {
 }
 #[cfg(test)]
 thread_local! { static TEXT_READS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)}; }
+#[cfg(test)]
+thread_local! { static AFTER_CHARGE:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const {std::cell::RefCell::new(None)}; }
 
 #[cfg(test)]
 #[path = "prepared_source_tests.rs"]

@@ -6,6 +6,12 @@ use agents::investigation::staged_refusal::CompletionCallMode;
 use rusqlite::Transaction;
 use serde_json::Value;
 
+// Refusal-local, thread-local and consumed once. Production has no failure hook.
+#[cfg(test)]
+thread_local! {
+    static FAIL_AFTER_REFUSAL_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl JobStore {
     /// Host-only refusal publication. The worker supplies the reason from its
     /// continuation proof; this method authenticates durable write authority.
@@ -118,6 +124,12 @@ pub(super) fn refuse_capacity(
     // was invented, and derives the count/feedback rather than trusting a slot.
     admission_journal::derive_current(tx, &next)?;
     storage::save_next_prompt_task(tx, &next, task.detail.summary.revision, false)?;
+    #[cfg(test)]
+    if FAIL_AFTER_REFUSAL_WRITE.with(|failure| failure.replace(false)) {
+        // Injected failure after the final write and real capacity check, before
+        // the caller can commit or acknowledge. This is not natural exhaustion.
+        return Err(InvestigationStoreError::Capacity);
+    }
     Ok(next)
 }
 

@@ -25,6 +25,15 @@ fn prepare(
     ledger: &InvestigationInputLedger,
     metadata: &ProtectedCompletionMetadata,
 ) -> PendingInvestigationStep {
+    prepare_with_pages(task, request, ledger, metadata, &[])
+}
+fn prepare_with_pages(
+    task: &StoredTask,
+    request: &StagedObligationRequest,
+    ledger: &InvestigationInputLedger,
+    metadata: &ProtectedCompletionMetadata,
+    pages: &[String],
+) -> PendingInvestigationStep {
     let policy = &INVESTIGATION_V2_POLICY;
     let turn = InvestigationTurnBasis {
         input_ledger_hash: ledger.fingerprint_with_policy(policy).unwrap(),
@@ -38,7 +47,7 @@ fn prepare(
         &request.question,
         task.detail.summary.specialist_id,
         ledger.clone(),
-        &[],
+        &pages.iter().map(String::as_str).collect::<Vec<_>>(),
         &[],
         &[],
         &task.detail.usage,
@@ -78,12 +87,23 @@ fn prepare(
 }
 
 pub(in crate::jobs::investigations) fn internal_fixture() -> InternalFixture {
+    internal_fixture_with_initial_ledger(|_, _, _, _| vec![])
+}
+
+pub(in crate::jobs::investigations) fn internal_fixture_with_initial_ledger(
+    initialize: impl FnOnce(
+        &mut JobStore,
+        &mut StoredTask,
+        &mut InvestigationInputLedger,
+        &mut StagedObligationRequest,
+    ) -> Vec<String>,
+) -> InternalFixture {
     let mut fixture = Fixture::with_family(
         InvestigationProviderMode::Local,
         &INVESTIGATION_V2_POLICY,
         true,
     );
-    let ledger = fixture
+    let mut ledger = fixture
         .store
         .investigation_ledger(&fixture.id)
         .unwrap()
@@ -91,9 +111,6 @@ pub(in crate::jobs::investigations) fn internal_fixture() -> InternalFixture {
     let mut request = fixture.request.clone();
     request.schema_version = 7;
     request.specialist_id = "domain-analyst@10".into();
-    let request = request
-        .normalized_with_policy(&INVESTIGATION_V2_POLICY)
-        .unwrap();
     let mut task = {
         let tx = fixture.store.conn.unchecked_transaction().unwrap();
         load_task(&tx, &fixture.id).unwrap()
@@ -106,12 +123,16 @@ pub(in crate::jobs::investigations) fn internal_fixture() -> InternalFixture {
     task.detail.summary.schema_version = 7;
     task.detail.summary.specialist_id = SpecialistId::DomainAnalystV10;
     task.detail.specialist = SpecialistId::DomainAnalystV10.definition().unwrap();
+    let pages = initialize(&mut fixture.store, &mut task, &mut ledger, &mut request);
+    let request = request
+        .normalized_with_policy(&INVESTIGATION_V2_POLICY)
+        .unwrap();
     let intent = CompletionIntent::new(&request).unwrap();
     task.intent_hash = intent.request_hash.clone();
     task.detail.completion = Some(initial_detail(&intent));
     task.completion_intent = Some(intent);
     let metadata = derive_protected_metadata(&task, vec![], &[]).unwrap();
-    let step = prepare(&task, &request, &ledger, &metadata);
+    let step = prepare_with_pages(&task, &request, &ledger, &metadata, &pages);
     let basis = {
         let tx = fixture.store.conn.unchecked_transaction().unwrap();
         SavedCallBasis::from_pre_call_saved(&tx, &task, &step, &ledger, &metadata).unwrap()

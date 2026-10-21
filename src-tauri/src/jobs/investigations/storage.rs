@@ -288,6 +288,8 @@ fn validate_task_contract(
             1
         }
         || task.admission_state.is_some() != next
+        || task.pending_source_read.is_some() != (task.phase == Phase::Reservation)
+        || (task.phase == Phase::Reservation && !next)
         || task.completion_intent.is_some() != v7
         || summary.schema_version
             != if next {
@@ -344,6 +346,17 @@ fn validate_task_contract(
     }
     if let Some(admission) = &task.admission_state {
         admission.validate_task_binding(task)?;
+    }
+    if let Some(pending) = &task.pending_source_read {
+        pending.validate()?;
+        if task
+            .admission_state
+            .as_ref()
+            .and_then(|state| state.current_call.as_ref())
+            .is_none_or(|call| call.step_id != pending.step_id)
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
     }
     if let Some(intent) = &task.completion_intent {
         intent.validate(task)?;
@@ -419,7 +432,7 @@ fn validate_task_contract(
         Phase::Consent => {
             summary.status == InvestigationStatus::AwaitingConsent && task.pending.is_some()
         }
-        Phase::Ready | Phase::Invocation | Phase::Action | Phase::Tool => {
+        Phase::Ready | Phase::Invocation | Phase::Action | Phase::Tool | Phase::Reservation => {
             summary.status == InvestigationStatus::Running
         }
         Phase::Terminal => matches!(
@@ -711,7 +724,9 @@ fn load_task_base_contract(
         return Err(InvestigationStoreError::Invalid);
     }
     if next_prompt {
-        if let Some(call) = task
+        if task.pending_source_read.is_some() {
+            source_validation::validate_saved_pending(connection, &task)?;
+        } else if let Some(call) = task
             .admission_state
             .as_ref()
             .and_then(|state| state.current_call.as_ref())

@@ -37,10 +37,18 @@ impl Fixture {
         let private = directory.path().join("private");
         std::fs::create_dir(&private).unwrap();
         let private = crate::paths::canonicalize(private).unwrap();
-        let root = directory.path().join("source");
+        let state = Self::state_at(&private);
+        Self {
+            _directory: directory,
+            private,
+            state,
+        }
+    }
+    fn state_at(private: &std::path::Path) -> AppState {
+        let root = private.join("source");
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("rule.ts"),"export function enabled(ok: boolean) { const limited = ok === false; if (limited) return false; }\n").unwrap();
-        let state = crate::registered_source_tests::app_state(&private);
+        let state = crate::registered_source_tests::app_state(private);
         let source = state.sources.lock().unwrap().register_local(&root).unwrap();
         let input = state
             .primary_sources
@@ -72,13 +80,12 @@ impl Fixture {
         drop(input);
         // Retained-read authority must not depend on a ready/current checkout.
         std::fs::remove_dir_all(root).unwrap();
-        Self {
-            _directory: directory,
-            private,
-            state,
-        }
+        state
     }
     fn context(&self) -> (FrozenContext, InvestigationInspectionTarget) {
+        Self::context_for(&self.state)
+    }
+    fn context_for(state: &AppState) -> (FrozenContext, InvestigationInspectionTarget) {
         let request = StartInvestigationRequest {
             schema_version: 1,
             request_nonce: "prepared-read".into(),
@@ -93,11 +100,11 @@ impl Fixture {
             conversation_id: None,
             parent_id: None,
         };
-        let mut context = FrozenContext::prepare(&self.state, &request, &[]).unwrap();
+        let mut context = FrozenContext::prepare(state, &request, &[]).unwrap();
         let mut sink = Sink::default();
         context
             .query(
-                &self.state,
+                state,
                 InvestigationQuery {
                     scope: InvestigationScope::All,
                     kind: Some(InvestigationFactKind::Node),
@@ -111,7 +118,7 @@ impl Fixture {
             .unwrap();
         let selected = &context.ledger.selected_facts[0];
         let (target, guard) = crate::investigations::inspection::resolve(
-            &self.state,
+            state,
             &selected.fact,
             &context.ledger.graph_snapshot_id,
             &selected.binding.as_ref().unwrap().receipt_id,
@@ -379,3 +386,6 @@ fn prepared_source_checks_actual_evidence_headroom_before_read() {
     ));
     assert_eq!(read_count(), 0);
 }
+
+#[path = "prepared_source_validation_tests.rs"]
+mod validation_tests;

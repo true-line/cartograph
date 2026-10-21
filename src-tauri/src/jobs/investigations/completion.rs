@@ -714,6 +714,172 @@ pub(super) fn append_attempt_at_step(
     }
     Ok(())
 }
+
+/// Append the exact projected acquisition suffix in the caller's writer Tx.
+/// The caller authenticates execution ownership/current invocation before any
+/// mutation and performs final task/global capacity/CAS checks before COMMIT.
+/// Named immutable call/response/ledger/event witnesses are reloaded here; the
+/// expected records confer no authority and must equal fresh pure derivation.
+/// Unlike the legacy append path this never infers an invocation from rowids.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // Internal atomic writer seam; public routing remains closed.
+pub(super) fn append_next_prompt_attempt_at_step(
+    tx: &rusqlite::Transaction<'_>,
+    task: &StoredTask,
+    call: &admission_contract::SavedCallBasis,
+    response: &InvestigationResponseMeta,
+    read: &ReadIntent,
+    outcome: &AttemptOutcome,
+    ledger: &InvestigationInputLedger,
+    expected_records: &[AttemptRecord],
+) -> Result<(), InvestigationStoreError> {
+    admission_contract::validate_pairing(task)?;
+    let policy = saved_policy(task)?;
+    let id = &task.detail.summary.investigation_id;
+    let core = admission_contract::load_saved_call_basis_core(tx, task, call)?;
+    if call.mode() != CompletionCallMode::Choice
+        || task.phase != Phase::Ready
+        || task.detail.summary.cancel_requested
+        || response.step_id != call.step_id
+        || !hash_valid(&response.response_hash)
+        || response.action_hash != staged::read_action_hash(read)?
+        || next_prompt_invocations(tx, task)?
+            .last()
+            .map(|(ordinal, _)| *ordinal)
+            != Some(core.ordinal)
+        || task.ledger_revision != Some(ledger.revision)
+        || task.ledger_hash.as_ref() != Some(&ledger.fingerprint_with_policy(policy)?)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let saved_response: InvestigationResponseMeta =
+        read_body(tx, "investigation_responses", "step_id", id, &call.step_id)?
+            .ok_or(InvestigationStoreError::Missing)?;
+    if saved_response != *response || ledger_at(tx, id, ledger.revision)? != *ledger {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let tool = match (read, outcome) {
+        (
+            ReadIntent::Source { fact, role, index },
+            AttemptOutcome::SourceAcquired { citation_id },
+        ) => {
+            let citation = ledger
+                .citations
+                .get(core.ledger.citations.len())
+                .ok_or(InvestigationStoreError::Invalid)?;
+            if citation.citation_id != *citation_id
+                || citation.fact != *fact
+                || citation.role != Some(*role)
+                || citation.index != Some(*index)
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            InvestigationTool::ReadEvidence
+        }
+        (
+            ReadIntent::Inventory {
+                context_id,
+                repo,
+                inventory_hash,
+                max_bytes,
+            },
+            AttemptOutcome::InventoryAcquired { read_index },
+        ) => {
+            let acquired = ledger
+                .coverage_reads
+                .get(*read_index)
+                .ok_or(InvestigationStoreError::Invalid)?;
+            if *read_index != core.ledger.coverage_reads.len()
+                || acquired.request
+                    != (InvestigationCoverageRead {
+                        context_id: context_id.clone(),
+                        repo: repo.clone(),
+                        inventory_hash: inventory_hash.clone(),
+                        max_bytes: *max_bytes,
+                    })
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            InvestigationTool::ReadCoverageInventory
+        }
+        _ => return Err(InvestigationStoreError::Invalid),
+    };
+    InvestigationTurnBasis {
+        input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
+        previous_ledger: Some(core.ledger),
+        completed_tool: Some(tool),
+    }
+    .validate_with_policy(ledger, policy)?;
+    let event: InvestigationEvent = read_body(
+        tx,
+        "investigation_events",
+        "sequence",
+        id,
+        &signed(task.detail.summary.last_event_sequence)?,
+    )?
+    .ok_or(InvestigationStoreError::Missing)?;
+    if event.investigation_id != *id
+        || event.sequence != task.detail.summary.last_event_sequence
+        || event.revision != task.detail.summary.revision
+        || event.kind != InvestigationEventKind::ToolCompleted
+        || event.tool != Some(tool)
+        || event
+            .step_id
+            .as_deref()
+            .is_some_and(|step| step != call.step_id)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let prior = attempts(tx, task)?;
+    // A publication is a one-shot suffix, including repeated reads. Reusing a
+    // completed invocation must not append another observation for that step.
+    if prior
+        .iter()
+        .any(|entry| entry.record.step_id == call.step_id)
+    {
+        return Err(InvestigationStoreError::Conflict);
+    }
+    let records = derive_attempt_records(
+        task,
+        &call.step_id,
+        response,
+        read,
+        outcome,
+        Some(ledger),
+        prior.len(),
+    )?;
+    if records != expected_records {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let entries = records
+        .into_iter()
+        .map(|record| AttemptEntry {
+            record,
+            response_hash: response.response_hash.clone(),
+            action_hash: response.action_hash.clone(),
+            event_sequence: task.detail.summary.last_event_sequence,
+        })
+        .collect::<Vec<_>>();
+    for entry in &entries {
+        encode(entry, MAX_RECORD_BYTES)?;
+    }
+    for (offset, entry) in entries.iter().enumerate() {
+        insert_body(
+            tx,
+            "completion_attempts",
+            id,
+            &signed((prior.len() + offset + 1) as u64)?,
+            entry,
+            MAX_RECORD_BYTES,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "next_prompt_attempt_tests.rs"]
+mod next_prompt_attempt_tests;
+
 pub(super) fn record_acquisition(
     connection: &Connection,
     task: &StoredTask,
@@ -1632,4 +1798,5 @@ mod tests;
 #[cfg(test)]
 pub(super) use tests::next_prompt_contract_tests::{
     InternalFixture, internal_fixture as internal_next_prompt_fixture,
+    internal_fixture_with_initial_ledger,
 };

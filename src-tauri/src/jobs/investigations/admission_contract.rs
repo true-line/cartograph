@@ -58,7 +58,7 @@ impl StoredAdmissionState {
         }
         let active = matches!(
             task.phase,
-            Phase::Consent | Phase::Invocation | Phase::Action | Phase::Tool
+            Phase::Consent | Phase::Invocation | Phase::Action | Phase::Tool | Phase::Reservation
         );
         if active && self.current_call.is_none()
             || matches!(task.phase, Phase::Queued | Phase::Preparing | Phase::Ready)

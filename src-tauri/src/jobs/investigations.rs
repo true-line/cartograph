@@ -28,6 +28,12 @@ mod reads;
 #[allow(dead_code)]
 #[path = "investigations/read_reservations.rs"]
 mod read_reservations;
+#[allow(dead_code)] // Internal issuer; reservation admission/public activation remain closed.
+#[path = "investigations/source_validation.rs"]
+mod source_validation;
+pub(crate) use source_validation::{CommittedSourceValidation, SourceValidationBasis};
+#[cfg(test)]
+pub(crate) use source_validation::{SourceValidationInitialData, captured_source_fixture};
 #[allow(dead_code)]
 #[path = "investigations/staged.rs"]
 mod staged;
@@ -256,6 +262,7 @@ enum Phase {
     Invocation,
     Action,
     Tool,
+    Reservation,
     Terminal,
 }
 
@@ -286,6 +293,8 @@ struct StoredTask {
     ledger_hash: Option<String>,
     ledger_revision: Option<u64>,
     pending: Option<PendingInvestigationStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_source_read: Option<source_validation::PendingSourceRead>,
     approved: bool,
     action_tool: Option<InvestigationTool>,
 }
@@ -463,6 +472,7 @@ impl JobStore {
             ledger_hash: None,
             ledger_revision: None,
             pending: None,
+            pending_source_read: None,
             approved: false,
             action_tool: None,
         };

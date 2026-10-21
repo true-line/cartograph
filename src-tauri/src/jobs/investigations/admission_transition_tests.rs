@@ -200,3 +200,113 @@ fn capacity_transition_uncommitted_success_has_no_reopen_effect() {
         .unwrap();
     assert_eq!(saved, before);
 }
+
+#[test]
+fn capacity_transition_injected_final_write_failure_rolls_back_owner_transaction() {
+    // AC-0287: this explicitly injected failure is after the successful final
+    // task write/capacity check. It does not simulate natural capacity exhaustion.
+    let mut f = internal_next_prompt_fixture();
+    let path = f.store.conn.path().unwrap().to_owned();
+    let id = f.basis.task_id.clone();
+    let proposal = fixture::proposal(&f, 1);
+    let mut response = fixture::response(&f, &proposal);
+    response.reported_input_tokens = Some(10);
+    response.reported_output_tokens = Some(5);
+    let before_task = saved_task_row(&f.store.conn, &id);
+    let before_inputs = body_rows(&f.store.conn, "investigation_inputs", &id);
+    let before_events = body_rows(&f.store.conn, "investigation_events", &id);
+    let before_responses = body_rows(&f.store.conn, "investigation_responses", &id);
+    assert_eq!(admission_namespace_count(&f.store.conn), 0);
+
+    FAIL_AFTER_REFUSAL_WRITE.with(|failure| assert!(!failure.replace(true)));
+    let outcome = f.store.refuse_next_prompt_capacity(
+        &f._execution_guard,
+        f.task.detail.summary.revision,
+        &response,
+        &proposal,
+        CapacityRefusalReason::PromptCapacity,
+    );
+    // Reset even if a regression returns before the intended boundary, so the
+    // thread-local hook cannot leak into another test on this worker thread.
+    let unconsumed = FAIL_AFTER_REFUSAL_WRITE.with(|failure| failure.replace(false));
+    assert!(!unconsumed, "the final-write failure hook was not reached");
+    assert!(matches!(outcome, Err(InvestigationStoreError::Capacity)));
+
+    let reopened = JobStore::open(&path).unwrap();
+    assert_eq!(saved_task_row(&reopened.conn, &id), before_task);
+    assert_eq!(
+        body_rows(&reopened.conn, "investigation_inputs", &id),
+        before_inputs
+    );
+    assert_eq!(
+        body_rows(&reopened.conn, "investigation_events", &id),
+        before_events
+    );
+    assert_eq!(
+        body_rows(&reopened.conn, "investigation_responses", &id),
+        before_responses
+    );
+    // Namespace creation, its refusal row and immutable triggers roll back too.
+    assert_eq!(admission_namespace_count(&reopened.conn), 0);
+    {
+        let tx = reopened.conn.unchecked_transaction().unwrap();
+        let saved = storage::load_next_prompt_task_base(&tx, &id).unwrap();
+        assert_eq!(saved.detail.usage, f.task.detail.usage);
+        assert_eq!(saved.phase, Phase::Invocation);
+        assert_eq!(
+            admission_journal::derive_current(&tx, &saved)
+                .unwrap()
+                .count,
+            0
+        );
+    }
+
+    // The consumed hook does not poison retries, and the failed publication
+    // did not charge the reported response usage before this successful retry.
+    let next = f
+        .store
+        .refuse_next_prompt_capacity(
+            &f._execution_guard,
+            f.task.detail.summary.revision,
+            &response,
+            &proposal,
+            CapacityRefusalReason::PromptCapacity,
+        )
+        .unwrap();
+    assert_eq!(next.usage.reported_input_tokens, Some(10));
+    assert_eq!(next.usage.reported_output_tokens, Some(5));
+}
+
+type BodyRows = Vec<(Vec<u8>, String)>;
+
+fn body_rows(connection: &Connection, table: &str, id: &str) -> BodyRows {
+    connection
+        .prepare(&format!(
+            "SELECT body,body_hash FROM {table} WHERE task_id=?1 ORDER BY body_hash,body"
+        ))
+        .unwrap()
+        .query_map([id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn saved_task_row(connection: &Connection, id: &str) -> (Vec<u8>, String, i64, i64) {
+    connection
+        .query_row(
+            "SELECT record,record_hash,revision,live FROM investigation_tasks WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap()
+}
+
+fn admission_namespace_count(connection: &Connection) -> i64 {
+    connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'investigation_admission_*'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}

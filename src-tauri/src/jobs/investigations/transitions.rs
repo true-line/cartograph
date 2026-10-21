@@ -548,7 +548,7 @@ fn check_ready(
     available_time(task)
 }
 
-fn available_time(task: &StoredTask) -> Result<(), InvestigationStoreError> {
+pub(super) fn available_time(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     if task.detail.usage.active_milliseconds >= task.detail.limits.active_seconds * 1000 {
         Err(InvestigationStoreError::Capacity)
     } else {
