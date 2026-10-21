@@ -3269,3 +3269,76 @@ fn equal_scope_configs_that_disagree_on_an_alias_never_resolve_it() {
     assert_eq!((kind.as_str(), tier), ("unresolved", Gap));
     assert!(imports_file(&out, "a/x.ts"), "agreeing configs resolve");
 }
+
+#[test]
+fn vue_script_blocks_are_parsed_with_spans_in_the_component() {
+    // AC-0268 (#595): `<script>` and `<script setup>` parse with this
+    // crate's extractor; template text is never read as code, and every
+    // span names its place in the `.vue` file itself.
+    const COMPONENT: &str = "<template>\n  <button @click=\"save()\">{{ label }}</button>\n</template>\n\
+        <script>\nexport default { name: 'Editor' }\n</script>\n\
+        <script setup lang=\"ts\">\nimport { load } from './api'\n\
+        function save(): Promise<Response> { return fetch('/api/notes', { method: 'POST' }) }\n\
+        function refresh() { return load() }\n</script>\n\
+        <style>\n.save { color: red }\n</style>\n";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Editor.vue"), COMPONENT).unwrap();
+    std::fs::write(
+        dir.path().join("api.ts"),
+        "export function load() { return 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("main.ts"),
+        "import Editor from './Editor.vue';\nexport const root = Editor;\n",
+    )
+    .unwrap();
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let vue = "file:qwtm/example@Editor.vue";
+    assert!(
+        out.nodes
+            .iter()
+            .any(|n| n.id == vue && n.props.get("placeholder").is_none())
+    );
+    let imports = edge_pairs(&out, "IMPORTS");
+    assert!(imports.contains(&(vue, "file:qwtm/example@api.ts")));
+    assert!(imports.contains(&("file:qwtm/example@main.ts", vue)));
+    assert!(edge_pairs(&out, "CALLS").contains(&(
+        "sym:qwtm/example@Editor.vue#refresh",
+        "sym:qwtm/example@api.ts#load"
+    )));
+    // The template's `save()` handler is not a call site.
+    assert!(
+        !edge_pairs(&out, "CALLS")
+            .iter()
+            .any(|(_, dst)| dst.ends_with("#save"))
+    );
+    let [site] = out.fetch_sites.as_slice() else {
+        panic!("one fetch site, got {:?}", out.fetch_sites);
+    };
+    assert_eq!(site.method, "POST");
+    assert_eq!(site.path, "Editor.vue");
+    let start = COMPONENT.find("fetch('/api/notes'").unwrap() as u64;
+    assert_eq!(site.byte_start, start);
+    let save = out
+        .nodes
+        .iter()
+        .find(|n| n.id == "sym:qwtm/example@Editor.vue#save")
+        .expect("save symbol");
+    let span = &save.props["prov"]["evidence"][0];
+    let start = span["byte_start"].as_u64().unwrap() as usize;
+    let end = span["byte_end"].as_u64().unwrap() as usize;
+    assert!(COMPONENT[start..end].starts_with("function save()"));
+
+    // Re-extraction of unchanged bytes is identical.
+    let again = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        serde_json::to_string(&out.nodes).unwrap(),
+        serde_json::to_string(&again.nodes).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string(&out.edges).unwrap(),
+        serde_json::to_string(&again.edges).unwrap()
+    );
+}

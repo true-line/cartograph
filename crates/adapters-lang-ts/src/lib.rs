@@ -4,6 +4,8 @@
 //! JavaScript parses cleanly under the TypeScript grammar (a syntactic
 //! superset), and `.jsx`/`.tsx` share the JSX-aware grammar — no separate
 //! JS-only adapter exists or is needed.
+//! Vue single-file components (`.vue`) contribute their `<script>` blocks
+//! through the same extractor; see [`vue`].
 //!
 //! Extracts, per file: the `File` node, `Symbol` nodes (functions, arrow
 //! consts, anonymous route handlers), `IMPORTS` edges, intra- and cross-file
@@ -1303,6 +1305,8 @@ fn extract_source_recording(
     id: &SourceId,
     mut direct: Option<&mut captured::DirectFacts>,
 ) -> Result<Extraction, ExtractError> {
+    let view = vue::parse_view(source, path);
+    let source: &[u8] = &view;
     // Only bare `.ts` keeps the non-JSX grammar — it's the sole extension
     // that can carry the old-style `<Type>expr` cast syntax the two
     // grammars exist to disambiguate, and TypeScript itself refuses JSX
@@ -3248,11 +3252,14 @@ pub(crate) fn skipped_directory(name: &str) -> bool {
     name == "node_modules" || name == "dist" || name.starts_with('.')
 }
 
-/// Every TS/JS source under `root`, sorted, through the shared
+/// Every TS/JS source and Vue component under `root`, sorted, through the shared
 /// `.gitignore`-aware walk (#248).
 fn collect_ts_files(root: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
     for file in source_walk::files(root, &skipped_directory, source_walk::Gitignores::Honor)? {
-        if SOURCE_EXTENSIONS.iter().any(|ext| file.name.ends_with(ext))
+        if SOURCE_EXTENSIONS
+            .iter()
+            .chain(&vue::COMPONENT_EXTENSIONS)
+            .any(|ext| file.name.ends_with(ext))
             && !file.name.ends_with(".d.ts")
         {
             out.push(file.rel);
@@ -3271,6 +3278,7 @@ mod local_definitions;
 pub(crate) mod resolution;
 mod rule_evidence;
 mod source_expression;
+pub mod vue;
 pub mod webextension;
 
 #[cfg(test)]

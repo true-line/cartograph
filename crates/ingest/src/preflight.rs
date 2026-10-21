@@ -125,6 +125,14 @@ pub const INSTALLED_ADAPTERS: &[AdapterInfo] = &[
                  crate's own grammar parses plain JS/JSX directly",
     },
     AdapterInfo {
+        id: "t0.adapter-ts",
+        language: "Vue",
+        extensions: &["vue"],
+        covers: "<script> and <script setup> blocks of single-file components, parsed \
+                 as JavaScript/TypeScript (imports, call graph, HTTP client calls); \
+                 templates and styles are not parsed",
+    },
+    AdapterInfo {
         id: "t0.webextension",
         language: "WebExtension",
         extensions: &[],
@@ -1096,6 +1104,46 @@ mod tests {
                 .any(|f| f.message.contains("JavaScript"))
         );
         assert!(!planned_adapter_for("JavaScript"));
+    }
+
+    #[test]
+    fn vue_components_are_covered_for_script_content_only() {
+        // AC-0268 (#595): `.vue` files are covered by the TypeScript crate
+        // for their script blocks, and the report says templates are not.
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/App.vue",
+            "<template><p/></template>\n<script setup>\nconst a = 1\n</script>\n",
+        );
+        let report = preflight(dir.path()).unwrap();
+        let vue = report
+            .languages
+            .iter()
+            .find(|l| l.language == "Vue")
+            .expect("Vue is detected");
+        assert_eq!(vue.adapter.as_deref(), Some("t0.adapter-ts"));
+        assert_eq!(vue.files, 1);
+        assert!(
+            vue.coverage
+                .iter()
+                .any(|cell| cell.note.contains("templates are not parsed"))
+        );
+        let adapter = INSTALLED_ADAPTERS
+            .iter()
+            .find(|a| a.language == "Vue")
+            .unwrap();
+        assert!(
+            adapter
+                .covers
+                .contains("templates and styles are not parsed")
+        );
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|f| f.kind == "uncovered-language")
+        );
     }
 
     #[test]

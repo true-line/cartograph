@@ -130,6 +130,8 @@ fn extract_file(
     };
     let mut parser = Parser::new();
     parser.set_language(&language)?;
+    let view = crate::vue::parse_view(source, path);
+    let source: &[u8] = &view;
     let tree = parser
         .parse(source, None)
         .ok_or_else(|| ExtractError::NoTree(path.into()))?;
