@@ -184,11 +184,32 @@ impl CompletionInvestigationAction {
 pub fn completed_attempts_hash(
     attempts: &[super::staged_attempt::AttemptEvidence<'_>],
 ) -> Result<String, InvestigationError> {
+    completed_attempts_hash_with_policy(attempts, &INVESTIGATION_V1_POLICY)
+}
+
+/// Policy-aware journal identity. The host must resolve the immutable policy
+/// from the exact saved task limits; this does not authorize new request routes.
+pub fn completed_attempts_hash_with_policy(
+    attempts: &[super::staged_attempt::AttemptEvidence<'_>],
+    policy: &InvestigationPolicy,
+) -> Result<String, InvestigationError> {
+    if attempts.len() > policy.max_completed_attempts() {
+        return Err(InvestigationError::InvalidInput);
+    }
     let ids: Vec<_> = attempts
         .iter()
         .map(|attempt| attempt.record.attempt_id.as_str())
         .collect();
-    if ids.len() > 2 * MAX_TOOL_ACTIONS as usize
+    completed_attempt_ids_hash_with_policy(&ids, policy)
+}
+
+/// Shared ordered ID admission for durable host observations and agent evidence.
+/// Hashing IDs does not certify the underlying attempt witnesses.
+pub fn completed_attempt_ids_hash_with_policy(
+    ids: &[&str],
+    policy: &InvestigationPolicy,
+) -> Result<String, InvestigationError> {
+    if ids.len() > policy.max_completed_attempts()
         || ids.iter().any(|id| !crate::source_basis::hash(id))
         || ids.iter().collect::<std::collections::BTreeSet<_>>().len() != ids.len()
     {
@@ -436,5 +457,55 @@ impl InvestigationResult {
             return Err(InvestigationError::InvalidInput);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod attempt_policy_tests {
+    use super::*;
+
+    #[test]
+    fn completion_attempt_policy_preserves_ordered_hash_and_exact_capacity() {
+        // AC-0266: journal identities retain their literal v1 encoding/domain.
+        let policy = InvestigationPolicy::for_limits(&InvestigationLimits::default()).unwrap();
+        assert_eq!(policy.max_completed_attempts(), 16);
+        assert_eq!(
+            completed_attempts_hash(&[]).unwrap(),
+            "624d0b347af43bcc8e218043ff6e8f893be9ff0a8a8470c0cf275eb2a15d3689"
+        );
+        assert_eq!(
+            completed_attempts_hash(&[]).unwrap(),
+            completed_attempts_hash_with_policy(&[], policy).unwrap()
+        );
+        let values = (0..policy.max_completed_attempts())
+            .map(|index| format!("{index:064x}"))
+            .collect::<Vec<_>>();
+        let mut ids = values.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            completed_attempt_ids_hash_with_policy(&ids, policy).unwrap(),
+            "be42d429beea794160144a62d036c702412b96b11ff89a52f76052bac354b236"
+        );
+        ids.reverse();
+        assert_eq!(
+            completed_attempt_ids_hash_with_policy(&ids, policy).unwrap(),
+            "62432f604ef3b49aa7989807c8f8293b4c44671ae9e8c39178eca3bc7d799c3b"
+        );
+        ids.push("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        assert_eq!(
+            completed_attempt_ids_hash_with_policy(&ids, policy),
+            Err(InvestigationError::InvalidInput)
+        );
+        ids.pop();
+        ids[1] = ids[0];
+        assert_eq!(
+            completed_attempt_ids_hash_with_policy(&ids, policy),
+            Err(InvestigationError::InvalidInput)
+        );
+        ids.pop();
+        ids[0] = "invalid";
+        assert_eq!(
+            completed_attempt_ids_hash_with_policy(&ids, policy),
+            Err(InvestigationError::InvalidInput)
+        );
     }
 }

@@ -280,6 +280,8 @@ pub(super) fn attempts(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<AttemptEntry>, InvestigationStoreError> {
+    let policy = saved_policy(task)?;
+    let limit = policy.max_completed_attempts();
     let Some(intent) = &task.completion_intent else {
         return Ok(vec![]);
     };
@@ -287,11 +289,13 @@ pub(super) fn attempts(
     let id = &task.detail.summary.investigation_id;
     let sequences = connection
         .prepare(
-            "SELECT sequence FROM completion_attempts WHERE task_id=?1 ORDER BY sequence LIMIT 33",
+            "SELECT sequence FROM completion_attempts WHERE task_id=?1 ORDER BY sequence LIMIT ?2",
         )?
-        .query_map([id], |row| row.get::<_, i64>(0))?
+        .query_map(params![id, signed(limit as u64 + 1)?], |row| {
+            row.get::<_, i64>(0)
+        })?
         .collect::<Result<Vec<_>, _>>()?;
-    if sequences.len() > 2 * MAX_TOOL_ACTIONS as usize {
+    if sequences.len() > limit {
         return Err(InvestigationStoreError::Capacity);
     }
     let mut entries = Vec::new();
@@ -457,6 +461,7 @@ fn append_attempt(
     outcome: AttemptOutcome,
     revision: u64,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = saved_policy(task)?;
     // Reserved decode-only outcome: no current production firewall emits a
     // trustworthy per-read refusal witness, and redaction is still acquisition.
     if matches!(outcome, AttemptOutcome::FirewallRefused { .. }) {
@@ -479,6 +484,10 @@ fn append_attempt(
         if !read.matches(obligation) {
             continue;
         }
+        count += 1;
+        if count > policy.max_completed_attempts() {
+            return Err(InvestigationStoreError::Capacity);
+        }
         let mut record = AttemptRecord {
             schema_version: 1,
             attempt_id: String::new(),
@@ -496,10 +505,6 @@ fn append_attempt(
         record.input_ledger_hash = ledger.fingerprint()?;
         record.attempt_id = record.content_id()?;
         record.validate_binding(&intent.request_hash, &intent.obligations, id, &ledger)?;
-        count += 1;
-        if count > 2 * MAX_TOOL_ACTIONS as usize {
-            return Err(InvestigationStoreError::Capacity);
-        }
         let entry = AttemptEntry {
             record,
             response_hash: response.response_hash.clone(),
@@ -752,20 +757,10 @@ pub(super) fn validate_step_metadata(
     }
     Ok(())
 }
-fn attempt_domain_hash(domain: &[u8], value: &[u8]) -> String {
-    let mut bytes = domain.to_vec();
-    bytes.extend_from_slice(value);
-    core_prov::content_hash(&bytes)
-}
-fn attempts_hash(entries: &[AttemptEntry]) -> Result<String, InvestigationStoreError> {
-    let ids = entries
-        .iter()
-        .map(|entry| entry.record.attempt_id.as_str())
-        .collect::<Vec<_>>();
-    Ok(attempt_domain_hash(
-        b"cartograph:completion-attempts:v1\0",
-        &encode(&ids, MAX_RECORD_BYTES)?,
-    ))
+fn saved_policy(
+    task: &StoredTask,
+) -> Result<&'static InvestigationPolicy, InvestigationStoreError> {
+    InvestigationPolicy::for_limits(&task.detail.limits).ok_or(InvestigationStoreError::Invalid)
 }
 fn observed_assessment(
     intent: &CompletionIntent,
@@ -815,6 +810,7 @@ fn observation_detail(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<InvestigationCompletionDetail, InvestigationStoreError> {
+    let policy = saved_policy(task)?;
     let intent = task
         .completion_intent
         .as_ref()
@@ -827,6 +823,9 @@ fn observation_detail(
     }
     let basis = if task.phase != Phase::Terminal {
         let last = last.ok_or(InvestigationStoreError::Invalid)?;
+        if last.attempts.len() > policy.max_completed_attempts() {
+            return Err(InvestigationStoreError::Capacity);
+        }
         let ids = last
             .attempts
             .iter()
@@ -836,14 +835,17 @@ fn observation_detail(
             step_id: last.record.step_id.clone(),
             input_ledger_hash: last.record.input_ledger_hash.clone(),
             disclosure_hash: last.record.disclosure_hash.clone(),
-            finishing_attempts_hash: attempt_domain_hash(
-                b"cartograph:completion-attempts:v1\0",
-                &encode(&ids, MAX_RECORD_BYTES)?,
-            ),
+            finishing_attempts_hash: completed_attempt_ids_hash_with_policy(&ids, policy)?,
         }
     } else {
         CompletionAssessmentBasis::TerminalObservation {
-            finishing_attempts_hash: attempts_hash(&entries)?,
+            finishing_attempts_hash: completed_attempt_ids_hash_with_policy(
+                &entries
+                    .iter()
+                    .map(|entry| entry.record.attempt_id.as_str())
+                    .collect::<Vec<_>>(),
+                policy,
+            )?,
             last_refusal_id: last.map(|entry| entry.record.refusal_id.clone()),
             last_refusal_basis: last.map(|entry| CompletionRefusalBasis {
                 step_id: entry.record.step_id.clone(),

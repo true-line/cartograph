@@ -808,3 +808,55 @@ fn completion_v7_coordinated_legacy_downgrade_rejects_durable_evidence() {
         assert!(reopened.investigation_history(None, None).is_err());
     }
 }
+
+#[test]
+fn completion_attempt_journal_resolves_saved_policy_before_bounded_replay() {
+    // AC-0266: malicious journal rows never become witnesses. This isolates
+    // admission order: exact policy, raw row count, then individual decoding.
+    let mut fixture = Fixture::new();
+    let tx = fixture.store.conn.transaction().unwrap();
+    let mut task = load_task_base(&tx, &fixture.id).unwrap();
+    let limit = saved_policy(&task).unwrap().max_completed_attempts();
+    assert_eq!(limit, 16);
+    for sequence in 1..=limit {
+        insert_body(
+            &tx,
+            "completion_attempts",
+            &fixture.id,
+            &signed(sequence as u64).unwrap(),
+            &json!({}),
+            MAX_RECORD_BYTES,
+        )
+        .unwrap();
+    }
+    assert!(matches!(
+        attempts(&tx, &task),
+        Err(InvestigationStoreError::Invalid)
+    ));
+    insert_body(
+        &tx,
+        "completion_attempts",
+        &fixture.id,
+        &signed(limit as u64 + 1).unwrap(),
+        &json!({}),
+        MAX_RECORD_BYTES,
+    )
+    .unwrap();
+    assert!(matches!(
+        attempts(&tx, &task),
+        Err(InvestigationStoreError::Capacity)
+    ));
+    task.detail.limits.tool_actions += 1;
+    assert!(matches!(
+        attempts(&tx, &task),
+        Err(InvestigationStoreError::Invalid)
+    ));
+    tx.rollback().unwrap();
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert!(
+        reopened
+            .investigation_completion_attempts(&fixture.id)
+            .unwrap()
+            .is_empty()
+    );
+}

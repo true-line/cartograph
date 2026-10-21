@@ -49,6 +49,8 @@ const POLICIES: &[&InvestigationPolicy] = &[&INVESTIGATION_V1_POLICY];
 const _: () = {
     let mut index = 0;
     while index < POLICIES.len() {
+        // Evaluate checked derived capacities for every registered policy.
+        let _ = POLICIES[index].max_completed_attempts();
         assert!(POLICIES[index].tool_actions <= super::MAX_TOOL_ACTIONS);
         assert!(POLICIES[index].model_invocations <= super::MAX_MODEL_CALLS);
         index += 1;
@@ -56,6 +58,15 @@ const _: () = {
 };
 
 impl InvestigationPolicy {
+    /// Preserve the existing journal allowance of twice the tool-action ceiling.
+    /// This is record capacity, not an additional tool-action allowance.
+    pub const fn max_completed_attempts(&self) -> usize {
+        match (self.tool_actions as usize).checked_mul(2) {
+            Some(limit) => limit,
+            None => panic!("registered investigation attempt capacity overflow"),
+        }
+    }
+
     pub fn for_profile(profile: &str) -> Option<&'static Self> {
         POLICIES
             .iter()
