@@ -102,12 +102,48 @@ async function selectAndGenerate(canvasElement: HTMLElement) {
   await waitFor(() => expect(canvas.getByTestId('packet-body-identity')).toHaveTextContent(packetFixture.packet_id));
 }
 
-export const SelectGenerateReviewReopenExport: Story = {
-  // AC-0252: the mock responses are real PacketStore fixture outputs, including the exact Markdown export.
+// Seeds the state a later step of the packet flow starts from, through the same mocks and fixtures the full
+// select → generate path produces, so each story below stays well inside the 15 s default test budget (#687).
+function seedSavedPacket(packet: PacketDetail) {
+  return () => {
+    saved = structuredClone(packet);
+    useWorkPacketStore.setState({ detail: structuredClone(packet) });
+    useAppStore.setState({ view: 'packets' });
+  };
+}
+
+async function expectPacketBody(canvasElement: HTMLElement) {
+  const canvas = within(canvasElement);
+  for (const group of ['identity', 'intent', 'evidence', 'work', 'acceptance', 'handoff', 'return']) await expect(canvas.getByRole('region', { name: `Packet ${group}` })).toBeInTheDocument();
+  const evidence = within(canvas.getByRole('region', { name: 'Packet evidence' }));
+  await expect(evidence.getAllByText('rejected').length).toBeGreaterThan(0);
+  await expect(evidence.getAllByText('true').length).toBeGreaterThan(0);
+  const objective = packetRequestFixture.intent.objective;
+  if (objective.state === 'supplied') await expect(within(canvas.getByRole('region', { name: 'Packet intent' })).getByText(objective.value)).toBeInTheDocument();
+}
+
+async function expectNoAuthorityOrActiveContent(canvasElement: HTMLElement) {
+  await expect(calls.some((call) => /publish|provider|shell|target_write|grant_cloud|start_investigation/.test(call.command))).toBe(false);
+  await expect(canvasElement.querySelector('.packet-detail script, .packet-detail iframe, .packet-detail a')).toBeNull();
+}
+
+export const SelectAndGeneratePacket: Story = {
+  // AC-0252: the mock responses are real PacketStore fixture outputs; selection and generation run through the UI once.
+  play: async ({ canvasElement }) => {
+    await selectAndGenerate(canvasElement);
+    await expectPacketBody(canvasElement);
+    await expect(useWorkPacketStore.getState().detail).toEqual(packetFixture);
+    await expect(calls.filter((call) => call.command === 'generate_work_packet')).toHaveLength(1);
+    await expectNoAuthorityOrActiveContent(canvasElement);
+  },
+};
+
+export const ReviewAndReopenSavedPacket: Story = {
+  // AC-0252: starts from the saved fixture packet that generation returns; the complete body survives review and reopening.
+  beforeEach: seedSavedPacket(packetFixture),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await selectAndGenerate(canvasElement);
-    for (const group of ['identity', 'intent', 'evidence', 'work', 'acceptance', 'handoff', 'return']) await expect(canvas.getByRole('region', { name: `Packet ${group}` })).toBeInTheDocument();
+    await canvas.findByTestId('packet-body-identity', undefined, { timeout: 5_000 });
     await expect(useWorkPacketStore.getState().detail).toEqual(packetFixture);
     // The complete body survives reopening; no regeneration is used by list/get.
     await userEvent.click(canvas.getByLabelText('Review note'));
@@ -121,18 +157,24 @@ export const SelectGenerateReviewReopenExport: Story = {
     await expect(useWorkPacketStore.getState().detail?.freshness).toEqual(packetFixture.freshness);
     await expect(useWorkPacketStore.getState().detail?.execution).toBe('unoffered');
     await expect(useWorkPacketStore.getState().detail).toEqual(packetReviewedFixture);
+    await expect(calls.filter((call) => call.command === 'generate_work_packet')).toHaveLength(0);
+    await expectNoAuthorityOrActiveContent(canvasElement);
+  },
+};
+
+export const ExportReviewedPacket: Story = {
+  // AC-0252: the mock export is the exact Markdown PacketStore emits for the reviewed fixture packet.
+  beforeEach: seedSavedPacket(packetReviewedFixture),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await canvas.findByTestId('packet-body-identity', undefined, { timeout: 5_000 });
     await userEvent.click(canvas.getByRole('button', { name: 'Export packet Markdown' }));
     await waitFor(() => expect(canvas.getByText('Packet export prepared; local download requested.')).toBeInTheDocument());
     await expect(lastExport).toEqual({ packet_id: packetFixture.packet_id, file_name: `cartograph-work-packet-${packetFixture.packet_id.split(':')[1]}.md`, content: packetReviewedExportFixture });
     await expect(packetReviewedExportFixture).toContain(packetFixture.packet_id);
-    const evidence = within(canvas.getByRole('region', { name: 'Packet evidence' }));
-    await expect(evidence.getAllByText('rejected').length).toBeGreaterThan(0);
-    await expect(evidence.getAllByText('true').length).toBeGreaterThan(0);
-    const objective = packetRequestFixture.intent.objective;
-    if (objective.state === 'supplied') await expect(within(canvas.getByRole('region', { name: 'Packet intent' })).getByText(objective.value)).toBeInTheDocument();
-    await expect(calls.filter((call) => call.command === 'generate_work_packet')).toHaveLength(1);
-    await expect(calls.some((call) => /publish|provider|shell|target_write|grant_cloud|start_investigation/.test(call.command))).toBe(false);
-    await expect(canvasElement.querySelector('.packet-detail script, .packet-detail iframe, .packet-detail a')).toBeNull();
+    await expectPacketBody(canvasElement);
+    await expect(calls.filter((call) => call.command === 'generate_work_packet')).toHaveLength(0);
+    await expectNoAuthorityOrActiveContent(canvasElement);
   },
 };
 
