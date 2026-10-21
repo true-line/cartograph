@@ -6,6 +6,13 @@ impl InvestigationInput {
         &mut self,
         raw_details: &[String],
     ) -> Result<(), InvestigationError> {
+        self.add_coverage_details_raw(raw_details)
+    }
+
+    pub(super) fn add_coverage_details_raw<P: AsRef<str>>(
+        &mut self,
+        raw_details: &[P],
+    ) -> Result<(), InvestigationError> {
         let proof = self
             .ledger
             .coverage
@@ -16,7 +23,7 @@ impl InvestigationInput {
         }
         let mut details = Vec::with_capacity(raw_details.len());
         for (manifest, raw) in self.ledger.coverage_reads.iter().zip(raw_details) {
-            let detail = manifest.admit_response(proof, raw)?;
+            let detail = manifest.admit_response(proof, raw.as_ref())?;
             strict::preflight(&detail.inventory_json, MAX_QUERY_BYTES, 32, 16384, 16384)?;
             let inventory: Value = serde_json::from_str(&detail.inventory_json)
                 .map_err(|_| InvestigationError::InvalidInput)?;
@@ -28,9 +35,7 @@ impl InvestigationInput {
             .map_err(|_| InvestigationError::InvalidInput)?;
         prompt["coverage_details"] =
             serde_json::to_value(details).map_err(|_| InvestigationError::InvalidInput)?;
-        self.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        bounded_bytes(&self.payload, MAX_INPUT_BYTES)?;
+        wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
         Ok(())
     }
 }

@@ -90,6 +90,18 @@ pub struct RefusalFeedback {
     pub schema_version: u32,
     pub unmet: Vec<FeedbackEntry>,
 }
+
+/// Synthetic serialization envelope for sizing only, never a real refusal,
+/// assessment, completed attempt or authorization to dispatch a provider.
+///
+/// It serializes exactly as `RefusalFeedback`, with no additional wrapper.
+/// The private representation has no conversion into authoritative feedback.
+/// Its bound covers this component only, not a complete prompt or payload.
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct RefusalFeedbackSizeEnvelope {
+    feedback: RefusalFeedback,
+}
 /// Feedback entries are at most 137 encoded bytes (a 64-hex id, `inventory`,
 /// `acquired_not_supplied`); the frame is 31. These allowances keep v1's
 /// literal 2 KiB bound for its 12 obligations and scale with the saved policy.
@@ -105,6 +117,44 @@ fn feedback_bytes(policy: &InvestigationPolicy) -> Result<usize, InvestigationEr
 }
 
 impl RefusalFeedback {
+    /// Derive a maximal feedback representation for this exact normalized
+    /// obligation set and the immutable policy resolved from saved task limits.
+    ///
+    /// Every canonical obligation contributes its actual id and kind. The
+    /// longest current serialized reason is `acquired_not_supplied`; no real
+    /// read or finish decision is asserted. Ids, kinds and current reason codes
+    /// contain no JSON-escaped characters: the longest reason dominates at each
+    /// embedding layer, and adding every entry dominates every valid subset.
+    /// This assumes the other enclosing fields are kept unchanged.
+    /// Callers must serialize this sizing
+    /// component through their actual enclosing structures and include every
+    /// other prompt component before claiming any larger bound.
+    pub fn sizing_upper_envelope_with_policy(
+        obligations: &ObligationEnvelope,
+        policy: &InvestigationPolicy,
+    ) -> Result<RefusalFeedbackSizeEnvelope, InvestigationError> {
+        if obligations.normalized_with_policy(policy)? != *obligations {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let feedback = Self {
+            schema_version: 1,
+            unmet: obligations
+                .obligations
+                .iter()
+                .map(|obligation| {
+                    let (kind, id) = obligation.key();
+                    FeedbackEntry {
+                        obligation_id: id.into(),
+                        kind: kind.into(),
+                        reason: RefusalReason::AcquiredNotSupplied,
+                    }
+                })
+                .collect(),
+        };
+        feedback.bytes_with_policy(policy)?;
+        Ok(RefusalFeedbackSizeEnvelope { feedback })
+    }
+
     pub fn bytes(&self) -> Result<Vec<u8>, InvestigationError> {
         self.bytes_with_policy(&INVESTIGATION_V1_POLICY)
     }
@@ -149,6 +199,10 @@ impl RefusalFeedback {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "feedback_capacity_tests.rs"]
+mod feedback_capacity_tests;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObligationObservation {
@@ -223,7 +277,7 @@ pub fn admit_finish_with_policy(
         return Err(InvestigationError::InvalidInput);
     }
     let ledger = input.ledger();
-    if matches!(disclosure.schema_version, 4 | 5) {
+    if matches!(disclosure.schema_version, 4..=6) {
         input.validate_completion_binding_with_policy(&request, disclosure, attempts, policy)?;
     }
     if request
@@ -292,7 +346,7 @@ pub fn admit_finish_with_policy(
         attempts,
         policy,
     )?;
-    let completion = if matches!(disclosure.schema_version, 4 | 5) {
+    let completion = if matches!(disclosure.schema_version, 4..=6) {
         Some(InvestigationCompletionResult {
             schema_version: 1,
             outcome: finish.outcome,

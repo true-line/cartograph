@@ -1,0 +1,198 @@
+//! AC-0287: actual complete-response decisions from genuine production starts.
+use super::*;
+#[path = "next_prompt_finish_fixture.rs"]
+pub(super) mod fixture;
+use fixture::Fixture;
+
+#[path = "next_prompt_finish_only_tests.rs"]
+mod finish_only;
+
+#[test]
+fn next_prompt_finish_boundary_accepted_result7_reopens_and_rejects_family_downgrade() {
+    let mut f = Fixture::new(true);
+    f.begin();
+    let before = f.base.f.task.detail.usage.clone();
+    let detail = f.publish().unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Completed);
+    assert_eq!(
+        detail.summary.completion_outcome,
+        Some(InvestigationCompletionOutcome::InsufficientEvidence)
+    );
+    assert_eq!(detail.usage.tool_actions, before.tool_actions);
+    let saved = f.saved();
+    let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+    let result = load_result(&tx, &saved).unwrap().unwrap();
+    assert_eq!(result.schema_version, 7);
+    assert!(
+        result
+            .disclosure_hash
+            .as_ref()
+            .unwrap()
+            .starts_with("investigation-disclosure-v6:")
+    );
+    assert_eq!(
+        result.invocation_step_id.as_deref(),
+        Some(f.response.step_id.as_str())
+    );
+    let mut old_request = f.base.f.request.clone();
+    old_request.schema_version = 6;
+    old_request.specialist_id = "domain-analyst@9".into();
+    let mut old = saved.clone();
+    old.schema_version = 2;
+    old.detail.summary.schema_version = 6;
+    old.detail.summary.specialist_id = SpecialistId::DomainAnalystV9;
+    old.completion_intent = Some(host_fixture_intent(&old_request).unwrap());
+    assert_eq!(
+        validate_inspection_result(&old, &result),
+        Err(InvestigationStoreError::Invalid)
+    );
+    let mut downgraded = result;
+    downgraded.schema_version = 6;
+    assert_eq!(
+        validate_inspection_result(&saved, &downgraded),
+        Err(InvestigationStoreError::Invalid)
+    );
+    let sql: String = tx
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='investigation_results_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    tx.execute_batch("DROP TRIGGER investigation_results_no_update")
+        .unwrap();
+    let body = encode(&downgraded, MAX_RESULT_BYTES).unwrap();
+    tx.execute(
+        "UPDATE investigation_results SET body=?1,body_hash=?2 WHERE task_id=?3",
+        params![body, core_prov::content_hash(&body), f.base.id()],
+    )
+    .unwrap();
+    tx.execute_batch(&sql).unwrap();
+    tx.commit().unwrap();
+    let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
+    let tx = reopened.conn.unchecked_transaction().unwrap();
+    assert!(load_next_prompt_task(&tx, f.base.id()).is_err());
+}
+
+#[test]
+fn next_prompt_finish_boundary_refusals_use_existing_obligations_and_two_finish_cap() {
+    let mut f = Fixture::new(false);
+    f.begin();
+    let first = f.publish().unwrap();
+    assert_eq!(first.summary.status, InvestigationStatus::Running);
+    assert_eq!(first.completion.as_ref().unwrap().refusal_count, 1);
+    assert_eq!(first.usage.tool_actions, 0);
+    assert_eq!(f.saved().phase, Phase::Ready);
+    f.next();
+    f.begin();
+    let second = f.publish().unwrap();
+    assert_eq!(second.summary.status, InvestigationStatus::Failed);
+    assert_eq!(
+        second.summary.completion_outcome,
+        Some(InvestigationCompletionOutcome::ObligationsUnmet)
+    );
+    assert_eq!(second.completion.as_ref().unwrap().refusal_count, 2);
+    assert_eq!(second.usage.model_invocations, 2);
+    assert_eq!(second.usage.tool_actions, 0);
+    assert_eq!(second.citations.len(), 0);
+    let saved = f.saved();
+    let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+    assert_eq!(staged::load_for_task(&tx, &saved).unwrap().len(), 2);
+    assert_eq!(load_ledger(&tx, &saved).unwrap().unwrap(), f.base.f.ledger);
+    assert_eq!(
+        admission_journal::derive_current(&tx, &saved)
+            .unwrap()
+            .count,
+        0
+    );
+}
+
+#[test]
+fn next_prompt_finish_boundary_late_cancel_preserves_valid_finish_and_terminates_refusal() {
+    for acquired in [false, true] {
+        let mut f = Fixture::new(acquired);
+        f.begin();
+        let id = f.base.id().to_owned();
+        f.base
+            .f
+            .store
+            .cancel_next_prompt_investigation(&id)
+            .unwrap();
+        f.base.refresh();
+        let detail = f.publish().unwrap();
+        assert_eq!(
+            detail.summary.status,
+            if acquired {
+                InvestigationStatus::Completed
+            } else {
+                InvestigationStatus::Cancelled
+            }
+        );
+        assert_eq!(detail.summary.has_result, acquired);
+        assert_eq!(detail.usage.evidence_requests, 0);
+        f.saved();
+    }
+}
+
+#[test]
+fn next_prompt_finish_boundary_rebinding_and_stale_proposals_leave_no_effects() {
+    for kind in ["envelope", "request", "prepared", "stale", "choice_read"] {
+        let mut f = Fixture::new(false);
+        f.begin();
+        let before = f.rows();
+        if kind == "envelope" {
+            f.original["outcome"] = "supported".into();
+        }
+        if kind == "request" {
+            f.base.f.request.question.push_str(" changed");
+        }
+        if kind == "prepared" {
+            f.prepared = Fixture::new(false).prepared;
+        }
+        if kind == "stale" {
+            f.base.f.task.detail.summary.revision += 1;
+        }
+        if kind == "choice_read" {
+            let query = InvestigationQuery {
+                scope: InvestigationScope::All,
+                kind: None,
+                labels: vec![],
+                max_facts: 1,
+                max_bytes: 16384,
+                cursor: None,
+            };
+            f.original = serde_json::json!({"type":"query_context","context_id":f.base.f.request.expected_context_id,"query":query});
+            f.response.action_hash =
+                core_prov::content_hash(&encode(&f.original, MAX_ACTION_BYTES).unwrap());
+        }
+        assert!(f.publish().is_err(), "{kind}");
+        assert_eq!(f.rows(), before, "{kind}");
+    }
+}
+
+#[test]
+fn next_prompt_finish_boundary_final_write_rollback_and_lost_ack_are_exact() {
+    for acquired in [false, true] {
+        let mut f = Fixture::new(acquired);
+        f.begin();
+        let before = f.rows();
+        FAIL_BEFORE_FINISH_COMMIT.with(|flag| flag.set(true));
+        assert_eq!(f.publish(), Err(InvestigationStoreError::Capacity));
+        assert_eq!(f.rows(), before);
+        LOSE_FINISH_ACK.with(|flag| flag.set(true));
+        assert_eq!(f.publish(), Err(InvestigationStoreError::Storage));
+        let saved = f.saved();
+        assert_eq!(
+            saved.phase,
+            if acquired {
+                Phase::Terminal
+            } else {
+                Phase::Ready
+            }
+        );
+        assert_eq!(saved.detail.summary.has_result, acquired);
+        let after = f.rows();
+        assert_eq!(f.publish(), Err(InvestigationStoreError::Stale));
+        assert_eq!(f.rows(), after);
+    }
+}

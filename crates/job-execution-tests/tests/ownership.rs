@@ -34,3 +34,15 @@ mod jobs;
 #[allow(dead_code)]
 #[path = "../../../src-tauri/src/job_execution.rs"]
 mod job_execution;
+
+// The metadata writer's read-only retained identity view uses the same real
+// state.db registry validator as the host, rather than a test-only substitute.
+#[allow(dead_code, missing_docs)]
+#[path = "../../../src-tauri/src/findings.rs"]
+mod findings;
+#[allow(dead_code)]
+#[path = "../../../src-tauri/src/paths.rs"]
+mod paths;
+#[allow(dead_code, missing_docs, unused_imports)]
+#[path = "../../../src-tauri/src/sources.rs"]
+mod sources;

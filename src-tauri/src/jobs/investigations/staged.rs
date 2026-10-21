@@ -351,15 +351,24 @@ fn saved_ledger(
     )?
     .ok_or(InvestigationStoreError::Invalid)
 }
+#[cfg(test)]
 fn completed_attempts(
     connection: &Connection,
     id: &str,
     attempts: &[AttemptRecord],
 ) -> Result<Vec<InvestigationInputLedger>, InvestigationStoreError> {
     let task = load_task_base(connection, id)?;
-    let policy = super::completion::saved_policy(&task)?;
+    completed_attempts_for_task(connection, &task, attempts)
+}
+fn completed_attempts_for_task(
+    connection: &Connection,
+    task: &StoredTask,
+    attempts: &[AttemptRecord],
+) -> Result<Vec<InvestigationInputLedger>, InvestigationStoreError> {
+    let id = &task.detail.summary.investigation_id;
+    let policy = super::completion::saved_policy(task)?;
     if task.completion_intent.is_some() {
-        let durable = super::completion::attempts(connection, &task)?;
+        let durable = super::completion::attempts(connection, task)?;
         if durable.len() < attempts.len()
             || durable
                 .iter()
@@ -434,8 +443,7 @@ fn completed_attempts(
         if response.action_hash != read_action_hash(&attempt.read)? {
             return Err(InvestigationStoreError::Invalid);
         }
-        let task = load_task_base(connection, id)?;
-        if task.detail.summary.last_event_sequence > journal_event_limit(&task)? {
+        if task.detail.summary.last_event_sequence > journal_event_limit(task)? {
             return Err(InvestigationStoreError::Invalid);
         }
         let mut admitted = false;
@@ -450,7 +458,7 @@ fn completed_attempts(
                 &signed(sequence)?,
             )?
             .ok_or(InvestigationStoreError::Invalid)?;
-            if event.sequence != sequence || event.investigation_id != id {
+            if event.sequence != sequence || event.investigation_id != *id {
                 return Err(InvestigationStoreError::Invalid);
             }
             if event.kind == InvestigationEventKind::ToolCompleted {
@@ -502,6 +510,34 @@ struct ResponseUsage {
 
 // Invocation order is authoritative: a missing response cannot be skipped to
 // turn a later response into the first measured call, or restore unknown usage.
+fn response_usage_for_task(
+    connection: &Connection,
+    task: &StoredTask,
+    step_id: &str,
+) -> Result<ResponseUsage, InvestigationStoreError> {
+    let id = &task.detail.summary.investigation_id;
+    let max_invocations = task.detail.limits.model_invocations;
+    if !task
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        return response_usage(connection, id, step_id, max_invocations);
+    }
+    let ordered = super::completion::next_prompt_invocations(connection, task)?;
+    let cutoff = ordered
+        .iter()
+        .find(|(_, step)| step.step_id == step_id)
+        .map(|(ordinal, _)| *ordinal)
+        .ok_or(InvestigationStoreError::Missing)?;
+    let steps = ordered
+        .into_iter()
+        .filter(|(ordinal, _)| *ordinal <= cutoff)
+        .map(|(_, step)| Some(step.step_id))
+        .collect::<Vec<_>>();
+    response_usage_from_steps(connection, id, step_id, max_invocations, steps)
+}
 fn response_usage(
     connection: &Connection,
     id: &str,
@@ -511,6 +547,15 @@ fn response_usage(
     let steps = connection.prepare("SELECT CASE WHEN typeof(step_id)='text' AND length(CAST(step_id AS BLOB))<=128 THEN step_id END FROM investigation_invocations WHERE task_id=?1 AND rowid<=(SELECT rowid FROM investigation_invocations WHERE task_id=?1 AND step_id=?2) ORDER BY rowid LIMIT ?3")?
         .query_map(params![id, step_id, i64::from(max_invocations) + 1], |row| row.get::<_, Option<String>>(0))?
         .collect::<Result<Vec<_>, _>>()?;
+    response_usage_from_steps(connection, id, step_id, max_invocations, steps)
+}
+fn response_usage_from_steps(
+    connection: &Connection,
+    id: &str,
+    step_id: &str,
+    max_invocations: u32,
+    steps: Vec<Option<String>>,
+) -> Result<ResponseUsage, InvestigationStoreError> {
     if steps.is_empty()
         || steps.len() > max_invocations as usize
         || steps.last().and_then(|step| step.as_deref()) != Some(step_id)
@@ -561,7 +606,19 @@ pub(super) fn load(
     }
     validate_schema(connection)?;
     let task = load_task_base(connection, id)?;
-    let policy = super::completion::saved_policy(&task)?;
+    load_for_task(connection, &task)
+}
+
+pub(super) fn load_for_task(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<Vec<JournalEntry>, InvestigationStoreError> {
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    validate_schema(connection)?;
+    let id = &task.detail.summary.investigation_id;
+    let policy = super::completion::saved_policy(task)?;
     let binding = read::<Binding>(
         connection,
         "staged_completion_intents",
@@ -570,7 +627,7 @@ pub(super) fn load(
         binding_bytes(policy),
     )?
     .ok_or(InvestigationStoreError::Invalid)?;
-    binding.validate(&task)?;
+    binding.validate(task)?;
     let count: i64 = connection.query_row(
         "SELECT count(*) FROM staged_completion_refusals WHERE task_id=?1",
         [id],
@@ -616,7 +673,15 @@ pub(super) fn load(
             .disclosure
             .as_ref()
             .ok_or(InvestigationStoreError::Invalid)?;
-        let attempt_ledgers = completed_attempts(connection, id, &entry.attempts)?;
+        if task
+            .detail
+            .summary
+            .specialist_id
+            .uses_next_prompt_admission()
+        {
+            validate_next_prompt_refusal_basis(connection, task, &entry, &step, &ledger)?;
+        }
+        let attempt_ledgers = completed_attempts_for_task(connection, task, &entry.attempts)?;
         let witnesses = entry
             .attempts
             .iter()
@@ -642,7 +707,7 @@ pub(super) fn load(
             entries.last().map(|entry| &entry.record),
             policy,
         )?;
-        if entry.record.task_id != id
+        if entry.record.task_id != *id
             || entry.record.refusal_count != sequence
             || entry.record.assessment != assessment
             || entry.record.feedback != feedback
@@ -671,12 +736,7 @@ pub(super) fn load(
         {
             return Err(InvestigationStoreError::Invalid);
         }
-        let replay = response_usage(
-            connection,
-            id,
-            &entry.record.step_id,
-            task.detail.limits.model_invocations,
-        )?;
+        let replay = response_usage_for_task(connection, task, &entry.record.step_id)?;
         if replay.response != entry.response
             || replay.invocations != entry.usage.model_invocations
             || replay.input_tokens != entry.usage.reported_input_tokens
@@ -716,6 +776,66 @@ pub(super) fn load(
     }
     Ok(entries)
 }
+
+fn validate_next_prompt_refusal_basis(
+    connection: &Connection,
+    task: &StoredTask,
+    entry: &JournalEntry,
+    step: &PendingInvestigationStep,
+    ledger: &InvestigationInputLedger,
+) -> Result<(), InvestigationStoreError> {
+    let disclosure = step
+        .disclosure
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    let admission = disclosure
+        .admission
+        .clone()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    let metadata = super::completion::metadata_at_saved_step(connection, task, step)?;
+    let call = admission_contract::SavedCallBasis {
+        schema_version: 1,
+        task_id: task.detail.summary.investigation_id.clone(),
+        request_hash: task.intent_hash.clone(),
+        step_id: step.step_id.clone(),
+        invocation_ordinal: admission
+            .consumed_budgets
+            .model_invocations
+            .checked_add(1)
+            .ok_or(InvestigationStoreError::Invalid)?,
+        input_ledger_hash: step.input_ledger_hash.clone(),
+        input_revision: ledger.revision,
+        completion_metadata_hash: disclosure
+            .completion_metadata_hash
+            .clone()
+            .ok_or(InvestigationStoreError::Invalid)?,
+        admission,
+    };
+    call.validate_core(task, step, ledger, &metadata)?;
+    let capacity = admission_journal::derive_at(connection, task, &step.step_id)?;
+    let mut expected = call.admission.consumed_budgets.clone();
+    expected.model_invocations = call.invocation_ordinal;
+    expected.generated_token_reservations = expected
+        .generated_token_reservations
+        .checked_add(step.generated_tokens)
+        .ok_or(InvestigationStoreError::Invalid)?;
+    expected.reported_input_tokens = entry.usage.reported_input_tokens;
+    expected.reported_output_tokens = entry.usage.reported_output_tokens;
+    expected.active_milliseconds = entry.response.active_milliseconds;
+    if call.admission.capacity_refusal_count != capacity.count
+        || call.admission.capacity_feedback != capacity.feedback
+        || expected != entry.usage
+        || entry
+            .attempts
+            .iter()
+            .map(|record| &record.attempt_id)
+            .collect::<Vec<_>>()
+            != metadata.completed_attempt_ids.iter().collect::<Vec<_>>()
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(())
+}
 /// Caller owns this transaction and commit. No production caller until slice 3.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn append(
@@ -733,8 +853,26 @@ pub(super) fn append(
     let id = transitions::task_id_for_job(tx, execution.id())?
         .ok_or(InvestigationStoreError::Missing)?;
     let task = load_task_base(tx, &id)?;
-    let policy = super::completion::saved_policy(&task)?;
-    transitions::check_identity(&task, execution)?;
+    append_for_task(
+        tx, namespace, execution, &task, request, input, finish, response, attempts,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_for_task(
+    tx: &Transaction<'_>,
+    namespace: &ExecutionNamespace,
+    execution: &JobExecution,
+    task: &StoredTask,
+    request: &StagedObligationRequest,
+    input: &InvestigationInput,
+    finish: &StagedFinish,
+    response: InvestigationResponseMeta,
+    attempts: &[AttemptRecord],
+) -> Result<RefusalDisposition, InvestigationStoreError> {
+    let id = task.detail.summary.investigation_id.clone();
+    let policy = super::completion::saved_policy(task)?;
+    transitions::check_identity(task, execution)?;
     transitions::check_job(tx, execution, task.completion_intent.is_some())?;
     if execution.inner.namespace != *namespace
         || task.phase != Phase::Invocation
@@ -742,13 +880,13 @@ pub(super) fn append(
     {
         return Err(InvestigationStoreError::Stale);
     }
-    let binding = bind(tx, &task, request)?;
-    let previous = load(tx, &id)?;
+    let binding = bind(tx, task, request)?;
+    let previous = load_for_task(tx, task)?;
     if previous.len() >= 2 {
         return Err(InvestigationStoreError::Capacity);
     }
-    let (step, usage) = transitions::validate_response(tx, &task, &response)?;
-    let ledger = load_ledger(tx, &task)?.ok_or(InvestigationStoreError::Invalid)?;
+    let (step, usage) = transitions::validate_response(tx, task, &response)?;
+    let ledger = load_ledger(tx, task)?.ok_or(InvestigationStoreError::Invalid)?;
     if input.ledger() != &ledger {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -756,7 +894,7 @@ pub(super) fn append(
         .disclosure
         .as_ref()
         .ok_or(InvestigationStoreError::Invalid)?;
-    let attempt_ledgers = completed_attempts(tx, &id, attempts)?;
+    let attempt_ledgers = completed_attempts_for_task(tx, task, attempts)?;
     let evidence = attempts
         .iter()
         .zip(&attempt_ledgers)
@@ -864,12 +1002,7 @@ pub(super) fn append(
             core_prov::content_hash(&response_body)
         ],
     )?)?;
-    let replay = response_usage(
-        tx,
-        &id,
-        &entry.record.step_id,
-        task.detail.limits.model_invocations,
-    )?;
+    let replay = response_usage_for_task(tx, task, &entry.record.step_id)?;
     if replay.response != entry.response
         || replay.invocations != entry.usage.model_invocations
         || replay.input_tokens != entry.usage.reported_input_tokens

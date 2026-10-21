@@ -544,7 +544,7 @@ impl InvestigationResult {
         else {
             return Err(InvestigationError::InvalidAction);
         };
-        if binding.is_some_and(|(_, d)| matches!(d.schema_version, 4 | 5)) != completion.is_some() {
+        if binding.is_some_and(|(_, d)| matches!(d.schema_version, 4..=6)) != completion.is_some() {
             return Err(InvestigationError::InvalidInput);
         }
         if binding.is_some_and(|(_, disclosure)| {
@@ -557,7 +557,9 @@ impl InvestigationResult {
             return Err(InvestigationError::InvalidInput);
         }
         let mut result = Self {
-            schema_version: if binding.is_some_and(|(_, d)| d.schema_version == 5) {
+            schema_version: if binding.is_some_and(|(_, d)| d.schema_version == 6) {
+                7
+            } else if binding.is_some_and(|(_, d)| d.schema_version == 5) {
                 6
             } else if completion.is_some() {
                 5
@@ -601,7 +603,7 @@ impl InvestigationResult {
         }
         result.result_id = result.content_id()?;
         match binding {
-            Some((_, disclosure)) if matches!(result.schema_version, 5 | 6) => {
+            Some((_, disclosure)) if matches!(result.schema_version, 5..=7) => {
                 result.validate_bound(
                     ledger,
                     &disclosure.eligible_citations_with_policy(ledger, policy)?,
@@ -643,6 +645,10 @@ impl InvestigationResult {
             6 => (
                 "investigation-result-v6",
                 b"cartograph:investigation-result:v6\0",
+            ),
+            7 => (
+                "investigation-result-v7",
+                b"cartograph:investigation-result:v7\0",
             ),
             _ => return Err(InvestigationError::InvalidInput),
         };
@@ -703,7 +709,9 @@ impl InvestigationResult {
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
         if self.schema_version
-            != if disclosure.schema_version == 5 {
+            != if disclosure.schema_version == 6 {
+                7
+            } else if disclosure.schema_version == 5 {
                 6
             } else if disclosure.schema_version == 4 {
                 5
@@ -714,7 +722,7 @@ impl InvestigationResult {
             } else {
                 2
             }
-            || matches!(self.schema_version, 5 | 6) != self.completion.is_some()
+            || matches!(self.schema_version, 5..=7) != self.completion.is_some()
             || self.coverage != disclosure.coverage
             || self.inspection_assessment.is_some()
                 != disclosure.inspection_requirements_hash.is_some()

@@ -33,6 +33,13 @@ impl CompactInvestigationContext {
         raw_pages: &[String],
         policy: &InvestigationPolicy,
     ) -> Result<Self, InvestigationError> {
+        Self::prepare_raw_with_policy(ledger, raw_pages, policy)
+    }
+    pub(crate) fn prepare_raw_with_policy<P: AsRef<str>>(
+        ledger: &InvestigationInputLedger,
+        raw_pages: &[P],
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
         ledger.validate_with_policy(policy)?;
         if raw_pages.len() != ledger.queries.len() {
             return Err(InvestigationError::InvalidInput);
@@ -46,6 +53,7 @@ impl CompactInvestigationContext {
         let mut observed = BTreeSet::new();
         let mut total_bytes = 0usize;
         for (index, (raw, manifest)) in raw_pages.iter().zip(&ledger.queries).enumerate() {
+            let raw = raw.as_ref();
             if raw.len() != manifest.response_bytes
                 || content_hash(raw.as_bytes()) != manifest.response_hash
             {

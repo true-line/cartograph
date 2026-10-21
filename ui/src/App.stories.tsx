@@ -1,10 +1,11 @@
+import { admissionCatalog, completionChoices } from './completionFixtures';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, userEvent, waitFor, within } from 'storybook/test';
 import App from './App';
 import { useInvestigationStore } from './investigationStore';
 import { inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationCitations, investigationConsent, investigationDetail, investigationResult } from './investigationFixtures';
-import type { InvestigationDetail, InvestigationEvent, StartInvestigationRequest } from './investigationTypes';
+import type { InvestigationDetail, InvestigationEvent, InvestigationInspectionTarget, StartInvestigationRequest } from './investigationTypes';
 import { usePrimarySourceStore, type CapturedDescription, type FactKey } from './primarySourceStore';
 import {
   useAppStore,
@@ -334,6 +335,7 @@ function installFakeCore(options: {
   evidenceGate?: Promise<void>;
   capturedDescriptions?: boolean;
   inspectionSelection?: boolean;
+  admissionSelection?: boolean;
   existingInvestigation?: InvestigationDetail;
   rejectJobActionOnce?: boolean;
   legacyRunningJob?: boolean;
@@ -352,6 +354,7 @@ function installFakeCore(options: {
   let investigation: InvestigationDetail | null = options.existingInvestigation ?? null;
   const investigationJournal: InvestigationEvent[] = [];
   let investigationStep = 1;
+  let latestInspectionTarget: InvestigationInspectionTarget | null = null;
   let straddleResult = options.straddleResultCommit ?? false;
   const appendInvestigationEvent = (kind: InvestigationEvent['kind'], summary: string,
     tool: InvestigationEvent['tool'] = null) => {
@@ -397,7 +400,7 @@ function installFakeCore(options: {
   mockIPC((cmd, args) => {
     switch (cmd) {
       case 'investigation_specialists':
-        return options.inspectionSelection ? inspectionCatalog : investigationCatalog;
+        return options.admissionSelection ? admissionCatalog : options.inspectionSelection ? inspectionCatalog : investigationCatalog;
       case 'list_investigations':
         return { items: investigation ? [investigation] : [], next_cursor: null };
       case 'start_investigation': {
@@ -535,7 +538,7 @@ function installFakeCore(options: {
         const request = args as Record<string, unknown>;
         capturedDescriptionRequests.push(request);
         return {
-          graph_snapshot_id: 'snapshot:original',
+          graph_snapshot_id: options.admissionSelection ? completionChoices.graph_snapshot_id : 'snapshot:original',
           fact: request.fact as FactKey,
           receipt_id: `receipt:selection-${capturedDescriptionRequests.length}`,
           emitted_fact_digest: 'fact-digest', source_id: 'src_fixture', repo_key: 'local',
@@ -546,14 +549,23 @@ function installFakeCore(options: {
       case 'read_captured_source':
         return { receipt_id: `receipt:selection-${capturedDescriptionRequests.length}`, range_index: 0,
           text: SPAN_TEXT, path: 'src/app.ts', byte_start: SPAN_START, byte_end: SPAN_END };
-      case 'resolve_investigation_inspection_target':
+      case 'resolve_investigation_inspection_target': {
         investigationRequests.push({ command: cmd, args });
-        return { ...inspectionTarget, target_id: 'c'.repeat(64), fact: (args as { fact: FactKey }).fact,
+        latestInspectionTarget = { ...inspectionTarget, graph_snapshot_id: options.admissionSelection ? completionChoices.graph_snapshot_id : inspectionTarget.graph_snapshot_id,
+          target_id: 'c'.repeat(64), fact: (args as { fact: FactKey }).fact,
           fact_digest: 'fact-digest', registered_source_id: 'src_fixture',
           receipt_id: `receipt:selection-${capturedDescriptionRequests.length}`, receipt_inventory_index: 0,
           source: { ...inspectionTarget.source, repo: 'local', path: 'src/app.ts', byte_start: SPAN_START, byte_end: SPAN_END },
           captured: { ...inspectionTarget.captured, file: { ...inspectionTarget.captured.file, source_id: 'src_fixture', path: 'src/app.ts' },
             byte_start: SPAN_START, byte_end: SPAN_END } };
+        return latestInspectionTarget;
+      }
+      case 'investigation_obligation_choices':
+        return options.admissionSelection ? completionChoices : null;
+      case 'resolve_investigation_source_obligation':
+        investigationRequests.push({ command: cmd, args });
+        if (!options.admissionSelection || !latestInspectionTarget) throw new Error('No selected completion source');
+        return { kind: 'source', obligation_id: '6'.repeat(64), target: latestInspectionTarget };
       case 'export_flows':
         return '# Flow dossier\n\n## GET /users — Verified (score 1.00)\n';
       case 'list_flows':
@@ -1804,5 +1816,35 @@ export const InspectionFollowUpSurvivesSourceSelectionNavigation: Story = {
     await expect(useInvestigationStore.getState().composer.parent).toBeNull();
     await expect(useInvestigationStore.getState().composer.question).toBe('');
     await expect(useInvestigationStore.getState().draftInspectionRequirements).toHaveLength(0);
+  },
+};
+
+
+export const NextPromptCapturedSourceBecomesCompletionObligation: Story = {
+  // AC-0287: actual App navigation chooses the completion resolver for @10.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    installFakeCore({ capturedDescriptions: true, admissionSelection: true });
+    await userEvent.click(canvas.getByRole('button', { name: 'Open investigations' }));
+    await useInvestigationStore.getState().loadCatalog();
+    await userEvent.selectOptions(await canvas.findByLabelText('Investigation budget'), 'investigation-v2');
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@10/ })).toBeChecked();
+    await userEvent.click(canvas.getByRole('button', { name: 'Workspace' }));
+    const endpoints = canvas.getByRole('heading', { name: 'Endpoints' }).closest('section') as HTMLElement;
+    await userEvent.click(await within(endpoints).findByRole('button', { name: /GET \/users/ }));
+    await userEvent.selectOptions(await canvas.findByLabelText('Captured cited range'), '0');
+    await waitFor(() => expect(usePrimarySourceStore.getState().loading).toBe(false));
+    await userEvent.click(canvas.getByRole('button', { name: 'Require this source in an investigation' }));
+    await waitFor(() => expect(useInvestigationStore.getState().draftObligations).toHaveLength(1));
+    const state = useInvestigationStore.getState();
+    await expect(state.draftInspectionRequirements).toHaveLength(0);
+    await expect(state.draftObligations[0]).toMatchObject({ kind: 'source', target: {
+      fact: { kind: 'node', id: FAKE_ENDPOINT.id }, graph_snapshot_id: completionChoices.graph_snapshot_id } });
+    await expect(investigationRequests.map((item) => item.command)).toEqual([
+      'resolve_investigation_inspection_target', 'resolve_investigation_source_obligation' ]);
+    await expect(await canvas.findByLabelText('Question')).toBeVisible();
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@10/ })).toBeChecked();
+    await userEvent.type(canvas.getByLabelText('Question'), 'Inspect this newly selected completion source.');
+    await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeEnabled();
   },
 };

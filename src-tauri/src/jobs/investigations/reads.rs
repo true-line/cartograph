@@ -67,7 +67,7 @@ impl JobStore {
             if ordinal <= 0 {
                 return Err(InvestigationStoreError::Invalid);
             }
-            let task = load_task(&tx, &id)?;
+            let task = load_execution_task(&tx, &id)?;
             let size = encode(&task.detail.summary, 4096)?.len() + 1;
             if items.len() == 50 || size > remaining {
                 more = true;
@@ -104,7 +104,7 @@ impl JobStore {
     ) -> Result<InvestigationEventPage, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
-        let task = load_task(&tx, id)?;
+        let task = load_execution_task(&tx, id)?;
         if after_sequence > journal_event_limit(&task)? {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -169,21 +169,57 @@ impl JobStore {
             "SELECT (SELECT count(*) FROM investigation_tasks), (SELECT count(*) FROM investigation_inputs), (SELECT count(*) FROM investigation_refs)",
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        if !(0..=128).contains(&tasks)
-            || !(0..=1152).contains(&inputs)
-            || !(0..=8192).contains(&refs)
+        if usize::try_from(tasks)
+            .ok()
+            .is_none_or(|count| count > MAX_TASKS)
         {
             return Err(InvestigationStoreError::Capacity);
         }
         let ids = tx.prepare("SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks ORDER BY id")?
             .query_map([], |row| row.get::<_, Option<String>>(0))?
             .collect::<Result<Vec<_>, _>>()?;
+        // Only registry-resolved immutable policies contribute admission caps.
+        // Inspect at most MAX_TASKS bounded records before owning input/ref rows;
+        // a new registered profile cannot inherit a hard-coded legacy ceiling.
+        let mut loaded = Vec::with_capacity(ids.len());
+        let mut input_capacity = 0usize;
+        let mut reference_capacity = 0usize;
+        for id in ids {
+            let id = id.ok_or(InvestigationStoreError::Invalid)?;
+            let task = load_execution_task(&tx, &id)?;
+            let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+                .ok_or(InvestigationStoreError::Invalid)?;
+            let revisions = usize::try_from(policy.limits().tool_actions)
+                .ok()
+                .and_then(|count| count.checked_add(1))
+                .ok_or(InvestigationStoreError::Capacity)?;
+            input_capacity = input_capacity
+                .checked_add(revisions)
+                .ok_or(InvestigationStoreError::Capacity)?;
+            // Ledger receipts are monotonic and bounded by selected_facts. Pins
+            // may retain additional receipts before or outside that selection.
+            reference_capacity = reference_capacity
+                .checked_add(policy.limits().selected_facts)
+                .and_then(|count| count.checked_add(policy.max_completion_obligations()))
+                .ok_or(InvestigationStoreError::Capacity)?;
+            loaded.push(task);
+        }
+        if usize::try_from(inputs)
+            .ok()
+            .is_none_or(|count| count > input_capacity)
+            || usize::try_from(refs)
+                .ok()
+                .is_none_or(|count| count > reference_capacity)
+        {
+            return Err(InvestigationStoreError::Capacity);
+        }
         type ReferenceKey = (String, String, String, String);
         let mut expected = std::collections::BTreeMap::<ReferenceKey, i64>::new();
         let mut checked_inputs = 0i64;
-        for id in ids {
-            let id = id.ok_or(InvestigationStoreError::Invalid)?;
-            let task = load_task(&tx, &id)?;
+        for task in loaded {
+            let id = task.detail.summary.investigation_id.clone();
+            let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+                .ok_or(InvestigationStoreError::Invalid)?;
             if let Some(targets) = &task.detail.inspection_requirements {
                 for target in targets {
                     expected
@@ -196,11 +232,23 @@ impl JobStore {
                         .or_insert(0);
                 }
             }
+            if let Some(intent) = &task.completion_intent {
+                for target in intent.obligations.sources_with_policy(policy)? {
+                    // The actual factory inserts pinned source receipts at
+                    // revision zero, even while the task has no initial ledger.
+                    expected
+                        .entry((
+                            id.clone(),
+                            target.registered_source_id,
+                            target.source.repo,
+                            target.receipt_id,
+                        ))
+                        .or_insert(0);
+                }
+            }
             // Verify the current pointer/hash as well as the independently
             // retained revisions. Historical references are never subtracted.
             let current = load_ledger(&tx, &task)?;
-            let policy = InvestigationPolicy::for_limits(&task.detail.limits)
-                .ok_or(InvestigationStoreError::Invalid)?;
             let max_revisions = u64::from(policy.limits().tool_actions)
                 .checked_add(1)
                 .ok_or(InvestigationStoreError::Invalid)?;
@@ -244,7 +292,7 @@ impl JobStore {
                             reference.receipt_id,
                         ))
                         .or_insert(revision);
-                    if expected.len() > 8192 {
+                    if expected.len() > reference_capacity {
                         return Err(InvestigationStoreError::Capacity);
                     }
                 }
@@ -288,3 +336,7 @@ impl JobStore {
         Ok(references)
     }
 }
+
+#[cfg(test)]
+#[path = "reads_tests.rs"]
+mod tests;

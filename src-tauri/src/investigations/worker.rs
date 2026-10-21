@@ -22,6 +22,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::Manager;
 
+#[path = "worker/next_metadata.rs"]
+mod next_metadata;
+#[path = "worker/next_prompt.rs"]
+mod next_prompt;
+#[path = "worker/next_source.rs"]
+mod next_source;
+
 #[derive(Debug)]
 enum Failure {
     AlreadyTerminal,
@@ -149,7 +156,7 @@ fn run_inner<R: tauri::Runtime>(
     let mut clock = RunClock::new(started);
     let outcome = (|| {
         let request = request?;
-        let detail = read_detail(&state, &id)?;
+        let detail = read_detail(&state, &id, &execution)?;
         let mut worker = Worker {
             app: &app,
             state: &state,
@@ -256,11 +263,20 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         self.check_new_work()?;
         let mut usage = self.detail.usage.clone();
         usage.active_milliseconds = self.clock.active_milliseconds();
-        self.transition(InvestigationTransition::InputPrepared {
-            coverage_archive: context.coverage_archive.clone().map(Box::new),
-            ledger: Box::new(context.ledger.clone()),
-            usage,
-        })?;
+        if request.specialist_id.uses_next_prompt_admission() {
+            self.publish_initial_next_prompt(
+                completion_request.ok_or(HostError::InvalidInput)?,
+                provider,
+                &context,
+                &history,
+            )?;
+        } else {
+            self.transition(InvestigationTransition::InputPrepared {
+                coverage_archive: context.coverage_archive.clone().map(Box::new),
+                ledger: Box::new(context.ledger.clone()),
+                usage,
+            })?;
+        }
 
         loop {
             self.check_new_work()?;
@@ -270,26 +286,73 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             if descriptor(provider, request.provider_mode)? != self.detail.provider {
                 return Err(Failure::Stop(InvestigationStopReason::ProviderFailure));
             }
-            let (attempts, attempt_ledgers, completion_metadata) = if completion_request.is_some() {
+            let next_snapshot = if request.specialist_id.uses_next_prompt_admission() {
                 let jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
-                (
-                    jobs.investigation_completion_attempts(self.id)?,
-                    jobs.investigation_completion_attempt_ledgers(self.id)?,
-                    Some(jobs.investigation_completion_metadata(self.id)?),
-                )
+                let snapshot = jobs.investigation_next_prompt_snapshot(
+                    self.id,
+                    completion_request.ok_or(HostError::InvalidInput)?,
+                )?;
+                if snapshot.ledger() != &context.ledger {
+                    return Err(HostError::InputChanged.into());
+                }
+                self.detail = snapshot.detail().clone();
+                Some(snapshot)
             } else {
-                (vec![], vec![], None)
+                None
             };
-            if attempts.len() != attempt_ledgers.len() {
-                return Err(Failure::Store(InvestigationStoreError::Invalid));
-            }
-            let input = if let Some(completion_request) = completion_request {
-                let basis = self
-                    .state
-                    .jobs
-                    .lock()
-                    .map_err(|_| HostError::Operational)?
-                    .investigation_turn_basis(self.id)?;
+            let completion_snapshot = if completion_request.is_some() && next_snapshot.is_none() {
+                let jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
+                let snapshot = jobs.investigation_completion_prompt_snapshot(self.id)?;
+                if snapshot.ledger() != &context.ledger {
+                    return Err(HostError::InputChanged.into());
+                }
+                // Usage, attempt witnesses, metadata and turn ordering now share
+                // one saved read snapshot. Mutation still rechecks ownership and
+                // cancellation through the existing transition boundary.
+                self.detail = snapshot.detail().clone();
+                Some(snapshot)
+            } else {
+                None
+            };
+            // Preserve the exact coherent PRE-call mode, including historical
+            // consent usage. Charging a call must never change its saved mode.
+            let admission_mode = next_snapshot.as_ref().map(|snapshot| snapshot.mode());
+            let input = if let Some(snapshot) = &next_snapshot {
+                let mut pre_call_usage = snapshot.detail().usage.clone();
+                if snapshot.pending_step().is_none() {
+                    pre_call_usage.active_milliseconds = self.clock.active_milliseconds();
+                }
+                let query_pages = context
+                    .query_pages
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                let inventory_details = context
+                    .inventory_details
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                InvestigationInput::prepare_v9_with_policy(
+                    &snapshot.request().question,
+                    self.detail.summary.specialist_id,
+                    context.ledger.clone(),
+                    &query_pages,
+                    &context.evidence,
+                    &history,
+                    &pre_call_usage,
+                    snapshot.basis(),
+                    snapshot.request(),
+                    snapshot.metadata(),
+                    &inventory_details,
+                    snapshot.mode(),
+                    snapshot.capacity_refusal_count(),
+                    snapshot.capacity_feedback(),
+                    policy,
+                )?
+            } else if let Some(completion_request) = completion_request {
+                let snapshot = completion_snapshot
+                    .as_ref()
+                    .ok_or(HostError::InvalidInput)?;
                 let prepare = if self
                     .detail
                     .summary
@@ -308,11 +371,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     &context.evidence,
                     &history,
                     &self.detail.usage,
-                    &basis,
+                    snapshot.basis(),
                     completion_request,
-                    completion_metadata
-                        .as_ref()
-                        .ok_or(HostError::InvalidInput)?,
+                    snapshot.metadata(),
                     &context.inventory_details,
                     policy,
                 )?
@@ -393,7 +454,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             };
             self.check_new_work()?;
             let consent = if provider.locality() == Locality::Cloud {
-                Some(self.await_consent(&step, &prepared)?)
+                Some(self.await_consent(&step, &prepared, &input, &context)?)
             } else {
                 None
             };
@@ -404,7 +465,12 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .authorize_bounded(provider, &prepared, consent.as_ref())
                 .map_err(provider_failure)?;
             self.check_new_work()?;
-            self.transition(InvestigationTransition::BeginInvocation { step })?;
+            if request.specialist_id.uses_next_prompt_admission() {
+                self.publish_next_invocation(&input, &prepared, &context, Some(&authorized))?;
+                super::emit_changed(self.app, &self.detail);
+            } else {
+                self.transition(InvestigationTransition::BeginInvocation { step })?;
+            }
             self.clear_pending()?;
             let deadline = self.clock.deadline()?;
             let directive = || execution_directive(self.state, self.execution, self.id);
@@ -437,6 +503,49 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             input
                 .validate_response_metadata(completion.response_model.as_deref())
                 .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+            if let Some(mode) = admission_mode
+                && self.admit_next_finish_response(
+                    completion_request.ok_or(HostError::InvalidInput)?,
+                    &input,
+                    &prepared,
+                    &completion,
+                    mode,
+                    &step_id,
+                )?
+            {
+                if terminal(self.detail.summary.status) {
+                    return Ok(());
+                }
+                continue;
+            }
+            if admission_mode.is_some() {
+                if self.admit_next_metadata_response(
+                    completion_request.ok_or(HostError::InvalidInput)?,
+                    &input,
+                    &prepared,
+                    &completion,
+                    &step_id,
+                    provider,
+                    &mut context,
+                    &history,
+                )? {
+                    continue;
+                }
+                self.admit_next_source_response(
+                    completion_request.ok_or(HostError::InvalidInput)?,
+                    &input,
+                    &prepared,
+                    &completion,
+                    &step_id,
+                    provider,
+                    &mut context,
+                    &history,
+                )?;
+                if terminal(self.detail.summary.status) {
+                    return Ok(());
+                }
+                continue;
+            }
             let mut completion_finish = None;
             let (action, inventory_read, action_hash) = if completion_request.is_some() {
                 let proof = context
@@ -481,6 +590,16 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 let value: serde_json::Value = serde_json::from_str(&completion.text)
                     .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
                 let hash = content_hash(&bounded_json(&value, 32 * 1024)?);
+                // A finish-only tool proposal terminates before ActionAdmitted,
+                // BeginTool, query replay publication or source access. It is not
+                // a capacity refusal and cannot buy another model iteration.
+                if admission_mode == Some(staged_refusal::CompletionCallMode::FinishOnly)
+                    && matches!(&action, CompletionInvestigationAction::Read(_))
+                {
+                    return Err(Failure::Stop(
+                        InvestigationStopReason::FinishOnlyToolProposal,
+                    ));
+                }
                 match action {
                     CompletionInvestigationAction::Finish(finish) => {
                         completion_finish = Some(finish);
@@ -551,9 +670,13 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .lock()
                     .map_err(|_| HostError::Operational)?
                     .investigation_timestamp(0)?;
-                let evidence = attempts
+                let snapshot = completion_snapshot
+                    .as_ref()
+                    .ok_or(HostError::InvalidInput)?;
+                let evidence = snapshot
+                    .attempts()
                     .iter()
-                    .zip(&attempt_ledgers)
+                    .zip(snapshot.attempt_ledgers())
                     .map(|(record, ledger)| staged_attempt::AttemptEvidence { record, ledger })
                     .collect::<Vec<_>>();
                 match input
@@ -677,7 +800,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
     fn check_new_work(&mut self) -> Result<(), Failure> {
         self.clock.deadline()?;
         let jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
-        let detail = jobs.investigation(self.id)?;
+        let detail = jobs.investigation_owned_detail(self.execution, self.id)?;
         if detail.summary.job_id != self.execution.id() {
             return Err(Failure::Stop(InvestigationStopReason::Operational));
         }
@@ -732,6 +855,16 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             return Ok(Vec::new());
         };
         let jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
+        if request.specialist_id.uses_next_prompt_admission() {
+            let conversation = request
+                .conversation_id
+                .as_deref()
+                .ok_or(HostError::InvalidInput)?;
+            return Ok(jobs
+                .investigation_next_parent_history(parent_id, conversation)?
+                .history()
+                .to_vec());
+        }
         let parent = jobs.investigation(parent_id)?;
         if request.conversation_id.as_ref() != Some(&parent.summary.conversation_id) {
             return Err(Failure::Stop(InvestigationStopReason::PreparationFailed));
@@ -762,6 +895,8 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         &mut self,
         step: &PendingInvestigationStep,
         prepared: &PreparedBoundedCompletion,
+        input: &InvestigationInput,
+        context: &FrozenContext,
     ) -> Result<ConsentGrant, Failure> {
         let remaining = self.clock.remaining_wall().min(Duration::from_secs(900));
         if remaining.is_zero() {
@@ -778,7 +913,16 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .try_into()
                     .map_err(|_| HostError::InvalidInput)?,
             )?;
-        self.apply(InvestigationTransition::AwaitConsent { step: step.clone() })?;
+        if self
+            .detail
+            .summary
+            .specialist_id
+            .uses_next_prompt_admission()
+        {
+            self.publish_next_invocation(input, prepared, context, None)?;
+        } else {
+            self.apply(InvestigationTransition::AwaitConsent { step: step.clone() })?;
+        }
         *self
             .live
             .pending
@@ -802,7 +946,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             }
             let observed = {
                 let jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
-                let detail = jobs.investigation(self.id)?;
+                let detail = jobs.investigation_owned_detail(self.execution, self.id)?;
                 if terminal(detail.summary.status) {
                     return Err(Failure::AlreadyTerminal);
                 }
@@ -815,7 +959,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 ) {
                     return Err(Failure::Stop(InvestigationStopReason::Operational));
                 }
-                jobs.investigation_pending_step(self.id)?
+                jobs.investigation_owned_pending_step(self.execution, self.id)?
             };
             let Some((revision, observed_step, approved)) = observed else {
                 return Err(Failure::Stop(InvestigationStopReason::Operational));
@@ -958,12 +1102,16 @@ fn firewall(state: &AppState) -> Result<EgressFirewall, HostError> {
             .map_err(|_| HostError::Operational)?,
     ))
 }
-fn read_detail(state: &AppState, id: &str) -> Result<InvestigationDetail, Failure> {
+fn read_detail(
+    state: &AppState,
+    id: &str,
+    execution: &JobExecution,
+) -> Result<InvestigationDetail, Failure> {
     Ok(state
         .jobs
         .lock()
         .map_err(|_| HostError::Operational)?
-        .investigation(id)?)
+        .investigation_owned_detail(execution, id)?)
 }
 fn terminal(status: InvestigationStatus) -> bool {
     matches!(
@@ -979,7 +1127,7 @@ fn execution_directive(state: &AppState, execution: &JobExecution, id: &str) -> 
     let Ok(jobs) = state.jobs.lock() else {
         return CallDirective::OwnershipLost;
     };
-    let Ok(detail) = jobs.investigation(id) else {
+    let Ok(detail) = jobs.investigation_owned_detail(execution, id) else {
         return CallDirective::OwnershipLost;
     };
     if detail.summary.job_id != execution.id() {
@@ -1035,23 +1183,35 @@ fn stop<R: tauri::Runtime>(
     active_milliseconds: u64,
 ) {
     for _ in 0..3 {
+        let mut next_family = false;
         let attempt = (|| {
             let mut jobs = state
                 .jobs
                 .lock()
                 .map_err(|_| InvestigationStoreError::Storage)?;
-            let current = jobs.investigation(id)?;
+            let current = jobs.investigation_owned_detail(execution, id)?;
             if terminal(current.summary.status) {
                 return Ok(None);
             }
-            jobs.advance_investigation(
-                execution,
-                current.summary.revision,
-                InvestigationTransition::StopWithElapsed {
+            next_family = current.summary.specialist_id.uses_next_prompt_admission();
+            let elapsed = active_milliseconds.max(current.usage.active_milliseconds);
+            if next_family {
+                jobs.stop_next_prompt_investigation(
+                    execution,
+                    current.summary.revision,
                     reason,
-                    active_milliseconds: active_milliseconds.max(current.usage.active_milliseconds),
-                },
-            )
+                    elapsed,
+                )
+            } else {
+                jobs.advance_investigation(
+                    execution,
+                    current.summary.revision,
+                    InvestigationTransition::StopWithElapsed {
+                        reason,
+                        active_milliseconds: elapsed,
+                    },
+                )
+            }
             .map(Some)
         })();
         match attempt {
@@ -1059,7 +1219,9 @@ fn stop<R: tauri::Runtime>(
                 super::emit_changed(app, &detail);
                 return;
             }
-            Err(InvestigationStoreError::Stale) => continue,
+            // Preserve legacy cleanup semantics; the new family never refreshes
+            // a lost write basis, even for terminal bookkeeping.
+            Err(InvestigationStoreError::Stale) if !next_family => continue,
             _ => return,
         }
     }
@@ -1068,3 +1230,6 @@ fn stop<R: tauri::Runtime>(
 #[cfg(test)]
 #[path = "worker/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(super) use tests::with_public_start_fixture;

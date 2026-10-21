@@ -204,7 +204,85 @@ pub struct ProtectedCompletionMetadata {
     pub last_refusal_id: Option<String>,
     pub feedback: Option<RefusalFeedback>,
 }
+/// Schema-one metadata permits one repair after a refused finish. This is a
+/// protocol allowance, not an additional numeric policy budget.
+const MAX_CONTINUABLE_REFUSALS: u32 = 1;
+
+/// Remaining supported finishing opportunities, derived from saved metadata.
+/// This neither reserves usage nor certifies byte capacity or provider context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinishCallReserve {
+    pub model_invocations: u32,
+    pub generated_token_reservations: u32,
+}
+
+/// Resource-only next-turn decision. Neither variant authorizes dispatch or
+/// proves byte capacity; the host must also certify that mode's exact input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionCallMode {
+    Choice,
+    FinishOnly,
+}
+
 impl ProtectedCompletionMetadata {
+    /// A future admission controller must retain these finish opportunities
+    /// before spending another unrestricted call. Each finish can still be
+    /// invalid or fail operationally; no successful result is promised.
+    pub fn finish_call_reserve_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<FinishCallReserve, InvestigationError> {
+        self.validate_with_policy(policy)?;
+        let model_invocations = MAX_CONTINUABLE_REFUSALS
+            .checked_sub(self.refusal_count)
+            .and_then(|repairs| repairs.checked_add(1))
+            .ok_or(InvestigationError::InvalidInput)?;
+        let generated_token_reservations = model_invocations
+            .checked_mul(policy.limits().generated_tokens_per_invocation)
+            .ok_or(InvestigationError::LimitExceeded)?;
+        Ok(FinishCallReserve {
+            model_invocations,
+            generated_token_reservations,
+        })
+    }
+
+    /// Preserve the remaining repair/finish opportunities before allowing an
+    /// unrestricted choice. Count and generated-token capacity are independent.
+    /// This pure projection charges nothing and cannot attest saved usage.
+    pub fn next_call_mode_with_policy(
+        &self,
+        usage: &InvestigationUsage,
+        policy: &InvestigationPolicy,
+    ) -> Result<CompletionCallMode, InvestigationError> {
+        let reserve = self.finish_call_reserve_with_policy(policy)?;
+        let limits = policy.limits();
+        let calls = limits
+            .model_invocations
+            .checked_sub(usage.model_invocations)
+            .ok_or(InvestigationError::LimitExceeded)?;
+        let tokens = limits
+            .generated_token_reservations
+            .checked_sub(usage.generated_token_reservations)
+            .ok_or(InvestigationError::LimitExceeded)?;
+        if calls < reserve.model_invocations || tokens < reserve.generated_token_reservations {
+            return Err(InvestigationError::LimitExceeded);
+        }
+        let choice_calls = reserve
+            .model_invocations
+            .checked_add(1)
+            .ok_or(InvestigationError::LimitExceeded)?;
+        let choice_tokens = reserve
+            .generated_token_reservations
+            .checked_add(limits.generated_tokens_per_invocation)
+            .ok_or(InvestigationError::LimitExceeded)?;
+        Ok(if calls >= choice_calls && tokens >= choice_tokens {
+            CompletionCallMode::Choice
+        } else {
+            CompletionCallMode::FinishOnly
+        })
+    }
+
     pub fn fingerprint(&self) -> Result<String, InvestigationError> {
         self.fingerprint_with_policy(&INVESTIGATION_V1_POLICY)
     }
@@ -232,7 +310,7 @@ impl ProtectedCompletionMetadata {
             || self.completed_attempt_ids.len() > policy.max_completed_attempts()
             || self.completed_attempt_ids.iter().any(|id| !crate::source_basis::hash(id))
             || self.completed_attempt_ids.iter().collect::<std::collections::BTreeSet<_>>().len() != self.completed_attempt_ids.len()
-            || self.refusal_count > 1 // count two cannot authorize another input
+            || self.refusal_count > MAX_CONTINUABLE_REFUSALS // count two cannot authorize another input
             || (self.refusal_count == 0) != self.last_refusal_id.is_none()
             || (self.refusal_count == 0) != self.feedback.is_none()
             || self.last_refusal_id.as_deref().is_some_and(|id| !crate::source_basis::hash(id))
@@ -284,3 +362,7 @@ impl ProtectedCompletionMetadata {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "finish_reserve_tests.rs"]
+mod finish_reserve_tests;

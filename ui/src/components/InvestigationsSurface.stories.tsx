@@ -1,4 +1,5 @@
-import { queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionCatalog, completionChoices, completionDetail, completionResult, inventoryObligation, sourceObligation } from '../completionFixtures';
+import actualAdmission from '../fixtures/completion-v10-supported.json';
+import { admissionCatalog, admissionDetail, admissionResult, queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionCatalog, completionChoices, completionDetail, completionResult, inventoryObligation, sourceObligation } from '../completionFixtures';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
@@ -598,5 +599,87 @@ export const QueryHistorySavedCompletion: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByText('Supported completion.')).toBeVisible();
     await expect(canvas.getByText('Completion obligations')).toBeVisible();
+  },
+};
+
+
+export const ExplicitNextPromptAdmission: Story = {
+  // AC-0287: only an explicit Expanded selection chooses the advertised @10 family.
+  args: { state: state({ catalog: admissionCatalog, obligationChoices: completionChoices,
+    draftObligations: [inventoryObligation], detail: null, selectedId: null }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByLabelText('Investigation budget')).toHaveValue('investigation-v1');
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
+    await userEvent.click(canvas.getByRole('radio', { name: /evidence-auditor@3/ }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Audit bounded continuation evidence.');
+    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
+    await expect(canvas.getByRole('radio', { name: /evidence-auditor@10/ })).toBeChecked();
+    await expect(canvas.queryByRole('radio', { name: /evidence-auditor@9/ })).not.toBeInTheDocument();
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'evidence-auditor@10',
+      limit_profile: 'investigation-v2', obligations: expect.objectContaining({ schema_version: 2 }) }));
+  },
+};
+
+export const SavedQueryHistoryNeedsExplicitNextFamilyFollowup: Story = {
+  args: { state: state({ catalog: admissionCatalog, obligationChoices: completionChoices,
+    draftObligations: [inventoryObligation], detail: queryHistoryDetail(), result: queryHistoryResult(), selectedId: 'inv-query-history' }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Supported completion.')).toBeVisible();
+    useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@9', limitProfile: 'investigation-v2',
+      question: 'Inspect a fresh basis.', parent: { conversation_id: 'original-conversation', parent_id: 'original-parent' } });
+    await waitFor(() => expect(canvas.getByText(/is unavailable for this investigation budget/)).toBeVisible());
+    await expect(canvas.getByRole('button', { name: 'Start follow-up' })).toBeDisabled();
+    await expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@9');
+    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@10/ }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@10',
+      parent_id: 'original-parent', conversation_id: 'original-conversation' }));
+    await expect(args.state.detail?.specialist_id).toBe('domain-analyst@9');
+  },
+};
+
+export const NextPromptSavedCompletion: Story = {
+  args: { state: state({ catalog: admissionCatalog, detail: admissionDetail(), result: admissionResult(),
+    selectedId: 'inv-admission', history: [admissionDetail()] }) },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Supported completion.')).toBeVisible();
+    await expect(canvas.getByText('Completion obligations')).toBeVisible();
+  },
+};
+
+
+export const ActualNextPromptWorkerReopened: Story = {
+  // AC-0287: actual Rust MockRuntime worker -> public durable DTO -> UI; not a live-provider acceptance claim.
+  beforeEach: () => {
+    const detail = actualAdmission.detail as unknown as InvestigationDetail;
+    mockIPC((command) => command === 'get_investigation' ? detail : command === 'investigation_result' ? actualAdmission.result :
+      command === 'investigation_events' ? { investigation_id: detail.investigation_id, items: actualAdmission.events,
+        next_sequence: actualAdmission.events.at(-1)!.sequence, has_more: false } : null);
+    useInvestigationStore.setState({ catalog: admissionCatalog });
+    return () => clearMocks();
+  },
+  render: function ActualWorkerHistory() {
+    const state = useInvestigationStore();
+    return <InvestigationsSurface state={state} anchors={[]} canStart />;
+  },
+  play: async ({ canvasElement }) => {
+    await useInvestigationStore.getState().open(actualAdmission.detail.investigation_id);
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Supported completion.')).toBeVisible();
+    await expect(canvas.getByText(actualAdmission.result.findings[0].title)).toBeVisible();
+    const coverage = within(canvas.getByRole('region', { name: 'Saved investigation coverage' }));
+    await expect(coverage.getByText('Coverage is not exhaustive.')).toBeVisible();
+    await expect(coverage.getByText(/Recorded at preparation/)).toBeVisible();
+    await expect(coverage.getByText('Limited recorded coverage.')).toBeVisible();
+    await expect(coverage.getByText(actualAdmission.detail.coverage_context.coverage.repos[0].repo)).toBeVisible();
+    await expect(coverage.getByText('The saved coverage qualification was available to the specialist when it finished.')).toBeVisible();
+    await expect(useInvestigationStore.getState().detail).toEqual(actualAdmission.detail);
+    await expect(useInvestigationStore.getState().result).toEqual(actualAdmission.result);
+    await expect(useInvestigationStore.getState().events).toEqual(actualAdmission.events);
+    await expect(canvas.getByText(/Findings cover the inspected scope; knowledge remains partial/)).toBeVisible();
   },
 };

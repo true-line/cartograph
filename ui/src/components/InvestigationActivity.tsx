@@ -6,6 +6,7 @@ const LABELS: Record<InvestigationEvent['kind'], string> = {
   model_completed: 'Model response received', action_admitted: 'Action validated',
   tool_started: 'Tool started', tool_completed: 'Tool completed',
   evidence_validation_reserved: 'Source validation budget reserved',
+  capacity_refused: 'Evidence request exceeds continuation capacity',
   finish_refused: 'Finish refused — evidence obligations remain', read_unavailable: 'Requested evidence unavailable',
   consent_required: 'Cloud action awaiting consent', consent_approved: 'Cloud action approved',
   consent_declined: 'Cloud action declined', cancel_requested: 'Cancellation requested',

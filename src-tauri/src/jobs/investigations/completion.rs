@@ -2,10 +2,25 @@
 use super::*;
 use rusqlite::Transaction;
 
+#[path = "saved_metadata_history.rs"]
+mod saved_metadata_history;
+pub(super) use saved_metadata_history::SavedMetadataHistory;
+
+#[path = "next_prompt_snapshot.rs"]
+mod next_prompt_snapshot;
+
+#[path = "next_prompt_finish.rs"]
+mod next_prompt_finish;
+#[cfg(test)]
+pub(super) use next_prompt_finish::FinishFixture;
+pub(crate) use next_prompt_finish::NextPromptFinish;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CompletionIntent {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_schema_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     limit_profile: Option<String>,
     pub request_hash: String,
@@ -30,13 +45,16 @@ impl CompletionIntent {
             serde_json::from_value(serde_json::Value::String(request.specialist_id.clone()))
                 .map_err(|_| InvestigationStoreError::Invalid)?;
         Ok(Self {
-            schema_version: if specialist.uses_query_history_disclosure() {
+            schema_version: if specialist.uses_next_prompt_admission() {
+                4
+            } else if specialist.uses_query_history_disclosure() {
                 3
             } else if policy.profile() == "investigation-v1" {
                 1
             } else {
                 2
             },
+            request_schema_version: specialist.uses_next_prompt_admission().then_some(7),
             limit_profile: (policy.profile() != "investigation-v1")
                 .then(|| policy.profile().into()),
             request_hash: request.intent_hash_with_policy(policy)?,
@@ -60,13 +78,22 @@ impl CompletionIntent {
         let legacy = policy.profile() == "investigation-v1";
         let summary = &task.detail.summary;
         if self.schema_version
-            != if summary.specialist_id.uses_query_history_disclosure() {
+            != if summary.specialist_id.uses_next_prompt_admission() {
+                4
+            } else if summary.specialist_id.uses_query_history_disclosure() {
                 3
             } else if legacy {
                 1
             } else {
                 2
             }
+            || self.request_schema_version
+                != summary
+                    .specialist_id
+                    .uses_next_prompt_admission()
+                    .then_some(7)
+            || (summary.specialist_id.uses_next_prompt_admission()
+                && (task.schema_version != 3 || summary.schema_version != 7 || legacy))
             || self.limit_profile.as_deref() != if legacy { None } else { Some(policy.profile()) }
             || summary.specialist_id.uses_policy_selection() == legacy
             || !hash_valid(&self.request_hash)
@@ -126,10 +153,11 @@ impl CompletionIntent {
                 .as_ref()
                 .map(|basis| &basis.disclosure_hash),
         };
-        let prefix = if self.schema_version == 3 {
-            "investigation-disclosure-v5:"
-        } else {
-            "investigation-disclosure-v4:"
+        let prefix = match self.schema_version {
+            4 => "investigation-disclosure-v6:",
+            3 => "investigation-disclosure-v5:",
+            1 | 2 => "investigation-disclosure-v4:",
+            _ => return Err(InvestigationStoreError::Invalid),
         };
         if disclosure_hash.is_some_and(|hash| !hash.strip_prefix(prefix).is_some_and(hash_valid)) {
             return Err(InvestigationStoreError::Invalid);
@@ -145,6 +173,13 @@ impl CompletionIntent {
         }
     }
 }
+#[cfg(test)]
+pub(super) fn host_fixture_intent(
+    request: &StagedObligationRequest,
+) -> Result<CompletionIntent, InvestigationStoreError> {
+    CompletionIntent::new(request)
+}
+
 pub(super) fn initial_detail(intent: &CompletionIntent) -> InvestigationCompletionDetail {
     InvestigationCompletionDetail {
         schema_version: 1,
@@ -156,11 +191,59 @@ pub(super) fn initial_detail(intent: &CompletionIntent) -> InvestigationCompleti
         assessment: vec![],
     }
 }
+/// Coherent, owned completion inputs from one saved database read snapshot.
+/// This carries no lease/authorization proof, latest-graph claim or transient
+/// source bytes. A later mutation still needs its normal transaction guards.
+pub(crate) struct CompletionPromptSnapshot {
+    detail: InvestigationDetail,
+    ledger: InvestigationInputLedger,
+    attempts: Vec<AttemptRecord>,
+    attempt_ledgers: Vec<InvestigationInputLedger>,
+    metadata: ProtectedCompletionMetadata,
+    basis: InvestigationTurnBasis,
+}
+impl CompletionPromptSnapshot {
+    pub(crate) fn detail(&self) -> &InvestigationDetail {
+        &self.detail
+    }
+    pub(crate) fn ledger(&self) -> &InvestigationInputLedger {
+        &self.ledger
+    }
+    pub(crate) fn attempts(&self) -> &[AttemptRecord] {
+        &self.attempts
+    }
+    pub(crate) fn attempt_ledgers(&self) -> &[InvestigationInputLedger] {
+        &self.attempt_ledgers
+    }
+    pub(crate) fn metadata(&self) -> &ProtectedCompletionMetadata {
+        &self.metadata
+    }
+    pub(crate) fn basis(&self) -> &InvestigationTurnBasis {
+        &self.basis
+    }
+}
+
 impl JobStore {
     pub(crate) fn start_completion_investigation(
         &mut self,
         request: &StagedObligationRequest,
         provider: Option<&InvestigationProvider>,
+    ) -> Result<InvestigationStart, InvestigationStoreError> {
+        self.start_completion_family(request, provider, false)
+    }
+    /// Factory for the exact next-prompt request family.
+    pub(crate) fn start_next_prompt_investigation(
+        &mut self,
+        request: &StagedObligationRequest,
+        provider: Option<&InvestigationProvider>,
+    ) -> Result<InvestigationStart, InvestigationStoreError> {
+        self.start_completion_family(request, provider, true)
+    }
+    fn start_completion_family(
+        &mut self,
+        request: &StagedObligationRequest,
+        provider: Option<&InvestigationProvider>,
+        next_prompt: bool,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         let policy = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
@@ -185,7 +268,7 @@ impl JobStore {
             conversation_id: request.conversation_id.clone(),
             parent_id: request.parent_id.clone(),
         };
-        self.start_investigation_internal(&projected, provider, Some(intent))
+        self.start_investigation_internal(&projected, provider, Some(intent), next_prompt)
     }
     pub(crate) fn existing_investigation_completion(
         &self,
@@ -204,8 +287,18 @@ impl JobStore {
             )
             .optional()?;
         let detail = if let Some(id) = id {
-            let task = load_task(&tx, &id)?;
-            if task.schema_version != 2 || task.intent_hash != hash {
+            let task = load_execution_task(&tx, &id)?;
+            let expected = CompletionIntent::new(request)?;
+            let schema = if expected.specialist.uses_next_prompt_admission() {
+                3
+            } else {
+                2
+            };
+            if task.schema_version != schema
+                || task.intent_hash != hash
+                || encode(&task.completion_intent, MAX_MANIFEST_BYTES)?
+                    != encode(&Some(expected), MAX_MANIFEST_BYTES)?
+            {
                 return Err(InvestigationStoreError::Conflict);
             }
             Some(task.detail)
@@ -215,6 +308,22 @@ impl JobStore {
         tx.commit()?;
         Ok(detail)
     }
+    /// Read saved task/revision/usage, current ledger, exact ordered completed
+    /// attempts and their ledgers, protected metadata and turn basis coherently.
+    /// All loaders run inside this one read-only deferred transaction. This is
+    /// a saved-state view, not permission to invoke a provider or publish a read.
+    pub(crate) fn investigation_completion_prompt_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<CompletionPromptSnapshot, InvestigationStoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let task = load_task(&tx, id)?;
+        let snapshot = prompt_snapshot(&tx, task)?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+    #[cfg(test)]
     pub(crate) fn investigation_completion_attempts(
         &self,
         id: &str,
@@ -226,6 +335,7 @@ impl JobStore {
         tx.commit()?;
         Ok(rows.into_iter().map(|entry| entry.record).collect())
     }
+    #[cfg(test)]
     pub(crate) fn investigation_completion_attempt_ledgers(
         &self,
         id: &str,
@@ -251,6 +361,31 @@ impl JobStore {
         Ok(metadata)
     }
 }
+/// All authority reads use the caller's already pinned read transaction.
+fn prompt_snapshot(
+    connection: &Connection,
+    task: StoredTask,
+) -> Result<CompletionPromptSnapshot, InvestigationStoreError> {
+    let id = &task.detail.summary.investigation_id;
+    validated_intent(&task)?;
+    let ledger = load_ledger(connection, &task)?.ok_or(InvestigationStoreError::Invalid)?;
+    let entries = attempts(connection, &task)?;
+    let attempt_ledgers = entries
+        .iter()
+        .map(|entry| ledger_at(connection, id, entry.record.input_revision))
+        .collect::<Result<Vec<_>, _>>()?;
+    let metadata = metadata(connection, &task, None)?;
+    let basis = super::turn::basis(connection, &task)?;
+    Ok(CompletionPromptSnapshot {
+        detail: task.detail,
+        ledger,
+        attempts: entries.into_iter().map(|entry| entry.record).collect(),
+        attempt_ledgers,
+        metadata,
+        basis,
+    })
+}
+
 const LEGACY_ATTEMPT_TABLE: &str = "CREATE TABLE completion_attempts(task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 32), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence)) STRICT";
 const ATTEMPT_SCHEMA: &[&str] = &[
     "CREATE TABLE completion_attempts(task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 112), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence)) STRICT",
@@ -320,7 +455,7 @@ pub(super) fn stored_bytes(
     let bytes:i64=connection.query_row("SELECT coalesce(sum(length(CAST(body AS BLOB))+length(CAST(body_hash AS BLOB))+256),0) FROM completion_attempts WHERE (?1 IS NULL OR task_id=?1)",[id],|r|r.get(0))?;
     usize::try_from(bytes).map_err(|_| InvestigationStoreError::Capacity)
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AttemptEntry {
     pub record: AttemptRecord,
@@ -501,7 +636,7 @@ pub(super) fn attempts(
                     max_bytes,
                 } = &entry.record.read
                 {
-                    let archive = super::coverage::load(connection, id)?
+                    let archive = super::coverage::load_for_task(connection, task)?
                         .ok_or(InvestigationStoreError::Invalid)?;
                     if !matches!(
                         archive.read(&InvestigationCoverageRead {
@@ -528,7 +663,7 @@ pub(super) fn attempts(
     }
     Ok(entries)
 }
-fn unavailable_message(reason: &UnavailableReason) -> &'static str {
+pub(super) fn unavailable_message(reason: &UnavailableReason) -> &'static str {
     match reason {
         UnavailableReason::PinnedTargetAbsent => "Pinned completion target was unavailable.",
         UnavailableReason::RangeOutOfBounds => "Completion source range was unavailable.",
@@ -537,6 +672,10 @@ fn unavailable_message(reason: &UnavailableReason) -> &'static str {
         }
     }
 }
+#[path = "prospective_attempt.rs"]
+mod prospective_attempt;
+pub(super) use prospective_attempt::derive_attempt_records;
+
 fn append_attempt(
     connection: &Connection,
     task: &StoredTask,
@@ -544,53 +683,66 @@ fn append_attempt(
     outcome: AttemptOutcome,
     revision: u64,
 ) -> Result<(), InvestigationStoreError> {
-    let policy = saved_policy(task)?;
-    // Reserved decode-only outcome: no current production firewall emits a
-    // trustworthy per-read refusal witness, and redaction is still acquisition.
+    saved_policy(task)?;
+    if matches!(outcome, AttemptOutcome::FirewallRefused { .. }) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    validated_intent(task)?;
+    let step_id = latest_step(connection, &task.detail.summary.investigation_id)?;
+    append_attempt_at_step(connection, task, &step_id, read, outcome, revision)
+}
+
+/// Derive and append against the exact saved step/response. This never accepts
+/// caller-fabricated records or silently replaces a stale step with the latest.
+/// The caller owns the transaction and genuine read/event/phase authority.
+pub(super) fn append_attempt_at_step(
+    connection: &Connection,
+    task: &StoredTask,
+    step_id: &str,
+    read: &ReadIntent,
+    outcome: AttemptOutcome,
+    revision: u64,
+) -> Result<(), InvestigationStoreError> {
+    saved_policy(task)?;
     if matches!(outcome, AttemptOutcome::FirewallRefused { .. }) {
         return Err(InvestigationStoreError::Invalid);
     }
     let intent = validated_intent(task)?;
     let id = &task.detail.summary.investigation_id;
-    let step = latest_step(connection, id)?;
-    let response: InvestigationResponseMeta =
-        read_body(connection, "investigation_responses", "step_id", id, &step)?
-            .ok_or(InvestigationStoreError::Invalid)?;
+    if latest_step(connection, id)? != step_id {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let response: InvestigationResponseMeta = read_body(
+        connection,
+        "investigation_responses",
+        "step_id",
+        id,
+        &step_id,
+    )?
+    .ok_or(InvestigationStoreError::Invalid)?;
     if response.action_hash != staged::read_action_hash(read)? {
         return Err(InvestigationStoreError::Invalid);
     }
-    let mut count = attempts(connection, task)?.len();
-    for obligation in &intent.obligations.obligations {
-        if !read.matches(obligation) {
-            continue;
-        }
-        count += 1;
-        if count > policy.max_completed_attempts() {
-            return Err(InvestigationStoreError::Capacity);
-        }
-        let mut record = AttemptRecord {
-            schema_version: 1,
-            attempt_id: String::new(),
-            task_id: id.clone(),
-            request_hash: intent.request_hash.clone(),
-            obligations_hash: intent.obligations_hash.clone(),
-            obligation_id: obligation.key().1.into(),
-            step_id: step.clone(),
-            read: read.clone(),
-            input_ledger_hash: String::new(),
-            input_revision: revision,
-            outcome: outcome.clone(),
-        };
-        let ledger = ledger_at(connection, id, revision)?;
-        record.input_ledger_hash = ledger.fingerprint_with_policy(policy)?;
-        record.attempt_id = record.content_id()?;
-        record.validate_binding_with_policy(
-            &intent.request_hash,
-            &intent.obligations,
-            id,
-            &ledger,
-            policy,
-        )?;
+    let count = attempts(connection, task)?.len();
+    // Incidental reads with no matching obligation historically require no
+    // acquisition ledger lookup. Keep that behavior in the shared derivation.
+    let ledger = intent
+        .obligations
+        .obligations
+        .iter()
+        .any(|obligation| read.matches(obligation))
+        .then(|| ledger_at(connection, id, revision))
+        .transpose()?;
+    let records = derive_attempt_records(
+        task,
+        step_id,
+        &response,
+        read,
+        &outcome,
+        ledger.as_ref(),
+        count,
+    )?;
+    for (offset, record) in records.into_iter().enumerate() {
         let entry = AttemptEntry {
             record,
             response_hash: response.response_hash.clone(),
@@ -601,13 +753,168 @@ fn append_attempt(
             connection,
             "completion_attempts",
             id,
-            &signed(count as u64)?,
+            &signed((count + offset + 1) as u64)?,
             &entry,
             MAX_RECORD_BYTES,
         )?;
     }
     Ok(())
 }
+
+/// Append the exact projected acquisition suffix in the caller's writer Tx.
+/// The caller authenticates execution ownership/current invocation before any
+/// mutation and performs final task/global capacity/CAS checks before COMMIT.
+/// Named immutable call/response/ledger/event witnesses are reloaded here; the
+/// expected records confer no authority and must equal fresh pure derivation.
+/// Unlike the legacy append path this never infers an invocation from rowids.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_next_prompt_attempt_at_step(
+    tx: &rusqlite::Transaction<'_>,
+    task: &StoredTask,
+    call: &admission_contract::SavedCallBasis,
+    response: &InvestigationResponseMeta,
+    read: &ReadIntent,
+    outcome: &AttemptOutcome,
+    ledger: &InvestigationInputLedger,
+    expected_records: &[AttemptRecord],
+) -> Result<(), InvestigationStoreError> {
+    admission_contract::validate_pairing(task)?;
+    let policy = saved_policy(task)?;
+    let id = &task.detail.summary.investigation_id;
+    let core = admission_contract::load_saved_call_basis_core(tx, task, call)?;
+    if call.mode() != CompletionCallMode::Choice
+        || task.phase != Phase::Ready
+        || task.detail.summary.cancel_requested
+        || response.step_id != call.step_id
+        || !hash_valid(&response.response_hash)
+        || response.action_hash != staged::read_action_hash(read)?
+        || next_prompt_invocations(tx, task)?
+            .last()
+            .map(|(ordinal, _)| *ordinal)
+            != Some(core.ordinal)
+        || task.ledger_revision != Some(ledger.revision)
+        || task.ledger_hash.as_ref() != Some(&ledger.fingerprint_with_policy(policy)?)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let saved_response: InvestigationResponseMeta =
+        read_body(tx, "investigation_responses", "step_id", id, &call.step_id)?
+            .ok_or(InvestigationStoreError::Missing)?;
+    if saved_response != *response || ledger_at(tx, id, ledger.revision)? != *ledger {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let tool = match (read, outcome) {
+        (
+            ReadIntent::Source { fact, role, index },
+            AttemptOutcome::SourceAcquired { citation_id },
+        ) => {
+            let citation = ledger
+                .citations
+                .get(core.ledger.citations.len())
+                .ok_or(InvestigationStoreError::Invalid)?;
+            if citation.citation_id != *citation_id
+                || citation.fact != *fact
+                || citation.role != Some(*role)
+                || citation.index != Some(*index)
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            InvestigationTool::ReadEvidence
+        }
+        (
+            ReadIntent::Inventory {
+                context_id,
+                repo,
+                inventory_hash,
+                max_bytes,
+            },
+            AttemptOutcome::InventoryAcquired { read_index },
+        ) => {
+            let acquired = ledger
+                .coverage_reads
+                .get(*read_index)
+                .ok_or(InvestigationStoreError::Invalid)?;
+            if *read_index != core.ledger.coverage_reads.len()
+                || acquired.request
+                    != (InvestigationCoverageRead {
+                        context_id: context_id.clone(),
+                        repo: repo.clone(),
+                        inventory_hash: inventory_hash.clone(),
+                        max_bytes: *max_bytes,
+                    })
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            InvestigationTool::ReadCoverageInventory
+        }
+        _ => return Err(InvestigationStoreError::Invalid),
+    };
+    InvestigationTurnBasis {
+        input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
+        previous_ledger: Some(core.ledger),
+        completed_tool: Some(tool),
+    }
+    .validate_with_policy(ledger, policy)?;
+    let event: InvestigationEvent = read_body(
+        tx,
+        "investigation_events",
+        "sequence",
+        id,
+        &signed(task.detail.summary.last_event_sequence)?,
+    )?
+    .ok_or(InvestigationStoreError::Missing)?;
+    if event.investigation_id != *id
+        || event.sequence != task.detail.summary.last_event_sequence
+        || event.revision != task.detail.summary.revision
+        || event.kind != InvestigationEventKind::ToolCompleted
+        || event.tool != Some(tool)
+        || event
+            .step_id
+            .as_deref()
+            .is_some_and(|step| step != call.step_id)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let prior = attempts(tx, task)?;
+    // A publication is a one-shot suffix, including repeated reads. Reusing a
+    // completed invocation must not append another observation for that step.
+    if prior
+        .iter()
+        .any(|entry| entry.record.step_id == call.step_id)
+    {
+        return Err(InvestigationStoreError::Conflict);
+    }
+    let records = derive_attempt_records(
+        task,
+        &call.step_id,
+        response,
+        read,
+        outcome,
+        Some(ledger),
+        prior.len(),
+    )?;
+    if records != expected_records {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let entries =
+        project_attempt_entries(records, response, task.detail.summary.last_event_sequence)?;
+    for (offset, entry) in entries.iter().enumerate() {
+        insert_body(
+            tx,
+            "completion_attempts",
+            id,
+            &signed((prior.len() + offset + 1) as u64)?,
+            entry,
+            MAX_RECORD_BYTES,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "next_prompt_attempt_tests.rs"]
+mod next_prompt_attempt_tests;
+
 pub(super) fn record_acquisition(
     connection: &Connection,
     task: &StoredTask,
@@ -695,7 +1002,7 @@ pub(super) fn unavailable(
         if reason != UnavailableReason::InventoryExceedsMaxBytes {
             return Err(InvestigationStoreError::Invalid);
         }
-        let archive = super::coverage::load(connection, &task.detail.summary.investigation_id)?
+        let archive = super::coverage::load_for_task(connection, task)?
             .ok_or(InvestigationStoreError::Invalid)?;
         let request = InvestigationCoverageRead {
             context_id: context_id.clone(),
@@ -768,13 +1075,25 @@ fn raw_refusals(
     }
     Ok(entries)
 }
+#[path = "prospective_metadata.rs"]
+mod prospective_metadata;
+pub(super) use prospective_metadata::derive_protected_metadata;
+
 fn metadata(
     connection: &Connection,
     task: &StoredTask,
     step: Option<&str>,
 ) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
-    let policy = saved_policy(task)?;
-    let intent = validated_intent(task)?;
+    if task
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        return next_prompt_metadata(connection, task, step);
+    }
+    saved_policy(task)?;
+    validated_intent(task)?;
     let id = &task.detail.summary.investigation_id;
     let cutoff = step
         .map(|step| {
@@ -806,24 +1125,175 @@ fn metadata(
             refusals.push(entry);
         }
     }
-    let last = refusals.last();
-    let metadata = ProtectedCompletionMetadata {
-        schema_version: 1,
-        request_hash: intent.request_hash.clone(),
-        obligations_hash: intent.obligations_hash.clone(),
-        completed_attempt_ids: records,
-        refusal_count: refusals.len() as u32,
-        last_refusal_id: last.map(|entry| entry.record.refusal_id.clone()),
-        feedback: last.map(|entry| entry.record.feedback.clone()),
-    };
-    metadata.validate_with_policy(policy)?;
-    Ok(metadata)
+    derive_protected_metadata(
+        task,
+        records,
+        &refusals
+            .iter()
+            .map(|entry| &entry.record)
+            .collect::<Vec<_>>(),
+    )
 }
+/// Immutable within-task @10 invocation ordinals, derived from the sealed
+/// pre-call counter. No rowid/timestamp/cross-table sequence orders new calls.
+pub(super) fn next_prompt_invocations(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<Vec<(u32, PendingInvestigationStep)>, InvestigationStoreError> {
+    #[cfg(test)]
+    saved_metadata_history::note_invocation_sweep();
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    admission_contract::validate_pairing(task)?;
+    let id = &task.detail.summary.investigation_id;
+    let policy = saved_policy(task)?;
+    let limit = policy.limits().model_invocations;
+    let (count, bounded): (i64, bool) = connection.query_row(
+        "SELECT count(*),coalesce(min(typeof(step_id)='text' AND length(CAST(step_id AS BLOB)) BETWEEN 1 AND 128),1) FROM investigation_invocations WHERE task_id=?1",
+        [id], |row| Ok((row.get(0)?,row.get(1)?)))?;
+    if !bounded
+        || u32::try_from(count).ok().is_none_or(|n| n > limit)
+        || u32::try_from(count).ok() != Some(task.detail.usage.model_invocations)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let keys = connection
+        .prepare("SELECT step_id FROM investigation_invocations WHERE task_id=?1")?
+        .query_map([id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut steps = Vec::with_capacity(keys.len());
+    for key in keys {
+        let step: PendingInvestigationStep =
+            read_body(connection, "investigation_invocations", "step_id", id, &key)?
+                .ok_or(InvestigationStoreError::Missing)?;
+        validate_step(&step, &task.detail.limits)?;
+        let disclosure = step
+            .disclosure
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let admission = disclosure
+            .admission
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        admission.validate_with_policy(policy)?;
+        let ordinal = admission
+            .consumed_budgets
+            .model_invocations
+            .checked_add(1)
+            .ok_or(InvestigationStoreError::Capacity)?;
+        if step.step_id != key || disclosure.schema_version != 6 || ordinal > limit {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        steps.push((ordinal, step));
+    }
+    steps.sort_by_key(|(ordinal, _)| *ordinal);
+    for (index, (ordinal, _)) in steps.iter().enumerate() {
+        if usize::try_from(*ordinal).ok() != index.checked_add(1) {
+            return Err(InvestigationStoreError::Invalid);
+        }
+    }
+    Ok(steps)
+}
+
+fn next_prompt_metadata(
+    connection: &Connection,
+    task: &StoredTask,
+    cutoff_step: Option<&str>,
+) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
+    validated_intent(task)?;
+    let steps = next_prompt_invocations(connection, task)?;
+    let ordinal = |step: &str| -> Result<u32, InvestigationStoreError> {
+        steps
+            .iter()
+            .find(|(_, saved)| saved.step_id == step)
+            .map(|(ordinal, _)| *ordinal)
+            .ok_or(InvestigationStoreError::Missing)
+    };
+    let cutoff = cutoff_step.map(ordinal).transpose()?;
+    let mut records = Vec::new();
+    for entry in attempts(connection, task)? {
+        let current = ordinal(&entry.record.step_id)?;
+        if cutoff.is_none_or(|cutoff| current < cutoff) {
+            records.push(entry.record.attempt_id);
+        }
+    }
+    let mut refusals = Vec::new();
+    for entry in raw_refusals(connection, task)? {
+        let current = ordinal(&entry.record.step_id)?;
+        if cutoff.is_none_or(|cutoff| current < cutoff) {
+            refusals.push(entry);
+        }
+    }
+    derive_protected_metadata(
+        task,
+        records,
+        &refusals
+            .iter()
+            .map(|entry| &entry.record)
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Authentic protected metadata for a prospective @10 call. Historical callers
+/// must instead name their exact immutable invocation cutoff.
+pub(super) fn metadata_current_next_prompt(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
+    next_prompt_metadata(connection, task, None)
+}
+
+/// Require the exact immutable invocation before deriving its metadata cutoff.
+/// A missing requested step never becomes None/latest/all-records metadata.
+pub(super) fn metadata_at_saved_step(
+    connection: &Connection,
+    task: &StoredTask,
+    step: &PendingInvestigationStep,
+) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let saved: PendingInvestigationStep = read_body(
+        connection,
+        "investigation_invocations",
+        "step_id",
+        &task.detail.summary.investigation_id,
+        &step.step_id,
+    )?
+    .ok_or(InvestigationStoreError::Missing)?;
+    if saved != *step {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    metadata(connection, task, Some(&step.step_id))
+}
+
 pub(super) fn validate_step_metadata(
     connection: &Connection,
     task: &StoredTask,
     step: &PendingInvestigationStep,
 ) -> Result<(), InvestigationStoreError> {
+    if task
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        let call = task
+            .admission_state
+            .as_ref()
+            .and_then(|state| state.current_call.as_ref())
+            .ok_or(InvestigationStoreError::Invalid)?;
+        if call.step_id != step.step_id {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        call.validate_saved(connection, task)?;
+        let core = admission_contract::load_saved_call_basis_core(connection, task, call)?;
+        if core.step != *step {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        return Ok(());
+    }
     let policy = saved_policy(task)?;
     let intent = validated_intent(task)?;
     let disclosure = step
@@ -912,10 +1382,17 @@ fn observation_detail(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<InvestigationCompletionDetail, InvestigationStoreError> {
-    let policy = saved_policy(task)?;
-    let intent = validated_intent(task)?;
     let entries = attempts(connection, task)?;
     let refusals = raw_refusals(connection, task)?;
+    observation_from_entries(task, &entries, &refusals)
+}
+fn observation_from_entries(
+    task: &StoredTask,
+    entries: &[AttemptEntry],
+    refusals: &[staged::JournalEntry],
+) -> Result<InvestigationCompletionDetail, InvestigationStoreError> {
+    let policy = saved_policy(task)?;
+    let intent = validated_intent(task)?;
     let last = refusals.last();
     if task.phase != Phase::Terminal && last.is_none() {
         return Ok(initial_detail(intent));
@@ -966,7 +1443,7 @@ fn observation_detail(
             .assessment
             .clone()
     } else {
-        observed_assessment(intent, &entries)
+        observed_assessment(intent, entries)
     };
     Ok(InvestigationCompletionDetail {
         schema_version: 1,
@@ -1151,7 +1628,16 @@ pub(super) fn validate_saved(
     let refusals = if raw.is_empty() {
         vec![]
     } else {
-        staged::load(connection, &task.detail.summary.investigation_id)?
+        if task
+            .detail
+            .summary
+            .specialist_id
+            .uses_next_prompt_admission()
+        {
+            staged::load_for_task(connection, task)?
+        } else {
+            staged::load(connection, &task.detail.summary.investigation_id)?
+        }
     };
     let detail = task
         .detail
@@ -1306,16 +1792,35 @@ pub(super) fn refused(
         .into_iter()
         .map(|entry| entry.record)
         .collect::<Vec<_>>();
-    let disposition = staged::append(
-        tx,
-        namespace,
-        execution,
-        request,
-        input,
-        finish,
-        response.clone(),
-        &attempts,
-    )?;
+    let disposition = if task
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        staged::append_for_task(
+            tx,
+            namespace,
+            execution,
+            task,
+            request,
+            input,
+            finish,
+            response.clone(),
+            &attempts,
+        )?
+    } else {
+        staged::append(
+            tx,
+            namespace,
+            execution,
+            request,
+            input,
+            finish,
+            response.clone(),
+            &attempts,
+        )?
+    };
     let entries = raw_refusals(tx, task)?;
     let entry = entries.last().ok_or(InvestigationStoreError::Invalid)?;
     task.detail.usage = entry.usage.clone();
@@ -1323,6 +1828,9 @@ pub(super) fn refused(
     task.approved = false;
     task.action_tool = None;
     task.phase = Phase::Ready;
+    if let Some(state) = task.admission_state.as_mut() {
+        state.current_call = None;
+    }
     task.detail.summary.status = InvestigationStatus::Running;
     task.detail.summary.completion_outcome = None;
     bump(tx, task)?;
@@ -1382,3 +1890,23 @@ pub(super) fn refused(
 #[cfg(test)]
 #[path = "completion_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(super) use tests::next_prompt_contract_tests::{
+    InternalFixture, internal_fixture as internal_next_prompt_fixture,
+    internal_fixture_with_initial_ledger, internal_fixture_with_step_preparer,
+};
+
+#[path = "completion_settlement_projection.rs"]
+mod settlement_projection;
+pub(super) use settlement_projection::{
+    persist_projected_entries, project_attempt_entries, project_observation,
+    size_attempt_event_sequence,
+};
+
+#[cfg(test)]
+pub(super) use tests::next_prompt_initial_fixture::{InitialFixture, initial_fixture};
+
+#[cfg(test)]
+#[path = "next_prompt_recovery_tests.rs"]
+mod next_prompt_recovery_tests;

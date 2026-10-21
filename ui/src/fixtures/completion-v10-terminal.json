@@ -1,0 +1,262 @@
+{
+  "detail": {
+    "actions": {
+      "can_cancel": false,
+      "can_follow_up": true
+    },
+    "cancel_requested": false,
+    "citations": [],
+    "completion": {
+      "assessment": [
+        {
+          "acquired": false,
+          "attempted": false,
+          "exactly_supplied": false,
+          "kind": "inventory",
+          "obligation_id": "d7345ec5a6cf92a15cd0585d4d964ee33053093015587aa4b493128c2a9cd5d4",
+          "unmet": "not_attempted"
+        }
+      ],
+      "assessment_basis": {
+        "finishing_attempts_hash": "624d0b347af43bcc8e218043ff6e8f893be9ff0a8a8470c0cf275eb2a15d3689",
+        "kind": "terminal_observation",
+        "last_refusal_basis": {
+          "disclosure_hash": "investigation-disclosure-v6:0b135cd5c78f3d190b3c087e1608ed1032acd4b14630e8fa690b07825877a450",
+          "finish_hash": "a401902a61702489fe1b8c5d35e444070db640427707e838868286455cff003e",
+          "input_ledger_hash": "733d67b7d458d4a854b87f24024613f7fded98120ef67bda11b5f6dde240a4cf",
+          "step_id": "step-2"
+        },
+        "last_refusal_id": "0312e4c74b6fcadb926e13c45aef0c666a361250100594e4573cba1939fad21e"
+      },
+      "obligations": {
+        "contract": "investigation-completion-obligations@2",
+        "obligations": [
+          {
+            "kind": "inventory",
+            "obligation_id": "d7345ec5a6cf92a15cd0585d4d964ee33053093015587aa4b493128c2a9cd5d4",
+            "target": {
+              "context_id": "context-v2:ca4769171eabeb849a9e18b78f352bdbcf18114b4d1d6ad3b320d9f011f36689",
+              "inventory_hash": "a3b5f3a093cc66f5b301a028652cbc314465ebd9b40a01748c62d8a1f4fff327",
+              "repo": "local/src_4db6734f9c055e01035c8b2424b8c7aa"
+            }
+          }
+        ],
+        "schema_version": 2
+      },
+      "obligations_hash": "cc04bf8bec633ed718a84376bf43fb2b72b47a82a8ccef2f9062361fb9ad5007",
+      "refusal_count": 2,
+      "request_hash": "6db51b1a9f336b706499c44e307f5b9a2514a8731d5c3912316f57cce861c80c",
+      "schema_version": 1
+    },
+    "completion_outcome": "obligations_unmet",
+    "context_owner": "5d48ed6f93f3b81208773b3156e8ae46",
+    "conversation_id": "conversation:014ac2fab8dd894fd4a79c1ec671a2a8",
+    "coverage_context": {
+      "context_id": "context-v2:ca4769171eabeb849a9e18b78f352bdbcf18114b4d1d6ad3b320d9f011f36689",
+      "coverage": {
+        "contract": "coverage-qualification@1",
+        "coverage_id": "coverage-context-v1:0627071ada70b4eb713e852d731c8fc8eac3ca94d8a1a0b98646f17f8f38398c",
+        "exhaustive": false,
+        "repos": [
+          {
+            "commit": "workdir",
+            "compared": [
+              "registration",
+              "plugins"
+            ],
+            "counts": {
+              "missing_input": 1,
+              "not_applicable": 0,
+              "not_selected": 0,
+              "unsupported": 0
+            },
+            "inventory_hash": "a3b5f3a093cc66f5b301a028652cbc314465ebd9b40a01748c62d8a1f4fff327",
+            "layer_hints": [],
+            "limited": true,
+            "repo": "local/src_4db6734f9c055e01035c8b2424b8c7aa",
+            "status": "recorded"
+          }
+        ]
+      }
+    },
+    "created_at": "2026-10-21T20:38:43Z",
+    "error": "Two well-formed finishes left completion obligations unmet.",
+    "graph_snapshot_id": "context-v1:9da42f9519f506efbef07b96eb68588b21a08e9c021c0f0c7dfadc5ac1cdb9b8",
+    "has_result": false,
+    "investigation_id": "investigation:30fcea51c9c0db1edc12c74ac5591b41",
+    "invocation_pending": false,
+    "job_id": 3,
+    "last_event_sequence": 10,
+    "limits": {
+      "active_seconds": 600,
+      "captured_validation_bytes": 134217728,
+      "consent_wait_seconds": 900,
+      "evidence_bytes": 65536,
+      "evidence_items": 56,
+      "evidence_requests": 64,
+      "generated_token_reservations": 131072,
+      "generated_tokens_per_invocation": 2048,
+      "model_invocations": 64,
+      "profile": "investigation-v2",
+      "selected_facts": 64,
+      "tool_actions": 56,
+      "wall_seconds": 3600
+    },
+    "obligation_status": "unmet",
+    "origin": "app",
+    "parent_id": null,
+    "provider": {
+      "available": true,
+      "deployment": null,
+      "endpoint": "http://127.0.0.1:11434/api/chat",
+      "mode": "local",
+      "model": "scripted-model",
+      "protocol_version": "bounded-json-completion@2",
+      "provider_id": "local-scripted",
+      "unavailable_reason": null
+    },
+    "provider_mode": "local",
+    "question": "Inspect selected source and recorded analysis limits.",
+    "revision": 7,
+    "schema_version": 7,
+    "scope": {
+      "type": "all"
+    },
+    "scope_snapshot_id": "context-v1:9da42f9519f506efbef07b96eb68588b21a08e9c021c0f0c7dfadc5ac1cdb9b8",
+    "specialist": {
+      "confidence_tier": "InferredWeak",
+      "id": "domain-analyst@10",
+      "name": "Domain analyst",
+      "operations": [
+        "query_context",
+        "replay_query",
+        "read_evidence",
+        "read_coverage_inventory",
+        "finish"
+      ],
+      "prompt_fingerprint": "e5be78acb8b65b9f1e8e69595570a47ceabfc83580aae08b35d087aa02187f54",
+      "purpose": "Investigate scoped business behavior, features and design evidence.",
+      "tier": "Agentic",
+      "version": 10
+    },
+    "specialist_id": "domain-analyst@10",
+    "status": "failed",
+    "updated_at": "2026-10-21T20:38:44Z",
+    "usage": {
+      "active_milliseconds": 599,
+      "captured_validation_bytes": 0,
+      "evidence_bytes": 0,
+      "evidence_items": 0,
+      "evidence_requests": 0,
+      "generated_token_reservations": 4096,
+      "model_invocations": 2,
+      "reported_input_tokens": 200,
+      "reported_output_tokens": 80,
+      "selected_facts": 0,
+      "tool_actions": 0
+    }
+  },
+  "events": [
+    {
+      "created_at": "2026-10-21T20:38:43Z",
+      "investigation_id": "investigation:30fcea51c9c0db1edc12c74ac5591b41",
+      "kind": "created",
+      "revision": 0,
+      "sequence": 1,
+      "step_id": null,
+      "summary": "Investigation created.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:43Z",
+      "investigation_id": "investigation:30fcea51c9c0db1edc12c74ac5591b41",
+      "kind": "preparation_started",
+      "revision": 1,
+      "sequence": 2,
+      "step_id": null,
+      "summary": "Execution ownership attached atomically; preparation started.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:44Z",
+      "investigation_id": "investigation:30fcea51c9c0db1edc12c74ac5591b41",
+      "kind": "context_prepared",
+      "revision": 2,
+      "sequence": 3,
+      "step_id": null,
+      "summary": "Frozen context and original input metadata committed.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:44Z",
+      "investigation_id": "investigation:30fcea51c9c0db1edc12c74ac5591b41",
+      "kind": "model_started",
+      "revision": 3,
+      "sequence": 4,
+      "step_id": "step-1",
+      "summary": "Next-family invocation boundary committed; the provider outcome is pending.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:44Z",
+      "investigation_id": "investigation:30fcea51c9c0db1edc12c74ac5591b41",
+      "kind": "model_completed",
+      "revision": 4,
+      "sequence": 5,
+      "step_id": "step-1",
+      "summary": "A complete refused finish response was durably admitted.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:44Z",
+      "investigation_id": "investigation:30fcea51c9c0db1edc12c74ac5591b41",
+      "kind": "finish_refused",
+      "revision": 4,
+      "sequence": 6,
+      "step_id": "step-1",
+      "summary": "Completion obligations remain unmet; fixed feedback was retained.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:44Z",
+      "investigation_id": "investigation:30fcea51c9c0db1edc12c74ac5591b41",
+      "kind": "model_started",
+      "revision": 5,
+      "sequence": 7,
+      "step_id": "step-2",
+      "summary": "Next-family invocation boundary committed; the provider outcome is pending.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:44Z",
+      "investigation_id": "investigation:30fcea51c9c0db1edc12c74ac5591b41",
+      "kind": "model_completed",
+      "revision": 6,
+      "sequence": 8,
+      "step_id": "step-2",
+      "summary": "A complete refused finish response was durably admitted.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:44Z",
+      "investigation_id": "investigation:30fcea51c9c0db1edc12c74ac5591b41",
+      "kind": "finish_refused",
+      "revision": 6,
+      "sequence": 9,
+      "step_id": "step-2",
+      "summary": "Completion obligations remain unmet; fixed feedback was retained.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:44Z",
+      "investigation_id": "investigation:30fcea51c9c0db1edc12c74ac5591b41",
+      "kind": "failed",
+      "revision": 7,
+      "sequence": 10,
+      "step_id": "step-2",
+      "summary": "No further completion invocation is authorized.",
+      "tool": null
+    }
+  ],
+  "result": null
+}

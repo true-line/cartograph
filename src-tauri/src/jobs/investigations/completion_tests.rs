@@ -37,6 +37,14 @@ impl Fixture {
         policy: &InvestigationPolicy,
         progressive: bool,
     ) -> Self {
+        Self::with_family_preparation(mode, policy, progressive, true)
+    }
+    fn with_family_preparation(
+        mode: InvestigationProviderMode,
+        policy: &InvestigationPolicy,
+        progressive: bool,
+        prepare_input: bool,
+    ) -> Self {
         let legacy = policy.profile() == INVESTIGATION_V1_POLICY.profile();
         let directory = tempfile::tempdir().unwrap();
         let mut store = JobStore::open(directory.path().join("state.db")).unwrap();
@@ -142,18 +150,20 @@ impl Fixture {
             supplied_history_hash: None,
             supplied_history_bytes: 0,
         };
-        let detail = store.investigation(&id).unwrap();
-        store
-            .advance_investigation(
-                &execution,
-                detail.summary.revision,
-                InvestigationTransition::InputPrepared {
-                    coverage_archive: Some(Box::new(archive.clone())),
-                    ledger: Box::new(ledger),
-                    usage: detail.usage,
-                },
-            )
-            .unwrap();
+        if prepare_input {
+            let detail = store.investigation(&id).unwrap();
+            store
+                .advance_investigation(
+                    &execution,
+                    detail.summary.revision,
+                    InvestigationTransition::InputPrepared {
+                        coverage_archive: Some(Box::new(archive.clone())),
+                        ledger: Box::new(ledger),
+                        usage: detail.usage,
+                    },
+                )
+                .unwrap();
+        }
         Self {
             directory,
             store,
@@ -1483,3 +1493,21 @@ fn completion_v2_nine_durable_reads_finish_and_reopen_without_v1_fallback() {
 
 #[path = "assessment_basis_tests.rs"]
 mod assessment_basis_tests;
+
+#[path = "prospective_attempt_tests.rs"]
+mod prospective_attempt_tests;
+
+#[path = "prospective_metadata_tests.rs"]
+mod prospective_metadata_tests;
+
+#[path = "attempt_storage_helper_tests.rs"]
+mod attempt_storage_helper_tests;
+
+#[path = "completion_snapshot_tests.rs"]
+mod completion_snapshot_tests;
+
+#[path = "next_prompt_contract_tests.rs"]
+pub(in crate::jobs::investigations) mod next_prompt_contract_tests;
+
+#[path = "next_prompt_initial_fixture.rs"]
+pub(in crate::jobs::investigations) mod next_prompt_initial_fixture;

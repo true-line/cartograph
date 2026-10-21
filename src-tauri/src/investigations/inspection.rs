@@ -44,7 +44,7 @@ pub(crate) fn graph_snapshot_for_receipt(
     }
     Ok(snapshot)
 }
-fn descriptor(
+pub(super) fn descriptor(
     receipt: &Receipt,
     snapshot: &str,
     ordinal: usize,

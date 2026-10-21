@@ -29,3 +29,15 @@ export const Empty: Story = {
     await expect(within(canvasElement).getByText('No activity loaded yet.')).toBeVisible();
   },
 };
+
+export const CapacityRefusal: Story = {
+  args: { events: [{ ...investigationEvents()[0], kind: 'capacity_refused',
+    summary: 'The proposed acquisition could not be admitted within the proven continuation capacity.' }] },
+  // AC-0287: a refused acquisition is visible without implying tool execution.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Evidence request exceeds continuation capacity')).toBeVisible();
+    await expect(canvas.queryByText('Tool completed')).not.toBeInTheDocument();
+    await expect(canvas.queryByText('Unsupported event')).not.toBeInTheDocument();
+  },
+};

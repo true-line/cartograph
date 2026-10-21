@@ -84,12 +84,15 @@ pub(super) fn start<R: tauri::Runtime>(
     let descriptor = provider
         .as_ref()
         .and_then(|provider| runtime::descriptor(provider.as_ref(), request.provider_mode).ok());
-    let committed = state
-        .jobs
-        .lock()
+    let committed = {
+        let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+        if specialist.uses_next_prompt_admission() {
+            jobs.start_next_prompt_investigation(&request, descriptor.as_ref())
+        } else {
+            jobs.start_completion_investigation(&request, descriptor.as_ref())
+        }
         .map_err(|e| e.to_string())?
-        .start_completion_investigation(&request, descriptor.as_ref())
-        .map_err(|e| e.to_string())?;
+    };
     if !committed.created {
         return Ok(committed.detail.summary);
     }

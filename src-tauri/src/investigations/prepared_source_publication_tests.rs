@@ -1,0 +1,220 @@
+//! AC-0287: actual retained capture, real reserve/charge, actual sealed prompt,
+//! authenticated settlement and installation. No provider dispatch occurs.
+use super::*;
+use crate::investigations::evidence::prepared_source::publication::{
+    SourcePublicationError, SourcePublicationInput,
+};
+use crate::jobs::investigations::CapturedSourceInvocationFixture;
+
+fn publication<'a>(
+    saved: &'a CapturedSourceInvocationFixture,
+    firewall: &'a llm::EgressFirewall,
+    provider: &'a dyn llm::LlmProvider,
+) -> SourcePublicationInput<'a> {
+    SourcePublicationInput {
+        request: saved.request(),
+        current: saved.current(),
+        current_prepared: saved.prepared(),
+        proof: saved.proof(),
+        supplied_history: &[],
+        firewall,
+        provider,
+    }
+}
+fn provider() -> llm::OllamaProvider {
+    llm::OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test-model",
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap()
+}
+fn read(
+    saved: &CapturedSourceInvocationFixture,
+    state: &AppState,
+    context: &FrozenContext,
+    target: &InvestigationInspectionTarget,
+) -> Result<PreparedSourceCandidate, PreparedSourceFailure> {
+    let prepared = context.prepare_captured_source(state, target).unwrap();
+    let reserved = prepared
+        .reserve(
+            context,
+            state,
+            saved.execution(),
+            saved.revision(),
+            &clock(),
+            &saved.admission(),
+        )
+        .unwrap();
+    prepared.read_reserved(context, state, saved.execution(), &reserved.basis())
+}
+#[test]
+fn prepared_source_publication_acquired_installs_actual_read_only_after_ack() {
+    let (saved, state, mut context, target, _) = fixture();
+    reset_reads();
+    let candidate = match read(&saved, &state, &context, &target) {
+        Ok(candidate) => candidate,
+        Err(error) => panic!("read failed: {:?}", error.kind()),
+    };
+    assert_eq!(read_count(), 1);
+    assert!(context.evidence.is_empty());
+    let expected_ledger = candidate.ledger().clone();
+    let expected_text = candidate.evidence().text.clone();
+    let firewall = llm::EgressFirewall::new(llm::EgressPolicy::default());
+    let provider = provider();
+    let published = match candidate.publish_acquired(
+        &mut context,
+        &state,
+        saved.execution(),
+        &clock(),
+        &publication(&saved, &firewall, &provider),
+    ) {
+        Ok(result) => result,
+        Err(error) => panic!("publication failed: {}", error.error()),
+    };
+    assert_eq!(context.ledger, expected_ledger);
+    assert_eq!(context.evidence.len(), 1);
+    assert_eq!(context.evidence[0].text, expected_text);
+    assert_eq!(published.input.ledger(), &context.ledger);
+    assert!(
+        published
+            .input
+            .seal_disclosure_with_policy(&published.prepared, context.policy)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(published.detail.usage.evidence_items, 1);
+    assert_eq!(
+        saved.publication_after_reopen(),
+        (context.ledger.revision, 1, 1)
+    );
+    assert_eq!(read_count(), 1);
+}
+#[test]
+fn prepared_source_publication_true_unavailable_adds_attempt_without_acquisition() {
+    let (saved, state, mut context, target, private) = fixture();
+    rusqlite::Connection::open(private.join("retained-source/captures.sqlite"))
+        .unwrap()
+        .execute("DELETE FROM objects", [])
+        .unwrap();
+    reset_reads();
+    let base = context.ledger.clone();
+    let failure = match read(&saved, &state, &context, &target) {
+        Err(failure) => failure,
+        Ok(_) => panic!("missing object acquired"),
+    };
+    assert_eq!(failure.kind(), SourceReadFailureKind::ReadUnavailable);
+    assert_eq!(read_count(), 1);
+    let firewall = llm::EgressFirewall::new(llm::EgressPolicy::default());
+    let provider = provider();
+    let published = match failure.publish_unavailable(
+        &mut context,
+        &state,
+        saved.execution(),
+        &clock(),
+        &publication(&saved, &firewall, &provider),
+    ) {
+        Ok(result) => result,
+        Err(error) => panic!("unavailable failed: {}", error.error()),
+    };
+    assert_eq!(context.ledger, base);
+    assert!(context.evidence.is_empty());
+    assert_eq!(published.input.ledger(), &base);
+    assert_eq!(published.detail.usage.evidence_items, 0);
+    assert_eq!(saved.publication_after_reopen(), (base.revision, 0, 1));
+    assert_eq!(saved.counts(), (1, 1, target.captured.file.byte_len));
+    assert_eq!(read_count(), 1);
+}
+#[test]
+fn prepared_source_publication_cancel_or_retention_failure_keeps_known_read_unpublished() {
+    for cancel in [false, true] {
+        let (mut saved, state, mut context, target, private) = fixture();
+        reset_reads();
+        let candidate = match read(&saved, &state, &context, &target) {
+            Ok(candidate) => candidate,
+            Err(error) => panic!("read failed: {:?}", error.kind()),
+        };
+        let base = context.ledger.clone();
+        if cancel {
+            saved.cancel();
+        } else {
+            rusqlite::Connection::open(private.join("retained-source/captures.sqlite"))
+                .unwrap()
+                .execute("DELETE FROM captures", [])
+                .unwrap();
+        }
+        let firewall = llm::EgressFirewall::new(llm::EgressPolicy::default());
+        let provider = provider();
+        let failure = match candidate.publish_acquired(
+            &mut context,
+            &state,
+            saved.execution(),
+            &clock(),
+            &publication(&saved, &firewall, &provider),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("invalidated known read published"),
+        };
+        assert_eq!(failure.stage(), SourceAccessStage::AccessStarted);
+        assert!(failure.validation_receipt().is_some());
+        assert!(
+            matches!(
+                failure.error(),
+                SourcePublicationError::Store(InvestigationStoreError::Stale)
+            ) == cancel
+        );
+        assert_eq!(context.ledger, base);
+        assert!(context.evidence.is_empty());
+        assert_eq!(read_count(), 1);
+        assert_eq!(saved.counts(), (1, 1, target.captured.file.byte_len));
+    }
+}
+#[test]
+fn prepared_source_publication_rollback_and_unknown_ack_never_install_or_repeat_read() {
+    for lost_ack in [false, true] {
+        let (saved, state, mut context, target, _) = fixture();
+        reset_reads();
+        let candidate = match read(&saved, &state, &context, &target) {
+            Ok(candidate) => candidate,
+            Err(error) => panic!("read failed: {:?}", error.kind()),
+        };
+        let base = context.ledger.clone();
+        let next = candidate.ledger().revision;
+        crate::jobs::investigations::fail_next_source_publication(lost_ack);
+        let firewall = llm::EgressFirewall::new(llm::EgressPolicy::default());
+        let provider = provider();
+        let failure = match candidate.publish_acquired(
+            &mut context,
+            &state,
+            saved.execution(),
+            &clock(),
+            &publication(&saved, &firewall, &provider),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("fault acknowledged publication"),
+        };
+        assert!(matches!(
+            failure.error(),
+            SourcePublicationError::Store(InvestigationStoreError::Storage)
+        ));
+        assert_eq!(failure.stage(), SourceAccessStage::AccessStarted);
+        assert!(failure.validation_receipt().is_some());
+        assert_eq!(context.ledger, base);
+        assert!(context.evidence.is_empty());
+        assert_eq!(read_count(), 1);
+        assert_eq!(
+            saved.publication_after_reopen(),
+            if lost_ack {
+                (next, 1, 1)
+            } else {
+                (base.revision, 0, 0)
+            }
+        );
+        assert_eq!(saved.counts(), (1, 1, target.captured.file.byte_len));
+        // The failure retains guards and charge but exposes no candidate/read
+        // retry. Unknown acknowledgement is resolved by durable recovery.
+    }
+}
+
+#[path = "prepared_source_cleanup_tests.rs"]
+mod cleanup_tests;

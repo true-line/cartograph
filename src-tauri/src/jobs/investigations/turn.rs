@@ -30,33 +30,45 @@ impl JobStore {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let task = load_task(&tx, id)?;
-        let policy = InvestigationPolicy::for_limits(&task.detail.limits)
-            .ok_or(InvestigationStoreError::Invalid)?;
-        let current = load_ledger(&tx, &task)?.ok_or(InvestigationStoreError::Invalid)?;
-        let previous_ledger = if let Some(revision) = current.revision.checked_sub(1) {
-            Some(
-                read_body::<InvestigationInputLedger>(
-                    &tx,
-                    "investigation_inputs",
-                    "revision",
-                    id,
-                    &signed(revision)?,
-                )?
-                .ok_or(InvestigationStoreError::Invalid)?,
-            )
-        } else {
-            None
-        };
-        let completed_tool = completed_tool(&tx, &task, current.revision)?;
-        let basis = InvestigationTurnBasis {
-            input_ledger_hash: current.fingerprint_with_policy(policy)?,
-            previous_ledger,
-            completed_tool,
-        };
-        basis.validate_with_policy(&current, policy)?;
+        let basis = basis(&tx, &task)?;
         tx.commit()?;
         Ok(basis)
     }
+}
+
+/// Derive the existing turn basis inside the caller's saved-task read snapshot.
+/// This validates durable ordering; it grants no execution ownership or latest
+/// graph claim and performs no writes.
+pub(super) fn basis(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<InvestigationTurnBasis, InvestigationStoreError> {
+    let id = &task.detail.summary.investigation_id;
+    let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+        .ok_or(InvestigationStoreError::Invalid)?;
+    let current = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
+    let previous_ledger = if let Some(revision) = current.revision.checked_sub(1) {
+        Some(
+            read_body::<InvestigationInputLedger>(
+                connection,
+                "investigation_inputs",
+                "revision",
+                id,
+                &signed(revision)?,
+            )?
+            .ok_or(InvestigationStoreError::Invalid)?,
+        )
+    } else {
+        None
+    };
+    let completed_tool = completed_tool(connection, task, current.revision)?;
+    let basis = InvestigationTurnBasis {
+        input_ledger_hash: current.fingerprint_with_policy(policy)?,
+        previous_ledger,
+        completed_tool,
+    };
+    basis.validate_with_policy(&current, policy)?;
+    Ok(basis)
 }
 
 fn completed_tool(

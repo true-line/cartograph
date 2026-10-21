@@ -92,7 +92,17 @@ pub(super) fn validate(
 pub(super) fn validate_archive_schema(
     connection: &Connection,
 ) -> Result<(), InvestigationStoreError> {
-    validate_layout(connection, &schema())?;
+    let mut expected = schema();
+    // Read reservations are optional: old stores do not acquire empty tables or
+    // new charges on open. Only a complete, exact versioned additive namespace
+    // is recognized; partial/foreign schemas fail before any body is read.
+    if super::read_reservations::validate_optional_schema(connection)? {
+        expected.extend(super::read_reservations::schema());
+    }
+    if let Some(admission) = super::admission_journal::validate_optional_schema(connection)? {
+        expected.extend(admission);
+    }
+    validate_layout(connection, &expected)?;
     super::coverage::validate_version(connection)
 }
 
@@ -167,7 +177,7 @@ pub(super) fn encode(
     Ok(writer.bytes)
 }
 
-fn decode<T: serde::de::DeserializeOwned + Serialize>(
+pub(super) fn decode<T: serde::de::DeserializeOwned + Serialize>(
     bytes: &[u8],
     hash: &str,
 ) -> Result<T, InvestigationStoreError> {
@@ -240,15 +250,49 @@ pub(super) fn validate_usage(
 }
 
 fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
+    validate_task_contract(task, false)
+}
+
+/// Structural task3 validation. Public and owned readers additionally validate
+/// the exact saved call journal, steps and ledgers before exposing task history.
+pub(super) fn validate_next_prompt_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
+    admission_contract::validate_pairing(task)?;
+    validate_task_contract(task, true)
+}
+
+fn validate_task_contract(
+    task: &StoredTask,
+    allow_next_prompt: bool,
+) -> Result<(), InvestigationStoreError> {
+    let next = task
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission();
+    if next && !allow_next_prompt {
+        return Err(InvestigationStoreError::Invalid);
+    }
     let detail = &task.detail;
     let policy =
         InvestigationPolicy::for_limits(&detail.limits).ok_or(InvestigationStoreError::Invalid)?;
     let summary = &detail.summary;
     let v7 = summary.specialist_id.uses_completion_obligations();
-    if task.schema_version != if v7 { 2 } else { 1 }
+    if task.schema_version
+        != if next {
+            3
+        } else if v7 {
+            2
+        } else {
+            1
+        }
+        || task.admission_state.is_some() != next
+        || task.pending_source_read.is_some() != (task.phase == Phase::Reservation)
+        || (task.phase == Phase::Reservation && !next)
         || task.completion_intent.is_some() != v7
         || summary.schema_version
-            != if summary.specialist_id.uses_query_history_disclosure() {
+            != if next {
+                7
+            } else if summary.specialist_id.uses_query_history_disclosure() {
                 6
             } else if summary.specialist_id.uses_policy_selection() {
                 5
@@ -297,6 +341,20 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
         || summary.updated_at.len() > 32
     {
         return Err(InvestigationStoreError::Invalid);
+    }
+    if let Some(admission) = &task.admission_state {
+        admission.validate_task_binding(task)?;
+    }
+    if let Some(pending) = &task.pending_source_read {
+        pending.validate()?;
+        if task
+            .admission_state
+            .as_ref()
+            .and_then(|state| state.current_call.as_ref())
+            .is_none_or(|call| call.step_id != pending.step_id)
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
     }
     if let Some(intent) = &task.completion_intent {
         intent.validate(task)?;
@@ -372,7 +430,7 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
         Phase::Consent => {
             summary.status == InvestigationStatus::AwaitingConsent && task.pending.is_some()
         }
-        Phase::Ready | Phase::Invocation | Phase::Action | Phase::Tool => {
+        Phase::Ready | Phase::Invocation | Phase::Action | Phase::Tool | Phase::Reservation => {
             summary.status == InvestigationStatus::Running
         }
         Phase::Terminal => matches!(
@@ -510,8 +568,23 @@ pub(super) fn validate_inspection_result(
         .ok_or(InvestigationStoreError::Invalid)?;
     if let Some(intent) = &task.completion_intent {
         let sources = intent.obligations.sources_with_policy(policy)?;
+        if task
+            .detail
+            .summary
+            .specialist_id
+            .uses_next_prompt_admission()
+        {
+            admission_contract::validate_pairing(task)?;
+        }
         if result.schema_version
             != if task
+                .detail
+                .summary
+                .specialist_id
+                .uses_next_prompt_admission()
+            {
+                7
+            } else if task
                 .detail
                 .summary
                 .specialist_id
@@ -606,9 +679,70 @@ pub(super) fn load_task(
     Ok(task)
 }
 
+/// Family routing for execution and public reads. The bounded, checksummed
+/// discriminator chooses a full validator; it never grants mutation authority.
+pub(super) fn load_execution_task(
+    connection: &Connection,
+    id: &str,
+) -> Result<StoredTask, InvestigationStoreError> {
+    if connection.is_autocommit() || !id_valid(id) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let row: Option<(Option<Vec<u8>>, Option<String>)> = connection.query_row(
+        "SELECT CASE WHEN typeof(record)='blob' AND length(record)<=262144 THEN record END, CASE WHEN typeof(record_hash)='text' AND length(CAST(record_hash AS BLOB))=64 THEN record_hash END FROM investigation_tasks WHERE id=?1",
+        [id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let (Some(bytes), Some(hash)) = row.ok_or(InvestigationStoreError::Missing)? else {
+        return Err(InvestigationStoreError::Invalid);
+    };
+    let discriminator: StoredTask = decode(&bytes, &hash)?;
+    if discriminator
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        load_next_prompt_task(connection, id)
+    } else {
+        load_task(connection, id)
+    }
+}
+
+/// Full internal reader for callers that are not themselves validating a
+/// historical projection. Keep the base reader separate to avoid replay cycles.
+pub(super) fn load_next_prompt_task(
+    connection: &Connection,
+    id: &str,
+) -> Result<StoredTask, InvestigationStoreError> {
+    let task = load_next_prompt_task_base(connection, id)?;
+    completion::validate_saved(connection, &task)?;
+    Ok(task)
+}
+
 pub(super) fn load_task_base(
     connection: &Connection,
     id: &str,
+) -> Result<StoredTask, InvestigationStoreError> {
+    load_task_base_contract(connection, id, false)
+}
+
+/// Task3 reader in the caller's snapshot. Row bounds and every SQL scalar
+/// parity check are shared with historical families, while saved @10 calls
+/// use their exact journal/ordinal contract.
+pub(super) fn load_next_prompt_task_base(
+    connection: &Connection,
+    id: &str,
+) -> Result<StoredTask, InvestigationStoreError> {
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    load_task_base_contract(connection, id, true)
+}
+
+fn load_task_base_contract(
+    connection: &Connection,
+    id: &str,
+    next_prompt: bool,
 ) -> Result<StoredTask, InvestigationStoreError> {
     if !id_valid(id) {
         return Err(InvestigationStoreError::Invalid);
@@ -622,7 +756,11 @@ pub(super) fn load_task_base(
         return Err(InvestigationStoreError::Invalid);
     };
     let task: StoredTask = decode(&bytes, &hash)?;
-    validate_task(&task)?;
+    if next_prompt {
+        validate_next_prompt_task(&task)?;
+    } else {
+        validate_task(&task)?;
+    }
     let namespace: String = connection.query_row(
         "SELECT namespace FROM investigation_meta WHERE singleton=1",
         [],
@@ -638,7 +776,21 @@ pub(super) fn load_task_base(
     {
         return Err(InvestigationStoreError::Invalid);
     }
-    if let Some(pending) = &task.pending {
+    if next_prompt {
+        if task.pending_source_read.is_some() {
+            source_validation::validate_saved_pending(connection, &task)?;
+        } else if let Some(call) = task
+            .admission_state
+            .as_ref()
+            .and_then(|state| state.current_call.as_ref())
+        {
+            if task.phase == Phase::Consent {
+                call.validate_pending_consent(connection, &task)?;
+            } else {
+                call.validate_saved(connection, &task)?;
+            }
+        }
+    } else if let Some(pending) = &task.pending {
         validate_step_basis(connection, &task, pending)?;
         if task.completion_intent.is_some() && task.phase == Phase::Invocation {
             let invoked: PendingInvestigationStep = read_body(
@@ -675,6 +827,24 @@ pub(super) fn insert_task(
     task: &StoredTask,
 ) -> Result<(), InvestigationStoreError> {
     validate_task(task)?;
+    insert_validated_task(connection, task)
+}
+
+pub(super) fn insert_next_prompt_task(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<(), InvestigationStoreError> {
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    validate_next_prompt_task(task)?;
+    insert_validated_task(connection, task)
+}
+
+fn insert_validated_task(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<(), InvestigationStoreError> {
     let bytes = encode(task, MAX_RECORD_BYTES)?;
     one(connection.execute("INSERT INTO investigation_tasks(id,nonce,conversation_id,job_id,revision,live,record,record_hash) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![task.detail.summary.investigation_id,task.nonce,task.detail.summary.conversation_id,task.detail.summary.job_id,signed(task.detail.summary.revision)?,i64::from(task.phase!=Phase::Terminal),bytes,core_prov::content_hash(&bytes)])?)
 }
@@ -686,6 +856,30 @@ pub(super) fn save_task(
     terminal: bool,
 ) -> Result<(), InvestigationStoreError> {
     validate_task(task)?;
+    save_validated_task(connection, task, expected_revision, terminal)
+}
+
+/// Task3 writer. The caller authenticates execution/task authority and owns
+/// transaction/commit; historical families retain their separate serializer.
+pub(super) fn save_next_prompt_task(
+    connection: &Connection,
+    task: &StoredTask,
+    expected_revision: u64,
+    terminal: bool,
+) -> Result<(), InvestigationStoreError> {
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    validate_next_prompt_task(task)?;
+    save_validated_task(connection, task, expected_revision, terminal)
+}
+
+fn save_validated_task(
+    connection: &Connection,
+    task: &StoredTask,
+    expected_revision: u64,
+    terminal: bool,
+) -> Result<(), InvestigationStoreError> {
     let bytes = encode(task, MAX_RECORD_BYTES)?;
     one(connection.execute("UPDATE investigation_tasks SET revision=?2,live=?3,record=?4,record_hash=?5 WHERE id=?1 AND revision=?6", params![task.detail.summary.investigation_id,signed(task.detail.summary.revision)?,i64::from(task.phase!=Phase::Terminal),bytes,core_prov::content_hash(&bytes),signed(expected_revision)?])?)?;
     check_task_capacity(connection, &task.detail.summary.investigation_id, terminal)
@@ -718,13 +912,26 @@ pub(super) fn check_task_capacity(
     id: &str,
     terminal: bool,
 ) -> Result<(), InvestigationStoreError> {
+    super::read_reservations::with_compatibility_scope(connection, |reads| {
+        check_task_capacity_with_reads(connection, id, terminal, reads)
+    })
+}
+
+/// Reuse one caller-transaction-borrowed read snapshot across both bounds and
+/// repeated checks. Namespace writes invalidate/rederive it before the next use.
+pub(super) fn check_task_capacity_with_reads(
+    connection: &Connection,
+    id: &str,
+    terminal: bool,
+    reads: &mut super::read_reservations::ReadTransaction<'_>,
+) -> Result<(), InvestigationStoreError> {
     let maximum = if terminal {
         TASK_CAPACITY
     } else {
         TASK_CAPACITY - TERMINAL_RESERVE
     };
-    if stored_bytes(connection, Some(id))? > maximum
-        || stored_bytes(connection, None)? > STORE_CAPACITY
+    if stored_bytes_with_reads(connection, Some(id), reads)? > maximum
+        || stored_bytes_with_reads(connection, None, reads)? > STORE_CAPACITY
     {
         return Err(InvestigationStoreError::Capacity);
     }
@@ -750,11 +957,41 @@ pub(super) fn remaining_store_capacity(
         .ok_or(InvestigationStoreError::Capacity)
 }
 
+/// Compatibility wrapper: a fresh short-lived read preflight/snapshot per
+/// call. Existing absent-namespace autocommit metadata reads stay unchanged.
 pub(super) fn stored_bytes(
     connection: &Connection,
     id: Option<&str>,
 ) -> Result<usize, InvestigationStoreError> {
-    // Fixed scalar/index/namespace/conversation allowance plus every stored body.
+    super::read_reservations::with_compatibility_scope(connection, |reads| {
+        stored_bytes_with_reads(connection, id, reads)
+    })
+}
+
+/// Actual logical occupancy excludes unspent allocations, using one coherent
+/// read snapshot. Used to verify that an own-stage write fits its allocation.
+pub(super) fn actual_stored_bytes(
+    connection: &Connection,
+    id: Option<&str>,
+) -> Result<usize, InvestigationStoreError> {
+    super::read_reservations::with_compatibility_scope(connection, |reads| {
+        stored_bytes_with_reads(connection, id, reads)?
+            .checked_sub(reads.capacity_charge(id)?.claims)
+            .ok_or(InvestigationStoreError::Invalid)
+    })
+}
+
+pub(super) fn stored_bytes_with_reads(
+    connection: &Connection,
+    id: Option<&str>,
+    reads: &mut super::read_reservations::ReadTransaction<'_>,
+) -> Result<usize, InvestigationStoreError> {
+    if !reads.matches_connection(connection) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    // Effective occupied capacity: fixed allowances, every stored body, and
+    // additional pending source-settlement claims. Claims are beyond the
+    // existing TERMINAL_RESERVE; do not add that reserve here a second time.
     // BLOB casts charge UTF-8 bytes even if a malformed row has SQL TEXT type.
     let (tasks, records): (i64, i64) = connection.query_row(
         "SELECT count(*), coalesce(sum(length(CAST(record AS BLOB))+length(CAST(record_hash AS BLOB))+length(CAST(id AS BLOB))+length(CAST(nonce AS BLOB))+length(CAST(conversation_id AS BLOB))),0) FROM investigation_tasks WHERE (?1 IS NULL OR id=?1)",
@@ -789,6 +1026,8 @@ pub(super) fn stored_bytes(
     // accounting without creating or migrating its private schema.
     let journal_bytes = super::staged::journal_bytes(connection, id)?;
     let completion_bytes = super::completion::stored_bytes(connection, id)?;
+    let admission_bytes = super::admission_journal::stored_bytes(connection, id)?;
+    let read_charge = reads.capacity_charge(id)?.occupied()?;
     let refs: i64 = connection.query_row(
         "SELECT coalesce(sum(length(CAST(task_id AS BLOB))+length(CAST(source_id AS BLOB))+length(CAST(repo_key AS BLOB))+length(CAST(receipt_id AS BLOB))+128),0) FROM investigation_refs WHERE (?1 IS NULL OR task_id=?1)",
         [id], |r| r.get(0),
@@ -797,6 +1036,8 @@ pub(super) fn stored_bytes(
         .checked_add(usize::try_from(refs).map_err(|_| InvestigationStoreError::Invalid)?)
         .and_then(|bytes| bytes.checked_add(journal_bytes))
         .and_then(|bytes| bytes.checked_add(completion_bytes))
+        .and_then(|bytes| bytes.checked_add(admission_bytes))
+        .and_then(|bytes| bytes.checked_add(read_charge))
         .ok_or(InvestigationStoreError::Capacity)
 }
 
@@ -814,6 +1055,20 @@ pub(super) fn event(
     tool: Option<InvestigationTool>,
     summary: &'static str,
 ) -> Result<(), InvestigationStoreError> {
+    let event = prepare_event(task, kind, step, tool, summary, timestamp(connection)?)?;
+    persist_event(connection, &event)
+}
+
+/// Shared production event projection. Sizing callers can serialize this exact
+/// record before a writer publishes it; this function performs no SQL mutation.
+pub(super) fn prepare_event(
+    task: &mut StoredTask,
+    kind: InvestigationEventKind,
+    step: Option<&str>,
+    tool: Option<InvestigationTool>,
+    summary: &'static str,
+    created_at: String,
+) -> Result<InvestigationEvent, InvestigationStoreError> {
     let next = task
         .detail
         .summary
@@ -836,7 +1091,7 @@ pub(super) fn event(
         return Err(InvestigationStoreError::Capacity);
     }
     task.detail.summary.last_event_sequence = next;
-    let event = InvestigationEvent {
+    Ok(InvestigationEvent {
         investigation_id: task.detail.summary.investigation_id.clone(),
         sequence: next,
         revision: task.detail.summary.revision,
@@ -844,14 +1099,40 @@ pub(super) fn event(
         step_id: step.map(str::to_owned),
         tool,
         summary: summary.into(),
-        created_at: timestamp(connection)?,
-    };
-    let body = encode(&event, 16 * 1024)?;
+        created_at,
+    })
+}
+
+pub(super) fn persist_event(
+    connection: &Connection,
+    event: &InvestigationEvent,
+) -> Result<(), InvestigationStoreError> {
+    let reserved =
+        super::read_reservations::pending_event_claims(connection, &event.investigation_id)?;
+    if reserved != 0 {
+        let terminal_slots = if event.kind == InvestigationEventKind::CancelRequested {
+            2
+        } else {
+            3
+        };
+        let maximum = INVESTIGATION_V2_POLICY
+            .journal_events()
+            .checked_sub(terminal_slots)
+            .ok_or(InvestigationStoreError::Invalid)?;
+        if event
+            .sequence
+            .checked_add(reserved as u64)
+            .is_none_or(|n| n > maximum)
+        {
+            return Err(InvestigationStoreError::Capacity);
+        }
+    }
+    let body = encode(event, 16 * 1024)?;
     one(connection.execute(
         "INSERT INTO investigation_events VALUES (?1,?2,?3,?4)",
         params![
             event.investigation_id,
-            signed(next)?,
+            signed(event.sequence)?,
             body,
             core_prov::content_hash(&body)
         ],
@@ -941,7 +1222,7 @@ pub(super) fn load_ledger(
     {
         return Err(InvestigationStoreError::Invalid);
     }
-    let archive = super::coverage::load(connection, &task.detail.summary.investigation_id)?;
+    let archive = super::coverage::load_for_task(connection, task)?;
     match (&ledger.coverage, archive.as_ref()) {
         (None, None) => {}
         (Some(proof), Some(archive)) if proof == archive.proof() => {

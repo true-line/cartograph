@@ -1,0 +1,512 @@
+{
+  "detail": {
+    "actions": {
+      "can_cancel": false,
+      "can_follow_up": true
+    },
+    "cancel_requested": false,
+    "citations": [
+      {
+        "citation_id": "fact-1",
+        "fact": {
+          "id": "rule:local/src_c9260d3272a9934590c4be6158ba95de@rule.ts#exit@132",
+          "kind": "node"
+        },
+        "fact_digest": "node-v1:f3e6e6f4e82bb2a0096f95abadcb1be66fcd5872a005e57f7f913c4e3222d862",
+        "index": null,
+        "origin": {
+          "kind": "graph_metadata"
+        },
+        "role": null,
+        "source": null,
+        "text_hash": null
+      },
+      {
+        "citation_id": "evidence-1",
+        "fact": {
+          "id": "rule:local/src_c9260d3272a9934590c4be6158ba95de@rule.ts#exit@132",
+          "kind": "node"
+        },
+        "fact_digest": "node-v1:f3e6e6f4e82bb2a0096f95abadcb1be66fcd5872a005e57f7f913c4e3222d862",
+        "index": 0,
+        "origin": {
+          "captured": {
+            "byte_end": 117,
+            "byte_start": 105,
+            "file": {
+              "byte_len": 148,
+              "capture_id": "capture-v1:60adb95cd9f45a2cbc49c887584d7676612ee0ca5d6912a3efdd7968b0d04dde",
+              "digest": "3be4a496336cb115472ca22ba2aa7c7f16c8813b2c6c429083a2b65d94bd1357",
+              "path": "rule.ts",
+              "source_id": "src_c9260d3272a9934590c4be6158ba95de"
+            }
+          },
+          "input_closure": "input_closure_not_established",
+          "kind": "captured_primary_source",
+          "receipt_id": "ts-primary-v2:7a5bd9fd8d562b2be68df6f498db8897b8ad4c5e21cf8779b495fc0fa9692edc",
+          "receipt_inventory_index": 12,
+          "registered_source_id": "src_c9260d3272a9934590c4be6158ba95de",
+          "scope": "primary_source_only"
+        },
+        "role": "definition_initializer",
+        "source": {
+          "byte_end": 117,
+          "byte_start": 105,
+          "commit_sha": "workdir",
+          "path": "rule.ts",
+          "repo": "local/src_c9260d3272a9934590c4be6158ba95de"
+        },
+        "text_hash": "532a83006ce1693da524348093ba3ac851527d718fe2e1604963726b4492f3c4"
+      }
+    ],
+    "completion": {
+      "assessment": [
+        {
+          "acquired": true,
+          "attempted": true,
+          "exactly_supplied": true,
+          "kind": "source",
+          "last_attempt_outcome": "acquired",
+          "obligation_id": "ce65b5000b1aa0e02357d1007324a6eaa099be33064e6be032b93b682fd4f740",
+          "unmet": null
+        }
+      ],
+      "assessment_basis": {
+        "disclosure_hash": "investigation-disclosure-v6:08bdcdfc5b89fab5071866363c1521bacb44a336c37e23c88735e1724db922df",
+        "finishing_attempts_hash": "06a8154ac164e26d0726b1e22ca1e079911274e621a8ea69317558208d234e09",
+        "input_ledger_hash": "c28270dbbd66a7dcb01a3abaa2016ae6f005dcc615f858b6670965ad7c589b32",
+        "kind": "finishing_disclosure",
+        "step_id": "step-3"
+      },
+      "obligations": {
+        "contract": "investigation-completion-obligations@2",
+        "obligations": [
+          {
+            "kind": "source",
+            "obligation_id": "ce65b5000b1aa0e02357d1007324a6eaa099be33064e6be032b93b682fd4f740",
+            "target": {
+              "captured": {
+                "byte_end": 117,
+                "byte_start": 105,
+                "file": {
+                  "byte_len": 148,
+                  "capture_id": "capture-v1:60adb95cd9f45a2cbc49c887584d7676612ee0ca5d6912a3efdd7968b0d04dde",
+                  "digest": "3be4a496336cb115472ca22ba2aa7c7f16c8813b2c6c429083a2b65d94bd1357",
+                  "path": "rule.ts",
+                  "source_id": "src_c9260d3272a9934590c4be6158ba95de"
+                }
+              },
+              "fact": {
+                "id": "rule:local/src_c9260d3272a9934590c4be6158ba95de@rule.ts#exit@132",
+                "kind": "node"
+              },
+              "fact_digest": "node-v1:f3e6e6f4e82bb2a0096f95abadcb1be66fcd5872a005e57f7f913c4e3222d862",
+              "graph_snapshot_id": "context-v1:af39dae1cf26a4140b5cc8f9d4bdb2614380b102119867ad3e6480068e10810b",
+              "index": 0,
+              "receipt_id": "ts-primary-v2:7a5bd9fd8d562b2be68df6f498db8897b8ad4c5e21cf8779b495fc0fa9692edc",
+              "receipt_inventory_index": 12,
+              "registered_source_id": "src_c9260d3272a9934590c4be6158ba95de",
+              "role": "definition_initializer",
+              "schema_version": 1,
+              "source": {
+                "byte_end": 117,
+                "byte_start": 105,
+                "commit_sha": "workdir",
+                "path": "rule.ts",
+                "repo": "local/src_c9260d3272a9934590c4be6158ba95de"
+              },
+              "target_id": "ec2c26c4e1e0f559095fb3e4bf4942d5bd5bebee87c7cf430e93ce79eda57c6e"
+            }
+          }
+        ],
+        "schema_version": 2
+      },
+      "obligations_hash": "1235f0579923b75bc26b7d28608c1bdf59f163155b55ca40043421e7a43c73bd",
+      "refusal_count": 0,
+      "request_hash": "612928d052435eedc56f80fd5396a9b24353a549772a7748d63413a0968bd0e3",
+      "schema_version": 1
+    },
+    "completion_outcome": "supported",
+    "context_owner": "7985dc66d0b20052992b93924b665e70",
+    "conversation_id": "conversation:2ae23907f79ac4a7e8856a576fa73823",
+    "coverage_context": {
+      "context_id": "context-v2:60239f4feb98582a784b289464f6f118bf023f29630ed8db399c05b7495e3bf4",
+      "coverage": {
+        "contract": "coverage-qualification@1",
+        "coverage_id": "coverage-context-v1:1f60f8af673b8b73a1cfa14c24540ab6ec54b261f55500a351e6f5bb2a5fa964",
+        "exhaustive": false,
+        "repos": [
+          {
+            "commit": "workdir",
+            "compared": [
+              "registration",
+              "plugins"
+            ],
+            "counts": {
+              "missing_input": 1,
+              "not_applicable": 0,
+              "not_selected": 0,
+              "unsupported": 0
+            },
+            "inventory_hash": "64888d7d209b9c59be7eebd27aa63943551af799ea78c7474ea7654d1c73833a",
+            "layer_hints": [],
+            "limited": true,
+            "repo": "local/src_c9260d3272a9934590c4be6158ba95de",
+            "status": "recorded"
+          }
+        ]
+      }
+    },
+    "created_at": "2026-10-21T20:38:35Z",
+    "error": null,
+    "graph_snapshot_id": "context-v1:af39dae1cf26a4140b5cc8f9d4bdb2614380b102119867ad3e6480068e10810b",
+    "has_result": true,
+    "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+    "invocation_pending": false,
+    "job_id": 3,
+    "last_event_sequence": 17,
+    "limits": {
+      "active_seconds": 600,
+      "captured_validation_bytes": 134217728,
+      "consent_wait_seconds": 900,
+      "evidence_bytes": 65536,
+      "evidence_items": 56,
+      "evidence_requests": 64,
+      "generated_token_reservations": 131072,
+      "generated_tokens_per_invocation": 2048,
+      "model_invocations": 64,
+      "profile": "investigation-v2",
+      "selected_facts": 64,
+      "tool_actions": 56,
+      "wall_seconds": 3600
+    },
+    "obligation_status": "satisfied",
+    "origin": "app",
+    "parent_id": null,
+    "provider": {
+      "available": true,
+      "deployment": null,
+      "endpoint": "http://127.0.0.1:11434/api/chat",
+      "mode": "local",
+      "model": "scripted-model",
+      "protocol_version": "bounded-json-completion@2",
+      "provider_id": "local-scripted",
+      "unavailable_reason": null
+    },
+    "provider_mode": "local",
+    "question": "Inspect selected source and recorded analysis limits.",
+    "revision": 12,
+    "schema_version": 7,
+    "scope": {
+      "type": "all"
+    },
+    "scope_snapshot_id": "context-v1:af39dae1cf26a4140b5cc8f9d4bdb2614380b102119867ad3e6480068e10810b",
+    "specialist": {
+      "confidence_tier": "InferredWeak",
+      "id": "domain-analyst@10",
+      "name": "Domain analyst",
+      "operations": [
+        "query_context",
+        "replay_query",
+        "read_evidence",
+        "read_coverage_inventory",
+        "finish"
+      ],
+      "prompt_fingerprint": "e5be78acb8b65b9f1e8e69595570a47ceabfc83580aae08b35d087aa02187f54",
+      "purpose": "Investigate scoped business behavior, features and design evidence.",
+      "tier": "Agentic",
+      "version": 10
+    },
+    "specialist_id": "domain-analyst@10",
+    "status": "completed",
+    "updated_at": "2026-10-21T20:38:38Z",
+    "usage": {
+      "active_milliseconds": 2920,
+      "captured_validation_bytes": 148,
+      "evidence_bytes": 12,
+      "evidence_items": 1,
+      "evidence_requests": 1,
+      "generated_token_reservations": 6144,
+      "model_invocations": 3,
+      "reported_input_tokens": 300,
+      "reported_output_tokens": 120,
+      "selected_facts": 1,
+      "tool_actions": 2
+    }
+  },
+  "events": [
+    {
+      "created_at": "2026-10-21T20:38:35Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "created",
+      "revision": 0,
+      "sequence": 1,
+      "step_id": null,
+      "summary": "Investigation created.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:35Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "preparation_started",
+      "revision": 1,
+      "sequence": 2,
+      "step_id": null,
+      "summary": "Execution ownership attached atomically; preparation started.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:35Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "context_prepared",
+      "revision": 2,
+      "sequence": 3,
+      "step_id": null,
+      "summary": "Frozen context and original input metadata committed.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:35Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "model_started",
+      "revision": 3,
+      "sequence": 4,
+      "step_id": "step-1",
+      "summary": "Next-family invocation boundary committed; the provider outcome is pending.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:36Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "model_completed",
+      "revision": 4,
+      "sequence": 5,
+      "step_id": "step-1",
+      "summary": "A complete provider response was recorded.",
+      "tool": "query_context"
+    },
+    {
+      "created_at": "2026-10-21T20:38:36Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "action_admitted",
+      "revision": 4,
+      "sequence": 6,
+      "step_id": "step-1",
+      "summary": "The exact metadata acquisition passed continuation admission.",
+      "tool": "query_context"
+    },
+    {
+      "created_at": "2026-10-21T20:38:36Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "tool_started",
+      "revision": 4,
+      "sequence": 7,
+      "step_id": "step-1",
+      "summary": "The prepared metadata acquisition was admitted.",
+      "tool": "query_context"
+    },
+    {
+      "created_at": "2026-10-21T20:38:36Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "tool_completed",
+      "revision": 5,
+      "sequence": 8,
+      "step_id": "step-1",
+      "summary": "Exact metadata, receipt references and completion observations committed together.",
+      "tool": "query_context"
+    },
+    {
+      "created_at": "2026-10-21T20:38:36Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "model_started",
+      "revision": 6,
+      "sequence": 9,
+      "step_id": "step-2",
+      "summary": "Next-family invocation boundary committed; the provider outcome is pending.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:36Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "model_completed",
+      "revision": 7,
+      "sequence": 10,
+      "step_id": "step-2",
+      "summary": "A complete source-read response was recorded.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:36Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "action_admitted",
+      "revision": 7,
+      "sequence": 11,
+      "step_id": "step-2",
+      "summary": "The exact source read passed continuation admission; access is still uncharged.",
+      "tool": "read_evidence"
+    },
+    {
+      "created_at": "2026-10-21T20:38:37Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "evidence_validation_reserved",
+      "revision": 8,
+      "sequence": 12,
+      "step_id": "step-2",
+      "summary": "Exact captured-file validation charge committed before source access.",
+      "tool": "read_evidence"
+    },
+    {
+      "created_at": "2026-10-21T20:38:37Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "tool_started",
+      "revision": 9,
+      "sequence": 13,
+      "step_id": "step-2",
+      "summary": "A reserved captured-source read executed.",
+      "tool": "read_evidence"
+    },
+    {
+      "created_at": "2026-10-21T20:38:37Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "tool_completed",
+      "revision": 9,
+      "sequence": 14,
+      "step_id": "step-2",
+      "summary": "Exact captured source and its completion observations committed together.",
+      "tool": "read_evidence"
+    },
+    {
+      "created_at": "2026-10-21T20:38:38Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "model_started",
+      "revision": 10,
+      "sequence": 15,
+      "step_id": "step-3",
+      "summary": "Next-family invocation boundary committed; the provider outcome is pending.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:38Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "model_completed",
+      "revision": 11,
+      "sequence": 16,
+      "step_id": "step-3",
+      "summary": "A complete provider response was admitted and its identity persisted.",
+      "tool": null
+    },
+    {
+      "created_at": "2026-10-21T20:38:38Z",
+      "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+      "kind": "result_persisted",
+      "revision": 12,
+      "sequence": 17,
+      "step_id": "step-3",
+      "summary": "Cited findings were persisted against the original input ledger.",
+      "tool": null
+    }
+  ],
+  "result": {
+    "completion": {
+      "assessment": [
+        {
+          "acquired": true,
+          "attempted": true,
+          "exactly_supplied": true,
+          "kind": "source",
+          "last_attempt_outcome": "acquired",
+          "obligation_id": "ce65b5000b1aa0e02357d1007324a6eaa099be33064e6be032b93b682fd4f740",
+          "unmet": null
+        }
+      ],
+      "finishing_attempts_hash": "06a8154ac164e26d0726b1e22ca1e079911274e621a8ea69317558208d234e09",
+      "obligations_hash": "1235f0579923b75bc26b7d28608c1bdf59f163155b55ca40043421e7a43c73bd",
+      "outcome": "supported",
+      "request_hash": "612928d052435eedc56f80fd5396a9b24353a549772a7748d63413a0968bd0e3",
+      "schema_version": 1
+    },
+    "coverage": {
+      "context_id": "context-v2:60239f4feb98582a784b289464f6f118bf023f29630ed8db399c05b7495e3bf4",
+      "coverage_id": "coverage-context-v1:1f60f8af673b8b73a1cfa14c24540ab6ec54b261f55500a351e6f5bb2a5fa964",
+      "representation_hash": "50d3bb66bfb8cfe6b11be355536da9a838ca4ca2cc367a4aa7c09f76dfe55cab"
+    },
+    "created_at": "2026-10-21T20:38:38Z",
+    "disclosure_hash": "investigation-disclosure-v6:08bdcdfc5b89fab5071866363c1521bacb44a336c37e23c88735e1724db922df",
+    "findings": [
+      {
+        "citation_ids": [
+          "evidence-1"
+        ],
+        "claim_kind": "inferred_interpretation",
+        "confidence_tier": "InferredWeak",
+        "finding_id": "finding-1",
+        "limitations": [
+          "Runtime inputs remain unknown."
+        ],
+        "statement": "The acquired callable includes a conditional exit.",
+        "tier": "Agentic",
+        "title": "Observed bounded guard 0"
+      }
+    ],
+    "graph_snapshot_id": "context-v1:af39dae1cf26a4140b5cc8f9d4bdb2614380b102119867ad3e6480068e10810b",
+    "input_ledger_hash": "c28270dbbd66a7dcb01a3abaa2016ae6f005dcc615f858b6670965ad7c589b32",
+    "inspection_assessment": {
+      "disclosure_hash": "investigation-disclosure-v6:08bdcdfc5b89fab5071866363c1521bacb44a336c37e23c88735e1724db922df",
+      "finishing_step_id": "step-3",
+      "input_ledger_hash": "c28270dbbd66a7dcb01a3abaa2016ae6f005dcc615f858b6670965ad7c589b32",
+      "requirements": [
+        {
+          "acquired": true,
+          "cited": true,
+          "status": "supplied",
+          "supplied": true,
+          "target": {
+            "captured": {
+              "byte_end": 117,
+              "byte_start": 105,
+              "file": {
+                "byte_len": 148,
+                "capture_id": "capture-v1:60adb95cd9f45a2cbc49c887584d7676612ee0ca5d6912a3efdd7968b0d04dde",
+                "digest": "3be4a496336cb115472ca22ba2aa7c7f16c8813b2c6c429083a2b65d94bd1357",
+                "path": "rule.ts",
+                "source_id": "src_c9260d3272a9934590c4be6158ba95de"
+              }
+            },
+            "fact": {
+              "id": "rule:local/src_c9260d3272a9934590c4be6158ba95de@rule.ts#exit@132",
+              "kind": "node"
+            },
+            "fact_digest": "node-v1:f3e6e6f4e82bb2a0096f95abadcb1be66fcd5872a005e57f7f913c4e3222d862",
+            "graph_snapshot_id": "context-v1:af39dae1cf26a4140b5cc8f9d4bdb2614380b102119867ad3e6480068e10810b",
+            "index": 0,
+            "receipt_id": "ts-primary-v2:7a5bd9fd8d562b2be68df6f498db8897b8ad4c5e21cf8779b495fc0fa9692edc",
+            "receipt_inventory_index": 12,
+            "registered_source_id": "src_c9260d3272a9934590c4be6158ba95de",
+            "role": "definition_initializer",
+            "schema_version": 1,
+            "source": {
+              "byte_end": 117,
+              "byte_start": 105,
+              "commit_sha": "workdir",
+              "path": "rule.ts",
+              "repo": "local/src_c9260d3272a9934590c4be6158ba95de"
+            },
+            "target_id": "ec2c26c4e1e0f559095fb3e4bf4942d5bd5bebee87c7cf430e93ce79eda57c6e"
+          },
+          "target_id": "ec2c26c4e1e0f559095fb3e4bf4942d5bd5bebee87c7cf430e93ce79eda57c6e"
+        }
+      ],
+      "requirements_hash": "8657545b2c8953c54cfdd81d5103173f688d3a53c72135224c2d8de04395319b",
+      "schema_version": 1
+    },
+    "investigation_id": "investigation:b7defb971a5a6b6f53cb72b605834b01",
+    "invocation_step_id": "step-3",
+    "knowledge_completeness": "partial",
+    "limitations": [
+      "No complete business policy was established."
+    ],
+    "observed_response_model": "scripted-model-observed",
+    "result_id": "investigation-result-v7:cf1a3965d889f1a8533d086078e6d489e8d36f3aca2e15558a4f7b26c7e95f85",
+    "schema_version": 7
+  }
+}

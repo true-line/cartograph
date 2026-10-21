@@ -27,8 +27,8 @@ fn available_specialists() -> Vec<SpecialistId> {
     let mut specialists = AVAILABLE_SPECIALISTS.to_vec();
     if InvestigationPolicy::for_profile("investigation-v2").is_some() {
         specialists.extend([
-            SpecialistId::DomainAnalystV9,
-            SpecialistId::EvidenceAuditorV9,
+            SpecialistId::DomainAnalystV10,
+            SpecialistId::EvidenceAuditorV10,
         ]);
     }
     specialists
@@ -42,7 +42,7 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
             let v2 = name == "investigation-v2";
             Some(InvestigationPolicyCatalogEntry {
                 limits: policy.limits(),
-                request_schema_version: if v2 { 6 } else { 4 },
+                request_schema_version: if v2 { 7 } else { 4 },
                 envelope_schema_version: if v2 { 2 } else { 1 },
                 envelope_contract: if v2 {
                     "investigation-completion-obligations@2"
@@ -55,8 +55,8 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
                 envelope_bytes: policy.envelope_bytes(),
                 specialist_ids: if v2 {
                     vec![
-                        SpecialistId::DomainAnalystV9,
-                        SpecialistId::EvidenceAuditorV9,
+                        SpecialistId::DomainAnalystV10,
+                        SpecialistId::EvidenceAuditorV10,
                     ]
                 } else {
                     vec![
@@ -361,10 +361,21 @@ fn consent_decision<R: tauri::Runtime>(
     }
     let detail = {
         let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
-        if approved {
-            jobs.approve_investigation(id, revision, step_id, payload_hash)
-        } else {
-            jobs.decline_investigation(id, revision, step_id, payload_hash)
+        let next = jobs
+            .investigation(id)
+            .map_err(|e| e.to_string())?
+            .summary
+            .specialist_id
+            .uses_next_prompt_admission();
+        match (next, approved) {
+            (true, true) => {
+                jobs.approve_next_prompt_investigation(id, revision, step_id, payload_hash)
+            }
+            (true, false) => {
+                jobs.decline_next_prompt_investigation(id, revision, step_id, payload_hash)
+            }
+            (false, true) => jobs.approve_investigation(id, revision, step_id, payload_hash),
+            (false, false) => jobs.decline_investigation(id, revision, step_id, payload_hash),
         }
         .map_err(|e| e.to_string())?
     };
@@ -422,12 +433,21 @@ pub(crate) async fn cancel_investigation(
 ) -> Result<InvestigationSummary, String> {
     crate::off_ui_thread(move || {
         let state = app.state::<AppState>();
-        let detail = state
-            .jobs
-            .lock()
+        let detail = {
+            let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+            let next = jobs
+                .investigation(&investigation_id)
+                .map_err(|e| e.to_string())?
+                .summary
+                .specialist_id
+                .uses_next_prompt_admission();
+            if next {
+                jobs.cancel_next_prompt_investigation(&investigation_id)
+            } else {
+                jobs.cancel_investigation(&investigation_id)
+            }
             .map_err(|e| e.to_string())?
-            .cancel_investigation(&investigation_id)
-            .map_err(|e| e.to_string())?;
+        };
         state.investigations.wake(&investigation_id);
         emit_changed(&app, &detail);
         Ok(detail.summary)
@@ -467,7 +487,7 @@ mod staged_tests {
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
-        for generation in [3, 4, 5, 6] {
+        for generation in [3, 4, 5, 6, 7] {
             let mut raw = serde_json::json!({
                 "schema_version": generation, "request_nonce": "invalid-semantic",
                 "specialist_id": format!("domain-analyst@{}", generation + 3),
@@ -588,6 +608,29 @@ mod policy_catalog_tests {
     use super::*;
 
     #[test]
+    fn admission_generation_is_advertised_only_with_registered_policy() {
+        // AC-0287: new Expanded starts use the exact request7 family.
+        let expanded = policy_catalog()
+            .into_iter()
+            .find(|p| p.limits.profile == "investigation-v2");
+        assert_eq!(
+            expanded.is_some(),
+            InvestigationPolicy::for_profile("investigation-v2").is_some()
+        );
+        if let Some(policy) = expanded {
+            assert_eq!(policy.request_schema_version, 7);
+            assert!(
+                policy
+                    .specialist_ids
+                    .iter()
+                    .all(|id| id.uses_next_prompt_admission())
+            );
+        }
+        assert!(!available_specialists().contains(&SpecialistId::DomainAnalystV9));
+        assert!(!available_specialists().contains(&SpecialistId::EvidenceAuditorV9));
+    }
+
+    #[test]
     fn investigation_policy_catalog_advertises_only_registered_exact_choices() {
         // AC-0286: numeric v2 stays immutable while new starts use the @9 family.
         assert!(!available_specialists().contains(&SpecialistId::DomainAnalystV8));
@@ -610,7 +653,7 @@ mod policy_catalog_tests {
                     .all(|id| available_specialists().contains(id))
             );
             let expanded = policy.profile() == "investigation-v2";
-            assert_eq!(choice.request_schema_version, if expanded { 6 } else { 4 });
+            assert_eq!(choice.request_schema_version, if expanded { 7 } else { 4 });
             assert_eq!(choice.envelope_schema_version, if expanded { 2 } else { 1 });
             assert!(
                 choice
@@ -626,8 +669,12 @@ mod policy_catalog_tests {
             InvestigationPolicy::for_profile("investigation-v2").is_some()
         );
         assert_eq!(
-            available_specialists().contains(&SpecialistId::DomainAnalystV9),
+            available_specialists().contains(&SpecialistId::DomainAnalystV10),
             InvestigationPolicy::for_profile("investigation-v2").is_some()
         );
     }
 }
+
+#[cfg(test)]
+#[path = "commands/activation_tests.rs"]
+mod activation_tests;

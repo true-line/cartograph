@@ -6,16 +6,50 @@ use agents::investigation::*;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
+#[path = "investigations/admission_contract.rs"]
+mod admission_contract;
+#[path = "investigations/admission_journal.rs"]
+mod admission_journal;
+#[path = "investigations/admission_transition.rs"]
+mod admission_transition;
 #[path = "investigations/completion.rs"]
 mod completion;
+pub(crate) use completion::NextPromptFinish;
+#[path = "investigations/metadata_admission.rs"]
+mod metadata_admission;
+pub(crate) use metadata_admission::{MetadataAdmission, MetadataContinuationRead};
+#[path = "investigations/next_prompt_consent.rs"]
+mod next_prompt_consent;
+#[path = "investigations/next_prompt_initial.rs"]
+mod next_prompt_initial;
+#[path = "investigations/next_prompt_invocation.rs"]
+mod next_prompt_invocation;
+pub(crate) use next_prompt_invocation::NextPromptInvocation;
 #[path = "investigations/coverage.rs"]
 mod coverage;
 #[cfg(test)]
 #[path = "investigations/coverage_tests.rs"]
 mod coverage_tests;
+#[cfg(test)]
+#[path = "investigations/metadata_host_fixture.rs"]
+pub(crate) mod metadata_host_fixture;
 #[path = "investigations/reads.rs"]
 mod reads;
-#[allow(dead_code)]
+// Internal admission foundation; no historical runtime initializes these tables.
+#[path = "investigations/read_reservations.rs"]
+mod read_reservations;
+#[path = "investigations/source_admission.rs"]
+mod source_admission;
+#[path = "investigations/source_settlement.rs"]
+mod source_settlement;
+#[cfg(test)]
+pub(crate) use source_admission::lose_next_commit_ack as lose_next_source_admission_ack;
+pub(crate) use source_admission::{CommittedSourceReservation, SourceAdmission};
+#[path = "investigations/source_validation.rs"]
+mod source_validation;
+pub(crate) use source_validation::{CommittedSourceValidation, SourceValidationBasis};
+#[cfg(test)]
+pub(crate) use source_validation::{SourceValidationInitialData, captured_source_fixture};
 #[path = "investigations/staged.rs"]
 mod staged;
 #[path = "investigations/storage.rs"]
@@ -173,6 +207,7 @@ pub(crate) enum InvestigationStopReason {
     InputChanged,
     SourceUnavailable,
     InvalidResponse,
+    FinishOnlyToolProposal,
     LimitExceeded,
     ProviderFailure,
     OutcomeUnknown,
@@ -190,6 +225,9 @@ impl InvestigationStopReason {
             Self::SourceUnavailable => "Selected source evidence is unavailable.",
             Self::InvalidResponse => {
                 "The completed provider response was not an admissible action."
+            }
+            Self::FinishOnlyToolProposal => {
+                "The provider proposed a tool when only a finishing response was permitted."
             }
             Self::LimitExceeded => "An investigation work or storage limit was reached.",
             Self::ProviderFailure => "The provider call failed without a usable response.",
@@ -239,6 +277,7 @@ enum Phase {
     Invocation,
     Action,
     Tool,
+    Reservation,
     Terminal,
 }
 
@@ -252,10 +291,12 @@ struct StoredExecution {
     owner: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredTask {
     schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admission_state: Option<admission_contract::StoredAdmissionState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completion_intent: Option<completion::CompletionIntent>,
     nonce: String,
@@ -267,6 +308,8 @@ struct StoredTask {
     ledger_hash: Option<String>,
     ledger_revision: Option<u64>,
     pending: Option<PendingInvestigationStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_source_read: Option<source_validation::PendingSourceRead>,
     approved: bool,
     action_tool: Option<InvestigationTool>,
 }
@@ -294,16 +337,26 @@ impl JobStore {
         provider: Option<&InvestigationProvider>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         let normalized = request.normalized()?;
-        self.start_investigation_internal(&normalized, provider, None)
+        self.start_investigation_internal(&normalized, provider, None, false)
     }
     fn start_investigation_internal(
         &mut self,
         request: &StartInvestigationRequest,
         provider: Option<&InvestigationProvider>,
         completion_intent: Option<completion::CompletionIntent>,
+        next_prompt: bool,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         let policy = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
+        if request.specialist_id.uses_next_prompt_admission() != next_prompt
+            || (next_prompt
+                && (request.schema_version != 7
+                    || completion_intent
+                        .as_ref()
+                        .is_none_or(|intent| intent.schema_version != 4)))
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
         let intent_hash = match &completion_intent {
             Some(intent) => intent.request_hash.clone(),
             None => request.intent_hash()?,
@@ -317,7 +370,11 @@ impl JobStore {
         ).optional()?;
         if let Some(id) = prior {
             let id = id.ok_or(InvestigationStoreError::Invalid)?;
-            let record = load_task(&tx, &id)?;
+            let record = if next_prompt {
+                load_next_prompt_task(&tx, &id)?
+            } else {
+                load_task(&tx, &id)?
+            };
             if record.intent_hash != intent_hash {
                 return Err(InvestigationStoreError::Conflict);
             }
@@ -350,9 +407,13 @@ impl JobStore {
             None => new_id(&tx, "conversation")?,
         };
         if let Some(parent) = &request.parent_id {
-            let parent = load_task(&tx, parent)?;
-            if parent.detail.summary.conversation_id != conversation_id {
-                return Err(InvestigationStoreError::Invalid);
+            if next_prompt {
+                next_parent_history::load(&tx, parent, &conversation_id)?;
+            } else {
+                let parent = load_execution_task(&tx, parent)?;
+                if parent.detail.summary.conversation_id != conversation_id {
+                    return Err(InvestigationStoreError::Invalid);
+                }
             }
         }
         let id = new_id(&tx, "investigation")?;
@@ -373,7 +434,17 @@ impl JobStore {
             [job_id],
         )?)?;
         let record = StoredTask {
-            schema_version: if completion_intent.is_some() { 2 } else { 1 },
+            schema_version: if next_prompt {
+                3
+            } else if completion_intent.is_some() {
+                2
+            } else {
+                1
+            },
+            admission_state: next_prompt.then_some(admission_contract::StoredAdmissionState {
+                schema_version: 1,
+                current_call: None,
+            }),
             completion_intent: completion_intent.clone(),
             nonce: request.request_nonce.clone(),
             intent_hash,
@@ -443,10 +514,15 @@ impl JobStore {
             ledger_hash: None,
             ledger_revision: None,
             pending: None,
+            pending_source_read: None,
             approved: false,
             action_tool: None,
         };
-        insert_task(&tx, &record)?;
+        if next_prompt {
+            insert_next_prompt_task(&tx, &record)?;
+        } else {
+            insert_task(&tx, &record)?;
+        }
         if let Some(targets) = &request.inspection_requirements {
             for target in targets {
                 tx.execute(
@@ -469,7 +545,11 @@ impl JobStore {
             None,
             "Investigation created.",
         )?;
-        save_task(&tx, &record, 0, true)?;
+        if next_prompt {
+            save_next_prompt_task(&tx, &record, 0, true)?;
+        } else {
+            save_task(&tx, &record, 0, true)?;
+        }
         check_task_capacity(&tx, &id, false)?;
         tx.commit()?;
         Ok(InvestigationStart {
@@ -484,7 +564,25 @@ impl JobStore {
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
-        let task = load_task(&tx, id)?;
+        let task = load_execution_task(&tx, id)?;
+        tx.commit()?;
+        Ok(task.detail)
+    }
+
+    /// Worker counterpart of the family-aware public read, requiring a live owner.
+    pub(crate) fn investigation_owned_detail(
+        &self,
+        execution: &JobExecution,
+        id: &str,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        execution.verify()?;
+        if execution.inner.namespace != self.namespace {
+            return Err(InvestigationStoreError::Ownership);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let task = load_execution_task(&tx, id)?;
+        transitions::check_identity(&task, execution)?;
         tx.commit()?;
         Ok(task.detail)
     }
@@ -495,7 +593,7 @@ impl JobStore {
     ) -> Result<Option<InvestigationInputLedger>, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
-        let task = load_task(&tx, id)?;
+        let task = load_execution_task(&tx, id)?;
         let ledger = load_ledger(&tx, &task)?;
         tx.commit()?;
         Ok(ledger)
@@ -507,10 +605,34 @@ impl JobStore {
     ) -> Result<Option<InvestigationResult>, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
-        let task = load_task(&tx, id)?;
+        let task = load_execution_task(&tx, id)?;
         let result = load_result(&tx, &task)?;
         tx.commit()?;
         Ok(result)
+    }
+
+    /// Owned counterpart for the worker, including next-family consent.
+    pub(crate) fn investigation_owned_pending_step(
+        &self,
+        execution: &JobExecution,
+        id: &str,
+    ) -> Result<Option<(u64, PendingInvestigationStep, bool)>, InvestigationStoreError> {
+        execution.verify()?;
+        if execution.inner.namespace != self.namespace {
+            return Err(InvestigationStoreError::Ownership);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let task = load_execution_task(&tx, id)?;
+        transitions::check_identity(&task, execution)?;
+        let pending = if task.phase == Phase::Consent && !task.detail.summary.cancel_requested {
+            task.pending
+                .map(|step| (task.detail.summary.revision, step, task.approved))
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(pending)
     }
 
     pub(crate) fn investigation_pending_step(
@@ -519,7 +641,7 @@ impl JobStore {
     ) -> Result<Option<(u64, PendingInvestigationStep, bool)>, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
-        let task = load_task(&tx, id)?;
+        let task = load_execution_task(&tx, id)?;
         let pending = if task.phase == Phase::Consent && !task.detail.summary.cancel_requested {
             task.pending
                 .map(|step| (task.detail.summary.revision, step, task.approved))
@@ -564,3 +686,19 @@ fn one(rows: usize) -> Result<(), InvestigationStoreError> {
         Err(InvestigationStoreError::Storage)
     }
 }
+
+#[cfg(test)]
+#[path = "investigations/captured_source_invocation_fixture.rs"]
+mod captured_source_invocation_fixture;
+#[cfg(test)]
+pub(crate) use captured_source_invocation_fixture::CapturedSourceInvocationFixture;
+
+pub(crate) use source_settlement::{SourceContinuationOutcome, SourceContinuationSnapshotInput};
+
+pub(crate) use source_settlement::{KnownSourceDisposition, SourceContinuation};
+
+#[cfg(test)]
+pub(crate) use source_settlement::fail_next_publication as fail_next_source_publication;
+
+#[path = "investigations/next_parent_history.rs"]
+mod next_parent_history;

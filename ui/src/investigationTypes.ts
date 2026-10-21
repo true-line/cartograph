@@ -6,7 +6,7 @@ import type { EgressPreview } from './components/EgressConsentDialog';
 import type { FactKey } from './primarySourceStore';
 import type { EvidenceRef, TaskSourceBasisV2 } from './store';
 
-export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5' | 'domain-analyst@6' | 'evidence-auditor@6' | 'domain-analyst@7' | 'evidence-auditor@7' | 'domain-analyst@8' | 'evidence-auditor@8' | 'domain-analyst@9' | 'evidence-auditor@9';
+export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5' | 'domain-analyst@6' | 'evidence-auditor@6' | 'domain-analyst@7' | 'evidence-auditor@7' | 'domain-analyst@8' | 'evidence-auditor@8' | 'domain-analyst@9' | 'evidence-auditor@9' | 'domain-analyst@10' | 'evidence-auditor@10';
 export type InvestigationProviderMode = 'local' | 'cloud';
 /** The existing context-hub QueryScope wire shape, not a filesystem scope. */
 export type InvestigationScope = { type: 'all' } |
@@ -55,7 +55,7 @@ export interface InvestigationLimits {
 
 export interface InvestigationPolicy {
   limits: InvestigationLimits;
-  request_schema_version: 4 | 5 | 6;
+  request_schema_version: 4 | 5 | 6 | 7;
   envelope_schema_version: 1 | 2;
   envelope_contract: string;
   max_completion_obligations: number;
@@ -140,7 +140,7 @@ export type StartInvestigationRequest = InvestigationStartFields & (
   { schema_version: 2; inspection_requirements: InvestigationInspectionTarget[]; expected_context_id?: never } |
   { schema_version: 3; inspection_requirements?: InvestigationInspectionTarget[]; expected_context_id?: string; obligations?: never }
 ) | (Omit<InvestigationStartFields, 'expected_graph_revision' | 'conversation_id' | 'parent_id'> & {
-  schema_version: 4 | 5 | 6; inspection_requirements?: never; obligations: InvestigationObligationEnvelope; expected_context_id: string;
+  schema_version: 4 | 5 | 6 | 7; inspection_requirements?: never; obligations: InvestigationObligationEnvelope; expected_context_id: string;
   expected_graph_revision: string | null; conversation_id: string | null; parent_id: string | null;
 });
 
@@ -178,8 +178,8 @@ export type InvestigationStatus = 'queued' | 'preparing' | 'running' |
 
 /** Bounded history summary. Question is the host's redacted saved representation. */
 export interface InvestigationSummary {
-  /** V7 uses schema 4, V6 schema 3, V5 schema 2; V1–V4 history stays schema 1. */
-  schema_version: 1 | 2 | 3 | 4 | 5 | 6;
+  /** V10 uses schema 7; V7–V9 use 4–6, V6 uses 3, V5 uses 2; V1–V4 stay 1. */
+  schema_version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
   investigation_id: string;
   conversation_id: string;
   parent_id: string | null;
@@ -244,7 +244,7 @@ export interface InvestigationPage {
 export type InvestigationEventKind = 'created' | 'preparation_started' |
   'context_prepared' | 'model_started' | 'model_completed' | 'action_admitted' |
   'tool_started' | 'tool_completed' | 'consent_required' | 'consent_approved' |
-  'evidence_validation_reserved' | 'finish_refused' | 'read_unavailable' |
+  'evidence_validation_reserved' | 'finish_refused' | 'capacity_refused' | 'read_unavailable' |
   'consent_declined' | 'cancel_requested' | 'result_persisted' | 'completed' |
   'failed' | 'cancelled' | 'interrupted' | 'outcome_unknown';
 
@@ -290,7 +290,7 @@ export interface InvestigationFinding {
 }
 
 export interface InvestigationResult {
-  schema_version: 1 | 2 | 3 | 4 | 5 | 6;
+  schema_version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
   completion?: InvestigationCompletionResult;
   coverage?: InvestigationCoverageAttestation;
   investigation_id: string;

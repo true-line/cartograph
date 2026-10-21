@@ -418,6 +418,71 @@ impl JobStore {
         Ok(task.detail)
     }
 
+    /// Internal next-family cancellation uses the existing terminal reserve,
+    /// independently of the source stage allocations. No owner lease is needed
+    /// to request cancellation; settlement still requires owner or orphan proof.
+    pub(crate) fn cancel_next_prompt_investigation(
+        &mut self,
+        id: &str,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate(&tx, &self.namespace)?;
+        let mut task = load_next_prompt_task_base(&tx, id)?;
+        if task.phase != Phase::Terminal && !task.detail.summary.cancel_requested {
+            let expected = task.detail.summary.revision;
+            request_cancel(&tx, &mut task)?;
+            save_next_prompt_task(&tx, &task, expected, true)?;
+        }
+        tx.commit()?;
+        Ok(task.detail)
+    }
+
+    /// Internal terminal path for failures outside a pending source read.
+    /// Reservations must settle their durable charge and disposition instead.
+    pub(crate) fn stop_next_prompt_investigation(
+        &mut self,
+        execution: &JobExecution,
+        revision: u64,
+        reason: InvestigationStopReason,
+        active_milliseconds: u64,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        execution.verify()?;
+        if execution.inner.namespace != self.namespace {
+            return Err(InvestigationStoreError::Ownership);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate(&tx, &self.namespace)?;
+        let id = task_id_for_job(&tx, execution.id())?.ok_or(InvestigationStoreError::Missing)?;
+        let mut task = load_next_prompt_task_base(&tx, &id)?;
+        check_identity(&task, execution)?;
+        if task.detail.summary.revision != revision || task.phase == Phase::Terminal {
+            return Err(InvestigationStoreError::Stale);
+        }
+        check_job(&tx, execution, true)?;
+        if task.phase == Phase::Reservation || task.pending_source_read.is_some() {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        if active_milliseconds < task.detail.usage.active_milliseconds {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        task.detail.usage.active_milliseconds = active_milliseconds;
+        if task.phase == Phase::Consent {
+            // This prospective call was never invoked; it has no invocation row.
+            task.admission_state
+                .as_mut()
+                .ok_or(InvestigationStoreError::Invalid)?
+                .current_call = None;
+        }
+        stop(&tx, &mut task, reason)?;
+        save_next_prompt_task(&tx, &task, revision, true)?;
+        tx.commit()?;
+        Ok(task.detail)
+    }
+
     pub(crate) fn investigation_recovery_candidates(
         &self,
     ) -> Result<Vec<InvestigationRecoveryCandidate>, InvestigationStoreError> {
@@ -431,7 +496,7 @@ impl JobStore {
         let mut candidates = Vec::new();
         for id in ids {
             let id = id.ok_or(InvestigationStoreError::Invalid)?;
-            let task = load_task(&tx, &id)?;
+            let task = load_execution_task(&tx, &id)?;
             // No owner was ever recorded for a queued task. A concurrent start
             // may still be moving toward claim, so an absent/new lock cannot
             // prove its process died. Such rows remain explicitly cancellable.
@@ -470,7 +535,7 @@ impl JobStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         validate(&tx, &self.namespace)?;
-        let mut task = load_task(&tx, &candidate.id)?;
+        let mut task = load_execution_task(&tx, &candidate.id)?;
         if task.phase == Phase::Terminal
             || task.detail.summary.revision != candidate.revision
             || task.execution != candidate.identity
@@ -478,8 +543,30 @@ impl JobStore {
             tx.commit()?;
             return Ok(None);
         }
+        let next_family = task
+            .detail
+            .summary
+            .specialist_id
+            .uses_next_prompt_admission();
+        if next_family && task.phase == Phase::Reservation {
+            // Keep the recovered OS lock. The source writer rechecks this exact
+            // candidate inside its own immediate transaction and records the
+            // unknown read without refunding its charge or reserved accounting.
+            tx.commit()?;
+            return self
+                .settle_orphaned_next_prompt_source(candidate, reservation)
+                .map(Some);
+        }
         let expected = task.detail.summary.revision;
         let unknown = task.phase == Phase::Invocation;
+        if next_family && task.phase == Phase::Consent {
+            // An uninvoked consent stamp is not a provider call. Preserve all
+            // earlier measured usage while removing only that prospective call.
+            task.admission_state
+                .as_mut()
+                .ok_or(InvestigationStoreError::Invalid)?
+                .current_call = None;
+        }
         if unknown {
             clear_unmeasured_usage(&mut task);
         }
@@ -513,7 +600,11 @@ impl JobStore {
         )?;
         completion::refresh_observation(&tx, &mut task)?;
         sync_terminal_job(&tx, &task)?;
-        save_task(&tx, &task, expected, true)?;
+        if next_family {
+            save_next_prompt_task(&tx, &task, expected, true)?;
+        } else {
+            save_task(&tx, &task, expected, true)?;
+        }
         tx.commit()?;
         Ok(Some(task.detail))
     }
@@ -548,7 +639,7 @@ fn check_ready(
     available_time(task)
 }
 
-fn available_time(task: &StoredTask) -> Result<(), InvestigationStoreError> {
+pub(super) fn available_time(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     if task.detail.usage.active_milliseconds >= task.detail.limits.active_seconds * 1000 {
         Err(InvestigationStoreError::Capacity)
     } else {
@@ -556,13 +647,63 @@ fn available_time(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     }
 }
 
-fn admit_input(
+pub(super) fn admit_input(
     connection: &Connection,
     task: &mut StoredTask,
     ledger: &InvestigationInputLedger,
     usage: InvestigationUsage,
     first: bool,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = validate_input_candidate(connection, task, ledger, &usage)?;
+    persist_input_rows(connection, task, ledger)?;
+    task.ledger_revision = Some(ledger.revision);
+    task.ledger_hash = Some(ledger.fingerprint_with_policy(policy)?);
+    task.detail.summary.graph_snapshot_id = Some(ledger.graph_snapshot_id.clone());
+    task.detail.scope_snapshot_id = Some(ledger.scope_snapshot_id.clone());
+    task.detail.coverage_context =
+        ledger
+            .coverage
+            .as_ref()
+            .map(|proof| InvestigationCoverageContext {
+                context_id: proof.context_id.clone(),
+                coverage: proof.qualification.clone(),
+            });
+    task.detail.citations = ledger.citations.clone();
+    task.detail.usage = usage;
+    let tool = task.action_tool.take();
+    task.phase = Phase::Ready;
+    task.detail.summary.status = InvestigationStatus::Running;
+    bump(connection, task)?;
+    event(
+        connection,
+        task,
+        if first {
+            InvestigationEventKind::ContextPrepared
+        } else {
+            InvestigationEventKind::ToolCompleted
+        },
+        None,
+        tool,
+        if first {
+            "Frozen context and original input metadata committed."
+        } else {
+            "Tool input and its actual receipt references committed before lease release."
+        },
+    )?;
+    if !first {
+        completion::record_acquisition(connection, task, ledger, tool)?;
+    }
+    completion::refresh_observation(connection, task)
+}
+
+/// Read-only validation shared with prospective admission. The caller retains
+/// the authoritative transaction and must revalidate its task/owner basis.
+pub(super) fn validate_input_candidate(
+    connection: &Connection,
+    task: &StoredTask,
+    ledger: &InvestigationInputLedger,
+    usage: &InvestigationUsage,
+) -> Result<&'static InvestigationPolicy, InvestigationStoreError> {
     let policy = InvestigationPolicy::for_limits(&task.detail.limits)
         .ok_or(InvestigationStoreError::Invalid)?;
     ledger.validate_with_policy(policy)?;
@@ -574,7 +715,7 @@ fn admit_input(
         }
         _ => return Err(InvestigationStoreError::Invalid),
     }
-    validate_usage(&usage, &task.detail.limits)?;
+    validate_usage(usage, &task.detail.limits)?;
     let prior = &task.detail.usage;
     if usage.model_invocations != prior.model_invocations
         || usage.tool_actions != prior.tool_actions
@@ -654,6 +795,17 @@ fn admit_input(
         }
         .validate_with_policy(ledger, policy)?;
     }
+    Ok(policy)
+}
+
+/// Persist only bounded input and newly referenced receipts, in caller order.
+/// The caller must validate the candidate and owns transaction/rollback plus
+/// task, event and completion-attempt finalization; this helper never commits.
+pub(super) fn persist_input_rows(
+    connection: &Connection,
+    task: &StoredTask,
+    ledger: &InvestigationInputLedger,
+) -> Result<(), InvestigationStoreError> {
     let id = &task.detail.summary.investigation_id;
     insert_body(
         connection,
@@ -678,44 +830,7 @@ fn admit_input(
             )?)?;
         }
     }
-    task.ledger_revision = Some(ledger.revision);
-    task.ledger_hash = Some(ledger.fingerprint_with_policy(policy)?);
-    task.detail.summary.graph_snapshot_id = Some(ledger.graph_snapshot_id.clone());
-    task.detail.scope_snapshot_id = Some(ledger.scope_snapshot_id.clone());
-    task.detail.coverage_context =
-        ledger
-            .coverage
-            .as_ref()
-            .map(|proof| InvestigationCoverageContext {
-                context_id: proof.context_id.clone(),
-                coverage: proof.qualification.clone(),
-            });
-    task.detail.citations = ledger.citations.clone();
-    task.detail.usage = usage;
-    let tool = task.action_tool.take();
-    task.phase = Phase::Ready;
-    task.detail.summary.status = InvestigationStatus::Running;
-    bump(connection, task)?;
-    event(
-        connection,
-        task,
-        if first {
-            InvestigationEventKind::ContextPrepared
-        } else {
-            InvestigationEventKind::ToolCompleted
-        },
-        None,
-        tool,
-        if first {
-            "Frozen context and original input metadata committed."
-        } else {
-            "Tool input and its actual receipt references committed before lease release."
-        },
-    )?;
-    if !first {
-        completion::record_acquisition(connection, task, ledger, tool)?;
-    }
-    completion::refresh_observation(connection, task)
+    Ok(())
 }
 
 pub(super) fn check_identity(
@@ -756,7 +871,7 @@ pub(super) fn check_job(
     }
 }
 
-fn stop(
+pub(super) fn stop(
     connection: &Connection,
     task: &mut StoredTask,
     reason: InvestigationStopReason,
@@ -890,7 +1005,7 @@ pub(in crate::jobs) fn attach_execution(
     if kind != format!("{KIND_PREFIX}{id}") {
         return Err(InvestigationStoreError::Invalid);
     }
-    let mut task = load_task(connection, &id)?;
+    let mut task = load_execution_task(connection, &id)?;
     if task.phase != Phase::Queued
         || task.execution.is_some()
         || task.detail.summary.cancel_requested
@@ -916,7 +1031,16 @@ pub(in crate::jobs) fn attach_execution(
         None,
         "Execution ownership attached atomically; preparation started.",
     )?;
-    save_task(connection, &task, revision, false)
+    if task
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        save_next_prompt_task(connection, &task, revision, false)
+    } else {
+        save_task(connection, &task, revision, false)
+    }
 }
 
 pub(in crate::jobs) fn cancel_for_job(
@@ -928,11 +1052,20 @@ pub(in crate::jobs) fn cancel_for_job(
         return Ok(());
     };
     validate(connection, namespace)?;
-    let mut task = load_task(connection, &id)?;
+    let mut task = load_execution_task(connection, &id)?;
     if task.phase != Phase::Terminal && !task.detail.summary.cancel_requested {
         let revision = task.detail.summary.revision;
         request_cancel(connection, &mut task)?;
-        save_task(connection, &task, revision, true)?;
+        if task
+            .detail
+            .summary
+            .specialist_id
+            .uses_next_prompt_admission()
+        {
+            save_next_prompt_task(connection, &task, revision, true)?;
+        } else {
+            save_task(connection, &task, revision, true)?;
+        }
     }
     Ok(())
 }

@@ -84,9 +84,7 @@ impl InvestigationInput {
         prompt["schema_version"] = 3.into();
         prompt["turn_progress"] =
             serde_json::to_value(progress).map_err(|_| InvestigationError::InvalidInput)?;
-        input.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        bounded_bytes(&input.payload, MAX_INPUT_BYTES)?;
+        wire::replace_prompt(&mut input.payload, &prompt, MAX_INPUT_BYTES)?;
         Ok(input)
     }
 
@@ -164,9 +162,7 @@ impl InvestigationInput {
         let mut prompt: Value = serde_json::from_str(&input.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
         prompt["schema_version"] = 5.into();
-        input.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        bounded_bytes(&input.payload, MAX_INPUT_BYTES)?;
+        wire::replace_prompt(&mut input.payload, &prompt, MAX_INPUT_BYTES)?;
         input.add_coverage_details(coverage_details)?;
         Ok(input)
     }
@@ -271,8 +267,7 @@ impl InvestigationInput {
             .map_err(|_| InvestigationError::InvalidInput)?;
         // Coverage details validates the raw acquired responses before schema6.
         prompt["schema_version"] = 5.into();
-        input.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
+        input.payload.prompt = wire::encode_prompt(&prompt, MAX_INPUT_BYTES)?;
         input.add_coverage_details(coverage_details)?;
         prompt = serde_json::from_str(&input.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
@@ -285,9 +280,7 @@ impl InvestigationInput {
             serde_json::to_value(contract).map_err(|_| InvestigationError::InvalidInput)?;
         prompt["completion_metadata"] =
             serde_json::to_value(metadata).map_err(|_| InvestigationError::InvalidInput)?;
-        input.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        bounded_bytes(&input.payload, MAX_INPUT_BYTES)?;
+        wire::replace_prompt(&mut input.payload, &prompt, MAX_INPUT_BYTES)?;
         Ok(input)
     }
 
@@ -316,9 +309,7 @@ impl InvestigationInput {
         prompt["inspection_progress"] = serde_json::json!({"requirements":targets.iter().map(|target|serde_json::json!({
             "target_id":target.target_id,"acquired":self.ledger.citations.iter().any(|citation|target.matches(citation)),
             "exact_supply":"determined_by_finishing_disclosure"})).collect::<Vec<_>>()});
-        self.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        bounded_bytes(&self.payload, MAX_INPUT_BYTES)?;
+        wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
         self.inspection_requirements = Some(targets);
         Ok(())
     }

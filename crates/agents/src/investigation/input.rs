@@ -19,6 +19,28 @@ pub struct InvestigationInput {
     inspection_requirements: Option<Vec<InvestigationInspectionTarget>>,
 }
 
+/// Shared compact citation representation. It contains complete source origin
+/// metadata but no source text or text hash; sizing views reuse this serializer.
+#[derive(serde::Serialize)]
+struct CitationPromptHandle<'a> {
+    citation_id: &'a str,
+    fact: &'a crate::TaskFactKey,
+    origin: &'a InvestigationEvidenceOrigin,
+    role: &'a Option<crate::TaskRangeRole>,
+    index: &'a Option<u32>,
+}
+impl<'a> From<&'a InvestigationCitation> for CitationPromptHandle<'a> {
+    fn from(citation: &'a InvestigationCitation) -> Self {
+        Self {
+            citation_id: &citation.citation_id,
+            fact: &citation.fact,
+            origin: &citation.origin,
+            role: &citation.role,
+            index: &citation.index,
+        }
+    }
+}
+
 impl InvestigationInput {
     /// Provider-observed identity fields are untrusted output too. Tool steps
     /// may retain them only after the same source/metadata admission policy.
@@ -109,11 +131,11 @@ impl InvestigationInput {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_base_projected(
+    fn prepare_base_projected<P: AsRef<str> + serde::Serialize>(
         question: &str,
         specialist: SpecialistId,
         ledger: InvestigationInputLedger,
-        query_pages: &[String],
+        query_pages: &[P],
         evidence: &[AgentEvidence],
         supplied_history: &[String],
         usage: &InvestigationUsage,
@@ -147,6 +169,7 @@ impl InvestigationInput {
         let mut graph_strings = Vec::new();
         let mut total_query_bytes = 0usize;
         for (raw, manifest) in query_pages.iter().zip(&ledger.queries) {
+            let raw = raw.as_ref();
             if raw.len() != manifest.response_bytes
                 || content_hash(raw.as_bytes()) != manifest.response_hash
             {
@@ -252,13 +275,13 @@ impl InvestigationInput {
             // Select before compaction: routing a new history through the old
             // cumulative selector representation would reject a fitting new input.
             let context = match request_hash {
-                Some(hash) => serde_json::to_value(ProgressiveInvestigationContext::prepare(
+                Some(hash) => serde_json::to_value(ProgressiveInvestigationContext::prepare_raw(
                     hash,
                     &ledger,
                     query_pages,
                     policy,
                 )?),
-                None => serde_json::to_value(CompactInvestigationContext::prepare_with_policy(
+                None => serde_json::to_value(CompactInvestigationContext::prepare_raw_with_policy(
                     &ledger,
                     query_pages,
                     policy,
@@ -268,15 +291,7 @@ impl InvestigationInput {
             let citations: Vec<_> = ledger
                 .citations
                 .iter()
-                .map(|citation| {
-                    serde_json::json!({
-                        "citation_id": citation.citation_id,
-                        "fact": citation.fact,
-                        "origin": citation.origin,
-                        "role": citation.role,
-                        "index": citation.index,
-                    })
-                })
+                .map(CitationPromptHandle::from)
                 .collect();
             serde_json::json!({
                 "schema_version": 2,
@@ -328,14 +343,12 @@ impl InvestigationInput {
                 return Err(InvestigationError::LimitExceeded);
             }
         }
-        let prompt = String::from_utf8(bounded_bytes(&prompt_value, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        let payload = CompletionPayload {
+        let mut payload = CompletionPayload {
             system: specialist.prompt(),
-            prompt,
+            prompt: String::new(),
             spans,
         };
-        bounded_bytes(&payload, MAX_INPUT_BYTES)?;
+        wire::replace_prompt(&mut payload, &prompt_value, MAX_INPUT_BYTES)?;
         Ok(Self {
             ledger,
             payload,
@@ -397,9 +410,7 @@ impl InvestigationInput {
         self.payload
             .spans
             .retain(|span| selected.contains(&span.id));
-        self.payload.prompt = String::from_utf8(bounded_bytes(&prompt, MAX_INPUT_BYTES)?)
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        bounded_bytes(&self.payload, MAX_INPUT_BYTES)?;
+        wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
         Ok(self)
     }
 
@@ -435,13 +446,30 @@ impl InvestigationInput {
         if !prepared.matches_action(&action) {
             return Err(InvestigationError::InvalidInput);
         }
-        super::sealing::seal_with_policy(
-            &self.ledger,
-            &self.payload,
-            prepared,
-            policy,
-            self.inspection_requirements.as_deref(),
-        )
+        let prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let admission = if prompt["schema_version"] == 9 {
+            Some(self.disclosed_admission_with_policy(policy)?)
+        } else {
+            None
+        };
+        match admission {
+            Some(admission) => super::sealing::seal_with_admission_policy(
+                &self.ledger,
+                &self.payload,
+                prepared,
+                policy,
+                self.inspection_requirements.as_deref(),
+                Some(admission),
+            ),
+            None => super::sealing::seal_with_policy(
+                &self.ledger,
+                &self.payload,
+                prepared,
+                policy,
+                self.inspection_requirements.as_deref(),
+            ),
+        }
         .map(Some)
     }
 
@@ -484,15 +512,24 @@ impl InvestigationInput {
             serde_json::from_value(prompt["completion_metadata"].clone())
                 .map_err(|_| InvestigationError::InvalidInput)?;
         let request = request.normalized_with_policy(policy)?;
-        let progressive = request.schema_version == 6;
+        let progressive = matches!(request.schema_version, 6 | 7);
+        let admission = request.schema_version == 7;
         let schema = match request.schema_version {
             4 => 6,
             5 => 7,
             6 => 8,
+            7 => 9,
             _ => return Err(InvestigationError::InvalidInput),
         };
         if prompt["schema_version"] != schema
-            || disclosure.schema_version != if progressive { 5 } else { 4 }
+            || disclosure.schema_version
+                != if admission {
+                    6
+                } else if progressive {
+                    5
+                } else {
+                    4
+                }
             || (progressive
                 && disclosure
                     .query_history
@@ -513,6 +550,14 @@ impl InvestigationInput {
             || disclosure.completion_metadata_hash.as_deref()
                 != Some(metadata.fingerprint_with_policy(policy)?.as_str())
         {
+            return Err(InvestigationError::InvalidInput);
+        }
+        if admission {
+            if disclosure.admission.as_ref() != Some(&self.disclosed_admission_with_policy(policy)?)
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+        } else if disclosure.admission.is_some() {
             return Err(InvestigationError::InvalidInput);
         }
         Ok(())
@@ -561,7 +606,13 @@ impl InvestigationInput {
     ) -> Result<Result<InvestigationResult, staged_finish::FinishDecision>, InvestigationError>
     {
         let request = request.normalized_with_policy(policy)?;
-        if disclosure.schema_version != if request.schema_version == 6 { 5 } else { 4 } {
+        if disclosure.schema_version
+            != match request.schema_version {
+                7 => 6,
+                6 => 5,
+                _ => 4,
+            }
+        {
             return Err(InvestigationError::InvalidInput);
         }
         let request = &request;
@@ -779,3 +830,20 @@ mod coverage_details;
 
 #[path = "input_query_history.rs"]
 mod query_history_input;
+
+#[path = "input_wire.rs"]
+mod wire;
+
+#[path = "input_admission.rs"]
+mod admission_input;
+pub use admission_input::{
+    AdmissionCapacityFeedback, AdmissionReserveMeasurements, CapacityRefusalReason,
+};
+
+#[path = "input_context_preview.rs"]
+mod context_preview;
+pub use context_preview::{ContextPreviewBound, ContextPreviewKind, ContextPreviewMeasurements};
+
+#[path = "input_source_preview.rs"]
+mod source_preview;
+pub use source_preview::UnreadSourcePreviewBound;
