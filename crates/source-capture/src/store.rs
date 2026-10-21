@@ -56,6 +56,23 @@ pub struct CaptureInfo {
     pub byte_len: u64,
 }
 
+/// Coordinates in one validated retained file, with no checkout substitution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapturedSpanLocation {
+    /// Inclusive raw-byte offset.
+    pub byte_start: u64,
+    /// Exclusive raw-byte offset, including at end of file.
+    pub byte_end: u64,
+    /// One-based line containing the start; LF starts a new line.
+    pub start_line: u64,
+    /// One-based UTF-8 byte column of the start.
+    pub start_column: u64,
+    /// One-based line of the exclusive end.
+    pub end_line: u64,
+    /// One-based UTF-8 byte column of the exclusive end.
+    pub end_column: u64,
+}
+
 /// Atomic local raw-source retention, separate from graphs and proposal stores.
 ///
 /// The trusted host supplies a private application location and permissions.
@@ -255,42 +272,57 @@ impl CaptureStore {
     /// does not block this read. `load` still validates every captured object.
     pub fn read_span(&self, reference: &CaptureSpanRef) -> Result<Vec<u8>> {
         let transaction = self.connection.unchecked_transaction()?;
-        check_version(&transaction)?;
-        let (manifest, max_span_bytes) = load_manifest(&transaction, &reference.file.capture_id)?;
-        let entry = manifest
-            .files
-            .iter()
-            .find(|entry| entry.path == reference.file.path)
-            .ok_or(CaptureError::Missing("path outside capture"))?;
-        let expected = CaptureFileRef {
-            source_id: manifest.source_id.clone(),
-            capture_id: reference.file.capture_id.clone(),
-            path: entry.path.clone(),
-            digest: entry.digest.clone(),
-            byte_len: entry.byte_len,
-        };
-        if reference.file != expected {
-            return Err(CaptureError::Corrupt("file reference mismatch"));
+        let bytes = read_bound_span_file(&transaction, reference, MAX_SPAN_BYTES)?;
+        let span = bytes[reference.byte_start as usize..reference.byte_end as usize].to_vec();
+        transaction.commit()?;
+        Ok(span)
+    }
+
+    /// Locate a nonempty span of at most 8 KiB in a retained file of at most
+    /// 16 MiB. Retained policy, manifest, selected object and Git identity are
+    /// validated once before scanning that bounded buffer. Columns count UTF-8
+    /// bytes; LF advances the line and CR remains a byte in a CRLF line ending.
+    pub fn read_span_location(&self, reference: &CaptureSpanRef) -> Result<CapturedSpanLocation> {
+        if reference.file.byte_len > MAX_FILE_BYTES {
+            return Err(CaptureError::Limit("location file bytes"));
         }
         validate_range(
             reference.byte_start,
             reference.byte_end,
-            entry.byte_len,
-            max_span_bytes,
+            reference.file.byte_len,
+            8 * 1024,
         )?;
-        let bytes = read_object(&transaction, &entry.digest)?
-            .ok_or(CaptureError::Missing("captured object"))?;
-        if bytes.len() as u64 != entry.byte_len {
-            return Err(CaptureError::Corrupt("manifest and object length disagree"));
-        }
-        if let Some(git) = &entry.git
-            && git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)?.to_string() != git.oid
+        let transaction = self.connection.unchecked_transaction()?;
+        let bytes = read_bound_span_file(&transaction, reference, 8 * 1024)?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| CaptureError::Encoding)?;
+        if !text.is_char_boundary(reference.byte_start as usize)
+            || !text.is_char_boundary(reference.byte_end as usize)
         {
-            return Err(CaptureError::Corrupt("Git blob identity mismatch"));
+            return Err(CaptureError::Encoding);
         }
-        let span = bytes[reference.byte_start as usize..reference.byte_end as usize].to_vec();
+        let mut line = 1;
+        let mut column = 1;
+        let mut start = (line, column);
+        for (offset, byte) in bytes[..reference.byte_end as usize].iter().enumerate() {
+            if offset as u64 == reference.byte_start {
+                start = (line, column);
+            }
+            if *byte == b'\n' {
+                line += 1;
+                column = 1;
+            } else {
+                column += 1;
+            }
+        }
         transaction.commit()?;
-        Ok(span)
+        Ok(CapturedSpanLocation {
+            byte_start: reference.byte_start,
+            byte_end: reference.byte_end,
+            start_line: start.0,
+            start_column: start.1,
+            end_line: line,
+            end_column: column,
+        })
     }
 
     /// Strict UTF-8 span read; no normalization or lossy decoding is performed.
@@ -527,6 +559,49 @@ fn check_schema(connection: &Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// Both span APIs share one read snapshot and the same selected-file validation.
+// All range and retained policy bounds are checked before loading raw bytes.
+fn read_bound_span_file(
+    connection: &Connection,
+    reference: &CaptureSpanRef,
+    span_limit: u64,
+) -> Result<Vec<u8>> {
+    check_version(connection)?;
+    let (manifest, max_span_bytes) = load_manifest(connection, &reference.file.capture_id)?;
+    let entry = manifest
+        .files
+        .iter()
+        .find(|entry| entry.path == reference.file.path)
+        .ok_or(CaptureError::Missing("path outside capture"))?;
+    let expected = CaptureFileRef {
+        source_id: manifest.source_id.clone(),
+        capture_id: reference.file.capture_id.clone(),
+        path: entry.path.clone(),
+        digest: entry.digest.clone(),
+        byte_len: entry.byte_len,
+    };
+    if reference.file != expected {
+        return Err(CaptureError::Corrupt("file reference mismatch"));
+    }
+    validate_range(
+        reference.byte_start,
+        reference.byte_end,
+        entry.byte_len,
+        max_span_bytes.min(span_limit),
+    )?;
+    let bytes =
+        read_object(connection, &entry.digest)?.ok_or(CaptureError::Missing("captured object"))?;
+    if bytes.len() as u64 != entry.byte_len {
+        return Err(CaptureError::Corrupt("manifest and object length disagree"));
+    }
+    if let Some(git) = &entry.git
+        && git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)?.to_string() != git.oid
+    {
+        return Err(CaptureError::Corrupt("Git blob identity mismatch"));
+    }
+    Ok(bytes)
 }
 
 fn read_object(connection: &Connection, digest: &str) -> Result<Option<Vec<u8>>> {
@@ -1529,5 +1604,241 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    // AC-0262: positions use the retained UTF-8 byte representation, including
+    // multibyte prefixes, LF/CRLF and the exclusive position after a final LF.
+    #[test]
+    fn captured_locations_use_utf8_byte_columns_and_exclusive_eof() {
+        let capture = captured("source", "é🚀\r\nx\n".as_bytes());
+        let mut store = CaptureStore::in_memory(StoreLimits::default()).unwrap();
+        store.persist(&capture).unwrap();
+        let file = capture.file("source").unwrap();
+        for (start, end, expected) in [
+            (2, 6, (1, 3, 1, 7)),
+            (6, 8, (1, 7, 2, 1)),
+            (8, 10, (2, 1, 3, 1)),
+            (0, 10, (1, 1, 3, 1)),
+        ] {
+            let location = store
+                .read_span_location(&file.span(start, end).unwrap())
+                .unwrap();
+            assert_eq!((location.byte_start, location.byte_end), (start, end));
+            assert_eq!(
+                (
+                    location.start_line,
+                    location.start_column,
+                    location.end_line,
+                    location.end_column
+                ),
+                expected
+            );
+        }
+        let no_final_lf = captured("source", "éx".as_bytes());
+        store.persist(&no_final_lf).unwrap();
+        let location = store
+            .read_span_location(&no_final_lf.file("source").unwrap().span(2, 3).unwrap())
+            .unwrap();
+        assert_eq!(
+            (
+                location.start_line,
+                location.start_column,
+                location.end_line,
+                location.end_column
+            ),
+            (1, 3, 1, 4)
+        );
+    }
+
+    // AC-0262: malformed ranges and UTF-8 boundaries never produce locations.
+    #[test]
+    fn captured_locations_reject_invalid_ranges_and_encoding() {
+        let capture = captured("source", "é\nx".as_bytes());
+        let mut store = CaptureStore::in_memory(StoreLimits::default()).unwrap();
+        store.persist(&capture).unwrap();
+        let span = capture.file("source").unwrap().span(0, 2).unwrap();
+        for (start, end) in [(0, 0), (3, 2), (0, 5), (u64::MAX, u64::MAX)] {
+            let mut invalid = span.clone();
+            invalid.byte_start = start;
+            invalid.byte_end = end;
+            assert!(matches!(
+                store.read_span_location(&invalid),
+                Err(CaptureError::Invalid(_))
+            ));
+        }
+        for (start, end) in [(1, 2), (0, 1)] {
+            let invalid = capture.file("source").unwrap().span(start, end).unwrap();
+            assert!(matches!(
+                store.read_span_location(&invalid),
+                Err(CaptureError::Encoding)
+            ));
+        }
+        let binary = captured("binary", &[0xff, b'\n', b'x']);
+        store.persist(&binary).unwrap();
+        assert!(matches!(
+            store.read_span_location(&binary.file("binary").unwrap().span(2, 3).unwrap()),
+            Err(CaptureError::Encoding)
+        ));
+        // Byte reads retain their existing binary semantics.
+        assert_eq!(
+            store
+                .read_span(&binary.file("binary").unwrap().span(0, 1).unwrap())
+                .unwrap(),
+            [0xff]
+        );
+    }
+
+    // AC-0262: hard location limits and narrower persisted policy precede raw
+    // acquisition. Deleting the object distinguishes limit rejection from read.
+    #[test]
+    fn captured_location_limits_precede_object_reads_and_preserve_span_policy() {
+        let capture = captured("source", &vec![b'x'; 8193]);
+        let mut store = CaptureStore::in_memory(StoreLimits::default()).unwrap();
+        store.persist(&capture).unwrap();
+        let file = capture.file("source").unwrap();
+        assert!(
+            store
+                .read_span_location(&file.span(0, 8192).unwrap())
+                .is_ok()
+        );
+        assert_eq!(
+            store.read_span(&file.span(0, 8193).unwrap()).unwrap().len(),
+            8193
+        );
+        store.connection.execute("DELETE FROM objects", []).unwrap();
+        assert!(matches!(
+            store.read_span_location(&file.span(0, 8193).unwrap()),
+            Err(CaptureError::Limit(_))
+        ));
+        let mut oversized = file.span(0, 1).unwrap();
+        oversized.file.byte_len = MAX_FILE_BYTES + 1;
+        assert!(matches!(
+            store.read_span_location(&oversized),
+            Err(CaptureError::Limit(_))
+        ));
+        let narrow = captured_with_cap("narrow", b"abcd", 2);
+        store.persist(&narrow).unwrap();
+        let mut denied = narrow.file("narrow").unwrap().span(0, 2).unwrap();
+        denied.byte_end = 3;
+        store.connection.execute("DELETE FROM objects", []).unwrap();
+        assert!(matches!(
+            store.read_span_location(&denied),
+            Err(CaptureError::Limit(_))
+        ));
+    }
+
+    // AC-0262: the selected object is authenticated, with no working-tree fallback.
+    #[test]
+    fn captured_locations_reject_missing_corrupt_and_oversized_objects() {
+        for mutation in [
+            "DELETE FROM objects",
+            "UPDATE objects SET bytes=X'78787878'",
+            "UPDATE objects SET bytes=zeroblob(16777217)",
+        ] {
+            let capture = captured("source", b"a\nb\n");
+            let span = capture.file("source").unwrap().span(2, 3).unwrap();
+            let mut store = CaptureStore::in_memory(StoreLimits::default()).unwrap();
+            store.persist(&capture).unwrap();
+            store.connection.execute(mutation, []).unwrap();
+            assert!(store.read_span_location(&span).is_err());
+        }
+    }
+
+    // AC-0262: unrelated raw objects are not loaded or validated by a location read.
+    #[test]
+    fn captured_locations_validate_only_the_selected_file() {
+        let capture = captured_files(
+            "location-fixture",
+            &[("selected", b"one\ntwo"), ("other", b"other")],
+        );
+        let mut store = CaptureStore::in_memory(StoreLimits::default()).unwrap();
+        store.persist(&capture).unwrap();
+        store
+            .connection
+            .execute(
+                "DELETE FROM objects WHERE digest=?1",
+                [&capture.file("other").unwrap().reference().digest],
+            )
+            .unwrap();
+        let location = store
+            .read_span_location(&capture.file("selected").unwrap().span(4, 7).unwrap())
+            .unwrap();
+        assert_eq!(
+            (
+                location.start_line,
+                location.start_column,
+                location.end_line,
+                location.end_column
+            ),
+            (2, 1, 2, 4)
+        );
+        assert!(store.load(capture.id()).is_err());
+    }
+
+    // AC-0262: a canonical file binding cannot bypass a Git blob disagreement.
+    #[test]
+    fn captured_locations_validate_git_blob_identity() {
+        let capture = captured("source", b"a\nb");
+        let mut store = CaptureStore::in_memory(StoreLimits::default()).unwrap();
+        store.persist(&capture).unwrap();
+        let mut manifest = capture.manifest().clone();
+        manifest.kind = crate::CaptureKind::Git {
+            commit: "1".repeat(40),
+            tree: "2".repeat(40),
+        };
+        manifest.files[0].git = Some(crate::GitFile {
+            oid: "3".repeat(40),
+            mode: 0o100644,
+        });
+        let raw = canonical_manifest(&manifest, MAX_MANIFEST_BYTES).unwrap();
+        let id = manifest_id(&raw);
+        store
+            .connection
+            .execute(
+                "INSERT INTO captures(id,manifest,max_span_bytes) VALUES (?1,?2,?3)",
+                params![&id, raw, MAX_SPAN_BYTES as i64],
+            )
+            .unwrap();
+        let mut span = capture.file("source").unwrap().span(0, 1).unwrap();
+        span.file.capture_id = id;
+        assert!(matches!(
+            store.read_span_location(&span),
+            Err(CaptureError::Corrupt("Git blob identity mismatch"))
+        ));
+    }
+
+    // AC-0262: restart and checkout edits do not relocate a retained source span.
+    #[test]
+    fn persisted_captured_location_ignores_changed_live_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.ts");
+        std::fs::write(&path, "é\nreturn x;\n").unwrap();
+        let capture = capture_working_tree(
+            directory.path(),
+            &SourceId::new("location-live-fixture").unwrap(),
+            &["source.ts".into()],
+            CaptureLimits::default(),
+        )
+        .unwrap();
+        let span = capture.file("source.ts").unwrap().span(3, 12).unwrap();
+        let database = directory.path().join("retained.sqlite");
+        let before = {
+            let mut store = CaptureStore::open(&database, StoreLimits::default()).unwrap();
+            store.persist(&capture).unwrap();
+            store.read_span_location(&span).unwrap()
+        };
+        std::fs::write(&path, "\n".repeat(200)).unwrap();
+        let store = CaptureStore::open(&database, StoreLimits::default()).unwrap();
+        assert_eq!(store.read_span_location(&span).unwrap(), before);
+        assert_eq!(
+            (
+                before.start_line,
+                before.start_column,
+                before.end_line,
+                before.end_column
+            ),
+            (2, 1, 2, 10)
+        );
+        assert_eq!(store.read_text_span(&span).unwrap(), "return x;");
     }
 }

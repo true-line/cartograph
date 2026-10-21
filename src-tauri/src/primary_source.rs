@@ -648,6 +648,7 @@ pub(crate) struct CapturedRange {
 
 #[derive(Serialize)]
 pub(crate) struct CapturedDescription {
+    pub graph_snapshot_id: String,
     pub fact: FactKey,
     pub receipt_id: String,
     pub emitted_fact_digest: String,
@@ -711,6 +712,9 @@ fn bound_receipt(
 pub(crate) fn describe(state: &AppState, fact: &FactKey) -> Result<CapturedDescription, String> {
     let (receipt, _guard) = bound_receipt(state, fact, None)?;
     Ok(CapturedDescription {
+        graph_snapshot_id: crate::investigations::inspection::graph_snapshot_for_receipt(
+            state, &receipt,
+        )?,
         fact: receipt.fact_key().clone(),
         receipt_id: receipt.id().to_owned(),
         emitted_fact_digest: receipt.fact_digest().to_owned(),

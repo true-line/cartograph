@@ -113,16 +113,61 @@ impl PrimarySourceStore {
             .lock()
             .map_err(|_| PinnedReadError::Operational)?
             .read_text_span(&range.captured)
-            .map_err(|error| match error {
-                CaptureError::Missing(_) => PinnedReadError::Unavailable,
-                CaptureError::Invalid(_)
-                | CaptureError::Limit(_)
-                | CaptureError::Corrupt(_)
-                | CaptureError::Encoding
-                | CaptureError::Json(_) => PinnedReadError::Invalid,
-                CaptureError::Sqlite(_) | CaptureError::Io(_) | CaptureError::Git(_) => {
-                    PinnedReadError::Operational
-                }
-            })
+            .map_err(capture_error)
+    }
+}
+
+fn capture_error(error: CaptureError) -> PinnedReadError {
+    match error {
+        CaptureError::Missing(_) => PinnedReadError::Unavailable,
+        CaptureError::Invalid(_)
+        | CaptureError::Limit(_)
+        | CaptureError::Corrupt(_)
+        | CaptureError::Encoding
+        | CaptureError::Json(_) => PinnedReadError::Invalid,
+        CaptureError::Sqlite(_) | CaptureError::Io(_) | CaptureError::Git(_) => {
+            PinnedReadError::Operational
+        }
+    }
+}
+impl PrimarySourceStore {
+    pub(crate) fn task_capture_present(
+        &self,
+        guard: &RetentionGuard,
+        span: &agents::TaskCaptureSpanRef,
+    ) -> Result<(), PinnedReadError> {
+        self.validate_task_guard(guard, &span.file.source_id)?;
+        let source = source_capture::SourceId::new(&span.file.source_id).map_err(capture_error)?;
+        let inventory = self
+            .captures
+            .lock()
+            .map_err(|_| PinnedReadError::Operational)?
+            .source_inventory(&source)
+            .map_err(capture_error)?;
+        if !inventory
+            .iter()
+            .any(|capture| capture.capture_id == span.file.capture_id)
+        {
+            return Err(PinnedReadError::Unavailable);
+        }
+        Ok(())
+    }
+    /// Human location inspection only; this is not agent evidence acquisition.
+    pub(crate) fn task_location(
+        &self,
+        guard: &RetentionGuard,
+        receipt: &Receipt,
+        index: usize,
+    ) -> Result<source_capture::CapturedSpanLocation, PinnedReadError> {
+        self.validate_task_guard(guard, receipt.source_id().as_str())?;
+        let range = receipt
+            .ranges()
+            .get(index)
+            .ok_or(PinnedReadError::Invalid)?;
+        self.captures
+            .lock()
+            .map_err(|_| PinnedReadError::Operational)?
+            .read_span_location(&range.captured)
+            .map_err(capture_error)
     }
 }

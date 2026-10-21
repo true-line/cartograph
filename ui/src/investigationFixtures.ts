@@ -115,3 +115,37 @@ export function legacyInvestigationResult(id = 'inv-legacy'): InvestigationResul
   delete result.disclosure_hash;
   return result;
 }
+
+/** Scripted exact-target fixture; role index 2 intentionally differs from receipt occurrence 8. */
+export const inspectionTarget: import('./investigationTypes').InvestigationInspectionTarget = {
+  schema_version: 1, target_id: 'b'.repeat(64), graph_snapshot_id: 'snapshot:original',
+  fact: { kind: 'node', id: 'rule:stock' }, fact_digest: 'node-v1:original-rule',
+  registered_source_id: 'src_original', receipt_id: 'receipt:original', receipt_inventory_index: 8,
+  role: 'definition_expression', index: 2,
+  source: { repo: 'local/src_original', path: 'src/stock.ts', byte_start: 12, byte_end: 54, commit_sha: 'working-tree' },
+  captured: { file: { source_id: 'src_original', capture_id: 'capture:original', path: 'src/stock.ts',
+    digest: 'file:original', byte_len: 180 }, byte_start: 12, byte_end: 54 },
+};
+
+export const inspectionCatalog: InvestigationCatalog = { ...investigationCatalog,
+  specialists: [...investigationCatalog.specialists,
+    { ...investigationCatalog.specialists[0], id: 'domain-analyst@5', version: 5,
+      purpose: 'Inspect explicitly required captured sources.', prompt_fingerprint: 'prompt:domain-v5' },
+    { ...investigationCatalog.specialists[1], id: 'evidence-auditor@5', version: 5,
+      purpose: 'Audit explicitly required captured sources.', prompt_fingerprint: 'prompt:audit-v5' }] };
+
+export function inspectionAssessment(supplied = false): import('./investigationTypes').InvestigationInspectionAssessment {
+  return { schema_version: 1, requirements_hash: 'd'.repeat(64), input_ledger_hash: 'ledger:original',
+    finishing_step_id: 'step-1', disclosure_hash: `investigation-disclosure-v1:${'a'.repeat(64)}`,
+    requirements: [{ target_id: inspectionTarget.target_id, target: inspectionTarget,
+      status: supplied ? 'supplied' : 'unmet', acquired: true, supplied, cited: false }] };
+}
+
+
+/** Schema-2 V5 detail mirrors the host; legacy detail fixtures remain schema 1. */
+export function inspectionDetail(id = 'inv-fixture', overrides: Partial<InvestigationDetail> = {}): InvestigationDetail {
+  return investigationDetail(id, { schema_version: 2, specialist_id: 'domain-analyst@5',
+    specialist: inspectionCatalog.specialists.find((item) => item.id === 'domain-analyst@5')!,
+    inspection_requirements: [inspectionTarget], inspection_requirement_count: 1,
+    inspection_status: 'unmet', inspection_assessment: inspectionAssessment(), ...overrides });
+}

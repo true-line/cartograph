@@ -269,7 +269,8 @@ impl JobStore {
         request: &StartInvestigationRequest,
         provider: Option<&InvestigationProvider>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
-        request.validate()?;
+        let normalized = request.normalized()?;
+        let request = &normalized;
         let intent_hash = request.intent_hash()?;
         let tx = self
             .conn
@@ -338,8 +339,18 @@ impl JobStore {
             intent_hash,
             expected_graph_revision: request.expected_graph_revision.clone(),
             detail: InvestigationDetail {
+                inspection_requirements: request.inspection_requirements.clone(),
+                inspection_assessment: None,
                 summary: InvestigationSummary {
-                    schema_version: 1,
+                    inspection_status: request
+                        .inspection_requirements
+                        .as_ref()
+                        .map(|_| InvestigationInspectionStatus::Pending),
+                    inspection_requirement_count: request
+                        .inspection_requirements
+                        .as_ref()
+                        .map(Vec::len),
+                    schema_version: request.schema_version,
                     investigation_id: id.clone(),
                     conversation_id,
                     parent_id: request.parent_id.clone(),
@@ -381,6 +392,19 @@ impl JobStore {
             action_tool: None,
         };
         insert_task(&tx, &record)?;
+        if let Some(targets) = &request.inspection_requirements {
+            for target in targets {
+                tx.execute(
+                    "INSERT OR IGNORE INTO investigation_refs VALUES (?1,0,?2,?3,?4)",
+                    params![
+                        id,
+                        target.registered_source_id,
+                        target.source.repo,
+                        target.receipt_id
+                    ],
+                )?;
+            }
+        }
         let mut record = record;
         event(
             &tx,

@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { usePrimarySourceStore, type CapturedDescription, type CapturedText, type RetainedSource } from './primarySourceStore';
 import { useAppStore, type GraphNode } from './store';
+import { inspectionTarget } from './investigationFixtures';
+import type { InvestigationInspectionTarget } from './investigationTypes';
 
 const node = (id: string): GraphNode => ({ id, label: 'BusinessRule', props: {} });
 const description = (id: string): CapturedDescription => ({
@@ -198,5 +200,52 @@ describe('working-tree selection cannot roll captured selection back (AC-0154)',
     expect(useAppStore.getState().selected?.node).toBe(current);
     expect(useAppStore.getState().selected?.source).toMatchObject({ text: 'new' });
     useAppStore.getState().clearSelection();
+  });
+});
+
+describe('authoritative inspection targets (AC-0261)', () => {
+  const targetDescription: CapturedDescription = {
+    graph_snapshot_id: inspectionTarget.graph_snapshot_id, fact: inspectionTarget.fact,
+    receipt_id: inspectionTarget.receipt_id, emitted_fact_digest: inspectionTarget.fact_digest,
+    source_id: inspectionTarget.registered_source_id, repo_key: inspectionTarget.source.repo,
+    ranges: [{ index: 8, path: inspectionTarget.source.path, byte_start: 12, byte_end: 54 }],
+    scope: 'primary_source_only', input_closure: 'input_closure_not_established',
+  };
+
+  it('resolves viewer ordinal to the host role index without reading agent evidence', async () => {
+    const commands: string[] = [];
+    mockIPC((command, args) => {
+      commands.push(command);
+      if (command === 'describe_captured_source') return targetDescription;
+      expect(args).toEqual({ fact: inspectionTarget.fact, expectedGraphSnapshotId: 'snapshot:original',
+        expectedReceiptId: 'receipt:original', inventoryIndex: 8 });
+      return inspectionTarget;
+    });
+    await usePrimarySourceStore.getState().inspect(node('rule:stock'));
+    const target = await usePrimarySourceStore.getState().resolveInspectionTarget(8);
+    expect(target?.index).toBe(2);
+    expect(target?.receipt_inventory_index).toBe(8);
+    expect(commands).toEqual(['describe_captured_source', 'resolve_investigation_inspection_target']);
+  });
+
+  it('discards a late resolved target after same-fact reselection', async () => {
+    let reply: (value: InvestigationInspectionTarget) => void = () => {};
+    mockIPC((command) => command === 'describe_captured_source' ? targetDescription
+      : new Promise<InvestigationInspectionTarget>((resolve) => { reply = resolve; }));
+    await usePrimarySourceStore.getState().inspect(node('rule:stock'));
+    const selecting = usePrimarySourceStore.getState().resolveInspectionTarget(8);
+    await usePrimarySourceStore.getState().inspect(node('rule:stock'));
+    reply(inspectionTarget);
+    expect(await selecting).toBeNull();
+    expect(usePrimarySourceStore.getState().requirementBusy).toBe(false);
+  });
+
+  it('rejects a rebound receipt instead of adding the wrong source', async () => {
+    mockIPC((command) => command === 'describe_captured_source' ? targetDescription : {
+      ...inspectionTarget, receipt_id: 'rebound-receipt',
+    });
+    await usePrimarySourceStore.getState().inspect(node('rule:stock'));
+    expect(await usePrimarySourceStore.getState().resolveInspectionTarget(8)).toBeNull();
+    expect(usePrimarySourceStore.getState().requirementError).toContain('could not be bound');
   });
 });

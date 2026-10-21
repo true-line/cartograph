@@ -200,7 +200,12 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     let detail = &task.detail;
     let summary = &detail.summary;
     if task.schema_version != 1
-        || summary.schema_version != 1
+        || summary.schema_version
+            != if summary.specialist_id.uses_inspection_requirements() {
+                2
+            } else {
+                1
+            }
         || !id_valid(&summary.investigation_id)
         || !id_valid(&summary.conversation_id)
         || !id_valid(&task.nonce)
@@ -232,6 +237,38 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     summary.scope.validate()?;
     validate_provider(&detail.provider)?;
     validate_usage(&detail.usage, &detail.limits)?;
+    match &detail.inspection_requirements {
+        Some(targets) if summary.specialist_id.uses_inspection_requirements() => {
+            if normalize_inspection_targets(targets)? != *targets
+                || summary.inspection_requirement_count != Some(targets.len())
+                || detail.inspection_assessment.is_some() != summary.has_result
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            let status = detail.inspection_assessment.as_ref().map_or(
+                if task.phase == Phase::Terminal {
+                    InvestigationInspectionStatus::NotAssessed
+                } else {
+                    InvestigationInspectionStatus::Pending
+                },
+                |a| {
+                    if a.requirements.iter().all(|r| r.supplied) {
+                        InvestigationInspectionStatus::Supplied
+                    } else {
+                        InvestigationInspectionStatus::Unmet
+                    }
+                },
+            );
+            if summary.inspection_status != Some(status) {
+                return Err(InvestigationStoreError::Invalid);
+            }
+        }
+        None if !summary.specialist_id.uses_inspection_requirements()
+            && detail.inspection_assessment.is_none()
+            && summary.inspection_status.is_none()
+            && summary.inspection_requirement_count.is_none() => {}
+        _ => return Err(InvestigationStoreError::Invalid),
+    }
     let valid_status = match task.phase {
         Phase::Queued => summary.status == InvestigationStatus::Queued && task.execution.is_none(),
         Phase::Preparing => {
@@ -319,6 +356,15 @@ pub(super) fn validate_step_basis(
     if let Some(disclosure) = &step.disclosure {
         let ledger = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
         disclosure.validate(&ledger)?;
+        let expected = task
+            .detail
+            .inspection_requirements
+            .as_ref()
+            .map(|targets| inspection_requirements_hash(targets))
+            .transpose()?;
+        if disclosure.inspection_requirements_hash != expected {
+            return Err(InvestigationStoreError::Invalid);
+        }
     }
     Ok(())
 }
@@ -334,6 +380,34 @@ pub(super) fn validate_result_basis(
         None => result.validate(ledger)?,
     }
     Ok(())
+}
+
+pub(super) fn validate_inspection_result(
+    task: &StoredTask,
+    result: &InvestigationResult,
+) -> Result<(), InvestigationStoreError> {
+    match (
+        &task.detail.inspection_requirements,
+        &result.inspection_assessment,
+    ) {
+        (Some(targets), Some(assessment))
+            if result.schema_version == 3
+                && assessment.targets()? == *targets
+                && assessment.requirements_hash == inspection_requirements_hash(targets)? =>
+        {
+            Ok(())
+        }
+        (None, None)
+            if !task
+                .detail
+                .summary
+                .specialist_id
+                .uses_inspection_requirements() =>
+        {
+            Ok(())
+        }
+        _ => Err(InvestigationStoreError::Invalid),
+    }
 }
 
 pub(super) fn load_task(
@@ -370,6 +444,15 @@ pub(super) fn load_task(
     }
     if let Some(pending) = &task.pending {
         validate_step_basis(connection, &task, pending)?;
+    }
+    if task
+        .detail
+        .summary
+        .specialist_id
+        .uses_inspection_requirements()
+        && task.detail.summary.has_result
+    {
+        load_result(connection, &task)?.ok_or(InvestigationStoreError::Invalid)?;
     }
     Ok(task)
 }
@@ -606,6 +689,10 @@ pub(super) fn load_result(
                 return Err(InvestigationStoreError::Invalid);
             }
             result.validate(&ledger)?;
+        }
+        validate_inspection_result(task, result)?;
+        if result.inspection_assessment != task.detail.inspection_assessment {
+            return Err(InvestigationStoreError::Invalid);
         }
         if result.investigation_id != *id {
             return Err(InvestigationStoreError::Invalid);

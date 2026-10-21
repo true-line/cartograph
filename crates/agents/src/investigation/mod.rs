@@ -7,6 +7,7 @@
 mod admission;
 mod disclosure;
 mod input;
+mod inspection;
 mod privacy;
 mod projection;
 mod protocol;
@@ -18,6 +19,7 @@ mod turn;
 
 pub use disclosure::*;
 pub use input::*;
+pub use inspection::*;
 pub use privacy::{redacted_history_text, reject_prose_replay};
 pub use projection::*;
 pub use protocol::*;

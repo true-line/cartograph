@@ -1,5 +1,6 @@
 use super::*;
 use adapters_lang_ts::captured;
+use core_graph::GraphStore;
 use core_prov::{ConfidenceTier, Tier};
 use llm::bounded::{AuthorizedBoundedCompletion, ProviderProfile, ReportedUsage};
 use llm::{Embedding, ProviderCaps, ProviderError};
@@ -23,6 +24,7 @@ enum Mode {
     RepeatRead,
     UnavailableRead,
     PanicAfterQuery,
+    MetadataFinish,
 }
 
 /// One deterministic provider action per actual host invocation. The fixture
@@ -99,6 +101,15 @@ impl LlmProvider for Scripted {
                 json!({ "type": "query_context", "query": { "scope": {"type":"all"}, "kind":"node",
                     "labels":["BusinessRule"], "max_facts":1, "max_bytes":32768, "cursor":null } })
             }
+        } else if call == 1 && matches!(self.mode, Mode::MetadataFinish) {
+            let citations = prompt
+                .get("citations")
+                .unwrap_or(&prompt["input_ledger"]["citations"])
+                .as_array()
+                .unwrap();
+            json!({"type":"finish","findings":[{"claim_kind":"inferred_interpretation","title":"Scoped graph observation",
+                "statement":"The recovered context includes a guarded path; source remains uninspected.","citation_ids":[citations[0]["citation_id"]],
+                "limitations":["No source bytes were acquired."]}],"knowledge_completeness":"partial","limitations":["Graph metadata alone was inspected."]})
         } else if call == 1 || (call == 2 && matches!(self.mode, Mode::RepeatRead)) {
             let option = if prompt.get("compact_context").is_some() {
                 &prompt["compact_context"]["evidence_options"][0]
@@ -208,12 +219,22 @@ impl Fixture {
         question: &str,
         specialist_id: SpecialistId,
     ) -> Self {
+        Self::with_contract(provider, directory, question, specialist_id, None, ORIGINAL)
+    }
+    fn with_contract(
+        provider: &dyn LlmProvider,
+        directory: tempfile::TempDir,
+        question: &str,
+        specialist_id: SpecialistId,
+        required_role: Option<agents::TaskRangeRole>,
+        original: &str,
+    ) -> Self {
         let app_data = directory.path().join("private");
         std::fs::create_dir(&app_data).unwrap();
         let app_data = crate::paths::canonicalize(app_data).unwrap();
         let target = directory.path().join("target");
         std::fs::create_dir(&target).unwrap();
-        std::fs::write(target.join("rule.ts"), ORIGINAL).unwrap();
+        std::fs::write(target.join("rule.ts"), original).unwrap();
         let state = crate::registered_source_tests::app_state(&app_data);
         let source = state
             .sources
@@ -255,15 +276,52 @@ impl Fixture {
         std::fs::remove_dir_all(target).unwrap();
         let graph_before =
             serde_json::to_string(&state.graph.lock().unwrap().read_snapshot().unwrap()).unwrap();
+        let inspection_requirements = required_role.map(|role| {
+            let node = state
+                .graph
+                .lock()
+                .unwrap()
+                .nodes_with_label("BusinessRule")
+                .unwrap()
+                .remove(0);
+            let fact = agents::TaskFactKey::Node { id: node.id };
+            let description =
+                crate::primary_source::describe(&state, &crate::task_evidence::graph_fact(&fact))
+                    .unwrap();
+            let target = description
+                .ranges
+                .iter()
+                .find_map(|range| {
+                    let (target, _guard) = super::super::inspection::resolve(
+                        &state,
+                        &fact,
+                        &description.graph_snapshot_id,
+                        &description.receipt_id,
+                        range.index,
+                    )
+                    .unwrap();
+                    (target.role == role).then_some(target)
+                })
+                .unwrap();
+            vec![target]
+        });
+        let expected_graph_revision = inspection_requirements
+            .as_ref()
+            .map(|targets| targets[0].graph_snapshot_id.clone());
         let request = StartInvestigationRequest {
-            schema_version: 1,
+            schema_version: if inspection_requirements.is_some() {
+                2
+            } else {
+                1
+            },
+            inspection_requirements,
             request_nonce: "worker-fixture".into(),
             specialist_id,
             question: question.into(),
             scope: InvestigationScope::All,
             provider_mode: InvestigationProviderMode::Local,
             limit_profile: "investigation-v1".into(),
-            expected_graph_revision: None,
+            expected_graph_revision,
             conversation_id: None,
             parent_id: None,
         };
@@ -696,3 +754,6 @@ mod acceptance;
 
 #[path = "turn_tests.rs"]
 mod turn_tests;
+
+#[path = "inspection_tests.rs"]
+mod inspection_tests;

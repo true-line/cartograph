@@ -19,6 +19,8 @@ pub(crate) async fn investigation_specialists(
                 SpecialistId::EvidenceAuditorV3,
                 SpecialistId::DomainAnalystV4,
                 SpecialistId::EvidenceAuditorV4,
+                SpecialistId::DomainAnalystV5,
+                SpecialistId::EvidenceAuditorV5,
             ]
             .into_iter()
             .map(|id| id.definition())
@@ -37,22 +39,82 @@ pub(crate) async fn investigation_specialists(
     .await
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum InvestigationStartError {
+    Legacy(String),
+    Rejected {
+        code: &'static str,
+        message: String,
+        definitive: bool,
+    },
+}
+impl From<String> for InvestigationStartError {
+    fn from(error: String) -> Self {
+        Self::Legacy(error)
+    }
+}
+fn rejected(code: &'static str, message: impl ToString) -> InvestigationStartError {
+    InvestigationStartError::Rejected {
+        code,
+        message: message.to_string(),
+        definitive: true,
+    }
+}
 #[tauri::command]
 pub(crate) async fn start_investigation(
     request: StartInvestigationRequest,
     app: tauri::AppHandle,
-) -> Result<InvestigationSummary, String> {
+) -> Result<InvestigationSummary, InvestigationStartError> {
     let started = Instant::now();
-    crate::off_ui_thread(move || start(request, app, started)).await
+    tauri::async_runtime::spawn_blocking(move || start(request, app, started))
+        .await
+        .map_err(|e| InvestigationStartError::Legacy(e.to_string()))?
 }
 
-fn start<R: tauri::Runtime>(
+pub(super) fn start<R: tauri::Runtime>(
     request: StartInvestigationRequest,
     app: tauri::AppHandle<R>,
     started: Instant,
-) -> Result<InvestigationSummary, String> {
-    request.validate().map_err(|e| e.to_string())?;
+) -> Result<InvestigationSummary, InvestigationStartError> {
+    let schema2 =
+        request.schema_version == 2 || request.specialist_id.uses_inspection_requirements();
+    let request = request.normalized().map_err(|e| {
+        if schema2 {
+            rejected("invalid_input", e)
+        } else {
+            InvestigationStartError::Legacy(e.to_string())
+        }
+    })?;
     let state = app.state::<AppState>();
+    let _target_guards = if request.inspection_requirements.is_some() {
+        if let Some(prior) = state
+            .jobs
+            .lock()
+            .map_err(|_| HostError::Operational.to_string())?
+            .existing_investigation(&request)
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(prior.summary);
+        }
+        match super::inspection::validate_targets(&state, &request) {
+            Ok(guards) => guards,
+            Err(error) => {
+                if let Some(prior) = state
+                    .jobs
+                    .lock()
+                    .map_err(|_| HostError::Operational.to_string())?
+                    .existing_investigation(&request)
+                    .map_err(|e| e.to_string())?
+                {
+                    return Ok(prior.summary);
+                }
+                return Err(rejected("refresh_required", error));
+            }
+        }
+    } else {
+        Vec::new()
+    };
     // This resolves app-lifetime configuration only, without network activity.
     // An unavailable provider is passed through: durable deduplication must win
     // over a later configuration change for an already committed request.
@@ -91,7 +153,7 @@ fn start<R: tauri::Runtime>(
             state.investigations.remove(&id);
             // The nonce still recovers the committed identity. No second worker
             // or automatic re-claim is allowed after an uncertain start.
-            return Err(error);
+            return Err(error.into());
         }
     };
     // Keep the execution in the detached blocking worker even if the invoking

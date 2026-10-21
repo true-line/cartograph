@@ -3,7 +3,7 @@ import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, userEvent, waitFor, within } from 'storybook/test';
 import App from './App';
 import { useInvestigationStore } from './investigationStore';
-import { investigationCatalog, investigationCitations, investigationConsent, investigationDetail, investigationResult } from './investigationFixtures';
+import { inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationCitations, investigationConsent, investigationDetail, investigationResult } from './investigationFixtures';
 import type { InvestigationDetail, InvestigationEvent, StartInvestigationRequest } from './investigationTypes';
 import { usePrimarySourceStore, type CapturedDescription, type FactKey } from './primarySourceStore';
 import {
@@ -203,6 +203,8 @@ function installFakeCore(options: {
   unavailableEvidence?: boolean;
   evidenceGate?: Promise<void>;
   capturedDescriptions?: boolean;
+  inspectionSelection?: boolean;
+  existingInvestigation?: InvestigationDetail;
   rejectJobActionOnce?: boolean;
   legacyRunningJob?: boolean;
   investigationFlow?: boolean;
@@ -217,7 +219,7 @@ function installFakeCore(options: {
   capturedDescriptionRequests = [];
   repoRootLookups = 0;
   investigationRequests = [];
-  let investigation: InvestigationDetail | null = null;
+  let investigation: InvestigationDetail | null = options.existingInvestigation ?? null;
   const investigationJournal: InvestigationEvent[] = [];
   let investigationStep = 1;
   let straddleResult = options.straddleResultCommit ?? false;
@@ -265,16 +267,21 @@ function installFakeCore(options: {
   mockIPC((cmd, args) => {
     switch (cmd) {
       case 'investigation_specialists':
-        return investigationCatalog;
+        return options.inspectionSelection ? inspectionCatalog : investigationCatalog;
       case 'list_investigations':
         return { items: investigation ? [investigation] : [], next_cursor: null };
       case 'start_investigation': {
         if (!options.investigationFlow) throw new Error('Investigation fixture disabled');
         investigationRequests.push({ command: cmd, args });
         const request = (args as { request: StartInvestigationRequest }).request;
-        if (investigation) return investigation;
-        investigation = investigationDetail('inv-app-script', { question: request.question, scope: request.scope,
-          specialist_id: request.specialist_id, specialist: investigationCatalog.specialists.find((item) => item.id === request.specialist_id)!,
+        if (investigation && request.parent_id !== investigation.investigation_id) return investigation;
+        if (investigation) investigationJournal.length = 0;
+        investigation = investigationDetail(request.parent_id ? 'inv-app-follow-up' : 'inv-app-script', { question: request.question, scope: request.scope,
+          parent_id: request.parent_id ?? null, conversation_id: request.conversation_id ?? 'conversation-inv-app-script',
+          schema_version: request.schema_version, ...(request.schema_version === 2 ? {
+            inspection_requirements: request.inspection_requirements, inspection_requirement_count: request.inspection_requirements.length,
+            inspection_status: 'pending' as const } : {}),
+          specialist_id: request.specialist_id, specialist: (options.inspectionSelection ? inspectionCatalog : investigationCatalog).specialists.find((item) => item.id === request.specialist_id)!,
           provider_mode: request.provider_mode, provider: investigationCatalog.providers.find((item) => item.mode === request.provider_mode)!,
           status: 'queued', graph_snapshot_id: null, has_result: false, revision: 0, last_event_sequence: 0,
           actions: { can_cancel: true, can_follow_up: false } });
@@ -398,6 +405,7 @@ function installFakeCore(options: {
         const request = args as Record<string, unknown>;
         capturedDescriptionRequests.push(request);
         return {
+          graph_snapshot_id: 'snapshot:original',
           fact: request.fact as FactKey,
           receipt_id: `receipt:selection-${capturedDescriptionRequests.length}`,
           emitted_fact_digest: 'fact-digest', source_id: 'src_fixture', repo_key: 'local',
@@ -405,6 +413,17 @@ function installFakeCore(options: {
           scope: 'primary_source_only', input_closure: 'input_closure_not_established',
         } satisfies CapturedDescription;
       }
+      case 'read_captured_source':
+        return { receipt_id: `receipt:selection-${capturedDescriptionRequests.length}`, range_index: 0,
+          text: SPAN_TEXT, path: 'src/app.ts', byte_start: SPAN_START, byte_end: SPAN_END };
+      case 'resolve_investigation_inspection_target':
+        investigationRequests.push({ command: cmd, args });
+        return { ...inspectionTarget, target_id: 'c'.repeat(64), fact: (args as { fact: FactKey }).fact,
+          fact_digest: 'fact-digest', registered_source_id: 'src_fixture',
+          receipt_id: `receipt:selection-${capturedDescriptionRequests.length}`, receipt_inventory_index: 0,
+          source: { ...inspectionTarget.source, repo: 'local', path: 'src/app.ts', byte_start: SPAN_START, byte_end: SPAN_END },
+          captured: { ...inspectionTarget.captured, file: { ...inspectionTarget.captured.file, source_id: 'src_fixture', path: 'src/app.ts' },
+            byte_start: SPAN_START, byte_end: SPAN_END } };
       case 'export_flows':
         return '# Flow dossier\n\n## GET /users — Verified (score 1.00)\n';
       case 'list_flows':
@@ -1590,5 +1609,93 @@ export const InvestigationResultCommitStraddleIsRejected: Story = {
     await waitFor(() => expect(canvas.getByText('A local stock guard is present')).toBeVisible());
     await expect(useInvestigationStore.getState().detail?.status).toBe('completed');
     await expect(canvas.queryByText(/could not be refreshed consistently/)).not.toBeInTheDocument();
+  },
+};
+
+export const CapturedRangeBecomesExplicitInvestigationRequirement: Story = {
+  // AC-0261: real App/store route; viewer read never creates an agent obligation.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const endpoints = canvas.getByRole('heading', { name: 'Endpoints' }).closest('section') as HTMLElement;
+    installFakeCore({ capturedDescriptions: true, inspectionSelection: true, investigationFlow: true });
+    await userEvent.click(await within(endpoints).findByRole('button', { name: /GET \/users/ }));
+    await userEvent.selectOptions(await canvas.findByLabelText('Captured cited range'), '0');
+    await waitFor(() => expect(usePrimarySourceStore.getState().loading).toBe(false));
+    await expect(investigationRequests).toHaveLength(0);
+    await expect(useInvestigationStore.getState().draftInspectionRequirements).toHaveLength(0);
+    await userEvent.click(canvas.getByRole('button', { name: 'Require this source in an investigation' }));
+    await expect(await canvas.findByText('local/src/app.ts')).toBeVisible();
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
+    await expect(investigationRequests[0]).toEqual({ command: 'resolve_investigation_inspection_target', args: {
+      fact: { kind: 'node', id: FAKE_ENDPOINT.id }, expectedGraphSnapshotId: 'snapshot:original',
+      expectedReceiptId: 'receipt:selection-1', inventoryIndex: 0,
+    } });
+    const target = useInvestigationStore.getState().draftInspectionRequirements[0];
+    await expect(target.index).toBe(2);
+    await expect(target.receipt_inventory_index).toBe(0);
+    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@5/ }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Inspect this exact captured source.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await waitFor(() => expect(investigationRequests.some((item) => item.command === 'start_investigation')).toBe(true));
+    const sent = (investigationRequests.find((item) => item.command === 'start_investigation')?.args as { request: StartInvestigationRequest }).request;
+    await expect(sent.schema_version).toBe(2);
+    await expect(sent.specialist_id).toBe('domain-analyst@5');
+    await expect(sent.inspection_requirements).toEqual([target]);
+    await expect(sent.expected_graph_revision).toBe(target.graph_snapshot_id);
+    await expect(typeof sent.request_nonce).toBe('string');
+  },
+};
+
+
+export const InspectionFollowUpSurvivesSourceSelectionNavigation: Story = {
+  // AC-0261: actual App unmount/remount retains explicit composer intent, never old requirements.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const parent = inspectionDetail('inv-parent', {
+      specialist_id: 'domain-analyst@5', specialist: inspectionCatalog.specialists.find((item) => item.id === 'domain-analyst@5')!,
+      status: 'interrupted', has_result: false, revision: 0, last_event_sequence: 0,
+      inspection_status: 'not_assessed', inspection_assessment: undefined,
+      inspection_requirements: [inspectionTarget], inspection_requirement_count: 1,
+      actions: { can_cancel: false, can_follow_up: true },
+    });
+    installFakeCore({ existingInvestigation: parent, inspectionSelection: true, capturedDescriptions: true, investigationFlow: true });
+    await userEvent.click(canvas.getByRole('button', { name: 'Open investigations' }));
+    await useInvestigationStore.getState().open(parent.investigation_id);
+    await userEvent.click(await canvas.findByRole('button', { name: 'Ask a follow-up' }));
+    await expect(useInvestigationStore.getState().draftInspectionRequirements).toHaveLength(0);
+    await userEvent.click(canvas.getByRole('radio', { name: /evidence-auditor@5/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Provider'), 'cloud');
+    await userEvent.selectOptions(canvas.getByLabelText('Scope'), 'neighborhood');
+    await expect(useInvestigationStore.getState().composer.scopeType).toBe('neighborhood');
+    const anchor = await canvas.findByLabelText(/^Anchor fact ID/);
+    await userEvent.clear(anchor);
+    await userEvent.type(anchor, FAKE_ENDPOINT.id);
+    await userEvent.selectOptions(canvas.getByLabelText('Hops'), '2');
+    const question = 'Inspect this newly selected source in the follow-up.';
+    await userEvent.type(canvas.getByLabelText('Follow-up question'), question);
+    await userEvent.click(canvas.getByRole('button', { name: 'Workspace' }));
+    const endpoints = canvas.getByRole('heading', { name: 'Endpoints' }).closest('section') as HTMLElement;
+    await userEvent.click(await within(endpoints).findByRole('button', { name: /GET \/users/ }));
+    await userEvent.selectOptions(await canvas.findByLabelText('Captured cited range'), '0');
+    await waitFor(() => expect(usePrimarySourceStore.getState().loading).toBe(false));
+    await userEvent.click(canvas.getByRole('button', { name: 'Require this source in an investigation' }));
+    await expect(await canvas.findByLabelText('Follow-up question')).toHaveValue(question);
+    await expect(canvas.getByRole('radio', { name: /evidence-auditor@5/ })).toBeChecked();
+    await expect(canvas.getByLabelText('Provider')).toHaveValue('cloud');
+    await expect(canvas.getByLabelText(/^Anchor fact ID/)).toHaveValue(FAKE_ENDPOINT.id);
+    await expect(canvas.getByLabelText('Hops')).toHaveValue('2');
+    const requirements = structuredClone(useInvestigationStore.getState().draftInspectionRequirements);
+    await expect(requirements).toHaveLength(1);
+    await expect(requirements[0].target_id).not.toBe(inspectionTarget.target_id);
+    await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up' }));
+    await waitFor(() => expect(investigationRequests.some((item) => item.command === 'start_investigation')).toBe(true));
+    const request = (investigationRequests.find((item) => item.command === 'start_investigation')!.args as { request: StartInvestigationRequest }).request;
+    await expect(request).toMatchObject({ schema_version: 2, question, specialist_id: 'evidence-auditor@5', provider_mode: 'cloud',
+      scope: { type: 'neighborhood', anchor: FAKE_ENDPOINT.id, hops: 2 },
+      parent_id: parent.investigation_id, conversation_id: parent.conversation_id, inspection_requirements: requirements });
+    await waitFor(() => expect(useInvestigationStore.getState().pendingStart).toBeNull());
+    await expect(useInvestigationStore.getState().composer.parent).toBeNull();
+    await expect(useInvestigationStore.getState().composer.question).toBe('');
+    await expect(useInvestigationStore.getState().draftInspectionRequirements).toHaveLength(0);
   },
 };

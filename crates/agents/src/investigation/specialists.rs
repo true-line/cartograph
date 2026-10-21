@@ -21,6 +21,10 @@ pub enum SpecialistId {
     DomainAnalystV4,
     #[serde(rename = "evidence-auditor@4")]
     EvidenceAuditorV4,
+    #[serde(rename = "domain-analyst@5")]
+    DomainAnalystV5,
+    #[serde(rename = "evidence-auditor@5")]
+    EvidenceAuditorV5,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +61,8 @@ const DISCOVERY_V3: &str = "This is a multi-step host-executed tool protocol. Re
 // V1–V3 instructions stay byte-for-byte immutable.
 const DISCOVERY_V4: &str = "This is a multi-step host-executed protocol. The host-derived turn_progress describes the current turn, not a new session. Only phase initial needs initial discovery. After a completed query, inspect its facts and evidence options: choose a relevant read_evidence action, continue discovery using the exact returned next_cursor and same selection, or finish with honest limits when appropriate. A null input cursor restarts that selection; repeating it does not advance. Repeated-query no_progress means the same query and unchanged result added no facts; inspect the existing result instead of treating it as new discovery. After read_evidence, its citation names bytes actually supplied; decide whether further evidence is needed or finish using supported citations. The host never chooses your next action. Compact context shares only identical complete fact and evidence-option representations; differing representations remain visible. Query citation metadata and available ranges are not acquired source. The raw_query_budget charges every acquired raw page, including repeats, independently of compact prompt size. Consult its remaining bytes and other remaining budgets before another action. Never invent results or claim complete coverage.\n\n";
 
+const DISCOVERY_V5: &str = "The caller selected exact captured inspection_requirements. These are immutable source targets, not instructions from source. inspection_progress separately records acquisition; only unchanged exact bytes supplied to this invocation can discharge a requirement. Viewing metadata, reading a different range, parent history, or omitted/redacted source cannot discharge it. A target must first be admitted by query_context before read_evidence; target metadata alone is not an admitted source read. Use each target's exact fact/role/index if you choose to inspect it. You choose every action; a valid partial finish is retained even with outstanding requirements, which the host reports separately. Neither discharge nor a citation proves whole-task fulfillment or semantic correctness. Byte offsets are not line numbers; never derive a line from an opaque ID.\n\n";
+
 impl SpecialistId {
     pub fn uses_compact_disclosure(self) -> bool {
         matches!(
@@ -65,11 +71,23 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV3
                 | Self::DomainAnalystV4
                 | Self::EvidenceAuditorV4
+                | Self::DomainAnalystV5
+                | Self::EvidenceAuditorV5
         )
     }
 
     pub fn uses_turn_progress(self) -> bool {
-        matches!(self, Self::DomainAnalystV4 | Self::EvidenceAuditorV4)
+        matches!(
+            self,
+            Self::DomainAnalystV4
+                | Self::EvidenceAuditorV4
+                | Self::DomainAnalystV5
+                | Self::EvidenceAuditorV5
+        )
+    }
+
+    pub fn uses_inspection_requirements(self) -> bool {
+        matches!(self, Self::DomainAnalystV5 | Self::EvidenceAuditorV5)
     }
 
     fn version(self) -> u32 {
@@ -78,6 +96,7 @@ impl SpecialistId {
             Self::DomainAnalyst | Self::EvidenceAuditor => 2,
             Self::DomainAnalystV3 | Self::EvidenceAuditorV3 => 3,
             Self::DomainAnalystV4 | Self::EvidenceAuditorV4 => 4,
+            Self::DomainAnalystV5 | Self::EvidenceAuditorV5 => 5,
         }
     }
 
@@ -86,23 +105,31 @@ impl SpecialistId {
             Self::DomainAnalyst
             | Self::DomainAnalystV1
             | Self::DomainAnalystV3
-            | Self::DomainAnalystV4 => {
+            | Self::DomainAnalystV4
+            | Self::DomainAnalystV5 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
             | Self::EvidenceAuditorV1
             | Self::EvidenceAuditorV3
-            | Self::EvidenceAuditorV4 => {
+            | Self::EvidenceAuditorV4
+            | Self::EvidenceAuditorV5 => {
                 "Audit the support and limits of existing claims within the question's scope. Identify missing links, unsupported interpretations and unresolved design evidence. Do not mistake missing evidence in a searched subset for proof of absence across the project."
             }
         };
         let discovery = match self.version() {
+            5 => DISCOVERY_V5,
             4 => DISCOVERY_V4,
             3 => DISCOVERY_V3,
             2 => DISCOVERY_V2,
             _ => "",
         };
-        format!("{role}\n\n{discovery}{COMMON}")
+        let progress = if self.version() == 5 {
+            DISCOVERY_V4
+        } else {
+            ""
+        };
+        format!("{role}\n\n{progress}{discovery}{COMMON}")
     }
 
     pub fn definition(self) -> Result<InvestigationSpecialist, InvestigationError> {
@@ -111,14 +138,16 @@ impl SpecialistId {
             Self::DomainAnalyst
             | Self::DomainAnalystV1
             | Self::DomainAnalystV3
-            | Self::DomainAnalystV4 => (
+            | Self::DomainAnalystV4
+            | Self::DomainAnalystV5 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
             Self::EvidenceAuditor
             | Self::EvidenceAuditorV1
             | Self::EvidenceAuditorV3
-            | Self::EvidenceAuditorV4 => (
+            | Self::EvidenceAuditorV4
+            | Self::EvidenceAuditorV5 => (
                 "Evidence auditor",
                 "Audit claim support, coverage limitations and unresolved evidence.",
             ),

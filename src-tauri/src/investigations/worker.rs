@@ -142,6 +142,8 @@ impl<R: tauri::Runtime> Worker<'_, R> {
     ) -> Result<(), Failure> {
         self.check_new_work()?;
         let history = self.parent_history(request)?;
+        let _inspection_guards = super::inspection::validate_targets(self.state, request)
+            .map_err(|_| Failure::Stop(InvestigationStopReason::InputChanged))?;
         let mut context = FrozenContext::prepare(self.state, request, &history)?;
         self.check_new_work()?;
         let mut usage = self.detail.usage.clone();
@@ -166,16 +168,30 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .lock()
                     .map_err(|_| HostError::Operational)?
                     .investigation_turn_basis(self.id)?;
-                InvestigationInput::prepare_v4(
-                    &request.question,
-                    request.specialist_id,
-                    context.ledger.clone(),
-                    &context.query_pages,
-                    &context.evidence,
-                    &history,
-                    &self.detail.usage,
-                    &basis,
-                )?
+                if let Some(targets) = &request.inspection_requirements {
+                    InvestigationInput::prepare_v5(
+                        &request.question,
+                        request.specialist_id,
+                        context.ledger.clone(),
+                        &context.query_pages,
+                        &context.evidence,
+                        &history,
+                        &self.detail.usage,
+                        &basis,
+                        targets,
+                    )?
+                } else {
+                    InvestigationInput::prepare_v4(
+                        &request.question,
+                        request.specialist_id,
+                        context.ledger.clone(),
+                        &context.query_pages,
+                        &context.evidence,
+                        &history,
+                        &self.detail.usage,
+                        &basis,
+                    )?
+                }
             } else {
                 InvestigationInput::prepare(
                     &request.question,

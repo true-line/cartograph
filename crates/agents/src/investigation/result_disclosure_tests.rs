@@ -73,6 +73,7 @@ fn basis() -> (
         representation_hash: content_hash(b"representation"),
     };
     let disclosure = InvestigationDisclosure {
+        inspection_requirements_hash: None,
         schema_version: 1,
         policy: COMPACT_DISCLOSURE_POLICY.into(),
         input_ledger_hash: ledger.fingerprint().unwrap(),

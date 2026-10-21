@@ -184,6 +184,18 @@ impl JobStore {
         for id in ids {
             let id = id.ok_or(InvestigationStoreError::Invalid)?;
             let task = load_task(&tx, &id)?;
+            if let Some(targets) = &task.detail.inspection_requirements {
+                for target in targets {
+                    expected
+                        .entry((
+                            id.clone(),
+                            target.registered_source_id.clone(),
+                            target.source.repo.clone(),
+                            target.receipt_id.clone(),
+                        ))
+                        .or_insert(0);
+                }
+            }
             // Verify the current pointer/hash as well as the independently
             // retained revisions. Historical references are never subtracted.
             let current = load_ledger(&tx, &task)?;

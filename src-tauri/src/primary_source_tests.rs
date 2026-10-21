@@ -237,6 +237,7 @@ fn retain_investigation_selection(
     };
     ledger.validate().unwrap();
     let request = StartInvestigationRequest {
+        inspection_requirements: None,
         schema_version: 1,
         request_nonce: nonce.into(),
         specialist_id: SpecialistId::DomainAnalyst,

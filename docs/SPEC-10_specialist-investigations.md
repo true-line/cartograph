@@ -535,3 +535,50 @@ Run focused local gates under the shared execution policy and complete exact-SHA
 CI before ready status. Record the solution as built, validation and remaining
 parent gates on #404 before closeout. Do not mark #256 or the market goal complete
 from this increment alone.
+
+
+### Explicit source-inspection requirements (#622; AC-0261–0262)
+
+This next slice accepts caller-selected, known captured source targets only.
+Each requirement binds an exact fact, original role/index, graph snapshot, fact
+digest and retained source/receipt identity. The captured-source viewer's receipt
+inventory ordinal is resolved by the host; it is not the protocol role index.
+Start admission revalidates bindings and rejects stale or rebound selections.
+Selecting or viewing a range does not count as an agent inspection.
+
+Use a new request/input version and explicitly selected V5 specialists. Preserve
+V1–V4 request, prompt, input and saved-result behavior, including default V3.
+Requirements are immutable parts of caller intent, disclosure and result identity;
+nonce replay and follow-ups preserve the existing no-replay boundaries. Follow-up
+requirements must be explicitly supplied, never inferred from parent history.
+Keep existing request and evidence budgets; do not expand them to fit a selection.
+The request permits at most 12 targets and at most 8,192 serialized bytes total,
+including the question and all target descriptors. These are simultaneous limits;
+long paths or questions can make fewer than 12 targets fit. The UI reports the
+request byte limit before submission rather than silently dropping requirements.
+
+Host assessment distinguishes acquired, supplied to the finishing invocation, and
+cited source. A requirement is met only by the exact matching source representation
+actually supplied to that invocation. Acquired but omitted/redacted source, another
+range, or parent history cannot satisfy it. Supplied but uncited evidence is not
+claimed as support for a finding. Repeated reads do not inflate unique coverage.
+Save valid partial results with unmet requirements; execution status remains
+separate. A terminal V5 task without a finishing result reports not_assessed,
+while a live task awaits assessment. Legacy untyped tasks also report not_assessed,
+without acquiring typed requirements. No assessment certifies
+entailment, relevance, complete knowledge or whole-task fulfillment. The host never
+forces a tool, retries, invents requirements or repairs a failed model response.
+
+Locations retain explicit byte units. Structured line/column locations, where
+shown, are computed from the exact captured source version and bound to that
+source identity; never derive a line from an opaque fact-ID suffix or the current
+working tree. Free-text claims remain subject to independent quality review;
+regex matching over arbitrary finding prose is not a semantic correctness gate.
+
+The app offers an explicit require-source action from a known captured range and
+removable human-readable requirements in the composer. Composer intent, including
+an explicitly selected follow-up parent, survives source-selection navigation;
+requirements are not inherited from that parent. Saved detail/history shows
+per-target assessment independently of execution and knowledge completeness.
+Discovery-selected promotion, generic open-ended task certification and automatic
+migration of old controls are outside this first slice.
