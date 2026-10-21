@@ -580,3 +580,6 @@ mod turn_tests;
 
 #[path = "inspection_tests.rs"]
 pub(super) mod inspection_tests;
+
+#[path = "staged_finish_tests.rs"]
+mod staged_finish_tests;

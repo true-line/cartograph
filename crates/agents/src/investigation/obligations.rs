@@ -10,7 +10,7 @@ const CONTRACT: &str = "investigation-completion-obligations@1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct InventoryTarget {
+pub struct InventoryTarget {
     pub context_id: String,
     pub repo: String,
     pub inventory_hash: String,
@@ -34,7 +34,7 @@ impl InventoryTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum Obligation {
+pub enum Obligation {
     Source {
         obligation_id: String,
         target: Box<InvestigationInspectionTarget>,
@@ -64,7 +64,7 @@ impl Obligation {
         };
         Ok(crate::source_basis::domain_hash(domain, &bytes))
     }
-    fn key(&self) -> (&str, &str) {
+    pub fn key(&self) -> (&str, &str) {
         match self {
             Self::Source { obligation_id, .. } => ("source", obligation_id),
             Self::Inventory { obligation_id, .. } => ("inventory", obligation_id),
@@ -74,7 +74,7 @@ impl Obligation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ObligationEnvelope {
+pub struct ObligationEnvelope {
     pub schema_version: u32,
     pub contract: String,
     pub obligations: Vec<Obligation>,
@@ -154,7 +154,7 @@ impl ObligationEnvelope {
 /// StartInvestigationRequest, and its specialist strings add no public enum cases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct StagedObligationRequest {
+pub struct StagedObligationRequest {
     pub schema_version: u32,
     pub request_nonce: String,
     pub specialist_id: String,

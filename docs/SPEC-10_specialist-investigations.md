@@ -686,3 +686,48 @@ source, inventory and generation-4 request identities use respectively
 separator. Existing client-intent v1/v2/v3 and inspection-requirements-v1 remain
 unchanged. These pure identities attest caller intent; authoritative retained
 inventory/source resolution remains required before eventual exposure.
+
+
+### Staged finish admission and refusal journal (#648, AC-0265)
+
+The private completion contract distinguishes `supported` from
+`insufficient_evidence`. Existing action, citation, replay, metadata and disclosure
+security checks run before obligation classification. A supported candidate needs
+all source and inventory obligations in the actual finishing disclosure, using
+exact source assessment and validated retained-inventory read manifests. Acquiring
+bytes, graph metadata, parent history and omitted, redacted or changed bodies do
+not establish exact supply. An insufficient candidate has no findings, retains
+required limitations, and needs a completed durable read attempt for every
+obligation. Neither candidate publishes a legacy-shaped V7 result.
+
+Attempts bind immutable task/request intent, obligation, actual read action and
+invocation, and saved ledger basis. Unavailable outcomes are a closed set: pinned
+target absent, range/index out of bounds, and retained inventory exceeding caller
+`max_bytes`. Firewall refusal additionally requires the completed acquisition and
+its actual sealing observation. Operational, ownership, storage and provider
+failures retain terminal semantics; model claims and started reads are not
+completed attempts.
+
+Recoverable refusal feedback contains only obligation IDs, kind and fixed reason
+codes in normalized order, bounded to 2 KiB for the complete serialization.
+Supported refusal precedence is no attempt, unavailable acquisition, absent
+finishing representation, redaction, then unequal body hash. Insufficient finish
+refuses only unattempted obligations. Invalid security evidence remains an ordinary
+error. Envelope, attempts, finish, feedback and refusals have separate identities;
+staged sealing protects completion metadata without changing V1–V6 inputs.
+
+The optional private JobStore journal binds staged intent to an existing task's
+context/source projection and real invocation records. Its append helper joins a
+caller-owned transaction: refusal metadata, response usage and bounded feedback
+commit together or all roll back. Ordered durable records reconstruct the journal
+on a fresh connection, with bounded decoding and identity/basis validation. The
+journal retains hashes and derived assessment, not rejected finding prose; this
+read-back does not claim raw response replay or complete V7 task recovery.
+
+The first refusal returns `Continue`; the second returns `TerminalRequired`, and
+no third continuation is admissible. This slice does not commit a second-refusal
+Ready task. The final integration slice must publish the second refusal and host
+`Failed/obligations_unmet` with no result in the same transaction, preserve charged
+usage across intervening reads, and verify cancellation, ownership loss, reopen,
+history and UI projections. V7 remains unavailable in catalog and direct start;
+these primitives neither dispatch providers nor activate worker continuation.

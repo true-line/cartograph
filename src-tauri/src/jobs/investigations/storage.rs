@@ -608,7 +608,7 @@ pub(super) fn remaining_store_capacity(
         .ok_or(InvestigationStoreError::Capacity)
 }
 
-fn stored_bytes(
+pub(super) fn stored_bytes(
     connection: &Connection,
     id: Option<&str>,
 ) -> Result<usize, InvestigationStoreError> {
@@ -643,12 +643,16 @@ fn stored_bytes(
             .checked_add(usize::try_from(sum).map_err(|_| InvestigationStoreError::Invalid)?)
             .ok_or(InvestigationStoreError::Capacity)?;
     }
+    // The optional journal is lazily created; legacy stores keep identical
+    // accounting without creating or migrating its private schema.
+    let journal_bytes = super::staged::journal_bytes(connection, id)?;
     let refs: i64 = connection.query_row(
         "SELECT coalesce(sum(length(CAST(task_id AS BLOB))+length(CAST(source_id AS BLOB))+length(CAST(repo_key AS BLOB))+length(CAST(receipt_id AS BLOB))+128),0) FROM investigation_refs WHERE (?1 IS NULL OR task_id=?1)",
         [id], |r| r.get(0),
     )?;
     bytes
         .checked_add(usize::try_from(refs).map_err(|_| InvestigationStoreError::Invalid)?)
+        .and_then(|bytes| bytes.checked_add(journal_bytes))
         .ok_or(InvestigationStoreError::Capacity)
 }
 
