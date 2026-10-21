@@ -89,3 +89,27 @@ fn non_regular_registry_entries_never_consume_an_extension_slot() {
     assert_eq!(rejected, ["extension:0-directory.json"]);
     assert_eq!(loaded.sources.len(), 2 + MAX_EXTENSION_FILES);
 }
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_registry_names_are_refused_before_they_can_alias() {
+    use std::os::unix::ffi::OsStringExt;
+    let dir = tempfile::tempdir().unwrap();
+    // x\x80.json and x\x81.json both read as "x\u{FFFD}.json" lossily.
+    for byte in [0x80u8, 0x81] {
+        let name = std::ffi::OsString::from_vec([b"x".as_slice(), &[byte], b".json"].concat());
+        if std::fs::write(dir.path().join(name), NATS).is_err() {
+            // Some filesystems (APFS) refuse non-UTF-8 names outright.
+            return;
+        }
+    }
+    let loaded = event_registries_in(dir.path());
+    assert_eq!(loaded.sources.len(), 2, "only the built-in files apply");
+    assert_eq!(loaded.rejected.len(), 2);
+    assert!(
+        loaded
+            .rejected
+            .iter()
+            .all(|r| r.reason == "unreadable: file name is not valid UTF-8")
+    );
+}

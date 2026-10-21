@@ -451,7 +451,21 @@ fn event_registries_in(dir: &std::path::Path) -> Registries {
             for entry in entries {
                 match entry {
                     Ok(entry) => {
-                        let name = entry.file_name().to_string_lossy().into_owned();
+                        let name = match entry.file_name().into_string() {
+                            Ok(name) => name,
+                            Err(raw) => {
+                                // A lossy conversion could alias two files to
+                                // one source name; refuse rather than guess.
+                                let name = raw.to_string_lossy().into_owned();
+                                if name.ends_with(".json") {
+                                    unreadable.push(RegistryRejection {
+                                        name: format!("extension:{name}"),
+                                        reason: "unreadable: file name is not valid UTF-8".into(),
+                                    });
+                                }
+                                continue;
+                            }
+                        };
                         if !name.ends_with(".json") {
                             continue;
                         }
