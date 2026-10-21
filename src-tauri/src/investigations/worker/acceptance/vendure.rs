@@ -8,6 +8,8 @@ use tauri::Manager;
 
 #[path = "vendure/input.rs"]
 mod input;
+#[path = "vendure/measurement.rs"]
+mod measurement;
 #[path = "vendure/profile.rs"]
 mod profile;
 #[path = "vendure/report.rs"]
@@ -199,6 +201,26 @@ fn verify_config(config: &Path, expected_hash: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Metadata independently checked against the SHA256-pinned Git-blob proof and
+// staged source bytes; each BLAKE3 digest was recomputed from those same bytes.
+// Embedded identities permit retained-store reopening after checkout removal.
+fn frozen_files() -> Result<std::collections::BTreeMap<String, input::VerifiedFile>, String> {
+    serde_json::from_str(include_str!("vendure/frozen-files.json"))
+        .map_err(|_| "invalid embedded frozen file identities".into())
+}
+
+fn verify_frozen_input(input: &input::VerifiedInput) -> Result<(), String> {
+    if input.repo != "vendurehq/vendure"
+        || input.commit_sha != COMMIT
+        || input.manifest_sha256 != MANIFEST_SHA
+        || input.proof_sha256 != PROOF_SHA
+        || input.files != frozen_files()?
+    {
+        return Err("frozen Vendure input identity mismatch".into());
+    }
+    Ok(())
+}
+
 fn prepare(
     source: &Path,
     manifest: &Path,
@@ -209,15 +231,8 @@ fn prepare(
     frozen_vendure: bool,
 ) -> Result<Preparation, String> {
     let input = input::verify(source, manifest, proof)?;
-    if frozen_vendure
-        && (input.repo != "vendurehq/vendure"
-            || input.commit_sha != COMMIT
-            || input.manifest_sha256 != MANIFEST_SHA
-            || input.proof_sha256 != PROOF_SHA
-            || input.files.len() != 17
-            || input.files.values().map(|file| file.byte_len).sum::<u64>() != 270_721)
-    {
-        return Err("frozen Vendure input identity mismatch".into());
+    if frozen_vendure {
+        verify_frozen_input(&input)?;
     }
     let (profile, native_config_sha256) = profile::NativeProfile::read(config)?;
     validate_paths(source, manifest, proof, config, &profile, output)?;

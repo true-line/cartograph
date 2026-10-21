@@ -847,6 +847,63 @@ forgetting remain pending. A later native handoff must use the same recorded
 directory map and databases after harness handles close, without copying or
 rebasing databases.
 
+**Vendure selection measurement (#686).** Keep the preparation receipt and the
+same disposable profile in place. Measurement reopens those production stores;
+it must not recreate the profile, register another source, copy databases or
+substitute synthetic coverage. Select exact fact/receipt/range ordinals from the
+preparation catalogue for the analyst and auditor independently. Questions and
+selection metadata must remain separate from the withheld oracle.
+
+The measurement receipt distinguishes a proposed request from an executable,
+admitted request. It records each role's production-resolved target identities,
+request serialization size, source-range and full-file validation costs,
+inventory response size, and minimum source/inventory actions plus a separate
+finish invocation. It includes the measurement and preparation code revisions, their equality
+status, the compared profile ID and exact limits, and reports exceeded limits
+explicitly. An over-budget proposal is never staged as a
+task. These counts are lower bounds: discovery, unsuccessful reads and additional
+model turns require headroom. They do not establish semantic sufficiency.
+
+Use the ignored `vendure_measure_prepared_selections` entrypoint only after
+operator authorization. Its selection JSON is an array with exactly two entries,
+`domain-analyst@7` followed by `evidence-auditor@7`. Each entry contains
+`specialist_id`, `question`, `request_nonce`, `scope`, and a nonempty `sources`
+array. Each source contains `fact`, `graph_snapshot_id`, `receipt_id`, and the
+zero-based receipt inventory `ordinal`, copied from the actual preparation
+catalogue. Use the production scope/fact JSON forms. Optional `parent_id` and
+`conversation_id` must describe existing intended bindings; do not fabricate
+future analyst IDs. Missing future auditor bindings mean request byte counts
+measure the proposal only, not the eventual executable auditor request.
+
+Keep the configuration, preparation receipt and selection file canonical and
+external to the source, profile and new measurement-output roots. The profile
+must still contain its original production stores. The output directory must
+not exist and must have an existing canonical parent.
+
+```sh
+CARTOGRAPH_VENDURE_NATIVE_CONFIG='/absolute/evaluator/native-config.json' \
+CARTOGRAPH_VENDURE_PREPARATION_RECEIPT='/absolute/preparation/preparation.json' \
+CARTOGRAPH_VENDURE_SELECTIONS='/absolute/evaluator/selected-targets.json' \
+CARTOGRAPH_VENDURE_MEASUREMENT_OUTPUT='/absolute/new-measurement-directory' \
+cargo test -p app vendure_measure_prepared_selections -- --ignored --nocapture
+```
+
+Retain `measurement.json` or `measurement-failed.json` with the selected-target
+input and original preparation receipt. The output directory is reserved and
+pinned before stores are opened. A boundary or binding change can prevent even
+a failure receipt from being written safely. The manual entrypoint rechecks the
+frozen Vendure repository, commit and input-proof identity before measuring;
+offline fixture receipts cannot substitute for a Vendure observation. Both roles must be measured independently, even when they select the
+same source ranges. The receipt's comparisons concern the recorded profile and
+limits, not a proposed expanded profile.
+
+Measurement does not change limits, call a provider or authorize an analyst or
+auditor run. Retain its immutable metadata-only output outside source/profile
+roots. A real preparation and measurement invocation requires its own operator
+authorization; offline fixture tests are separate evidence. Review the observed
+numbers before proposing a product-level budget profile. T-0191 remains
+UNEXECUTED until the complete controlled workflow has actual evidence.
+
 For a governed remote run, dispatch the existing CI workflow on the exact branch
 with purpose `exact-sha-preflight` and `local_provider_acceptance=true`. This
 explicit opt-in still runs the legacy @2 control after the full Rust suite, on the same

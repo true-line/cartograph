@@ -12,7 +12,7 @@ const MAX_FILES: usize = 64;
 const MAX_FILE: usize = 2 * 1024 * 1024;
 const MAX_TOTAL: u64 = 8 * 1024 * 1024;
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct VerifiedInput {
     pub repo: String,
     pub commit_sha: String,
@@ -20,7 +20,7 @@ pub(super) struct VerifiedInput {
     pub proof_sha256: String,
     pub files: BTreeMap<String, VerifiedFile>,
 }
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct VerifiedFile {
     pub byte_len: u64,
     pub sha256: String,
