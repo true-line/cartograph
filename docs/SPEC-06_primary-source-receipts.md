@@ -105,8 +105,9 @@ Short SQLite/WAL transactions bound receipt persistence (64 MiB logical metadata
 100,000 receipts initially); capture storage retains SPEC-04's 2 GiB/10,000-capture
 logical limits. Within one extraction, rule, owner and GOVERNS receipts are admitted
 first under those ceilings exactly as before; declaration receipts only use the
-remaining budget, in manifest order, so they never turn a capture that fit into a
-limit failure. Every omitted declaration is counted under its file path in the
+remaining budget, admitted greedily in manifest order, so they never turn an
+extraction that fit into an extraction limit failure (the host's persistent store
+capacity remains separately authoritative). Every omitted declaration is counted under its file path in the
 adapter's result (surfacing it in coverage is #693). SQLite/WAL overhead is additional. Capacity errors explain that
 the user can forget retained source before recovering again; no automatic eviction.
 Captured inspection validates manifest membership and the selected raw object

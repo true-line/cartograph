@@ -356,7 +356,8 @@ fn extract_captured_dir_bounded(
     let mut receipts = Vec::new();
     let mut receipt_bytes = 0;
     // Declarations are admitted after every rule receipt, so they can never
-    // turn a capture that fit before #691 into a limit failure. Retention
+    // turn an extraction that fit before #691 into an extraction limit failure
+    // (host store capacity remains separately authoritative). Retention
     // stops once they alone could not fit, bounding the extra memory.
     let mut declarations = Vec::new();
     let mut declaration_bytes = 0;
@@ -397,7 +398,8 @@ fn extract_captured_dir_bounded(
     let matching = matcher(&extraction);
     receipts.retain(|receipt| matching(receipt));
     // Only declarations whose complete fact survived directory completion use
-    // budget. Manifest order is deterministic, so the admitted prefix is too.
+    // budget. Admission is greedy in deterministic manifest order: a declaration
+    // that does not fit is skipped and a smaller later one may still be admitted.
     for (receipt, bytes) in declarations {
         if !matching(&receipt) {
             continue;
