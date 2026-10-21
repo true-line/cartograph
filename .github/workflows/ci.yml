@@ -165,8 +165,9 @@ jobs:
     # No repo-wide lane group: GitHub keeps one pending job per group, so a
     # third queued PR cancelled the one already waiting (#669). The
     # workflow-level group supersedes a PR's own older run; across PRs the
-    # self-hosted pool is the backpressure, and apt waits for the shared
-    # host's dpkg lock instead of failing.
+    # self-hosted pool is the backpressure. The runners share one host, so
+    # every package-manager step (apt, Playwright --with-deps) holds one
+    # host-wide flock, waiting for it within the step's timeout.
     # Several runners share one host's memory; cargo's default of one rustc
     # per CPU exhausts it while compiling the workspace.
     env:
@@ -189,8 +190,8 @@ jobs:
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Refresh Tauri apt metadata
-          executable: sudo
-          arguments-json: '["apt-get","-o","DPkg::Lock::Timeout=120","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
+          executable: flock
+          arguments-json: '["-w","120","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
           timeout-seconds: '240'
           attempts: '2'
           retry-delay-seconds: '5'
@@ -199,8 +200,8 @@ jobs:
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Install Tauri system dependencies
-          executable: sudo
-          arguments-json: '["apt-get","-o","DPkg::Lock::Timeout=210","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
+          executable: flock
+          arguments-json: '["-w","210","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
           timeout-seconds: '420'
 
       # The runners share one user's home. rust-cache's post-job cleanup
@@ -238,8 +239,8 @@ jobs:
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Install pinned-runtime archive support
-          executable: sudo
-          arguments-json: '["apt-get","-o","DPkg::Lock::Timeout=60","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","zstd"]'
+          executable: flock
+          arguments-json: '["-w","60","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","zstd"]'
           timeout-seconds: '120'
 
       - name: Run explicit local-provider acceptance
@@ -357,8 +358,8 @@ jobs:
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Refresh rustup apt metadata
-          executable: sudo
-          arguments-json: '["apt-get","-o","DPkg::Lock::Timeout=60","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
+          executable: flock
+          arguments-json: '["-w","60","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
           timeout-seconds: '120'
           attempts: '2'
           retry-delay-seconds: '5'
@@ -367,8 +368,8 @@ jobs:
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Install rustup
-          executable: sudo
-          arguments-json: '["apt-get","-o","DPkg::Lock::Timeout=90","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","rustup"]'
+          executable: flock
+          arguments-json: '["-w","90","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","rustup"]'
           timeout-seconds: '180'
 
       - name: Install cargo-about
@@ -472,8 +473,8 @@ jobs:
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
           task: Install Playwright Chromium and system dependencies
-          executable: npx
-          arguments-json: '["playwright","install","--with-deps","chromium"]'
+          executable: flock
+          arguments-json: '["-w","150","/tmp/cartograph-ci-packages.lock","npx","playwright","install","--with-deps","chromium"]'
           working-directory: ui
           timeout-seconds: '300'
           attempts: '2'

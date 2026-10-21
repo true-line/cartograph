@@ -81,22 +81,26 @@ test('required Advanced CodeQL contexts report on every non-draft PR run, even o
   assert.match(full, /test "\$CODEQL" = success/u);
 });
 
-test('queued PR lanes never cancel each other, and apt waits for the shared lock (#669)', () => {
+test('queued PR lanes never cancel each other, and package installs serialize on one host lock (#669)', () => {
   const workflow = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
   // A repo-wide lane group keeps one pending job, so a third queued PR
   // cancelled the waiting one. Only the workflow-level per-PR group may
   // supersede a run.
   assert.doesNotMatch(workflow, /ci-lane-/u);
   assert.match(workflow, /format\('pr-\{0\}', github\.event\.pull_request\.number\)/u);
-  // Concurrent lanes share one runner host's dpkg lock: every apt-get call
-  // waits for it, within its bounded step timeout.
-  const calls = [...workflow.matchAll(/"apt-get",(.*?)\]'\n\s+timeout-seconds: '(\d+)'/gu)];
-  assert.ok(calls.length >= 5);
-  for (const [, args, step] of calls) {
-    const wait = Number(args.match(/"DPkg::Lock::Timeout=(\d+)"/u)?.[1]);
-    assert.ok(wait > 0 && wait < Number(step), args);
-  }
-  assert.equal([...workflow.matchAll(/"apt-get"/gu)].length, calls.length);
+  // Concurrent lanes share one runner host: every apt-get, including the
+  // one Playwright --with-deps runs itself, holds the same flock and waits
+  // for it within its bounded step timeout.
+  const calls = [
+    ...workflow.matchAll(
+      /executable: flock\n\s+arguments-json: '\["-w","(\d+)","\/tmp\/cartograph-ci-packages\.lock",(.*?)\]'\n\s+(?:working-directory: .*\n\s+)?timeout-seconds: '(\d+)'/gu,
+    ),
+  ];
+  for (const [, wait, , step] of calls) assert.ok(Number(wait) < Number(step));
+  const locked = calls.map(([, , command]) => command);
+  assert.equal(locked.filter((command) => command.startsWith('"sudo","apt-get"')).length, 5);
+  assert.equal(locked.filter((command) => command.includes('"--with-deps"')).length, 1);
+  assert.equal([...workflow.matchAll(/arguments-json: .*(?:"apt-get"|"--with-deps")/gu)].length, calls.length);
 });
 
 test('direct non-CI entrypoints authorize before checkout and reusable calls inherit policy', () => {
