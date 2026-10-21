@@ -1,7 +1,8 @@
 //! Direct declaration facts that make non-callable source citable (#693).
 //!
 //! Top-level variables and the first-level properties of their object-literal
-//! initializers become `Declaration` nodes, member decorators become
+//! initializers (deeper only inside a section too large to inspect whole)
+//! become `Declaration` nodes, member decorators become
 //! `Decorator` nodes, and a callable whose span exceeds the inspection range
 //! cap gets a `Signature` node over its header. Existing Symbol spans and
 //! identities are untouched (ADR-0039). Props carry names and spans only, so
@@ -60,35 +61,12 @@ pub(super) fn emit(
             defined_in(cx, &id, &file, *declarator),
             out,
         );
-        let Some(object) = value.filter(|value| value.kind() == "object") else {
-            continue;
-        };
-        let mut cursor = object.walk();
-        let pairs: Vec<_> = object
-            .named_children(&mut cursor)
-            .filter(|child| child.kind() == "pair")
-            .collect();
-        let keys = unique_names(cx, &pairs, |cx, pair| {
-            let key = pair.child_by_field_name("key")?;
-            (key.kind() != "computed_property_name").then(|| callable::property_name(cx, Some(key)))
-        });
-        for (pair, key) in pairs.iter().zip(keys) {
-            let Some(key) = key else { continue };
-            if pair
-                .child_by_field_name("value")
-                .is_some_and(callable::is_callable)
-            {
-                continue; // Already a Symbol.
+        if let Some(object) = value.filter(|value| value.kind() == "object") {
+            let mut members = Vec::new();
+            properties(cx, object, &name, &id, &file, &mut members);
+            for (node, edge) in members {
+                push(node, edge, out);
             }
-            let member = format!("{name}.{key}");
-            let member_id = decl_id(cx, &member);
-            push(
-                declaration(cx, &member_id, &member, "Property", *pair, |props| {
-                    props["declaration"] = serde_json::json!(id);
-                }),
-                defined_in(cx, &member_id, &file, *pair),
-                out,
-            );
         }
     }
     for function in syntax_nodes
@@ -120,9 +98,7 @@ pub(super) fn emit(
         let Some(body) = function.child_by_field_name("body") else {
             continue;
         };
-        if evidence.end_byte() - evidence.start_byte() <= MAX_CITABLE_SPAN_BYTES
-            || body.start_byte() <= evidence.start_byte()
-        {
+        if !exceeds_cap(evidence) || body.start_byte() <= evidence.start_byte() {
             continue;
         }
         let (start, end) = (evidence.start_byte(), body.start_byte());
@@ -150,6 +126,53 @@ pub(super) fn emit(
     }
 }
 
+/// First-level properties of an object literal. A property whose own span
+/// exceeds the inspection cap is flagged, and its object value is described
+/// one level deeper, so every config section reaches a citable range or is
+/// a named gap.
+fn properties(
+    cx: &FileCx<'_>,
+    object: TsNode<'_>,
+    prefix: &str,
+    parent: &str,
+    file: &str,
+    facts: &mut Vec<(Node, Edge)>,
+) {
+    let mut cursor = object.walk();
+    let pairs: Vec<_> = object
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "pair")
+        .collect();
+    let keys = unique_names(cx, &pairs, |cx, pair| {
+        let key = pair.child_by_field_name("key")?;
+        (key.kind() != "computed_property_name").then(|| callable::property_name(cx, Some(key)))
+    });
+    for (pair, key) in pairs.iter().zip(keys) {
+        let Some(key) = key else { continue };
+        let value = pair.child_by_field_name("value").map(unwrap_value);
+        if value.is_some_and(callable::is_callable) {
+            continue; // Already a Symbol.
+        }
+        let member = format!("{prefix}.{key}");
+        let id = decl_id(cx, &member);
+        facts.push((
+            declaration(cx, &id, &member, "Property", *pair, |props| {
+                props["declaration"] = serde_json::json!(parent);
+            }),
+            defined_in(cx, &id, file, *pair),
+        ));
+        if exceeds_cap(*pair)
+            && let Some(nested) = value.filter(|value| value.kind() == "object")
+        {
+            properties(cx, nested, &member, &id, file, facts);
+        }
+    }
+}
+
+fn exceeds_cap(node: TsNode<'_>) -> bool {
+    node.end_byte() - node.start_byte() > MAX_CITABLE_SPAN_BYTES
+}
+
 fn decl_id(cx: &FileCx<'_>, name: &str) -> String {
     format!("decl:{}@{}#{name}", cx.id.repo, cx.path)
 }
@@ -167,6 +190,11 @@ fn declaration(
         "kind": kind,
         "prov": cx.prov(&span, &format!("{kind} {id}")),
     });
+    if exceeds_cap(span) {
+        // Receipted, but too large to inspect whole: a named gap that narrower
+        // member facts, where they exist, close.
+        props["span_exceeds_range_cap"] = serde_json::json!(true);
+    }
     extra(&mut props);
     Node {
         id: id.into(),
@@ -262,8 +290,12 @@ fn decorators(function: TsNode<'_>) -> Vec<TsNode<'_>> {
     }
     let mut result = Vec::new();
     let mut previous = function.prev_named_sibling();
-    while let Some(node) = previous.filter(|node| node.kind() == "decorator") {
-        result.push(node);
+    // Comments may sit between decorators and the member; the scan stops only
+    // at the preceding real member.
+    while let Some(node) = previous.filter(|node| matches!(node.kind(), "decorator" | "comment")) {
+        if node.kind() == "decorator" {
+            result.push(node);
+        }
         previous = node.prev_named_sibling();
     }
     result.reverse();

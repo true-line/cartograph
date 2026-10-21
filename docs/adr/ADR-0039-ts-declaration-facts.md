@@ -33,12 +33,18 @@ span and a provenance-only v2 receipt:
   parentheses, with id `decl:<repo>@<path>#<name>.<key>`.
   - Key naming reuses the callable rules. Quoted and number keys are named by
     position (`key@N`) and never persisted.
-  - Computed keys and callable values emit nothing.
+  - Computed keys and callable values (seen through `as`, `satisfies` and
+    parentheses) emit nothing.
+  - A section whose span exceeds 8 KiB is flagged `span_exceeds_range_cap`,
+    and its object value is described one level deeper the same way, so each
+    section reaches an inspectable range or remains a named gap.
   - A repeated name (a legal duplicate `var` or object key) is
     position-qualified as `<name>@N`, so every id stays unique.
 - **`Decorator`** covers each decorator applied to a method, with id
   `deco:<repo>@<path>#<method name>/<index>`.
-  - The `name` prop is the callee path, never the arguments.
+  - The `name` prop is the callee path rebuilt from identifier tokens, never
+    arguments or comments; any other callee is position-named.
+  - Comments between decorators and the method do not hide them.
   - A `DECORATES` edge links it to the method's Symbol.
 - **`Signature`** is emitted for a callable whose evidence span exceeds 8 KiB.
   - It covers the header, from the evidence start to the body start, with

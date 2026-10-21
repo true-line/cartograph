@@ -825,12 +825,17 @@ fn captured_declarations_are_bounded_per_file_before_admission() {
 #[test]
 fn captured_declaration_facts_cite_config_decorators_and_headers() {
     let body = "  const step = 1;\n".repeat(600);
+    let fields: String = (0..900)
+        .map(|index| format!("f{index}: {index}, "))
+        .collect();
     let source = format!(
         r#"export const config: Config = {{
   catalogOptions: {{ stock: new DefaultStock() }},
   'quoted-secret': 'value',
   [computed]: 1,
   handler: () => 1,
+  wrapped: (() => 2) as Handler,
+  orderOptions: {{ small: 1, big: {{ {fields} }} }},
 }} as const;
 let counter = 0, other = 1;
 var twice = 1;
@@ -843,6 +848,8 @@ class Resolver {{
   @Nest.Get()
   @Namespace /* private-sentinel */ .Guard()
   read() {{ return 1; }}
+  @Allow() /* why */ run() {{ return 2; }}
+  @First() /* between */ @Second() go() {{ return 3; }}
 }}
 export function configure(options: Options) {{
 {body}  return options;
@@ -907,6 +914,36 @@ export function configure(options: Options) {{
             .iter()
             .any(|node| node.props["name"] == "config.handler")
     );
+    assert!(
+        !facts
+            .nodes
+            .iter()
+            .any(|node| node.props["name"] == "config.wrapped")
+    );
+    // An oversized section is a flagged gap described one level deeper, until
+    // each member fits one inspection range.
+    let cap = crate::declarations::MAX_CITABLE_SPAN_BYTES;
+    let flagged = |name: &str| {
+        named("Declaration", name)
+            .props
+            .get("span_exceeds_range_cap")
+            .is_some()
+    };
+    assert!(
+        flagged("config") && flagged("config.orderOptions") && flagged("config.orderOptions.big")
+    );
+    assert!(!flagged("config.orderOptions.small") && !flagged("config.catalogOptions"));
+    assert_eq!(
+        text(named("Declaration", "config.orderOptions.big.f7")),
+        "f7: 7"
+    );
+    for node in facts
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Declaration")
+    {
+        assert!(text(node).len() <= cap || node.props["span_exceeds_range_cap"] == true);
+    }
     // A repeated `var` keeps unique, position-qualified identities.
     let twice: Vec<_> = facts
         .nodes
@@ -946,6 +983,18 @@ export function configure(options: Options) {{
             ),
         ]
     );
+    // Comments after or between decorators never hide them.
+    let decorated = |method: &str| {
+        let target = named("Symbol", method).id.as_str();
+        facts
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Decorator" && node.props["target"] == target)
+            .map(&text)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(decorated("Resolver.run"), ["@Allow()"]);
+    assert_eq!(decorated("Resolver.go"), ["@First()", "@Second()"]);
     let graph = serde_json::to_string(&(&facts.nodes, &facts.edges)).unwrap();
     assert!(!graph.contains("private-sentinel"));
     assert!(source.contains("private-sentinel"));
