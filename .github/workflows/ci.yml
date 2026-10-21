@@ -297,6 +297,17 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+      # A self-hosted runner keeps the environment it started with, so a
+      # machine-wide rustup installed afterwards is not on its PATH yet.
+      - name: Use the runner's machine-wide Rust installation
+        if: runner.environment == 'self-hosted'
+        shell: pwsh
+        run: |
+          $cargo = [Environment]::GetEnvironmentVariable('CARGO_HOME', 'Machine')
+          $rustup = [Environment]::GetEnvironmentVariable('RUSTUP_HOME', 'Machine')
+          if ($cargo) { "CARGO_HOME=$cargo" >> $env:GITHUB_ENV; "$cargo\bin" >> $env:GITHUB_PATH }
+          if ($rustup) { "RUSTUP_HOME=$rustup" >> $env:GITHUB_ENV }
+
       - name: Install pinned Rust toolchain
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
