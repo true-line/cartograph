@@ -410,7 +410,7 @@ impl JobStore {
             if next_prompt {
                 next_parent_history::load(&tx, parent, &conversation_id)?;
             } else {
-                let parent = load_task(&tx, parent)?;
+                let parent = load_execution_task(&tx, parent)?;
                 if parent.detail.summary.conversation_id != conversation_id {
                     return Err(InvestigationStoreError::Invalid);
                 }

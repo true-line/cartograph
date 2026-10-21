@@ -161,3 +161,128 @@ fn next_parent_history_rejects_foreign_conversation_namespace_and_rehashed_wrong
             .is_err()
     );
 }
+
+// AC-0287: choosing Standard for a follow-up preserves the parent's immutable
+// family while admitting only the child's exact historical request4 tuple.
+#[test]
+fn next_parent_history_completed_task3_allows_standard_child_without_cross_conversation() {
+    let mut fixture = completed();
+    let parent = fixture.saved();
+    assert_eq!(parent.detail.summary.status, InvestigationStatus::Completed);
+    assert_eq!(
+        parent.detail.summary.specialist_id,
+        SpecialistId::DomainAnalystV10
+    );
+    let parent_id = fixture.base.id().to_owned();
+    let parent_result = fixture
+        .base
+        .f
+        .store
+        .investigation_result(&parent_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(parent_result.schema_version, 7);
+    let mut child = fixture.base.f.request.clone();
+    child.schema_version = 4;
+    child.specialist_id = "domain-analyst@7".into();
+    child.limit_profile = INVESTIGATION_V1_POLICY.profile().into();
+    child.obligations.schema_version = 1;
+    child.obligations.contract = "investigation-completion-obligations@1".into();
+    child.request_nonce = "standard-other-conversation".into();
+    child.parent_id = None;
+    child.conversation_id = None;
+    let child = child
+        .normalized_with_policy(&INVESTIGATION_V1_POLICY)
+        .unwrap();
+    let other = fixture
+        .base
+        .f
+        .store
+        .start_completion_investigation(&child, Some(&parent.detail.provider))
+        .unwrap();
+    assert_ne!(
+        other.detail.summary.conversation_id,
+        parent.detail.summary.conversation_id
+    );
+    let mut child = child;
+    child.request_nonce = "standard-task3-parent-followup".into();
+    child.parent_id = Some(parent_id.clone());
+    child.conversation_id = Some(other.detail.summary.conversation_id);
+    let counts = |store: &JobStore| -> (i64, i64, i64) {
+        store.conn.query_row(
+            "SELECT (SELECT count(*) FROM investigation_tasks),(SELECT count(*) FROM jobs),(SELECT count(*) FROM investigation_conversations)",
+            [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap()
+    };
+    let before = counts(&fixture.base.f.store);
+    assert!(matches!(
+        fixture
+            .base
+            .f
+            .store
+            .start_completion_investigation(&child, Some(&parent.detail.provider),),
+        Err(InvestigationStoreError::Invalid)
+    ));
+    assert_eq!(counts(&fixture.base.f.store), before);
+    child.conversation_id = Some(parent.detail.summary.conversation_id.clone());
+    let expected_hash = child
+        .intent_hash_with_policy(&INVESTIGATION_V1_POLICY)
+        .unwrap();
+    let started = fixture
+        .base
+        .f
+        .store
+        .start_completion_investigation(&child, Some(&parent.detail.provider))
+        .unwrap();
+    assert!(started.created);
+    assert_eq!(
+        started.detail.summary.parent_id.as_deref(),
+        Some(parent_id.as_str())
+    );
+    assert_eq!(
+        started.detail.summary.conversation_id,
+        parent.detail.summary.conversation_id
+    );
+    assert_eq!(
+        started.detail.summary.specialist_id,
+        SpecialistId::DomainAnalystV7
+    );
+    assert_eq!(started.detail.limits, INVESTIGATION_V1_POLICY.limits());
+    let tx = fixture.base.f.store.conn.unchecked_transaction().unwrap();
+    let saved = load_task(&tx, &started.detail.summary.investigation_id).unwrap();
+    assert_eq!(saved.schema_version, 2);
+    assert!(saved.admission_state.is_none());
+    assert_eq!(saved.completion_intent.as_ref().unwrap().schema_version, 1);
+    assert_eq!(saved.intent_hash, expected_hash);
+    assert_eq!(
+        saved.completion_intent.as_ref().unwrap().request_hash,
+        expected_hash
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        fixture.base.f.store.investigation(&parent_id).unwrap(),
+        parent.detail
+    );
+    assert_eq!(
+        fixture
+            .base
+            .f
+            .store
+            .investigation_result(&parent_id)
+            .unwrap()
+            .unwrap(),
+        parent_result
+    );
+    let reopened = JobStore::open(fixture.base.f.directory.path().join("state.db")).unwrap();
+    assert_eq!(
+        reopened
+            .investigation(&started.detail.summary.investigation_id)
+            .unwrap(),
+        started.detail
+    );
+    assert_eq!(reopened.investigation(&parent_id).unwrap(), parent.detail);
+    assert_eq!(
+        reopened.investigation_result(&parent_id).unwrap().unwrap(),
+        parent_result
+    );
+}

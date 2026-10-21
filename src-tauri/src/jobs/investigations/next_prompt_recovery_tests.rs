@@ -383,3 +383,6 @@ fn last_event(tx: &Connection, id: &str, sequence: u64) -> InvestigationEvent {
         .unwrap();
     decode(&body, &hash).unwrap()
 }
+
+#[path = "next_prompt_job_cancel_tests.rs"]
+mod job_cancel_tests;

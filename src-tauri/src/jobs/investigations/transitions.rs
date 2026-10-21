@@ -1052,11 +1052,20 @@ pub(in crate::jobs) fn cancel_for_job(
         return Ok(());
     };
     validate(connection, namespace)?;
-    let mut task = load_task(connection, &id)?;
+    let mut task = load_execution_task(connection, &id)?;
     if task.phase != Phase::Terminal && !task.detail.summary.cancel_requested {
         let revision = task.detail.summary.revision;
         request_cancel(connection, &mut task)?;
-        save_task(connection, &task, revision, true)?;
+        if task
+            .detail
+            .summary
+            .specialist_id
+            .uses_next_prompt_admission()
+        {
+            save_next_prompt_task(connection, &task, revision, true)?;
+        } else {
+            save_task(connection, &task, revision, true)?;
+        }
     }
     Ok(())
 }
