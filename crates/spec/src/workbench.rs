@@ -875,6 +875,73 @@ mod tests {
     }
 
     #[test]
+    fn data_model_lists_every_relation_field_of_an_aggregated_relation() {
+        // AC-0284 (#239, #702 review): several relation fields to the same
+        // target entity are one fact — one edge — so data_model.md lists
+        // every field that edge declares, not one field and not one row per
+        // field.
+        let nodes = vec![
+            node(
+                "data:ticket",
+                "DataEntity",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+            node(
+                "data:user",
+                "DataEntity",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+        ];
+        let mut relation = edge(
+            "data:ticket",
+            "data:user",
+            "REFERENCES",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        relation.props["relations"] = serde_json::json!([
+            {
+                "field": "approvedBy",
+                "relation": "OneToOne",
+                "cardinality": "one-to-one",
+                "owning": true,
+            },
+            {
+                "field": "createdBy",
+                "relation": "ManyToOne",
+                "cardinality": "many-to-one",
+                "owning": true,
+            },
+        ]);
+        let bundle = compile_spec(
+            &nodes,
+            &[relation],
+            &[],
+            ExportMode::VerifiedOnly,
+            &BTreeSet::new(),
+        );
+        let data = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "data-model")
+            .unwrap();
+        // The edge stays one row…
+        assert!(
+            data.content
+                .contains("| `data:ticket` | REFERENCES | `data:user` |")
+        );
+        // …and every field it declares is listed.
+        for field in [
+            "| `data:ticket` | `approvedBy` | OneToOne | one-to-one | true | `data:user` |",
+            "| `data:ticket` | `createdBy` | ManyToOne | many-to-one | true | `data:user` |",
+        ] {
+            assert!(data.content.contains(field), "{field}: {}", data.content);
+        }
+    }
+
+    #[test]
     fn verified_only_excludes_weak_but_preserves_gap_and_drift_registers() {
         // AC-0034 / R-INT-5 (T-0034).
         let (nodes, edges, flows) = fixture();

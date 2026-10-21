@@ -15,9 +15,9 @@
 //! candidate rule as every cross-file Java fact.
 
 use super::{
-    BTreeMap, BTreeSet, ConfidenceTier, Edge, Extraction, FileCx, HashMap, Imports, Node,
-    TYPE_KINDS, TsNode, enclosing_type_chain, is_comment, retarget_props_commit, string_literal,
-    symbol_id,
+    BTreeMap, BTreeSet, ConfidenceTier, EXTRACTOR_ID, Edge, EvidenceRef, Extraction, FileCx,
+    HashMap, Imports, Node, Provenance, TYPE_KINDS, Tier, TsNode, enclosing_type_chain, is_comment,
+    retarget_props_commit, string_literal, symbol_id,
 };
 
 /// The two Java Persistence API package roots (Jakarta EE and the legacy
@@ -768,48 +768,246 @@ fn classify(method: &str) -> Option<bool> {
     }
 }
 
-/// Declared types per variable name in a subtree: locals, parameters,
-/// enhanced-for and try-with-resources variables.
-fn collect_variables(
-    cx: &FileCx<'_>,
-    node: TsNode<'_>,
-    into: &mut HashMap<String, BTreeSet<String>>,
-) {
-    match node.kind() {
-        "formal_parameter" | "catch_formal_parameter" | "enhanced_for_statement" | "resource" => {
-            if let (Some(name), Some(ty)) = (
-                node.child_by_field_name("name"),
-                node.child_by_field_name("type"),
-            ) && let Some(ty) = type_name(cx, ty)
-            {
-                into.entry(cx.text(&name).to_string())
-                    .or_default()
-                    .insert(ty);
+/// A name bound at a call site: the declared name and the type it is
+/// declared with. `ty` is `None` when the spelling proves no type — an
+/// untyped lambda parameter — which fails the fact closed.
+struct Binding {
+    ty: Option<String>,
+}
+
+/// The binding of `name` in a declaration that carries `name` and `type`
+/// fields (a formal parameter, an enhanced-for variable, a
+/// try-with-resources resource).
+fn field_binding(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> Option<Binding> {
+    let declared = node.child_by_field_name("name")?;
+    if cx.text(&declared) != name {
+        return None;
+    }
+    Some(Binding {
+        ty: node
+            .child_by_field_name("type")
+            .and_then(|ty| type_name(cx, ty)),
+    })
+}
+
+/// The binding of `name` in a local variable declaration.
+fn declaration_binding(cx: &FileCx<'_>, declaration: TsNode<'_>, name: &str) -> Option<Binding> {
+    let mut walk = declaration.walk();
+    for declarator in declaration.named_children(&mut walk) {
+        if declarator.kind() != "variable_declarator" {
+            continue;
+        }
+        let Some(declared) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        if cx.text(&declared) != name {
+            continue;
+        }
+        return Some(Binding {
+            ty: declaration
+                .child_by_field_name("type")
+                .and_then(|ty| type_name(cx, ty)),
+        });
+    }
+    None
+}
+
+/// The binding of `name` in a catch parameter. A multi-catch
+/// (`catch (A | B e)`) declares no single type, so it proves none.
+fn catch_binding(cx: &FileCx<'_>, clause: TsNode<'_>, name: &str) -> Option<Binding> {
+    let mut walk = clause.walk();
+    for child in clause.named_children(&mut walk) {
+        if child.kind() != "catch_formal_parameter" {
+            continue;
+        }
+        let Some(declared) = child.child_by_field_name("name") else {
+            continue;
+        };
+        if cx.text(&declared) != name {
+            continue;
+        }
+        let mut types = Vec::new();
+        let mut inner = child.walk();
+        for caught in child.named_children(&mut inner) {
+            if caught.kind() != "catch_type" {
+                continue;
+            }
+            let mut walk = caught.walk();
+            for ty in caught.named_children(&mut walk) {
+                if let Some(ty) = type_name(cx, ty) {
+                    types.push(ty);
+                }
             }
         }
-        "local_variable_declaration" => {
-            if let Some(ty) = node
-                .child_by_field_name("type")
-                .and_then(|ty| type_name(cx, ty))
-            {
-                let mut walk = node.walk();
-                for declarator in node.named_children(&mut walk) {
-                    if declarator.kind() == "variable_declarator"
-                        && let Some(name) = declarator.child_by_field_name("name")
-                    {
-                        into.entry(cx.text(&name).to_string())
-                            .or_default()
-                            .insert(ty.clone());
-                    }
+        return Some(Binding {
+            ty: if types.len() == 1 {
+                types.into_iter().next()
+            } else {
+                None
+            },
+        });
+    }
+    None
+}
+
+/// The binding of `name` in a lambda's parameters. An inferred (untyped)
+/// parameter binds the name but proves no type.
+fn lambda_binding(cx: &FileCx<'_>, lambda: TsNode<'_>, name: &str) -> Option<Binding> {
+    let parameters = lambda.child_by_field_name("parameters")?;
+    match parameters.kind() {
+        "identifier" => (cx.text(&parameters) == name).then_some(Binding { ty: None }),
+        "inferred_parameters" => {
+            let mut walk = parameters.walk();
+            let bound = parameters
+                .named_children(&mut walk)
+                .any(|child| child.kind() == "identifier" && cx.text(&child) == name);
+            bound.then_some(Binding { ty: None })
+        }
+        "formal_parameters" => {
+            let mut walk = parameters.walk();
+            for parameter in parameters.named_children(&mut walk) {
+                if parameter.kind() != "formal_parameter" {
+                    continue;
                 }
+                if let Some(binding) = field_binding(cx, parameter, name) {
+                    return Some(binding);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The names bound by a pattern variable anywhere in `node`: an
+/// `instanceof Foo x` binding, a record pattern component or a switch
+/// pattern. Flow scoping is not modelled, so a receiver bound by one of
+/// these names asserts nothing (#702 review).
+fn collect_pattern_names(cx: &FileCx<'_>, node: TsNode<'_>, into: &mut BTreeSet<String>) {
+    match node.kind() {
+        "type_pattern" | "record_pattern_component" => {
+            let mut walk = node.walk();
+            for child in node.named_children(&mut walk) {
+                if child.kind() == "identifier" {
+                    into.insert(cx.text(&child).to_string());
+                }
+            }
+        }
+        "instanceof_expression" => {
+            if let Some(name) = node.child_by_field_name("name") {
+                into.insert(cx.text(&name).to_string());
             }
         }
         _ => {}
     }
     let mut walk = node.walk();
     for child in node.named_children(&mut walk) {
-        collect_variables(cx, child, into);
+        collect_pattern_names(cx, child, into);
     }
+}
+
+/// The binding of `name` that is visible at `call`, if any.
+///
+/// Scopes are searched innermost first, so the nearest declaration wins
+/// (Java's shadowing rule): a parameter of the enclosing method,
+/// constructor or lambda, a catch parameter, an enhanced-for variable, a
+/// try-with-resources resource, or a local declared in an enclosing block
+/// before the call. A declaration that starts after the call, or that
+/// lives in a sibling block, is not visible there — the receiver is then
+/// the field, as Java resolves it (#702 review).
+fn visible_binding(
+    cx: &FileCx<'_>,
+    method: TsNode<'_>,
+    call: TsNode<'_>,
+    name: &str,
+) -> Option<Binding> {
+    let mut node = call;
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            // Constructor bodies and switch groups hold statements exactly
+            // like a block does, so their locals scope the same way.
+            "block" | "constructor_body" | "switch_block_statement_group" => {
+                let mut walk = parent.walk();
+                for child in parent.named_children(&mut walk) {
+                    if child.kind() != "local_variable_declaration" {
+                        continue;
+                    }
+                    // A local is in scope from its declaration to the end of
+                    // its block: one declared later captures no earlier call.
+                    if child.start_byte() > call.start_byte() {
+                        continue;
+                    }
+                    if let Some(binding) = declaration_binding(cx, child, name) {
+                        return Some(binding);
+                    }
+                }
+            }
+            "catch_clause" => {
+                if let Some(binding) = catch_binding(cx, parent, name) {
+                    return Some(binding);
+                }
+            }
+            "enhanced_for_statement" => {
+                if let Some(binding) = field_binding(cx, parent, name) {
+                    return Some(binding);
+                }
+            }
+            "try_with_resources_statement" => {
+                let mut walk = parent.walk();
+                for child in parent.named_children(&mut walk) {
+                    if child.kind() != "resource_specification" {
+                        continue;
+                    }
+                    let mut inner = child.walk();
+                    for resource in child.named_children(&mut inner) {
+                        if resource.kind() != "resource" {
+                            continue;
+                        }
+                        if let Some(binding) = field_binding(cx, resource, name) {
+                            return Some(binding);
+                        }
+                    }
+                }
+            }
+            "lambda_expression" => {
+                if let Some(binding) = lambda_binding(cx, parent, name) {
+                    return Some(binding);
+                }
+            }
+            "for_statement" => {
+                let mut walk = parent.walk();
+                for child in parent.named_children(&mut walk) {
+                    if child.kind() != "local_variable_declaration" {
+                        continue;
+                    }
+                    if let Some(binding) = declaration_binding(cx, child, name) {
+                        return Some(binding);
+                    }
+                }
+            }
+            "method_declaration" | "constructor_declaration" => {
+                if let Some(parameters) = parent.child_by_field_name("parameters") {
+                    let mut walk = parameters.walk();
+                    for parameter in parameters.named_children(&mut walk) {
+                        if !matches!(parameter.kind(), "formal_parameter" | "spread_parameter") {
+                            continue;
+                        }
+                        if let Some(binding) = field_binding(cx, parameter, name) {
+                            return Some(binding);
+                        }
+                    }
+                }
+                // The enclosing method ends the search: nothing outside it
+                // is visible here.
+                if parent.start_byte() == method.start_byte() {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        node = parent;
+    }
+    None
 }
 
 fn collect_fields(
@@ -862,7 +1060,7 @@ fn repository_calls(
     let query = Query::new(language, "(method_invocation) @call").expect("static query");
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&query, root, cx.source);
-    let mut locals: HashMap<usize, HashMap<String, BTreeSet<String>>> = HashMap::new();
+    let mut patterns: HashMap<usize, BTreeSet<String>> = HashMap::new();
     let mut fields: HashMap<usize, HashMap<String, BTreeSet<String>>> = HashMap::new();
     while let Some(found) = matches.next() {
         let call = found.captures()[0].node;
@@ -912,12 +1110,26 @@ fn repository_calls(
         };
         let mut types: Option<BTreeSet<String>> = None;
         if !this_only {
-            let table = locals.entry(method_node.start_byte()).or_insert_with(|| {
-                let mut table = HashMap::new();
-                collect_variables(cx, method_node, &mut table);
-                table
+            // A name bound by a pattern variable proves no type: flow
+            // scoping is not modelled, so the call asserts nothing at all
+            // rather than falling back to a field of the same name.
+            let bound = patterns.entry(method_node.start_byte()).or_insert_with(|| {
+                let mut names = BTreeSet::new();
+                collect_pattern_names(cx, method_node, &mut names);
+                names
             });
-            types = table.get(&receiver).cloned();
+            if bound.contains(&receiver) {
+                continue;
+            }
+            // The receiver is the declaration visible at the call site —
+            // not every declaration in the method.
+            match visible_binding(cx, method_node, call, &receiver) {
+                // A binding with no proven type (an untyped lambda parameter)
+                // fails closed too.
+                Some(Binding { ty: Some(ty) }) => types = Some(BTreeSet::from([ty])),
+                Some(Binding { ty: None }) => continue,
+                None => {}
+            }
         }
         if types.is_none() {
             let mut node = call;
@@ -980,8 +1192,12 @@ struct DuplicateEntity {
     prov: serde_json::Value,
 }
 
-/// The entity ids that more than one class FQN declares, with the claiming
+/// The entity ids that more than one declaration claims, with the claiming
 /// FQNs sorted and the provenance of the first one in that order.
+///
+/// A collision is counted per declaration, not per distinct FQN: two source
+/// roots that declare the same class claim one DataEntity id just as two
+/// packages that declare the same entity name do (#702 review).
 fn duplicate_entities(index: &[EntityDecl]) -> Vec<DuplicateEntity> {
     let mut by_id: BTreeMap<&str, Vec<&EntityDecl>> = BTreeMap::new();
     for decl in index {
@@ -990,12 +1206,13 @@ fn duplicate_entities(index: &[EntityDecl]) -> Vec<DuplicateEntity> {
     by_id
         .into_iter()
         .filter_map(|(id, mut decls)| {
-            let mut fqns: Vec<String> = decls.iter().map(|decl| decl.fqn.clone()).collect();
-            fqns.sort();
-            fqns.dedup();
-            if fqns.len() < 2 {
+            if decls.len() < 2 {
                 return None;
             }
+            // Every claiming FQN, sorted, duplicates included: the Gap names
+            // the declarations that collide, not the distinct names.
+            let mut fqns: Vec<String> = decls.iter().map(|decl| decl.fqn.clone()).collect();
+            fqns.sort();
             // The first FQN in sorted order supplies the Gap's provenance:
             // the join cannot recompute a source span.
             decls.sort_by(|a, b| a.fqn.cmp(&b.fqn));
@@ -1015,6 +1232,122 @@ fn duplicate_entities(index: &[EntityDecl]) -> Vec<DuplicateEntity> {
 /// The Gap node that stands in for a colliding entity id.
 fn duplicate_gap_id(entity_id: &str) -> String {
     format!("gap:jpa:duplicate:{entity_id}")
+}
+
+/// The relation metadata of one field, as a relation edge carries it: the
+/// same keys the per-field edge emits today.
+fn relation_props(edge: &Edge) -> serde_json::Value {
+    let mut props = serde_json::Map::new();
+    for key in [
+        "field",
+        "relation",
+        "cardinality",
+        "owning",
+        "mapped_by",
+        "join_column",
+        "join_table",
+    ] {
+        if let Some(value) = edge.props.get(key) {
+            props.insert(key.to_string(), value.clone());
+        }
+    }
+    serde_json::Value::Object(props)
+}
+
+/// Whether `edge` is a JPA relation edge — not a repository binding, not a
+/// relation Gap.
+fn is_relation_edge(edge: &Edge) -> bool {
+    edge.label == "REFERENCES"
+        && edge.props.get("framework").and_then(|v| v.as_str()) == Some("jpa")
+}
+
+/// The relation field an edge declares.
+fn relation_field(edge: &Edge) -> &str {
+    edge.props
+        .get("field")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+}
+
+/// Provenance citing every relation field's evidence, built the way the
+/// file builds multi-span provenance: one span per proving declaration, one
+/// deterministic hash over the merged fact.
+fn merged_relation_prov(edges: &[&Edge], relations: &[serde_json::Value]) -> serde_json::Value {
+    let mut evidence: Vec<EvidenceRef> = Vec::new();
+    for edge in edges {
+        let Ok(prov) = serde_json::from_value::<Provenance>(edge.props["prov"].clone()) else {
+            continue;
+        };
+        evidence.extend(prov.evidence);
+    }
+    let fact = serde_json::to_vec(&serde_json::json!({ "relations": relations }))
+        .expect("relations serialize");
+    let provenance = Provenance::new(
+        Tier::Deterministic,
+        ConfidenceTier::Confirmed,
+        evidence,
+        EXTRACTOR_ID,
+        &fact,
+    )
+    .expect("Deterministic confidence is within its ceiling");
+    serde_json::to_value(provenance).expect("provenance serializes")
+}
+
+/// One edge for the relation fields one DataEntity declares to the same
+/// target entity. Several fields to one target are one fact: the
+/// reconciler keeps one edge per `(src, dst, label)` and would drop every
+/// field but one (#702 review). The per-field metadata moves into
+/// `relations` — sorted by field name — and the provenance cites every
+/// field's evidence.
+fn merge_relation_group(edges: &[Edge]) -> Edge {
+    let mut ordered: Vec<&Edge> = edges.iter().collect();
+    ordered.sort_by(|a, b| relation_field(a).cmp(relation_field(b)));
+    let relations: Vec<serde_json::Value> =
+        ordered.iter().map(|edge| relation_props(edge)).collect();
+    let mut merged = (*ordered.first().expect("a group holds an edge")).clone();
+    merged.props = serde_json::json!({
+        "framework": "jpa",
+        "relations": relations,
+        "prov": merged_relation_prov(&ordered, &relations),
+    });
+    merged
+}
+
+/// Aggregate the relation edges one DataEntity declares to the same target
+/// entity into one edge. A single-field relation keeps the shape it has
+/// today and gains the same `relations` list, so a consumer reads the
+/// per-field metadata in one place either way.
+fn aggregate_relation_edges(edges: &mut Vec<Edge>) {
+    let mut slots: Vec<Vec<Edge>> = Vec::new();
+    let mut groups: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for edge in edges.drain(..) {
+        if is_relation_edge(&edge) {
+            let key = (edge.src.clone(), edge.dst.clone());
+            match groups.get(&key) {
+                Some(index) => slots[*index].push(edge),
+                None => {
+                    groups.insert(key, slots.len());
+                    slots.push(vec![edge]);
+                }
+            }
+        } else {
+            slots.push(vec![edge]);
+        }
+    }
+    let mut merged: Vec<Edge> = Vec::with_capacity(slots.len());
+    for slot in slots {
+        if slot.len() == 1 {
+            let mut edge = slot.into_iter().next().expect("a slot holds one edge");
+            if is_relation_edge(&edge) {
+                let relations = serde_json::json!([relation_props(&edge)]);
+                edge.props["relations"] = relations;
+            }
+            merged.push(edge);
+        } else {
+            merged.push(merge_relation_group(&slot));
+        }
+    }
+    *edges = merged;
 }
 
 /// Resolve pending links and repository call sites against the repo-wide
@@ -1108,7 +1441,15 @@ pub(crate) fn resolve(out: &mut Extraction) {
         }
     }
 
-    let mut seen = BTreeSet::new();
+    // Several relation fields to the same target entity are one fact: the
+    // reconciler keeps one edge per `(src, dst, label)`, so separate edges
+    // would collapse into whichever field came last (#702 review).
+    aggregate_relation_edges(&mut out.edges);
+
+    // Every call site is its own occurrence: the reconciler unions the
+    // evidence of repeated `(src, dst, label)` edges, so dropping the later
+    // ones here would lose their citations and their fact hash (#702
+    // review).
     for call in std::mem::take(&mut out.pending_repo_calls) {
         let matched: Vec<&String> = call
             .candidates
@@ -1122,9 +1463,6 @@ pub(crate) fn resolve(out: &mut Extraction) {
             continue;
         };
         let label = if call.writes { "WRITES" } else { "READS" };
-        if !seen.insert((call.src.clone(), entity.clone(), label)) {
-            continue;
-        }
         out.edges.push(Edge {
             src: call.src,
             dst: entity.clone(),

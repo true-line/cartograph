@@ -1530,6 +1530,16 @@ fn jpa_facts_survive_incremental_reuse_and_retarget_commits() {
     assert_eq!(shape(&first), shape(&second));
     // 3 entities, 4 relations, 2 repository bindings, 4 repository accesses.
     assert_eq!(shape(&second).len(), 13);
+    // The reuse path holds one entity declaration per file: no id is
+    // claimed twice, so no duplicate-entity Gap is produced (#702 review).
+    assert!(
+        !second
+            .nodes
+            .iter()
+            .any(|node| node.id.starts_with("gap:jpa:duplicate:")),
+        "{:?}",
+        second.nodes.iter().map(|node| &node.id).collect::<Vec<_>>()
+    );
     let access = second
         .edges
         .iter()
@@ -1771,5 +1781,427 @@ public class Service {
             .iter()
             .filter(|edge| edge.src == inner)
             .collect::<Vec<_>>()
+    );
+}
+
+/// AC-0284 (#239, #702 review): two relation fields to the same target
+/// entity are one fact, not two edges the reconciler collapses into
+/// whichever field came last. The published edge carries every field's
+/// metadata in `relations` and cites every field's evidence.
+#[test]
+fn jpa_relations_to_the_same_target_aggregate_into_one_edge_with_per_field_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/java/com/demo/Ticket.java",
+        r#"package com.demo;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.OneToOne;
+
+@Entity
+public class Ticket {
+    @Id
+    private Integer id;
+
+    @ManyToOne
+    private User createdBy;
+
+    @OneToOne
+    private User approvedBy;
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/User.java",
+        r#"package com.demo;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+
+@Entity
+public class User {
+    @Id
+    private Integer id;
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+
+    let ticket = "data:local/demo@jpa:Ticket";
+    let user = "data:local/demo@jpa:User";
+    let relations: Vec<&Edge> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "REFERENCES" && edge.src == ticket && edge.dst == user)
+        .collect();
+    assert_eq!(relations.len(), 1, "{relations:?}");
+
+    // Both fields, sorted by name, with their own relation metadata.
+    let published = relations[0];
+    assert_eq!(
+        published.props["relations"],
+        serde_json::json!([
+            {
+                "field": "approvedBy",
+                "relation": "OneToOne",
+                "cardinality": "one-to-one",
+                "owning": true,
+            },
+            {
+                "field": "createdBy",
+                "relation": "ManyToOne",
+                "cardinality": "many-to-one",
+                "owning": true,
+            },
+        ])
+    );
+    // The edge cites both fields' evidence.
+    let source = std::fs::read(dir.path().join("src/main/java/com/demo/Ticket.java")).unwrap();
+    let cited = cited(&source, &published.props["prov"]);
+    assert_eq!(cited.len(), 2, "{cited:?}");
+    assert!(cited[0].contains("approvedBy"), "{cited:?}");
+    assert!(cited[1].contains("createdBy"), "{cited:?}");
+}
+
+/// AC-0284 (#239, #702 review): the receiver of a repository call is the
+/// declaration visible at the call site — not every declaration in the
+/// method. A local declared later or in a sibling block does not capture
+/// an earlier call (the field wins there); a local in an inner block and a
+/// lambda parameter shadow the field inside their scope; a name bound by a
+/// pattern variable asserts nothing, because flow scoping is not modelled.
+#[test]
+fn jpa_repository_receiver_resolves_against_the_scope_visible_at_the_call_site() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, body) in [
+        (
+            "Pet",
+            r#"package com.demo;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+
+@Entity
+public class Pet {
+    @Id
+    private Integer id;
+}
+"#,
+        ),
+        (
+            "Owner",
+            r#"package com.demo;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+
+@Entity
+public class Owner {
+    @Id
+    private Integer id;
+}
+"#,
+        ),
+    ] {
+        write(
+            dir.path(),
+            &format!("src/main/java/com/demo/{name}.java"),
+            body,
+        );
+    }
+    write(
+        dir.path(),
+        "src/main/java/com/demo/PetRepository.java",
+        r#"package com.demo;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface PetRepository extends JpaRepository<Pet, Integer> {
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/OwnerRepository.java",
+        r#"package com.demo;
+
+import org.springframework.data.repository.Repository;
+
+public interface OwnerRepository extends Repository<Owner, Integer> {
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/Service.java",
+        r#"package com.demo;
+
+public class Service {
+    private final PetRepository repo;
+    private final OwnerRepository owners;
+
+    void laterLocal(Pet pet) {
+        repo.save(pet);
+        {
+            OwnerRepository repo = owners;
+            repo.save(pet);
+        }
+    }
+
+    void siblingBlock(Pet pet) {
+        {
+            OwnerRepository repo = owners;
+            repo.save(pet);
+        }
+        {
+            repo.save(pet);
+        }
+    }
+
+    void shadowingLocal(Pet pet) {
+        {
+            OwnerRepository repo = owners;
+            repo.save(pet);
+        }
+    }
+
+    void lambdaParameter(Pet pet) {
+        java.util.function.Function<OwnerRepository, Pet> f = (OwnerRepository repo) -> {
+            repo.save(pet);
+            return null;
+        };
+    }
+
+    void patternBinding(Pet pet, Object value) {
+        if (value instanceof OwnerRepository repo) {
+            repo.save(pet);
+        }
+    }
+
+    void switchPattern(Pet pet, Object value) {
+        switch (value) {
+            case OwnerRepository repo -> repo.save(pet);
+            default -> { }
+        }
+    }
+
+    Service(OwnerRepository owners, Pet pet) {
+        this.owners = owners;
+        this.repo = null;
+        OwnerRepository repo = owners;
+        repo.save(pet);
+    }
+
+    void switchGroupLocal(Pet pet, int kind) {
+        switch (kind) {
+            case 1:
+                OwnerRepository repo = owners;
+                repo.save(pet);
+                break;
+            default:
+                break;
+        }
+    }
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+
+    let pet = "data:local/demo@jpa:Pet";
+    let owner = "data:local/demo@jpa:Owner";
+    let service = "sym:local/demo@src/main/java/com/demo/Service.java#Service";
+    let writes = |method: &str, entity: &str| -> usize {
+        out.edges
+            .iter()
+            .filter(|edge| {
+                edge.label == "WRITES"
+                    && edge.src == format!("{service}.{method}")
+                    && edge.dst == entity
+            })
+            .count()
+    };
+    let accesses = |method: &str| -> usize {
+        out.edges
+            .iter()
+            .filter(|edge| {
+                matches!(edge.label.as_str(), "READS" | "WRITES")
+                    && edge.src == format!("{service}.{method}")
+            })
+            .count()
+    };
+
+    // The local in the later block does not capture the earlier call: that
+    // one is the field, the later one is the local.
+    assert_eq!(writes("laterLocal(Pet)", pet), 1, "{:?}", out.edges);
+    assert_eq!(writes("laterLocal(Pet)", owner), 1, "{:?}", out.edges);
+    // The sibling block's local is out of scope in the second block: the
+    // field wins there.
+    assert_eq!(writes("siblingBlock(Pet)", owner), 1, "{:?}", out.edges);
+    assert_eq!(writes("siblingBlock(Pet)", pet), 1, "{:?}", out.edges);
+    // An inner-block local shadows the field inside its block.
+    assert_eq!(writes("shadowingLocal(Pet)", owner), 1, "{:?}", out.edges);
+    assert_eq!(writes("shadowingLocal(Pet)", pet), 0, "{:?}", out.edges);
+    // A lambda parameter shadows the field too.
+    assert_eq!(writes("lambdaParameter(Pet)", owner), 1, "{:?}", out.edges);
+    assert_eq!(writes("lambdaParameter(Pet)", pet), 0, "{:?}", out.edges);
+    // A name bound by a pattern variable asserts nothing — neither the
+    // pattern's type nor the field of the same name.
+    assert_eq!(accesses("patternBinding(Pet,Object)"), 0, "{:?}", out.edges);
+    assert_eq!(accesses("switchPattern(Pet,Object)"), 0, "{:?}", out.edges);
+    // A local declared directly in a constructor body or a switch group
+    // shadows the field just as a block local does.
+    let constructor_writes = |entity: &str| -> usize {
+        out.edges
+            .iter()
+            .filter(|edge| {
+                edge.label == "WRITES"
+                    && edge.src.starts_with(&format!("{service}.Service("))
+                    && edge.dst == entity
+            })
+            .count()
+    };
+    assert_eq!(constructor_writes(owner), 1, "{:?}", out.edges);
+    assert_eq!(constructor_writes(pet), 0, "{:?}", out.edges);
+    assert_eq!(
+        writes("switchGroupLocal(Pet,int)", owner),
+        1,
+        "{:?}",
+        out.edges
+    );
+    assert_eq!(
+        writes("switchGroupLocal(Pet,int)", pet),
+        0,
+        "{:?}",
+        out.edges
+    );
+}
+
+/// AC-0284 (#239, #702 review): every call site is its own occurrence. The
+/// reconciler unions the evidence of repeated `(src, dst, label)` edges, so
+/// dropping the later ones would lose their citations — and their fact
+/// hash.
+#[test]
+fn jpa_repeated_repository_calls_each_cite_their_own_occurrence() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/java/com/demo/Pet.java",
+        r#"package com.demo;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+
+@Entity
+public class Pet {
+    @Id
+    private Integer id;
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/PetRepository.java",
+        r#"package com.demo;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface PetRepository extends JpaRepository<Pet, Integer> {
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/Service.java",
+        r#"package com.demo;
+
+public class Service {
+    private final PetRepository repo;
+
+    void twice(Pet pet) {
+        repo.save(pet);
+        repo.save(pet);
+    }
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+
+    let src = "sym:local/demo@src/main/java/com/demo/Service.java#Service.twice(Pet)";
+    let writes: Vec<&Edge> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "WRITES" && edge.src == src)
+        .collect();
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    for occurrence in &writes {
+        assert_eq!(occurrence.dst, "data:local/demo@jpa:Pet");
+        assert_eq!(occurrence.props["method"], "save");
+    }
+    // The two occurrences cite their own call site.
+    let starts: BTreeSet<u64> = writes
+        .iter()
+        .map(|edge| {
+            edge.props["prov"]["evidence"][0]["byte_start"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(starts.len(), 2, "{starts:?}");
+}
+
+/// AC-0284 (#239, #702 review): a collision is counted per declaration, not
+/// per distinct FQN. Two source roots that declare the same class claim one
+/// DataEntity id just as two packages that declare the same entity name do:
+/// the merged node would assert facts no single declaration proves, so one
+/// explicit Gap replaces it and names every claiming FQN.
+#[test]
+fn jpa_same_fqn_entity_declarations_collide_in_two_source_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    for root in ["src/main/java", "src/test/java"] {
+        write(
+            dir.path(),
+            &format!("{root}/com/demo/Owner.java"),
+            r#"package com.demo;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+
+@Entity
+public class Owner {
+    @Id
+    private Integer id;
+}
+"#,
+        );
+    }
+    let out = extract_dir(dir.path(), &id()).unwrap();
+
+    // The merged DataEntity is gone: no node claims that id any more.
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|node| node.id == "data:local/demo@jpa:Owner"),
+        "{:?}",
+        out.nodes.iter().map(|node| &node.id).collect::<Vec<_>>()
+    );
+    let gap = node(&out.nodes, "gap:jpa:duplicate:data:local/demo@jpa:Owner");
+    assert_eq!(gap.label, "Gap");
+    assert_eq!(
+        gap.props["reason"],
+        "JPA entity name is declared by more than one class"
+    );
+    // Every claiming FQN, duplicates included.
+    assert_eq!(
+        gap.props["fqns"],
+        serde_json::json!(["com.demo.Owner", "com.demo.Owner"])
+    );
+    assert_eq!(gap.props["prov"]["confidence_tier"], "Gap");
+    // The Gap cites one of the two declarations.
+    assert_eq!(
+        gap.props["prov"]["evidence"][0]["path"],
+        "src/main/java/com/demo/Owner.java"
     );
 }
