@@ -1537,3 +1537,239 @@ fn jpa_facts_survive_incremental_reuse_and_retarget_commits() {
         .expect("repository write");
     assert_eq!(access.props["prov"]["evidence"][0]["commit_sha"], "abc123");
 }
+
+/// AC-0284 (#239): an entity name is not unique across packages. Two
+/// `@Entity` classes that share it would claim one DataEntity id and merge
+/// into a fact neither class proves. The join replaces the merged node with
+/// one explicit Gap naming both classes, and the relation that targeted it
+/// fails closed to its own Gap (R-INT-4).
+#[test]
+fn jpa_duplicate_entity_names_across_packages_fail_closed_to_one_gap() {
+    let dir = tempfile::tempdir().unwrap();
+    for (package, path) in [
+        ("com.demo.owner", "src/main/java/com/demo/owner/Owner.java"),
+        ("com.demo.other", "src/main/java/com/demo/other/Owner.java"),
+    ] {
+        write(
+            dir.path(),
+            path,
+            &format!(
+                r#"package {package};
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+
+@Entity
+public class Owner {{
+    @Id
+    private Integer id;
+}}
+"#
+            ),
+        );
+    }
+    write(
+        dir.path(),
+        "src/main/java/com/demo/pet/Pet.java",
+        r#"package com.demo.pet;
+
+import com.demo.owner.Owner;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.ManyToOne;
+
+@Entity
+public class Pet {
+    @Id
+    private Integer id;
+
+    @ManyToOne
+    private Owner owner;
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+
+    // The merged DataEntity is gone: no node claims that id any more.
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|node| node.id == "data:local/demo@jpa:Owner"),
+        "{:?}",
+        out.nodes.iter().map(|node| &node.id).collect::<Vec<_>>()
+    );
+    let entities: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "DataEntity")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(entities, BTreeSet::from(["data:local/demo@jpa:Pet"]));
+
+    // One Gap stands in for the ambiguous entity, naming both classes.
+    let gap = node(&out.nodes, "gap:jpa:duplicate:data:local/demo@jpa:Owner");
+    assert_eq!(gap.label, "Gap");
+    assert_eq!(
+        gap.props["reason"],
+        "JPA entity name is declared by more than one class"
+    );
+    assert_eq!(gap.props["attempted_tiers"], serde_json::json!(["T0"]));
+    assert_eq!(gap.props["framework"], "jpa");
+    assert_eq!(gap.props["language"], "java");
+    assert_eq!(
+        gap.props["fqns"],
+        serde_json::json!(["com.demo.other.Owner", "com.demo.owner.Owner"])
+    );
+    assert_eq!(gap.props["prov"]["confidence_tier"], "Gap");
+    assert_eq!(gap.props["prov"]["tier"], "Deterministic");
+    // The Gap cites the first class in sorted-FQN order.
+    assert_eq!(
+        gap.props["prov"]["evidence"][0]["path"],
+        "src/main/java/com/demo/other/Owner.java"
+    );
+
+    // The relation to the ambiguous entity fails closed to its own Gap.
+    let relation_gap = out
+        .nodes
+        .iter()
+        .find(|node| {
+            node.label == "Gap"
+                && node.props["reason"] == "JPA relation target is not a recovered entity"
+        })
+        .expect("relation gap");
+    edge(
+        &out.edges,
+        "data:local/demo@jpa:Pet",
+        &relation_gap.id,
+        "REFERENCES",
+    );
+    assert!(
+        !out.edges
+            .iter()
+            .any(|edge| edge.dst == "data:local/demo@jpa:Owner"),
+        "the ambiguous entity id resolves to nothing"
+    );
+}
+
+/// AC-0284 (#239): a `@Table` name computed at runtime is not a table
+/// identity T0 can confirm, so it fails closed to an explicit Gap — and that
+/// Gap stays connected to the entity that declares it (R-INT-4).
+#[test]
+fn jpa_dynamic_table_name_gap_is_connected_to_its_entity() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/java/com/demo/Dynamic.java",
+        r#"package com.demo;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(name = Names.TABLE)
+public class Dynamic {
+    @Id
+    private Integer id;
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let gap = out
+        .nodes
+        .iter()
+        .find(|node| {
+            node.label == "Gap" && node.props["reason"] == "runtime-computed JPA table name"
+        })
+        .expect("dynamic table gap");
+    assert_eq!(gap.props["framework"], "jpa");
+    assert_eq!(gap.props["prov"]["confidence_tier"], "Gap");
+
+    // The Gap is connected to its source, not orphaned in the graph.
+    let edge = edge(
+        &out.edges,
+        "data:local/demo@jpa:Dynamic",
+        &gap.id,
+        "REFERENCES",
+    );
+    assert_eq!(edge.props["prov"]["confidence_tier"], "Gap");
+    assert_eq!(edge.props["attempted_resolution"], "entity-type");
+
+    // The entity itself is still recovered, with no table asserted.
+    let entity = node(&out.nodes, "data:local/demo@jpa:Dynamic");
+    assert_eq!(entity.props["table_source"], "unresolved");
+    assert!(entity.props.get("table").is_none());
+}
+
+/// AC-0284 (#239): `this.x` names a field of the immediately enclosing type
+/// only. An inner class that declares no such field asserts nothing, even
+/// when an enclosing type declares a field of the same name.
+#[test]
+fn jpa_this_receiver_resolves_only_in_the_immediately_enclosing_type() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/java/com/demo/Pet.java",
+        r#"package com.demo;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+
+@Entity
+public class Pet {
+    @Id
+    private Integer id;
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/PetRepository.java",
+        r#"package com.demo;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface PetRepository extends JpaRepository<Pet, Integer> {
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/Service.java",
+        r#"package com.demo;
+
+public class Service {
+    private final PetRepository repo;
+
+    public void outerWrite(Pet pet) {
+        this.repo.save(pet);
+    }
+
+    public class Inner {
+        public void innerWrite(Pet pet) {
+            this.repo.save(pet);
+        }
+    }
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let outer = "sym:local/demo@src/main/java/com/demo/Service.java#Service.outerWrite(Pet)";
+    let inner = "sym:local/demo@src/main/java/com/demo/Service.java#Service.Inner.innerWrite(Pet)";
+
+    // The outer class declares the field: its `this.repo` is that field.
+    edge(&out.edges, outer, "data:local/demo@jpa:Pet", "WRITES");
+
+    // The inner class declares no `repo` field: `this.repo` names nothing
+    // there, and the enclosing type's field is a different receiver.
+    assert!(
+        !out.edges
+            .iter()
+            .any(|edge| { edge.src == inner && matches!(edge.label.as_str(), "READS" | "WRITES") }),
+        "{:?}",
+        out.edges
+            .iter()
+            .filter(|edge| edge.src == inner)
+            .collect::<Vec<_>>()
+    );
+}

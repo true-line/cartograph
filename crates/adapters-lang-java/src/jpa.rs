@@ -42,6 +42,10 @@ fn repository_package(name: &str) -> Option<&'static str> {
 pub(crate) struct EntityDecl {
     pub fqn: String,
     pub id: String,
+    /// Provenance for the Gap that replaces this entity when several classes
+    /// declare the same entity name. It is built at extraction time because
+    /// the directory join cannot recompute a source span.
+    pub duplicate_prov: serde_json::Value,
 }
 
 /// A Spring Data repository interface, keyed by its FQN.
@@ -83,6 +87,11 @@ pub(crate) fn retarget(extraction: &mut Extraction, commit: &str) {
         let mut holder = serde_json::json!({ "prov": call.prov.take() });
         retarget_props_commit(&mut holder, commit);
         call.prov = holder["prov"].take();
+    }
+    for decl in &mut extraction.entity_index {
+        let mut holder = serde_json::json!({ "prov": decl.duplicate_prov.take() });
+        retarget_props_commit(&mut holder, commit);
+        decl.duplicate_prov = holder["prov"].take();
     }
 }
 
@@ -390,7 +399,7 @@ fn entity(
         Str::Literal(name) => name,
         Str::Absent => simple,
         Str::Dynamic => {
-            let (node, _) = gap_pair(
+            let (node, edge) = gap_pair(
                 cx,
                 &symbol_id(repo, cx.path, &qualified),
                 "REFERENCES",
@@ -399,6 +408,7 @@ fn entity(
                 serde_json::json!({ "raw": cx.text(entity_annotation) }),
             );
             out.nodes.push(node);
+            out.edges.push(edge);
             return;
         }
     };
@@ -425,7 +435,7 @@ fn entity(
             Str::Dynamic => {
                 table = None;
                 table_source = "unresolved";
-                let (node, _) = gap_pair(
+                let (node, edge) = gap_pair(
                     cx,
                     &entity_id,
                     "REFERENCES",
@@ -434,6 +444,7 @@ fn entity(
                     serde_json::json!({ "raw": cx.text(&table_annotation) }),
                 );
                 out.nodes.push(node);
+                out.edges.push(edge);
             }
         }
     }
@@ -520,9 +531,18 @@ fn entity(
         label: "DataEntity".into(),
         props,
     });
+    // The entity name is not unique across packages: two classes may claim
+    // one entity id. The join decides whether this id collides, but it cannot
+    // recompute a source span — so the Gap's provenance is built here.
+    let duplicate_prov = cx.prov_spanning(
+        &evidence,
+        ConfidenceTier::Gap,
+        &format!("Gap duplicate {entity_id}"),
+    );
     out.entity_index.push(EntityDecl {
         fqn,
         id: entity_id.clone(),
+        duplicate_prov,
     });
 
     // Relations, one REFERENCES edge per annotated field.
@@ -912,6 +932,13 @@ fn repository_calls(
                         types = Some(found.clone());
                         break;
                     }
+                    // `this.x` names a field of the immediately enclosing
+                    // type: an enclosing type's field of the same name is a
+                    // different receiver, so the search stops here whether or
+                    // not the field was found.
+                    if this_only {
+                        break;
+                    }
                 }
                 node = parent;
             }
@@ -941,17 +968,96 @@ fn repository_calls(
 // Directory join
 // ---------------------------------------------------------------------------
 
+/// An entity id claimed by more than one class FQN: the entity name is not
+/// unique across packages, so the id would merge two classes into one fact.
+#[derive(Debug, Clone)]
+struct DuplicateEntity {
+    /// The colliding DataEntity id.
+    id: String,
+    /// Every class FQN claiming it, sorted.
+    fqns: Vec<String>,
+    /// Provenance of the Gap that replaces the merged node.
+    prov: serde_json::Value,
+}
+
+/// The entity ids that more than one class FQN declares, with the claiming
+/// FQNs sorted and the provenance of the first one in that order.
+fn duplicate_entities(index: &[EntityDecl]) -> Vec<DuplicateEntity> {
+    let mut by_id: BTreeMap<&str, Vec<&EntityDecl>> = BTreeMap::new();
+    for decl in index {
+        by_id.entry(decl.id.as_str()).or_default().push(decl);
+    }
+    by_id
+        .into_iter()
+        .filter_map(|(id, mut decls)| {
+            let mut fqns: Vec<String> = decls.iter().map(|decl| decl.fqn.clone()).collect();
+            fqns.sort();
+            fqns.dedup();
+            if fqns.len() < 2 {
+                return None;
+            }
+            // The first FQN in sorted order supplies the Gap's provenance:
+            // the join cannot recompute a source span.
+            decls.sort_by(|a, b| a.fqn.cmp(&b.fqn));
+            Some(DuplicateEntity {
+                id: id.to_string(),
+                fqns,
+                prov: decls
+                    .first()
+                    .expect("a claimed id has at least one declaration")
+                    .duplicate_prov
+                    .clone(),
+            })
+        })
+        .collect()
+}
+
+/// The Gap node that stands in for a colliding entity id.
+fn duplicate_gap_id(entity_id: &str) -> String {
+    format!("gap:jpa:duplicate:{entity_id}")
+}
+
 /// Resolve pending links and repository call sites against the repo-wide
 /// entity and repository indexes. A target resolves only when exactly one of
 /// its candidate FQNs is declared exactly once; otherwise the link fails
 /// closed to its Gap.
 pub(crate) fn resolve(out: &mut Extraction) {
+    // An entity name shared by classes in different packages claims one
+    // DataEntity id. The merged node asserts facts no single class proves,
+    // so it is replaced by one explicit Gap and the id resolves to nothing.
+    let duplicates = duplicate_entities(&out.entity_index);
+    let collided: BTreeSet<&str> = duplicates.iter().map(|d| d.id.as_str()).collect();
+    if !duplicates.is_empty() {
+        out.nodes
+            .retain(|node| !(node.label == "DataEntity" && collided.contains(node.id.as_str())));
+        for duplicate in &duplicates {
+            out.nodes.push(Node {
+                id: duplicate_gap_id(&duplicate.id),
+                label: "Gap".into(),
+                props: serde_json::json!({
+                    "reason": "JPA entity name is declared by more than one class",
+                    "attempted_tiers": ["T0"],
+                    "framework": "jpa",
+                    "language": "java",
+                    "fqns": duplicate.fqns,
+                    "prov": duplicate.prov,
+                }),
+            });
+        }
+    }
+
     let mut entities: BTreeMap<String, Option<String>> = BTreeMap::new();
     for decl in &out.entity_index {
         entities
             .entry(decl.fqn.clone())
             .and_modify(|id| *id = None)
             .or_insert_with(|| Some(decl.id.clone()));
+    }
+    // A colliding entity resolves to no class: links to it fail closed.
+    for duplicate in &duplicates {
+        for fqn in &duplicate.fqns {
+            entities.insert(fqn.clone(), None);
+        }
     }
     let mut repositories: BTreeMap<String, bool> = BTreeMap::new();
     for decl in &out.repository_index {
@@ -980,8 +1086,11 @@ pub(crate) fn resolve(out: &mut Extraction) {
             gap,
             repository,
         } = link;
+        // A relation owned by a colliding entity names no single class, so
+        // it fails closed like a relation to one.
+        let ambiguous_source = collided.contains(edge.src.as_str());
         match unique_target(&candidates) {
-            Some(id) => {
+            Some(id) if !ambiguous_source => {
                 edge.dst = id.clone();
                 if let Some(repository) = repository {
                     // Two bindings for one repository are ambiguous.
@@ -992,7 +1101,7 @@ pub(crate) fn resolve(out: &mut Extraction) {
                 }
                 out.edges.push(edge);
             }
-            None => {
+            _ => {
                 out.nodes.push(gap.0);
                 out.edges.push(gap.1);
             }
@@ -1027,5 +1136,13 @@ pub(crate) fn resolve(out: &mut Extraction) {
                 "prov": call.prov,
             }),
         });
+    }
+
+    // No edge may stay sourced at a removed DataEntity: the duplicate Gap
+    // takes its place, so every edge keeps a live endpoint.
+    for edge in &mut out.edges {
+        if collided.contains(edge.src.as_str()) {
+            edge.src = duplicate_gap_id(&edge.src);
+        }
     }
 }
