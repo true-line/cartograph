@@ -243,6 +243,10 @@ fn prepared_context_reads_reject_stale_equal_revision_and_policy_before_sink() {
                 _ => context.policy = &INVESTIGATION_V2_POLICY,
             }
             let before = snapshot(&context);
+            assert!(matches!(
+                context.prospective_context(&candidate),
+                Err(HostError::InputChanged)
+            ));
             let mut sink = Sink::default();
             assert_eq!(
                 context.publish_context_read(candidate, &mut sink),
@@ -290,6 +294,10 @@ fn prepared_context_read_publication_failure_installs_no_bytes_or_ledger() {
         assert_eq!(sink.calls, 1);
         let mut corrupt = fixture.candidate(&context, kind);
         corrupt.raw.push(' ');
+        assert!(matches!(
+            context.prospective_context(&corrupt),
+            Err(HostError::InvalidInput)
+        ));
         let mut unused = Sink::default();
         assert_eq!(
             context.publish_context_read(corrupt, &mut unused),
@@ -487,6 +495,10 @@ fn prepared_context_reads_require_exactly_one_manifest_extension() {
                 }
             }
             let before = snapshot(&context);
+            assert!(matches!(
+                context.prospective_context(&candidate),
+                Err(HostError::InvalidInput)
+            ));
             let mut sink = Sink::default();
             assert_eq!(
                 context.publish_context_read(candidate, &mut sink),
@@ -495,5 +507,67 @@ fn prepared_context_reads_require_exactly_one_manifest_extension() {
             assert_eq!(sink.calls, 0);
             assert_eq!(snapshot(&context), before);
         }
+    }
+}
+
+#[test]
+fn prospective_context_borrows_exact_candidate_and_rejects_changed_basis() {
+    // AC-0287: sizing sees the same raw bytes publication will install.
+    let fixture = Fixture::new();
+    for kind in [
+        PreparedContextReadKind::Query,
+        PreparedContextReadKind::Inventory,
+    ] {
+        let mut context = fixture.prepare();
+        let first = fixture.candidate(&context, kind);
+        context
+            .publish_context_read(first, &mut Sink::default())
+            .unwrap();
+        let prepared = fixture.candidate(&context, kind);
+        let before = snapshot(&context);
+        let view = context.prospective_context(&prepared).unwrap();
+        assert!(std::ptr::eq(view.ledger, prepared.ledger()));
+        assert!(std::ptr::eq(view.evidence, context.evidence.as_slice()));
+        for (borrowed, original) in view.query_pages.iter().zip(&context.query_pages) {
+            assert!(std::ptr::eq(*borrowed, original.as_str()));
+        }
+        for (borrowed, original) in view
+            .inventory_details
+            .iter()
+            .zip(&context.inventory_details)
+        {
+            assert!(std::ptr::eq(*borrowed, original.as_str()));
+        }
+        match kind {
+            PreparedContextReadKind::Query => {
+                assert_eq!(view.query_pages.len(), context.query_pages.len() + 1);
+                assert_eq!(
+                    view.inventory_details.len(),
+                    context.inventory_details.len()
+                );
+                assert!(std::ptr::eq(
+                    *view.query_pages.last().unwrap(),
+                    prepared.raw()
+                ));
+            }
+            PreparedContextReadKind::Inventory => {
+                assert_eq!(
+                    view.inventory_details.len(),
+                    context.inventory_details.len() + 1
+                );
+                assert_eq!(view.query_pages.len(), context.query_pages.len());
+                assert!(std::ptr::eq(
+                    *view.inventory_details.last().unwrap(),
+                    prepared.raw()
+                ));
+            }
+        }
+        drop(view);
+        assert_eq!(snapshot(&context), before);
+        context.ledger.revision += 1;
+        assert!(matches!(
+            context.prospective_context(&prepared),
+            Err(HostError::InputChanged)
+        ));
     }
 }

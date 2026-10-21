@@ -270,26 +270,24 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             if descriptor(provider, request.provider_mode)? != self.detail.provider {
                 return Err(Failure::Stop(InvestigationStopReason::ProviderFailure));
             }
-            let (attempts, attempt_ledgers, completion_metadata) = if completion_request.is_some() {
+            let completion_snapshot = if completion_request.is_some() {
                 let jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
-                (
-                    jobs.investigation_completion_attempts(self.id)?,
-                    jobs.investigation_completion_attempt_ledgers(self.id)?,
-                    Some(jobs.investigation_completion_metadata(self.id)?),
-                )
+                let snapshot = jobs.investigation_completion_prompt_snapshot(self.id)?;
+                if snapshot.ledger() != &context.ledger {
+                    return Err(HostError::InputChanged.into());
+                }
+                // Usage, attempt witnesses, metadata and turn ordering now share
+                // one saved read snapshot. Mutation still rechecks ownership and
+                // cancellation through the existing transition boundary.
+                self.detail = snapshot.detail().clone();
+                Some(snapshot)
             } else {
-                (vec![], vec![], None)
+                None
             };
-            if attempts.len() != attempt_ledgers.len() {
-                return Err(Failure::Store(InvestigationStoreError::Invalid));
-            }
             let input = if let Some(completion_request) = completion_request {
-                let basis = self
-                    .state
-                    .jobs
-                    .lock()
-                    .map_err(|_| HostError::Operational)?
-                    .investigation_turn_basis(self.id)?;
+                let snapshot = completion_snapshot
+                    .as_ref()
+                    .ok_or(HostError::InvalidInput)?;
                 let prepare = if self
                     .detail
                     .summary
@@ -308,11 +306,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     &context.evidence,
                     &history,
                     &self.detail.usage,
-                    &basis,
+                    snapshot.basis(),
                     completion_request,
-                    completion_metadata
-                        .as_ref()
-                        .ok_or(HostError::InvalidInput)?,
+                    snapshot.metadata(),
                     &context.inventory_details,
                     policy,
                 )?
@@ -551,9 +547,13 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .lock()
                     .map_err(|_| HostError::Operational)?
                     .investigation_timestamp(0)?;
-                let evidence = attempts
+                let snapshot = completion_snapshot
+                    .as_ref()
+                    .ok_or(HostError::InvalidInput)?;
+                let evidence = snapshot
+                    .attempts()
                     .iter()
-                    .zip(&attempt_ledgers)
+                    .zip(snapshot.attempt_ledgers())
                     .map(|(record, ledger)| staged_attempt::AttemptEvidence { record, ledger })
                     .collect::<Vec<_>>();
                 match input

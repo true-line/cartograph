@@ -1492,3 +1492,6 @@ mod prospective_metadata_tests;
 
 #[path = "attempt_storage_helper_tests.rs"]
 mod attempt_storage_helper_tests;
+
+#[path = "completion_snapshot_tests.rs"]
+mod completion_snapshot_tests;

@@ -156,6 +156,38 @@ pub(super) fn initial_detail(intent: &CompletionIntent) -> InvestigationCompleti
         assessment: vec![],
     }
 }
+/// Coherent, owned completion inputs from one saved database read snapshot.
+/// This carries no lease/authorization proof, latest-graph claim or transient
+/// source bytes. A later mutation still needs its normal transaction guards.
+pub(crate) struct CompletionPromptSnapshot {
+    detail: InvestigationDetail,
+    ledger: InvestigationInputLedger,
+    attempts: Vec<AttemptRecord>,
+    attempt_ledgers: Vec<InvestigationInputLedger>,
+    metadata: ProtectedCompletionMetadata,
+    basis: InvestigationTurnBasis,
+}
+impl CompletionPromptSnapshot {
+    pub(crate) fn detail(&self) -> &InvestigationDetail {
+        &self.detail
+    }
+    pub(crate) fn ledger(&self) -> &InvestigationInputLedger {
+        &self.ledger
+    }
+    pub(crate) fn attempts(&self) -> &[AttemptRecord] {
+        &self.attempts
+    }
+    pub(crate) fn attempt_ledgers(&self) -> &[InvestigationInputLedger] {
+        &self.attempt_ledgers
+    }
+    pub(crate) fn metadata(&self) -> &ProtectedCompletionMetadata {
+        &self.metadata
+    }
+    pub(crate) fn basis(&self) -> &InvestigationTurnBasis {
+        &self.basis
+    }
+}
+
 impl JobStore {
     pub(crate) fn start_completion_investigation(
         &mut self,
@@ -215,6 +247,22 @@ impl JobStore {
         tx.commit()?;
         Ok(detail)
     }
+    /// Read saved task/revision/usage, current ledger, exact ordered completed
+    /// attempts and their ledgers, protected metadata and turn basis coherently.
+    /// All loaders run inside this one read-only deferred transaction. This is
+    /// a saved-state view, not permission to invoke a provider or publish a read.
+    pub(crate) fn investigation_completion_prompt_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<CompletionPromptSnapshot, InvestigationStoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let task = load_task(&tx, id)?;
+        let snapshot = prompt_snapshot(&tx, task)?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+    #[cfg(test)]
     pub(crate) fn investigation_completion_attempts(
         &self,
         id: &str,
@@ -226,6 +274,7 @@ impl JobStore {
         tx.commit()?;
         Ok(rows.into_iter().map(|entry| entry.record).collect())
     }
+    #[cfg(test)]
     pub(crate) fn investigation_completion_attempt_ledgers(
         &self,
         id: &str,
@@ -251,6 +300,31 @@ impl JobStore {
         Ok(metadata)
     }
 }
+/// All authority reads use the caller's already pinned read transaction.
+fn prompt_snapshot(
+    connection: &Connection,
+    task: StoredTask,
+) -> Result<CompletionPromptSnapshot, InvestigationStoreError> {
+    let id = &task.detail.summary.investigation_id;
+    validated_intent(&task)?;
+    let ledger = load_ledger(connection, &task)?.ok_or(InvestigationStoreError::Invalid)?;
+    let entries = attempts(connection, &task)?;
+    let attempt_ledgers = entries
+        .iter()
+        .map(|entry| ledger_at(connection, id, entry.record.input_revision))
+        .collect::<Result<Vec<_>, _>>()?;
+    let metadata = metadata(connection, &task, None)?;
+    let basis = super::turn::basis(connection, &task)?;
+    Ok(CompletionPromptSnapshot {
+        detail: task.detail,
+        ledger,
+        attempts: entries.into_iter().map(|entry| entry.record).collect(),
+        attempt_ledgers,
+        metadata,
+        basis,
+    })
+}
+
 const LEGACY_ATTEMPT_TABLE: &str = "CREATE TABLE completion_attempts(task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 32), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence)) STRICT";
 const ATTEMPT_SCHEMA: &[&str] = &[
     "CREATE TABLE completion_attempts(task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 112), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence)) STRICT",

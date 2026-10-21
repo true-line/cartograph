@@ -84,6 +84,17 @@ pub(super) struct PreparedContextRead {
     guards: Option<EvidenceGuards>,
 }
 
+/// Borrowed complete prospective context. The preparation and its retention
+/// guards must outlive this view; no raw response or source text is cloned.
+/// This is sizing input, not a durable publication or execution capability.
+#[allow(dead_code)] // Consumed by the guarded admission path once its closure is complete.
+pub(super) struct ProspectiveContextView<'a> {
+    pub ledger: &'a InvestigationInputLedger,
+    pub query_pages: Vec<&'a str>,
+    pub evidence: &'a [AgentEvidence],
+    pub inventory_details: Vec<&'a str>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PreparedContextReadKind {
     Query,
@@ -808,14 +819,9 @@ impl FrozenContext {
         })
     }
 
-    /// Publish against the same in-memory acquisition basis. The sink still
-    /// owns durable task/lease/cancellation and transaction checks. Query guards
-    /// remain live through publication and installation of the prepared buffers.
-    pub(super) fn publish_context_read(
-        &mut self,
-        prepared: PreparedContextRead,
-        sink: &mut impl AcquisitionSink,
-    ) -> Result<(), HostError> {
+    /// Check the complete prospective representation against the frozen base.
+    /// Publication repeats this check after any intervening work.
+    fn validate_prepared_context(&self, prepared: &PreparedContextRead) -> Result<(), HostError> {
         if prepared.base_ledger() != &self.ledger
             || prepared.policy_profile() != self.policy.profile()
         {
@@ -859,6 +865,46 @@ impl FrozenContext {
         {
             return Err(HostError::InvalidInput);
         }
+        Ok(())
+    }
+
+    #[allow(dead_code)] // New-family admission integration is not enabled yet.
+    pub(super) fn prospective_context<'a>(
+        &'a self,
+        prepared: &'a PreparedContextRead,
+    ) -> Result<ProspectiveContextView<'a>, HostError> {
+        self.validate_prepared_context(prepared)?;
+        let mut query_pages = Vec::new();
+        query_pages
+            .try_reserve(self.query_pages.len().saturating_add(1))
+            .map_err(|_| HostError::LimitExceeded)?;
+        query_pages.extend(self.query_pages.iter().map(String::as_str));
+        let mut inventory_details = Vec::new();
+        inventory_details
+            .try_reserve(self.inventory_details.len().saturating_add(1))
+            .map_err(|_| HostError::LimitExceeded)?;
+        inventory_details.extend(self.inventory_details.iter().map(String::as_str));
+        match prepared.kind() {
+            PreparedContextReadKind::Query => query_pages.push(prepared.raw()),
+            PreparedContextReadKind::Inventory => inventory_details.push(prepared.raw()),
+        }
+        Ok(ProspectiveContextView {
+            ledger: prepared.ledger(),
+            query_pages,
+            evidence: &self.evidence,
+            inventory_details,
+        })
+    }
+
+    /// Publish against the same in-memory acquisition basis. The sink still
+    /// owns durable task/lease/cancellation and transaction checks. Query guards
+    /// remain live through publication and installation of the prepared buffers.
+    pub(super) fn publish_context_read(
+        &mut self,
+        prepared: PreparedContextRead,
+        sink: &mut impl AcquisitionSink,
+    ) -> Result<(), HostError> {
+        self.validate_prepared_context(&prepared)?;
         // All allocation and UTF-8 conversion precede durable publication.
         match prepared.kind() {
             PreparedContextReadKind::Query => self.query_pages.try_reserve(1),
