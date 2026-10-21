@@ -7,6 +7,8 @@ use rusqlite::Transaction;
 pub(super) struct CompletionIntent {
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_schema_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     limit_profile: Option<String>,
     pub request_hash: String,
     pub obligations: ObligationEnvelope,
@@ -30,13 +32,16 @@ impl CompletionIntent {
             serde_json::from_value(serde_json::Value::String(request.specialist_id.clone()))
                 .map_err(|_| InvestigationStoreError::Invalid)?;
         Ok(Self {
-            schema_version: if specialist.uses_query_history_disclosure() {
+            schema_version: if specialist.uses_next_prompt_admission() {
+                4
+            } else if specialist.uses_query_history_disclosure() {
                 3
             } else if policy.profile() == "investigation-v1" {
                 1
             } else {
                 2
             },
+            request_schema_version: specialist.uses_next_prompt_admission().then_some(7),
             limit_profile: (policy.profile() != "investigation-v1")
                 .then(|| policy.profile().into()),
             request_hash: request.intent_hash_with_policy(policy)?,
@@ -60,13 +65,22 @@ impl CompletionIntent {
         let legacy = policy.profile() == "investigation-v1";
         let summary = &task.detail.summary;
         if self.schema_version
-            != if summary.specialist_id.uses_query_history_disclosure() {
+            != if summary.specialist_id.uses_next_prompt_admission() {
+                4
+            } else if summary.specialist_id.uses_query_history_disclosure() {
                 3
             } else if legacy {
                 1
             } else {
                 2
             }
+            || self.request_schema_version
+                != summary
+                    .specialist_id
+                    .uses_next_prompt_admission()
+                    .then_some(7)
+            || (summary.specialist_id.uses_next_prompt_admission()
+                && (task.schema_version != 3 || summary.schema_version != 7 || legacy))
             || self.limit_profile.as_deref() != if legacy { None } else { Some(policy.profile()) }
             || summary.specialist_id.uses_policy_selection() == legacy
             || !hash_valid(&self.request_hash)
@@ -126,10 +140,11 @@ impl CompletionIntent {
                 .as_ref()
                 .map(|basis| &basis.disclosure_hash),
         };
-        let prefix = if self.schema_version == 3 {
-            "investigation-disclosure-v5:"
-        } else {
-            "investigation-disclosure-v4:"
+        let prefix = match self.schema_version {
+            4 => "investigation-disclosure-v6:",
+            3 => "investigation-disclosure-v5:",
+            1 | 2 => "investigation-disclosure-v4:",
+            _ => return Err(InvestigationStoreError::Invalid),
         };
         if disclosure_hash.is_some_and(|hash| !hash.strip_prefix(prefix).is_some_and(hash_valid)) {
             return Err(InvestigationStoreError::Invalid);
@@ -868,6 +883,14 @@ fn metadata(
     task: &StoredTask,
     step: Option<&str>,
 ) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
+    if task
+        .detail
+        .summary
+        .specialist_id
+        .uses_next_prompt_admission()
+    {
+        return next_prompt_metadata(connection, task, step);
+    }
     saved_policy(task)?;
     validated_intent(task)?;
     let id = &task.detail.summary.investigation_id;
@@ -910,6 +933,138 @@ fn metadata(
             .collect::<Vec<_>>(),
     )
 }
+/// Immutable within-task @10 invocation ordinals, derived from the sealed
+/// pre-call counter. No rowid/timestamp/cross-table sequence orders new calls.
+pub(super) fn next_prompt_invocations(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<Vec<(u32, PendingInvestigationStep)>, InvestigationStoreError> {
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    admission_contract::validate_pairing(task)?;
+    let id = &task.detail.summary.investigation_id;
+    let policy = saved_policy(task)?;
+    let limit = policy.limits().model_invocations;
+    let (count, bounded): (i64, bool) = connection.query_row(
+        "SELECT count(*),coalesce(min(typeof(step_id)='text' AND length(CAST(step_id AS BLOB)) BETWEEN 1 AND 128),1) FROM investigation_invocations WHERE task_id=?1",
+        [id], |row| Ok((row.get(0)?,row.get(1)?)))?;
+    if !bounded
+        || u32::try_from(count).ok().is_none_or(|n| n > limit)
+        || u32::try_from(count).ok() != Some(task.detail.usage.model_invocations)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let keys = connection
+        .prepare("SELECT step_id FROM investigation_invocations WHERE task_id=?1")?
+        .query_map([id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut steps = Vec::with_capacity(keys.len());
+    for key in keys {
+        let step: PendingInvestigationStep =
+            read_body(connection, "investigation_invocations", "step_id", id, &key)?
+                .ok_or(InvestigationStoreError::Missing)?;
+        validate_step(&step, &task.detail.limits)?;
+        let disclosure = step
+            .disclosure
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let admission = disclosure
+            .admission
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        admission.validate_with_policy(policy)?;
+        let ordinal = admission
+            .consumed_budgets
+            .model_invocations
+            .checked_add(1)
+            .ok_or(InvestigationStoreError::Capacity)?;
+        if step.step_id != key || disclosure.schema_version != 6 || ordinal > limit {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        steps.push((ordinal, step));
+    }
+    steps.sort_by_key(|(ordinal, _)| *ordinal);
+    for (index, (ordinal, _)) in steps.iter().enumerate() {
+        if usize::try_from(*ordinal).ok() != index.checked_add(1) {
+            return Err(InvestigationStoreError::Invalid);
+        }
+    }
+    Ok(steps)
+}
+
+fn next_prompt_metadata(
+    connection: &Connection,
+    task: &StoredTask,
+    cutoff_step: Option<&str>,
+) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
+    validated_intent(task)?;
+    let steps = next_prompt_invocations(connection, task)?;
+    let ordinal = |step: &str| -> Result<u32, InvestigationStoreError> {
+        steps
+            .iter()
+            .find(|(_, saved)| saved.step_id == step)
+            .map(|(ordinal, _)| *ordinal)
+            .ok_or(InvestigationStoreError::Missing)
+    };
+    let cutoff = cutoff_step.map(ordinal).transpose()?;
+    let mut records = Vec::new();
+    for entry in attempts(connection, task)? {
+        let current = ordinal(&entry.record.step_id)?;
+        if cutoff.is_none_or(|cutoff| current < cutoff) {
+            records.push(entry.record.attempt_id);
+        }
+    }
+    let mut refusals = Vec::new();
+    for entry in raw_refusals(connection, task)? {
+        let current = ordinal(&entry.record.step_id)?;
+        if cutoff.is_none_or(|cutoff| current < cutoff) {
+            refusals.push(entry);
+        }
+    }
+    derive_protected_metadata(
+        task,
+        records,
+        &refusals
+            .iter()
+            .map(|entry| &entry.record)
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Authentic protected metadata for a prospective @10 call. Historical callers
+/// must instead name their exact immutable invocation cutoff.
+pub(super) fn metadata_current_next_prompt(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
+    next_prompt_metadata(connection, task, None)
+}
+
+/// Require the exact immutable invocation before deriving its metadata cutoff.
+/// A missing requested step never becomes None/latest/all-records metadata.
+pub(super) fn metadata_at_saved_step(
+    connection: &Connection,
+    task: &StoredTask,
+    step: &PendingInvestigationStep,
+) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let saved: PendingInvestigationStep = read_body(
+        connection,
+        "investigation_invocations",
+        "step_id",
+        &task.detail.summary.investigation_id,
+        &step.step_id,
+    )?
+    .ok_or(InvestigationStoreError::Missing)?;
+    if saved != *step {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    metadata(connection, task, Some(&step.step_id))
+}
+
 pub(super) fn validate_step_metadata(
     connection: &Connection,
     task: &StoredTask,
@@ -1473,3 +1628,8 @@ pub(super) fn refused(
 #[cfg(test)]
 #[path = "completion_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(super) use tests::next_prompt_contract_tests::{
+    InternalFixture, internal_fixture as internal_next_prompt_fixture,
+};

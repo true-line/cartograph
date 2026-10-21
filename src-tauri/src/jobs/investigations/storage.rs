@@ -99,6 +99,9 @@ pub(super) fn validate_archive_schema(
     if super::read_reservations::validate_optional_schema(connection)? {
         expected.extend(super::read_reservations::schema());
     }
+    if let Some(admission) = super::admission_journal::validate_optional_schema(connection)? {
+        expected.extend(admission);
+    }
     validate_layout(connection, &expected)?;
     super::coverage::validate_version(connection)
 }
@@ -247,14 +250,28 @@ pub(super) fn validate_usage(
 }
 
 fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
-    // The @10 descriptor is internal groundwork. It may not inherit @9's
-    // task2/summary6 branch before its exact task3 contract is implemented.
-    if task
+    validate_task_contract(task, false)
+}
+
+/// Internal DTO validation only. Public/history load_task retains the @10
+/// guard until the complete transition pipeline is integrated. Saved calls
+/// additionally require exact journal/step/ledger validation before use.
+#[allow(dead_code)]
+pub(super) fn validate_next_prompt_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
+    admission_contract::validate_pairing(task)?;
+    validate_task_contract(task, true)
+}
+
+fn validate_task_contract(
+    task: &StoredTask,
+    allow_next_prompt: bool,
+) -> Result<(), InvestigationStoreError> {
+    let next = task
         .detail
         .summary
         .specialist_id
-        .uses_next_prompt_admission()
-    {
+        .uses_next_prompt_admission();
+    if next && !allow_next_prompt {
         return Err(InvestigationStoreError::Invalid);
     }
     let detail = &task.detail;
@@ -262,10 +279,20 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
         InvestigationPolicy::for_limits(&detail.limits).ok_or(InvestigationStoreError::Invalid)?;
     let summary = &detail.summary;
     let v7 = summary.specialist_id.uses_completion_obligations();
-    if task.schema_version != if v7 { 2 } else { 1 }
+    if task.schema_version
+        != if next {
+            3
+        } else if v7 {
+            2
+        } else {
+            1
+        }
+        || task.admission_state.is_some() != next
         || task.completion_intent.is_some() != v7
         || summary.schema_version
-            != if summary.specialist_id.uses_query_history_disclosure() {
+            != if next {
+                7
+            } else if summary.specialist_id.uses_query_history_disclosure() {
                 6
             } else if summary.specialist_id.uses_policy_selection() {
                 5
@@ -314,6 +341,9 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
         || summary.updated_at.len() > 32
     {
         return Err(InvestigationStoreError::Invalid);
+    }
+    if let Some(admission) = &task.admission_state {
+        admission.validate_task_binding(task)?;
     }
     if let Some(intent) = &task.completion_intent {
         intent.validate(task)?;
@@ -703,6 +733,31 @@ pub(super) fn save_task(
     terminal: bool,
 ) -> Result<(), InvestigationStoreError> {
     validate_task(task)?;
+    save_validated_task(connection, task, expected_revision, terminal)
+}
+
+/// Internal task3 writer only. Caller authenticates execution/task authority
+/// and owns transaction/commit; ordinary save_task retains the public guard.
+#[allow(dead_code)]
+pub(super) fn save_next_prompt_task(
+    connection: &Connection,
+    task: &StoredTask,
+    expected_revision: u64,
+    terminal: bool,
+) -> Result<(), InvestigationStoreError> {
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    validate_next_prompt_task(task)?;
+    save_validated_task(connection, task, expected_revision, terminal)
+}
+
+fn save_validated_task(
+    connection: &Connection,
+    task: &StoredTask,
+    expected_revision: u64,
+    terminal: bool,
+) -> Result<(), InvestigationStoreError> {
     let bytes = encode(task, MAX_RECORD_BYTES)?;
     one(connection.execute("UPDATE investigation_tasks SET revision=?2,live=?3,record=?4,record_hash=?5 WHERE id=?1 AND revision=?6", params![task.detail.summary.investigation_id,signed(task.detail.summary.revision)?,i64::from(task.phase!=Phase::Terminal),bytes,core_prov::content_hash(&bytes),signed(expected_revision)?])?)?;
     check_task_capacity(connection, &task.detail.summary.investigation_id, terminal)
@@ -836,6 +891,7 @@ pub(super) fn stored_bytes_with_reads(
     // accounting without creating or migrating its private schema.
     let journal_bytes = super::staged::journal_bytes(connection, id)?;
     let completion_bytes = super::completion::stored_bytes(connection, id)?;
+    let admission_bytes = super::admission_journal::stored_bytes(connection, id)?;
     let read_charge = reads.capacity_charge(id)?.occupied()?;
     let refs: i64 = connection.query_row(
         "SELECT coalesce(sum(length(CAST(task_id AS BLOB))+length(CAST(source_id AS BLOB))+length(CAST(repo_key AS BLOB))+length(CAST(receipt_id AS BLOB))+128),0) FROM investigation_refs WHERE (?1 IS NULL OR task_id=?1)",
@@ -845,6 +901,7 @@ pub(super) fn stored_bytes_with_reads(
         .checked_add(usize::try_from(refs).map_err(|_| InvestigationStoreError::Invalid)?)
         .and_then(|bytes| bytes.checked_add(journal_bytes))
         .and_then(|bytes| bytes.checked_add(completion_bytes))
+        .and_then(|bytes| bytes.checked_add(admission_bytes))
         .and_then(|bytes| bytes.checked_add(read_charge))
         .ok_or(InvestigationStoreError::Capacity)
 }

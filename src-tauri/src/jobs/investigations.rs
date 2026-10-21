@@ -6,6 +6,15 @@ use agents::investigation::*;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
+#[allow(dead_code)]
+#[path = "investigations/admission_contract.rs"]
+mod admission_contract;
+#[allow(dead_code)]
+#[path = "investigations/admission_journal.rs"]
+mod admission_journal;
+#[allow(dead_code)]
+#[path = "investigations/admission_transition.rs"]
+mod admission_transition;
 #[path = "investigations/completion.rs"]
 mod completion;
 #[path = "investigations/coverage.rs"]
@@ -265,6 +274,8 @@ struct StoredExecution {
 struct StoredTask {
     schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    admission_state: Option<admission_contract::StoredAdmissionState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     completion_intent: Option<completion::CompletionIntent>,
     nonce: String,
     intent_hash: String,
@@ -382,6 +393,7 @@ impl JobStore {
         )?)?;
         let record = StoredTask {
             schema_version: if completion_intent.is_some() { 2 } else { 1 },
+            admission_state: None,
             completion_intent: completion_intent.clone(),
             nonce: request.request_nonce.clone(),
             intent_hash,

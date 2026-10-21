@@ -1495,3 +1495,6 @@ mod attempt_storage_helper_tests;
 
 #[path = "completion_snapshot_tests.rs"]
 mod completion_snapshot_tests;
+
+#[path = "next_prompt_contract_tests.rs"]
+pub(in crate::jobs::investigations) mod next_prompt_contract_tests;

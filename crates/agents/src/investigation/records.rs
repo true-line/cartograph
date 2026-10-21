@@ -382,6 +382,7 @@ pub enum InvestigationEventKind {
     OutcomeUnknown,
     EvidenceValidationReserved,
     FinishRefused,
+    CapacityRefused,
     ReadUnavailable,
 }
 
