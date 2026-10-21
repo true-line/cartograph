@@ -1266,7 +1266,7 @@ fn investigation_compact_disclosure_is_durable_and_finishing_binding_is_revalida
     pending.disclosure = Some(disclosure.clone());
     let mut mismatched = pending.clone();
     mismatched.payload_hash = hash("wrong-payload");
-    assert!(validate_step(&mismatched).is_err());
+    assert!(validate_step(&mismatched, &InvestigationLimits::default()).is_err());
     begin(&mut fixture, &id, &execution, pending.clone());
     let saved: PendingInvestigationStep = read_body(
         &fixture.store.conn,
@@ -1315,7 +1315,9 @@ fn investigation_compact_disclosure_is_durable_and_finishing_binding_is_revalida
     let mut missing = pending;
     missing.disclosure = None;
     let body = encode(&missing, MAX_INVOCATION_BYTES).unwrap();
-    assert!(validate_result_basis(&result, &ledger, &missing).is_err());
+    assert!(
+        validate_result_basis(&result, &ledger, &missing, &InvestigationLimits::default()).is_err()
+    );
     assert!(
         fixture
             .store

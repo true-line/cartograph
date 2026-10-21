@@ -268,8 +268,7 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
         || detail.specialist != summary.specialist_id.definition()?
         || detail.provider.mode != summary.provider_mode
-        || InvestigationPolicy::for_profile(&detail.limits.profile)
-            .is_none_or(|policy| detail.limits != policy.limits())
+        || InvestigationPolicy::for_limits(&detail.limits).is_none()
         || redacted_history_text(&summary.question, MAX_QUESTION_BYTES)? != summary.question
         || summary.last_event_sequence > MAX_EVENTS
         || summary.actions.can_cancel
@@ -385,7 +384,7 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
         return Err(InvestigationStoreError::Invalid);
     }
     if let Some(pending) = &task.pending {
-        validate_step(pending)?;
+        validate_step(pending, &detail.limits)?;
     }
     if task.pending.is_some() != matches!(task.phase, Phase::Consent | Phase::Invocation)
         || (task.approved && task.phase != Phase::Consent)
@@ -399,14 +398,16 @@ fn validate_task(task: &StoredTask) -> Result<(), InvestigationStoreError> {
 
 pub(super) fn validate_step(
     step: &PendingInvestigationStep,
+    limits: &InvestigationLimits,
 ) -> Result<(), InvestigationStoreError> {
+    let policy = InvestigationPolicy::for_limits(limits).ok_or(InvestigationStoreError::Invalid)?;
     if !id_valid(&step.step_id)
         || !hash_valid(&step.payload_hash)
         || !hash_valid(&step.input_ledger_hash)
         || step.input_bytes == 0
         || step.input_bytes > MAX_INPUT_BYTES
         || step.generated_tokens == 0
-        || step.generated_tokens > 2048
+        || step.generated_tokens > policy.limits().generated_tokens_per_invocation
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -466,8 +467,9 @@ pub(super) fn validate_result_basis(
     result: &InvestigationResult,
     ledger: &InvestigationInputLedger,
     step: &PendingInvestigationStep,
+    limits: &InvestigationLimits,
 ) -> Result<(), InvestigationStoreError> {
-    validate_step(step)?;
+    validate_step(step, limits)?;
     match &step.disclosure {
         Some(disclosure) => result.validate_with_disclosure(ledger, &step.step_id, disclosure)?,
         None => result.validate(ledger)?,
@@ -931,7 +933,7 @@ pub(super) fn load_result(
                 return Err(InvestigationStoreError::Invalid);
             }
             validate_step_basis(connection, task, &step)?;
-            validate_result_basis(result, &ledger, &step)?;
+            validate_result_basis(result, &ledger, &step, &task.detail.limits)?;
             super::completion::validate_result(connection, task, result, &ledger, &step)?;
         } else {
             if task.detail.summary.specialist_id.uses_compact_disclosure() {

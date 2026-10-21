@@ -89,7 +89,7 @@ impl JobStore {
             }
             InvestigationTransition::BeginInvocation { step } => {
                 completion::reserve_invocation(&tx, &task)?;
-                validate_step(&step)?;
+                validate_step(&step, &task.detail.limits)?;
                 validate_step_basis(&tx, &task, &step)?;
                 if task.ledger_hash.as_ref() != Some(&step.input_ledger_hash) {
                     return Err(InvestigationStoreError::Conflict);
@@ -171,7 +171,7 @@ impl JobStore {
                 if let Some(result) = &result {
                     let ledger =
                         load_ledger(&tx, &task)?.ok_or(InvestigationStoreError::Invalid)?;
-                    validate_result_basis(result, &ledger, &invoked)?;
+                    validate_result_basis(result, &ledger, &invoked, &task.detail.limits)?;
                     validate_inspection_result(&task, result)?;
                     completion::accepted(&tx, &mut task, result, &ledger, &invoked)?;
                     if result.investigation_id != id
@@ -541,7 +541,7 @@ fn check_ready(
     task: &StoredTask,
     step: &PendingInvestigationStep,
 ) -> Result<(), InvestigationStoreError> {
-    validate_step(step)?;
+    validate_step(step, &task.detail.limits)?;
     if task.phase != Phase::Ready || task.ledger_hash.as_ref() != Some(&step.input_ledger_hash) {
         return Err(InvestigationStoreError::Stale);
     }

@@ -358,7 +358,7 @@ fn completed_attempts(
             &attempt.step_id,
         )?
         .ok_or(InvestigationStoreError::Invalid)?;
-        validate_step(&read_step)?;
+        validate_step(&read_step, &task.detail.limits)?;
         let previous_revision = attempt
             .input_revision
             .checked_sub(1)
@@ -559,7 +559,7 @@ pub(super) fn load(
             &entry.record.step_id,
         )?
         .ok_or(InvestigationStoreError::Invalid)?;
-        validate_step(&step)?;
+        validate_step(&step, &task.detail.limits)?;
         let disclosure = step
             .disclosure
             .as_ref()

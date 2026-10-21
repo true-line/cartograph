@@ -322,7 +322,7 @@ pub(super) fn attempts(
             &entry.record.step_id,
         )?
         .ok_or(InvestigationStoreError::Invalid)?;
-        validate_step(&actual_step)?;
+        validate_step(&actual_step, &task.detail.limits)?;
         if actual_step.step_id != entry.record.step_id || response.step_id != entry.record.step_id {
             return Err(InvestigationStoreError::Invalid);
         }

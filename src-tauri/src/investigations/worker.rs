@@ -345,7 +345,11 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             let step_id = format!("step-{}", self.detail.usage.model_invocations + 1);
             let action = input.action(format!("{}:{step_id}", self.id))?;
             let input_bytes = bounded_json(&action.payload, 128 * 1024)?.len();
-            let limits = CompletionLimits::default();
+            let policy = InvestigationPolicy::for_limits(&self.detail.limits)
+                .ok_or(InvestigationStoreError::Invalid)?;
+            let mut transport = CompletionLimits::default().values();
+            transport.max_output_tokens = policy.limits().generated_tokens_per_invocation;
+            let limits = CompletionLimits::new(transport).map_err(provider_failure)?;
             let prepared = firewall(self.state)?
                 .prepare_bounded(provider, &action, &limits)
                 .map_err(provider_failure)?;

@@ -49,6 +49,11 @@ impl InvestigationPolicy {
             .find(|policy| policy.profile == profile)
     }
 
+    /// Resolve only an exact immutable specification, including every counter.
+    pub fn for_limits(limits: &InvestigationLimits) -> Option<&'static Self> {
+        Self::for_profile(&limits.profile).filter(|policy| policy.limits() == *limits)
+    }
+
     pub const fn request_bytes(&self) -> usize {
         self.request_bytes
     }
