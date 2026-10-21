@@ -17,6 +17,11 @@ mod admission_journal;
 mod admission_transition;
 #[path = "investigations/completion.rs"]
 mod completion;
+#[allow(dead_code)] // Internal atomic metadata writer; public @10 remains closed.
+#[path = "investigations/metadata_admission.rs"]
+mod metadata_admission;
+#[allow(unused_imports)] // Used by the separately integrated internal host adapter.
+pub(crate) use metadata_admission::MetadataAdmission;
 #[path = "investigations/coverage.rs"]
 mod coverage;
 #[cfg(test)]

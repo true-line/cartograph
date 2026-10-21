@@ -2623,6 +2623,7 @@ dependencies = [
  "core-graph",
  "core-prov",
  "dunce",
+ "ingest",
  "llm",
  "rusqlite",
  "serde",

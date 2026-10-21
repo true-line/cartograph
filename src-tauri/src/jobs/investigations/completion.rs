@@ -1798,5 +1798,5 @@ mod tests;
 #[cfg(test)]
 pub(super) use tests::next_prompt_contract_tests::{
     InternalFixture, internal_fixture as internal_next_prompt_fixture,
-    internal_fixture_with_initial_ledger,
+    internal_fixture_with_initial_ledger, internal_fixture_with_step_preparer,
 };

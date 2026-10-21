@@ -17,6 +17,10 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+#[allow(dead_code)] // Internal admission path; public family routing remains closed.
+#[path = "context_metadata_admission.rs"]
+pub(super) mod metadata_admission;
+
 /// Validated acquisition authority, separate from every public request family.
 /// Completion requests retain their actual role and selected immutable policy.
 #[derive(Clone)]

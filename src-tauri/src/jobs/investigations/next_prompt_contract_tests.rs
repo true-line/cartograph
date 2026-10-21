@@ -98,6 +98,24 @@ pub(in crate::jobs::investigations) fn internal_fixture_with_initial_ledger(
         &mut StagedObligationRequest,
     ) -> Vec<String>,
 ) -> InternalFixture {
+    internal_fixture_with_step_preparer(initialize, prepare_with_pages)
+}
+
+pub(in crate::jobs::investigations) fn internal_fixture_with_step_preparer(
+    initialize: impl FnOnce(
+        &mut JobStore,
+        &mut StoredTask,
+        &mut InvestigationInputLedger,
+        &mut StagedObligationRequest,
+    ) -> Vec<String>,
+    prepare_step: impl FnOnce(
+        &StoredTask,
+        &StagedObligationRequest,
+        &InvestigationInputLedger,
+        &ProtectedCompletionMetadata,
+        &[String],
+    ) -> PendingInvestigationStep,
+) -> InternalFixture {
     let mut fixture = Fixture::with_family(
         InvestigationProviderMode::Local,
         &INVESTIGATION_V2_POLICY,
@@ -132,7 +150,7 @@ pub(in crate::jobs::investigations) fn internal_fixture_with_initial_ledger(
     task.detail.completion = Some(initial_detail(&intent));
     task.completion_intent = Some(intent);
     let metadata = derive_protected_metadata(&task, vec![], &[]).unwrap();
-    let step = prepare_with_pages(&task, &request, &ledger, &metadata, &pages);
+    let step = prepare_step(&task, &request, &ledger, &metadata, &pages);
     let basis = {
         let tx = fixture.store.conn.unchecked_transaction().unwrap();
         SavedCallBasis::from_pre_call_saved(&tx, &task, &step, &ledger, &metadata).unwrap()

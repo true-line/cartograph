@@ -5,6 +5,10 @@ use ingest::managed::{ManagedCheckout, ManagedOrigin, parse_managed_origin};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::{Component, Path, PathBuf};
 
+#[path = "sources/retained_view.rs"]
+mod retained_view;
+pub(crate) use retained_view::{RetainedSourceError, RetainedSourceView};
+
 // Bound UTF-8 byte lengths before fetching retained strings. Paths allow the
 // Windows long-path range; origin validation additionally applies ingest's cap.
 const MAX_PATH_BYTES: usize = 128 * 1024;
@@ -569,4 +573,5 @@ fn read_sources(
 }
 
 #[cfg(test)]
+#[path = "sources/tests.rs"]
 mod tests;

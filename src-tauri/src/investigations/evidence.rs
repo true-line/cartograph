@@ -28,6 +28,27 @@ pub(super) struct EvidenceGuards {
 }
 
 impl EvidenceGuards {
+    /// Validate saved registration identities through the active state.db
+    /// writer and verify the already-held retention handles. Acquires no new
+    /// OS locks or registry/jobs mutexes and makes no live-graph freshness claim.
+    pub(super) fn revalidate_in_view(
+        &self,
+        primary: &crate::primary_source::PrimarySourceStore,
+        view: &crate::sources::RetainedSourceView<'_>,
+    ) -> Result<(), HostError> {
+        for expected in self.sources.values() {
+            view.verify(expected).map_err(|error| match error {
+                crate::sources::RetainedSourceError::Missing => HostError::SourceUnavailable,
+                crate::sources::RetainedSourceError::Changed => HostError::InputChanged,
+                crate::sources::RetainedSourceError::Operational => HostError::Operational,
+            })?;
+        }
+        for guard in self.guards.values() {
+            primary.verify_task_guard(guard).map_err(pinned_error)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn acquire(
         state: &AppState,
         selections: &BTreeMap<FactKey, TaskFactSelection>,
@@ -183,6 +204,10 @@ impl EvidenceGuards {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "evidence_retained_view_tests.rs"]
+mod retained_view_tests;
 
 impl FrozenContext {
     pub(super) fn read_evidence(
