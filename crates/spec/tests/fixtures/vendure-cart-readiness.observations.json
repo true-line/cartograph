@@ -1,0 +1,568 @@
+{
+  "schema": "cartograph.test.recovered-rule-observations.v1",
+  "note": "Offline transcription of the six guarded-exit observations recorded as local_exit_anchors in docs/evals/vendure-cart-readiness.score.json (Cartograph c01c2e7 on vendurehq/vendure 2cc309d). Expected-rule labels are deliberately not copied. Not recorded there and approximated here: branch_source equals the condition expression span, the return value span equals the exit span, syntax kinds are placeholders, and dependencies are omitted. The other 133 observations of that run are not included.",
+  "observations": [
+    {
+      "node_id": "rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12446",
+      "rule": {
+        "schema_version": 1,
+        "kind": "guarded_exit",
+        "owner_id": "sym:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#configureDefaultOrderProcess/orderProcess@6228.onTransitionStart@9799",
+        "exit_source": {
+          "repo": "vendurehq/vendure",
+          "path": "packages/core/src/config/order/default-order-process.ts",
+          "byte_start": 12446,
+          "byte_end": 12527,
+          "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+        },
+        "source_order": 4,
+        "conditions": [
+          {
+            "branch_source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 11601,
+              "byte_end": 11804,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "expression": {
+              "source": {
+                "repo": "vendurehq/vendure",
+                "path": "packages/core/src/config/order/default-order-process.ts",
+                "byte_start": 11601,
+                "byte_end": 11804,
+                "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+              },
+              "syntax_kind": "parenthesized_expression",
+              "display": "(\n                options.checkAllVariantsExist !== false &&\n                fromState === 'AddingItems' &&\n                toState !== 'Cancelled' &&\n                order.lines.length > 0\n            )",
+              "capture": "complete_syntax",
+              "literal": null
+            },
+            "polarity": "truthy_branch"
+          },
+          {
+            "branch_source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 12375,
+              "byte_end": 12423,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "expression": {
+              "source": {
+                "repo": "vendurehq/vendure",
+                "path": "packages/core/src/config/order/default-order-process.ts",
+                "byte_start": 12375,
+                "byte_end": 12423,
+                "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+              },
+              "syntax_kind": "parenthesized_expression",
+              "display": "(availableVariants.length !== variantIds.length)",
+              "capture": "complete_syntax",
+              "literal": null
+            },
+            "polarity": "truthy_branch"
+          }
+        ],
+        "effect": {
+          "kind": "return",
+          "value": {
+            "source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 12446,
+              "byte_end": 12527,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "syntax_kind": "string",
+            "display": "[REDACTED]",
+            "capture": "redacted",
+            "literal": null
+          }
+        },
+        "dependencies": [],
+        "interpretation": {
+          "execution_predicate": "not_established",
+          "consumer_effect": "not_established",
+          "gap_ids": [
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12446:consumer_semantics_unknown",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12446:execution_predicate_unknown",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12446:loop_dependency",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12446:mutation",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12446:preceding_exit",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12446:redacted_expression"
+          ]
+        },
+        "redactions": []
+      }
+    },
+    {
+      "node_id": "rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12732",
+      "rule": {
+        "schema_version": 1,
+        "kind": "guarded_exit",
+        "owner_id": "sym:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#configureDefaultOrderProcess/orderProcess@6228.onTransitionStart@9799",
+        "exit_source": {
+          "repo": "vendurehq/vendure",
+          "path": "packages/core/src/config/order/default-order-process.ts",
+          "byte_start": 12732,
+          "byte_end": 12798,
+          "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+        },
+        "source_order": 5,
+        "conditions": [
+          {
+            "branch_source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 12575,
+              "byte_end": 12607,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "expression": {
+              "source": {
+                "repo": "vendurehq/vendure",
+                "path": "packages/core/src/config/order/default-order-process.ts",
+                "byte_start": 12575,
+                "byte_end": 12607,
+                "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+              },
+              "syntax_kind": "parenthesized_expression",
+              "display": "(toState === 'ArrangingPayment')",
+              "capture": "complete_syntax",
+              "literal": null
+            },
+            "polarity": "truthy_branch"
+          },
+          {
+            "branch_source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 12629,
+              "byte_end": 12709,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "expression": {
+              "source": {
+                "repo": "vendurehq/vendure",
+                "path": "packages/core/src/config/order/default-order-process.ts",
+                "byte_start": 12629,
+                "byte_end": 12709,
+                "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+              },
+              "syntax_kind": "parenthesized_expression",
+              "display": "(options.arrangingPaymentRequiresContents !== false && order.lines.length === 0)",
+              "capture": "complete_syntax",
+              "literal": null
+            },
+            "polarity": "truthy_branch"
+          }
+        ],
+        "effect": {
+          "kind": "return",
+          "value": {
+            "source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 12732,
+              "byte_end": 12798,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "syntax_kind": "string",
+            "display": "[REDACTED]",
+            "capture": "redacted",
+            "literal": null
+          }
+        },
+        "dependencies": [],
+        "interpretation": {
+          "execution_predicate": "not_established",
+          "consumer_effect": "not_established",
+          "gap_ids": [
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12732:consumer_semantics_unknown",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12732:execution_predicate_unknown",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12732:loop_dependency",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12732:mutation",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12732:preceding_exit",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12732:redacted_expression"
+          ]
+        },
+        "redactions": []
+      }
+    },
+    {
+      "node_id": "rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12930",
+      "rule": {
+        "schema_version": 1,
+        "kind": "guarded_exit",
+        "owner_id": "sym:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#configureDefaultOrderProcess/orderProcess@6228.onTransitionStart@9799",
+        "exit_source": {
+          "repo": "vendurehq/vendure",
+          "path": "packages/core/src/config/order/default-order-process.ts",
+          "byte_start": 12930,
+          "byte_end": 12993,
+          "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+        },
+        "source_order": 6,
+        "conditions": [
+          {
+            "branch_source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 12575,
+              "byte_end": 12607,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "expression": {
+              "source": {
+                "repo": "vendurehq/vendure",
+                "path": "packages/core/src/config/order/default-order-process.ts",
+                "byte_start": 12575,
+                "byte_end": 12607,
+                "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+              },
+              "syntax_kind": "parenthesized_expression",
+              "display": "(toState === 'ArrangingPayment')",
+              "capture": "complete_syntax",
+              "literal": null
+            },
+            "polarity": "truthy_branch"
+          },
+          {
+            "branch_source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 12836,
+              "byte_end": 12907,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "expression": {
+              "source": {
+                "repo": "vendurehq/vendure",
+                "path": "packages/core/src/config/order/default-order-process.ts",
+                "byte_start": 12836,
+                "byte_end": 12907,
+                "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+              },
+              "syntax_kind": "parenthesized_expression",
+              "display": "(options.arrangingPaymentRequiresCustomer !== false && !order.customer)",
+              "capture": "complete_syntax",
+              "literal": null
+            },
+            "polarity": "truthy_branch"
+          }
+        ],
+        "effect": {
+          "kind": "return",
+          "value": {
+            "source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 12930,
+              "byte_end": 12993,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "syntax_kind": "string",
+            "display": "[REDACTED]",
+            "capture": "redacted",
+            "literal": null
+          }
+        },
+        "dependencies": [],
+        "interpretation": {
+          "execution_predicate": "not_established",
+          "consumer_effect": "not_established",
+          "gap_ids": [
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12930:consumer_semantics_unknown",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12930:execution_predicate_unknown",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12930:loop_dependency",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12930:mutation",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12930:preceding_exit",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@12930:redacted_expression"
+          ]
+        },
+        "redactions": []
+      }
+    },
+    {
+      "node_id": "rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@13226",
+      "rule": {
+        "schema_version": 1,
+        "kind": "guarded_exit",
+        "owner_id": "sym:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#configureDefaultOrderProcess/orderProcess@6228.onTransitionStart@9799",
+        "exit_source": {
+          "repo": "vendurehq/vendure",
+          "path": "packages/core/src/config/order/default-order-process.ts",
+          "byte_start": 13226,
+          "byte_end": 13296,
+          "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+        },
+        "source_order": 7,
+        "conditions": [
+          {
+            "branch_source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 12575,
+              "byte_end": 12607,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "expression": {
+              "source": {
+                "repo": "vendurehq/vendure",
+                "path": "packages/core/src/config/order/default-order-process.ts",
+                "byte_start": 12575,
+                "byte_end": 12607,
+                "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+              },
+              "syntax_kind": "parenthesized_expression",
+              "display": "(toState === 'ArrangingPayment')",
+              "capture": "complete_syntax",
+              "literal": null
+            },
+            "polarity": "truthy_branch"
+          },
+          {
+            "branch_source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 13031,
+              "byte_end": 13203,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "expression": {
+              "source": {
+                "repo": "vendurehq/vendure",
+                "path": "packages/core/src/config/order/default-order-process.ts",
+                "byte_start": 13031,
+                "byte_end": 13203,
+                "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+              },
+              "syntax_kind": "parenthesized_expression",
+              "display": "(\n                    options.arrangingPaymentRequiresShipping !== false &&\n                    (!order.shippingLines || order.shippingLines.length === 0)\n                )",
+              "capture": "complete_syntax",
+              "literal": null
+            },
+            "polarity": "truthy_branch"
+          }
+        ],
+        "effect": {
+          "kind": "return",
+          "value": {
+            "source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 13226,
+              "byte_end": 13296,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "syntax_kind": "string",
+            "display": "[REDACTED]",
+            "capture": "redacted",
+            "literal": null
+          }
+        },
+        "dependencies": [],
+        "interpretation": {
+          "execution_predicate": "not_established",
+          "consumer_effect": "not_established",
+          "gap_ids": [
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@13226:consumer_semantics_unknown",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@13226:execution_predicate_unknown",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@13226:loop_dependency",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@13226:mutation",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@13226:preceding_exit",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@13226:redacted_expression"
+          ]
+        },
+        "redactions": []
+      }
+    },
+    {
+      "node_id": "rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@14034",
+      "rule": {
+        "schema_version": 1,
+        "kind": "guarded_exit",
+        "owner_id": "sym:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#configureDefaultOrderProcess/orderProcess@6228.onTransitionStart@9799",
+        "exit_source": {
+          "repo": "vendurehq/vendure",
+          "path": "packages/core/src/config/order/default-order-process.ts",
+          "byte_start": 14034,
+          "byte_end": 14431,
+          "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+        },
+        "source_order": 8,
+        "conditions": [
+          {
+            "branch_source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 12575,
+              "byte_end": 12607,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "expression": {
+              "source": {
+                "repo": "vendurehq/vendure",
+                "path": "packages/core/src/config/order/default-order-process.ts",
+                "byte_start": 12575,
+                "byte_end": 12607,
+                "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+              },
+              "syntax_kind": "parenthesized_expression",
+              "display": "(toState === 'ArrangingPayment')",
+              "capture": "complete_syntax",
+              "literal": null
+            },
+            "polarity": "truthy_branch"
+          },
+          {
+            "branch_source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 13334,
+              "byte_end": 13383,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "expression": {
+              "source": {
+                "repo": "vendurehq/vendure",
+                "path": "packages/core/src/config/order/default-order-process.ts",
+                "byte_start": 13334,
+                "byte_end": 13383,
+                "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+              },
+              "syntax_kind": "parenthesized_expression",
+              "display": "(options.arrangingPaymentRequiresStock !== false)",
+              "capture": "complete_syntax",
+              "literal": null
+            },
+            "polarity": "truthy_branch"
+          },
+          {
+            "branch_source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 13961,
+              "byte_end": 14007,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "expression": {
+              "source": {
+                "repo": "vendurehq/vendure",
+                "path": "packages/core/src/config/order/default-order-process.ts",
+                "byte_start": 13961,
+                "byte_end": 14007,
+                "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+              },
+              "syntax_kind": "parenthesized_expression",
+              "display": "(variantsWithInsufficientSaleableStock.length)",
+              "capture": "complete_syntax",
+              "literal": null
+            },
+            "polarity": "truthy_branch"
+          }
+        ],
+        "effect": {
+          "kind": "return",
+          "value": {
+            "source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/config/order/default-order-process.ts",
+              "byte_start": 14034,
+              "byte_end": 14431,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "syntax_kind": "unsupported",
+            "display": "[UNSUPPORTED EXPRESSION]",
+            "capture": "unsupported",
+            "literal": null
+          }
+        },
+        "dependencies": [],
+        "interpretation": {
+          "execution_predicate": "not_established",
+          "consumer_effect": "not_established",
+          "gap_ids": [
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@14034:consumer_semantics_unknown",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@14034:execution_predicate_unknown",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@14034:loop_dependency",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@14034:mutation",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@14034:preceding_exit",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@14034:redacted_expression",
+            "gap:rule:vendurehq/vendure@packages/core/src/config/order/default-order-process.ts#exit@14034:unresolved_call"
+          ]
+        },
+        "redactions": []
+      }
+    },
+    {
+      "node_id": "rule:vendurehq/vendure@packages/core/src/service/services/product-variant.service.ts#exit@13869",
+      "rule": {
+        "schema_version": 1,
+        "kind": "guarded_exit",
+        "owner_id": "sym:vendurehq/vendure@packages/core/src/service/services/product-variant.service.ts#ProductVariantService.getSaleableStockLevel",
+        "exit_source": {
+          "repo": "vendurehq/vendure",
+          "path": "packages/core/src/service/services/product-variant.service.ts",
+          "byte_start": 13869,
+          "byte_end": 13900,
+          "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+        },
+        "source_order": 0,
+        "conditions": [
+          {
+            "branch_source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/service/services/product-variant.service.ts",
+              "byte_start": 13833,
+              "byte_end": 13854,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "expression": {
+              "source": {
+                "repo": "vendurehq/vendure",
+                "path": "packages/core/src/service/services/product-variant.service.ts",
+                "byte_start": 13833,
+                "byte_end": 13854,
+                "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+              },
+              "syntax_kind": "parenthesized_expression",
+              "display": "(inventoryNotTracked)",
+              "capture": "complete_syntax",
+              "literal": null
+            },
+            "polarity": "truthy_branch"
+          }
+        ],
+        "effect": {
+          "kind": "return",
+          "value": {
+            "source": {
+              "repo": "vendurehq/vendure",
+              "path": "packages/core/src/service/services/product-variant.service.ts",
+              "byte_start": 13869,
+              "byte_end": 13900,
+              "commit_sha": "2cc309deb5394af176314552ac7320a7b26a0104"
+            },
+            "syntax_kind": "member_expression",
+            "display": "Number.MAX_SAFE_INTEGER",
+            "capture": "complete_syntax",
+            "literal": null
+          }
+        },
+        "dependencies": [],
+        "interpretation": {
+          "execution_predicate": "not_established",
+          "consumer_effect": "not_established",
+          "gap_ids": [
+            "gap:rule:vendurehq/vendure@packages/core/src/service/services/product-variant.service.ts#exit@13869:consumer_semantics_unknown",
+            "gap:rule:vendurehq/vendure@packages/core/src/service/services/product-variant.service.ts#exit@13869:execution_predicate_unknown",
+            "gap:rule:vendurehq/vendure@packages/core/src/service/services/product-variant.service.ts#exit@13869:unresolved_binding"
+          ]
+        },
+        "redactions": []
+      }
+    }
+  ]
+}

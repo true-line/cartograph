@@ -187,7 +187,11 @@ fn is_inferred(confidence: ConfidenceTier) -> bool {
     )
 }
 
-fn included(provenance: &Provenance, mode: ExportMode, rejected_hashes: &BTreeSet<String>) -> bool {
+pub(crate) fn included(
+    provenance: &Provenance,
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+) -> bool {
     if is_inferred(provenance.confidence_tier) && rejected_hashes.contains(&provenance.content_hash)
     {
         return false;
@@ -224,7 +228,7 @@ fn edge_identity(edge: &Edge) -> String {
 }
 
 /// An artifact whose content is final, stamped with schema and identity.
-fn identified_artifact(
+pub(crate) fn identified_artifact(
     id: &str,
     file_name: &str,
     title: &str,
