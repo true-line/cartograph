@@ -6,8 +6,9 @@ Vision elements V1–V9: [VISION.md](VISION.md). Baseline: `main` at `cb0e876` (
 
 The decisions in section 3 were agreed between the two implementation agents
 (Claude for core recovery and lifecycle artifacts, Codex for the agentic
-layer). This document is the proposed roadmap built on them, under cross-review
-in #574. It authorizes no implementation by itself: every item below lands
+layer). The roadmap built on them was
+cross-reviewed in #574 and agreed in #572; the section 8 realignment was
+cross-reviewed in #719 and approved by the owner there. It authorizes no implementation by itself: every item below lands
 through its own scoped issue and pull request.
 
 ## 1. North star and how it is measured
@@ -129,7 +130,7 @@ target test recovery and skills.
 | P2 | W5 curated projection; W4 views | Accept a proposal, see it in the Workbench, the export and an agent read with the same curated revision |
 | P3 | W6 packets; W7 compact investigation and discovery | Ask a scoped question, get a cited finding and an auditor follow-up, turn a gap into a reviewed packet |
 | P4 | W8a read-only MCP and skill, then the W8b agent team | An agent reads Cartograph through MCP, then a human and ACP-hosted and local-model agents work a gap together in the app |
-| P5 | The north-star cycle on SimpleLogin, first as a deterministic showcase | The full cycle in section 1, with its measurements recorded |
+| P5 | The north-star cycle on SimpleLogin, first as a deterministic showcase | The deterministic showcase in section 8: SimpleLogin recovered end to end, its contract scored against `docs/api.md`, every gap named, published under `docs/showcases/`. The full section 1 cycle, with journeys and test arrangements, closes after W10 and W11 |
 
 Phases are ordered by dependency, not as a waterfall. Recovered-only work
 packets (AP-1a) and compact disclosure (AP-2a) can progress before the curated
@@ -181,13 +182,14 @@ recent effort went into investigation proof machinery that has no user-visible
 consumer yet, while there is still no MCP surface, no finished showcase, and
 no recovered test arrangements or journeys. The order changes as follows.
 
-1. **Citable declarations first (#691).** Only rule-shaped code mints
-   primary receipts today, which leaves 4 of 17 Vendure files with no citable
-   fact. This is a deterministic gap under every later item, including #590.
-   Receipts must also scale: a 4,337-file TypeScript repo produces 319 MB
-   of rule receipts against a 64 MiB ceiling and fails ingest outright
-   (#722). That is fixed alongside, by naming omissions instead of failing,
-   compacting the receipt schema, and scaling ceilings per source.
+1. **Receipts that scale come first.** Citable declarations have landed
+   (#691, AC-0280: direct callables and config, const, decorator and header
+   facts now mint primary receipts). The deterministic gap under every later item,
+   including #590, is now scale: a 4,337-file TypeScript repo produces 319 MB
+   of rule receipts against a 64 MiB ceiling and failed ingest outright
+   (#722). Recovery now names those omissions instead of failing (#722);
+   #725 compacts the receipt schema and makes retention scale, so large
+   repos become citable rather than only recoverable.
 2. **W8 is no longer gated on W7.** A read-only MCP server and a Cartograph
    skill (W8a) expose what already exists deterministically, and become the
    agent team's read path. W8a's boundary:
@@ -258,6 +260,8 @@ no recovered test arrangements or journeys. The order changes as follows.
    enter through a manifest or plugin. Unscheduled until v1's showcase lands.
 
 Identifiers reserved for this realignment: US-0041 and AC-0288..0290 for
-W8a, plus ADR-0044 (Codex). AC-0291 and ADR-0043 are for #691 (Claude). The
-next free identifiers are US-0042, AC-0292 and ADR-0045.
+W8a, plus ADR-0044 (Codex). AC-0291 and ADR-0043, first reserved for #691,
+are retired unused because #691 landed under AC-0280. AC-0292 is #722, and
+ADR-0045 is reserved for the living-wiki design (#724). The next free
+identifiers are US-0042, AC-0293 and ADR-0046.
 
