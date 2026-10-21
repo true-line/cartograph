@@ -50,7 +50,12 @@ uncertain retry.
 
 Numerical ceilings and headroom require the complete evidence measurement after
 #691 and #693 and the owner's decision. Do not enable the new route until all
-admission, persistence and execution boundaries support it. This decision does
+admission, persistence and execution boundaries support it. The remaining global
+MAX_MODEL_CALLS and MAX_TOOL_ACTIONS bounds in investigation/mod.rs feed admission,
+coverage and staged finish/refusal validators (including doubled bounds). They
+must be routed consistently for the opt-in family. The immutable specialists
+COMMON prompt also embeds eight calls/actions; the @8 definitions must state the
+new policy without changing legacy text. This decision does
 not authorize a provider run or establish semantic acceptance under #598.
 
 ## Consequences
