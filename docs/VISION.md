@@ -68,6 +68,16 @@ the deliverable from a recovered spec to the reconstructed lifecycle, with the
 agent team inside the product rather than only around it. The recovery engine
 and the context hub are its evidence foundation, not its end state.
 
+## Beyond v1: targets without source
+
+v1 reconstructs from source because business rules, user journeys and the
+roles infrastructure plays can only be confirmed with the code. v2 adds
+targets without source: a website, mobile app, desktop app or similar
+artifact, broken down through observation (structure, bundles, network
+traffic, binaries, runtime behavior). Observation layers on top of v1 and
+fills its missing pieces. It stays separately labeled evidence that can support
+or contradict a claim but never confirms a rule alone. See ROADMAP §8.
+
 ## Earlier staged roadmap (ADR-0007, for the record)
 
 - **Stage 1 (SPEC-00 v1, M0–M10, delivered):** spec recovery only, with this

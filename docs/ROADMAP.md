@@ -205,6 +205,20 @@ no recovered test arrangements or journeys. The order changes as follows.
 5. **Missing lifecycle artifacts are named, not scheduled.** W10, test
    arrangements and validation (recovered target tests with qualified links),
    and W11, journeys, are ordered after the showcase shows which matters more.
+6. **v2 horizon: targets without source.** After v1 works on source,
+   Cartograph should take a website, mobile app, desktop app or similar
+   artifact, such as an old site of the owner's, and break it down the way
+   REA-style reverse engineering does: page structure, bundles, network
+   observations, binaries and runtime behavior. This observation layer sits on
+   top of v1 and fills its missing pieces. It never replaces it. Business
+   rules, journeys and infrastructure roles can be confirmed only from source,
+   so observed evidence stays a separately labeled kind that can support or
+   contradict a claim but cannot confirm a rule on its own. To keep v2 cheap
+   to add: keep source and observation provenance distinct in the tier model,
+   keep omission fill seams able to route a gap to an observation source, and
+   prefer composition over rebuilding. W8a's MCP surface lets an agent use an
+   observation tool such as REA alongside Cartograph, and observed facts could
+   enter through a manifest or plugin. Unscheduled until v1's showcase lands.
 
 Identifiers reserved for this realignment: US-0041 and AC-0288..0290 for
 W8a, plus ADR-0044 (Codex). AC-0291 and ADR-0043 are for #691 (Claude). The
