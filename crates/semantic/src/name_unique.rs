@@ -39,6 +39,9 @@ pub enum SkipReason {
     DenylistedName,
     /// No Symbol of that language has the callee's name.
     NoCandidate,
+    /// The only Symbol with the name is not a proven callable (a class, a
+    /// plugin-supplied kind, or no kind at all).
+    NotCallable,
     /// Two or more Symbols share the name, in any repo.
     Collision,
     /// The only candidate is the caller itself.
@@ -113,6 +116,15 @@ fn evidence_key(evidence: &EvidenceRef) -> (&str, &str, u64, u64, &str) {
     )
 }
 
+/// Kinds the TS/JS extractor emits for declarations a call can reach.
+fn callable(node: &Node) -> bool {
+    node.label == "Component"
+        || matches!(
+            node.props["kind"].as_str(),
+            Some("Function" | "Method" | "Component")
+        )
+}
+
 /// Derive every fill from `nodes` and `edges`. Pure and order-independent:
 /// the same graph yields byte-identical output however it was read.
 pub fn plan(nodes: &[Node], edges: &[Edge]) -> Plan {
@@ -136,11 +148,16 @@ pub fn plan(nodes: &[Node], edges: &[Edge]) -> Plan {
         let Some(language) = language(&evidence_from(&node.props)) else {
             continue;
         };
+        // Every named Symbol counts toward a collision; only a proven
+        // callable can be the target, so `class Foo` beside `function Foo`
+        // stays a Gap rather than resolving either way.
         by_name
             .entry((language, name))
             .or_default()
             .insert(node.id.as_str());
-        targets.insert(node.id.as_str(), node);
+        if callable(node) {
+            targets.insert(node.id.as_str(), node);
+        }
     }
     let held: BTreeSet<(&str, &str)> = edges
         .iter()
@@ -171,7 +188,9 @@ pub fn plan(nodes: &[Node], edges: &[Edge]) -> Plan {
                     Some(ids) if ids.len() > 1 => Err(SkipReason::Collision),
                     Some(ids) => {
                         let target = *ids.first().expect("a name index entry is never empty");
-                        if target == source {
+                        if !targets.contains_key(target) {
+                            Err(SkipReason::NotCallable)
+                        } else if target == source {
                             Err(SkipReason::SelfCall)
                         } else if held.contains(&(source, target)) {
                             Err(SkipReason::EdgeExists)
@@ -457,6 +476,38 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn only_callable_symbols_take_a_fill() {
+        let mut class = symbol("sym:app@src/k.ts#Store", "Store", "src/k.ts");
+        class.props["kind"] = serde_json::json!("Class");
+        let mut unknown = symbol("sym:app@src/u.ts#plugged", "plugged", "src/u.ts");
+        unknown.props.as_object_mut().unwrap().remove("kind");
+        let mut shadow = symbol("sym:app@src/s.ts#Model", "Model", "src/s.ts");
+        shadow.props["kind"] = serde_json::json!("Class");
+        let nodes = vec![
+            symbol("sym:app@src/a.ts#main", "main", "src/a.ts"),
+            class,
+            unknown,
+            shadow,
+            symbol("sym:app@src/m.ts#Model", "Model", "src/m.ts"),
+            gap("gap:class", "Store", "src/a.ts", 1),
+            gap("gap:unknown", "plugged", "src/a.ts", 2),
+            gap("gap:shadow", "Model", "src/a.ts", 3),
+        ];
+        let edges: Vec<Edge> = ["gap:class", "gap:unknown", "gap:shadow"]
+            .iter()
+            .map(|gap| calls("sym:app@src/a.ts#main", gap))
+            .collect();
+        let plan = plan(&nodes, &edges);
+        assert!(plan.edges.is_empty());
+        assert_eq!(
+            plan.skipped,
+            BTreeMap::from([(SkipReason::NotCallable, 2), (SkipReason::Collision, 1)])
+        );
+        // No fill exists, so every hop stays T2 work.
+        assert_eq!(call_hops(&nodes, &edges).len(), 3);
     }
 
     fn call_hops(nodes: &[Node], edges: &[Edge]) -> Vec<String> {
