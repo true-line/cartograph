@@ -633,6 +633,25 @@ separate observation, never a replay or replacement for a failed control. All
 three entrypoints use the same synthetic fixture, limits and acceptance checks;
 none is the Vendure primary-input procedure.
 
+The separately selected
+`investigation_source_inspection_local_provider_acceptance` exercises @5 with
+explicit captured-source requirements. Use the same environment and its exact
+test name with a fresh output directory. The analyst and auditor each receive an
+independently host-resolved `definition_initializer` target from the existing
+synthetic source. Both intended targets and the source content hash are recorded before the first
+model call. The auditor target is revalidated before its follow-up starts, and
+the report records that outcome even when it succeeds. This does not
+inherit requirements from parent findings or force a source-reading tool call.
+
+The @5 report additionally checks the exact saved requirements and their finishing
+assessment: each target must have been acquired and supplied unchanged, with the
+assessment bound to the finishing invocation and input ledger. Citation support
+remains a separate check. A valid partial result with unmet requirements fails
+mechanical acceptance and is retained; the auditor is skipped after a failed
+analyst control. Existing @2–@4 controls and their receipts are unchanged. This
+@5 control is a production-module observation, not a native-app run, a Vendure
+acceptance result, or proof that model conclusions follow from the source.
+
 Use a clean checkout and an output directory outside it that does not exist. The
 manifest records the exact source commit and intended analyst/auditor definitions
 before the first provider call. It records runtime/model identity
