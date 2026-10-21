@@ -48,7 +48,8 @@ acquisition revisions or unavailable/completed evidence attempts.
 Derive finishing-call requirements from saved refusal allowance, and reserve
 per-call generated tokens separately. Expose finish-only mode in versioned
 progress and certify its distinct prompt. A tool proposal there terminates
-explicitly. The host never synthesizes a successful insufficient-evidence result.
+explicitly without a capacity-refusal increment or tool debit, retaining the
+model-call charge. The host never synthesizes a successful insufficient-evidence result.
 
 Bytes, provider framing, generated-token reservations and unknown tokenizer or
 provider-context capacity remain separate. Component bounds and early refusal
@@ -78,7 +79,7 @@ The current implementation includes a coherent saved completion snapshot,
 internal prompt9 construction and feedback-reserve measurement, and borrowed
 query/inventory preparation views retaining source guards. Source reservations
 have immutable storage records and central capacity accounting. These components
-do not yet establish the complete admission transaction: source-class closure,
+do not yet establish the complete admission transaction: complete class closure,
 new runtime routing, atomic candidate transitions and refusal journals remain
 required. The design document records that scope; this ADR is not a
 shipped-feature or provider-acceptance claim.
