@@ -4132,3 +4132,126 @@ details.investigation-section { display: block; }
 .packet-values { padding-left: 20px; }
 .packet-review { margin-top: 24px; padding-top: 12px; border-top: 1px solid var(--border, #374151); }
 @media (max-width: 800px) { .packet-layout { grid-template-columns: 1fr; } }
+
+/* Rendered topology, flow, deployment, and data-model views (AC-0246, AC-0247). */
+.spec-diagram-view {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface-alt);
+}
+
+.spec-diagram-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.spec-diagram-meta {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.spec-diagram-identity {
+  font-size: 0.74rem;
+}
+
+.spec-diagram-scale {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.76rem;
+}
+
+.spec-diagram-page-controls {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.spec-diagram-canvas {
+  min-height: 240px;
+  height: 260px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+}
+
+.spec-diagram-deployments {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  font-size: 0.76rem;
+}
+
+.spec-diagram-deployments ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.diagram-node-chip,
+.diagram-edge-chip {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--control);
+  color: var(--text-body);
+}
+
+.diagram-node-chip.unresolved,
+.diagram-edge-chip.unresolved {
+  border-style: dashed;
+  border-width: 1.5px;
+  border-color: var(--tier-gap);
+  color: var(--tier-gap);
+}
+
+.diagram-node-chip.deployed {
+  border-color: var(--tier-confirmed);
+}
+
+.diagram-node-chip.kind-unknown {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.spec-diagram-truncated-note {
+  margin: 0;
+  font-size: 0.76rem;
+}
+
+.spec-diagram-evidence {
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+}
+
+.topology-mermaid-disclosure,
+.spec-source-disclosure {
+  margin-top: 0.5rem;
+}
+
+.topology-mermaid-disclosure summary,
+.spec-source-disclosure summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--accent);
+}
+

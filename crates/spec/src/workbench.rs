@@ -5,7 +5,7 @@ pub(crate) mod diagrams;
 mod producers;
 mod registers;
 pub(crate) mod render;
-mod selected;
+pub(crate) mod selected;
 use core_graph::omission::{FillSeam, Omission, OmissionClass};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance, Tier};
@@ -223,7 +223,7 @@ fn gap_node_edge_label<'a>(node: &'a Node, edges: &[&'a Edge]) -> Option<&'a str
         .or_else(|| node.props["edge_label"].as_str())
 }
 
-fn edge_identity(edge: &Edge) -> String {
+pub(crate) fn edge_identity(edge: &Edge) -> String {
     format!("{} {} {}", edge.src, edge.label, edge.dst)
 }
 
@@ -250,7 +250,7 @@ pub(crate) fn identified_artifact(
     artifact
 }
 
-fn filter_nodes<'a>(
+pub(crate) fn filter_nodes<'a>(
     nodes: &'a [Node],
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
@@ -263,7 +263,7 @@ fn filter_nodes<'a>(
     selected
 }
 
-fn filter_edges<'a>(
+pub(crate) fn filter_edges<'a>(
     edges: &'a [Edge],
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
@@ -432,7 +432,7 @@ fn projection_gap(hop: &Hop, reason: &str) -> Hop {
 /// `REFERENCES` joins the data model only where it touches a `DataEntity`
 /// (the producer filters on that): JPA relations and repository bindings
 /// (#239). Infra `REFERENCES` between resources never reach this view.
-const DATA_EDGE_LABELS: &[&str] = &["READS", "WRITES", "MAPS_TO", "REFERENCES"];
+pub(crate) const DATA_EDGE_LABELS: &[&str] = &["READS", "WRITES", "MAPS_TO", "REFERENCES"];
 
 /// True when `node` is an explicit System Gap. Public so the shell's
 /// findings summary counts with the register's own definition (#116) —

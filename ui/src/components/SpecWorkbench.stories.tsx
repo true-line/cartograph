@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, within } from 'storybook/test';
-import type { SpecArtifact, SpecAssertion, SpecBundle } from '../store';
+import type { SpecArtifact, SpecAssertion, SpecBundle, SpecViewBundle } from '../store';
+import { STRUCTURED_VIEW_UNAVAILABLE_NOTICE } from './SpecDiagramView';
 import { SpecWorkbench } from './SpecWorkbench';
 
 const CONFIRMED: SpecAssertion = {
@@ -252,6 +253,15 @@ export const FullArtifactSetAndInlineProvenance: Story = {
     await userEvent.click(within(nav).getByRole('button', { name: /Gap register/ }));
     await expect(canvas.getByText('Gap: runtime-computed channel identity')).toBeInTheDocument();
     await expect(canvas.queryByText('None recorded — treated as unresolved.')).not.toBeInTheDocument();
+
+    // Without host views from the core, diagram artifacts show the unavailable
+    // notice and raw source rather than fabricating a client-derived diagram.
+    await userEvent.click(within(nav).getByRole('button', { name: /Resource topology/ }));
+    await expect(canvas.queryByTestId('spec-diagram-canvas')).not.toBeInTheDocument();
+    await expect(canvas.getByTestId('diagram-view-unavailable')).toHaveTextContent(
+      STRUCTURED_VIEW_UNAVAILABLE_NOTICE,
+    );
+    await expect(canvas.getByTestId('spec-artifact-source')).toHaveTextContent('# Resource topology');
 
     // AC-0125: the new artifact is navigable and copyable with its source-only
     // qualifier, actual assertion units, and locked T0 observation intact.
@@ -537,3 +547,231 @@ export const Empty: Story = {
     await expect(within(canvasElement).getByText(/No compiled spec is available/)).toBeInTheDocument();
   },
 };
+
+const WORKBENCH_VIEWS: SpecViewBundle = {
+  mode: 'best-effort',
+  topology: {
+    artifact_id: 'topology',
+    schema: 'cartograph.spec/topology.md@1',
+    content_id: 'spec-artifact-v1:fixture-topology.md',
+    mode: 'best-effort',
+    nodes: [
+      {
+        id: 'res:aws_sqs_queue.orders',
+        label: 'Resource',
+        props: {
+          name: 'aws_sqs_queue.orders',
+          prov: {
+            tier: 'Dynamic',
+            confidence_tier: 'Confirmed',
+            evidence: [
+              {
+                repo: 'acme/infra',
+                path: 'orders.tf',
+                byte_start: 10,
+                byte_end: 88,
+                commit_sha: 'def456',
+              },
+            ],
+            extractor_id: 't1.aws-describe',
+            content_hash: '8'.repeat(64),
+          },
+        },
+      },
+      {
+        id: 'gap:channel',
+        label: 'Gap',
+        props: {
+          name: 'runtime-computed channel identity',
+          reason: 'channel ARN constructed dynamically',
+          prov: GAP.provenance,
+        },
+      },
+    ],
+    nodes_total: 2,
+    edges: [
+      {
+        src: 'res:aws_sqs_queue.orders',
+        dst: 'gap:channel',
+        label: 'TRIGGERS',
+        props: {
+          gap_reason: 'channel ARN constructed dynamically',
+          prov: GAP.provenance,
+        },
+      },
+    ],
+    edges_total: 1,
+    flows_total: 0,
+    deployments: [
+      {
+        resource_id: 'res:aws_sqs_queue.orders',
+        source: 't1.aws-describe',
+        provenance: {
+          tier: 'Dynamic',
+          confidence_tier: 'Confirmed',
+          evidence: [
+            {
+              repo: 'acme/infra',
+              path: 'orders.tf',
+              byte_start: 10,
+              byte_end: 88,
+              commit_sha: 'def456',
+            },
+          ],
+          extractor_id: 't1.aws-describe',
+          content_hash: '8'.repeat(64),
+        },
+        backed_channels: ['orders.queue'],
+      },
+    ],
+    truncated: false,
+  },
+  flows: {
+    artifact_id: 'flow-dossiers',
+    schema: 'cartograph.spec/flow_dossiers.md@1',
+    content_id: 'spec-artifact-v1:fixture-flow_dossiers.md',
+    mode: 'best-effort',
+    nodes: [
+      {
+        id: 'ep:POST:/orders',
+        label: 'Endpoint',
+        props: {
+          name: 'POST /orders',
+          prov: CONFIRMED.provenance,
+        },
+      },
+      {
+        id: 'gap:channel',
+        label: 'Gap',
+        props: {
+          name: 'runtime-computed channel identity',
+          reason: 'channel ARN constructed dynamically',
+          prov: GAP.provenance,
+        },
+      },
+    ],
+    nodes_total: 2,
+    edges: [
+      {
+        src: 'ep:POST:/orders',
+        dst: 'gap:channel',
+        label: 'PUBLISHES',
+        props: {
+          gap_reason: 'channel ARN constructed dynamically',
+          prov: GAP.provenance,
+        },
+      },
+    ],
+    edges_total: 1,
+    flows_total: 1,
+    truncated: false,
+  },
+  data_model: {
+    artifact_id: 'data-model',
+    schema: 'cartograph.spec/data_model.md@1',
+    content_id: 'spec-artifact-v1:fixture-data_model.md',
+    mode: 'best-effort',
+    nodes: [
+      {
+        id: 'data:orders',
+        label: 'DataEntity',
+        props: {
+          name: 'orders',
+          prov: CONFIRMED.provenance,
+        },
+      },
+      {
+        id: 'sym:orders#create',
+        label: 'Symbol',
+        props: {
+          name: 'createOrder',
+          prov: CONFIRMED.provenance,
+        },
+      },
+    ],
+    nodes_total: 2,
+    edges: [
+      {
+        src: 'sym:orders#create',
+        dst: 'data:orders',
+        label: 'WRITES',
+        props: {
+          prov: CONFIRMED.provenance,
+        },
+      },
+    ],
+    edges_total: 1,
+    flows_total: 0,
+    truncated: false,
+  },
+};
+
+export const RenderedViewsMatchExportedIdentityAndSelectEvidence: Story = {
+  // AC-0246, AC-0247 (T-0246, T-0247): topology, flow, and data-model views in
+  // SpecWorkbench render as interactive diagrams bound to the exported
+  // projection's schema + content_id, while keeping copyable source available
+  // as a secondary action and opening evidence/tier/confidence on selection.
+  args: {
+    views: WORKBENCH_VIEWS,
+    onSelectNode: fn(),
+    onSelectEdge: fn(),
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const nav = canvas.getByRole('navigation', { name: 'Official spec artifacts' });
+
+    // 1. Resource topology view
+    await userEvent.click(within(nav).getByRole('button', { name: /Resource topology/ }));
+    const topoDiagram = within(canvas.getByTestId('spec-diagram-topology'));
+    await expect(topoDiagram.getByTestId('spec-diagram-canvas')).toBeInTheDocument();
+    await expect(topoDiagram.getByTestId('diagram-content-identity')).toHaveAttribute(
+      'data-content-id',
+      'spec-artifact-v1:fixture-topology.md',
+    );
+    await expect(topoDiagram.getByTestId('diagram-deployments')).toHaveTextContent(
+      'DEPLOYED (t1.aws-describe)',
+    );
+    const gapEdge = within(topoDiagram.getByLabelText('Diagram edges and hops')).getByRole(
+      'button',
+      { name: /GAP TRIGGERS \[UNRESOLVED: channel ARN constructed dynamically\]/ },
+    );
+    await expect(gapEdge).toHaveClass('unresolved');
+    await userEvent.click(gapEdge);
+    await expect(args.onSelectEdge).toHaveBeenCalledWith(WORKBENCH_VIEWS.topology.edges[0]);
+    await expect(topoDiagram.getByTestId('diagram-selected-evidence')).toHaveTextContent(
+      'acme/shop:src/publish.ts',
+    );
+
+    // Copyable source remains available as a secondary action.
+    await expect(canvas.getByTestId('spec-artifact-source')).toHaveTextContent(
+      '# Resource topology',
+    );
+
+    // 2. Flow dossiers view
+    await userEvent.click(within(nav).getByRole('button', { name: /Flow dossiers/ }));
+    const flowDiagram = within(canvas.getByTestId('spec-diagram-flow-dossiers'));
+    await expect(flowDiagram.getByTestId('spec-diagram-canvas')).toBeInTheDocument();
+    await expect(flowDiagram.getByTestId('diagram-content-identity')).toHaveAttribute(
+      'data-content-id',
+      'spec-artifact-v1:fixture-flow_dossiers.md',
+    );
+
+    // 3. Data model view
+    await userEvent.click(within(nav).getByRole('button', { name: /Data model/ }));
+    const dataDiagram = within(canvas.getByTestId('spec-diagram-data-model'));
+    await expect(dataDiagram.getByTestId('spec-diagram-canvas')).toBeInTheDocument();
+    await expect(dataDiagram.getByTestId('diagram-content-identity')).toHaveAttribute(
+      'data-content-id',
+      'spec-artifact-v1:fixture-data_model.md',
+    );
+    const dataNode = within(dataDiagram.getByLabelText('Diagram nodes')).getByRole('button', {
+      name: /T0 · orders/,
+    });
+    await userEvent.click(dataNode);
+    await expect(args.onSelectNode).toHaveBeenCalledWith(WORKBENCH_VIEWS.data_model.nodes[0]);
+    await expect(dataDiagram.getByTestId('diagram-selected-evidence')).toHaveTextContent(
+      'Confirmed',
+    );
+  },
+};
+

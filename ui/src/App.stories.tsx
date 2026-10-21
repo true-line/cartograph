@@ -9,9 +9,11 @@ import { usePrimarySourceStore, type CapturedDescription, type FactKey } from '.
 import {
   useAppStore,
   type AssertionDecisionRecord,
+  type Flow,
   type Provenance,
   type SpecAssertion,
   type SpecBundle,
+  type SpecViewBundle,
   type StagedProposal,
 } from './store';
 
@@ -132,8 +134,16 @@ const FAKE_SPEC: SpecBundle = {
         summary: 'Gap: remote sync target computed at runtime',
         provenance: { ...FAKE_PROVENANCE, confidence_tier: 'Gap' as const },
       }] : [];
+    const id =
+      fileName === 'flow_dossiers.md'
+        ? 'flow-dossiers'
+        : fileName === 'topology.md'
+          ? 'topology'
+          : fileName === 'data_model.md'
+            ? 'data-model'
+            : `artifact-${index}`;
     return {
-      id: `artifact-${index}`,
+      id,
       file_name: fileName,
       title: index === 0 ? 'User stories' : index === 5 ? 'Architecture decisions' : fileName,
       format: fileName.endsWith('.mmd') ? 'mermaid' : 'markdown',
@@ -152,6 +162,126 @@ const FAKE_SPEC: SpecBundle = {
   drift_count: 0,
   security_count: 0,
 };
+
+const FAKE_FLOW: Flow = {
+  trigger: 'ep:GET:/users',
+  trigger_kind: 'Endpoint',
+  trigger_name: 'GET /users',
+  hops: [
+    {
+      label: 'HANDLES',
+      src: 'ep:GET:/users',
+      dst: 'sym:app.ts#listUsers',
+      src_name: 'GET /users',
+      dst_name: 'listUsers',
+      tier: 'Deterministic',
+      confidence: 'Confirmed',
+      evidence: 'src/app.ts bytes 92..120',
+      provenance: FAKE_PROVENANCE,
+      gap_reason: null,
+      attempted_tiers: [],
+    },
+    {
+      label: 'CALLS',
+      src: 'sym:app.ts#listUsers',
+      dst: 'gap:sync',
+      src_name: 'listUsers',
+      dst_name: 'GAP: remote sync target computed at runtime',
+      tier: 'Deterministic',
+      confidence: 'Gap',
+      evidence: 'src/app.ts bytes 92..120',
+      provenance: { ...FAKE_PROVENANCE, confidence_tier: 'Gap' },
+      gap_reason: 'remote sync target computed at runtime',
+      attempted_tiers: ['T0', 'T1'],
+    },
+  ],
+  status: 'Partial',
+  score: 0.5,
+  depth_limited: false,
+};
+
+function fakeSpecViews(mode: SpecBundle['mode']): SpecViewBundle {
+  return {
+    mode,
+    topology: {
+      artifact_id: 'topology',
+      schema: 'cartograph.spec/topology.md@1',
+      content_id: 'spec-artifact-v1:fixture-topology.md',
+      mode,
+      nodes: [
+        {
+          id: 'res:aws_sqs_queue.orders',
+          label: 'Resource',
+          props: { name: 'aws_sqs_queue.orders', prov: FAKE_PROVENANCE },
+        },
+      ],
+      nodes_total: 1,
+      edges: [],
+      edges_total: 0,
+      flows_total: 0,
+      deployments: [],
+      truncated: false,
+    },
+    flows: {
+      artifact_id: 'flow-dossiers',
+      schema: 'cartograph.spec/flow_dossiers.md@1',
+      content_id: 'spec-artifact-v1:fixture-flow_dossiers.md',
+      mode,
+      nodes: [
+        FAKE_ENDPOINT,
+        {
+          id: 'sym:app.ts#listUsers',
+          label: 'Symbol',
+          props: { name: 'listUsers', prov: FAKE_PROVENANCE },
+        },
+        {
+          id: 'gap:sync',
+          label: 'Gap',
+          props: {
+            name: 'GAP: remote sync target computed at runtime',
+            reason: 'remote sync target computed at runtime',
+            prov: { ...FAKE_PROVENANCE, confidence_tier: 'Gap' },
+          },
+        },
+      ],
+      nodes_total: 3,
+      edges: [
+        {
+          src: 'ep:GET:/users',
+          dst: 'sym:app.ts#listUsers',
+          label: 'HANDLES',
+          props: { prov: FAKE_PROVENANCE },
+        },
+        {
+          src: 'sym:app.ts#listUsers',
+          dst: 'gap:sync',
+          label: 'CALLS',
+          props: {
+            gap_reason: 'remote sync target computed at runtime',
+            prov: { ...FAKE_PROVENANCE, confidence_tier: 'Gap' },
+          },
+        },
+      ],
+      edges_total: 2,
+      flows: [FAKE_FLOW],
+      flows_total: 1,
+      deployments: [],
+      truncated: false,
+    },
+    data_model: {
+      artifact_id: 'data-model',
+      schema: 'cartograph.spec/data_model.md@1',
+      content_id: 'spec-artifact-v1:fixture-data_model.md',
+      mode,
+      nodes: [],
+      nodes_total: 0,
+      edges: [],
+      edges_total: 0,
+      flows_total: 0,
+      truncated: false,
+    },
+  };
+}
 
 interface MockTier {
   tier: string;
@@ -427,44 +557,7 @@ function installFakeCore(options: {
       case 'export_flows':
         return '# Flow dossier\n\n## GET /users — Verified (score 1.00)\n';
       case 'list_flows':
-        return [
-          {
-            trigger: 'ep:GET:/users',
-            trigger_kind: 'Endpoint',
-            trigger_name: 'GET /users',
-            hops: [
-              {
-                label: 'HANDLES',
-                src: 'ep:GET:/users',
-                dst: 'sym:app.ts#listUsers',
-                src_name: 'GET /users',
-                dst_name: 'listUsers',
-                tier: 'Deterministic',
-                confidence: 'Confirmed',
-                evidence: 'src/app.ts bytes 92..120',
-                provenance: FAKE_PROVENANCE,
-                gap_reason: null,
-                attempted_tiers: [],
-              },
-              {
-                label: 'CALLS',
-                src: 'sym:app.ts#listUsers',
-                dst: 'gap:sync',
-                src_name: 'listUsers',
-                dst_name: 'GAP: remote sync target computed at runtime',
-                tier: 'Deterministic',
-                confidence: 'Gap',
-                evidence: 'src/app.ts bytes 92..120',
-                provenance: { ...FAKE_PROVENANCE, confidence_tier: 'Gap' },
-                gap_reason: 'remote sync target computed at runtime',
-                attempted_tiers: ['T0', 'T1'],
-              },
-            ],
-            status: 'Partial',
-            score: 0.5,
-            depth_limited: false,
-          },
-        ];
+        return [FAKE_FLOW];
       case 'list_flow_anchors':
         return [
           { kind: 'screens (routes/pages)', found: 0 },
@@ -499,6 +592,8 @@ function installFakeCore(options: {
         return 'flowchart LR\n    res_aws_sqs_queue_orders["aws_sqs_queue.orders"]\n';
       case 'export_spec':
         return { ...FAKE_SPEC, mode: (args as { mode: SpecBundle['mode'] }).mode };
+      case 'export_spec_views':
+        return fakeSpecViews((args as { mode: SpecBundle['mode'] }).mode);
       case 'read_spec_artifact':
         return (
           FAKE_SPEC.artifacts.find(
@@ -836,6 +931,7 @@ const meta = {
       flows: null,
       flowList: [],
       specBundle: null,
+      specViews: null,
       specMode: 'best-effort',
       curation: [],
       specBusy: false,

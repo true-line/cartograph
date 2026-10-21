@@ -1,6 +1,21 @@
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { HelpTip } from './HelpTip';
-import type { AnchorProbe, Flow, FlowHop, Tier } from '../store';
+import {
+  STRUCTURED_VIEW_UNAVAILABLE_NOTICE,
+  SpecDiagramCanvas,
+  isGapEdgeFact,
+  subsetFlowDiagramView,
+  verifyDiagramViewIdentity,
+} from './SpecDiagramView';
+import type {
+  AnchorProbe,
+  Flow,
+  FlowHop,
+  GraphNode,
+  SpecArtifact,
+  SpecDiagramView,
+  Tier,
+} from '../store';
 
 export type FlowExportMode = 'verified-only' | 'best-effort';
 
@@ -12,6 +27,13 @@ export interface FlowsCardProps {
   anchors?: AnchorProbe[];
   /** Flow-dossier Markdown from the spec compiler, or null with no backend. */
   dossier: string | null;
+  /** Compiled flow-dossiers diagram view (US-0036, AC-0246). */
+  view?: SpecDiagramView | null;
+  /** Exported flow-dossiers artifact for content-identity verification (AC-0246). */
+  artifact?: SpecArtifact | null;
+  pageSize?: number;
+  /** Open the evidence drawer for a node in the flow/infrastructure diagram. */
+  onSelectNode?: (node: GraphNode) => void;
   /** Open the evidence drawer for a hop's own provenance. */
   onSelectHop?: (hop: FlowHop) => void;
   /** Open the Resolution Strategy modal for a gap hop's Gap node. */
@@ -252,6 +274,10 @@ export function FlowsCard({
   flows,
   anchors,
   dossier,
+  view,
+  artifact,
+  pageSize,
+  onSelectNode,
   onSelectHop,
   onOpenResolution,
 }: FlowsCardProps) {
@@ -266,6 +292,21 @@ export function FlowsCard({
   );
   const selected: Flow | undefined = flows[selectedIndex];
   const projected = selected ? projectFlow(selected, mode) : null;
+  const diagramView = useMemo<SpecDiagramView | null>(() => {
+    if (!selected || !view) return null;
+    if (!verifyDiagramViewIdentity(view, artifact)) return view;
+    if (view.mode !== mode) return null;
+    return subsetFlowDiagramView(view, selected.trigger);
+  }, [selected, view, mode, artifact]);
+  // A flow past the host view's flow cap has no structured diagram; that is
+  // truncation, not an unavailable core.
+  const flowBeyondHostView = Boolean(
+    selected &&
+      view &&
+      view.mode === mode &&
+      verifyDiagramViewIdentity(view, artifact) &&
+      !view.flows?.some((flow) => flow.trigger === selected.trigger),
+  );
   const dossierText =
     mode === 'best-effort' && dossier?.includes('## ') ? dossier : projectedDossier(flows, mode);
 
@@ -400,6 +441,39 @@ export function FlowsCard({
                   'annotated — excluded from verified-only exports (R-INT-5).'
                 : 'Best-effort: no InferredWeak hops in this flow — both projections are identical.'}
           </p>
+
+          {diagramView ? (
+            <SpecDiagramCanvas
+              key={`${selected.trigger}:${diagramView.content_id}`}
+              view={diagramView}
+              artifact={artifact}
+              title={`Flow & infrastructure diagram · ${selected.trigger_name}`}
+              pageSize={pageSize}
+              onSelectNode={onSelectNode}
+              onSelectEdge={(edge) => {
+                if (isGapEdgeFact(edge) && edge.dst.startsWith('gap:') && !edge.dst.startsWith('gap:projection:')) {
+                  onOpenResolution?.(edge.dst);
+                  return;
+                }
+                const matched = selected.hops.find(
+                  (hop) =>
+                    hop.src === edge.src &&
+                    (hop.dst === edge.dst ||
+                      (edge.label === 'UNRESOLVED' && edge.dst.startsWith(`gap:projection:${hop.src}:`))),
+                );
+                if (matched) onSelectHop?.(matched);
+              }}
+            />
+          ) : (
+            <p
+              className="muted spec-diagram-unavailable"
+              data-testid="diagram-view-unavailable"
+            >
+              {flowBeyondHostView
+                ? `This flow is beyond the ${view?.flows?.length ?? 0} of ${view?.flows_total ?? 0} flows the core view includes; its hops are listed below.`
+                : STRUCTURED_VIEW_UNAVAILABLE_NOTICE}
+            </p>
+          )}
 
           <ol
             className="flow-hop-row"

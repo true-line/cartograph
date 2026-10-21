@@ -149,12 +149,12 @@ const ARTIFACTS: &[Artifact] = &[
     },
 ];
 
-pub(super) struct Projection {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    flows: Vec<Flow>,
+pub(crate) struct Projection {
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) edges: Vec<Edge>,
+    pub(crate) flows: Vec<Flow>,
 }
-pub(super) fn project(
+pub(crate) fn project(
     nodes: &[Node],
     edges: &[Edge],
     flows: &[Flow],
@@ -277,6 +277,20 @@ fn produce(
     Ok(identified_artifact(
         a.id, a.file, a.title, a.format, content, assertions,
     ))
+}
+pub(crate) fn produce_by_id(
+    id: &str,
+    nodes: &[&Node],
+    edges: &[&Edge],
+    flows: &[Flow],
+    gaps: usize,
+    mode: ExportMode,
+) -> SpecArtifact {
+    let artifact = ARTIFACTS
+        .iter()
+        .find(|item| item.id == id)
+        .expect("known official artifact id");
+    produce(artifact, nodes, edges, flows, gaps, mode, None).expect("unbounded native artifact")
 }
 fn bytes(artifact: &SpecArtifact) -> usize {
     struct Count(usize);

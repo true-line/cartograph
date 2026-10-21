@@ -2,16 +2,27 @@ import { useMemo, useState } from 'react';
 import type {
   AssertionDecision,
   AssertionDecisionRecord,
+  GraphEdge,
+  GraphNode,
   SpecArtifact,
   SpecAssertion,
   SpecBundle,
+  SpecDiagramView,
   SpecExportMode,
+  SpecViewBundle,
   Tier,
 } from '../store';
+import {
+  STRUCTURED_VIEW_UNAVAILABLE_NOTICE,
+  SpecDiagramCanvas,
+  verifyDiagramViewIdentity,
+} from './SpecDiagramView';
 import { TierBadge, methodLabel } from './TierBadge';
 
 export interface SpecWorkbenchProps {
   bundle: SpecBundle | null;
+  views?: SpecViewBundle | null;
+  pageSize?: number;
   mode: SpecExportMode;
   decisions: AssertionDecisionRecord[];
   busy: boolean;
@@ -25,6 +36,8 @@ export interface SpecWorkbenchProps {
   onCurate: (assertion: SpecAssertion, decision: AssertionDecision, note?: string) => void;
   onCopyArtifact: (artifact: SpecArtifact) => void;
   onExportBundle: (bundle: SpecBundle) => void;
+  onSelectNode?: (node: GraphNode) => void;
+  onSelectEdge?: (edge: GraphEdge) => void;
 }
 
 /** A readable prefix of an artifact's content identity; the full value is
@@ -100,6 +113,8 @@ function decisionLabel(decision: AssertionDecision): string {
 /** Official spec artifacts, provenance, curation, and security review (US-0012/US-0015). */
 export function SpecWorkbench({
   bundle,
+  views,
+  pageSize,
   mode,
   decisions,
   busy,
@@ -113,6 +128,8 @@ export function SpecWorkbench({
   onCurate,
   onCopyArtifact,
   onExportBundle,
+  onSelectNode,
+  onSelectEdge,
 }: SpecWorkbenchProps) {
   const [selectedId, setSelectedId] = useState('');
   const [notes, setNotes] = useState<Record<string, string>>({});
@@ -122,6 +139,22 @@ export function SpecWorkbench({
   );
   const selected =
     bundle?.artifacts.find((artifact) => artifact.id === selectedId) ?? bundle?.artifacts[0] ?? null;
+  const isDiagramArtifact = Boolean(
+    selected &&
+      (selected.id === 'topology' ||
+        selected.id === 'flow-dossiers' ||
+        selected.id === 'data-model'),
+  );
+  const selectedDiagramView = useMemo<SpecDiagramView | null>(() => {
+    if (!selected || !isDiagramArtifact || !views) return null;
+    if (selected.id === 'topology') return views.topology ?? null;
+    if (selected.id === 'flow-dossiers') return views.flows ?? null;
+    if (selected.id === 'data-model') return views.data_model ?? null;
+    return null;
+  }, [selected, isDiagramArtifact, views]);
+  const hasValidDiagramView = Boolean(
+    selectedDiagramView && verifyDiagramViewIdentity(selectedDiagramView, selected),
+  );
 
   return (
     <section className="card spec-workbench-card" aria-labelledby="spec-workbench-title">
@@ -242,9 +275,39 @@ export function SpecWorkbench({
                   be curated (R-INT-1).
                 </p>
 
-                <pre className="spec-artifact-source" data-testid="spec-artifact-source">
-                  {selected.content}
-                </pre>
+                {selectedDiagramView ? (
+                  <>
+                    <SpecDiagramCanvas
+                      key={`${selected.id}:${selected.content_id}`}
+                      view={selectedDiagramView}
+                      artifact={selected}
+                      title={`${selected.title} diagram`}
+                      pageSize={pageSize}
+                      onSelectNode={onSelectNode}
+                      onSelectEdge={onSelectEdge}
+                    />
+                    <details className="spec-artifact-source-details" open={!hasValidDiagramView}>
+                      <summary>Copyable Mermaid / Markdown source</summary>
+                      <pre className="spec-artifact-source" data-testid="spec-artifact-source">
+                        {selected.content}
+                      </pre>
+                    </details>
+                  </>
+                ) : (
+                  <>
+                    {isDiagramArtifact && (
+                      <p
+                        className="muted spec-diagram-unavailable"
+                        data-testid="diagram-view-unavailable"
+                      >
+                        {STRUCTURED_VIEW_UNAVAILABLE_NOTICE}
+                      </p>
+                    )}
+                    <pre className="spec-artifact-source" data-testid="spec-artifact-source">
+                      {selected.content}
+                    </pre>
+                  </>
+                )}
                 {selected.content_truncated && (
                   <p className="muted spec-artifact-truncated-note" data-testid="spec-artifact-truncated-note">
                     Showing a preview — the complete artifact is{' '}
