@@ -43,6 +43,18 @@ pub const INVESTIGATION_V1_POLICY: InvestigationPolicy = InvestigationPolicy {
 };
 const POLICIES: &[&InvestigationPolicy] = &[&INVESTIGATION_V1_POLICY];
 
+// Temporary integration guard: legacy ledger/finish validators still consume
+// these ceilings. A larger policy must not become registrable before those
+// authority paths are made policy-aware. This does not implement the opt-in path.
+const _: () = {
+    let mut index = 0;
+    while index < POLICIES.len() {
+        assert!(POLICIES[index].tool_actions <= super::MAX_TOOL_ACTIONS);
+        assert!(POLICIES[index].model_invocations <= super::MAX_MODEL_CALLS);
+        index += 1;
+    }
+};
+
 impl InvestigationPolicy {
     pub fn for_profile(profile: &str) -> Option<&'static Self> {
         POLICIES

@@ -784,9 +784,13 @@ pub(super) fn event(
     let maximum = if task.phase == Phase::Terminal {
         event_limit
     } else if kind == InvestigationEventKind::CancelRequested {
-        event_limit - 2
+        event_limit
+            .checked_sub(2)
+            .ok_or(InvestigationStoreError::Invalid)?
     } else {
-        event_limit - 3
+        event_limit
+            .checked_sub(3)
+            .ok_or(InvestigationStoreError::Invalid)?
     };
     if next > maximum {
         return Err(InvestigationStoreError::Capacity);
