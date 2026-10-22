@@ -11,6 +11,7 @@ mod drop_intake;
 mod egress;
 mod escalation;
 mod evidence;
+mod export_save;
 mod findings;
 #[cfg(test)]
 mod graph_projection_tests;
@@ -5511,6 +5512,7 @@ fn main() {
             work_packets::get_work_packet,
             work_packets::review_work_packet,
             work_packets::export_work_packet,
+            export_save::save_export_file,
             investigations::commands::investigation_specialists,
             investigations::commands::start_investigation,
             investigations::commands::list_investigations,

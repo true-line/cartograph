@@ -64,6 +64,7 @@ function installPacketCore() {
       case 'assess_work_packet': return saved;
       case 'export_work_packet': lastExport = { packet_id: saved?.packet_id, file_name: `cartograph-work-packet-${saved?.packet_id.split(':')[1]}.md`,
         content: saved?.review.status === 'reviewed' ? packetReviewedExportFixture : packetExportFixture }; return lastExport;
+      case 'save_export_file': return true;
       case 'export_topology': case 'export_flows': case 'adapter_inventory': case 'findings_summary': case 'egress_summary': case 'get_ingest_parallelism': case 'cloud_disclosure': return null;
       default: throw new Error(`Unexpected packet product boundary: ${command}`);
     }
@@ -170,7 +171,7 @@ export const ExportReviewedPacket: Story = {
     const canvas = within(canvasElement);
     await canvas.findByTestId('packet-body-identity', undefined, { timeout: 5_000 });
     await userEvent.click(canvas.getByRole('button', { name: 'Export packet Markdown' }));
-    await waitFor(() => expect(canvas.getByText('Packet export prepared; local download requested.')).toBeInTheDocument());
+    await waitFor(() => expect(canvas.getByText('Packet exported.')).toBeInTheDocument());
     await expect(lastExport).toEqual({ packet_id: packetFixture.packet_id, file_name: `cartograph-work-packet-${packetFixture.packet_id.split(':')[1]}.md`, content: packetReviewedExportFixture });
     await expect(packetReviewedExportFixture).toContain(packetFixture.packet_id);
     await expectPacketBody(canvasElement);

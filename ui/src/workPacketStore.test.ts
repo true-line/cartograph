@@ -48,4 +48,37 @@ describe('host-authoritative packet tray (AC-0248, AC-0251)', () => {
     useWorkPacketStore.getState().removeArtifact(artifact.id, artifact.mode);
     expect(useWorkPacketStore.getState().snapshotId).toBeNull();
   });
+  it('exports via save_export_file: sets notice on save, preserves notice on cancel, and surfaces errors (#729)', async () => {
+    const packetId = 'work-packet-v1:' + 'b'.repeat(64);
+    const detail = { packet_id: packetId } as NonNullable<ReturnType<typeof useWorkPacketStore.getState>['detail']>;
+    let saveResult: boolean | 'error' = true;
+    mockIPC((command, args) => {
+      if (command === 'export_work_packet') {
+        expect(args).toEqual({ packetId });
+        return { packet_id: packetId, file_name: 'cartograph-work-packet-test.md', content: '# Packet' };
+      }
+      if (command === 'save_export_file') {
+        expect(args).toEqual({ suggestedName: 'cartograph-work-packet-test.md', content: '# Packet' });
+        if (saveResult === 'error') throw new Error('Failed to write export file: disk full');
+        return saveResult;
+      }
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    useWorkPacketStore.setState({ detail, notice: 'Prior notice.' });
+    saveResult = false;
+    await useWorkPacketStore.getState().exportPacket();
+    expect(useWorkPacketStore.getState().notice).toBe('Prior notice.');
+    expect(useWorkPacketStore.getState().error).toBeNull();
+
+    saveResult = true;
+    await useWorkPacketStore.getState().exportPacket();
+    expect(useWorkPacketStore.getState().notice).toBe('Packet exported.');
+    expect(useWorkPacketStore.getState().error).toBeNull();
+
+    saveResult = 'error';
+    await useWorkPacketStore.getState().exportPacket();
+    expect(useWorkPacketStore.getState().error).toBe('Failed to write export file: disk full');
+    expect(useWorkPacketStore.getState().notice).toBeNull();
+  });
 });

@@ -35,3 +35,16 @@ accepted = [
 ignore-build-dependencies = true
 ignore-dev-dependencies = true
 ignore-transitive-dependencies = false
+
+# rfd also ships the xdg-desktop-portal backend's own LICENSE under src/, so
+# which text cargo-about picks follows directory-walk order, which differs
+# between APFS and ext4. Pin the crate's root license so macOS and Linux
+# generate the same notices. That backend is Linux-only and not in the macOS
+# bundle.
+[rfd.clarify]
+license = "MIT"
+
+[[rfd.clarify.files]]
+path = "LICENSE"
+license = "MIT"
+checksum = "65fc947f4bac882a2cd104ef73c246b1b037059df9f2b3a58b7f77f0b9e56071"

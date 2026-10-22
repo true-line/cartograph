@@ -42,6 +42,7 @@ import {
   type ReadSpecArtifact,
   type ReportSpecError,
 } from './specExport';
+import { saveExport } from './saveExport';
 
 const AtlasCanvas = lazy(() =>
   import('./components/AtlasCanvas').then(({ AtlasCanvas: Component }) => ({
@@ -75,15 +76,12 @@ async function exportSpecBundle(
   const artifacts = await withFullArtifacts(bundle.artifacts, readSpecArtifact, reportError);
   if (artifacts === null) return;
   const files = Object.fromEntries(artifacts.map((artifact) => [artifact.file_name, artifact.content]));
-  const blob = new Blob([JSON.stringify({ ...bundle, artifacts, files }, null, 2)], {
-    type: 'application/json',
-  });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `cartograph-spec-${bundle.mode}.json`;
-  anchor.click();
-  URL.revokeObjectURL(url);
+  const content = JSON.stringify({ ...bundle, artifacts, files }, null, 2);
+  try {
+    await saveExport(`cartograph-spec-${bundle.mode}.json`, content);
+  } catch (error) {
+    reportError(error instanceof Error ? error.message : typeof error === 'string' ? error : String(error));
+  }
 }
 
 /** Copies the artifact's content, or aborts (leaving `specError` for the
