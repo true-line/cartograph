@@ -225,3 +225,74 @@ per-fact omission capabilities remain false until their producer-backed resolver
 integration is verified. Production installation/signing and other-platform
 native evidence are not established by this ARM fixture. Required cross-review,
 owner review and current-head CI are separate from these observations.
+
+
+## Integrated export and independent client — 94c7cf3
+
+Tested signed source `94c7cf3f4207a55e41dd1e442f295a5fe73f2741`, tree
+`47e4fbebaf32f5f8e38331bdaf8c72aca1d9b9cc`. This was a separately identified
+ARM macOS debug v0.20 fixture, with its packaged relay and an isolated copy of
+the existing 12-node/10-edge synthetic profile made through SQLite backups.
+The owner's installed v0.19 app and stores were untouched. No ingestion,
+provider execution or model download occurred.
+
+The current production reservation functions accepted the derived exact worker
+and aggregate minimum and rejected each one-below value. These are logical
+payload accounting units, not resident-memory guarantees. The initial derivation
+driver selected zero tests because its exact filter was incomplete; the corrected
+full-name invocation executed one passing test. The temporary test-only include
+was removed before building the app from the clean published source.
+
+### Native export parity
+
+The service started disabled. In Spec Workbench, verified-only export of the
+selected source-rule evidence opened the native Save dialog and produced a
+91,899-byte JSON file; the app remained responsive. No graph, registration or
+curation change occurred between export and MCP retrieval.
+
+The packaged-relay retained smoke and offline parity checks passed. The exported
+artifact and complete MCP reconstruction have the same schema
+`cartograph.spec/rule-evidence@1`, all 11 assertions, 10,575 UTF-8 content bytes,
+and official identity
+`spec-artifact-v1:ed1cb5cbf1d5b42bfcbadd6e4476cfd1e5f545a1f900cb25a098d7ff8fd65371`.
+Content SHA256 is
+`b654657ba0d2b65b02533c1959e06b750fa77fd4f595307a74558ba7561ba2a9`.
+All nine parity checks passed, including complete content/assertions and the
+export's duplicate `files` member. Whole exported JSON size is a separate measure
+from artifact content or protocol wire size.
+
+### Disclosure and independent client
+
+The same-session, same-artifact complete-content comparison measured 24,409 wire
+bytes for one complete response versus 71,119 for all 42 progressive pages.
+Both include 12,407 shared protocol bytes; tool schemas account for 5,837 bytes
+within that overhead. Retrieving every page costs more. Token counts remain
+unknown; these measurements do not establish savings for a selective task or
+model answer quality.
+
+On a separate fresh activation, installed official MCP Inspector `mcpdo` 2.12.0
+followed the repository skill: list tools once, capabilities, one BusinessRule
+candidate, artifact catalog, a 512-byte selected artifact page, retained evidence
+description and the exact returned span. All six tool calls passed on one
+session and basis. The retained fixture's instruction-like text was treated as
+quoted data; it did not authorize a mutation or provider call. This was an
+operator-driven client test, not a model-resistance evaluation. Raw Inspector
+wire bytes were not measured and its JSON transcript size is not a substitute.
+
+After each run, native read access was disabled and the fixture quit normally.
+The private Inspector daemon was stopped and activation-record absence verified.
+
+Reports are under `/tmp/cartograph-ui-testing/mcp-fixture-94c7cf3/`:
+`bundle-verification.json`, `accounting-receipt.json`, `native-smoke.json`,
+`export-parity.json`, `inspector-workflow-transcript.json`,
+`inspector-result.json` and `REPORT.md`.
+
+### Remaining acceptance
+
+This supersedes only the earlier pending export-parity and current-head
+independent-client observations. The full controlled registration, rejection,
+coverage-change and retention-cleanup concurrency matrix remains incomplete.
+Per-fact omission classification still lacks its producer contract; the new
+forgotten-only capability is explicitly partial and broad absence remains false.
+No cache exists to exercise eviction. Other-platform MCP, production signing,
+owner review and current-head CI are not established by these fixture runs.
