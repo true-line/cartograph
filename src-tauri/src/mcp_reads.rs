@@ -47,6 +47,8 @@ pub(crate) enum ReadError {
     EvidenceUnavailable,
     #[error("evidence_forgotten")]
     EvidenceForgotten,
+    #[error("evidence_omitted")]
+    EvidenceOmitted(core_graph::source::ReceiptOmissionKind),
     #[error("evidence_invalid")]
     EvidenceInvalid,
     #[error("invalid_request")]

@@ -2693,3 +2693,188 @@ fn mcp_current_unbound_fact_is_unavailable_without_weakening_stale_or_invalid_ch
         ReadError::StaleBasis
     );
 }
+
+// AC-0288 / T-0288: actual bounded producer omission, not missing-binding inference.
+#[test]
+fn mcp_real_store_capacity_omission_is_positive_guarded_and_stale_safe() {
+    use crate::mcp_reads::ReadError;
+    use core_graph::source::{OmissionLookup, ReceiptOmissionKind};
+    use tauri::Manager;
+    let temp = tempfile::tempdir().unwrap();
+    let private = directory(temp.path(), "private");
+    let root = directory(temp.path(), "project");
+    std::fs::write(root.join("rules.ts"), "export function alpha(ok: boolean) { if (!ok) return false; return true; }\nexport function beta() { return 2; }\n").unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&private));
+    app.manage(crate::PreflightRuns::default());
+    let state = app.state::<AppState>();
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 1;
+    let source = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(source.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &source.ingest_job_kind()).unwrap();
+    run_ingest(&source, &operation, &execution, app.handle(), &state).unwrap();
+    let graph = state.graph.lock().unwrap();
+    let (nodes, _) = graph.read_snapshot().unwrap();
+    let node = nodes
+        .into_iter()
+        .find(|node| {
+            let selected = graph
+                .read_source_selection_snapshot(&[FactKey::from_node(node)])
+                .unwrap();
+            matches!(
+                selected.selections[0].omission,
+                OmissionLookup::Omitted {
+                    kind: ReceiptOmissionKind::StoreCapacity,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    drop(graph);
+    let session = mcp_forgotten_session(&state, &source);
+    let basis = session.basis_id().unwrap();
+    let fact = agents::TaskFactKey::Node {
+        id: node.id.clone(),
+    };
+    let describe = || {
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err()
+    };
+    assert_eq!(
+        describe(),
+        ReadError::EvidenceOmitted(ReceiptOmissionKind::StoreCapacity)
+    );
+    assert!(matches!(
+        crate::investigations::inspection::resolve_typed(
+            &state,
+            &fact,
+            &session.basis().recovered_graph_id,
+            "unused",
+            0
+        ),
+        Err(crate::investigations::inspection::InspectionError::Stale)
+    ));
+    // An exclusive retention lock prevents positive classification without protection.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(
+            private
+                .join("retained-source/locks")
+                .join(format!("{}.lock", source.source_id)),
+        )
+        .unwrap();
+    lock.try_lock().unwrap();
+    assert_eq!(describe(), ReadError::Storage);
+    drop(lock);
+    let db_path = private.join("graph.db");
+    let changed_node = node.id.clone();
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .set_source_binding_after_lookup_hook(move || {
+            let writer = rusqlite::Connection::open(db_path).unwrap();
+            writer
+                .execute(
+                    "UPDATE source_node_omissions SET kind='rules' WHERE node_id=?1",
+                    [&changed_node],
+                )
+                .unwrap();
+            Ok(())
+        });
+    // Same graph hash, but omission changed between the two guarded observations.
+    assert_eq!(describe(), ReadError::StaleBasis);
+    assert_eq!(
+        describe(),
+        ReadError::EvidenceOmitted(ReceiptOmissionKind::Rules)
+    );
+    let db = rusqlite::Connection::open(private.join("graph.db")).unwrap();
+    let bound = state
+        .graph
+        .lock()
+        .unwrap()
+        .source_bindings_for_repo(&source.repo_key)
+        .unwrap()
+        .into_iter()
+        .find(|b| matches!(b.fact, FactKey::Node { .. }))
+        .unwrap();
+    let bound_id = match &bound.fact {
+        FactKey::Node { id } => id,
+        _ => unreachable!(),
+    };
+    // Contradictory test metadata cannot override a real current binding.
+    db.execute("INSERT INTO source_node_omissions(node_id,repo_key,kind,emitted_fact_digest) VALUES (?1,?2,'rules',?3)",rusqlite::params![bound_id,source.repo_key,bound.emitted_fact_digest]).unwrap();
+    let bound_fact = crate::task_evidence::task_fact(&bound.fact);
+    let bound_target = session
+        .describe_evidence(&state, &basis, &bound_fact, 0, 65536)
+        .unwrap()
+        .target;
+    // An unchanged raw graph does not authorize an invalid omission digest.
+    db.execute(
+        "UPDATE source_node_omissions SET emitted_fact_digest=?1 WHERE node_id=?2",
+        rusqlite::params![format!("node-v1:{}", "0".repeat(64)), node.id],
+    )
+    .unwrap();
+    assert_eq!(describe(), ReadError::EvidenceUnavailable);
+    assert_eq!(
+        state
+            .graph
+            .lock()
+            .unwrap()
+            .read_source_selection_snapshot(&[FactKey::from_node(&node)])
+            .unwrap()
+            .selections[0]
+            .omission,
+        OmissionLookup::Unrecorded
+    );
+    db.execute(
+        "DELETE FROM source_node_omissions WHERE node_id=?1",
+        [&node.id],
+    )
+    .unwrap();
+    assert_eq!(
+        state
+            .graph
+            .lock()
+            .unwrap()
+            .read_source_selection_snapshot(&[FactKey::from_node(&node)])
+            .unwrap()
+            .selections[0]
+            .omission,
+        OmissionLookup::NotOmitted
+    );
+    assert_eq!(describe(), ReadError::EvidenceUnavailable);
+    // A current binding still takes forgotten precedence over contradictory omission metadata.
+    let preview = primary_source::preview(&state, &source.source_id).unwrap();
+    primary_source::forget(&state, &source.source_id, &preview.fingerprint).unwrap();
+    assert_eq!(
+        session
+            .read_evidence(
+                &state,
+                &basis,
+                &bound_target,
+                crate::mcp_reads::evidence::EvidenceLimits {
+                    max_file_validation_bytes: 4096,
+                    max_span_bytes: 1024,
+                    max_response_bytes: 65536
+                }
+            )
+            .unwrap_err(),
+        ReadError::EvidenceForgotten
+    );
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&Node {
+            id: "changed-omission-basis".into(),
+            label: "Module".into(),
+            props: json!({}),
+        })
+        .unwrap();
+    assert_eq!(describe(), ReadError::StaleBasis);
+}

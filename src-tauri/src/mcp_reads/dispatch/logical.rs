@@ -73,6 +73,9 @@ pub(crate) fn logical_protocol_workspace_bytes(limits: WorkerLimits) -> Option<u
         ReadError::EvidenceUnavailable,
         ReadError::EvidenceInvalid,
         ReadError::EvidenceForgotten,
+        ReadError::EvidenceOmitted(core_graph::source::ReceiptOmissionKind::Declarations),
+        ReadError::EvidenceOmitted(core_graph::source::ReceiptOmissionKind::Rules),
+        ReadError::EvidenceOmitted(core_graph::source::ReceiptOmissionKind::StoreCapacity),
         ReadError::InvalidRequest,
     ];
     let mut error_peak = 0;

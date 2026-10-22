@@ -92,7 +92,7 @@ not bypass that work limit. Evidence errors are not permission to run a provider
 Every example must check JSON-RPC errors and the returned CallToolResult's `isError` before reading
 structured content. Do not treat an error payload as an empty successful result.
 
-On the proposed typed-error revision, `evidence_unavailable` means absent retained
+On hosts advertising typed evidence failures, `evidence_unavailable` means absent retained
 evidence, not proof of forgetting or omission. `evidence_invalid` means retained
 evidence failed validation (including underlying retention bounds); `stale_basis`
 means the selected identity is no longer usable; `storage_unavailable` is operational.
@@ -103,3 +103,11 @@ returns no source span and is not permission to recapture, ingest or read the
 checkout. This partial capability does not imply receipt-omission support;
 `evidence_absence_reason_available` can remain false. Report generic unavailable
 without inventing a cause when this specific result is absent.
+
+When `receipt_omission_classification.available` is true, `evidence_omitted` with
+structured `omission_kind` (`declarations`, `rules`, `store_capacity`) identifies
+an authoritative current-fact producer omission at the checked basis. It returns
+no source target or span and does not authorize recapture, ingestion or checkout
+access. Unknown absence is never omission; `NotOmitted` does not mean a receipt
+is available. This separate partial capability also leaves broad
+`evidence_absence_reason_available` false.

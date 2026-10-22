@@ -317,7 +317,8 @@ fn graph_and_coverage_limits_are_store_admitted_and_errors_are_source_free() {
                 &GraphPatch::default(),
                 "fixture/repo",
                 &[],
-                Some(&record)
+                Some(&record),
+                core_graph::source::SourceOmissions::NONE,
             )
             .unwrap()
     );

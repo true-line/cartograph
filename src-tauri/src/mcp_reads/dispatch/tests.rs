@@ -178,9 +178,18 @@ fn real_capabilities_discovery_catalog_and_identity_bound_artifact_pages() {
         data["forgotten_receipt_classification"]["unknown_is_forgotten"],
         false
     );
+    assert_eq!(data["receipt_omission_classification"]["partial"], true);
     assert_eq!(
-        data["receipt_omission_classification"]["pending_issue"],
-        725
+        data["receipt_omission_classification"]["kinds"],
+        json!(["declarations", "rules", "store_capacity"])
+    );
+    assert_eq!(
+        data["receipt_omission_classification"]["unknown_is_omitted"],
+        false
+    );
+    assert_eq!(
+        data["receipt_omission_classification"]["not_omitted_is_receipt_available"],
+        false
     );
     let args = discovery_args(&dispatch);
     let first = call(&mut dispatch, 2, "cartograph_discover", args.clone());
@@ -424,5 +433,21 @@ fn security_derivation_limits_preserve_closed_stage_resource_shape() {
             )),
             json!({"stage":"security_derivation","resource":name,"maximum":7})
         );
+    }
+}
+
+#[test]
+fn omitted_error_preserves_closed_code_and_explicit_kind() {
+    for kind in [
+        core_graph::source::ReceiptOmissionKind::Declarations,
+        core_graph::source::ReceiptOmissionKind::Rules,
+        core_graph::source::ReceiptOmissionKind::StoreCapacity,
+    ] {
+        let response = tool_error(&json!(1), ReadError::EvidenceOmitted(kind));
+        assert_eq!(
+            response["result"]["structuredContent"],
+            json!({"error":"evidence_omitted", "omission_kind":kind})
+        );
+        assert_eq!(response["result"]["isError"], true);
     }
 }

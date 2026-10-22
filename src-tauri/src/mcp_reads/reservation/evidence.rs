@@ -66,7 +66,42 @@ pub(crate) fn evidence_peak_bytes(
     // Exact forgotten-status lookup can retain this bounded summary while
     // validating a pinned receipt; source36 + RFC3339 timestamp20 bytes.
     let forgotten = sum(&[36, 20, size_of::<crate::primary_source::TombstoneSummary>()])?;
-    let common = sum(&[targets, bindings, source, source, forgotten])?;
+    // Two same-revision selections can overlap on the positive omission path.
+    // Each owns its typed key, digest and bounded repository key; graph copies
+    // are released between observations. The enum kind adds no dynamic owner.
+    let selection = sum(&[
+        size_of::<core_graph::source::FactSourceSelection>(),
+        // Maximum typed edge key: source8192 + label256 + destination8192.
+        sum(&[8192, 256, 8192])?,
+        72,
+        256,
+    ])?;
+    let omission = sum(&[
+        selection,
+        selection,
+        slots::<core_graph::StoreRevision>(2)?,
+        32,
+        32,
+        // Exact comparison temporarily constructs one digest and omission DTO.
+        72,
+        256,
+        size_of::<core_graph::source::OmissionLookup>(),
+        // SQL CASE admits these three BLOB cells before Vec/UTF-8 conversion.
+        slots::<Option<Vec<u8>>>(3)?,
+        slots::<String>(3)?,
+        256,
+        16,
+        72,
+    ])?;
+    let common = sum(&[
+        targets,
+        bindings,
+        source,
+        source,
+        forgotten,
+        omission,
+        super::schema::workspace_bytes()?,
+    ])?;
     let object = usize::try_from(
         limits
             .max_file_validation_bytes

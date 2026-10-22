@@ -6,7 +6,9 @@ use agents::{TaskCaptureFileRef, TaskCaptureSpanRef, TaskFactKey};
 use context_hub::ContextSnapshot;
 use core_graph::{
     SnapshotReadLimits,
-    source::{FactSourceState, SourceBinding},
+    source::{
+        FactSourceSelection, FactSourceState, OmissionLookup, ReceiptOmissionKind, SourceBinding,
+    },
 };
 use serde::Serialize;
 use tauri::Manager;
@@ -21,6 +23,7 @@ pub(crate) enum InspectionError {
     Limit,
     Unavailable,
     Forgotten,
+    Omitted(ReceiptOmissionKind),
     Invalid,
     Operational,
 }
@@ -54,6 +57,40 @@ fn snapshot_typed_at(
     expected_snapshot: Option<&str>,
     allow_unbound: bool,
 ) -> Result<(String, SourceBinding), InspectionError> {
+    let (context_id, revision, selection) = selection_snapshot(state, fact, limits)?;
+    if expected_snapshot.is_some_and(|expected| expected != context_id) {
+        return Err(InspectionError::Stale);
+    }
+    let binding = match selection.state {
+        FactSourceState::Present { binding, .. } => binding,
+        FactSourceState::Absent { fact_digest } if allow_unbound => {
+            if let OmissionLookup::Omitted { repo_key, kind } = selection.omission {
+                return Err(checked_omission(
+                    state,
+                    fact,
+                    limits,
+                    &context_id,
+                    &revision,
+                    &fact_digest,
+                    &repo_key,
+                    kind,
+                )?);
+            }
+            return Err(InspectionError::Unavailable);
+        }
+        FactSourceState::Invalid { .. } if expected_snapshot.is_some() => {
+            return Err(InspectionError::Invalid);
+        }
+        _ => return Err(InspectionError::Stale),
+    };
+    Ok((context_id, binding))
+}
+
+fn selection_snapshot(
+    state: &AppState,
+    fact: &TaskFactKey,
+    limits: SnapshotReadLimits,
+) -> Result<(String, core_graph::StoreRevision, FactSourceSelection), InspectionError> {
     let snapshot = state
         .graph
         .lock()
@@ -65,21 +102,72 @@ fn snapshot_typed_at(
         })?;
     let context = ContextSnapshot::new(snapshot.graph.0, snapshot.graph.1)
         .map_err(|_| InspectionError::Operational)?;
-    if expected_snapshot.is_some_and(|expected| expected != context.id()) {
+    let id = context.id().to_owned();
+    // Release graph/projection owners before a guarded second observation.
+    drop(context);
+    let selection = snapshot
+        .selections
+        .into_iter()
+        .next()
+        .ok_or(InspectionError::Operational)?;
+    Ok((id, snapshot.revision, selection))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn checked_omission(
+    state: &AppState,
+    fact: &TaskFactKey,
+    limits: SnapshotReadLimits,
+    expected: &str,
+    revision: &core_graph::StoreRevision,
+    digest: &str,
+    repo: &str,
+    kind: ReceiptOmissionKind,
+) -> Result<InspectionError, InspectionError> {
+    let source = state
+        .sources
+        .lock()
+        .map_err(|_| InspectionError::Operational)?
+        .get_by_repo(repo)
+        .map_err(|_| InspectionError::Operational)?
+        .ok_or(InspectionError::Unavailable)?;
+    let _guard = state
+        .primary_sources
+        .task_guard(&source.source_id)
+        .map_err(InspectionError::from)?;
+    let (checked_id, checked_revision, checked) = selection_snapshot(state, fact, limits)?;
+    if checked_id != expected
+        || &checked_revision != revision
+        || checked.state
+            != (FactSourceState::Absent {
+                fact_digest: digest.into(),
+            })
+        || checked.omission
+            != (OmissionLookup::Omitted {
+                repo_key: repo.into(),
+                kind,
+            })
+    {
         return Err(InspectionError::Stale);
     }
-    let binding = match snapshot.selections.into_iter().next().map(|s| s.state) {
-        Some(FactSourceState::Present { binding, .. }) => binding,
-        Some(FactSourceState::Absent { .. }) if allow_unbound => {
-            return Err(InspectionError::Unavailable);
-        }
-        Some(FactSourceState::Invalid { .. }) if expected_snapshot.is_some() => {
-            return Err(InspectionError::Invalid);
-        }
-        _ => return Err(InspectionError::Stale),
-    };
-    Ok((context.id().into(), binding))
+    let after = state
+        .sources
+        .lock()
+        .map_err(|_| InspectionError::Operational)?
+        .get_by_repo(repo)
+        .map_err(|_| InspectionError::Operational)?
+        .ok_or(InspectionError::Stale)?;
+    if source.source_id != after.source_id
+        || source.repo_key != after.repo_key
+        || source.root() != after.root()
+        || source.is_managed() != after.is_managed()
+        || source.clone_url() != after.clone_url()
+    {
+        return Err(InspectionError::Stale);
+    }
+    Ok(InspectionError::Omitted(kind))
 }
+
 pub(crate) fn graph_snapshot_for_receipt(
     state: &AppState,
     receipt: &Receipt,

@@ -15,30 +15,39 @@ available through the official `flow-dossiers` artifact; capabilities must state
 this explicitly rather than implying that absent discovery results mean no flows.
 
 Evidence resolution uses the production receipt resolver and its version-aware
-reader. No tool assumes a v1 range layout. When producer evidence explicitly
-records a receipt omitted under a named limit, return `receipt_omitted`, its
-reason/filling seam, and no citable target. Absence of a binding alone does not
-prove omission: retain unavailable/stale/missing outcomes until #725's persisted
-`(coverage/basis id, FactKey)` lookup supports this distinction. #726 records
-aggregate counts and a first site per capability, not per-fact/per-file persisted
-omission evidence; those counts may qualify the inventory but cannot classify
-an individual missing binding. A receipt omission is neither a
-forgotten capture nor an ordinary failed read.
+reader. No tool assumes a v1 range layout. For an unchanged current fact without
+a binding, authoritative same-transaction `Omitted` evidence returns
+`evidence_omitted` with structured `omission_kind`: `declarations`, `rules` or
+`store_capacity`. Registration, store revision, fact digest and omission are
+rechecked under retention protection. No citable target is returned. A changed
+basis remains stale, and a supplied receipt target whose binding disappeared
+cannot become an omission result. A current binding and its exact forgotten
+receipt classification take precedence over omission metadata.
+
+`NotOmitted`, `Unrecorded` and aggregate omission counts cannot establish that a
+receipt exists or identify a specific absence reason. A receipt omission is
+neither a forgotten capture nor an ordinary failed read.
 
 The current resolver preserves typed failures as `evidence_unavailable`
-(binding/receipt/capture absent at an unchanged current basis),
+(binding/receipt/capture absent at an unchanged current basis without an applicable
+positive omission or forget record), `evidence_omitted` (positive per-fact producer
+record, with `omission_kind`),
 `evidence_invalid` (retained evidence cannot be validated), `stale_basis` (selection/identity changed), and `storage_unavailable`
 (operational failure). Check the expected recovered-graph identity before
 classifying an absent binding: a changed basis stays stale; a still-visible fact
-with no binding is unavailable, not proof of omission or forgetting. Invalid does
+with no binding and no positive omission record is unavailable, not proof of
+omission or forgetting. Invalid does
 not identify the underlying cause: the retention layer also uses that category for its own read bounds. Explicit MCP
 admission limits still return `response_limit`. These fixed codes contain no
 source text or filesystem diagnostics; existing desktop inspection callers keep
 their original refresh message.
 
 `evidence_absence_reason_available: false` continues to advertise incomplete
-classification: per-fact receipt omission has no persisted producer lookup yet.
-The separate `forgotten_receipt_classification` capability reports partial
+classification. The separate `receipt_omission_classification` capability
+advertises partial support scoped to `exact_current_fact_same_transaction_omission`
+with the three explicit kinds above. `unknown_is_omitted: false` and
+`not_omitted_is_receipt_available: false` forbid stronger absence or availability
+claims. The separate `forgotten_receipt_classification` capability reports partial
 support scoped to `exact_current_basis_binding_receipt_id`, with
 `omitted_available: false` and `unknown_is_forgotten: false`.
 

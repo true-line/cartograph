@@ -221,6 +221,7 @@ impl SessionReservation {
         ])?;
         let before_scope = sum(&[rejected, scope.peak_bytes])?;
         let bounded_read = sum(&[
+            super::schema::workspace_bytes()?,
             rejected,
             scope.result_bytes,
             graph,

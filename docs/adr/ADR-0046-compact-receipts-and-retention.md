@@ -1,6 +1,6 @@
 # ADR-0046 — Compact receipts, positive absence records and reclaimable retention
 
-- **Status:** Proposed. Design r2 agreed with Codex (20261022T033000Z). Decisions 1 (receipt contract v3), 2 (per-fact omission records and lookup; see the implementation note under decision 2) and 3 (forget reclaim and pins) implemented; MCP absence-reason integration (#727) and decisions 4, 5 and 6 pending. Decision 3 adds three indexes so the store's integrity checks stay linear in tombstones and reclaims, and binds each capture-forgotten receipt to the exact tombstone that marked it; saved work packets also pin their cited receipts (#749).
+- **Status:** Proposed. Design r2 agreed with Codex (20261022T033000Z). Decisions 1 (receipt contract v3), 2 (per-fact omission records and lookup; see the implementation note under decision 2) and 3 (forget reclaim and pins) implemented; decision 4 is partially implemented for complete-mode MCP exact-binding forgotten and current-fact positive omission classification (#727). Broader end-to-end absence acceptance and decisions 5 and 6 remain pending. Decision 3 adds three indexes so the store's integrity checks stay linear in tombstones and reclaims, and binds each capture-forgotten receipt to the exact tombstone that marked it; saved work packets also pin their cited receipts (#749).
 - **Date:** 2026-10-22
 - **Deciders:** Cartograph maintainers; Claude implementation, Codex cross-review
 - **Issue:** #725 (follows #722/#726; serves AC-0288 in #727)
@@ -44,12 +44,20 @@ Read-only MCP must distinguish *forgotten*, *omitted* and *missing* evidence. To
    1. Try present evidence for the exact requested `(basis id, receipt id)` and its capture.
    2. Pinned receipt row with `capture_forgotten` → **forgotten**.
    3. Exact receipt id is a reclaimed row. A reclaim ledger keyed by receipt id records the tombstone it belongs to → **forgotten**.
-   4. Omission record for `(basis id, FactKey)`, where that basis has complete records → **omitted**.
+   4. An exact current per-fact positive omission record → **omitted**. Incomplete or unrecorded coverage establishes neither a negative classification nor completeness.
    5. Otherwise → **missing**.
 
    Classification never uses the current source or path. A reimport gets a new source revision, so an old tombstone can't touch it, and an unknown or forged receipt id reaches step 5.
 
    Tests: forget then reimport, an old pinned receipt, an unrelated missing id, and simultaneous omission and tombstone records for the same fact. The receipt-id step wins because it is more specific.
+
+   Complete-mode MCP checks the raw graph basis before classifying an unbound fact,
+   then rechecks its revision, digest, omission and registration under retention
+   protection. Positive records return `evidence_omitted` with `omission_kind`
+   (`declarations`, `rules`, `store_capacity`); unknown or `NotOmitted` remains
+   unavailable. A supplied receipt target whose binding disappeared remains stale.
+   The partial omission and forgotten capabilities do not enable broad
+   `evidence_absence_reason_available`; historical Inspector behavior is preserved.
 5. **Reclaimable retention (shared eligibility predicate).**
    - A receipt row is reclaimable iff (its source is forgotten, or a newer completed recovery of the same source supersedes its capture) and no saved investigation ref, work packet or retained citation pins its receipt id.
    - Forget and supersession both use this one predicate, inside the committing transaction, under the retention guard, with a bounded pin query.

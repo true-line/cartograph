@@ -10,6 +10,7 @@ fn inspection_error(error: crate::investigations::inspection::InspectionError) -
         InspectionError::OrdinalOutOfRange => ReadError::InvalidRequest,
         InspectionError::Limit => ReadError::Limit,
         InspectionError::Forgotten => ReadError::EvidenceForgotten,
+        InspectionError::Omitted(kind) => ReadError::EvidenceOmitted(kind),
         InspectionError::Unavailable => ReadError::EvidenceUnavailable,
         InspectionError::Invalid => ReadError::EvidenceInvalid,
         InspectionError::Operational => ReadError::Storage,
