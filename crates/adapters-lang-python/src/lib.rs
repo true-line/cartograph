@@ -710,13 +710,32 @@ fn sole_module_binding(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
     let mut statement = node;
     while let Some(parent) = statement.parent() {
         if parent.kind() == "module" {
-            return binding_sites(cx, parent, name)
-                .iter()
-                .all(|site| site.id() == statement.id());
+            // A class-body assignment climbs to its class statement, which
+            // binds the class name, not `name`; require the exact site.
+            return statement.kind() == "expression_statement"
+                && matches!(
+                    binding_sites(cx, parent, name).as_slice(),
+                    [site] if site.id() == statement.id()
+                );
         }
         statement = parent;
     }
     false
+}
+
+/// Whether a module-scope read of `name` at `use_node` is reached by the
+/// name's sole module binding, written before the read (#747). Imported
+/// modules finish executing before their names are read, so this applies only
+/// to same-file module-level code.
+fn module_binding_reaches(cx: &FileCx<'_>, use_node: TsNode<'_>, name: &str) -> bool {
+    let mut root = use_node;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    matches!(
+        binding_sites(cx, root, name).as_slice(),
+        [site] if site.end_byte() <= use_node.start_byte()
+    )
 }
 
 /// What the object of a mount call is, as far as this file can prove it.
@@ -761,6 +780,11 @@ fn mount_parent(
             ..
         }) => MountParent::Def((target.clone(), exported.clone())),
         Some(_) => MountParent::Unproven,
+        None if enclosing_function_node(object).is_none()
+            && !module_binding_reaches(cx, object, name) =>
+        {
+            MountParent::Unproven
+        }
         None => MountParent::Def((cx.path.to_string(), name.to_string())),
     }
 }

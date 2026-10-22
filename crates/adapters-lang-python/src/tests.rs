@@ -535,7 +535,8 @@ fn mount_receivers_need_their_reaching_definition() {
     let dir = tempfile::tempdir().unwrap();
     let mut routers = String::from("from fastapi import APIRouter\n");
     for name in [
-        "good", "over", "late", "inner", "cond", "shadow", "module", "loop", "matched",
+        "good", "over", "late", "inner", "cond", "shadow", "module", "loop", "matched", "classy",
+        "early",
     ] {
         routers.push_str(&format!(
             "{name} = APIRouter()\n@{name}.get(\"/x\")\ndef {name}_x():\n    return {{}}\n"
@@ -563,7 +564,7 @@ def make():
         "main.py",
         r#"
 from fastapi import FastAPI
-from routers import good, over, late, inner, cond, shadow, module, loop, matched
+from routers import good, over, late, inner, cond, shadow, module, loop, matched, classy, early
 from fake import Fake
 
 app = FastAPI()
@@ -611,6 +612,14 @@ def install_match(value):
 real = FastAPI()
 real = Fake()
 real.include_router(module, prefix="/module")
+
+class Holder:
+    held = FastAPI()
+
+held.include_router(classy, prefix="/classy")
+
+later.include_router(early, prefix="/early")
+later = FastAPI()
 "#,
     );
     write(
@@ -638,7 +647,9 @@ real.include_router(module, prefix="/module")
     assert_eq!(
         facts,
         vec![
+            unproven("/classy/x"),
             unproven("/cond/x"),
+            unproven("/early/x"),
             confirmed("/flask/x"),
             confirmed("/good/x"),
             unproven("/inner/x"),
