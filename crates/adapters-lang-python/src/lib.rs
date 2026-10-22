@@ -553,36 +553,213 @@ fn parameter_annotation<'s>(
     None
 }
 
-/// An application assigned to `name` from an import-proven factory inside
-/// `function` itself (nested functions and classes are other scopes).
-fn local_app_assignment(
-    cx: &FileCx<'_>,
-    function: TsNode<'_>,
-    name: &str,
-    bindings: &HashMap<String, ImportBinding>,
-) -> Option<Framework> {
-    let mut stack: Vec<TsNode<'_>> = function.child_by_field_name("body").into_iter().collect();
-    while let Some(node) = stack.pop() {
-        if matches!(node.kind(), "function_definition" | "class_definition") {
-            continue;
+/// Whether `target` (an assignment, `for`, `with` or `del` target) rebinds
+/// `name`. Attribute and subscript targets write members, not the name.
+fn target_binds(cx: &FileCx<'_>, target: TsNode<'_>, name: &str) -> bool {
+    match target.kind() {
+        "identifier" => cx.text(&target) == name,
+        "attribute" | "subscript" => false,
+        _ => {
+            let mut walk = target.walk();
+            target
+                .named_children(&mut walk)
+                .any(|child| target_binds(cx, child, name))
         }
-        if node.kind() == "assignment"
-            && let (Some(left), Some(right)) = (
-                node.child_by_field_name("left"),
-                node.child_by_field_name("right"),
-            )
-            && left.kind() == "identifier"
-            && cx.text(&left) == name
-            && right.kind() == "call"
-            && let Some(framework) =
-                call_name(cx, right).and_then(|callee| framework_factory(&callee, bindings))
-        {
-            return Some(framework);
+    }
+}
+
+/// Whether any identifier in `node` is spelled `name`.
+fn mentions(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+    if node.kind() == "identifier" {
+        return cx.text(&node) == name;
+    }
+    let mut walk = node.walk();
+    node.named_children(&mut walk)
+        .any(|child| mentions(cx, child, name))
+}
+
+/// How `function`'s own scope binds `name`.
+#[derive(Default)]
+struct ScopeBinding<'t> {
+    /// Every statement or expression that binds `name` in this scope,
+    /// including a nested scope's `nonlocal` rebinding.
+    writes: Vec<TsNode<'t>>,
+    global: bool,
+    nonlocal: bool,
+}
+
+/// Collect `function`'s bindings of `name`. Anything that might bind it
+/// counts, so an unrecognised form fails closed rather than proving a value.
+fn scope_binding<'t>(cx: &FileCx<'_>, function: TsNode<'t>, name: &str) -> ScopeBinding<'t> {
+    let mut binding = ScopeBinding::default();
+    let mut stack: Vec<TsNode<'t>> = function.child_by_field_name("body").into_iter().collect();
+    while let Some(node) = stack.pop() {
+        let binds = match node.kind() {
+            "function_definition" | "class_definition" => {
+                // Its own name binds here; its body is another scope, except
+                // that a `nonlocal` in it rebinds this one.
+                let named = node
+                    .child_by_field_name("name")
+                    .is_some_and(|ident| cx.text(&ident) == name);
+                let mut inner = node.walk();
+                let rebinds = node
+                    .children_by_field_name("body", &mut inner)
+                    .any(|body| nonlocal_in(cx, body, name));
+                if named || rebinds {
+                    binding.writes.push(node);
+                }
+                continue;
+            }
+            "lambda" => continue,
+            "global_statement" => {
+                binding.global |= mentions(cx, node, name);
+                false
+            }
+            "nonlocal_statement" => {
+                binding.nonlocal |= mentions(cx, node, name);
+                false
+            }
+            "assignment" => {
+                node.child_by_field_name("right").is_some()
+                    && node
+                        .child_by_field_name("left")
+                        .is_some_and(|left| target_binds(cx, left, name))
+            }
+            "augmented_assignment" | "for_statement" => node
+                .child_by_field_name("left")
+                .is_some_and(|left| target_binds(cx, left, name)),
+            "named_expression" => node
+                .child_by_field_name("name")
+                .is_some_and(|ident| cx.text(&ident) == name),
+            "as_pattern" | "except_clause" => node
+                .child_by_field_name("alias")
+                .is_some_and(|alias| target_binds(cx, alias, name)),
+            "delete_statement" => {
+                let mut walk = node.walk();
+                node.named_children(&mut walk)
+                    .any(|target| target_binds(cx, target, name))
+            }
+            "import_statement" | "import_from_statement" => import_binds(cx, node, name),
+            "case_pattern" => mentions(cx, node, name),
+            _ => false,
+        };
+        if binds {
+            binding.writes.push(node);
         }
         let mut walk = node.walk();
         stack.extend(node.named_children(&mut walk));
     }
-    None
+    binding
+}
+
+/// Whether an import statement binds `name`: an `as` alias, the first part
+/// of an unaliased `import a.b`, or the name of `from m import a`. A
+/// wildcard may bind anything.
+fn import_binds(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+    let mut walk = node.walk();
+    if node
+        .named_children(&mut walk)
+        .any(|child| child.kind() == "wildcard_import")
+    {
+        return true;
+    }
+    let from = node.kind() == "import_from_statement";
+    let mut walk = node.walk();
+    node.children_by_field_name("name", &mut walk)
+        .any(|imported| match imported.kind() {
+            "aliased_import" => imported
+                .child_by_field_name("alias")
+                .is_some_and(|alias| cx.text(&alias) == name),
+            _ if from => cx.text(&imported).trim() == name,
+            _ => cx.text(&imported).split('.').next().map(str::trim) == Some(name),
+        })
+}
+
+/// Whether a `nonlocal` statement anywhere under `node` names `name`.
+fn nonlocal_in(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+    if node.kind() == "nonlocal_statement" {
+        return mentions(cx, node, name);
+    }
+    let mut walk = node.walk();
+    node.named_children(&mut walk)
+        .any(|child| nonlocal_in(cx, child, name))
+}
+
+/// What a function-local receiver `name` at `object` is, following Python's
+/// scope rules outward from the nearest enclosing function (#747).
+enum LocalReceiver<'s> {
+    /// The scope's only binding is an import-proven factory assignment that
+    /// precedes the call: at the call the name holds that app or is unbound.
+    App(Framework),
+    /// An unrebound parameter, with its annotation if one is written.
+    Parameter(Option<&'s str>),
+    /// Bound locally, but not provably to an application.
+    Unproven,
+    /// Not bound by any enclosing function: a module-level name.
+    Free,
+}
+
+fn local_receiver<'s>(
+    cx: &'s FileCx<'_>,
+    object: TsNode<'_>,
+    name: &str,
+    bindings: &HashMap<String, ImportBinding>,
+) -> LocalReceiver<'s> {
+    let mut scope = enclosing_function_node(object);
+    while let Some(function) = scope {
+        let binding = scope_binding(cx, function, name);
+        let parameter = parameter_annotation(cx, function, name);
+        if binding.global {
+            return if binding.writes.is_empty() && parameter.is_none() {
+                LocalReceiver::Free
+            } else {
+                LocalReceiver::Unproven
+            };
+        }
+        if binding.nonlocal {
+            if !binding.writes.is_empty() || parameter.is_some() {
+                return LocalReceiver::Unproven;
+            }
+        } else if let Some(annotation) = parameter {
+            return if binding.writes.is_empty() {
+                LocalReceiver::Parameter(annotation)
+            } else {
+                LocalReceiver::Unproven
+            };
+        } else if !binding.writes.is_empty() {
+            let [write] = binding.writes[..] else {
+                return LocalReceiver::Unproven;
+            };
+            // A constructor after the call may not have run when it does.
+            // In an outer scope that is any write after the definition of
+            // the closure making the call, which may be invoked first.
+            if write.end_byte() > object.start_byte() {
+                return LocalReceiver::Unproven;
+            }
+            return factory_assignment(cx, write, name, bindings)
+                .map_or(LocalReceiver::Unproven, LocalReceiver::App);
+        }
+        scope = enclosing_function_node(function);
+    }
+    LocalReceiver::Free
+}
+
+/// The framework of `write` when it is exactly `name = <factory>(...)`.
+fn factory_assignment(
+    cx: &FileCx<'_>,
+    write: TsNode<'_>,
+    name: &str,
+    bindings: &HashMap<String, ImportBinding>,
+) -> Option<Framework> {
+    if write.kind() != "assignment" {
+        return None;
+    }
+    let left = write.child_by_field_name("left")?;
+    let right = write.child_by_field_name("right")?;
+    if left.kind() != "identifier" || cx.text(&left) != name || right.kind() != "call" {
+        return None;
+    }
+    call_name(cx, right).and_then(|callee| framework_factory(&callee, bindings))
 }
 
 /// What the object of a mount call is, as far as this file can prove it.
@@ -595,15 +772,15 @@ fn mount_parent(
         return MountParent::Unproven;
     }
     let name = cx.text(&object);
-    if let Some(function) = enclosing_function_node(object) {
-        if let Some(framework) = local_app_assignment(cx, function, name, bindings) {
-            return MountParent::LocalApp(framework);
-        }
-        if let Some(annotation) = parameter_annotation(cx, function, name) {
+    match local_receiver(cx, object, name, bindings) {
+        LocalReceiver::App(framework) => return MountParent::LocalApp(framework),
+        LocalReceiver::Parameter(annotation) => {
             return annotation
                 .and_then(|annotation| framework_factory(annotation, bindings))
                 .map_or(MountParent::Unproven, MountParent::AnnotatedApp);
         }
+        LocalReceiver::Unproven => return MountParent::Unproven,
+        LocalReceiver::Free => {}
     }
     match bindings.get(name) {
         Some(ImportBinding::Symbol {
