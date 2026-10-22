@@ -359,7 +359,7 @@ fn captured_receipts_reject_tampering_versions_and_bounds() {
         "/content/file/digest",
         "/content/repo_key",
         "/content/grammar_package",
-        "/content/ranges/0/evidence/byte_end",
+        "/content/ranges/0/byte_end",
         "/receipt_id",
     ] {
         let mut tampered = value.clone();
