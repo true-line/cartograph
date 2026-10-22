@@ -93,6 +93,26 @@ The bundle has 26,910 assertions, 7,512 open gap findings in 25 cause classes an
 7. **TypeScript rule gaps dominate the count but not the impact.** Classes C-01 to C-09 account for 6,910 of the 7,512 gap findings. They are unresolved interpretation (return/throw consumers, predicates, mutation, loops), routed to T1, and they don't affect the HTTP contract.
 8. **Unresolved module edges.** There are 177 in Python (C-10) and 69 in Kotlin (C-12), plus 38 unresolved Kotlin imports (C-15). These are mostly third-party packages that aren't vendored in the checkout.
 
+## Measuring contract drift (#739)
+
+To have Cartograph recover and report API contract drift directly in `drift_register.md`, declare `docs/api.md` in `$SRC/app/.cartograph/api-docs.toml` (writing this file makes the local checkout dirty, so recovery records `workdir` as the source commit) and re-run the showcase command:
+
+```sh
+mkdir -p "$SRC/app/.cartograph"
+cat > "$SRC/app/.cartograph/api-docs.toml" <<'EOF'
+[[doc]]
+path = "docs/api.md"
+prefix = "/api"
+EOF
+
+cd src-tauri
+CARTOGRAPH_SHOWCASE_SOURCES=$SRC/app:$SRC/browser-extension:$SRC/Simple-Login-Android \
+CARTOGRAPH_SHOWCASE_OUTPUT=$OUT \
+  cargo test --release showcase_recover_and_export -- --ignored --nocapture
+```
+
+Expected result to verify in `$OUT/verified-only/drift_register.md` under `## API contract drift`: **1 `documented-not-served`** (`POST /api/notifications/{}`) and **12 `served-undocumented`** routes under `/api`, each citing the documented route or recovered endpoint.
+
 ## Known limits
 
 - Swift is unsupported; no iOS client was ingested.

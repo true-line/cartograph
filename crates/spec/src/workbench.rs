@@ -472,9 +472,12 @@ pub fn count_gap_findings<'a>(
             .count()
 }
 
-/// True when `edge` records ADR/code drift (see [`is_drift_node`]).
+/// True when `edge` records ADR/code or API contract drift (see [`is_drift_node`]).
 pub fn is_drift_edge(edge: &Edge) -> bool {
-    matches!(edge.label.as_str(), "CONFLICTS" | "DRIFTS_FROM")
+    matches!(
+        edge.label.as_str(),
+        "CONFLICTS" | "DRIFTS_FROM" | "DOCUMENTED_AS" | "SERVED_AS"
+    )
 }
 
 /// Registers at or below this many rows stay one flat table, as the Gaps
@@ -502,10 +505,14 @@ fn class_id(index: usize) -> String {
     format!("C-{:02}", index + 1)
 }
 
-/// True when `node` records ADR/code drift (see [`is_gap_node`] for why
-/// these predicates are public).
+/// True when `node` records ADR/code or API contract drift (see [`is_gap_node`]
+/// for why these predicates are public).
 pub fn is_drift_node(node: &Node) -> bool {
-    node.label == "Drift" || node.props["kind"].as_str() == Some("drift")
+    node.label == "Drift"
+        || matches!(
+            node.props["kind"].as_str(),
+            Some("drift" | "contract-drift")
+        )
 }
 
 /// Compile the complete official artifact set with one R-INT-5 policy.

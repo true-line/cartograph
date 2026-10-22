@@ -74,6 +74,11 @@ pub struct ManifestRepo {
     /// unresolved T0 channel slots at T1 (AC-0012, issue #54).
     #[serde(default)]
     pub otel_jsonl: Vec<String>,
+    /// Author-declared API reference files for documented-contract drift
+    /// comparison (#739, AC-0313). Unioned with `.cartograph/api-docs.toml`
+    /// in the repo root, with the manifest entry winning on duplicate `path`.
+    #[serde(default)]
+    pub api_docs: Vec<crate::api_docs::ApiDocDeclaration>,
 }
 
 /// A service another repo's clients call over HTTP (#589, AC-0240): the

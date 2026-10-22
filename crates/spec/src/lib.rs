@@ -9,6 +9,7 @@ use core_graph::{Edge, Node};
 use flowtracer::Flow;
 
 mod adr;
+mod contract;
 
 /// Version of the spec compiler's projection rules, recorded with every
 /// rule-derived statement's producing method (AC-0244). Bump when a rule's
@@ -36,6 +37,12 @@ mod workbench;
 pub use adr::{
     AdrFacts, AdrLimit, AdrLimitExceeded, AdrLimits, derive_adr_facts, derive_adr_facts_bounded,
     extract_found_adrs,
+};
+pub use contract::{
+    CONTRACT_DRIFT_EXTRACTOR_ID, CONTRACT_EXTRACTOR_ID, CONTRACT_METHODS, ContractFacts,
+    ContractValidationGap, DOCUMENTED_NOT_SERVED_REASON, DeclaredApiDoc, EMPTY_DOC_REASON,
+    UNSUPPORTED_YAML_REASON, canonical_endpoint, documented_endpoints_markdown,
+    extract_contract_facts,
 };
 pub use views::{
     DeploymentRole, SPEC_VIEW_MAX_EDGES, SPEC_VIEW_MAX_FLOWS, SPEC_VIEW_MAX_NODES, SpecDiagramView,

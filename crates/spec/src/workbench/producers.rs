@@ -318,11 +318,30 @@ pub(super) fn drift(
     for e in edges.iter().copied().filter(|e| is_drift_edge(e)) {
         assertions.edge(e)?;
     }
+    let adr_findings: Vec<_> = findings
+        .iter()
+        .copied()
+        .filter(|n| n.props["kind"].as_str() != Some("contract-drift"))
+        .collect();
+    let mut contract_findings: Vec<_> = findings
+        .iter()
+        .copied()
+        .filter(|n| n.props["kind"].as_str() == Some("contract-drift"))
+        .collect();
+    let mut contract_gaps: Vec<_> = nodes
+        .iter()
+        .copied()
+        .filter(|n| is_gap_node(n) && n.props["kind"].as_str() == Some("contract-doc-gap"))
+        .collect();
+    let has_declared_docs = !contract_findings.is_empty()
+        || !contract_gaps.is_empty()
+        || nodes.iter().any(|n| n.label == "DocumentedRoute");
+
     let mut content = Text::new(
         &budget,
         "# Drift register\n\n| Finding | ADR | Offending edge | Flow triggers | Confidence |\n|---|---|---|---|---|\n",
     )?;
-    for n in &findings {
+    for n in &adr_findings {
         let triggers = strings(n, "flow_triggers");
         let p = provenance(&n.props, &n.id);
         write!(
@@ -339,10 +358,97 @@ pub(super) fn drift(
         }
         writeln!(content, " | {:?} |", p.confidence_tier)?;
     }
-    if findings.is_empty() {
+    if adr_findings.is_empty() {
         content.push_str("| — | No ADR/code conflicts recovered |\n")?;
     }
+    if has_declared_docs {
+        let by_id: BTreeMap<&str, &Node> =
+            nodes.iter().copied().map(|n| (n.id.as_str(), n)).collect();
+        content.push_str(
+            "\n## API contract drift\n\n| Finding | Endpoint | Documented | Served | Confidence |\n|---|---|---|---|---|\n",
+        )?;
+        contract_findings.sort_by(|a, b| {
+            let ak = a.props["drift_kind"].as_str().unwrap_or("");
+            let bk = b.props["drift_kind"].as_str().unwrap_or("");
+            let ae = a.props["key"]
+                .as_str()
+                .or_else(|| a.props["canonical"].as_str())
+                .unwrap_or(&a.id);
+            let be = b.props["key"]
+                .as_str()
+                .or_else(|| b.props["canonical"].as_str())
+                .unwrap_or(&b.id);
+            (ak, ae, a.id.as_str()).cmp(&(bk, be, b.id.as_str()))
+        });
+        for n in &contract_findings {
+            let drift_kind = n.props["drift_kind"].as_str().unwrap_or("contract-drift");
+            let endpoint = n.props["key"]
+                .as_str()
+                .or_else(|| n.props["canonical"].as_str())
+                .unwrap_or(&n.id);
+            let documented = contract_side_cell(n, "documented", "DOCUMENTED_AS", edges, &by_id);
+            let served = contract_side_cell(n, "served", "SERVED_AS", edges, &by_id);
+            let p = provenance(&n.props, &n.id);
+            writeln!(
+                content,
+                "| {} | `{}` | {} | {} | {:?} |",
+                Safe(drift_kind),
+                Safe(endpoint),
+                Safe(&documented),
+                Safe(&served),
+                p.confidence_tier,
+            )?;
+        }
+        contract_gaps.sort_by(|a, b| {
+            let ad = a.props["doc_path"].as_str().unwrap_or("");
+            let bd = b.props["doc_path"].as_str().unwrap_or("");
+            let ar = a.props["reason"].as_str().unwrap_or("");
+            let br = b.props["reason"].as_str().unwrap_or("");
+            (ad, ar, a.id.as_str()).cmp(&(bd, br, b.id.as_str()))
+        });
+        for g in &contract_gaps {
+            let doc_path = g.props["doc_path"].as_str().unwrap_or("—");
+            let reason = g.props["reason"].as_str().unwrap_or(&g.id);
+            writeln!(
+                content,
+                "| gap | `{}` | {} | — | Gap |",
+                Safe(doc_path),
+                Safe(reason),
+            )?;
+        }
+        if contract_findings.is_empty() && contract_gaps.is_empty() {
+            content.push_str("| — | No API contract drift recovered | — | — | — |\n")?;
+        }
+    }
     finish(content, assertions)
+}
+fn contract_side_cell(
+    drift: &Node,
+    prop_name: &str,
+    edge_label: &str,
+    edges: &[&Edge],
+    by_id: &BTreeMap<&str, &Node>,
+) -> String {
+    if let Some(s) = drift.props[prop_name].as_str().filter(|s| !s.is_empty()) {
+        return s.to_string();
+    }
+    let mut parts = Vec::new();
+    for edge in edges
+        .iter()
+        .copied()
+        .filter(|e| e.src == drift.id && e.label == edge_label)
+    {
+        if let Some(target) = by_id.get(edge.dst.as_str()) {
+            parts.push(format!("{} ({})", NodeName(target), target.id));
+        } else {
+            parts.push(edge.dst.clone());
+        }
+    }
+    if parts.is_empty() {
+        "—".into()
+    } else {
+        parts.join(", ")
+    }
 }
 fn list(out: &mut Text, values: &[&str]) -> fmt::Result {
     if values.iter().all(|s| s.is_empty()) && values.len() < 2 {

@@ -1266,6 +1266,7 @@ fn extract_tree_with_primary(
         state_json,
         pulumi_json,
         otel_jsonl,
+        &[],
         cache,
         plugins,
         Registries::builtin(),
@@ -1290,6 +1291,7 @@ fn extract_tree_with_registries(
     state_json: Option<&std::path::Path>,
     pulumi_json: Option<&std::path::Path>,
     otel_jsonl: &[std::path::PathBuf],
+    api_docs: &[ingest::api_docs::ApiDocDeclaration],
     cache: &mut RepoExtractionCache,
     plugins: &[ActivePlugin],
     registries: &Registries,
@@ -1607,6 +1609,9 @@ fn extract_tree_with_registries(
         .map_err(|error| error.to_string())?;
     extraction.nodes.extend(adr_facts.nodes);
     extraction.edges.extend(adr_facts.edges);
+    let contract_facts = extract_repo_contracts(root, repo, commit, api_docs, &extraction.nodes);
+    extraction.nodes.extend(contract_facts.nodes);
+    extraction.edges.extend(contract_facts.edges);
     // Toolchain facts (#215): config files become Tool nodes with cited
     // settings, DEFINED_IN the config File that proves them. Runs for every
     // layer selection — the toolchain is cross-cutting evidence.
@@ -1740,6 +1745,37 @@ fn fact_owned_by_repo(props: &serde_json::Value, repo: &str) -> bool {
         })
 }
 
+fn extract_repo_contracts(
+    root: &std::path::Path,
+    repo: &str,
+    commit: &str,
+    manifest_api_docs: &[ingest::api_docs::ApiDocDeclaration],
+    candidates: &[Node],
+) -> spec::ContractFacts {
+    let loaded = ingest::api_docs::load_api_docs(root, manifest_api_docs);
+    if !loaded.declared {
+        return spec::ContractFacts::default();
+    }
+    let docs: Vec<spec::DeclaredApiDoc> = loaded
+        .docs
+        .into_iter()
+        .map(|doc| spec::DeclaredApiDoc {
+            path: doc.path,
+            prefix: doc.prefix,
+            contents: doc.contents,
+        })
+        .collect();
+    let gaps: Vec<spec::ContractValidationGap> = loaded
+        .gaps
+        .into_iter()
+        .map(|gap| spec::ContractValidationGap {
+            doc_path: gap.doc_path,
+            reason: gap.reason,
+        })
+        .collect();
+    spec::extract_contract_facts(repo, commit, &docs, &gaps, candidates)
+}
+
 fn id_explicitly_owned_by_repo(id: &str, repo: &str) -> bool {
     id == format!("repo:{repo}")
         || id.starts_with(&format!("file:{repo}@"))
@@ -1748,6 +1784,9 @@ fn id_explicitly_owned_by_repo(id: &str, repo: &str) -> bool {
         || id.starts_with(&format!("res:{repo}@"))
         || id.starts_with(&format!("screen:{repo}@"))
         || id.starts_with(&format!("adr:{repo}@"))
+        || id.starts_with(&format!("doc-route:{repo}@"))
+        || id.starts_with(&format!("drift:contract:{repo}@"))
+        || id.starts_with(&format!("gap:contract:{repo}@"))
         || id.starts_with(&format!("tool:{repo}@"))
         || id.starts_with(&format!("gap:call:{repo}@"))
         || id.starts_with(&format!("gap:chan:{repo}@"))
@@ -3820,6 +3859,7 @@ fn run_ingest<R: tauri::Runtime>(
             None,
             None,
             &[],
+            &[],
             cache,
             &active_plugins,
             &registries,
@@ -4245,6 +4285,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
             None,
             None,
             &[],
+            &[],
             cache,
             &active_plugins,
             &registries,
@@ -4532,6 +4573,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 state_path.as_deref(),
                 pulumi_path.as_deref(),
                 &trace_paths,
+                &entry.api_docs,
                 cache,
                 &active_plugins,
                 &registries,
@@ -7775,6 +7817,90 @@ export function queueOrder() {
                 .nodes
                 .iter()
                 .all(|node| node.props["language"] != "python")
+        );
+    }
+
+    // AC-0313 (#739): repo recovery reads `.cartograph/api-docs.toml`, parses
+    // the declared Markdown API reference into DocumentedRoute facts, compares
+    // them with recovered FastAPI Endpoint nodes, and reports contract drift in
+    // `drift_register.md` with both sides cited.
+    #[test]
+    fn python_server_ingest_recovers_contract_drift_and_register() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".cartograph")).unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(
+            dir.path().join(".cartograph/api-docs.toml"),
+            "[[doc]]\npath = \"docs/api.md\"\nprefix = \"/api\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("docs/api.md"),
+            "# API Reference\n\n#### GET /api/orders/:order_id\n#### POST /api/orders\n#### DELETE /api/legacy/:id\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("api.py"),
+            concat!(
+                "from fastapi import FastAPI\n\n",
+                "app = FastAPI()\n\n",
+                "@app.get('/api/orders/{id}')\n",
+                "def get_order():\n    return {}\n\n",
+                "@app.put('/api/orders')\n",
+                "def replace_orders():\n    return {}\n\n",
+                "@app.get('/api/internal/health')\n",
+                "def health():\n    return {}\n",
+            ),
+        )
+        .unwrap();
+
+        let (extraction, _) = crate::extract_tree_with_summary(
+            dir.path(),
+            "local/contract-app",
+            "workdir",
+            &["server".into()],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+
+        let drifts: Vec<&Node> = extraction
+            .nodes
+            .iter()
+            .filter(|n| spec::is_drift_node(n))
+            .collect();
+        assert_eq!(drifts.len(), 3, "{drifts:?}");
+
+        let bundle = spec::compile_spec(
+            &extraction.nodes,
+            &extraction.edges,
+            &[],
+            spec::ExportMode::VerifiedOnly,
+            &std::collections::BTreeSet::new(),
+        );
+        assert_eq!(bundle.drift_count, 3);
+        let drift_reg = bundle
+            .artifacts
+            .iter()
+            .find(|a| a.id == "drift-register")
+            .expect("drift_register.md");
+        assert!(drift_reg.content.contains("## API contract drift"));
+        assert!(
+            drift_reg
+                .content
+                .contains("| documented-not-served | `DELETE /api/legacy/{}` |")
+        );
+        assert!(
+            drift_reg
+                .content
+                .contains("| method-mismatch | `/api/orders` |")
+        );
+        assert!(
+            drift_reg
+                .content
+                .contains("| served-undocumented | `GET /api/internal/health` |")
         );
     }
 

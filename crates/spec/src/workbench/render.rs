@@ -161,7 +161,7 @@ pub(crate) struct NodeName<'a>(pub &'a Node);
 impl fmt::Display for NodeName<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let n = self.0;
-        if n.label == "Endpoint"
+        if matches!(n.label.as_str(), "Endpoint" | "DocumentedRoute")
             && let (Some(method), Some(path)) =
                 (n.props["method"].as_str(), n.props["path"].as_str())
         {
