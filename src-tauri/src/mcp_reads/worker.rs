@@ -494,3 +494,6 @@ mod native_tests {
 
 #[cfg(all(test, unix))]
 mod scoped_tests;
+
+#[cfg(all(test, unix))]
+mod scoped_measure_tests;

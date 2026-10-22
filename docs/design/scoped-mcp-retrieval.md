@@ -87,3 +87,31 @@ observations with a reproducible fixture and exact source tree. A real target
 needs separate authorization. Full local gates, current-head CI and required
 owner review remain publication gates; source fixture tests do not establish
 installed-app v0.19 or native release acceptance.
+
+## Synthetic native transport observation (2026-10-22)
+
+The ignored `scoped_mcp_synthetic_measurement` fixture uses 60,001 nodes and
+60,000 edges, real authenticated Unix sockets and the production worker and
+scoped dispatcher. Three sessions traversed all 60,001 node rows in 15 windows
+each, preserving basis/detail identities. Complete acquisition refused the same
+120,001-row graph. Initializations took 1.1–4.8 ms; full node discovery took
+1.428–1.468 s; six selected node/edge reads had a 3.285 ms median. These debug
+profile, shared-machine observations include client framing and use warm shared
+process state; they are not latency guarantees or release benchmarks.
+
+A separate SQLite writer completed in 0.493 ms and the subsequent cursor read
+refused the stale basis. WAL file length remained 9,809,752 bytes; this is not a
+retention or long-running contention bound. Process RSS was 92,320 KiB at fixture
+readiness, with a sampled session peak of 98,160 KiB and OS whole-process highwater
+100,777,984 bytes. Harness, allocator and fixture memory are included. Logical
+reservation was 174,196,282,675 payload units under the fixture policy, deliberately
+reported separately from process memory; no practical deployment ceiling follows
+from this test.
+
+The exact Cargo artifact, frozen source manifests and binary hashes were checked
+before and after the run. This proves synthetic native transport behavior, not
+installed-app acceptance, positive retained evidence latency, partition artifact
+content, independent clients or providers. The fixture reports unavailable
+evidence/artifacts explicitly. Reproducible build/runner scripts and captured
+results are retained in the external task artifact `731-mcp-measure/run-final`;
+source checkpoint was `6887125` plus the ignored measurement fixture.
