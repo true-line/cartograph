@@ -1,3 +1,5 @@
+// AC-0302 / T-0302: atomic mutation revision and rollback.
+// AC-0303 / T-0303: compatible migration, bounded validation and coherent reads.
 use super::*;
 use crate::{
     GraphPatch, GraphStore,

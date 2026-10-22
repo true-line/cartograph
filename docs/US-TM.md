@@ -23,7 +23,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0017 | AC-0068..0070, AC-0093 | adapters-*, ingest, app, ui | post-M10 | — | ADR-0003, ADR-0017 | T-0068..0070, T-0093 |
 | US-0018 | AC-0090..0092, AC-0222 | app, ingest, ui, scripts | post-M10 | — | ADR-0002, ADR-0018 | T-0090..0092, T-0222 |
 | US-0019 | AC-0096..0097 | ingest, core-graph, spec, app, ui | post-M10 | — | ADR-0003 | T-0096..0097 |
-| US-0020 | AC-0101..0105, AC-0137..0139, AC-0232..0233 | context-hub, core-graph, app | H1 | — | ADR-0008, ADR-0019 | T-0101..0105, T-0137..0139, T-0232..0233 |
+| US-0020 | AC-0101..0105, AC-0137..0139, AC-0232..0233, AC-0302..0303 | context-hub, core-graph, app | H1 | — | ADR-0008, ADR-0019, ADR-0047 | T-0101..0105, T-0137..0139, T-0232..0233, T-0302..0303 |
 | US-0021 | AC-0106..0109 | context-hub, agents, spec, app, ui | H2–H3 | — | ADR-0019 | T-0106..0109 |
 | US-0022 | AC-0110..0114 | context-hub, agents, app, ui | H4–H5 | — | ADR-0019 | T-0110..0114 |
 | US-0023 | AC-0115..0118 | context-hub, agents, app, ui | H6–H7 | — | ADR-0019 | T-0115..0118 |
@@ -115,3 +115,4 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0042 | Prove continuation capacity before tool admission (proposed) |
 
 | ADR-0046 | Compact receipts, positive absence records and reclaimable retention (proposed; receipt v3 and forget reclaim implemented) |
+| ADR-0047 | Graph store revision (proposed) |

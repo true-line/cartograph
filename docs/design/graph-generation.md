@@ -1,6 +1,7 @@
 # Atomic graph generation (#744)
 
 Status: proposed. Editor: Codex. Prerequisite to #731; shared with #725.
+Decision: [ADR-0047 — Graph store revision](../adr/ADR-0047-graph-store-revision.md); acceptance: AC-0302/T-0302 and AC-0303/T-0303 (US-0020).
 The storage implementation is under review. Scoped agent acquisition and
 completed-recovery integration remain separate, unshipped work.
 
