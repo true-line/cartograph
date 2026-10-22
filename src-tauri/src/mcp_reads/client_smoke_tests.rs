@@ -351,3 +351,6 @@ fn mcp_scripted_stdio_client_smoke_against_isolated_app_service() {
         println!("{}", String::from_utf8(output.stdout).unwrap());
     }
 }
+
+#[path = "scoped_client_smoke_tests.rs"]
+mod scoped;

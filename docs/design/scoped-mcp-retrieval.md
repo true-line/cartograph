@@ -190,3 +190,37 @@ this partition phase. Positive retained-evidence transport latency and the full
 evidence denominator remain separate from partition rendering or a source-backed
 dispatcher assertion. AC-0288..0290 and the full installed/native/independent-client
 manual gates are unchanged; no complete #731 delivery is claimed here.
+
+## Independent scripted client fixture
+
+The opt-in
+`scoped_scripted_client_partition_and_retained_span_after_checkout_removal`
+fixture starts the production authenticated service in explicit scoped mode. A
+separate Node process drives a separately source-built relay over stdio, selects
+a rule partition, follows its assertion to an exact retained descriptor, and
+reads the captured span after the synthetic checkout has been removed. The host
+compares the returned bytes by length and SHA-256 with the original captured
+source and checks that the graph is unchanged. The client also checks stale
+session identity, response-limit refusal, clean relay EOF and service cleanup.
+
+Run only with an explicit absolute `CARTOGRAPH_TEST_MCP_RELAY` path and the exact
+ignored test selected. Record the source tree/diff and relay/test binary hashes
+with the result. Fixture limits are explicit test inputs; they are not new
+product policy defaults. This fixture is independent-process protocol evidence,
+not installed-client, native UI, production-signing or provider acceptance. It
+does not replace the separately attributed large-graph measurements or establish
+positive-evidence latency guarantees.
+
+Observed on 2026-10-22: the exact opt-in test passed once with zero failures.
+It returned 99 retained bytes with SHA-256
+`96302f89516cd78c7274affc984dc7bba27b6981ace5ad16d6abe8608182e2f7`;
+both refusal controls passed, relay exit was zero with no stderr, the activation
+record was removed, and the graph remained unchanged. The executed source was
+signed base `0552319b8ecdb8c3dcf5043558607c28e8d19774` plus the test/script
+changes in this update; it was not a clean signed-head run. Source inventories
+before and after execution matched. The app-test binary SHA-256 was
+`2b48c7c597788eb9ad5aa8f7abbdf0fe185913c19438adfc5ded383bccd06baa`; the debug relay SHA-256 was
+`84d8a9d9bf2d02a445f6de0d510acd9ac5fd79fba0faa98b7f81ddba99613ae2`. Raw result, source inventories and binary hashes are retained
+in `/tmp/cartograph-codex/755-scoped-client/` on the executing host. The fixture
+and independent client are committed so the observation can be reproduced;
+the local scratch directory is not a portable evidence archive.
