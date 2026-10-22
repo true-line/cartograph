@@ -1,5 +1,12 @@
 # cartograph
 
+## 0.22.0
+
+### Minor Changes
+
+- 818dce6: Package the read-only context skill and its references with the desktop app. Settings shows build-matched guidance without enabling MCP or changing client settings, and reports missing or modified skill files as unavailable.
+- 892219b: Add an explicitly enabled, bounded read-only MCP service and a packaged macOS stdio relay. Connected clients can discover recovered nodes, read compiled artifacts, and follow retained evidence without changing confirmed facts. Settings exposes service status, an explicit resource policy, revocation, and client configuration; Windows transport remains unavailable. Typed evidence failures distinguish positively recorded receipt omissions and exact-binding forgotten receipts from unproven absence.
+
 ## 0.21.0
 
 ### Minor Changes
