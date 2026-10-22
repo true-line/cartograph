@@ -324,3 +324,31 @@ without echoing arbitrary client output or source text.
 These are scripted external-process results, not installed-client, signed-package,
 model-quality or H5 acceptance. The client skill and packaged-client lifecycle
 procedure remain required before issue closeout.
+
+## Native acceptance and retrieval cost
+
+[Native macOS acceptance](../acceptance/read-only-mcp-native.md) records the
+tested commit, build identity, isolated app lifecycle and retained-source results.
+It does not establish provider or full installed-agent acceptance.
+
+Historical source-relay head `bf5b9b2` reconstructed 10,457 content bytes in
+41 pages of at most 256 bytes. With framing and shared overhead, full content
+used 23,884 wire bytes; all pages used 69,449 (+45,565). Shared overhead was
+12,000 bytes, including 5,837 input-schema bytes. Tokens were unknown. These
+figures are specific to that head; the native report records later measurements.
+
+Artifact pages currently repeat the full trace and compilation. The wire-byte
+measurements above exclude that CPU/allocation cost and do not establish that
+pagination reduces total retrieval cost. Smaller pages do not reduce compilation
+work. Session graph admission also has a 50,000-row ceiling: larger graphs cannot
+open a read session, regardless of how narrow the later query would be.
+Tracked by [#731](https://github.com/true-line/cartograph/issues/731).
+Packaged skill discovery is tracked separately in
+[#732](https://github.com/true-line/cartograph/issues/732).
+
+Evidence visibility is frozen once from the shared compiler projection. Freshness
+validation still takes two graph snapshots per describe or read; those reads use
+the session's admitted graph limits. The activation's caller-supplied worker
+reservation is accounting, not a validated allocation model. Registry and plugin
+metadata reads before admission also require bounded acquisition; aggregate
+reservation tests do not prove total worker memory containment.

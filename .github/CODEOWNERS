@@ -95,3 +95,6 @@ package-lock.json @qwts
 # Package-only MCP sidecar compilation and bundle configuration.
 /scripts/build-mcp-relay.mjs @qwts
 /src-tauri/tauri.mcp-bundle.conf.json @qwts
+
+# Read-only context skill controls external agent retrieval.
+/.agents/skills/read-cartograph-context/ @qwts
