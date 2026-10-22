@@ -567,8 +567,16 @@ fn client_identity(
     let value = match spec {
         IdentityArg::First => {
             let mut walk = args.walk();
-            args.named_children(&mut walk)
-                .find(|arg| arg.kind() != "comment")?
+            let first = args
+                .named_children(&mut walk)
+                .find(|arg| arg.kind() != "comment")?;
+            // `axios({ url })`: an HTTP call configured by one object
+            // names its URL there (#765 review).
+            if family == ObservedFamily::HttpApi && unwrap_assertions(first).kind() == "object" {
+                pair_value_in_args(cx, &args, "url")?
+            } else {
+                first
+            }
         }
         IdentityArg::Key(key) => pair_value_in_args(cx, &args, key)?,
     };
@@ -588,12 +596,45 @@ fn client_identity(
 fn url_head(cx: &FileCx, node: TsNode, scopes: &Scopes) -> IdentityExpr {
     match url_parts(cx, node, scopes, String::new()) {
         Head::Env(key) => IdentityExpr::EnvRef(key),
-        Head::Text(text, true) => IdentityExpr::Literal(text),
+        Head::Text(text, true) => IdentityExpr::Literal(canonical_origin(&text)),
         Head::Text(text, false) => match text.split_once("://") {
-            Some((_, rest)) if rest.contains(['/', '?', '#']) => IdentityExpr::Literal(text),
+            Some((_, rest)) if rest.contains(['/', '?', '#']) => {
+                IdentityExpr::Literal(canonical_origin(&text))
+            }
             None if !text.is_empty() => IdentityExpr::Literal(text),
             _ => IdentityExpr::Computed(cx.text(&node).to_string()),
         },
+    }
+}
+
+/// A URL with its origin in canonical form, so one origin is one resource
+/// (#765 review): scheme and host lowercased and the scheme's default port
+/// dropped. Userinfo and the rest are kept for `recorded_literal` to cut.
+fn canonical_origin(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let (userinfo, host) = match authority.rsplit_once('@') {
+        Some((userinfo, host)) => (Some(userinfo), host),
+        None => (None, authority),
+    };
+    let mut host = host.to_ascii_lowercase();
+    let default = match scheme.as_str() {
+        "http" => Some(":80"),
+        "https" => Some(":443"),
+        _ => None,
+    };
+    if let Some(port) = default
+        && host.ends_with(port)
+    {
+        host.truncate(host.len() - port.len());
+    }
+    match userinfo {
+        Some(userinfo) => format!("{scheme}://{userinfo}@{host}{tail}"),
+        None => format!("{scheme}://{host}{tail}"),
     }
 }
 
@@ -792,7 +833,13 @@ fn storage_global(
 /// global receiver's `fetch`, neither bound nor written by the file.
 fn global_fetch(cx: &FileCx, callee: TsNode, scopes: &Scopes) -> bool {
     match callee.kind() {
-        "identifier" => cx.text(&callee) == "fetch" && scopes.global("fetch", callee),
+        // Bare `fetch` and `window.fetch` are one global property: a write
+        // through any alias voids both spellings (#765 review).
+        "identifier" => {
+            cx.text(&callee) == "fetch"
+                && scopes.global("fetch", callee)
+                && !fetch_rewritten(scopes)
+        }
         "member_expression" => {
             let (Some(receiver), Some(property)) = (
                 callee.child_by_field_name("object"),
@@ -804,10 +851,17 @@ fn global_fetch(cx: &FileCx, callee: TsNode, scopes: &Scopes) -> bool {
                 && GLOBAL_OBJECTS.contains(&cx.text(&receiver))
                 && scopes.global(cx.text(&receiver), receiver)
                 && cx.text(&property) == "fetch"
-                && !scopes.member_written(cx.text(&receiver), "fetch")
+                && !fetch_rewritten(scopes)
         }
         _ => false,
     }
+}
+
+/// Whether the file writes `fetch` through any global object.
+fn fetch_rewritten(scopes: &Scopes) -> bool {
+    GLOBAL_OBJECTS
+        .iter()
+        .any(|global| scopes.member_written(global, "fetch"))
 }
 
 fn extract_file(

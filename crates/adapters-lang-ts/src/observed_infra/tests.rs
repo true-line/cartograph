@@ -529,6 +529,8 @@ export async function load(id: string) {
   await fetch(dynamicUrl(id));
   await axios.get(dynamicUrl(id));
   await axios.get("/relative");
+  await axios({ url: "https://HOOKS.example.org:443/v2", method: "post" });
+  await fetch("HTTPS://API.EXAMPLE.COM/upper");
 }
 function dynamicUrl(id: string) { return id; }
 "#;
@@ -541,6 +543,17 @@ function dynamicUrl(id: string) { return id; }
     // A resource shared by every client records none of their modules.
     let hooks = resource(&ex, "observed:http-api:https://hooks.example.org");
     assert!(hooks.props.get("module").is_none());
+    // `axios({ url })` names its URL, and an origin is canonical: one
+    // resource for any case or default port spelling.
+    let to_hooks = ex
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.dst
+                .ends_with("@observed:http-api:https://hooks.example.org")
+        })
+        .count();
+    assert_eq!(to_hooks, 2);
     resource(&ex, "observed:http-api:https://billing.example.net");
     let resources: Vec<_> = ex
         .nodes
@@ -571,6 +584,7 @@ function dynamicUrl(id: string) { return id; }
             ("fetch", "fetch(`${API}/items/${id}`)"),
             ("fetch", r#"window.fetch(API + "/stats")"#),
             ("axios", r#"axios.get("https://api.example.com/users?x=1")"#),
+            ("fetch", r#"fetch("HTTPS://API.EXAMPLE.COM/upper")"#),
         ]
     );
     // Only the computed axios URL is a Gap; the open host and the
@@ -601,6 +615,13 @@ export const a = () => fetch("https://api.example.com/a");
             r#"
 window.fetch = mock;
 export const b = () => window.fetch("https://api.example.com/b");
+"#,
+        ),
+        (
+            "src/d.ts",
+            r#"
+window.fetch = mock;
+export const d = () => fetch("https://api.example.com/d");
 "#,
         ),
         (
