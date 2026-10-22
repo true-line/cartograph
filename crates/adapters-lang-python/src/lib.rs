@@ -760,13 +760,18 @@ fn lambda_parameter_shadows(cx: &FileCx<'_>, use_node: TsNode<'_>, name: &str) -
                     }
                 }
                 // A walrus in the body binds in the lambda's own scope (PEP
-                // 572), comprehensions included; a nested lambda or def owns
-                // its walruses, and a use inside one is checked there first.
+                // 572), comprehensions included. A nested lambda owns the
+                // walruses in its body (a use inside one is checked there
+                // first), but its parameter defaults evaluate here.
                 if let Some(body) = node.child_by_field_name("body") {
                     let mut stack = vec![body];
                     while let Some(current) = stack.pop() {
                         match current.kind() {
-                            "lambda" | "function_definition" | "class_definition" => continue,
+                            "lambda" => {
+                                stack.extend(current.child_by_field_name("parameters"));
+                                continue;
+                            }
+                            "function_definition" | "class_definition" => continue,
                             "named_expression"
                                 if current
                                     .child_by_field_name("name")

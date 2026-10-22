@@ -536,7 +536,7 @@ fn mount_receivers_need_their_reaching_definition() {
     let mut routers = String::from("from fastapi import APIRouter\n");
     for name in [
         "good", "over", "late", "inner", "cond", "shadow", "module", "loop", "matched", "classy",
-        "early", "lam", "walrus", "glob", "lamwal", "lamwalfn", "lamok",
+        "early", "lam", "walrus", "glob", "lamwal", "lamwalfn", "lamok", "lamdef",
     ] {
         routers.push_str(&format!(
             "{name} = APIRouter()\n@{name}.get(\"/x\")\ndef {name}_x():\n    return {{}}\n"
@@ -564,7 +564,7 @@ def make():
         "main.py",
         r#"
 from fastapi import FastAPI
-from routers import good, over, late, inner, cond, shadow, module, loop, matched, classy, early, lam, walrus, glob, lamwal, lamwalfn, lamok
+from routers import good, over, late, inner, cond, shadow, module, loop, matched, classy, early, lam, walrus, glob, lamwal, lamwalfn, lamok, lamdef
 from fake import Fake
 
 app = FastAPI()
@@ -622,6 +622,9 @@ def install_lambda_walrus():
 install_lw = lambda: ((app := Fake()), app.include_router(lamwal, prefix="/lamwal"))
 install_lw()
 
+install_def = lambda: ((lambda unused=(app := Fake()): None), app.include_router(lamdef, prefix="/lamdef"))
+install_def()
+
 install_ok = lambda: app.include_router(lamok, prefix="/lamok")
 install_ok()
 
@@ -678,6 +681,7 @@ later = FastAPI()
             confirmed("/good/x"),
             unproven("/inner/x"),
             unproven("/lam/x"),
+            unproven("/lamdef/x"),
             confirmed("/lamok/x"),
             unproven("/lamwal/x"),
             unproven("/lamwalfn/x"),
