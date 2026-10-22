@@ -62,6 +62,57 @@ enum TableName {
     Dynamic,
 }
 
+/// How an ORM member call (`Column`, `mapped_column`, `relationship`, `ForeignKey`)
+/// was invoked in source, so receiver-based calls (`db.Column`) can be checked
+/// against cross-file `proven_flask_dbs` during `resolve`.
+#[derive(Debug, Clone)]
+enum CallProof {
+    /// Directly proven via file imports from `sqlalchemy`, `sqlalchemy.orm`,
+    /// or `sqlalchemy.schema`.
+    SqlAlchemyImport,
+    /// Invoked as `<recv>.<member>`, proven iff `<recv>` resolves in `file`
+    /// to an entry in `proven_flask_dbs`.
+    FlaskDbReceiver { file: String, recv: String },
+}
+
+impl CallProof {
+    fn is_proven(
+        &self,
+        imports_by_file: &BTreeMap<String, HashMap<String, ImportBinding>>,
+        known_files: &BTreeSet<String>,
+        proven_flask_dbs: &BTreeSet<(String, String)>,
+    ) -> bool {
+        match self {
+            Self::SqlAlchemyImport => true,
+            Self::FlaskDbReceiver { file, recv } => {
+                resolve_symbol(file, recv, imports_by_file, known_files)
+                    .is_some_and(|target| proven_flask_dbs.contains(&target))
+            }
+        }
+    }
+}
+
+/// Recognized SQLAlchemy ORM member call kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrmMember {
+    Column,
+    MappedColumn,
+    Relationship,
+    ForeignKey,
+}
+
+impl OrmMember {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Column" => Some(Self::Column),
+            "mapped_column" => Some(Self::MappedColumn),
+            "relationship" => Some(Self::Relationship),
+            "ForeignKey" => Some(Self::ForeignKey),
+            _ => None,
+        }
+    }
+}
+
 /// A `Column(...)` / `mapped_column(...)` declaration in a class body.
 #[derive(Debug, Clone)]
 struct ColumnDecl {
@@ -69,6 +120,7 @@ struct ColumnDecl {
     col_type: Option<String>,
     nullable: Option<bool>,
     primary_key: Option<bool>,
+    proof: CallProof,
     evidence: EvidenceRef,
 }
 
@@ -84,6 +136,8 @@ enum FkTarget {
 struct ForeignKeyDecl {
     field: String,
     target: FkTarget,
+    col_proof: CallProof,
+    fk_proof: CallProof,
     evidence: EvidenceRef,
 }
 
@@ -100,6 +154,7 @@ enum RelTarget {
 struct RelationshipDecl {
     field: String,
     target: RelTarget,
+    proof: CallProof,
     evidence: EvidenceRef,
 }
 
@@ -130,13 +185,14 @@ enum Parent {
 }
 
 /// A Python class declaration with its candidate ORM bases, table name,
-/// columns, foreign keys, and relationships.
+/// schema, columns, foreign keys, and relationships.
 #[derive(Debug, Clone)]
 struct OrmClassDecl {
     key: (String, String),
     name: String,
     bases: Vec<BaseExpr>,
     tablename: TableName,
+    schema: Option<String>,
     is_abstract: bool,
     is_direct_declarative_base_subclass: bool,
     columns: Vec<ColumnDecl>,
@@ -338,11 +394,91 @@ fn sqlalchemy_type(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
     is_sqlalchemy_type_name(name).then(|| name.to_string())
 }
 
-fn is_foreign_key_call(cx: &FileCx<'_>, node: TsNode<'_>) -> bool {
-    node.kind() == "call"
-        && node
-            .child_by_field_name("function")
-            .is_some_and(|callee| callee_simple_name(cx, callee) == "ForeignKey")
+/// Whether `node` is an `identifier` or a dotted chain of `attribute` accesses
+/// rooted at an `identifier`.
+fn is_dotted_identifier(node: TsNode<'_>) -> bool {
+    match node.kind() {
+        "identifier" => true,
+        "attribute" => {
+            node.child_by_field_name("attribute")
+                .is_some_and(|attr| attr.kind() == "identifier")
+                && node
+                    .child_by_field_name("object")
+                    .is_some_and(is_dotted_identifier)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `module` is one of the SQLAlchemy packages that export `Column`,
+/// `mapped_column`, `relationship`, and `ForeignKey`.
+fn is_sqlalchemy_orm_module(module: &str) -> bool {
+    matches!(
+        module,
+        "sqlalchemy" | "sqlalchemy.orm" | "sqlalchemy.schema"
+    )
+}
+
+/// Classify a call's `function` node as a SQLAlchemy ORM member (`Column`,
+/// `mapped_column`, `relationship`, `ForeignKey`) if its callee is either
+/// import-proven from `sqlalchemy` / `sqlalchemy.orm` / `sqlalchemy.schema` or
+/// an attribute on a candidate Flask-SQLAlchemy receiver to be verified against
+/// `proven_flask_dbs` during `resolve`.
+fn classify_orm_callee(
+    cx: &FileCx<'_>,
+    callee: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+    shadowed_for_import: &BTreeSet<String>,
+    shadowed_for_receiver: &BTreeSet<String>,
+) -> Option<(OrmMember, CallProof)> {
+    if !is_dotted_identifier(callee) {
+        return None;
+    }
+    let text = cx.text(&callee).trim();
+    let head = text.split('.').next().unwrap_or(text);
+    if !shadowed_for_import.contains(head)
+        && let Some((module, exported)) = resolve_imported_symbol(text, bindings)
+        && is_sqlalchemy_orm_module(&module)
+        && let Some(member) = OrmMember::from_name(&exported)
+    {
+        return Some((member, CallProof::SqlAlchemyImport));
+    }
+    if callee.kind() == "attribute" && !shadowed_for_receiver.contains(head) {
+        let (recv, attr) = text.rsplit_once('.')?;
+        let member = OrmMember::from_name(attr)?;
+        return Some((
+            member,
+            CallProof::FlaskDbReceiver {
+                file: cx.path.to_string(),
+                recv: recv.to_string(),
+            },
+        ));
+    }
+    None
+}
+
+/// Return the [`CallProof`] when `node` is a candidate `ForeignKey(...)` call.
+fn foreign_key_call_proof(
+    cx: &FileCx<'_>,
+    node: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+    shadowed_for_import: &BTreeSet<String>,
+    shadowed_for_receiver: &BTreeSet<String>,
+) -> Option<CallProof> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let callee = node.child_by_field_name("function")?;
+    match classify_orm_callee(
+        cx,
+        callee,
+        bindings,
+        shadowed_for_import,
+        shadowed_for_receiver,
+    ) {
+        Some((OrmMember::ForeignKey, proof)) => Some(proof),
+        _ => None,
+    }
 }
 
 fn first_or_keyword_arg<'t>(
@@ -386,7 +522,13 @@ fn bound_target_text(text: &str) -> String {
     format!("{}…", &text[..end])
 }
 
-fn parse_foreign_key(cx: &FileCx<'_>, field: &str, fk_call: TsNode<'_>) -> ForeignKeyDecl {
+fn parse_foreign_key(
+    cx: &FileCx<'_>,
+    field: &str,
+    fk_call: TsNode<'_>,
+    col_proof: CallProof,
+    fk_proof: CallProof,
+) -> ForeignKeyDecl {
     let target = match first_or_keyword_arg(cx, fk_call, "column") {
         Some(arg) => match literal_string(cx, arg) {
             Some(lit) => FkTarget::Literal(lit),
@@ -397,7 +539,120 @@ fn parse_foreign_key(cx: &FileCx<'_>, field: &str, fk_call: TsNode<'_>) -> Forei
     ForeignKeyDecl {
         field: field.to_string(),
         target,
+        col_proof,
+        fk_proof,
         evidence: cx.evidence(&fk_call),
+    }
+}
+
+/// Peel outer tree-sitter `type` wrapper nodes to reach the inner type expression.
+fn unwrap_type_node(mut node: TsNode<'_>) -> TsNode<'_> {
+    while node.kind() == "type" {
+        let mut walk = node.walk();
+        let children: Vec<TsNode<'_>> = node
+            .named_children(&mut walk)
+            .filter(|c| c.kind() != "comment")
+            .collect();
+        if children.len() == 1 {
+            node = children[0];
+        } else {
+            break;
+        }
+    }
+    node
+}
+
+/// Split a generic or subscripted type expression `Base[Arg1, ...]` into
+/// `(base_text, type_args)`.
+fn split_generic<'a, 't>(
+    cx: &'a FileCx<'_>,
+    node: TsNode<'t>,
+) -> Option<(&'a str, Vec<TsNode<'t>>)> {
+    let node = unwrap_type_node(node);
+    match node.kind() {
+        "generic_type" => {
+            let mut walk = node.walk();
+            let mut children = node
+                .named_children(&mut walk)
+                .filter(|c| c.kind() != "comment");
+            let base = children.next()?;
+            let param = children.next()?;
+            if param.kind() != "type_parameter" {
+                return None;
+            }
+            let mut param_walk = param.walk();
+            let args: Vec<TsNode<'t>> = param
+                .named_children(&mut param_walk)
+                .filter(|c| c.kind() != "comment")
+                .map(unwrap_type_node)
+                .collect();
+            Some((cx.text(&base).trim(), args))
+        }
+        "subscript" => {
+            let value = node.child_by_field_name("value")?;
+            let mut walk = node.walk();
+            let mut args: Vec<TsNode<'t>> = node
+                .named_children(&mut walk)
+                .filter(|c| c.id() != value.id() && c.kind() != "comment")
+                .map(unwrap_type_node)
+                .collect();
+            if args.len() == 1 && args[0].kind() == "tuple" {
+                let tuple = args[0];
+                let mut tuple_walk = tuple.walk();
+                args = tuple
+                    .named_children(&mut tuple_walk)
+                    .filter(|c| c.kind() != "comment")
+                    .map(unwrap_type_node)
+                    .collect();
+            }
+            Some((cx.text(&value).trim(), args))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `name` is a single-target collection or optional wrapper inside
+/// `Mapped[...]`.
+fn is_relationship_container(name: &str) -> bool {
+    let bare = name.strip_prefix("typing.").unwrap_or(name);
+    matches!(
+        bare,
+        "list"
+            | "List"
+            | "set"
+            | "Set"
+            | "Optional"
+            | "Sequence"
+            | "MutableSequence"
+            | "AbstractSet"
+            | "MutableSet"
+            | "Collection"
+    )
+}
+
+/// Extract a `RelTarget` from a SQLAlchemy 2 `Mapped[...]` type annotation,
+/// unwrapping `list`/`List`/`set`/`Set`/`Optional`/`typing.*` one level.
+fn parse_mapped_annotation_target(cx: &FileCx<'_>, type_node: TsNode<'_>) -> RelTarget {
+    let raw_annotation = bound_target_text(cx.text(&type_node).trim());
+    let Some((outer_base, outer_args)) = split_generic(cx, type_node) else {
+        return RelTarget::Unprovable(raw_annotation);
+    };
+    if !(outer_base == "Mapped" || outer_base.ends_with(".Mapped")) || outer_args.len() != 1 {
+        return RelTarget::Unprovable(raw_annotation);
+    }
+    let mut inner = outer_args[0];
+    if let Some((inner_base, inner_args)) = split_generic(cx, inner)
+        && is_relationship_container(inner_base)
+        && inner_args.len() == 1
+    {
+        inner = inner_args[0];
+    }
+    if let Some(lit) = literal_string(cx, inner) {
+        RelTarget::Name(lit)
+    } else if matches!(inner.kind(), "identifier" | "attribute") && is_dotted_identifier(inner) {
+        RelTarget::Symbol(cx.text(&inner).trim().to_string())
+    } else {
+        RelTarget::Unprovable(raw_annotation)
     }
 }
 
@@ -406,24 +661,87 @@ fn parse_relationship(
     field: &str,
     rel_call: TsNode<'_>,
     assignment: TsNode<'_>,
+    proof: CallProof,
 ) -> RelationshipDecl {
     let target = match first_or_keyword_arg(cx, rel_call, "argument") {
         Some(arg) => {
             if let Some(lit) = literal_string(cx, arg) {
                 RelTarget::Name(lit)
-            } else if matches!(arg.kind(), "identifier" | "attribute") {
+            } else if matches!(arg.kind(), "identifier" | "attribute") && is_dotted_identifier(arg)
+            {
                 RelTarget::Symbol(cx.text(&arg).to_string())
             } else {
                 RelTarget::Unprovable(bound_target_text(cx.text(&arg)))
             }
         }
-        None => RelTarget::Unprovable(bound_target_text(cx.text(&rel_call))),
+        None => match assignment.child_by_field_name("type") {
+            Some(type_node) => parse_mapped_annotation_target(cx, type_node),
+            None => RelTarget::Unprovable(bound_target_text(cx.text(&rel_call))),
+        },
     };
     RelationshipDecl {
         field: field.to_string(),
         target,
+        proof,
         evidence: cx.evidence(&assignment),
     }
+}
+
+/// Extract a non-empty literal `"schema"` entry from a dict literal.
+fn dict_literal_schema(cx: &FileCx<'_>, dict: TsNode<'_>) -> Option<String> {
+    if dict.kind() != "dictionary" {
+        return None;
+    }
+    let mut schema = None;
+    let mut walk = dict.walk();
+    for child in dict.named_children(&mut walk) {
+        if child.kind() != "pair" {
+            continue;
+        }
+        let (Some(key), Some(value)) = (
+            child.child_by_field_name("key"),
+            child.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        if literal_string(cx, key).as_deref() == Some("schema") {
+            schema = literal_string(cx, value).filter(|s| !s.is_empty());
+        }
+    }
+    schema
+}
+
+/// Extract the literal `"schema"` from `__table_args__` when it is a dict
+/// literal or a tuple literal whose last element is a dict literal.
+fn parse_table_args_schema(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
+    match node.kind() {
+        "dictionary" => dict_literal_schema(cx, node),
+        "tuple" => {
+            let mut walk = node.walk();
+            let last = node
+                .named_children(&mut walk)
+                .filter(|c| c.kind() != "comment")
+                .last()?;
+            dict_literal_schema(cx, last)
+        }
+        _ => None,
+    }
+}
+
+/// Return the declared name when `node` is a function or class definition
+/// (including decorated definitions).
+fn def_or_class_name<'a>(cx: &'a FileCx<'_>, mut node: TsNode<'_>) -> Option<&'a str> {
+    if node.kind() == "decorated_definition" {
+        let mut walk = node.walk();
+        node = node
+            .named_children(&mut walk)
+            .find(|c| matches!(c.kind(), "function_definition" | "class_definition"))?;
+    }
+    if matches!(node.kind(), "function_definition" | "class_definition") {
+        let name = node.child_by_field_name("name")?;
+        return Some(cx.text(&name));
+    }
+    None
 }
 
 fn statement_assignment(node: TsNode<'_>) -> Option<TsNode<'_>> {
@@ -473,6 +791,18 @@ pub(crate) fn extract(
         }
     }
 
+    let mut module_shadowed_imports: BTreeSet<String> = BTreeSet::new();
+    let mut module_shadowed_receivers: BTreeSet<String> = BTreeSet::new();
+    {
+        let mut walk = root.walk();
+        for stmt in root.named_children(&mut walk) {
+            if let Some(name) = def_or_class_name(cx, stmt) {
+                module_shadowed_imports.insert(name.to_string());
+                module_shadowed_receivers.insert(name.to_string());
+            }
+        }
+    }
+
     let assign_query = Query::new(
         language,
         "(assignment left: (identifier) @lhs right: (_) @rhs) @assign",
@@ -496,23 +826,28 @@ pub(crate) fn extract(
         if is_inside_class_or_function(assign) {
             continue;
         }
+        module_shadowed_imports.insert(lhs.clone());
+        let mut is_candidate_receiver = false;
         match rhs.kind() {
             "call" => {
                 let Some(function) = rhs.child_by_field_name("function") else {
+                    module_shadowed_receivers.insert(lhs);
                     continue;
                 };
                 let callee = cx.text(&function);
                 if is_declarative_base_fn(callee, bindings) {
-                    file.proven_bases.insert(lhs);
+                    file.proven_bases.insert(lhs.clone());
                 } else if is_registry_fn(callee, bindings) {
-                    file.proven_registries.insert(lhs);
+                    file.proven_registries.insert(lhs.clone());
                 } else if is_flask_sqlalchemy_fn(callee, bindings) {
-                    file.proven_flask_dbs.insert(lhs);
+                    file.proven_flask_dbs.insert(lhs.clone());
+                    is_candidate_receiver = true;
                 } else if function.kind() == "attribute" {
                     let (Some(obj), Some(attr)) = (
                         function.child_by_field_name("object"),
                         function.child_by_field_name("attribute"),
                     ) else {
+                        module_shadowed_receivers.insert(lhs);
                         continue;
                     };
                     if cx.text(&attr) == "generate_base" {
@@ -520,11 +855,13 @@ pub(crate) fn extract(
                             if let Some(inner_fn) = obj.child_by_field_name("function")
                                 && is_registry_fn(cx.text(&inner_fn), bindings)
                             {
-                                file.proven_bases.insert(lhs);
+                                file.proven_bases.insert(lhs.clone());
                             }
                         } else if matches!(obj.kind(), "identifier" | "attribute") {
-                            file.assignments
-                                .push((lhs, ModuleRhs::GenerateBase(cx.text(&obj).to_string())));
+                            file.assignments.push((
+                                lhs.clone(),
+                                ModuleRhs::GenerateBase(cx.text(&obj).to_string()),
+                            ));
                         }
                     }
                 }
@@ -533,17 +870,22 @@ pub(crate) fn extract(
                 let text = cx.text(&rhs);
                 if let Some(recv) = text.strip_suffix(".Model") {
                     file.assignments
-                        .push((lhs, ModuleRhs::DotModel(recv.to_string())));
+                        .push((lhs.clone(), ModuleRhs::DotModel(recv.to_string())));
                 } else {
                     file.assignments
-                        .push((lhs, ModuleRhs::Alias(text.to_string())));
+                        .push((lhs.clone(), ModuleRhs::Alias(text.to_string())));
+                    is_candidate_receiver = true;
                 }
             }
             "identifier" => {
                 file.assignments
-                    .push((lhs, ModuleRhs::Alias(cx.text(&rhs).to_string())));
+                    .push((lhs.clone(), ModuleRhs::Alias(cx.text(&rhs).to_string())));
+                is_candidate_receiver = true;
             }
             _ => {}
+        }
+        if !is_candidate_receiver {
+            module_shadowed_receivers.insert(lhs);
         }
     }
 
@@ -605,12 +947,25 @@ pub(crate) fn extract(
         }
 
         let mut tablename = TableName::Absent;
+        let mut schema = None;
         let mut is_abstract = false;
         let mut columns = Vec::new();
         let mut foreign_keys = Vec::new();
         let mut relationships = Vec::new();
 
         if let Some(body) = class.child_by_field_name("body") {
+            let mut shadowed_for_import = module_shadowed_imports.clone();
+            let mut shadowed_for_receiver = module_shadowed_receivers.clone();
+            {
+                let mut walk = body.walk();
+                for stmt in body.named_children(&mut walk) {
+                    if let Some(local_name) = def_or_class_name(cx, stmt) {
+                        shadowed_for_import.insert(local_name.to_string());
+                        shadowed_for_receiver.insert(local_name.to_string());
+                    }
+                }
+            }
+
             let mut walk = body.walk();
             for stmt in body.named_children(&mut walk) {
                 let Some(assignment) = statement_assignment(stmt) else {
@@ -633,6 +988,10 @@ pub(crate) fn extract(
                     };
                     continue;
                 }
+                if attr_name == "__table_args__" {
+                    schema = parse_table_args_schema(cx, right);
+                    continue;
+                }
                 if attr_name == "__abstract__" {
                     if literal_bool(cx, right) == Some(true) {
                         is_abstract = true;
@@ -645,8 +1004,17 @@ pub(crate) fn extract(
                 let Some(callee) = right.child_by_field_name("function") else {
                     continue;
                 };
-                match callee_simple_name(cx, callee) {
-                    "Column" | "mapped_column" => {
+                let Some((member, call_proof)) = classify_orm_callee(
+                    cx,
+                    callee,
+                    bindings,
+                    &shadowed_for_import,
+                    &shadowed_for_receiver,
+                ) else {
+                    continue;
+                };
+                match member {
+                    OrmMember::Column | OrmMember::MappedColumn => {
                         let mut col_type = None;
                         let mut nullable = None;
                         let mut primary_key = None;
@@ -666,8 +1034,20 @@ pub(crate) fn extract(
                                     }
                                     _ => {}
                                 }
-                            } else if is_foreign_key_call(cx, arg) {
-                                foreign_keys.push(parse_foreign_key(cx, &attr_name, arg));
+                            } else if let Some(fk_proof) = foreign_key_call_proof(
+                                cx,
+                                arg,
+                                bindings,
+                                &shadowed_for_import,
+                                &shadowed_for_receiver,
+                            ) {
+                                foreign_keys.push(parse_foreign_key(
+                                    cx,
+                                    &attr_name,
+                                    arg,
+                                    call_proof.clone(),
+                                    fk_proof,
+                                ));
                             } else if col_type.is_none() {
                                 col_type = sqlalchemy_type(cx, arg);
                             }
@@ -677,13 +1057,16 @@ pub(crate) fn extract(
                             col_type,
                             nullable,
                             primary_key,
+                            proof: call_proof,
                             evidence: cx.evidence(&assignment),
                         });
                     }
-                    "relationship" => {
-                        relationships.push(parse_relationship(cx, &attr_name, right, assignment));
+                    OrmMember::Relationship => {
+                        relationships.push(parse_relationship(
+                            cx, &attr_name, right, assignment, call_proof,
+                        ));
                     }
-                    _ => {}
+                    OrmMember::ForeignKey => {}
                 }
             }
         }
@@ -693,6 +1076,7 @@ pub(crate) fn extract(
             name,
             bases,
             tablename,
+            schema,
             is_abstract,
             is_direct_declarative_base_subclass,
             columns,
@@ -1147,6 +1531,24 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
         }
     }
 
+    for class in &mut all_classes {
+        class.columns.retain(|col| {
+            col.proof
+                .is_proven(&imports_by_file, &known_files, &proven_flask_dbs)
+        });
+        class.foreign_keys.retain(|fk| {
+            fk.col_proof
+                .is_proven(&imports_by_file, &known_files, &proven_flask_dbs)
+                && fk
+                    .fk_proof
+                    .is_proven(&imports_by_file, &known_files, &proven_flask_dbs)
+        });
+        class.relationships.retain(|rel| {
+            rel.proof
+                .is_proven(&imports_by_file, &known_files, &proven_flask_dbs)
+        });
+    }
+
     // Track which classes are subclassed by another class in the repository, so
     // `class Base(DeclarativeBase): ...` used as a project base is distinguished
     // from a leaf model class that forgot `__tablename__`.
@@ -1174,11 +1576,12 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
         })
         .collect();
 
-    let mut table_claimants: BTreeMap<String, Vec<&OrmClassDecl>> = BTreeMap::new();
+    let mut table_claimants: BTreeMap<(Option<String>, String), Vec<&OrmClassDecl>> =
+        BTreeMap::new();
     for &class in &candidate_classes {
         if let TableName::Literal(store) = &class.tablename {
             table_claimants
-                .entry(store.clone())
+                .entry((class.schema.clone(), store.clone()))
                 .or_default()
                 .push(class);
         }
@@ -1228,8 +1631,8 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
     }
 
     let mut emitted_gaps: BTreeSet<String> = BTreeSet::new();
-    let mut emitted_dup_tables: BTreeSet<String> = BTreeSet::new();
-    let mut by_table: HashMap<String, Option<String>> = HashMap::new();
+    let mut emitted_dup_tables: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    let mut by_table: HashMap<(Option<String>, String), Option<String>> = HashMap::new();
     let mut by_class_key: HashMap<(String, String), String> = HashMap::new();
     let mut by_class_name: HashMap<String, Option<String>> = HashMap::new();
     let mut active_models: Vec<(
@@ -1284,40 +1687,49 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
         let TableName::Literal(store) = &class.tablename else {
             continue;
         };
-        let claimants = &table_claimants[store];
+        let table_key = (class.schema.clone(), store.clone());
+        let qualified_table = match &class.schema {
+            Some(schema) => format!("{schema}.{store}"),
+            None => store.clone(),
+        };
+        let claimants = &table_claimants[&table_key];
         if claimants.len() > 1 {
-            by_table.insert(store.clone(), None);
+            by_table.insert(table_key.clone(), None);
             by_class_name.insert(class.name.clone(), None);
-            if emitted_dup_tables.insert(store.clone()) {
-                let gap_id = format!("gap:sqlalchemy:{repo}@table:{store}");
+            if emitted_dup_tables.insert(table_key) {
+                let gap_id = format!("gap:sqlalchemy:{repo}@table:{qualified_table}");
                 if emitted_gaps.insert(gap_id.clone()) {
                     let classes: Vec<&str> = claimants.iter().map(|c| c.name.as_str()).collect();
                     let evidence: Vec<EvidenceRef> =
                         claimants.iter().map(|c| c.evidence.clone()).collect();
+                    let mut props = serde_json::json!({
+                        "reason": "table declared by more than one model",
+                        "table": store,
+                        "store": store,
+                        "classes": classes,
+                        "framework": "sqlalchemy",
+                        "language": "python",
+                        "attempted_tiers": ["T0"],
+                        "prov": prov_from(
+                            evidence,
+                            ConfidenceTier::Gap,
+                            &format!("Gap {gap_id}"),
+                        ),
+                    });
+                    if let Some(schema) = &class.schema {
+                        props["schema"] = serde_json::Value::String(schema.clone());
+                    }
                     out.nodes.push(Node {
                         id: gap_id.clone(),
                         label: "Gap".into(),
-                        props: serde_json::json!({
-                            "reason": "table declared by more than one model",
-                            "table": store,
-                            "store": store,
-                            "classes": classes,
-                            "framework": "sqlalchemy",
-                            "language": "python",
-                            "attempted_tiers": ["T0"],
-                            "prov": prov_from(
-                                evidence,
-                                ConfidenceTier::Gap,
-                                &format!("Gap {gap_id}"),
-                            ),
-                        }),
+                        props,
                     });
                 }
             }
             continue;
         }
 
-        let entity_id = format!("data:{repo}@sqlalchemy:{store}");
+        let entity_id = format!("data:{repo}@sqlalchemy:{qualified_table}");
         let (mut resolved_columns, mut resolved_fks, mut resolved_rels) =
             collect_inherited_members(class, &classes_by_key, &imports_by_file, &known_files);
         let mut seen_cols: BTreeSet<String> =
@@ -1374,27 +1786,31 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
             columns_json.push(serde_json::Value::Object(map));
         }
 
+        let mut props = serde_json::json!({
+            "name": class.name,
+            "storage": "sqlalchemy",
+            "store": store,
+            "table": store,
+            "columns": columns_json,
+            "framework": "sqlalchemy",
+            "language": "python",
+            "prov": prov_from(
+                evidence,
+                ConfidenceTier::Confirmed,
+                &format!("DataEntity {entity_id}"),
+            ),
+        });
+        if let Some(schema) = &class.schema {
+            props["schema"] = serde_json::Value::String(schema.clone());
+        }
         out.nodes.push(Node {
             id: entity_id.clone(),
             label: "DataEntity".into(),
-            props: serde_json::json!({
-                "name": class.name,
-                "storage": "sqlalchemy",
-                "store": store,
-                "table": store,
-                "columns": columns_json,
-                "framework": "sqlalchemy",
-                "language": "python",
-                "prov": prov_from(
-                    evidence,
-                    ConfidenceTier::Confirmed,
-                    &format!("DataEntity {entity_id}"),
-                ),
-            }),
+            props,
         });
 
         by_table
-            .entry(store.clone())
+            .entry(table_key)
             .and_modify(|id| *id = None)
             .or_insert_with(|| Some(entity_id.clone()));
         by_class_key.insert(class.key.clone(), entity_id.clone());
@@ -1414,7 +1830,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
             match &fk.target {
                 FkTarget::Literal(raw) => {
                     let parts: Vec<&str> = raw.split('.').collect();
-                    if parts.len() < 2 || parts.iter().any(|p| p.is_empty()) {
+                    if !matches!(parts.len(), 2 | 3) || parts.iter().any(|p| p.is_empty()) {
                         push_reference_gap(
                             out,
                             &mut emitted_gaps,
@@ -1427,9 +1843,13 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
                         );
                         continue;
                     }
-                    let table = parts[parts.len() - 2];
-                    let column = parts[parts.len() - 1];
-                    match by_table.get(table).and_then(|id| id.as_ref()) {
+                    let (schema, table, column) = match parts.as_slice() {
+                        [table, column] => (None, *table, *column),
+                        [schema, table, column] => (Some((*schema).to_string()), *table, *column),
+                        _ => unreachable!(),
+                    };
+                    let lookup_key = (schema, table.to_string());
+                    match by_table.get(&lookup_key).and_then(|id| id.as_ref()) {
                         Some(dst_entity_id) => {
                             resolved_references
                                 .entry((src_entity_id.clone(), dst_entity_id.clone()))

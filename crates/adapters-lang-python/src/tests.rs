@@ -1453,3 +1453,325 @@ class AdminUser(PrimaryUser):
             .any(|node| node.label == "Gap" && node.props["reason"] == "table name not declared")
     );
 }
+
+#[test]
+fn sqlalchemy_orm_member_calls_require_import_or_flask_db_proof() {
+    // #738/#746 review: `Column`, `mapped_column`, `relationship`, and
+    // `ForeignKey` count only when resolved to `sqlalchemy`, `sqlalchemy.orm`,
+    // `sqlalchemy.schema` (bare imports with `as` aliases or module aliases),
+    // or a proven Flask-SQLAlchemy `db` instance (including across files).
+    // `custom.relationship("User")`, `custom.ForeignKey(...)`, and a locally
+    // defined `def Column(...)` are ignored with no column, edge, or gap.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/extensions.py",
+        "from flask_sqlalchemy import SQLAlchemy\ndb = SQLAlchemy()\n",
+    );
+    write(
+        dir.path(),
+        "app/models.py",
+        r#"
+import sqlalchemy as sa
+from sqlalchemy import orm
+from sqlalchemy.schema import ForeignKey as SchemaFK
+from app.extensions import db
+import custom_dsl as custom
+
+Base = orm.declarative_base()
+
+def Column(*args, **kwargs):
+    return None
+
+class User(Base):
+    __tablename__ = "users"
+    id = sa.Column(sa.Integer, primary_key=True)
+    ignored_local = Column(sa.String(64))
+
+class Post(db.Model):
+    __tablename__ = "posts"
+    id = db.Column(db.Integer, primary_key=True)
+    author_id = sa.Column(sa.Integer, SchemaFK("users.id"), nullable=False)
+    author = orm.relationship("User")
+    bogus_fk = sa.Column(sa.Integer, custom.ForeignKey("missing.id"))
+    bogus_rel = custom.relationship("User")
+    bogus_missing_rel = custom.relationship("NoSuchEntity")
+"#,
+    );
+
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let entities: BTreeMap<&str, &Node> = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "DataEntity")
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    let users = entities["data:local/python-service@sqlalchemy:users"];
+    assert_eq!(
+        users.props["columns"],
+        serde_json::json!([
+            { "name": "id", "type": "Integer", "primary_key": true },
+        ])
+    );
+
+    let posts = entities["data:local/python-service@sqlalchemy:posts"];
+    assert_eq!(
+        posts.props["columns"],
+        serde_json::json!([
+            { "name": "id", "type": "Integer", "primary_key": true },
+            { "name": "author_id", "type": "Integer", "nullable": false },
+            { "name": "bogus_fk", "type": "Integer" },
+        ])
+    );
+
+    let ref_edges: Vec<&Edge> = extraction
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "REFERENCES")
+        .collect();
+    assert_eq!(ref_edges.len(), 1);
+    assert_eq!(
+        ref_edges[0].src,
+        "data:local/python-service@sqlalchemy:posts"
+    );
+    assert_eq!(
+        ref_edges[0].dst,
+        "data:local/python-service@sqlalchemy:users"
+    );
+    assert_eq!(
+        ref_edges[0].props["references"],
+        serde_json::json!([
+            {
+                "field": "author",
+                "relation": "relationship",
+                "target": "User",
+            },
+            {
+                "field": "author_id",
+                "relation": "ForeignKey",
+                "target": "users.id",
+                "target_table": "users",
+                "target_column": "id",
+            },
+        ])
+    );
+    assert!(
+        !extraction
+            .nodes
+            .iter()
+            .any(|node| node.label == "Gap" && node.props["framework"] == "sqlalchemy")
+    );
+}
+
+#[test]
+fn sqlalchemy_mapped_annotation_infers_relationship_targets_and_gaps_on_union() {
+    // #738/#746 review: SQLAlchemy 2 `Mapped[...]` annotations supply the
+    // relationship target when `relationship(...)` has no positional or
+    // `argument=` target, unwrapping one level of `list`/`List`/`set`/`Set`/
+    // `Optional`/`typing.*` for string literals and bare/dotted symbols, while
+    // irreducible annotations such as `Mapped[Union[A, B]]` stay a Gap.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "models.py",
+        r#"
+import typing
+from typing import List, Optional, Set, Union
+from sqlalchemy import Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+class Child(Base):
+    __tablename__ = "children"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent: Mapped["Parent"] = relationship()
+    opt_parent: Mapped[Optional["Parent"]] = relationship()
+
+class Tag(Base):
+    __tablename__ = "tags"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+class Parent(Base):
+    __tablename__ = "parents"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    children: Mapped[list["Child"]] = relationship(back_populates="parent")
+    typed_children: Mapped[List[Child]] = relationship()
+    tags: Mapped[Set[Tag]] = relationship()
+    extra_tags: Mapped[typing.Set[Tag]] = relationship()
+    ambiguous_rel: Mapped[Union[Child, Tag]] = relationship()
+"#,
+    );
+
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let refs = edge_pairs(&extraction, "REFERENCES");
+    assert!(refs.contains(&(
+        "data:local/python-service@sqlalchemy:children",
+        "data:local/python-service@sqlalchemy:parents"
+    )));
+    assert!(refs.contains(&(
+        "data:local/python-service@sqlalchemy:parents",
+        "data:local/python-service@sqlalchemy:children"
+    )));
+    assert!(refs.contains(&(
+        "data:local/python-service@sqlalchemy:parents",
+        "data:local/python-service@sqlalchemy:tags"
+    )));
+
+    let parent_to_child = extraction
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.label == "REFERENCES"
+                && edge.src == "data:local/python-service@sqlalchemy:parents"
+                && edge.dst == "data:local/python-service@sqlalchemy:children"
+        })
+        .expect("parents -> children REFERENCES edge");
+    assert_eq!(
+        parent_to_child.props["references"],
+        serde_json::json!([
+            {
+                "field": "children",
+                "relation": "relationship",
+                "target": "Child",
+            },
+            {
+                "field": "typed_children",
+                "relation": "relationship",
+                "target": "Child",
+            },
+        ])
+    );
+
+    let gaps: Vec<&Node> = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "sqlalchemy")
+        .collect();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].props["field"], "ambiguous_rel");
+    assert_eq!(
+        gaps[0].props["reason"],
+        "relationship target is not provable"
+    );
+    assert_eq!(gaps[0].props["target"], "Mapped[Union[Child, Tag]]");
+    assert!(refs.contains(&(
+        "data:local/python-service@sqlalchemy:parents",
+        gaps[0].id.as_str()
+    )));
+}
+
+#[test]
+fn sqlalchemy_schema_qualified_entities_and_foreign_keys_resolve_by_schema() {
+    // #738/#746 review: entities record `schema` from `__table_args__` dict or
+    // tuple trailing dict, include `{schema}.{table}` in entity ids, key
+    // duplicate detection and `by_table` by `(Option<schema>, table)`, match
+    // 3-part FKs against `Some(schema)` and 2-part FKs against `None`, and emit
+    // Gaps for unknown schemas or >3-part FK targets.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "models.py",
+        r#"
+from sqlalchemy import Column, ForeignKey, Integer, UniqueConstraint
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class PublicUser(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+
+class AuditUser(Base):
+    __tablename__ = "users"
+    __table_args__ = {"schema": "audit"}
+    id = Column(Integer, primary_key=True)
+
+class BillingAccount(Base):
+    __tablename__ = "accounts"
+    __table_args__ = (UniqueConstraint("id"), {"schema": "billing"})
+    id = Column(Integer, primary_key=True)
+
+class Event(Base):
+    __tablename__ = "events"
+    id = Column(Integer, primary_key=True)
+    public_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    audit_user_id = Column(Integer, ForeignKey("audit.users.id"), nullable=False)
+    billing_account_id = Column(Integer, ForeignKey("billing.accounts.id"), nullable=False)
+    missing_schema_user_id = Column(Integer, ForeignKey("other.users.id"))
+    malformed_fk_id = Column(Integer, ForeignKey("cat.audit.users.id"))
+"#,
+    );
+
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let entities: BTreeMap<&str, &Node> = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "DataEntity")
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    assert_eq!(
+        entities.keys().copied().collect::<Vec<_>>(),
+        vec![
+            "data:local/python-service@sqlalchemy:audit.users",
+            "data:local/python-service@sqlalchemy:billing.accounts",
+            "data:local/python-service@sqlalchemy:events",
+            "data:local/python-service@sqlalchemy:users",
+        ]
+    );
+    assert!(
+        entities["data:local/python-service@sqlalchemy:users"]
+            .props
+            .get("schema")
+            .is_none()
+    );
+    assert_eq!(
+        entities["data:local/python-service@sqlalchemy:audit.users"].props["schema"],
+        "audit"
+    );
+    assert_eq!(
+        entities["data:local/python-service@sqlalchemy:billing.accounts"].props["schema"],
+        "billing"
+    );
+
+    let refs = edge_pairs(&extraction, "REFERENCES");
+    assert!(refs.contains(&(
+        "data:local/python-service@sqlalchemy:events",
+        "data:local/python-service@sqlalchemy:users"
+    )));
+    assert!(refs.contains(&(
+        "data:local/python-service@sqlalchemy:events",
+        "data:local/python-service@sqlalchemy:audit.users"
+    )));
+    assert!(refs.contains(&(
+        "data:local/python-service@sqlalchemy:events",
+        "data:local/python-service@sqlalchemy:billing.accounts"
+    )));
+
+    let gaps: Vec<&Node> = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "sqlalchemy")
+        .collect();
+    assert_eq!(gaps.len(), 2);
+    let missing_schema_gap = gaps
+        .iter()
+        .find(|g| g.props["field"] == "missing_schema_user_id")
+        .expect("missing schema gap");
+    assert_eq!(
+        missing_schema_gap.props["reason"],
+        "ForeignKey target table is not a recovered entity"
+    );
+    assert_eq!(missing_schema_gap.props["target"], "other.users.id");
+
+    let malformed_gap = gaps
+        .iter()
+        .find(|g| g.props["field"] == "malformed_fk_id")
+        .expect("4-part FK gap");
+    assert_eq!(
+        malformed_gap.props["reason"],
+        "ForeignKey target is not a table.column reference"
+    );
+    assert_eq!(malformed_gap.props["target"], "cat.audit.users.id");
+}
