@@ -1042,10 +1042,7 @@ struct ProducerReads {
     omitted_stored_receipts: std::collections::BTreeMap<String, u64>,
     /// Fact identities omitted during captured TypeScript extraction or store
     /// persistence (#725).
-    omitted_receipt_facts: Vec<(
-        core_graph::source::FactKey,
-        core_graph::source::ReceiptOmissionKind,
-    )>,
+    omitted_receipt_facts: Vec<core_graph::source::SourceOmission>,
     /// Whether every omitted receipt had a fact key (#725).
     omitted_receipt_facts_complete: bool,
     /// Whether the captured TypeScript producer ran (#725).
@@ -1068,22 +1065,26 @@ impl Default for ProducerReads {
 }
 
 impl ProducerReads {
-    fn record_stored_omissions(&mut self, omitted_facts: Vec<core_graph::source::FactKey>) {
-        self.omitted_receipt_facts.extend(
-            omitted_facts
-                .into_iter()
-                .map(|fact| (fact, core_graph::source::ReceiptOmissionKind::StoreCapacity)),
-        );
+    fn record_stored_omissions(
+        &mut self,
+        omitted_facts: Vec<(core_graph::source::FactKey, String)>,
+    ) {
+        self.omitted_receipt_facts
+            .extend(
+                omitted_facts
+                    .into_iter()
+                    .map(
+                        |(fact, emitted_fact_digest)| core_graph::source::SourceOmission {
+                            fact,
+                            emitted_fact_digest,
+                            kind: core_graph::source::ReceiptOmissionKind::StoreCapacity,
+                        },
+                    ),
+            );
     }
 
     fn source_omissions(&self) -> Vec<core_graph::source::SourceOmission> {
-        self.omitted_receipt_facts
-            .iter()
-            .map(|(fact, kind)| core_graph::source::SourceOmission {
-                fact: fact.clone(),
-                kind: *kind,
-            })
-            .collect()
+        self.omitted_receipt_facts.clone()
     }
 }
 

@@ -63,6 +63,10 @@ impl ReceiptOmissionKind {
 pub struct SourceOmission {
     /// Complete typed fact identity.
     pub fact: FactKey,
+    /// Complete fact digest the omitted receipt was emitted for. A record is
+    /// kept only while it equals the published fact's digest, so an omitted
+    /// occurrence never describes different current content.
+    pub emitted_fact_digest: String,
     /// Bound that omitted the fact's primary receipt.
     pub kind: ReceiptOmissionKind,
 }
@@ -783,26 +787,34 @@ fn replace_omissions(
         )?;
         return Ok(());
     }
-    let mut by_fact: BTreeMap<&FactKey, ReceiptOmissionKind> = BTreeMap::new();
+    let mut by_fact: BTreeMap<&FactKey, Vec<&SourceOmission>> = BTreeMap::new();
     for omission in omissions.records {
         omission.fact.validate()?;
-        by_fact
-            .entry(&omission.fact)
-            .and_modify(|existing| {
-                if omission.kind < *existing {
-                    *existing = omission.kind;
-                }
-            })
-            .or_insert(omission.kind);
+        if omission.emitted_fact_digest.len() != 72 {
+            return Err(GraphError::SourceBinding("invalid omission digest"));
+        }
+        by_fact.entry(&omission.fact).or_default().push(omission);
     }
     let mut inserted: i64 = 0;
-    for (fact, kind) in by_fact {
+    for (fact, records) in by_fact {
         let Some(emitted_fact_digest) = current_digest(transaction, fact)? else {
             continue;
         };
-        if load_binding(transaction, fact)?.is_some_and(|binding| binding.repo_key != repo_key) {
+        // A current binding (from any repository, including this publication)
+        // means a primary receipt was retained, so the fact is not omitted.
+        if load_binding(transaction, fact)?.is_some() {
             continue;
         }
+        // Only occurrences emitted for the published content describe it;
+        // among those, keep the smallest kind.
+        let Some(kind) = records
+            .iter()
+            .filter(|record| record.emitted_fact_digest == emitted_fact_digest)
+            .map(|record| record.kind)
+            .min()
+        else {
+            continue;
+        };
         let changes = match fact {
             FactKey::Node { id } => transaction.execute(
                 "INSERT OR IGNORE INTO source_node_omissions(node_id, repo_key, kind, emitted_fact_digest) VALUES (?1, ?2, ?3, ?4)",

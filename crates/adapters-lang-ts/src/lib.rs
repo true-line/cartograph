@@ -173,9 +173,10 @@ pub struct IncrementalStats {
     /// in the graph; only their primary citation is missing, and each named
     /// file says so instead of failing the whole extraction.
     pub omitted_rule_receipts: std::collections::BTreeMap<String, u64>,
-    /// Fact identities whose primary receipts were omitted during captured
-    /// extraction, paired with the bound that omitted them (#725).
-    pub omitted_receipt_facts: Vec<(core_graph::FactKey, core_graph::source::ReceiptOmissionKind)>,
+    /// Facts whose primary receipts were omitted during captured extraction,
+    /// with the digest each omitted receipt was emitted for and the bound that
+    /// omitted it (#725).
+    pub omitted_receipt_facts: Vec<core_graph::source::SourceOmission>,
     /// True when every extraction receipt omission produced a [`core_graph::FactKey`];
     /// false when a per-file declaration bound omitted unminted receipts by count only.
     pub omitted_receipt_facts_complete: bool,

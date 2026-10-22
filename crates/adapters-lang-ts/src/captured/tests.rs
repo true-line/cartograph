@@ -746,11 +746,10 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
     let expected_b_decls: Vec<_> = per_file[1]
         .declarations
         .iter()
-        .map(|(receipt, _)| {
-            (
-                receipt.fact_key().clone(),
-                core_graph::source::ReceiptOmissionKind::Declarations,
-            )
+        .map(|(receipt, _)| core_graph::source::SourceOmission {
+            fact: receipt.fact_key().clone(),
+            emitted_fact_digest: receipt.fact_digest().to_owned(),
+            kind: core_graph::source::ReceiptOmissionKind::Declarations,
         })
         .collect();
     assert_eq!(stats.omitted_receipt_facts, expected_b_decls);
@@ -765,11 +764,10 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
     let expected_all_decls: Vec<_> = per_file
         .iter()
         .flat_map(|file| &file.declarations)
-        .map(|(receipt, _)| {
-            (
-                receipt.fact_key().clone(),
-                core_graph::source::ReceiptOmissionKind::Declarations,
-            )
+        .map(|(receipt, _)| core_graph::source::SourceOmission {
+            fact: receipt.fact_key().clone(),
+            emitted_fact_digest: receipt.fact_digest().to_owned(),
+            kind: core_graph::source::ReceiptOmissionKind::Declarations,
         })
         .collect();
     assert_eq!(stats.omitted_receipt_facts, expected_all_decls);
@@ -789,14 +787,18 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
     let omitted_rule_keys: Vec<_> = stats
         .omitted_receipt_facts
         .iter()
-        .filter(|(_, kind)| *kind == core_graph::source::ReceiptOmissionKind::Rules)
-        .map(|(key, _)| key.clone())
+        .filter(|omission| omission.kind == core_graph::source::ReceiptOmissionKind::Rules)
+        .map(|omission| omission.fact.clone())
         .collect();
     assert_eq!(omitted_rule_keys, vec![lost.fact_key().clone()]);
+    assert!(stats.omitted_receipt_facts.iter().any(|omission| {
+        omission.kind == core_graph::source::ReceiptOmissionKind::Rules
+            && omission.emitted_fact_digest == lost.fact_digest()
+    }));
     let omitted_decl_count = stats
         .omitted_receipt_facts
         .iter()
-        .filter(|(_, kind)| *kind == core_graph::source::ReceiptOmissionKind::Declarations)
+        .filter(|omission| omission.kind == core_graph::source::ReceiptOmissionKind::Declarations)
         .count() as u64;
     assert_eq!(
         omitted_decl_count,

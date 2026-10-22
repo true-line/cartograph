@@ -1074,10 +1074,12 @@ fn receipt_omissions_publish_lookup_and_require_complete_coverage() {
     let omissions_a = [
         SourceOmission {
             fact: FactKey::from_node(&n_omitted),
+            emitted_fact_digest: node_digest(&n_omitted).unwrap(),
             kind: ReceiptOmissionKind::Declarations,
         },
         SourceOmission {
             fact: FactKey::from_edge(&e_omitted),
+            emitted_fact_digest: edge_digest(&e_omitted).unwrap(),
             kind: ReceiptOmissionKind::Rules,
         },
     ];
@@ -1202,22 +1204,27 @@ fn receipt_omissions_deduplicate_by_smallest_kind_and_respect_bounds_and_rewrite
     let duplicate_omissions = [
         SourceOmission {
             fact: FactKey::from_node(&n1),
+            emitted_fact_digest: node_digest(&n1).unwrap(),
             kind: ReceiptOmissionKind::StoreCapacity,
         },
         SourceOmission {
             fact: FactKey::from_node(&n1),
+            emitted_fact_digest: node_digest(&n1).unwrap(),
             kind: ReceiptOmissionKind::Rules,
         },
         SourceOmission {
             fact: FactKey::from_node(&n1),
+            emitted_fact_digest: node_digest(&n1).unwrap(),
             kind: ReceiptOmissionKind::Declarations,
         },
         SourceOmission {
             fact: FactKey::from_node(&n2),
+            emitted_fact_digest: node_digest(&n2).unwrap(),
             kind: ReceiptOmissionKind::StoreCapacity,
         },
         SourceOmission {
             fact: FactKey::from_node(&n2),
+            emitted_fact_digest: node_digest(&n2).unwrap(),
             kind: ReceiptOmissionKind::Rules,
         },
     ];
@@ -1289,6 +1296,7 @@ fn receipt_omissions_deduplicate_by_smallest_kind_and_respect_bounds_and_rewrite
     let over_bound = vec![
         SourceOmission {
             fact: FactKey::from_node(&rewritten_n1),
+            emitted_fact_digest: node_digest(&rewritten_n1).unwrap(),
             kind: ReceiptOmissionKind::Rules,
         };
         MAX_OMISSIONS + 1
@@ -1369,6 +1377,7 @@ fn omission_only_publication_advances_revision_and_binds_selection_basis() {
 
     let records = [SourceOmission {
         fact: fact.clone(),
+        emitted_fact_digest: node_digest(&fact_node).unwrap(),
         kind: ReceiptOmissionKind::StoreCapacity,
     }];
     let expected = store.read_snapshot().unwrap();
@@ -1448,6 +1457,7 @@ fn bounded_omission_reads_preflight_coverage_schema_and_reject_malformed_cells()
     let fact = FactKey::from_node(&fact_node);
     let records = [SourceOmission {
         fact: fact.clone(),
+        emitted_fact_digest: node_digest(&fact_node).unwrap(),
         kind: ReceiptOmissionKind::Rules,
     }];
     let expected = store.read_snapshot().unwrap();
@@ -1572,4 +1582,100 @@ fn bounded_omission_reads_preflight_coverage_schema_and_reject_malformed_cells()
             .revision,
         after
     );
+}
+
+#[test]
+fn omission_records_require_the_omitted_digest_and_no_retained_binding() {
+    // AC-0314: an omitted occurrence describes the published fact only when
+    // its emitted digest is the fact's current digest, and a fact whose
+    // primary receipt was retained (it has a binding) is never Omitted, even
+    // when another collapsed occurrence of it was omitted. (T-0314)
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let bound = node("repo/a:bound");
+    let stale = node("repo/a:stale");
+    let exact = node("repo/a:exact");
+    let older_stale = Node {
+        props: serde_json::json!({"prov": {"content_hash": "older"}, "name": "stale"}),
+        ..stale.clone()
+    };
+    let records = [
+        SourceOmission {
+            fact: FactKey::from_node(&bound),
+            emitted_fact_digest: node_digest(&bound).unwrap(),
+            kind: ReceiptOmissionKind::Rules,
+        },
+        SourceOmission {
+            fact: FactKey::from_node(&stale),
+            emitted_fact_digest: node_digest(&older_stale).unwrap(),
+            kind: ReceiptOmissionKind::Rules,
+        },
+        SourceOmission {
+            fact: FactKey::from_node(&exact),
+            emitted_fact_digest: node_digest(&older_stale).unwrap(),
+            kind: ReceiptOmissionKind::Declarations,
+        },
+        SourceOmission {
+            fact: FactKey::from_node(&exact),
+            emitted_fact_digest: node_digest(&exact).unwrap(),
+            kind: ReceiptOmissionKind::StoreCapacity,
+        },
+    ];
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch {
+                    upsert_nodes: vec![bound.clone(), stale.clone(), exact.clone()],
+                    ..GraphPatch::default()
+                },
+                "repo/a",
+                &[node_binding(&bound, "repo/a", "r1")],
+                Some(&coverage_record("repo/a")),
+                SourceOmissions {
+                    records: &records,
+                    complete: true,
+                },
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .receipt_omissions(&[
+                FactKey::from_node(&bound),
+                FactKey::from_node(&stale),
+                FactKey::from_node(&exact),
+            ])
+            .unwrap(),
+        vec![
+            OmissionLookup::NotOmitted,
+            OmissionLookup::NotOmitted,
+            // Only the occurrence emitted for the published content counts,
+            // even though the stale one has a smaller kind.
+            OmissionLookup::Omitted {
+                repo_key: "repo/a".into(),
+                kind: ReceiptOmissionKind::StoreCapacity,
+            },
+        ]
+    );
+    let malformed = [SourceOmission {
+        fact: FactKey::from_node(&exact),
+        emitted_fact_digest: "short".into(),
+        kind: ReceiptOmissionKind::Rules,
+    }];
+    let expected = store.read_snapshot().unwrap();
+    assert!(matches!(
+        store.apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+            &expected,
+            &GraphPatch::default(),
+            "repo/a",
+            &[],
+            None,
+            SourceOmissions {
+                records: &malformed,
+                complete: true,
+            },
+        ),
+        Err(GraphError::SourceBinding("invalid omission digest"))
+    ));
 }

@@ -700,6 +700,7 @@ impl ReceiptStore {
                         receipt.id().to_owned(),
                         receipt.file().path.clone(),
                         receipt.fact_key().clone(),
+                        receipt.fact_digest().to_owned(),
                         json,
                     ));
                 }
@@ -712,7 +713,7 @@ impl ReceiptStore {
             .map_err(storage_error)?;
         let (mut count, mut bytes) = receipt_storage(&tx)?;
         let mut retained = RetainedReceipts::default();
-        for (id, path, fact_key, payload) in rows {
+        for (id, path, fact_key, fact_digest, payload) in rows {
             let old: Option<(String, String, String)> = tx
                 .query_row(
                     "SELECT source_id,repo_key,payload FROM receipts WHERE id=?1",
@@ -738,7 +739,7 @@ impl ReceiptStore {
             } else if count + 1 > self.capacity.0 || bytes + payload.len() as u64 > self.capacity.1
             {
                 *retained.omitted.entry(path).or_default() += 1;
-                retained.omitted_facts.push(fact_key);
+                retained.omitted_facts.push((fact_key, fact_digest));
                 continue;
             } else {
                 count += 1;
@@ -1152,7 +1153,7 @@ impl PrimarySourceStore {
 pub(crate) struct RetainedReceipts {
     ids: std::collections::BTreeSet<String>,
     omitted: std::collections::BTreeMap<String, u64>,
-    pub(crate) omitted_facts: Vec<FactKey>,
+    pub(crate) omitted_facts: Vec<(FactKey, String)>,
 }
 
 impl RetainedReceipts {
@@ -1160,7 +1161,10 @@ impl RetainedReceipts {
     pub(crate) fn keep_retained(
         self,
         receipts: &mut Vec<Receipt>,
-    ) -> (std::collections::BTreeMap<String, u64>, Vec<FactKey>) {
+    ) -> (
+        std::collections::BTreeMap<String, u64>,
+        Vec<(FactKey, String)>,
+    ) {
         receipts.retain(|receipt| self.ids.contains(receipt.id()));
         (self.omitted, self.omitted_facts)
     }
@@ -1692,7 +1696,7 @@ mod tests {
             );
             let expected_omitted_facts: Vec<_> = receipts[1..]
                 .iter()
-                .map(|receipt| receipt.fact_key().clone())
+                .map(|receipt| (receipt.fact_key().clone(), receipt.fact_digest().to_owned()))
                 .collect();
             assert_eq!(omitted_facts, expected_omitted_facts);
             assert_eq!(receipt_count(&store), 1);

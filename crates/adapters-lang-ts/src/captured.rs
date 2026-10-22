@@ -427,7 +427,11 @@ fn extract_captured_dir_bounded(
             for receipt in file_receipts.rules {
                 let bytes = receipt.to_json()?.len();
                 if receipt_bytes + bytes > budget.bytes || receipts.len() == budget.receipts {
-                    omitted_rules.push((path.to_owned(), receipt.fact_key().clone()));
+                    omitted_rules.push((
+                        path.to_owned(),
+                        receipt.fact_key().clone(),
+                        receipt.fact_digest().to_owned(),
+                    ));
                 } else {
                     receipt_bytes += bytes;
                     receipts.push(receipt);
@@ -447,10 +451,13 @@ fn extract_captured_dir_bounded(
                         .omitted_declaration_receipts
                         .entry(path.to_owned())
                         .or_default() += 1;
-                    stats.omitted_receipt_facts.push((
-                        receipt.fact_key().clone(),
-                        core_graph::source::ReceiptOmissionKind::Declarations,
-                    ));
+                    stats
+                        .omitted_receipt_facts
+                        .push(core_graph::source::SourceOmission {
+                            fact: receipt.fact_key().clone(),
+                            emitted_fact_digest: receipt.fact_digest().to_owned(),
+                            kind: core_graph::source::ReceiptOmissionKind::Declarations,
+                        });
                 } else {
                     declaration_bytes += bytes;
                     declarations.push((receipt, bytes));
@@ -467,12 +474,16 @@ fn extract_captured_dir_bounded(
     // Count an omitted rule only when its fact survived directory completion,
     // so the named omissions describe facts the graph actually holds.
     let surviving = surviving_facts(&extraction);
-    for (path, key) in omitted_rules {
+    for (path, key, digest) in omitted_rules {
         if surviving(&key) {
             *stats.omitted_rule_receipts.entry(path).or_default() += 1;
             stats
                 .omitted_receipt_facts
-                .push((key, core_graph::source::ReceiptOmissionKind::Rules));
+                .push(core_graph::source::SourceOmission {
+                    fact: key,
+                    emitted_fact_digest: digest,
+                    kind: core_graph::source::ReceiptOmissionKind::Rules,
+                });
         }
     }
     drop(surviving);
@@ -488,10 +499,13 @@ fn extract_captured_dir_bounded(
                 .omitted_declaration_receipts
                 .entry(receipt.file().path.clone())
                 .or_default() += 1;
-            stats.omitted_receipt_facts.push((
-                receipt.fact_key().clone(),
-                core_graph::source::ReceiptOmissionKind::Declarations,
-            ));
+            stats
+                .omitted_receipt_facts
+                .push(core_graph::source::SourceOmission {
+                    fact: receipt.fact_key().clone(),
+                    emitted_fact_digest: receipt.fact_digest().to_owned(),
+                    kind: core_graph::source::ReceiptOmissionKind::Declarations,
+                });
         } else {
             receipt_bytes += bytes;
             receipts.push(receipt);
