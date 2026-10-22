@@ -96,5 +96,10 @@ On the proposed typed-error revision, `evidence_unavailable` means absent retain
 evidence, not proof of forgetting or omission. `evidence_invalid` means retained
 evidence failed validation (including underlying retention bounds); `stale_basis`
 means the selected identity is no longer usable; `storage_unavailable` is operational.
-Do not infer a more specific cause. Check live capabilities: absence reasons are
-currently unavailable.
+Do not infer a more specific cause. When live capabilities explicitly advertise
+`forgotten_receipt_classification.available`, `evidence_forgotten` reports a
+durable forget classification for the exact current-basis receipt binding. It
+returns no source span and is not permission to recapture, ingest or read the
+checkout. This partial capability does not imply receipt-omission support;
+`evidence_absence_reason_available` can remain false. Report generic unavailable
+without inventing a cause when this specific result is absent.

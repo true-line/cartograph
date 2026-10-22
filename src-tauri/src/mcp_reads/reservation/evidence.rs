@@ -63,7 +63,10 @@ pub(crate) fn evidence_peak_bytes(
         snapshot_id,
     ])?;
     let source = crate::sources::selected_source_peak_bytes()?;
-    let common = sum(&[targets, bindings, source, source])?;
+    // Exact forgotten-status lookup can retain this bounded summary while
+    // validating a pinned receipt; source36 + RFC3339 timestamp20 bytes.
+    let forgotten = sum(&[36, 20, size_of::<crate::primary_source::TombstoneSummary>()])?;
+    let common = sum(&[targets, bindings, source, source, forgotten])?;
     let object = usize::try_from(
         limits
             .max_file_validation_bytes
@@ -89,7 +92,12 @@ pub(crate) fn evidence_peak_bytes(
         target_payload,
     ])?;
     let response_wire = sum(&[target_wire, string_wire(span)?, receipt_wire])?;
+    // On capture absence the original validated receipt remains borrowed while
+    // receipt_status performs its own mandatory stored-receipt validation.
+    // The latter decode is sequential with descriptor/file work, not free.
+    let receipt_status_peak = sum(&[receipt_typed, receipt_parse])?;
     let peak = [
+        receipt_status_peak,
         freshness_bytes,
         receipt_parse,
         sum(&[receipt_typed, manifest_parse])?,

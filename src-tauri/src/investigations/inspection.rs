@@ -20,6 +20,7 @@ pub(crate) enum InspectionError {
     OrdinalOutOfRange,
     Limit,
     Unavailable,
+    Forgotten,
     Invalid,
     Operational,
 }
@@ -163,6 +164,50 @@ pub(crate) fn resolve_with_receipt_typed_bounded(
     ordinal: usize,
     limits: SnapshotReadLimits,
 ) -> Result<(InvestigationInspectionTarget, RetentionGuard, Receipt), InspectionError> {
+    resolve_receipt_inner(
+        state,
+        fact,
+        expected_snapshot,
+        expected_receipt,
+        None,
+        ordinal,
+        limits,
+        false,
+    )
+}
+
+/// MCP-only positive forgotten classification. It identifies retention of the
+/// exact checked binding; it does not validate old range fields after reclaim.
+pub(crate) fn resolve_mcp_with_receipt_typed_bounded(
+    state: &AppState,
+    fact: &TaskFactKey,
+    expected_snapshot: &str,
+    expected_target: Option<&InvestigationInspectionTarget>,
+    ordinal: usize,
+    limits: SnapshotReadLimits,
+) -> Result<(InvestigationInspectionTarget, RetentionGuard, Receipt), InspectionError> {
+    resolve_receipt_inner(
+        state,
+        fact,
+        expected_snapshot,
+        expected_target.map(|t| t.receipt_id.as_str()),
+        expected_target,
+        ordinal,
+        limits,
+        true,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn resolve_receipt_inner(
+    state: &AppState,
+    fact: &TaskFactKey,
+    expected_snapshot: &str,
+    expected_receipt: Option<&str>,
+    expected_target: Option<&InvestigationInspectionTarget>,
+    ordinal: usize,
+    limits: SnapshotReadLimits,
+    classify_forgotten: bool,
+) -> Result<(InvestigationInspectionTarget, RetentionGuard, Receipt), InspectionError> {
     if ordinal >= 1024 {
         return Err(InspectionError::OrdinalOutOfRange);
     }
@@ -200,26 +245,51 @@ pub(crate) fn resolve_with_receipt_typed_bounded(
     {
         return Err(InspectionError::Stale);
     }
-    let receipt = state
-        .primary_sources
-        .task_receipt(
-            &guard,
-            &binding.fact,
-            &binding.emitted_fact_digest,
-            &binding.repo_key,
-            &binding.receipt_id,
-        )
-        .map_err(InspectionError::from)?;
+    if expected_target.is_some_and(|target| {
+        target.fact_digest != binding.emitted_fact_digest
+            || target.registered_source_id != source.source_id
+    }) {
+        return Err(InspectionError::Stale);
+    }
+    let unavailable = |receipt: Option<&Receipt>| -> Result<InspectionError, InspectionError> {
+        if classify_forgotten
+            && state
+                .primary_sources
+                .task_binding_forgotten(&guard, &binding, receipt)
+                .map_err(InspectionError::from)?
+        {
+            Ok(InspectionError::Forgotten)
+        } else {
+            Ok(InspectionError::Unavailable)
+        }
+    };
+    let receipt = match state.primary_sources.task_receipt(
+        &guard,
+        &binding.fact,
+        &binding.emitted_fact_digest,
+        &binding.repo_key,
+        &binding.receipt_id,
+    ) {
+        Ok(receipt) => receipt,
+        Err(crate::primary_source::PinnedReadError::Unavailable) => return Err(unavailable(None)?),
+        Err(error) => return Err(error.into()),
+    };
     // A caller-selected range outside this receipt cannot become valid by
     // reconnecting to the same graph; reserve Stale for changed identities.
     if ordinal >= receipt.ranges().len() {
         return Err(InspectionError::OrdinalOutOfRange);
     }
     let target = descriptor(&receipt, &snapshot_id, ordinal).map_err(|_| InspectionError::Stale)?;
-    state
+    match state
         .primary_sources
         .task_capture_present(&guard, &target.captured)
-        .map_err(InspectionError::from)?;
+    {
+        Ok(()) => {}
+        Err(crate::primary_source::PinnedReadError::Unavailable) => {
+            return Err(unavailable(Some(&receipt))?);
+        }
+        Err(error) => return Err(error.into()),
+    }
     Ok((target, guard, receipt))
 }
 pub(crate) fn validate_targets(

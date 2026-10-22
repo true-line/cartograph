@@ -32,11 +32,22 @@ admission limits still return `response_limit`. These fixed codes contain no
 source text or filesystem diagnostics; existing desktop inspection callers keep
 their original refresh message.
 
-`evidence_absence_reason_available: false` advertises a remaining acceptance gap:
-the store has no durable forget tombstone, so a missing capture cannot establish
-that a human forgot it. Distinguishing positively forgotten evidence remains
-required by AC-0288; the generic unavailable response does not satisfy it. Neither
-clients nor the skill may infer forgotten or receipt-omitted from absence.
+`evidence_absence_reason_available: false` continues to advertise incomplete
+classification: per-fact receipt omission has no persisted producer lookup yet.
+The separate `forgotten_receipt_classification` capability reports partial
+support scoped to `exact_current_basis_binding_receipt_id`, with
+`omitted_available: false` and `unknown_is_forgotten: false`.
+
+For MCP, `evidence_forgotten` requires a validated durable forget record for the
+receipt selected by the current graph binding. The resolver validates the fact
+digest, registration/source and basis before and after acquiring the retention
+guard. A retained receipt additionally supplies its validated fact/repo/source
+identity; a reclaimed receipt requires exact current-binding receipt-ID and
+source agreement with the reclaim ledger. A client-supplied receipt ID alone
+cannot establish this classification. Unknown IDs and ordinary absence remain
+`evidence_unavailable`; malformed records and operational failures retain their
+separate errors. Historical inspection callers keep their unavailable semantics.
+Neither clients nor the skill may infer forgotten or receipt-omitted from absence.
 
 Delivery is macOS/Unix first. Acceptance must name the actual tested platform;
 a Unix result does not claim Windows support. Windows remains a separate pending

@@ -9,6 +9,7 @@ fn inspection_error(error: crate::investigations::inspection::InspectionError) -
         InspectionError::Stale => ReadError::StaleBasis,
         InspectionError::OrdinalOutOfRange => ReadError::InvalidRequest,
         InspectionError::Limit => ReadError::Limit,
+        InspectionError::Forgotten => ReadError::EvidenceForgotten,
         InspectionError::Unavailable => ReadError::EvidenceUnavailable,
         InspectionError::Invalid => ReadError::EvidenceInvalid,
         InspectionError::Operational => ReadError::Storage,
@@ -67,7 +68,7 @@ impl ReadSession {
             return Err(ReadError::Limit);
         }
         let (target, _guard, receipt) =
-            crate::investigations::inspection::resolve_with_receipt_typed_bounded(
+            crate::investigations::inspection::resolve_mcp_with_receipt_typed_bounded(
                 state,
                 fact,
                 &self.basis.recovered_graph_id,
@@ -163,11 +164,11 @@ impl ReadSession {
             return Err(ReadError::Limit);
         }
         let (actual, guard, receipt) =
-            crate::investigations::inspection::resolve_with_receipt_typed_bounded(
+            crate::investigations::inspection::resolve_mcp_with_receipt_typed_bounded(
                 state,
                 &target.fact,
                 &self.basis.recovered_graph_id,
-                Some(&target.receipt_id),
+                Some(target),
                 target.receipt_inventory_index as usize,
                 self.graph_limits,
             )

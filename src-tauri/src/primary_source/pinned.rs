@@ -145,6 +145,51 @@ impl PrimarySourceStore {
             .map_err(|_| PinnedReadError::Operational)
     }
 
+    /// Positive retention classification for a binding already checked against
+    /// the caller's exact graph basis. Never call this with a client receipt ID
+    /// alone. Reclaimed metadata cannot attest old ranges or full receipt fields.
+    pub(crate) fn task_binding_forgotten(
+        &self,
+        guard: &RetentionGuard,
+        binding: &core_graph::source::SourceBinding,
+        validated_receipt: Option<&Receipt>,
+    ) -> Result<bool, PinnedReadError> {
+        self.validate_task_guard(guard, &guard.source_id)?;
+        let store = self
+            .receipts
+            .lock()
+            .map_err(|_| PinnedReadError::Operational)?;
+        let status = store
+            .receipt_status(&binding.receipt_id)
+            .map_err(|_| PinnedReadError::Operational)?;
+        match status {
+            ReceiptStatus::Present | ReceiptStatus::Unknown => Ok(false),
+            ReceiptStatus::CaptureForgotten { tombstone } => {
+                if tombstone.source_id != guard.source_id {
+                    return Err(PinnedReadError::Invalid);
+                }
+                // receipt_status already validates the current stored receipt.
+                // Reuse the original guarded read instead of a third decode.
+                let receipt = validated_receipt.ok_or(PinnedReadError::Unavailable)?;
+                if receipt.id() != binding.receipt_id
+                    || receipt.source_id().as_str() != guard.source_id
+                    || receipt.repo_key() != binding.repo_key
+                    || receipt.fact_key() != &binding.fact
+                    || receipt.fact_digest() != binding.emitted_fact_digest
+                {
+                    return Err(PinnedReadError::Invalid);
+                }
+                Ok(true)
+            }
+            ReceiptStatus::Reclaimed { tombstone } => {
+                if tombstone.source_id != guard.source_id {
+                    return Err(PinnedReadError::Invalid);
+                }
+                Ok(true)
+            }
+        }
+    }
+
     pub(crate) fn task_receipt(
         &self,
         guard: &RetentionGuard,

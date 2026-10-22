@@ -164,6 +164,20 @@ fn real_capabilities_discovery_catalog_and_identity_bound_artifact_pages() {
     assert_eq!(data["discovery_fact_kinds"], json!(["node"]));
     assert_eq!(data["flows_access"]["artifact_id"], "flow-dossiers");
     assert_eq!(data["receipt_omission_classification"]["available"], false);
+    assert_eq!(data["evidence_absence_reason_available"], false);
+    assert_eq!(
+        data["forgotten_receipt_classification"]["available"],
+        data["evidence_available"]
+    );
+    assert_eq!(data["forgotten_receipt_classification"]["partial"], true);
+    assert_eq!(
+        data["forgotten_receipt_classification"]["omitted_available"],
+        false
+    );
+    assert_eq!(
+        data["forgotten_receipt_classification"]["unknown_is_forgotten"],
+        false
+    );
     assert_eq!(
         data["receipt_omission_classification"]["pending_issue"],
         725

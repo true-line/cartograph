@@ -2334,13 +2334,13 @@ fn mcp_evidence_preserves_typed_retention_failures_and_legacy_refresh_message() 
         session
             .describe_evidence(&state, &basis, &fact, 0, 65536)
             .unwrap_err(),
-        ReadError::EvidenceUnavailable
+        ReadError::EvidenceForgotten
     );
     assert_eq!(
         session
             .read_evidence(&state, &basis, &target, limits())
             .unwrap_err(),
-        ReadError::EvidenceUnavailable
+        ReadError::EvidenceForgotten
     );
     assert_eq!(
         ReadError::EvidenceUnavailable.to_string(),
@@ -2358,6 +2358,232 @@ fn mcp_evidence_preserves_typed_retention_failures_and_legacy_refresh_message() 
     assert_eq!(
         session
             .read_evidence(&state, &basis, &target, limits())
+            .unwrap_err(),
+        ReadError::Storage
+    );
+}
+
+fn mcp_forgotten_session(
+    state: &AppState,
+    source: &RegisteredSource,
+) -> crate::mcp_reads::ReadSession {
+    crate::mcp_reads::ReadSession::acquire(
+        &state.graph,
+        &state.decisions,
+        || {
+            Ok(vec![context_hub::coverage::ScopedRepo {
+                repo_key: source.repo_key.clone(),
+                registered_source_id: Some(source.source_id.clone()),
+                config_hash: "forgotten-fixture".into(),
+                layer_hints: None,
+            }])
+        },
+        core_graph::SnapshotReadLimits::default(),
+        core_graph::coverage::CoverageReadLimits::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap()
+}
+#[test]
+fn mcp_exact_pinned_and_reclaimed_forgotten_receipts_keep_v3_and_basis_boundaries() {
+    use crate::mcp_reads::{ReadError, evidence::EvidenceLimits};
+    for pinned in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let private = directory(temp.path(), "private");
+        let root = directory(temp.path(), "project");
+        std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+        let state = app_state(&private);
+        let source = register_local_source(&state, &root).unwrap();
+        let parsed = parse(&state, &source, || {});
+        let rule = rule_node(&parsed);
+        let bindings = publish(&state, &source, &parsed);
+        let binding = bindings
+            .into_iter()
+            .find(|b| b.fact == FactKey::from_node(&rule))
+            .unwrap();
+        assert!(binding.receipt_id.starts_with("ts-primary-v3:"));
+        drop(parsed);
+        if pinned {
+            retain_investigation_selection(&state, &source, &binding, "mcp-forgotten-pin");
+        }
+        let session = mcp_forgotten_session(&state, &source);
+        let basis = session.basis_id().unwrap();
+        let fact = agents::TaskFactKey::Node { id: rule.id };
+        let target = session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap()
+            .target;
+        let limits = || EvidenceLimits {
+            max_file_validation_bytes: 4096,
+            max_span_bytes: 1024,
+            max_response_bytes: 65536,
+        };
+        assert!(
+            !session
+                .read_evidence(&state, &basis, &target, limits())
+                .unwrap()
+                .text
+                .is_empty()
+        );
+        let preview = primary_source::preview(&state, &source.source_id).unwrap();
+        primary_source::forget(&state, &source.source_id, &preview.fingerprint).unwrap();
+        let status = state
+            .primary_sources
+            .receipts
+            .lock()
+            .unwrap()
+            .receipt_status(&binding.receipt_id)
+            .unwrap();
+        assert!(if pinned {
+            matches!(
+                status,
+                primary_source::ReceiptStatus::CaptureForgotten { .. }
+            )
+        } else {
+            matches!(status, primary_source::ReceiptStatus::Reclaimed { .. })
+        });
+        // The producer may truncate its capture-id list to [] under its
+        // store-wide byte pool. Exact receipt/tombstone identity still proves
+        // forgetting; this list is not an absence-completeness oracle.
+        let raw =
+            rusqlite::Connection::open(private.join("retained-source/receipts.sqlite")).unwrap();
+        raw.execute(
+            "UPDATE receipt_tombstones SET capture_ids='[]',capture_ids_truncated=1",
+            [],
+        )
+        .unwrap();
+        let wrong_guard = state
+            .primary_sources
+            .task_guard(&format!("src_{}", "f".repeat(32)))
+            .unwrap();
+        assert_eq!(
+            state
+                .primary_sources
+                .task_binding_forgotten(&wrong_guard, &binding, None)
+                .unwrap_err(),
+            primary_source::PinnedReadError::Invalid
+        );
+        drop(wrong_guard);
+        assert_eq!(
+            session
+                .describe_evidence(&state, &basis, &fact, 0, 65536)
+                .unwrap_err(),
+            ReadError::EvidenceForgotten
+        );
+        assert_eq!(
+            session
+                .read_evidence(&state, &basis, &target, limits())
+                .unwrap_err(),
+            ReadError::EvidenceForgotten
+        );
+        for field in ["receipt", "digest", "source"] {
+            let mut forged = target.clone();
+            match field {
+                "receipt" => forged.receipt_id = format!("ts-primary-v3:{}", "f".repeat(64)),
+                "digest" => forged.fact_digest = format!("node-v1:{}", "f".repeat(64)),
+                _ => forged.registered_source_id = format!("src_{}", "f".repeat(32)),
+            }
+            forged.target_id = forged.content_id().unwrap();
+            // Source substitution also has to preserve the target's internal
+            // file-source equality to reach association validation.
+            if field == "source" {
+                forged.captured.file.source_id = forged.registered_source_id.clone();
+                forged.target_id = forged.content_id().unwrap();
+            }
+            assert_eq!(
+                session
+                    .read_evidence(&state, &basis, &forged, limits())
+                    .unwrap_err(),
+                ReadError::StaleBasis,
+                "{field}"
+            );
+        }
+        assert_eq!(
+            session
+                .describe_evidence(&state, "wrong-basis", &fact, 0, 65536)
+                .unwrap_err(),
+            ReadError::StaleBasis
+        );
+        // Identical recapture positively clears the old forgotten mark; an
+        // absent capture alone never overrides a newly Present receipt.
+        let identical = parse(&state, &source, || {});
+        let identical_bindings = publish(&state, &source, &identical);
+        drop(identical);
+        assert!(
+            identical_bindings
+                .iter()
+                .any(|b| b.receipt_id == binding.receipt_id)
+        );
+        let fresh = mcp_forgotten_session(&state, &source);
+        let fresh_basis = fresh.basis_id().unwrap();
+        assert!(
+            fresh
+                .describe_evidence(&state, &fresh_basis, &fact, 0, 65536)
+                .is_ok()
+        );
+        // Changed reimport establishes a different basis and a new receipt.
+        std::fs::write(root.join("source.ts"), STABLE_B).unwrap();
+        let changed = parse(&state, &source, || {});
+        publish(&state, &source, &changed);
+        drop(changed);
+        assert_eq!(
+            session
+                .read_evidence(&state, &basis, &target, limits())
+                .unwrap_err(),
+            ReadError::StaleBasis
+        );
+        let new_session = mcp_forgotten_session(&state, &source);
+        let new_basis = new_session.basis_id().unwrap();
+        let new_target = new_session
+            .describe_evidence(&state, &new_basis, &fact, 0, 65536)
+            .unwrap()
+            .target;
+        assert_ne!(new_target.receipt_id, target.receipt_id);
+    }
+}
+#[test]
+fn mcp_unknown_missing_receipt_is_not_forgotten_and_status_errors_are_operational() {
+    use crate::mcp_reads::ReadError;
+    let temp = tempfile::tempdir().unwrap();
+    let private = directory(temp.path(), "private");
+    let root = directory(temp.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&private);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    let rule = rule_node(&parsed);
+    publish(&state, &source, &parsed);
+    drop(parsed);
+    let session = mcp_forgotten_session(&state, &source);
+    let basis = session.basis_id().unwrap();
+    let fact = agents::TaskFactKey::Node { id: rule.id };
+    let target = session
+        .describe_evidence(&state, &basis, &fact, 0, 65536)
+        .unwrap()
+        .target;
+    let raw = rusqlite::Connection::open(private.join("retained-source/receipts.sqlite")).unwrap();
+    raw.execute("DELETE FROM receipts WHERE id=?1", [&target.receipt_id])
+        .unwrap();
+    assert_eq!(
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::EvidenceUnavailable
+    );
+    assert!(matches!(
+        state
+            .primary_sources
+            .receipts
+            .lock()
+            .unwrap()
+            .receipt_status(&target.receipt_id)
+            .unwrap(),
+        primary_source::ReceiptStatus::Unknown
+    ));
+    raw.execute_batch("DROP TABLE receipt_reclaims").unwrap();
+    assert_eq!(
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
             .unwrap_err(),
         ReadError::Storage
     );

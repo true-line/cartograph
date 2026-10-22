@@ -72,6 +72,7 @@ pub(crate) fn logical_protocol_workspace_bytes(limits: WorkerLimits) -> Option<u
         ReadError::Storage,
         ReadError::EvidenceUnavailable,
         ReadError::EvidenceInvalid,
+        ReadError::EvidenceForgotten,
         ReadError::InvalidRequest,
     ];
     let mut error_peak = 0;
