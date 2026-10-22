@@ -928,10 +928,13 @@ fn source_selection_global_failures_release_the_read_transaction() {
     ));
     assert!(store.conn.is_autocommit());
     store.put_node(&node("b")).unwrap();
+    // The repair is a row event, so only the revision differs.
+    let repaired = store.read_source_selection_snapshot(&keys).unwrap();
     assert_eq!(
-        store.read_source_selection_snapshot(&keys).unwrap(),
-        expected
+        (&repaired.graph, &repaired.selections),
+        (&expected.graph, &expected.selections)
     );
+    assert_ne!(repaired.revision, expected.revision);
     store
         .conn
         .execute_batch("DROP TRIGGER source_binding_node_update")
@@ -1335,4 +1338,102 @@ fn receipt_omissions_deduplicate_by_smallest_kind_and_respect_bounds_and_rewrite
         store.receipt_omissions(&too_many),
         Err(GraphError::SourceBinding("too many source selection keys"))
     ));
+}
+
+#[test]
+fn omission_only_publication_advances_revision_and_binds_selection_basis() {
+    // AC-0314: a publication whose only row events are omission records (an
+    // existing unbound fact, no bindings, no coverage, empty patch) still
+    // advances the store revision, and a revision-bound selection refuses the
+    // stale basis instead of pairing it with the new omission. (T-0314)
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let fact_node = node("repo/a:unbound");
+    let fact = FactKey::from_node(&fact_node);
+    let empty = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_if_snapshot_matches(
+                &empty,
+                &GraphPatch {
+                    upsert_nodes: vec![fact_node.clone()],
+                    ..GraphPatch::default()
+                },
+            )
+            .unwrap()
+    );
+    let limits = SnapshotReadLimits::default();
+    let before = store
+        .read_source_selection_snapshot_bounded(std::slice::from_ref(&fact), limits)
+        .unwrap();
+    assert_eq!(before.selections[0].omission, OmissionLookup::Unrecorded);
+
+    let records = [SourceOmission {
+        fact: fact.clone(),
+        kind: ReceiptOmissionKind::StoreCapacity,
+    }];
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch::default(),
+                "repo/a",
+                &[],
+                None,
+                SourceOmissions {
+                    records: &records,
+                    complete: true,
+                },
+            )
+            .unwrap()
+    );
+    let after = store
+        .read_source_selection_snapshot_bounded(std::slice::from_ref(&fact), limits)
+        .unwrap();
+    assert_eq!(after.graph, before.graph);
+    assert_eq!(
+        after.selections[0].omission,
+        OmissionLookup::Omitted {
+            repo_key: "repo/a".into(),
+            kind: ReceiptOmissionKind::StoreCapacity,
+        }
+    );
+    assert_ne!(after.revision, before.revision);
+    assert!(matches!(
+        store.read_source_selection_snapshot_at_revision_bounded(
+            &before.revision,
+            std::slice::from_ref(&fact),
+            limits,
+        ),
+        Err(GraphError::Generation(crate::GenerationError::Changed))
+    ));
+    assert_eq!(
+        store
+            .read_source_selection_snapshot_at_revision_bounded(
+                &after.revision,
+                std::slice::from_ref(&fact),
+                limits,
+            )
+            .unwrap(),
+        after
+    );
+
+    // Clearing the records with NONE is also a revision-advancing row event;
+    // republishing NONE with nothing recorded is not.
+    let expected = store.read_snapshot().unwrap();
+    store
+        .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+            &expected,
+            &GraphPatch::default(),
+            "repo/a",
+            &[],
+            None,
+            SourceOmissions::NONE,
+        )
+        .unwrap();
+    let cleared = store
+        .read_source_selection_snapshot_bounded(std::slice::from_ref(&fact), limits)
+        .unwrap();
+    assert_eq!(cleared.selections[0].omission, OmissionLookup::Unrecorded);
+    assert_ne!(cleared.revision, after.revision);
 }

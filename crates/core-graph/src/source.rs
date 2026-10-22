@@ -181,6 +181,9 @@ pub struct SourceSelectionSnapshot {
     pub graph: (Vec<Node>, Vec<Edge>),
     /// Unique selections sorted by typed fact identity.
     pub selections: Vec<FactSourceSelection>,
+    /// Store revision observed in the same transaction as the graph rows,
+    /// associations and omission records.
+    pub revision: crate::StoreRevision,
 }
 
 /// The observed source association state for one requested typed identity.
@@ -724,21 +727,28 @@ fn replace_omissions(
     repo_key: &str,
     omissions: SourceOmissions<'_>,
 ) -> Result<(), GraphError> {
-    transaction.execute(
-        "DELETE FROM source_node_omissions WHERE repo_key = ?1",
-        [repo_key],
-    )?;
-    transaction.execute(
-        "DELETE FROM source_edge_omissions WHERE repo_key = ?1",
-        [repo_key],
-    )?;
-    transaction.execute(
-        "DELETE FROM source_omission_index WHERE repo_key = ?1",
-        [repo_key],
-    )?;
+    let mut removed = 0;
+    for table in [
+        "source_node_omissions",
+        "source_edge_omissions",
+        "source_omission_index",
+    ] {
+        removed += transaction.execute(
+            &format!("DELETE FROM {table} WHERE repo_key = ?1"),
+            [repo_key],
+        )?;
+    }
     if omissions == SourceOmissions::NONE {
+        // Omission tables are not generation-watched, so their row events
+        // advance the store revision here, once per publication.
+        if removed > 0 {
+            crate::generation::bump(transaction)?;
+        }
         return Ok(());
     }
+    // Every other path rewrites the index row, a row event that must advance
+    // the revision even when graph and binding rows are unchanged.
+    crate::generation::bump(transaction)?;
     if omissions.records.len() > MAX_OMISSIONS {
         let recorded = i64::try_from(omissions.records.len())
             .map_err(|_| GraphError::SourceBinding("too many omissions"))?;
@@ -954,7 +964,7 @@ impl SqliteGraphStore {
         &self,
         keys: &[FactKey],
     ) -> Result<SourceSelectionSnapshot, GraphError> {
-        self.read_source_selection_snapshot_inner(keys, None)
+        self.read_source_selection_snapshot_inner(keys, None, None)
     }
 
     /// Copy a complete bounded graph and the same source-selection states as
@@ -968,13 +978,27 @@ impl SqliteGraphStore {
         limits: SnapshotReadLimits,
     ) -> Result<SourceSelectionSnapshot, GraphError> {
         limits.validate()?;
-        self.read_source_selection_snapshot_inner(keys, Some(limits))
+        self.read_source_selection_snapshot_inner(keys, Some(limits), None)
+    }
+
+    /// Bounded selection that refuses with [`crate::GenerationError::Changed`]
+    /// before reading graph rows when the store is no longer at `expected`, so
+    /// a consumer can bind associations and omissions to its acquisition basis.
+    pub fn read_source_selection_snapshot_at_revision_bounded(
+        &self,
+        expected: &crate::StoreRevision,
+        keys: &[FactKey],
+        limits: SnapshotReadLimits,
+    ) -> Result<SourceSelectionSnapshot, GraphError> {
+        limits.validate()?;
+        self.read_source_selection_snapshot_inner(keys, Some(limits), Some(expected))
     }
 
     fn read_source_selection_snapshot_inner(
         &self,
         keys: &[FactKey],
         limits: Option<SnapshotReadLimits>,
+        expected: Option<&crate::StoreRevision>,
     ) -> Result<SourceSelectionSnapshot, GraphError> {
         if keys.len() > MAX_SOURCE_SELECTION_KEYS {
             return Err(GraphError::SourceBinding("too many source selection keys"));
@@ -988,6 +1012,10 @@ impl SqliteGraphStore {
             preflight_selection_schema(&self.conn)?;
         }
         check_schema(&self.conn)?;
+        let revision = crate::generation::read_store_revision(&transaction)?;
+        if expected.is_some_and(|expected| expected != &revision) {
+            return Err(crate::GenerationError::Changed.into());
+        }
         let graph = match limits {
             Some(limits) => self.read_snapshot_rows_bounded(limits)?,
             None => self.read_snapshot_rows(None, None)?,
@@ -1028,7 +1056,11 @@ impl SqliteGraphStore {
             });
         }
         transaction.commit()?;
-        Ok(SourceSelectionSnapshot { graph, selections })
+        Ok(SourceSelectionSnapshot {
+            graph,
+            selections,
+            revision,
+        })
     }
 
     /// Publish scoped facts and replace only this repo's current source bindings
