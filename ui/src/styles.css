@@ -4255,3 +4255,7 @@ details.investigation-section { display: block; }
   color: var(--accent);
 }
 
+
+/* Packaged guidance remains readable without widening the Settings surface. */
+.mcp-client-skill pre { max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: .8rem; }
+.mcp-client-skill code { overflow-wrap: anywhere; }

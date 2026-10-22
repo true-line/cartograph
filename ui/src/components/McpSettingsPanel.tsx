@@ -78,7 +78,7 @@ export function McpSettingsPanel(props: McpSettingsPanelProps) {
       </button>
     </div>
     {props.skill?.status === 'unavailable' && <p role="alert">The packaged client skill is unavailable or does not match this build. Reinstall a complete matching app bundle.</p>}
-    {props.skill?.status === 'available' && <section aria-label="Packaged client skill">
+    {props.skill?.status === 'available' && <section className="mcp-client-skill" aria-label="Packaged client skill">
       <h4>Client skill · Cartograph {props.skill.app_version}</h4>
       <p>Skill location: <code>{props.skill.skill_path}</code></p>
       <p>Read SKILL.md first, then open references as needed. To install, use your client’s supported skill installation workflow with this complete folder.
