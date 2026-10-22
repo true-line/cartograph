@@ -321,6 +321,7 @@ pub(super) fn prepare(
         &fixture_dir,
         super::super::super::ORIGINAL,
         false,
+        None,
     );
     let graph_before_hash = content_hash(graph_before.as_bytes());
     let app = app(state)?;
