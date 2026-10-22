@@ -331,7 +331,7 @@ fn inspection_historical_location_is_pinned_and_errors_are_sanitized() {
 fn inspection_resolves_rule_less_declaration_receipt() {
     const SOURCE: &str = "export function guard(ok: boolean) { if (!ok) return false; return true; }\nexport function total(a: number, b: number) { return a + b; }\n";
     let directory = tempfile::tempdir().unwrap();
-    let (state, _app_data, _) = captured_fixture_state(directory.path(), SOURCE, false);
+    let (state, _app_data, _) = captured_fixture_state(directory.path(), SOURCE, false, None);
     let node = state
         .graph
         .lock()

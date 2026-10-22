@@ -222,6 +222,7 @@ fn captured_fixture_state(
     directory: &std::path::Path,
     original: &str,
     qualified: bool,
+    inventory_json: Option<fn(&str) -> String>,
 ) -> (AppState, PathBuf, String) {
     let app_data = directory.join("private");
     std::fs::create_dir(&app_data).unwrap();
@@ -260,10 +261,15 @@ fn captured_fixture_state(
         registered_source_id: Some(source.source_id.clone()),
         ingest_id: "worker-fixture-ingest".into(),
         config_hash: crate::coverage_config_hash(&[], crate::Registries::builtin()),
-        inventory_json: json!({"inventory":"coverage@1","repo":source.repo_key,
-            "commit":"workdir","layer_hints":[],"producers":[{"state":"missing_input"}],
-            "unsupported":[],"limited":true})
-        .to_string(),
+        inventory_json: inventory_json.map_or_else(
+            || {
+                json!({"inventory":"coverage@1","repo":source.repo_key,
+                    "commit":"workdir","layer_hints":[],"producers":[{"state":"missing_input"}],
+                    "unsupported":[],"limited":true})
+                .to_string()
+            },
+            |inventory| inventory(&source.repo_key),
+        ),
     });
     crate::load_into_graph_with_bindings(
         &mut state.graph.lock().unwrap(),
@@ -355,70 +361,12 @@ impl Fixture {
             &mut StartInvestigationRequest,
         ),
     ) -> Self {
-        let app_data = directory.path().join("private");
-        std::fs::create_dir(&app_data).unwrap();
-        let app_data = crate::paths::canonicalize(app_data).unwrap();
-        let target = directory.path().join("target");
-        std::fs::create_dir(&target).unwrap();
-        std::fs::write(target.join("rule.ts"), original).unwrap();
-        let state = crate::registered_source_tests::app_state(&app_data);
-        let source = state
-            .sources
-            .lock()
-            .unwrap()
-            .register_local(&target)
-            .unwrap();
-        let input = state
-            .primary_sources
-            .prepare(&source, source.root(), &["client".into()])
-            .unwrap();
-        let capture = input.capture.as_ref().unwrap();
-        let (extraction, receipts) = captured::extract_file(
-            capture.file("rule.ts").unwrap(),
-            &adapters_lang_ts::SourceId {
-                repo: &source.repo_key,
-                commit: "workdir",
-            },
-        )
-        .unwrap();
-        state
-            .primary_sources
-            .persist(&input, &source, &receipts)
-            .unwrap();
-        let bindings = crate::primary_source::matching_bindings(&extraction, &receipts);
-        assert!(!bindings.is_empty());
-        let coverage = specialist_id.uses_coverage_qualification().then(|| {
-            core_graph::coverage::CoverageRecord {
-                repo_key: source.repo_key.clone(),
-                registered_source_id: Some(source.source_id.clone()),
-                ingest_id: "worker-fixture-ingest".into(),
-                config_hash: crate::coverage_config_hash(&[], crate::Registries::builtin()),
-                inventory_json: inventory_json.map_or_else(
-                    || {
-                        json!({"inventory":"coverage@1","repo":source.repo_key,
-                "commit":"workdir","layer_hints":[],"producers":[{"state":"missing_input"}],
-                "unsupported":[],"limited":true})
-                        .to_string()
-                    },
-                    |inventory| inventory(&source.repo_key),
-                ),
-            }
-        });
-        crate::load_into_graph_with_bindings(
-            &mut state.graph.lock().unwrap(),
-            &extraction,
-            &source.repo_key,
-            source.root(),
-            "workdir",
-            &bindings,
-            coverage.as_ref(),
-        )
-        .unwrap();
-        drop(input);
-        // Every later read must use retained parser bytes, not this checkout.
-        std::fs::remove_dir_all(target).unwrap();
-        let graph_before =
-            serde_json::to_string(&state.graph.lock().unwrap().read_snapshot().unwrap()).unwrap();
+        let (state, app_data, graph_before) = captured_fixture_state(
+            directory.path(),
+            original,
+            specialist_id.uses_coverage_qualification(),
+            inventory_json,
+        );
 
         let inspection_requirements = required_role.map(|role| {
             let node = state
