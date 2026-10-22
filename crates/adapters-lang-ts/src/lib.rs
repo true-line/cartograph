@@ -3362,16 +3362,20 @@ pub(crate) fn skipped_directory(name: &str) -> bool {
     name == "node_modules" || name == "dist" || name.starts_with('.')
 }
 
+/// True for a TS/JS source or Vue component name, declaration files excluded.
+pub(crate) fn is_ts_source(name: &str) -> bool {
+    SOURCE_EXTENSIONS
+        .iter()
+        .chain(&vue::COMPONENT_EXTENSIONS)
+        .any(|ext| name.ends_with(ext))
+        && !name.ends_with(".d.ts")
+}
+
 /// Every TS/JS source and Vue component under `root`, sorted, through the shared
 /// `.gitignore`-aware walk (#248).
 fn collect_ts_files(root: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
     for file in source_walk::files(root, &skipped_directory, source_walk::Gitignores::Honor)? {
-        if SOURCE_EXTENSIONS
-            .iter()
-            .chain(&vue::COMPONENT_EXTENSIONS)
-            .any(|ext| file.name.ends_with(ext))
-            && !file.name.ends_with(".d.ts")
-        {
+        if is_ts_source(&file.name) {
             out.push(file.rel);
         }
     }

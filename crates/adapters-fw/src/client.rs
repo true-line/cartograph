@@ -92,17 +92,47 @@ pub fn join_base(base: &str, path: &str, join: BaseJoin) -> String {
                 .and_then(|start| base[start..].find('/').map(|j| start + j))
                 .unwrap_or(base.len());
             let (origin, base_path) = base.split_at(authority_end);
-            if path.starts_with('/') {
-                return format!("{origin}{path}");
-            }
-            // Merge: drop the base path's last segment, keep the directory.
-            let dir = match base_path.rfind('/') {
-                Some(i) => &base_path[..=i],
-                None => "/",
+            // The query or fragment of the reference is not path.
+            let split = path.find(['?', '#']).unwrap_or(path.len());
+            let (reference, suffix) = path.split_at(split);
+            let merged = if reference.starts_with('/') {
+                reference.to_string()
+            } else {
+                // Merge: drop the base path's last segment, keep the directory.
+                let dir = match base_path.rfind('/') {
+                    Some(i) => &base_path[..=i],
+                    None => "/",
+                };
+                format!("{dir}{reference}")
             };
-            format!("{origin}{dir}{path}")
+            format!("{origin}{}{suffix}", remove_dot_segments(&merged))
         }
     }
+}
+
+/// RFC 3986 §5.2.4 for an absolute path: `.` segments vanish and `..`
+/// removes the segment before it, never climbing above the root.
+fn remove_dot_segments(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let segments: Vec<&str> = path.split('/').skip(1).collect();
+    for (i, segment) in segments.iter().enumerate() {
+        let last = i + 1 == segments.len();
+        match *segment {
+            "." => {
+                if last {
+                    out.push("");
+                }
+            }
+            ".." => {
+                out.pop();
+                if last {
+                    out.push("");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    format!("/{}", out.join("/"))
 }
 
 /// Give every unjoined site the repository's one client base (#737): the
@@ -166,6 +196,43 @@ mod tests {
         );
         let c = BaseJoin::Concat;
         assert_eq!(join_base("https://h.io", "/api/x", c), "https://h.io/api/x");
+    }
+
+    // #757 review: resolution removes dot segments (RFC 3986 §5.2.4); the
+    // cases are §5.4's, against its base `http://a/b/c/d;p?q`.
+    #[test]
+    fn retrofit_resolution_removes_dot_segments() {
+        let base = "http://a/b/c/d;p?q";
+        for (reference, expected) in [
+            ("../users", "http://a/b/users"),
+            ("./g", "http://a/b/c/g"),
+            ("g/", "http://a/b/c/g/"),
+            (".", "http://a/b/c/"),
+            ("./", "http://a/b/c/"),
+            ("..", "http://a/b/"),
+            ("../", "http://a/b/"),
+            ("../..", "http://a/"),
+            ("../../../g", "http://a/g"),
+            ("/./g", "http://a/g"),
+            ("/../g", "http://a/g"),
+            ("g.", "http://a/b/c/g."),
+            ("..g", "http://a/b/c/..g"),
+            ("./g/.", "http://a/b/c/g/"),
+            ("g/./h", "http://a/b/c/g/h"),
+            ("g/../h", "http://a/b/c/h"),
+            ("g?y/./x", "http://a/b/c/g?y/./x"),
+            ("g#s/../x", "http://a/b/c/g#s/../x"),
+        ] {
+            assert_eq!(
+                join_base(base, reference, BaseJoin::Resolve),
+                expected,
+                "{reference}"
+            );
+        }
+        assert_eq!(
+            join_base("https://h/v1/dir/", "../users", BaseJoin::Resolve),
+            "https://h/v1/users"
+        );
     }
 
     fn site(path: &str) -> FetchSite {

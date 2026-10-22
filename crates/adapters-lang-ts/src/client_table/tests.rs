@@ -369,3 +369,60 @@ fn unknown_fetch_options_never_default_to_get() {
         ]
     );
 }
+
+// AC-0315 (#757 review): with a retained capture, joined calls come from the
+// captured bytes. An edit to the checkout after capture, or a declaration
+// file, never reaches the recovery. (T-0315)
+#[test]
+fn captured_recovery_reads_only_the_retained_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, source: &str| std::fs::write(dir.path().join(path), source).unwrap();
+    write("APIService.js", SERVICE);
+    write(
+        "Login.js",
+        "import { callAPI, API_ROUTE } from './APIService';\ncallAPI(API_ROUTE.LOGIN);\n",
+    );
+    // A declaration file is not source, captured or not.
+    write(
+        "types.d.ts",
+        "import { callAPI, API_ROUTE } from './APIService';\ncallAPI(API_ROUTE.GET_USER_INFO);\n",
+    );
+    let source = source_capture::SourceId::new("src_11111111111111111111111111111111").unwrap();
+    let capture = source_capture::capture_working_tree(
+        dir.path(),
+        &source,
+        &[
+            "APIService.js".into(),
+            "Login.js".into(),
+            "types.d.ts".into(),
+        ],
+        source_capture::CaptureLimits::default(),
+    )
+    .unwrap();
+    // The checkout changes after capture.
+    write(
+        "Login.js",
+        "import { callAPI, API_ROUTE } from './APIService';\ncallAPI(API_ROUTE.GET_USER_INFO);\n",
+    );
+    let id = SourceId {
+        repo: "local/ext",
+        commit: "abc123",
+    };
+    let paths = |sites: Vec<FetchSite>| -> Vec<(String, String)> {
+        sites
+            .into_iter()
+            .map(|site| (site.path, site.entry.unwrap()))
+            .collect()
+    };
+    assert_eq!(
+        paths(extract_captured(&capture, &id).unwrap()),
+        [("Login.js".to_string(), "API_ROUTE.LOGIN".to_string())]
+    );
+    assert_eq!(
+        paths(extract_dir(dir.path(), &id).unwrap()),
+        [(
+            "Login.js".to_string(),
+            "API_ROUTE.GET_USER_INFO".to_string()
+        )]
+    );
+}

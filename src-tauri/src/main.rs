@@ -1446,8 +1446,12 @@ fn extract_tree_with_registries(
         );
         // Table-driven HTTP clients (#737): a joined call replaces the
         // generic computed-URL site the TS pass recorded at the same call.
-        let joined =
-            adapters_lang_ts::client_table::extract_dir(root, &ts_id).map_err(|e| e.to_string())?;
+        let joined = match primary {
+            Some(capture) => adapters_lang_ts::client_table::extract_captured(capture, &ts_id)
+                .map_err(|e| e.to_string())?,
+            None => adapters_lang_ts::client_table::extract_dir(root, &ts_id)
+                .map_err(|e| e.to_string())?,
+        };
         let joined_at: std::collections::BTreeSet<(&str, u64)> = joined
             .iter()
             .map(|site| (site.path.as_str(), site.byte_start))
@@ -1517,7 +1521,10 @@ fn extract_tree_with_registries(
         };
         extraction.nodes.extend(go.nodes);
         extraction.edges.extend(go.edges);
-
+    }
+    // Java and Kotlin carry server routes and client calls (Retrofit), so a
+    // client-only Android or JVM repository runs them too (#757 review).
+    if wants_application {
         let java_id = adapters_lang_java::SourceId { repo, commit };
         let mut java_progress = |path: &str| on_file(&format!("Reading Java sources — {path}"));
         let (java, stats) = adapters_lang_java::extract_dir_incremental_with_progress(
@@ -8138,9 +8145,29 @@ export function queueOrder() {
             &[],
         )
         .unwrap();
-        assert_eq!(client_summary.java, crate::LayerSummary::default());
+        // #757 review: Java carries client calls (Retrofit), so a
+        // client-only repository runs the pass; an infra-only one does not.
+        assert_eq!(client_summary.java.files, 1);
         assert!(
             client_only
+                .nodes
+                .iter()
+                .any(|node| node.props["language"] == "java")
+        );
+        let (infra_only, infra_summary) = crate::extract_tree_with_summary(
+            dir.path(),
+            "local/java-app",
+            "workdir",
+            &["infra".into()],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(infra_summary.java, crate::LayerSummary::default());
+        assert!(
+            infra_only
                 .nodes
                 .iter()
                 .all(|node| node.props["language"] != "java")
@@ -8188,6 +8215,13 @@ export function queueOrder() {
                     == "sym:local/kotlin-app@src/com/demo/UserController.kt#UserController.users"
         }));
 
+        // #757 review: Kotlin carries client calls (Retrofit), so a
+        // client-only repository runs the pass too; an infra-only one does not.
+        std::fs::write(
+            dir.path().join("src/com/demo/Api.kt"),
+            "package com.demo\n\nimport retrofit2.http.GET\n\ninterface Api {\n    @GET(\"api/stats\")\n    fun stats(): String\n}\n",
+        )
+        .unwrap();
         let (client_only, client_summary) = crate::extract_tree_with_summary(
             dir.path(),
             "local/kotlin-app",
@@ -8199,9 +8233,29 @@ export function queueOrder() {
             &[],
         )
         .unwrap();
-        assert_eq!(client_summary.kotlin, crate::LayerSummary::default());
+        assert_eq!(client_summary.kotlin.files, 2);
         assert!(
             client_only
+                .fetch_sites
+                .iter()
+                .any(|site| site.entry.as_deref() == Some("Api.stats")),
+            "{:?}",
+            client_only.fetch_sites
+        );
+        let (infra_only, infra_summary) = crate::extract_tree_with_summary(
+            dir.path(),
+            "local/kotlin-app",
+            "workdir",
+            &["infra".into()],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(infra_summary.kotlin, crate::LayerSummary::default());
+        assert!(
+            infra_only
                 .nodes
                 .iter()
                 .all(|node| node.props["language"] != "kotlin")

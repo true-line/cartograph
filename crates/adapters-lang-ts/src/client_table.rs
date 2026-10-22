@@ -948,7 +948,33 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> Result<Vec<FetchSite>, Extract
         let source = std::fs::read(root.join(rel))?;
         extract_file(&source, rel, id, &mut index)?;
     }
+    Ok(joined_sites(&index))
+}
 
+/// Joined client calls from a retained capture: exactly the bytes the
+/// captured TS pass parsed, never a reread of the live checkout, so one
+/// recovery cannot mix snapshots (#757 review).
+pub fn extract_captured(
+    capture: &source_capture::Capture,
+    id: &SourceId,
+) -> Result<Vec<FetchSite>, crate::captured::CapturedError> {
+    let mut files: Vec<&str> = capture
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .filter(|path| crate::is_ts_source(path))
+        .collect();
+    files.sort(); // deterministic order (US-0014)
+    let mut index = RepoIndex::default();
+    for rel in files {
+        extract_file(capture.file(rel)?.bytes(), rel, id, &mut index)?;
+    }
+    Ok(joined_sites(&index))
+}
+
+/// Every call whose table, entry and wrapper are proven, as a joined site.
+fn joined_sites(index: &RepoIndex) -> Vec<FetchSite> {
     let mut out = Vec::new();
     for call in &index.calls {
         let Some(table_key) = index.prove(&index.tables, &call.file, &call.table) else {
@@ -991,7 +1017,7 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> Result<Vec<FetchSite>, Extract
         });
     }
     out.sort_by(|a, b| (&a.path, a.byte_start).cmp(&(&b.path, b.byte_start)));
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
