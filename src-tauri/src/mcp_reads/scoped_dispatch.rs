@@ -13,12 +13,13 @@ use mcp_wire::admission::{Action, Admission, ReadTool};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-const TOOLS: [ReadTool; 5] = [
+const TOOLS: [ReadTool; 6] = [
     ReadTool::Capabilities,
     ReadTool::Discover,
     ReadTool::ReadFact,
     ReadTool::Evidence,
     ReadTool::Artifacts,
+    ReadTool::ReadArtifact,
 ];
 pub(crate) struct ScopedDispatcher<'a> {
     admission: Admission,
@@ -254,7 +255,21 @@ impl<'a> ScopedDispatcher<'a> {
                     }
                 }
             }
-            ReadTool::ReadArtifact => Err(ReadError::InvalidRequest),
+            ReadTool::ReadArtifact => {
+                let args: Artifact = parse(args)?;
+                self.check(&args.session_id, &args.session_basis_id)?;
+                let inner = self
+                    .envelope_cap(id, "Closed scoped artifact.", "partition", cap)?
+                    .min(self.limits.compile.max_bytes);
+                let response = self.session.partition(
+                    ctx,
+                    &args.session_basis_id,
+                    args.kind.into(),
+                    &args.root,
+                    inner,
+                )?;
+                self.wrap(id, "Closed scoped artifact.", "partition", response)
+            }
         }
     }
     fn capabilities(&self) -> Value {
@@ -382,3 +397,30 @@ mod schemas;
 pub(crate) use logical::logical_protocol_workspace_bytes;
 #[cfg(test)]
 mod tests;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ArtifactKind {
+    DataModel,
+    RuleEvidence,
+    RuleEvidenceIndex,
+}
+impl From<ArtifactKind> for spec::PartitionArtifactKind {
+    fn from(kind: ArtifactKind) -> Self {
+        match kind {
+            ArtifactKind::DataModel => Self::DataModel,
+            ArtifactKind::RuleEvidence => Self::RuleEvidence,
+            ArtifactKind::RuleEvidenceIndex => Self::RuleEvidenceIndex,
+        }
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Artifact {
+    session_id: String,
+    session_basis_id: String,
+    kind: ArtifactKind,
+    root: String,
+    #[serde(rename = "max_bytes")]
+    _max_bytes: std::num::NonZeroUsize,
+}

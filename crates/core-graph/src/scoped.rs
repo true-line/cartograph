@@ -535,3 +535,6 @@ impl SqliteGraphStore {
 }
 #[cfg(test)]
 mod tests;
+
+mod adjacency;
+pub use adjacency::{AdjacencyPage, ScopedGraphReader, ScopedReadUsage};

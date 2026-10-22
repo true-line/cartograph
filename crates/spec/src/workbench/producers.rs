@@ -134,6 +134,9 @@ impl fmt::Display for ModelName<'_> {
         write!(f, "{}", NodeName(self.0))
     }
 }
+/// Producer-owned incident labels used by both rendering and partition closure.
+pub const DATA_PARTITION_EDGE_LABELS: &[&str] = DATA_EDGE_LABELS;
+
 pub(super) fn data(
     nodes: &[&Node],
     edges: &[&Edge],
@@ -151,7 +154,7 @@ pub(super) fn data(
     let mappings: Vec<_> = edges
         .iter()
         .copied()
-        .filter(|e| DATA_EDGE_LABELS.contains(&e.label.as_str()))
+        .filter(|e| DATA_PARTITION_EDGE_LABELS.contains(&e.label.as_str()))
         .filter(edge_nongap)
         .filter(|e| entity_ids.contains(e.src.as_str()) || entity_ids.contains(e.dst.as_str()))
         .filter(|e| by_id.contains_key(e.src.as_str()) && by_id.contains_key(e.dst.as_str()))

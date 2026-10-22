@@ -70,6 +70,7 @@ pub(crate) fn logical_protocol_workspace_bytes(limits: WorkerLimits) -> Option<u
         ReadError::StaleBasis,
         ReadError::Limit,
         ReadError::Storage,
+        ReadError::ArtifactUnavailable,
         ReadError::EvidenceUnavailable,
         ReadError::EvidenceInvalid,
         ReadError::EvidenceForgotten,

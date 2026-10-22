@@ -4571,6 +4571,7 @@ dependencies = [
  "core-graph",
  "core-prov",
  "flowtracer",
+ "rusqlite",
  "serde",
  "serde_json",
  "source-capture",

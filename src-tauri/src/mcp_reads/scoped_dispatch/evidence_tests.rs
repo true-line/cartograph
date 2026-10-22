@@ -10,6 +10,7 @@ struct RetainedFixture {
     root: std::path::PathBuf,
     scopes: Vec<ScopedRepo>,
     fact: Value,
+    rule_fact: Value,
 }
 impl RetainedFixture {
     fn new() -> Self {
@@ -45,6 +46,20 @@ impl RetainedFixture {
                 _ => None,
             })
             .unwrap();
+        let rule_fact = receipts
+            .iter()
+            .find_map(|receipt| match receipt.fact_key() {
+                FactKey::Node { id }
+                    if facts
+                        .nodes
+                        .iter()
+                        .any(|node| node.id == *id && node.label == "BusinessRule") =>
+                {
+                    Some(json!({"kind":"node","id":id}))
+                }
+                _ => None,
+            })
+            .expect("actual extracted guarded-exit rule has a retained receipt");
         state
             .primary_sources
             .persist(&prepared, &source, &receipts)
@@ -73,6 +88,7 @@ impl RetainedFixture {
             root,
             scopes,
             fact,
+            rule_fact,
         }
     }
 }
@@ -275,4 +291,82 @@ fn scoped_dispatcher_stale_target_cannot_be_reused_under_a_fresh_session() {
         fresh.receive(json!({"jsonrpc":"2.0","id":2,"method":"ping"}), &mut ctx),
         DispatchAction::Close
     );
+}
+
+#[test]
+fn scoped_rule_partition_assertion_resolves_to_retained_source_after_checkout_removal() {
+    let f = RetainedFixture::new();
+    let mut scope = || Ok(f.scopes.clone());
+    let mut ctx = ScopedReadContext {
+        graph: &f.state.graph,
+        decisions: &f.state.decisions,
+        scope: &mut scope,
+    };
+    let (mut dispatch, basis) = start(&f.state, &mut ctx, "partition-retained");
+    let root = f.rule_fact["id"].as_str().unwrap();
+    let response = super::call(
+        &mut dispatch,
+        &mut ctx,
+        2,
+        "cartograph_read_artifact",
+        json!({"session_id":"partition-retained","session_basis_id":basis,"kind":"rule-evidence","root":root,"max_bytes":65536}),
+    );
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert!(serde_json::to_vec(&response).unwrap().len() <= 65536);
+    let partition = &response["result"]["structuredContent"]["partition"];
+    assert_eq!(partition["complete_system"], false);
+    assert_eq!(partition["requested_root"], root);
+    let artifact = &partition["artifact"];
+    assert_eq!(
+        artifact["schema"],
+        "cartograph.spec-partition/rule-evidence@1"
+    );
+    let assertion = artifact["assertions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|assertion| {
+            assertion["subject_id"] == root && assertion["subject_kind"] == "BusinessRule"
+        })
+        .expect("native rule assertion remains linked to exact extracted fact");
+    assert!(
+        !assertion["provenance"]["evidence"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let fact = json!({"kind":"node","id":assertion["subject_id"]});
+    // Delete the checkout before descriptor resolution as well as text access.
+    // The retained capture, exact source binding and receipt are the only path.
+    std::fs::remove_dir_all(&f.root).unwrap();
+    let description = super::call(
+        &mut dispatch,
+        &mut ctx,
+        3,
+        "cartograph_evidence",
+        json!({"session_id":"partition-retained","session_basis_id":basis,"mode":"describe","kind":"retained_primary_source","fact":fact,"ordinal":0,"max_bytes":65536}),
+    );
+    assert_eq!(description["result"]["isError"], false, "{description}");
+    let target = description["result"]["structuredContent"]["evidence"]["target"].clone();
+    assert_eq!(target["fact"], f.rule_fact);
+    assert_eq!(target["basis_id"], basis);
+    let begin = target["captured"]["byte_start"].as_u64().unwrap() as usize;
+    let end = target["captured"]["byte_end"].as_u64().unwrap() as usize;
+    let read = super::call(
+        &mut dispatch,
+        &mut ctx,
+        4,
+        "cartograph_evidence",
+        read_args("partition-retained", &basis, &target, 65536),
+    );
+    assert_eq!(read["result"]["isError"], false, "{read}");
+    assert_eq!(
+        read["result"]["structuredContent"]["evidence"]["target"],
+        target
+    );
+    assert_eq!(
+        read["result"]["structuredContent"]["evidence"]["text"],
+        &SOURCE[begin..end]
+    );
+    assert!(!read.to_string().contains("context-v1:"));
 }

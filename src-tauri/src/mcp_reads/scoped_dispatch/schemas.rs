@@ -57,7 +57,7 @@ pub(super) fn descriptor(tool: ReadTool, graph: SnapshotReadLimits) -> Value {
             object(json!({}), &[]),
         ),
         ReadTool::Artifacts => (
-            "List every official artifact and why it is unavailable in this scoped session; no content is compiled.",
+            "List supported closed partitions and complete-only artifacts unavailable in this scoped session.",
             object(session(), &["session_id", "session_basis_id"]),
         ),
         ReadTool::Discover => {
@@ -112,15 +112,38 @@ pub(super) fn descriptor(tool: ReadTool, graph: SnapshotReadLimits) -> Value {
             )
         }
         ReadTool::ReadArtifact => {
-            unreachable!("scoped dispatcher never advertises artifact content")
+            let mut props = session();
+            props["kind"] = json!({"enum":["data-model","rule-evidence","rule-evidence-index"]});
+            props["root"] = json!({"type":"string","minLength":1});
+            props["max_bytes"] = json!({"type":"integer","minimum":1});
+            (
+                "Compile a bounded whole DataEntity component or explicit BusinessRule observation closure. A leaf may reach a large component and return a limit; never full-system evidence.",
+                object(
+                    props,
+                    &[
+                        "session_id",
+                        "session_basis_id",
+                        "kind",
+                        "root",
+                        "max_bytes",
+                    ],
+                ),
+            )
         }
     };
     json!({"name":tool.name(),"description":description,"inputSchema":schema,"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}})
 }
 pub(super) fn catalog() -> Value {
-    let entries:Vec<_>=spec::artifact_catalog().into_iter().map(|metadata|{
-        let partition=matches!(metadata.id,"data-model"|"flow-dossiers"|"rule-evidence"|"rule-evidence-index");
-        json!({"metadata":metadata,"status":"unavailable","required_basis":if partition {"closed_partition"}else{"complete"},"reason":if partition {"partition_closure_not_available"}else{"complete_basis_required"}})
+    let entries: Vec<_> = spec::artifact_catalog().into_iter().map(|metadata| {
+        let scope = match metadata.id {
+            "data-model" => Some(("DataEntity", "whole_connected_entity_component")),
+            "rule-evidence" | "rule-evidence-index" => Some(("BusinessRule", "explicit_rule_observation")),
+            _ => None,
+        };
+        match scope {
+            Some((label, scope)) => json!({"metadata":metadata,"status":"partition_supported","required_basis":"closed_partition","required_root_label":label,"scope":scope,"closure_may_exceed_limits":true}),
+            None => json!({"metadata":metadata,"status":"unavailable","required_basis":"complete","reason":if metadata.id=="flow-dossiers" {"explicit_seed_tracer_not_available"} else {"complete_basis_required"}}),
+        }
     }).collect();
     json!({"mode":"scoped","complete_system":false,"artifacts":entries})
 }
@@ -133,5 +156,5 @@ pub(super) fn capabilities(
     limits: DispatchLimits,
     evidence: EvidenceWorkLimits,
 ) -> Value {
-    json!({"mode":"scoped","session_id":session_id,"session_basis_id":basis,"revision":revision,"coverage_id":coverage_id,"matching_policy":context_hub::discovery::DISCOVERY_POLICY,"implemented_tools":TOOLS.iter().map(|t|t.name()).collect::<Vec<_>>(),"structured_content_required":true,"complete_system":false,"global_absence_available":false,"h3_curated_available":false,"artifact_content_available":false,"artifact_availability":"enumerated_by_cartograph_artifacts","unknown_degrees":true,"remaining_row_totals":"unknown","cursor_lower_bound":"caller_selected_exclusive_primary_key","exhaustion":"raw_tail_only_not_global_absence","worker_reservation_model":super::super::worker::SCOPED_WORKER_MODEL,"limits":{"max_response_bytes":limits.max_response_bytes.get(),"max_request_ids":limits.max_request_ids.get(),"window":{"max_rows":graph.max_rows,"hard_max_rows":SnapshotReadLimits::MAX_ROWS,"max_bytes":graph.max_bytes,"max_depth":graph.max_depth,"max_values":graph.max_values},"evidence":{"max_file_validation_bytes":evidence.max_file_validation_bytes.get(),"max_span_bytes":evidence.max_span_bytes.get()}}})
+    json!({"mode":"scoped","session_id":session_id,"session_basis_id":basis,"revision":revision,"coverage_id":coverage_id,"matching_policy":context_hub::discovery::DISCOVERY_POLICY,"implemented_tools":TOOLS.iter().map(|t|t.name()).collect::<Vec<_>>(),"structured_content_required":true,"complete_system":false,"global_absence_available":false,"h3_curated_available":false,"artifact_content_available":true,"artifact_availability":"enumerated_by_cartograph_artifacts","unknown_degrees":true,"remaining_row_totals":"unknown","cursor_lower_bound":"caller_selected_exclusive_primary_key","exhaustion":"raw_tail_only_not_global_absence","worker_reservation_model":super::super::worker::SCOPED_WORKER_MODEL,"limits":{"max_response_bytes":limits.max_response_bytes.get(),"max_request_ids":limits.max_request_ids.get(),"window":{"max_rows":graph.max_rows,"hard_max_rows":SnapshotReadLimits::MAX_ROWS,"max_bytes":graph.max_bytes,"max_depth":graph.max_depth,"max_values":graph.max_values},"evidence":{"max_file_validation_bytes":evidence.max_file_validation_bytes.get(),"max_span_bytes":evidence.max_span_bytes.get()}}})
 }

@@ -4,7 +4,12 @@ use crate::TOPOLOGY_EDGE_LABELS;
 pub(crate) mod accounting;
 pub use accounting::{COMPILE_WORKSPACE_MODEL, CompileWorkspaceBound, logical_compile_bound};
 pub(crate) mod diagrams;
+mod partition;
 mod producers;
+pub use partition::{
+    DATA_PARTITION_EDGE_LABELS, PartitionAcquisition, PartitionArtifact, PartitionArtifactKind,
+    PartitionError, PartitionWorkspaceBound, compile_partition_selected, logical_partition_bound,
+};
 mod registers;
 pub(crate) mod render;
 pub(crate) mod selected;

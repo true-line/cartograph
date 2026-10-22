@@ -70,7 +70,7 @@ fn scoped_protocol_advertises_real_routes_and_keeps_discovery_lean() {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"cartograph_read_fact"));
-        assert!(!names.contains(&"cartograph_read_artifact"));
+        assert!(names.contains(&"cartograph_read_artifact"));
         let caps = call(dispatch, ctx, 3, "cartograph_capabilities", json!({}));
         assert_eq!(
             caps["result"]["structuredContent"]["session_basis_id"],
@@ -114,11 +114,16 @@ fn scoped_protocol_advertises_real_routes_and_keeps_discovery_lean() {
             .as_array()
             .unwrap();
         assert_eq!(entries.len(), spec::artifact_catalog().len());
-        assert!(
+        assert_eq!(
             entries
                 .iter()
-                .all(|e| e["status"] == "unavailable" && e.get("content_id").is_none())
+                .filter(|e| e["status"] == "partition_supported")
+                .count(),
+            3
         );
+        assert!(entries.iter().all(|e| (e["status"] == "unavailable"
+            || e["status"] == "partition_supported")
+            && e.get("content_id").is_none()));
     });
 }
 #[test]
@@ -200,3 +205,5 @@ fn scoped_protocol_model_reserves_real_descriptors_when_write_cap_is_tiny() {
 
 #[path = "evidence_tests.rs"]
 mod evidence;
+
+mod partition_tests;

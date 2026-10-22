@@ -319,7 +319,11 @@ fn scoped_mcp_synthetic_measurement() {
                 .as_array()
                 .unwrap();
             assert!(!artifacts.is_empty());
-            assert!(artifacts.iter().all(|a| a["status"] == "unavailable"));
+            assert!(
+                artifacts
+                    .iter()
+                    .all(|a| a["status"] == "unavailable" || a["status"] == "partition_supported")
+            );
             let mut writer_observation = Value::Null;
             if repeat + 1 == REPEATS {
                 phase("writer_overlap");

@@ -21,6 +21,7 @@ export const ExplicitActivation: Story = {
     await expect(canvas.getByText(/"acquisition_mode": "complete"/)).toBeVisible();
     await expect(canvas.getByText(/bounded discovery handles, selected fact detail, and retained evidence/)).toBeVisible();
     await expect(canvas.getByText(/complete artifact compilation is unavailable/)).toBeVisible();
+    await expect(canvas.getByText(/a large component can exceed the supplied limits/)).toBeVisible();
     await userEvent.type(canvas.getByLabelText('Resource policy JSON'), 'invalid JSON');
     await expect(canvas.getByRole('button', { name: 'Enable read access' })).toBeDisabled();
     await userEvent.click(canvas.getByRole('button', { name: 'Refresh read service' }));

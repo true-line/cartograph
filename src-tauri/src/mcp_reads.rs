@@ -47,6 +47,8 @@ pub(crate) enum ReadError {
     Limit,
     #[error("storage_unavailable")]
     Storage,
+    #[error("artifact_unavailable")]
+    ArtifactUnavailable,
     #[error("evidence_unavailable")]
     EvidenceUnavailable,
     #[error("evidence_forgotten")]

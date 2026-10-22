@@ -208,6 +208,26 @@ pub(crate) fn required_bytes(limits: WorkerLimits) -> Option<usize> {
     // Deliberately keep complete retained-session envelope: it exceeds the
     // scoped coverage/rejection roles, but fixed scoped owners are added rather
     // than claiming the differently shaped complete basis covers them.
+    let partition = spec::logical_partition_bound(
+        flowtracer::TraceGraphBound {
+            bytes: limits.graph.max_bytes,
+            rows: limits.graph.max_rows,
+            values: limits.graph.max_values,
+        },
+        limits.dispatch.trace,
+        limits.dispatch.compile,
+    )?;
+    let partition_phase = sum(&[
+        partition.peak_bytes,
+        // Requested root is copied into response metadata after compilation.
+        r.min(limits.graph.max_bytes),
+        string_wire("mcp-scoped-session-v1:".len().checked_add(64)?)?,
+        slots::<String>(2)?,
+        // Serialized partition Value and enclosing success Value coexist with
+        // the native artifact before response transport ownership transfers.
+        json_bytes(w)?,
+        json_bytes(w)?,
+    ])?;
     let scoped = sum(&[
         complete.retained_session_bytes,
         ids,
@@ -217,7 +237,10 @@ pub(crate) fn required_bytes(limits: WorkerLimits) -> Option<usize> {
         complete.acquisition_peak_bytes, // fresh scope/coverage while frozen state lives
         keys,
         query,
-        selected.checked_add(candidates)?.max(evidence),
+        selected
+            .checked_add(candidates)?
+            .max(evidence)
+            .max(partition_phase),
     ])?;
     Some(full.max(scoped))
 }
@@ -262,5 +285,26 @@ mod tests {
         limits.dispatch.max_response_bytes = std::num::NonZeroUsize::new(1).unwrap();
         limits.max_request_frame_bytes = std::num::NonZeroUsize::new(1).unwrap();
         assert!(required_bytes(limits).unwrap() >= metadata().unwrap() + fixed_basis().unwrap());
+    }
+
+    #[test]
+    fn partition_compilation_remains_reserved_with_tiny_response_transport() {
+        // AC-0312: rejecting a tiny response still follows closure acquisition
+        // and native rendering, so transport size cannot stand in for those owners.
+        let mut limits = crate::mcp_reads::worker::tests::limits();
+        limits.dispatch.max_response_bytes = std::num::NonZeroUsize::new(1).unwrap();
+        let partition = spec::logical_partition_bound(
+            flowtracer::TraceGraphBound {
+                bytes: limits.graph.max_bytes,
+                rows: limits.graph.max_rows,
+                values: limits.graph.max_values,
+            },
+            limits.dispatch.trace,
+            limits.dispatch.compile,
+        )
+        .unwrap();
+        assert!(required_bytes(limits).unwrap() >= partition.peak_bytes + metadata().unwrap());
+        limits.dispatch.compile.max_bytes = usize::MAX;
+        assert!(required_bytes(limits).is_none());
     }
 }

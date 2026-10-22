@@ -14,9 +14,11 @@ maxima. Scoped mode interprets graph limits as a bounded acquisition window or
 selected fact closure, rather than a complete graph allowance.
 
 The first scoped acquisition records coverage and a storage revision without
-loading all facts. Each request brackets graph reads with registration,
-configuration and rejection observations. A changed observation returns
-`stale_basis`; clients open a new session. These checks are not a transaction
+loading all facts. Discovery/detail freshness checks bracket their graph reads
+with registration, configuration, rejection and revision observations. A changed
+observation returns `stale_basis`; clients open a new session. Partition requests
+instead pin the expected graph revision for their complete storage acquisition,
+as described below. Checks of external qualifications are not a transaction
 across independent stores and do not exclude ABA changes in those observations.
 Storage generation denotes mutation order, not successful recovery completion.
 
@@ -46,15 +48,52 @@ host revalidates selected identity and source binding, acquires the retention
 guard, repeats the checks, and rechecks session qualifications. It uses the
 existing retained receipt/capture reader, never a checkout fallback.
 
-All current official artifact producers require the complete producer basis in
-this slice. Scoped artifact catalog entries explicitly report unavailable with
-`complete_basis_required`; scoped sessions do not advertise artifact compilation.
-A sequence of discovery pages does not become an official artifact basis.
-Partition artifact support requires a separate producer-qualified closure:
-endpoint/entity dependencies, all required flow hops and alternatives, or full
-rule/condition/dependency support at one revision. Over-limit closure must return
-limited/unavailable without minting an artifact content identity. That work
-remains part of the #731 plan, not a capability implied by this first slice.
+Scoped `cartograph_read_artifact` supports three producer-qualified partition
+kinds: `data-model`, `rule-evidence` and `rule-evidence-index`. The catalog names
+those bounded scopes separately from complete-only artifacts. `flow-dossiers`
+remains unavailable: there is no explicit-seed tracer closure API in this slice.
+Complete acquisition keeps its existing compiler, schemas and limits unchanged.
+A union of discovery pages is never a producer closure or complete artifact basis.
+
+### Closed stored-fact partitions
+
+Only the storage-owned scoped reader constructs the private closure, inside one
+deferred SQLite transaction checked against the expected StoreRevision. It uses
+validated indexed adjacency, charging all inspected labels before deciding which
+ones the producer needs. Cumulative visits include duplicates/missing probes;
+raw/canonical bytes, JSON values/depth and bounded adjacency probes also consume
+the existing graph budget. A small entry can reach a large component and fail
+the whole request. Missing required context or exhausted acquisition/output
+limits produce unavailable/limited, with no prefix artifact or content identity.
+
+A data partition exhausts both directions of the native data-model relation set
+(`READS`, `WRITES`, `MAPS_TO`, `REFERENCES`) for its connected DataEntity component,
+and includes required incident context endpoints. A rule partition renders one
+explicit BusinessRule observation plus its outgoing native inventory relations;
+its owner, dependency targets, unresolved/interpretation gaps and local-definition
+references are acquired as rendering context. Context observations never become
+extra inventory roots. Lexical binding IDs are not graph-node requests. Existing
+native visibility, tier/provenance handling, gap rendering and malformed-payload
+limitations remain in force; stored closure is not a proof of complete execution
+predicates, consumer effects, source truth or behavioral completeness.
+
+The compiler shares official projection/rendering, including hidden BusinessRule
+relationship policy, but returns `cartograph.spec-partition/<kind>@1`,
+`spec-partition-basis-v1` and `spec-partition-artifact-v1` identities. The basis
+binds sorted stored closure, semantic roots, artifact kind, StoreRevision and
+qualified scoped session/export mode. The requested data entry is response
+metadata; two visible entries in the same component produce identical canonical
+content/basis/content IDs. Acquisition counters are disclosed outside that
+identity. Rule roots are explicit observation selections. Every response carries
+`complete_system: false` and `absence_claim: false`; no complete context ID or
+whole-system recovery claim is substituted.
+
+A concurrent graph writer can commit while the partition transaction retains its
+original snapshot. A successful response still names that pinned revision; it
+does not assert the store stayed unchanged until delivery. The next request
+using the older revision is stale. Registration/configuration and rejection
+qualifications are independently checked before and after the graph transaction;
+that is not a cross-store transaction or an exclusion of ABA changes.
 
 ## Alternatives and bounds
 
@@ -70,6 +109,10 @@ The scoped worker reservation accounts for simultaneous retained and transient
 owners: revision/schema validation, coverage and policy observations, raw and
 projected rows, candidate handles, selected endpoint closure, binding/digest
 scratch, receipt/capture buffers, protocol descriptors and response envelopes.
+Partition work adds closure maps/current indexed pages, frontier and typed rule
+reference sets before graph lookup, projection/native rendering, qualified
+header/body/assertion owners and serialized protocol Values while the frozen
+session remains retained.
 Checked arithmetic refuses overflow and a reservation below the derived minimum.
 The transport reservation remains separate. These named payload units are not an
 RSS guarantee; allocator overhead, SQLite caches and native runtime memory are
@@ -82,7 +125,9 @@ Keep complete-mode output and rejection behavior unchanged. Exercise a synthetic
 discovery and selected detail, then retained evidence after checkout removal.
 Cover mutation between pages, rejection/configuration drift without graph change,
 hidden rule endpoints, zero-match partial windows, invalid targets, output caps,
-and complete artifact unavailability. Measure actual latency and resource
+complete artifact unavailability, and producer-qualified partition identity,
+dangling required context, whole-component limits and whole-envelope refusal.
+Measure actual latency and resource
 observations with a reproducible fixture and exact source tree. A real target
 needs separate authorization. Full local gates, current-head CI and required
 owner review remain publication gates; source fixture tests do not establish
@@ -115,3 +160,19 @@ content, independent clients or providers. The fixture reports unavailable
 evidence/artifacts explicitly. Reproducible build/runner scripts and captured
 results are retained in the external task artifact `731-mcp-measure/run-final`;
 source checkpoint was `6887125` plus the ignored measurement fixture.
+
+## Partition validation scope
+
+AC-0311/T-0311 covers pinned indexed adjacency, component identity and native
+producer parity, required-context/limit refusal and partition workspace roles.
+AC-0312/T-0312 maps the scoped dispatcher artifact route on a large synthetic
+estate, exact serialized envelope boundary, root-independent identity and stale
+refusal, the authenticated native Unix socket/worker partition path, and a rule
+partition assertion followed through the production retained-source dispatcher
+path after checkout removal. These are automated fixtures, not installed-client
+or provider acceptance. The earlier timing observation above retains its
+original discovery/detail scope: its unavailable-artifact observation predates
+this partition phase. Positive retained-evidence transport latency and the full
+evidence denominator remain separate from partition rendering or a source-backed
+dispatcher assertion. AC-0288..0290 and the full installed/native/independent-client
+manual gates are unchanged; no complete #731 delivery is claimed here.

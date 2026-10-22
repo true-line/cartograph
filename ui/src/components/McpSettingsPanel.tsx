@@ -56,7 +56,9 @@ export function McpSettingsPanel(props: McpSettingsPanelProps) {
       <p>Acquisition mode is complete or scoped. Complete mode reads the whole recovered graph
         within the supplied limits and supports complete artifact compilation. Scoped mode provides
         bounded discovery handles, selected fact detail, and retained evidence with partial coverage;
-        complete artifact compilation is unavailable. The template uses complete mode to preserve
+        complete artifact compilation is unavailable. Scoped artifacts cover a whole connected data-entity component
+        or one rule observation; a large component can exceed the supplied limits. Flows remain unavailable.
+        The template uses complete mode to preserve
         the existing behavior.</p>
       <details><summary>Required policy fields</summary>
         <p>Replace every null with a positive integer. Times are milliseconds and sizes are bytes.

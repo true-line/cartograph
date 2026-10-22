@@ -19,6 +19,7 @@ serde_json = { workspace = true }
 blake3 = { workspace = true }
 
 [dev-dependencies]
+rusqlite = { workspace = true }
 adapters-lang-ts = { workspace = true }
 context-hub = { workspace = true }
 source-capture = { workspace = true }

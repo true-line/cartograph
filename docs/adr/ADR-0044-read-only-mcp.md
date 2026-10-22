@@ -94,10 +94,41 @@ over-limit graph; they do not establish installed packaging or independent-clien
 acceptance. Existing AC-0288..0290 and their manual acceptance denominator remain
 intact.
 
-Partition artifact compilation and closure proof are **not implemented** by this
-slice. The scoped catalog reports complete artifact compilation unavailable,
-never empty-complete results or a complete graph ID. H3 curated projection,
-installed/native packaging acceptance, independent-client/provider acceptance
-and Windows support retain their prior gates. Full MCP performance timings are
-**pending**; storage-only synthetic measurements do not establish end-to-end MCP
-latency or RSS bounds. This addendum does not claim complete #731 delivery.
+### Closed stored-fact partition phase
+
+AC-0311/T-0311 and AC-0312/T-0312 add producer-specific partitions without
+changing the complete compiler or its admission ceiling. Only a private closure
+built through a pinned, bounded storage reader is accepted. Data partitions
+exhaust the whole connected DataEntity component for the native relation set and
+include required context endpoints. Rule partitions select one explicit
+BusinessRule observation with its owner/dependency/gap context; context rules
+remain lookup-only. Native projection/renderers, tier/provenance and hidden
+BusinessRule relationship policy are shared. Over-limit or missing required
+closure refuses the artifact, never a truncated prefix or an empty-complete view.
+Flows remain unavailable pending a separate explicit-seed tracer closure.
+
+Partition schema/basis/content domains are separate from complete artifacts and
+context-v1. Sorted closure and semantic roots bind the expected StoreRevision,
+artifact kind and qualified session. The requested data entry appears only in
+the response envelope, so two visible entries in one component share canonical
+content and identity; acquisition counters do not affect that identity. Stored
+closure never establishes behavioral completeness or full-system coverage.
+
+One SQLite snapshot covers the whole partition acquisition. Concurrent graph
+commits cannot alter that result's named revision; later requests using the old
+revision fail. External registration/configuration and rejection observations
+are checked before/after separately, not atomically with the graph or against
+ABA changes. The worker floor additionally accounts for closure/frontier/typed
+reference ownership, native rendering and qualified protocol output while the
+session remains live; transport and evidence limits retain their prior gates.
+
+Automated storage/spec, large-estate dispatcher and authenticated native worker
+partition fixtures, plus the source-backed rule-assertion dispatcher fixture,
+remain distinct from installed acceptance. The synthetic authenticated Unix measurement described in the
+[scoped design](../design/scoped-mcp-retrieval.md) records discovery/detail at its
+original pre-partition source; it does not establish partition transport timing,
+positive retained-evidence latency or installed acceptance. H3 curated projection,
+installed/native packaging, independent-client/provider acceptance and Windows
+support remain pending under their prior gates. AC-0288..0290 and their manual
+evidence denominator are unchanged. Neither this addendum nor the partition
+fixture claims complete #731 delivery or owner approval.

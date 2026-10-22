@@ -379,5 +379,6 @@ impl ScopedReadSession {
 }
 mod admission;
 mod discovery;
+mod partition;
 #[cfg(test)]
 mod tests;

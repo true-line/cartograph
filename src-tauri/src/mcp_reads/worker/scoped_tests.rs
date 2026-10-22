@@ -87,7 +87,7 @@ fn scoped_worker_opens_large_graph_while_complete_mode_refuses_without_fallback(
         let tools = response["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().any(|t| t["name"] == "cartograph_read_fact"));
         assert!(
-            !tools
+            tools
                 .iter()
                 .any(|t| t["name"] == "cartograph_read_artifact")
         );
@@ -127,7 +127,7 @@ fn scoped_native_socket_reads_large_graph_and_refuses_stale_continuation() {
     );
     let app = tauri::test::mock_builder().build(context).unwrap();
     let state = crate::registered_source_tests::app_state(dir.path());
-    let patch = GraphPatch {
+    let mut patch = GraphPatch {
         upsert_nodes: (0..60_001)
             .map(|i| Node {
                 id: format!("n{i:06}"),
@@ -137,6 +137,26 @@ fn scoped_native_socket_reads_large_graph_and_refuses_stale_continuation() {
             .collect(),
         ..GraphPatch::default()
     };
+    // AC-0312: a real scoped artifact crosses the authenticated native transport.
+    let provenance = core_prov::Provenance::new(
+        core_prov::Tier::Deterministic,
+        core_prov::ConfidenceTier::Confirmed,
+        vec![core_prov::EvidenceRef {
+            repo: "fixture/repo".into(),
+            path: "model.py".into(),
+            byte_start: 0,
+            byte_end: 1,
+            commit_sha: "abc".into(),
+        }],
+        "partition.fixture",
+        b"native-entity",
+    )
+    .unwrap();
+    patch.upsert_nodes.push(Node {
+        id: "native-entity".into(),
+        label: "DataEntity".into(),
+        props: json!({"name":"NativeEntity", "prov":provenance}),
+    });
     assert!(
         state
             .graph
@@ -217,6 +237,18 @@ fn scoped_native_socket_reads_large_graph_and_refuses_stale_continuation() {
         assert_eq!(page["complete_system"], false);
         let cursor = page["next_cursor"].clone();
         assert!(cursor.is_object());
+        client.write(&json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"cartograph_read_artifact","arguments":{"session_id":"native-scoped","session_basis_id":basis,"kind":"data-model","root":"native-entity","max_bytes":65536}}})).await.unwrap();
+        let artifact = client.read().await.unwrap().unwrap();
+        let partition = &artifact["result"]["structuredContent"]["partition"];
+        assert_eq!(partition["artifact"]["roots"], json!(["native-entity"]));
+        assert_eq!(partition["complete_system"], false);
+        assert_eq!(partition["absence_claim"], false);
+        assert!(
+            partition["artifact"]["content_id"]
+                .as_str()
+                .unwrap()
+                .contains("partition")
+        );
         app.state::<crate::AppState>()
             .graph
             .lock()
