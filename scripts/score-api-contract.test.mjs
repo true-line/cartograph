@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { canonicalEndpoint, documentedEndpoints, recoveredEndpoints, score } from './score-api-contract.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 test('parameter segments compare by position across doc and framework syntax', () => {
   assert.equal(canonicalEndpoint('get', '/api/aliases/:alias_id/'), 'GET /api/aliases/{}');
@@ -41,4 +46,17 @@ test('precision counts only matches inside the requested scope', () => {
   assert.equal(result.recall, 1);
   assert.equal(result.recovered_in_scope, 1);
   assert.equal(result.documented_precision, 1);
+});
+
+test('shared fixture produces the exact canonical endpoint set expected by Rust spec::contract', () => {
+  const fixturePath = join(HERE, '..', 'crates', 'spec', 'tests', 'fixtures', 'api_contract_parity.md');
+  const markdown = readFileSync(fixturePath, 'utf8');
+  assert.deepEqual([...documentedEndpoints(markdown)].sort(), [
+    'DELETE /',
+    'GET /api/aliases/{}',
+    'GET /api/edge/:/<>',
+    'PATCH /api/profile/{}',
+    'POST /api/aliases/{}/items/{}',
+    'PUT /api/v2/settings',
+  ]);
 });

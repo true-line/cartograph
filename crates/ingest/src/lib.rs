@@ -8,6 +8,7 @@
 //! success — an auth failure leaves **no partial clone** (AC-0003) and
 //! maps to a typed error carrying remediation text.
 
+pub mod api_docs;
 pub mod coverage;
 pub mod managed;
 pub mod manifest;
