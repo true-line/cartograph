@@ -176,7 +176,7 @@
 - **Actor:** Engineer
 - **As a** engineer **I want** to explore the unified graph with layer filters and tier coloring **so that** I can see what is confirmed vs inferred vs gapped.
 - **Priority:** Must · **Status:** Done
-- **AC-0026** Given the graph, when I filter by layer, then only that layer's nodes/edges render.
+- **AC-0026** Given the graph, when I filter by layer, then only that layer's nodes/edges render: a node renders when its kind is native to the layer, an edge renders when both endpoints are native to the layer or its relationship belongs to the layer and one endpoint is native (bringing in the other endpoint), so relations between unclassified facts (rule exits and rule gaps) never appear under a layer; a layer with nothing recovered shows what would populate it (for Infrastructure: infrastructure-as-code, deployment config or a stack plugin).
 - **AC-0027** Given the confidence overlay, when active, then nodes/edges are colored by tier and Gaps are flagged.
 - **AC-0028** Given a node, when selected, then the evidence panel shows file/span/commit with read-only jump-to-source.
 - **AC-0062** Given the evidence drawer, when open, then it is resizable (320↔560px), its overlay never swallows clicks outside the panel, Esc closes it, the source view carries true file line numbers (windowed files report their real starting line) and the full span range including end line:col, non-Confirmed facts show a why-strip plus a collapsible why-this-tier explanation, the provenance table renders the complete 64-hex content hash with a copy affordance whose payload equals the displayed value, supporting evidence spans are navigable, a Gap offers the Resolution Strategy CTA, and the footer states the R-INT-1 integrity rule.

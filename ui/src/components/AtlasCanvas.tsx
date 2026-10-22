@@ -83,7 +83,9 @@ function edgeLayers(edge: GraphEdge): GraphLayer[] {
  *  A layer edge brings in its other endpoint only when one endpoint natively
  *  belongs to the layer, so generic relations between unclassified facts
  *  (rule exits, rule gaps joined by DEPENDS_ON) never surface under a layer
- *  they are not part of (#723). */
+ *  they are not part of (#723). An edge whose two endpoints are both native to
+ *  the layer also stays, whatever its label's own layer: Extension GRANTS
+ *  Permission and Command HANDLES ExtensionContext are client relationships. */
 export function filterAtlasGraph(snapshot: AtlasSnapshot, layer: AtlasLayer): AtlasSnapshot {
   if (layer === 'all') return snapshot;
 
@@ -91,7 +93,9 @@ export function filterAtlasGraph(snapshot: AtlasSnapshot, layer: AtlasLayer): At
     snapshot.nodes.filter((node) => baseLayers(node).includes(layer)).map((node) => node.id),
   );
   const edges = snapshot.edges.filter(
-    (edge) => edgeLayers(edge).includes(layer) && (native.has(edge.src) || native.has(edge.dst)),
+    (edge) =>
+      (native.has(edge.src) && native.has(edge.dst)) ||
+      (edgeLayers(edge).includes(layer) && (native.has(edge.src) || native.has(edge.dst))),
   );
   const visibleIds = new Set(native);
   for (const edge of edges) {

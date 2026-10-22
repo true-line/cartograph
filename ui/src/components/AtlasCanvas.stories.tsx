@@ -160,6 +160,30 @@ export const InfrastructureExcludesRuleGaps: Story = {
   },
 };
 
+const extensionFixture: AtlasSnapshot = {
+  nodes: [
+    { id: 'ext:local/addon@src', label: 'Extension', props: { name: 'addon', prov: prov('Confirmed', 'manifest.json') } },
+    { id: 'perm:local/addon@storage', label: 'Permission', props: { name: 'storage', prov: prov('Confirmed', 'manifest.json') } },
+    { id: 'cmd:local/addon@open', label: 'Command', props: { name: 'open', prov: prov('Confirmed', 'manifest.json') } },
+    { id: 'ctx:local/addon@background', label: 'ExtensionContext', props: { name: 'background', prov: prov('Confirmed', 'manifest.json') } },
+  ],
+  edges: [
+    { src: 'ext:local/addon@src', dst: 'perm:local/addon@storage', label: 'GRANTS', props: { prov: prov('Confirmed', 'manifest.json') } },
+    { src: 'cmd:local/addon@open', dst: 'ctx:local/addon@background', label: 'HANDLES', props: { prov: prov('Confirmed', 'manifest.json') } },
+  ],
+};
+
+export const ClientKeepsExtensionRelationships: Story = {
+  args: { snapshot: extensionFixture },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Client' }));
+    // GRANTS and HANDLES are labelled cloud/server, but both of their
+    // endpoints are client-native, so they stay with the Client layer.
+    await waitFor(() => expect(canvas.getByRole('status')).toHaveTextContent('4 nodes · 2 edges'));
+  },
+};
+
 export const InfrastructureEmptyNamesSources: Story = {
   args: { snapshot: { nodes: [atlasNodes[3]], edges: [] } },
   play: async ({ canvasElement }) => {
