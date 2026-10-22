@@ -117,7 +117,7 @@ pub(super) fn descriptor(tool: ReadTool, graph: SnapshotReadLimits) -> Value {
             props["root"] = json!({"type":"string","minLength":1});
             props["max_bytes"] = json!({"type":"integer","minimum":1});
             (
-                "Compile a bounded whole DataEntity component or explicit BusinessRule observation closure. A leaf may reach a large component and return a limit; never full-system evidence.",
+                "Compile a bounded whole DataEntity component or explicit BusinessRule observation closure. A Gap-tier DataEntity entry root returns unavailable; this does not establish missing data. A leaf may reach a large component and return a limit; never full-system evidence.",
                 object(
                     props,
                     &[

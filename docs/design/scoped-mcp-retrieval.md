@@ -68,7 +68,9 @@ limits produce unavailable/limited, with no prefix artifact or content identity.
 
 A data partition exhausts both directions of the native data-model relation set
 (`READS`, `WRITES`, `MAPS_TO`, `REFERENCES`) for its projected visible DataEntity
-component, and includes required incident context endpoints. Hidden, rejected or
+component, and includes required incident context endpoints. A Gap-tier DataEntity
+entry root returns unavailable by design; this is not a claim that the fact or
+its source data is missing. Hidden, rejected or
 below-mode bridges are inspected and charged at the visible boundary, but never
 expanded. High-degree boundary rows can still exhaust the
 acquisition limit; hidden components cannot join visible roots or render as
