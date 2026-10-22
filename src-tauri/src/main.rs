@@ -306,6 +306,13 @@ struct PluginCorpus {
 impl PluginCorpus {
     fn read(plugin: &adapters_plugin_host::discovery::DiscoveredPlugin) -> Self {
         let bytes = std::fs::read(plugin.path.with_extension("golden.json")).ok();
+        Self::from_bytes(plugin, bytes)
+    }
+
+    fn from_bytes(
+        plugin: &adapters_plugin_host::discovery::DiscoveredPlugin,
+        bytes: Option<Vec<u8>>,
+    ) -> Self {
         Self {
             gate_key: adapters_plugin_host::gate::gate_key(&plugin.content_hash, bytes.as_deref()),
             corpus: bytes.and_then(|bytes| serde_json::from_slice(&bytes).ok()),
@@ -574,22 +581,17 @@ fn active_plugins_in(
             continue;
         }
         let enabled = settings_store
-            .enabled_plugins(&settings_root)
-            .map_err(|e| e.to_string())?
-            .iter()
-            .any(|(id, hash)| *id == plugin.id && *hash == plugin.content_hash);
+            .plugin_enabled_exact(&settings_root, &plugin.id, &plugin.content_hash)
+            .map_err(|e| e.to_string())?;
         if !enabled {
             continue;
         }
         // The verdict covers these exact corpus bytes: an edited corpus
         // (new extension or coverage claims) is ungated, never trusted.
         let corpus = PluginCorpus::read(&plugin);
-        let gate_passed = matches!(
-            settings_store
-                .plugin_gate(&plugin.id, &corpus.gate_key)
-                .map_err(|e| e.to_string())?,
-            Some((true, _))
-        );
+        let gate_passed = settings_store
+            .plugin_gate_passed_exact(&plugin.id, &corpus.gate_key)
+            .map_err(|e| e.to_string())?;
         if !gate_passed {
             continue;
         }

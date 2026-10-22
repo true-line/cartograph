@@ -14,6 +14,9 @@ export const ExplicitActivation: Story = {
     await expect(args.onEnable).not.toHaveBeenCalled();
     await expect(canvas.getByRole('button', { name: 'Enable read access' })).toBeDisabled();
     await userEvent.click(canvas.getByText('Advanced resource policy'));
+    await userEvent.click(canvas.getByText('Required policy fields'));
+    await expect(canvas.getByText(/max_source_registry_bytes/)).toBeVisible();
+    await expect(canvas.getByText(/max_corpus_bytes/)).toBeVisible();
     await userEvent.type(canvas.getByLabelText('Resource policy JSON'), 'invalid JSON');
     await expect(canvas.getByRole('button', { name: 'Enable read access' })).toBeDisabled();
     await userEvent.click(canvas.getByRole('button', { name: 'Refresh read service' }));

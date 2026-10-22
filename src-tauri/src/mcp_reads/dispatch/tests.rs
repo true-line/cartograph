@@ -150,6 +150,16 @@ fn real_capabilities_discovery_catalog_and_identity_bound_artifact_pages() {
     assert_eq!(data["evidence_available"], false);
     assert_eq!(data["evidence_absence_reason_available"], false);
     assert_eq!(data["structured_content_required"], true);
+    assert_eq!(data["limits"]["graph"]["scope"], "complete_recovered_graph");
+    assert_eq!(data["limits"]["graph"]["hard_max_rows"], 50_000);
+    assert_eq!(
+        data["limits"]["graph"]["max_rows"],
+        dispatch.session.graph_limits.max_rows
+    );
+    assert_eq!(
+        data["limits"]["graph"]["max_bytes"],
+        dispatch.session.graph_limits.max_bytes
+    );
     assert_eq!(data["context_fact_kinds"], json!(["node", "edge"]));
     assert_eq!(data["discovery_fact_kinds"], json!(["node"]));
     assert_eq!(data["flows_access"]["artifact_id"], "flow-dossiers");

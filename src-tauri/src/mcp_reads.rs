@@ -28,6 +28,9 @@ pub(crate) mod artifacts;
 pub(crate) mod commands;
 pub(crate) mod dispatch;
 #[cfg(unix)]
+pub(crate) mod reservation;
+pub(crate) mod scope;
+#[cfg(unix)]
 pub(crate) mod service;
 pub(crate) mod worker;
 

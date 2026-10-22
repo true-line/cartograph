@@ -176,7 +176,7 @@ fn mcp_scripted_stdio_client_smoke_against_isolated_app_service() {
         // These are isolated fixture values, not app policy defaults or calibration.
         let mut worker = super::worker::tests::limits();
         worker.dispatch.max_request_ids = nz(128);
-        let policy = Policy {
+        let mut policy = Policy {
             transport: ActivationLimits {
                 max_connections: nz(1),
                 read_frame_bytes: nz(65536),
@@ -195,6 +195,12 @@ fn mcp_scripted_stdio_client_smoke_against_isolated_app_service() {
             },
             export_mode: spec::ExportMode::VerifiedOnly,
         };
+        let baseline = super::reservation::TransportReservation::for_limits(policy.transport)
+            .unwrap()
+            .activation_bytes;
+        policy.aggregate.max_reserved_bytes = nz(baseline
+            .checked_add(policy.worker.reserved_bytes.get())
+            .unwrap());
         let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()

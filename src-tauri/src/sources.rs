@@ -5,8 +5,11 @@ use ingest::managed::{ManagedCheckout, ManagedOrigin, parse_managed_origin};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::{Component, Path, PathBuf};
 
+#[path = "sources/bounded.rs"]
+mod bounded;
 #[path = "sources/retained_view.rs"]
 mod retained_view;
+pub(crate) use bounded::{SourceListError, SourceListLimits};
 pub(crate) use retained_view::{RetainedSourceError, RetainedSourceView};
 
 // Bound UTF-8 byte lengths before fetching retained strings. Paths allow the
@@ -281,6 +284,27 @@ impl SourceRegistry {
         check_state(&tx, Some(&self.registry_id))?;
         let sources = read_sources(&tx, &self.app_data_dir, &self.registry_id, None)?;
         tx.commit().map_err(storage_error)?;
+        Ok(sources)
+    }
+
+    /// Materialize one coherent registry revision under explicit row and raw
+    /// UTF-8 SQL text byte ceilings. These bound registry input materialization,
+    /// not allocator overhead, derived copies, SQLite caches or process RSS.
+    /// Zero ceilings admit an empty registry. The standalone read transaction
+    /// must not be called inside another transaction on this registry connection.
+    pub(crate) fn list_bounded(
+        &self,
+        limits: SourceListLimits,
+    ) -> Result<Vec<RegisteredSource>, SourceListError> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|_| SourceListError::Storage)?;
+        bounded::preflight(&tx, limits)?;
+        check_state(&tx, Some(&self.registry_id)).map_err(bounded::registry_error)?;
+        let sources = read_sources(&tx, &self.app_data_dir, &self.registry_id, None)
+            .map_err(bounded::registry_error)?;
+        tx.commit().map_err(|_| SourceListError::Storage)?;
         Ok(sources)
     }
 

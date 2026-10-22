@@ -1978,6 +1978,23 @@ fn mcp_retained_span_uses_session_receipt_and_refuses_changed_or_over_budget_evi
         spec::ExportMode::VerifiedOnly,
     )
     .unwrap();
+    let original_bytes = {
+        let graph = state.graph.lock().unwrap().read_snapshot().unwrap();
+        serde_json::to_vec(&graph).unwrap().len()
+    };
+    let byte_bounded_session = ReadSession::acquire(
+        &state.graph,
+        &state.decisions,
+        || Ok(vec![]),
+        core_graph::SnapshotReadLimits {
+            max_bytes: original_bytes,
+            ..core_graph::SnapshotReadLimits::default()
+        },
+        core_graph::coverage::CoverageReadLimits::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap();
+    let byte_basis = byte_bounded_session.basis_id().unwrap();
     let bounded_basis = bounded_session.basis_id().unwrap();
     assert_eq!(
         bounded_session
@@ -2186,6 +2203,16 @@ fn mcp_retained_span_uses_session_receipt_and_refuses_changed_or_over_budget_evi
             .read_evidence(&state, &basis, &target, limits())
             .unwrap_err(),
         ReadError::StaleBasis
+    );
+    // Changed selected fact properties must hit the session byte preflight
+    // before any preliminary unbounded digest lookup or receipt decode.
+    changed.props["mcp_oversized"] = json!("x".repeat(original_bytes));
+    state.graph.lock().unwrap().put_node(&changed).unwrap();
+    assert_eq!(
+        byte_bounded_session
+            .describe_evidence(&state, &byte_basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::Limit
     );
 }
 

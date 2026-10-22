@@ -18,6 +18,7 @@ const policyShape = {
   coverage: { max_records: null, max_bytes: null },
   dispatch: { max_response_bytes: null, max_request_ids: null, trace_max_flows: null, trace_max_hops: null, trace_max_output_bytes: null, compile_max_bytes: null, adr_max_rows: null, adr_max_output_bytes: null },
   evidence: { max_file_validation_bytes: null, max_span_bytes: null },
+  scope: { max_sources: null, max_source_registry_bytes: null, max_event_registry_bytes: null, max_directory_entries: null, max_artifact_bytes: null, max_metadata_bytes: null, max_corpus_bytes: null },
   aggregate: { max_workers: null, max_reserved_bytes: null, max_cumulative_read_bytes: null },
   worker_reserved_bytes: null,
   export_mode: 'verified-only',
@@ -42,10 +43,13 @@ export function McpSettingsPanel(props: McpSettingsPanelProps) {
       <summary>Advanced resource policy</summary>
       <p>Supply an explicit JSON policy for this activation. No default policy is applied.
         The backend checks all required limits before opening access. Byte reservations are
-        accounting limits, not a guarantee of process memory usage.</p>
+        accounting limits, not a guarantee of process memory usage. The aggregate
+        reservation must cover all connection payloads plus at least one worker.</p>
       <details><summary>Required policy fields</summary>
         <p>Replace every null with a positive integer. Times are milliseconds and sizes are bytes.
-          Export mode is verified-only or best-effort. This template supplies no numeric defaults.</p>
+          Scope source and registry limits apply per observation; artifact and corpus bytes apply per repo.
+          Directory and metadata limits apply per scan. Export mode is verified-only or best-effort.
+          This template supplies no numeric defaults.</p>
         <pre>{JSON.stringify(policyShape, null, 2)}</pre>
       </details>
       <label htmlFor="mcp-resource-policy">Resource policy JSON</label>

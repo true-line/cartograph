@@ -6,6 +6,10 @@
 //! keyed by BLAKE3 content hash (the same primitive provenance uses), so
 //! "same id, different bytes" is always visible.
 
+#[path = "discovery/bounded.rs"]
+mod bounded;
+pub use bounded::{DiscoveryError, DiscoveryLimits, discover_bounded};
+
 use core_prov::content_hash;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -21,6 +21,78 @@ pub(crate) struct Policy {
     pub aggregate: WorkLimits,
     pub export_mode: spec::ExportMode,
 }
+impl Policy {
+    /// Hold transport payload capacity for the full activation independently of
+    /// workers: responses and unauthenticated peers can outlive worker permits.
+    fn worker_budget(&self) -> Result<WorkLimits, ReadError> {
+        let transport = super::reservation::TransportReservation::for_limits(self.transport)
+            .ok_or(ReadError::InvalidRequest)?;
+        let remaining = self
+            .aggregate
+            .max_reserved_bytes
+            .get()
+            .checked_sub(transport.activation_bytes)
+            .and_then(std::num::NonZeroUsize::new)
+            .ok_or(ReadError::InvalidRequest)?;
+        Ok(WorkLimits {
+            max_reserved_bytes: remaining,
+            ..self.aggregate
+        })
+    }
+
+    /// Validate every activation entry point before state or endpoint mutation.
+    /// Raw numeric fields retain the positive bounds enforced by IPC decoding.
+    pub(crate) fn validate(&self) -> Result<(), ReadError> {
+        use core_graph::{SnapshotReadLimits, coverage::CoverageReadLimits};
+        use std::time::Instant;
+        let t = self.transport;
+        let w = self.worker;
+        let g = w.graph;
+        let c = w.coverage;
+        let d = w.dispatch;
+        let e = w.evidence;
+        let a = self.aggregate;
+        let worker_budget = self.worker_budget()?;
+        if w.scope.max_sources.get() > context_hub::coverage::MAX_COVERAGE_REPOS
+            || g.max_bytes == 0
+            || g.max_bytes > SnapshotReadLimits::MAX_BYTES
+            || g.max_rows == 0
+            || g.max_rows > SnapshotReadLimits::MAX_ROWS
+            || g.max_depth == 0
+            || g.max_depth > SnapshotReadLimits::MAX_DEPTH
+            || g.max_values == 0
+            || g.max_values > SnapshotReadLimits::MAX_VALUES
+            || c.max_records == 0
+            || c.max_records > CoverageReadLimits::MAX_RECORDS
+            || c.max_bytes == 0
+            || c.max_bytes > CoverageReadLimits::MAX_BYTES
+            || t.frame_deadline.is_zero()
+            || t.session_lifetime.is_zero()
+            || t.frame_deadline > t.session_lifetime
+            || Instant::now().checked_add(t.frame_deadline).is_none()
+            || Instant::now().checked_add(t.session_lifetime).is_none()
+            || t.frame_deadline.as_nanos().div_ceil(1_000_000) > u128::from(u64::MAX)
+            || t.session_lifetime.as_nanos().div_ceil(1_000_000) > u128::from(u64::MAX)
+            || d.max_response_bytes > t.write_frame_bytes
+            || d.trace.max_flows == 0
+            || d.trace.max_hops == 0
+            || d.trace.max_output_bytes == 0
+            || d.trace.max_output_bytes > d.max_response_bytes.get()
+            || d.compile.max_bytes == 0
+            || d.compile.max_bytes > d.max_response_bytes.get()
+            || d.compile.adr.max_rows == 0
+            || d.compile.adr.max_output_bytes == 0
+            || d.compile.adr.max_output_bytes > d.compile.max_bytes
+            || e.max_span_bytes > e.max_file_validation_bytes
+            || e.max_file_validation_bytes.get() > a.max_cumulative_read_bytes
+            || w.reserved_bytes > worker_budget.max_reserved_bytes
+            || a.max_workers > t.max_connections
+        {
+            return Err(ReadError::InvalidRequest);
+        }
+        Ok(())
+    }
+}
 struct Active {
     activation: Activation,
     budget: WorkBudget,
@@ -138,12 +210,7 @@ impl Service {
         parent: &Path,
         policy: Policy,
     ) -> Result<PathBuf, ReadError> {
-        if policy.worker.dispatch.max_response_bytes > policy.transport.write_frame_bytes
-            || policy.worker.reserved_bytes > policy.aggregate.max_reserved_bytes
-            || policy.aggregate.max_workers > policy.transport.max_connections
-        {
-            return Err(ReadError::InvalidRequest);
-        }
+        policy.validate()?;
         let mut state = self.0.lock().map_err(|_| ReadError::Storage)?;
         if state.active.is_some() || state.stopping || state.shutdown || state.cleanup_failed {
             return Err(ReadError::InvalidRequest);
@@ -162,7 +229,7 @@ impl Service {
         // synchronous workers have all exited, even if their sockets are gone.
         state.draining = None;
         state.cleanup = None;
-        let budget = WorkBudget::new(policy.aggregate);
+        let budget = WorkBudget::new(policy.worker_budget()?);
         let factory_budget = budget.clone();
         let activation = Activation::start(parent, policy.transport, move || {
             let app = app.clone();
@@ -265,7 +332,7 @@ mod tests {
         NonZeroUsize::new(n).unwrap()
     }
     pub(super) fn policy() -> Policy {
-        Policy {
+        let mut policy = Policy {
             transport: ActivationLimits {
                 max_connections: nz(2),
                 read_frame_bytes: nz(65536),
@@ -280,8 +347,138 @@ mod tests {
                 max_cumulative_read_bytes: 100_000,
             },
             export_mode: spec::ExportMode::VerifiedOnly,
+        };
+        let baseline =
+            super::super::reservation::TransportReservation::for_limits(policy.transport)
+                .unwrap()
+                .activation_bytes;
+        policy.aggregate.max_reserved_bytes = nz(baseline
+            .checked_add(policy.worker.reserved_bytes.get())
+            .unwrap());
+        policy
+    }
+    #[test]
+    fn direct_policy_validation_rejects_every_ingress_bound_before_endpoint_mutation() {
+        use core_graph::{SnapshotReadLimits, coverage::CoverageReadLimits};
+        use std::num::NonZeroU64;
+        let invalid: &[fn(&mut Policy)] = &[
+            |p| p.worker.graph.max_bytes = 0,
+            |p| p.worker.graph.max_rows = 0,
+            |p| p.worker.graph.max_depth = 0,
+            |p| p.worker.graph.max_values = 0,
+            |p| p.worker.graph.max_bytes = SnapshotReadLimits::MAX_BYTES + 1,
+            |p| p.worker.graph.max_rows = SnapshotReadLimits::MAX_ROWS + 1,
+            |p| p.worker.graph.max_depth = SnapshotReadLimits::MAX_DEPTH + 1,
+            |p| p.worker.graph.max_values = SnapshotReadLimits::MAX_VALUES + 1,
+            |p| p.worker.coverage.max_records = 0,
+            |p| p.worker.coverage.max_bytes = 0,
+            |p| p.worker.coverage.max_records = CoverageReadLimits::MAX_RECORDS + 1,
+            |p| p.worker.coverage.max_bytes = CoverageReadLimits::MAX_BYTES + 1,
+            |p| p.worker.scope.max_sources = nz(context_hub::coverage::MAX_COVERAGE_REPOS + 1),
+            |p| p.transport.frame_deadline = Duration::ZERO,
+            |p| p.transport.session_lifetime = Duration::ZERO,
+            |p| p.transport.frame_deadline = p.transport.session_lifetime + Duration::from_nanos(1),
+            |p| p.transport.session_lifetime = Duration::MAX,
+            |p| {
+                p.transport.frame_deadline = Duration::MAX;
+                p.transport.session_lifetime = Duration::MAX;
+            },
+            |p| p.worker.dispatch.max_response_bytes = nz(p.transport.write_frame_bytes.get() + 1),
+            |p| p.worker.dispatch.trace.max_flows = 0,
+            |p| p.worker.dispatch.trace.max_hops = 0,
+            |p| p.worker.dispatch.trace.max_output_bytes = 0,
+            |p| {
+                p.worker.dispatch.trace.max_output_bytes =
+                    p.worker.dispatch.max_response_bytes.get() + 1
+            },
+            |p| p.worker.dispatch.compile.max_bytes = 0,
+            |p| {
+                p.worker.dispatch.compile.max_bytes = p.worker.dispatch.max_response_bytes.get() + 1
+            },
+            |p| p.worker.dispatch.compile.adr.max_rows = 0,
+            |p| p.worker.dispatch.compile.adr.max_output_bytes = 0,
+            |p| {
+                p.worker.dispatch.compile.adr.max_output_bytes =
+                    p.worker.dispatch.compile.max_bytes + 1
+            },
+            |p| {
+                p.worker.evidence.max_span_bytes =
+                    NonZeroU64::new(p.worker.evidence.max_file_validation_bytes.get() + 1).unwrap()
+            },
+            |p| {
+                p.worker.evidence.max_file_validation_bytes =
+                    NonZeroU64::new(p.aggregate.max_cumulative_read_bytes + 1).unwrap()
+            },
+            |p| p.aggregate.max_cumulative_read_bytes = 0,
+            |p| p.transport.read_frame_bytes = nz(usize::MAX),
+            |p| p.transport.write_frame_bytes = nz(usize::MAX),
+            |p| p.transport.max_connections = nz(usize::MAX),
+            |p| {
+                p.aggregate.max_reserved_bytes = nz(
+                    super::super::reservation::TransportReservation::for_limits(p.transport)
+                        .unwrap()
+                        .activation_bytes,
+                )
+            },
+            |p| {
+                p.worker.reserved_bytes =
+                    nz(p.worker_budget().unwrap().max_reserved_bytes.get() + 1)
+            },
+            |p| p.worker.reserved_bytes = nz(p.aggregate.max_reserved_bytes.get() + 1),
+            |p| p.aggregate.max_workers = nz(p.transport.max_connections.get() + 1),
+        ];
+        let parent = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let service = Service::default();
+        assert!(policy().validate().is_ok());
+        for (index, mutate) in invalid.iter().enumerate() {
+            let mut candidate = policy();
+            mutate(&mut candidate);
+            assert_eq!(
+                candidate.validate(),
+                Err(ReadError::InvalidRequest),
+                "case {index}"
+            );
+            // No async runtime is entered: failure must precede transport startup.
+            assert_eq!(
+                service
+                    .enable(app.handle().clone(), parent.path(), candidate)
+                    .unwrap_err(),
+                ReadError::InvalidRequest,
+                "case {index}"
+            );
+            assert_eq!(service.status().unwrap(), Status::Disabled);
+            assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
         }
     }
+
+    #[test]
+    fn shared_policy_accepts_exact_existing_numeric_boundaries() {
+        use core_graph::{SnapshotReadLimits, coverage::CoverageReadLimits};
+        let mut candidate = policy();
+        candidate.worker.graph = SnapshotReadLimits {
+            max_bytes: SnapshotReadLimits::MAX_BYTES,
+            max_rows: SnapshotReadLimits::MAX_ROWS,
+            max_depth: SnapshotReadLimits::MAX_DEPTH,
+            max_values: SnapshotReadLimits::MAX_VALUES,
+        };
+        candidate.worker.coverage = CoverageReadLimits {
+            max_records: CoverageReadLimits::MAX_RECORDS,
+            max_bytes: CoverageReadLimits::MAX_BYTES,
+        };
+        candidate.worker.scope.max_sources = nz(context_hub::coverage::MAX_COVERAGE_REPOS);
+        candidate.transport.frame_deadline = candidate.transport.session_lifetime;
+        candidate.aggregate.max_workers = candidate.transport.max_connections;
+        candidate.worker.evidence.max_span_bytes =
+            candidate.worker.evidence.max_file_validation_bytes;
+        candidate.aggregate.max_cumulative_read_bytes =
+            candidate.worker.evidence.max_file_validation_bytes.get();
+        candidate.worker.reserved_bytes = candidate.worker_budget().unwrap().max_reserved_bytes;
+        assert_eq!(candidate.validate(), Ok(()));
+    }
+
     #[test]
     fn mcp_service_starts_disabled_and_cleans_record_before_reenable() {
         let parent = tempfile::tempdir().unwrap();
@@ -296,6 +493,21 @@ mod tests {
                 .unwrap();
             assert!(first.is_file());
             assert_eq!(service.status().unwrap(), Status::Running);
+            // The live worker ledger excludes the transport reservation even
+            // when no authenticated worker or response is currently present.
+            let budget = service
+                .0
+                .lock()
+                .unwrap()
+                .active
+                .as_ref()
+                .unwrap()
+                .budget
+                .clone();
+            let worker_bytes = policy().worker.reserved_bytes.get();
+            assert!(budget.try_acquire(nz(worker_bytes + 1), 0).is_err());
+            let permit = budget.try_acquire(nz(worker_bytes), 0).unwrap();
+            drop(permit);
             assert!(
                 service
                     .enable(app.handle().clone(), parent.path(), policy())

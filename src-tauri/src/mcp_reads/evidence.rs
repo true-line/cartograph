@@ -66,32 +66,16 @@ impl ReadSession {
         if max_response_bytes == 0 {
             return Err(ReadError::Limit);
         }
-        let binding = state
-            .graph
-            .lock()
-            .map_err(|_| ReadError::Storage)?
-            .current_source_binding(&crate::task_evidence::graph_fact(fact))
-            .map_err(|_| ReadError::Storage)?
-            .ok_or(ReadError::StaleBasis)?;
-        let (target, guard) = crate::investigations::inspection::resolve_typed_bounded(
-            state,
-            fact,
-            &self.basis.recovered_graph_id,
-            &binding.receipt_id,
-            ordinal,
-            self.graph_limits,
-        )
-        .map_err(inspection_error)?;
-        let receipt = state
-            .primary_sources
-            .task_receipt(
-                &guard,
-                &binding.fact,
-                &target.fact_digest,
-                &target.source.repo,
-                &target.receipt_id,
+        let (target, _guard, receipt) =
+            crate::investigations::inspection::resolve_with_receipt_typed_bounded(
+                state,
+                fact,
+                &self.basis.recovered_graph_id,
+                None,
+                ordinal,
+                self.graph_limits,
             )
-            .map_err(retained_error)?;
+            .map_err(inspection_error)?;
         let total_ranges = receipt.ranges().len();
         let response = EvidenceDescription {
             basis_id,
@@ -178,31 +162,28 @@ impl ReadSession {
         {
             return Err(ReadError::Limit);
         }
-        let (actual, guard) = crate::investigations::inspection::resolve_typed_bounded(
-            state,
-            &target.fact,
-            &self.basis.recovered_graph_id,
-            &target.receipt_id,
-            target.receipt_inventory_index as usize,
-            self.graph_limits,
-        )
-        .map_err(inspection_error)?;
+        let (actual, guard, receipt) =
+            crate::investigations::inspection::resolve_with_receipt_typed_bounded(
+                state,
+                &target.fact,
+                &self.basis.recovered_graph_id,
+                Some(&target.receipt_id),
+                target.receipt_inventory_index as usize,
+                self.graph_limits,
+            )
+            .map_err(inspection_error)?;
         if actual != *target {
             return Err(ReadError::StaleBasis);
         }
-        let receipt = state
-            .primary_sources
-            .task_receipt(
-                &guard,
-                &crate::task_evidence::graph_fact(&target.fact),
-                &target.fact_digest,
-                &target.source.repo,
-                &target.receipt_id,
-            )
-            .map_err(retained_error)?;
         response.text = state
             .primary_sources
-            .task_text(&guard, &receipt, target.receipt_inventory_index as usize)
+            .task_text_bounded(
+                &guard,
+                &receipt,
+                target.receipt_inventory_index as usize,
+                limits.max_file_validation_bytes,
+                limits.max_span_bytes,
+            )
             .map_err(retained_error)?;
         // Guard remains alive through the real read. No lease or provider budget
         // is implied; the service must separately charge cumulative read work.

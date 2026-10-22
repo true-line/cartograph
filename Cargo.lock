@@ -98,6 +98,7 @@ dependencies = [
 name = "adapters-plugin-host"
 version = "0.20.0"
 dependencies = [
+ "blake3",
  "core-graph",
  "core-prov",
  "serde",
@@ -2651,6 +2652,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "windows-sys 0.61.2",
 ]
 

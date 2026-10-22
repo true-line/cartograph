@@ -278,6 +278,35 @@ impl SettingsStore {
         rows.collect()
     }
 
+    /// Scalar selection for bounded readers; never materialize the enabled inventory.
+    pub(crate) fn plugin_enabled_exact(
+        &self,
+        project_root: &str,
+        plugin_id: &str,
+        content_hash: &str,
+    ) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM plugin_settings
+             WHERE project_root=?1 AND plugin_id=?2 AND content_hash=?3 AND enabled=1)",
+            params![project_root, plugin_id, content_hash],
+            |row| row.get(0),
+        )
+    }
+
+    /// Read only the outcome; an arbitrarily large stored report is not copied.
+    pub(crate) fn plugin_gate_passed_exact(
+        &self,
+        plugin_id: &str,
+        content_hash: &str,
+    ) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM plugin_gates
+             WHERE plugin_id=?1 AND content_hash=?2 AND passed=1)",
+            params![plugin_id, content_hash],
+            |row| row.get(0),
+        )
+    }
+
     /// Persist one conformance-gate outcome (#200), keyed by the exact
     /// artifact hash the gate actually ran: replaced bytes are ungated
     /// again, no matter what an earlier copy proved.
@@ -599,6 +628,64 @@ mod tests {
             store.plugin_gate("t0.adapter-ruby", "hash-1").unwrap(),
             Some((false, r#"{"passed":false}"#.to_string()))
         );
+    }
+
+    #[test]
+    fn bounded_plugin_selection_uses_exact_identity_without_report_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = super::SettingsStore::open(dir.path().join("state.db")).unwrap();
+        assert!(
+            !store
+                .plugin_enabled_exact("root", "plugin", "hash")
+                .unwrap()
+        );
+        assert!(!store.plugin_gate_passed_exact("plugin", "gate").unwrap());
+        store
+            .set_plugin_enabled("root", "plugin", "hash", true)
+            .unwrap();
+        store
+            .record_plugin_gate("plugin", "gate", true, &"x".repeat(1_000_000))
+            .unwrap();
+        assert!(
+            store
+                .plugin_enabled_exact("root", "plugin", "hash")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .plugin_enabled_exact("other", "plugin", "hash")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .plugin_enabled_exact("root", "plugin", "changed")
+                .unwrap()
+        );
+        assert!(store.plugin_gate_passed_exact("plugin", "gate").unwrap());
+        assert!(!store.plugin_gate_passed_exact("plugin", "changed").unwrap());
+        // Invalid UTF-8 cannot be decoded as a String by the legacy report API.
+        // Scalar eligibility deliberately never retrieves the report column.
+        store
+            .conn
+            .execute(
+                "UPDATE plugin_gates SET report_json=CAST(x'FF' AS TEXT)",
+                [],
+            )
+            .unwrap();
+        assert!(store.plugin_gate("plugin", "gate").is_err());
+        assert!(store.plugin_gate_passed_exact("plugin", "gate").unwrap());
+        store
+            .set_plugin_enabled("root", "plugin", "hash", false)
+            .unwrap();
+        store
+            .record_plugin_gate("plugin", "gate", false, "{}")
+            .unwrap();
+        assert!(
+            !store
+                .plugin_enabled_exact("root", "plugin", "hash")
+                .unwrap()
+        );
+        assert!(!store.plugin_gate_passed_exact("plugin", "gate").unwrap());
     }
 
     #[test]

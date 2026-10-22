@@ -141,11 +141,35 @@ pub(crate) fn resolve_typed_bounded(
     ordinal: usize,
     limits: SnapshotReadLimits,
 ) -> Result<(InvestigationInspectionTarget, RetentionGuard), InspectionError> {
+    resolve_with_receipt_typed_bounded(
+        state,
+        fact,
+        expected_snapshot,
+        Some(expected_receipt),
+        ordinal,
+        limits,
+    )
+    .map(|(target, guard, _)| (target, guard))
+}
+
+/// Resolve a current receipt through two bounded graph checks around its guard.
+/// Describe omits a prior receipt selection; read supplies its exact receipt.
+/// Returning the already validated receipt avoids an additional database decode.
+pub(crate) fn resolve_with_receipt_typed_bounded(
+    state: &AppState,
+    fact: &TaskFactKey,
+    expected_snapshot: &str,
+    expected_receipt: Option<&str>,
+    ordinal: usize,
+    limits: SnapshotReadLimits,
+) -> Result<(InvestigationInspectionTarget, RetentionGuard, Receipt), InspectionError> {
     if ordinal >= 1024 {
         return Err(InspectionError::OrdinalOutOfRange);
     }
     let (snapshot_id, preliminary) = snapshot_typed(state, fact, limits)?;
-    if snapshot_id != expected_snapshot || preliminary.receipt_id != expected_receipt {
+    if snapshot_id != expected_snapshot
+        || expected_receipt.is_some_and(|receipt| preliminary.receipt_id != receipt)
+    {
         return Err(InspectionError::Stale);
     }
     let source = state
@@ -196,7 +220,7 @@ pub(crate) fn resolve_typed_bounded(
         .primary_sources
         .task_capture_present(&guard, &target.captured)
         .map_err(InspectionError::from)?;
-    Ok((target, guard))
+    Ok((target, guard, receipt))
 }
 pub(crate) fn validate_targets(
     state: &AppState,

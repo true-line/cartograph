@@ -156,6 +156,26 @@ impl PrimarySourceStore {
             .read_text_span(&range.captured)
             .map_err(capture_error)
     }
+    /// Explicit MCP admission, preserving ordinary task_text callers' policy.
+    pub(crate) fn task_text_bounded(
+        &self,
+        guard: &RetentionGuard,
+        receipt: &Receipt,
+        range_index: usize,
+        max_file_bytes: u64,
+        max_span_bytes: u64,
+    ) -> Result<String, PinnedReadError> {
+        self.validate_task_guard(guard, receipt.source_id().as_str())?;
+        let range = receipt
+            .ranges()
+            .get(range_index)
+            .ok_or(PinnedReadError::Invalid)?;
+        self.captures
+            .lock()
+            .map_err(|_| PinnedReadError::Operational)?
+            .read_text_span_bounded(&range.captured, max_file_bytes, max_span_bytes)
+            .map_err(capture_error)
+    }
 }
 
 fn capture_error(error: CaptureError) -> PinnedReadError {
@@ -179,16 +199,13 @@ impl PrimarySourceStore {
     ) -> Result<(), PinnedReadError> {
         self.validate_task_guard(guard, &span.file.source_id)?;
         let source = source_capture::SourceId::new(&span.file.source_id).map_err(capture_error)?;
-        let inventory = self
+        let present = self
             .captures
             .lock()
             .map_err(|_| PinnedReadError::Operational)?
-            .source_inventory(&source)
+            .capture_belongs_to_source(&source, &span.file.capture_id)
             .map_err(capture_error)?;
-        if !inventory
-            .iter()
-            .any(|capture| capture.capture_id == span.file.capture_id)
-        {
+        if !present {
             return Err(PinnedReadError::Unavailable);
         }
         Ok(())

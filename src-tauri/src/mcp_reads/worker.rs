@@ -14,10 +14,12 @@ use tokio::sync::{mpsc, oneshot};
 pub(crate) struct WorkerLimits {
     pub graph: core_graph::SnapshotReadLimits,
     pub coverage: core_graph::coverage::CoverageReadLimits,
+    pub scope: super::scope::ScopeLimits,
     pub dispatch: DispatchLimits,
     pub evidence: EvidenceWorkLimits,
-    /// Host's conservative total reservation, including raw/projected/index and
-    /// compilation copies. This value is not a measured RSS guarantee.
+    /// Host-supplied worker accounting reservation. A complete derived minimum
+    /// for raw/projected/index/compiler copies is not yet enforced. Transport
+    /// payload is reserved separately; neither ledger is an RSS guarantee.
     pub reserved_bytes: NonZeroUsize,
 }
 
@@ -56,7 +58,7 @@ impl Worker {
                 let session = ReadSession::acquire(
                     &state.graph,
                     &state.decisions,
-                    || crate::context::coverage_scope(&app, &state).map_err(|_| ReadError::Storage),
+                    || super::scope::coverage_scope(&app, &state, limits.scope),
                     limits.graph,
                     limits.coverage,
                     mode,
@@ -142,6 +144,7 @@ pub(crate) mod tests {
         WorkerLimits {
             graph: core_graph::SnapshotReadLimits::default(),
             coverage: core_graph::coverage::CoverageReadLimits::default(),
+            scope: super::super::scope::tests::limits(),
             dispatch: DispatchLimits {
                 max_response_bytes: nz(65536),
                 max_request_ids: nz(16),

@@ -255,10 +255,31 @@ installed-client test and does not establish packaged relay availability.
 ### Human activation and packaging
 
 Settings exposes status, enable, disable, refresh and client configuration. Every
-numeric transport, graph, coverage, dispatcher, evidence and aggregate limit is
+numeric transport, graph, coverage, scope, dispatcher, evidence and aggregate limit is
 required; unknown fields, zero values and inconsistent cross-field limits fail
 closed. No policy is persisted or automatically activated. The example policy
 contains placeholders rather than an implied capacity recommendation.
+
+The required `scope` object supplies `max_sources`,
+`max_source_registry_bytes`, `max_event_registry_bytes`,
+`max_directory_entries`, `max_artifact_bytes`, `max_metadata_bytes`, and
+`max_corpus_bytes`. Source row/raw SQL text limits and aggregate event-extension
+file bytes apply independently to each scope observation. Directory entries and
+native encoded path/name metadata are bounded per scan; a plugin scan includes
+both the user and one project directory, and the event registry scan is separate.
+Artifact bytes and enabled-plugin corpus bytes are aggregate per repository;
+`max_sources` bounds how many repository scans run. Corpus path metadata has an
+independent per-repository allowance using the same metadata ceiling. The scope
+is observed before and after the graph acquisition. A host admission failure
+refuses the entire session; it does not qualify a partially collected scope.
+
+The MCP worker uses scalar plugin enablement and exact gate checks, bounded
+streaming artifact hashes, bounded corpus reads before parsing, and bounded
+source-registry and event-directory materialization. Official accepted event
+registry identities and bounded malformed-file rejections match normal reads.
+These input ceilings do not establish a complete allocation model or an RSS
+bound; the host-supplied worker reservation still requires separate validation.
+
 
 Client configuration points to the packaged sibling `cartograph-mcp` executable
 and the current private connection record. Arguments are separate JSON array
@@ -348,7 +369,24 @@ Packaged skill discovery is tracked separately in
 
 Evidence visibility is frozen once from the shared compiler projection. Freshness
 validation still takes two graph snapshots per describe or read; those reads use
-the session's admitted graph limits. The activation's caller-supplied worker
-reservation is accounting, not a validated allocation model. Registry and plugin
-metadata reads before admission also require bounded acquisition; aggregate
-reservation tests do not prove total worker memory containment.
+the session's admitted graph limits. Selected object type/length and the host's
+file-byte ceiling are checked before copying the blob, within the same read
+transaction. Capture presence validates only the selected canonical manifest;
+unrelated corrupt capture manifests no longer block that selected lookup.
+
+Source registry, plugin discovery, corpus and event-registry reads now require
+explicit bounded acquisition before session construction. All activation entry
+points share policy validation before endpoint creation. The versioned
+`mcp-transport-payload-v1` logical accounting model reserves every admitted
+connection's read-ahead, input bytes, parsed message/argument roles, response DOM
+and serialization buffers before admitting workers. This includes unauthenticated
+connections and terminal responses that can outlive a worker. The worker ledger
+receives only the aggregate remainder; overflow or insufficient space rejects
+activation. Logical JSON header/index charges are deliberately uniform accounting
+units, not claims about allocator or B-tree layout.
+
+The caller-supplied worker reservation still lacks a derived complete graph,
+projection and compiler minimum. Transport accounting excludes allocator slack,
+SQLite/executor/kernel caches and native stacks; it is not a heap/RSS ceiling.
+Receipt payload SQL preflight and the complete worker phase model remain open.
+Aggregate reservation tests do not prove total worker memory containment.

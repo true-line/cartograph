@@ -12,6 +12,7 @@ pub(crate) struct AdvancedPolicy {
     transport: TransportPolicy,
     graph: GraphPolicy,
     coverage: CoveragePolicy,
+    scope: super::scope::ScopeLimits,
     dispatch: DispatchPolicy,
     evidence: EvidencePolicy,
     aggregate: AggregatePolicy,
@@ -80,7 +81,7 @@ pub(crate) enum CommandError {
 impl AdvancedPolicy {
     fn into_policy(self) -> Result<super::service::Policy, CommandError> {
         use core_graph::{SnapshotReadLimits, coverage::CoverageReadLimits};
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
         let t = self.transport;
         let g = self.graph;
         let c = self.coverage;
@@ -89,26 +90,7 @@ impl AdvancedPolicy {
         let a = self.aggregate;
         let deadline = Duration::from_millis(t.frame_deadline_ms.get());
         let lifetime = Duration::from_millis(t.session_lifetime_ms.get());
-        if g.max_bytes.get() > SnapshotReadLimits::MAX_BYTES
-            || g.max_rows.get() > SnapshotReadLimits::MAX_ROWS
-            || g.max_depth.get() > SnapshotReadLimits::MAX_DEPTH
-            || g.max_values.get() > SnapshotReadLimits::MAX_VALUES
-            || c.max_records.get() > CoverageReadLimits::MAX_RECORDS
-            || c.max_bytes.get() > CoverageReadLimits::MAX_BYTES
-            || deadline > lifetime
-            || Instant::now().checked_add(lifetime).is_none()
-            || d.max_response_bytes > t.write_frame_bytes
-            || d.trace_max_output_bytes > d.max_response_bytes
-            || d.compile_max_bytes > d.max_response_bytes
-            || d.adr_max_output_bytes > d.compile_max_bytes
-            || e.max_span_bytes > e.max_file_validation_bytes
-            || e.max_file_validation_bytes > a.max_cumulative_read_bytes
-            || self.worker_reserved_bytes > a.max_reserved_bytes
-            || a.max_workers > t.max_connections
-        {
-            return Err(CommandError::InvalidPolicy);
-        }
-        Ok(super::service::Policy {
+        let policy = super::service::Policy {
             transport: mcp_local::activation::ActivationLimits {
                 max_connections: t.max_connections,
                 read_frame_bytes: t.read_frame_bytes,
@@ -127,6 +109,7 @@ impl AdvancedPolicy {
                     max_records: c.max_records.get(),
                     max_bytes: c.max_bytes.get(),
                 },
+                scope: self.scope,
                 dispatch: super::dispatch::DispatchLimits {
                     max_response_bytes: d.max_response_bytes,
                     max_request_ids: d.max_request_ids,
@@ -155,7 +138,9 @@ impl AdvancedPolicy {
                 max_cumulative_read_bytes: a.max_cumulative_read_bytes.get(),
             },
             export_mode: self.export_mode,
-        })
+        };
+        policy.validate().map_err(|_| CommandError::InvalidPolicy)?;
+        Ok(policy)
     }
 }
 
@@ -293,15 +278,31 @@ fn runtime_parent(app: &tauri::AppHandle) -> Result<std::path::PathBuf, CommandE
 mod tests {
     use super::*;
     fn input() -> serde_json::Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "transport":{"max_connections":1,"read_frame_bytes":1,"write_frame_bytes":1,"frame_deadline_ms":1,"session_lifetime_ms":1},
             "graph":{"max_bytes":1,"max_rows":1,"max_depth":1,"max_values":1},
             "coverage":{"max_records":1,"max_bytes":1},
+            "scope":{"max_sources":1,"max_source_registry_bytes":1,"max_event_registry_bytes":1,"max_directory_entries":1,"max_artifact_bytes":1,"max_metadata_bytes":1,"max_corpus_bytes":1},
             "dispatch":{"max_response_bytes":1,"max_request_ids":1,"trace_max_flows":1,"trace_max_hops":1,"trace_max_output_bytes":1,"compile_max_bytes":1,"adr_max_rows":1,"adr_max_output_bytes":1},
             "evidence":{"max_file_validation_bytes":1,"max_span_bytes":1},
             "aggregate":{"max_workers":1,"max_reserved_bytes":1,"max_cumulative_read_bytes":1},
             "worker_reserved_bytes":1,"export_mode":"verified-only"
-        })
+        });
+        let t: TransportPolicy = serde_json::from_value(value["transport"].clone()).unwrap();
+        let baseline = super::super::reservation::TransportReservation::for_limits(
+            mcp_local::activation::ActivationLimits {
+                max_connections: t.max_connections,
+                read_frame_bytes: t.read_frame_bytes,
+                write_frame_bytes: t.write_frame_bytes,
+                frame_deadline: std::time::Duration::from_millis(t.frame_deadline_ms.get()),
+                session_lifetime: std::time::Duration::from_millis(t.session_lifetime_ms.get()),
+            },
+        )
+        .unwrap()
+        .activation_bytes;
+        value["aggregate"]["max_reserved_bytes"] =
+            serde_json::json!(baseline.checked_add(1).unwrap());
+        value
     }
     #[test]
     fn explicit_policy_rejects_missing_zero_unknown_and_crossfield_limits() {
@@ -318,6 +319,25 @@ mod tests {
             .unwrap()
             .remove("read_frame_bytes");
         assert!(serde_json::from_value::<AdvancedPolicy>(missing).is_err());
+        let mut missing_scope = input();
+        missing_scope.as_object_mut().unwrap().remove("scope");
+        assert!(serde_json::from_value::<AdvancedPolicy>(missing_scope).is_err());
+        for key in [
+            "max_sources",
+            "max_source_registry_bytes",
+            "max_event_registry_bytes",
+            "max_directory_entries",
+            "max_artifact_bytes",
+            "max_metadata_bytes",
+            "max_corpus_bytes",
+        ] {
+            let mut invalid = input();
+            invalid["scope"][key] = serde_json::json!(0);
+            assert!(
+                serde_json::from_value::<AdvancedPolicy>(invalid).is_err(),
+                "{key}"
+            );
+        }
         let mut zero = input();
         zero["graph"]["max_rows"] = serde_json::json!(0);
         assert!(serde_json::from_value::<AdvancedPolicy>(zero).is_err());
@@ -325,6 +345,7 @@ mod tests {
         unknown["transport"]["path"] = serde_json::json!("/untrusted");
         assert!(serde_json::from_value::<AdvancedPolicy>(unknown).is_err());
         for (section, key) in [
+            ("scope", "max_sources"),
             ("graph", "max_bytes"),
             ("coverage", "max_records"),
             ("dispatch", "max_response_bytes"),
