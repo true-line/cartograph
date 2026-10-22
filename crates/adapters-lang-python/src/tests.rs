@@ -536,7 +536,7 @@ fn mount_receivers_need_their_reaching_definition() {
     let mut routers = String::from("from fastapi import APIRouter\n");
     for name in [
         "good", "over", "late", "inner", "cond", "shadow", "module", "loop", "matched", "classy",
-        "early",
+        "early", "lam", "walrus", "glob",
     ] {
         routers.push_str(&format!(
             "{name} = APIRouter()\n@{name}.get(\"/x\")\ndef {name}_x():\n    return {{}}\n"
@@ -564,7 +564,7 @@ def make():
         "main.py",
         r#"
 from fastapi import FastAPI
-from routers import good, over, late, inner, cond, shadow, module, loop, matched, classy, early
+from routers import good, over, late, inner, cond, shadow, module, loop, matched, classy, early, lam, walrus, glob
 from fake import Fake
 
 app = FastAPI()
@@ -601,6 +601,18 @@ def install_loop(apps):
     app = FastAPI()
     for app in apps:
         app.include_router(loop, prefix="/loop")
+
+def install_global():
+    app.include_router(glob, prefix="/global")
+
+def install_lambda(other):
+    (lambda app: app.include_router(lam, prefix="/lam"))(other)
+
+def install_walrus():
+    app = FastAPI()
+    def helper(value=(app := Fake())):
+        return value
+    app.include_router(walrus, prefix="/walrus")
 
 def install_match(value):
     app = FastAPI()
@@ -651,14 +663,17 @@ later = FastAPI()
             unproven("/cond/x"),
             unproven("/early/x"),
             confirmed("/flask/x"),
+            confirmed("/global/x"),
             confirmed("/good/x"),
             unproven("/inner/x"),
+            unproven("/lam/x"),
             unproven("/late/x"),
             unproven("/loop/x"),
             unproven("/matched/x"),
             unproven("/module/x"),
             unproven("/over/x"),
             unproven("/shadow/x"),
+            unproven("/walrus/x"),
         ]
     );
 }

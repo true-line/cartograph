@@ -611,8 +611,8 @@ fn binds_name(ident: TsNode<'_>, scope: TsNode<'_>) -> bool {
 }
 
 /// Every statement in `scope` that binds `name`, outside nested function,
-/// class and lambda bodies (other scopes). A nested definition's own name
-/// still binds here.
+/// class and lambda bodies (other scopes). A nested definition's own name and
+/// anything in its parameter defaults or annotations still bind here.
 fn binding_sites<'t>(cx: &FileCx<'_>, scope: TsNode<'t>, name: &str) -> Vec<TsNode<'t>> {
     let mut sites: Vec<TsNode<'t>> = Vec::new();
     let mut stack = vec![scope];
@@ -637,8 +637,10 @@ fn binding_sites<'t>(cx: &FileCx<'_>, scope: TsNode<'t>, name: &str) -> Vec<TsNo
                     node.kind(),
                     "function_definition" | "class_definition" | "lambda"
                 )
-                && !is_field(node, "name", child)
+                && is_field(node, "body", child)
             {
+                // Only the body is another scope: names, parameter defaults,
+                // annotations, decorators and bases run in this one.
                 continue;
             }
             stack.push(child);
@@ -738,6 +740,33 @@ fn module_binding_reaches(cx: &FileCx<'_>, use_node: TsNode<'_>, name: &str) -> 
     )
 }
 
+/// Whether a lambda between `use_node` and its enclosing function or class
+/// names `name` among its parameters, so the read is that parameter (#747).
+/// Any occurrence in the parameter list counts, which only fails closed.
+fn lambda_parameter_shadows(cx: &FileCx<'_>, use_node: TsNode<'_>, name: &str) -> bool {
+    let mut ancestor = use_node.parent();
+    while let Some(node) = ancestor {
+        match node.kind() {
+            "function_definition" | "class_definition" | "module" => return false,
+            "lambda" => {
+                if let Some(parameters) = node.child_by_field_name("parameters") {
+                    let mut stack = vec![parameters];
+                    while let Some(current) = stack.pop() {
+                        if current.kind() == "identifier" && cx.text(&current) == name {
+                            return true;
+                        }
+                        let mut walk = current.walk();
+                        stack.extend(current.named_children(&mut walk));
+                    }
+                }
+            }
+            _ => {}
+        }
+        ancestor = node.parent();
+    }
+    false
+}
+
 /// What the object of a mount call is, as far as this file can prove it.
 fn mount_parent(
     cx: &FileCx<'_>,
@@ -748,6 +777,9 @@ fn mount_parent(
         return MountParent::Unproven;
     }
     let name = cx.text(&object);
+    if lambda_parameter_shadows(cx, object, name) {
+        return MountParent::Unproven;
+    }
     if let Some(function) = enclosing_function_node(object) {
         match local_binding(cx, function, name, object.start_byte(), bindings) {
             LocalBinding::App(framework) => return MountParent::LocalApp(framework),
@@ -1281,10 +1313,22 @@ fn served_prefixes(
 /// router with no observed mount keeps its declared prefix at InferredStrong;
 /// so does one mounted only on an annotated parameter or an unproven receiver.
 fn resolve_routes(out: &mut Extraction, repo: &str) {
-    let defs: HashMap<(String, String), ReceiverDef> = std::mem::take(&mut out.receiver_defs)
-        .into_iter()
-        .map(|def| (def.key.clone(), def))
-        .collect();
+    // A function-local assignment shares its (file, name) key with a
+    // module-level one but never proves a module read; keep the module-level
+    // definition so a local `app = FastAPI()` elsewhere can't hide it.
+    let mut defs: HashMap<(String, String), ReceiverDef> = HashMap::new();
+    for def in std::mem::take(&mut out.receiver_defs) {
+        match defs.entry(def.key.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(def);
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if def.module_level && !entry.get().module_level {
+                    entry.insert(def);
+                }
+            }
+        }
+    }
     let mut mounts: HashMap<(String, String), Vec<Mount>> = HashMap::new();
     for mount in std::mem::take(&mut out.mounts) {
         mounts
