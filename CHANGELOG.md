@@ -1,5 +1,29 @@
 # cartograph
 
+## 0.21.0
+
+### Minor Changes
+
+- 7c19f16: Recover documented API contract drift from author-declared Markdown and OpenAPI 3 JSON references (`.cartograph/api-docs.toml` and `cartograph.system.toml` `api_docs`), comparing canonicalized `DocumentedRoute` facts against recovered `Endpoint` nodes and reporting `documented-not-served`, `served-undocumented`, and `method-mismatch` findings with both sides cited in `drift_register.md` (#739).
+- 9c52068: Forgetting a retained source now also frees its receipts. Receipts that a saved investigation or staged proposal still cites keep their identity, marked as forgotten, and all others are reclaimed, so repeated recoveries no longer fill the receipt store permanently. Existing stores upgrade automatically.
+- 135d565: Record the full `HEAD` commit SHA when recovering a clean local git checkout instead of `"workdir"`, fail closed before publishing if a clean checkout changes mid-recovery, and attach a bounded `commit_note` to `RepoCoverage` explaining why non-clean or non-repository local trees remain `"workdir"`.
+- 9730ff9: Python recovery now finds routes declared on Flask Blueprints and FastAPI `APIRouter`s, and gives each route its full path. A router's own prefix is joined with the prefix it is mounted under, even when the mount is in another file. Nested routers compose their whole mount chain. A route is confirmed only when its chain ends at an app the code is seen creating. A mount on an app passed in as a parameter, or a router whose mount was never observed, is marked as inferred rather than confirmed. A prefix that can't be read, or a cyclic chain, is reported as a gap.
+- dbd173d: Record positive per-fact receipt omission records and per-repository completeness in the graph store so callers can distinguish omitted primary receipts (`declarations`, `rules`, `store_capacity`) from unrecorded or non-omitted facts (#725).
+- 203db4c: TypeScript primary-source receipts are now minted in a compact v3 format that stores each cited range once instead of repeating the file identity, cutting receipt size about 4–5×. More facts in large repositories fit within the receipt store's limits. Existing v1 and v2 receipts keep working unchanged.
+- a5a522d: Record a human follow-up decision on an exact saved investigation finding and reopen it with its historical evidence. Decisions remain separate from graph acceptance and permission to execute work.
+  
+  Upgrades the investigation store; earlier app versions cannot open it afterwards.
+- 9edf363: Python recovery now reads SQLAlchemy declarative models. Each model with a declared table becomes a data entity with its columns, including inherited ones, and its foreign keys and relationships link entities in the data model. Anything that can't be proven, such as a missing or dynamic table name, a table claimed by two models, or a reference to an unknown table, is reported as a gap rather than guessed. On SimpleLogin, all 80 models are recovered.
+
+### Patch Changes
+
+- dabeb65: Atlas layer filters show only facts that belong to the layer and their direct neighbors. Rule exits and rule gaps no longer appear under Infrastructure, browser-extension relationships (permissions, command handlers) stay visible under Client, and an empty Infrastructure layer now says what would fill it.
+- f79bbda: Saving an export over an existing file is now atomic: the content is written to a temporary file beside it and swapped in only when complete, so a full disk or failed write leaves the previous file intact.
+- 13241c8: Track committed graph revisions atomically across facts, source bindings and coverage, preserving legacy data during the additive storage migration. Bounded revision reads reject stale acquisitions and malformed generation metadata.
+- 1a3a7e6: Exports from the desktop app (spec bundle and work packet) now open a native Save dialog and are written by the app, instead of using an in-page download that could freeze the app on macOS.
+- 9a942f0: Large TypeScript repositories no longer fail to recover when their primary receipts exceed the extraction budget or the retained receipt store is full. Receipts that fit are kept in a stable order, facts keep their place in the graph, and coverage marks the recovery limited and reports how many receipts in how many files could not be cited, with a separate entry when the receipt store is full.
+- a165fe7: Pin primary-source receipts cited by saved work packets so forgetting a retained source preserves those receipts as capture-forgotten instead of reclaiming them, and include work-packet receipt references in the retention preview and confirmation fingerprint.
+
 ## 0.20.0
 
 ### Minor Changes
