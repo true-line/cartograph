@@ -13,6 +13,8 @@ const UNREADABLE: &str = "git state unreadable";
 const MAX_DIRTY_FILES: usize = 10_000;
 /// Index mode of a submodule entry.
 const GITLINK_MODE: u32 = 0o160000;
+/// Deepest submodule nesting checked before failing closed.
+const MAX_SUBMODULE_DEPTH: usize = 8;
 
 /// Commit identity recorded for a registered local source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +61,11 @@ impl LocalCommit {
 /// Inspect `root` without parent-directory discovery and return its clean
 /// `HEAD` SHA or `"workdir"` with a bounded reason.
 pub(crate) fn local_commit(root: &Path) -> LocalCommit {
+    local_commit_at(root, 0)
+}
+
+/// [`local_commit`] for a checkout nested `depth` submodules below the source.
+fn local_commit_at(root: &Path, depth: usize) -> LocalCommit {
     let Ok(canonical_root) = crate::paths::canonicalize(root) else {
         return LocalCommit::Workdir {
             reason: NOT_GIT_ROOT.into(),
@@ -151,7 +158,7 @@ pub(crate) fn local_commit(root: &Path) -> LocalCommit {
             reason: format!("{dirty} modified or untracked files"),
         };
     }
-    match untracked_inputs(&repo, root) {
+    match untracked_inputs(&repo, root, depth) {
         Ok(0) => {}
         Ok(hidden) => {
             return LocalCommit::Workdir {
@@ -180,9 +187,36 @@ pub(crate) fn local_commit(root: &Path) -> LocalCommit {
 ///   untracked one can ignore itself and still change what recovery reads;
 /// - index entries marked assume-unchanged or skip-worktree, which libgit2
 ///   reports unmodified whatever their bytes (fail closed on any);
-/// - files inside a submodule are tracked by its gitlink, which status checks.
-fn untracked_inputs(repo: &git2::Repository, root: &Path) -> Result<usize, ()> {
+/// - files inside a submodule are tracked by its gitlink only when the
+///   submodule checkout is itself clean at the gitlink's commit. Status cannot
+///   vouch for that: the untrusted config's `diff.ignoreSubmodules` or
+///   `submodule.<name>.ignore` can hide submodule changes, so each populated
+///   submodule is checked recursively here and counts once when it is not.
+fn untracked_inputs(repo: &git2::Repository, root: &Path, depth: usize) -> Result<usize, ()> {
     let index = repo.index().map_err(drop)?;
+    let mut stale_submodules: usize = 0;
+    for entry in index.iter().filter(|entry| entry.mode == GITLINK_MODE) {
+        let rel = String::from_utf8(entry.path.clone()).map_err(drop)?;
+        let sub_root = root.join(&rel);
+        // An uninitialized submodule is an empty directory (or absent), so
+        // recovery reads nothing from it.
+        let populated = match std::fs::read_dir(&sub_root) {
+            Ok(mut entries) => entries.next().is_some(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => true,
+        };
+        if !populated {
+            continue;
+        }
+        let clean_at_gitlink = depth < MAX_SUBMODULE_DEPTH
+            && matches!(
+                local_commit_at(&sub_root, depth + 1),
+                LocalCommit::Clean { sha } if sha == entry.id.to_string()
+            );
+        if !clean_at_gitlink {
+            stale_submodules = stale_submodules.saturating_add(1);
+        }
+    }
     let flagged = index
         .iter()
         .filter(|entry| {
@@ -232,7 +266,9 @@ fn untracked_inputs(repo: &git2::Repository, root: &Path) -> Result<usize, ()> {
         .chain(gitignores)
         .chain(events::env_files(root).map_err(drop)?)
         .collect();
-    Ok(flagged.saturating_add(inputs.iter().filter(|rel| !tracked(rel)).count()))
+    Ok(flagged
+        .saturating_add(stale_submodules)
+        .saturating_add(inputs.iter().filter(|rel| !tracked(rel)).count()))
 }
 
 fn is_valid_sha(sha: &str) -> bool {
@@ -469,6 +505,63 @@ mod tests {
                 "skip-worktree={extended}"
             );
         }
+    }
+
+    // AC-0310: a submodule's consumed files keep the checkout at workdir when the
+    // submodule is modified, even if the repo config hides submodule changes. (T-0310)
+    #[test]
+    fn modified_submodule_hidden_by_config_keeps_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let sub_sha = init_clean_repo(&root.join("sub"), &[("app.ts", b"export const ok = 1;\n")]);
+        let repo = git2::Repository::init(root).unwrap();
+        fs::write(root.join("main.ts"), b"export const main = 1;\n").unwrap();
+        fs::write(
+            root.join(".gitmodules"),
+            b"[submodule \"sub\"]\n\tpath = sub\n\turl = ./sub\n",
+        )
+        .unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("main.ts")).unwrap();
+        index.add_path(Path::new(".gitmodules")).unwrap();
+        index
+            .add(&git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: GITLINK_MODE,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: git2::Oid::from_str(&sub_sha).unwrap(),
+                flags: 0,
+                flags_extended: 0,
+                path: b"sub".to_vec(),
+            })
+            .unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let signature =
+            git2::Signature::new("fixture", "fixture@example.invalid", &git2::Time::new(1, 0))
+                .unwrap();
+        let sha = repo
+            .commit(Some("HEAD"), &signature, &signature, "fixture", &tree, &[])
+            .unwrap()
+            .to_string();
+        assert_eq!(local_commit(root), LocalCommit::Clean { sha });
+
+        repo.config()
+            .unwrap()
+            .set_str("diff.ignoreSubmodules", "all")
+            .unwrap();
+        fs::write(root.join("sub/app.ts"), b"export const ok = 2;\n").unwrap();
+        assert_eq!(
+            local_commit(root),
+            LocalCommit::Workdir {
+                reason: "1 modified or untracked files".into()
+            }
+        );
     }
 
     // AC-0310: hostile `.git/config` (`core.fsmonitor`, `filter.*.clean`),
