@@ -1360,7 +1360,9 @@ promoted authority. This procedure does not pass W8b/H3/H4/H5 or real-provider g
 
 ## MT-W8A-01 — Qualified read-session and retained evidence
 
-**Status: UNEXECUTED.** AC-0288; #718. Use a disposable, prepopulated fixture
+**Status: PARTIAL, scoped evidence recorded.** AC-0288; #718.
+See [native acceptance](acceptance/read-only-mcp-native.md) for observed controlled
+acquisition, paging and guarded retention. Explicit omission remains pending. Use a disposable, prepopulated fixture
 profile, with separately authorized fixture setup. No provider calls.
 
 1. Record app/build, fixture graph and retained-capture identities. Open a session
@@ -1384,7 +1386,9 @@ profile, with separately authorized fixture setup. No provider calls.
 
 ## MT-W8A-02 — Installed relay, native boundary and lifecycle
 
-**Status: UNEXECUTED.** AC-0289; #718. Repeat natively on every advertised
+**Status: PARTIAL, isolated ARM macOS evidence recorded.** AC-0289; #718.
+See [native acceptance](acceptance/read-only-mcp-native.md); different-user peer
+and production/platform qualification remain unestablished. Repeat natively on every advertised
 platform with the actual packaged app and console relay.
 
 1. Record signed package/build and relay path. Verify disabled-by-default service,
@@ -1408,7 +1412,9 @@ platform with the actual packaged app and console relay.
 
 ## MT-W8A-03 — Independent client and progressive disclosure
 
-**Status: UNEXECUTED.** AC-0290; #718. No model/provider run is required or
+**Status: Scoped ARM fixture observations recorded.** AC-0290; #718.
+See [native acceptance](acceptance/read-only-mcp-native.md) for exact client,
+builds, transcripts, measurements and limitations. No model/provider run is required or
 implicitly authorized by this procedure.
 
 1. Record independent client/version, MCP protocol, packaged app/relay build and
