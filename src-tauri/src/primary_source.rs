@@ -545,6 +545,16 @@ fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
     if invalid_tombstones {
         return Err(storage_error("receipt tombstone bounds"));
     }
+    let tombstone_bytes: i64 = conn
+        .query_row(
+            "SELECT coalesce(sum(length(CAST(capture_ids AS BLOB))),0) FROM receipt_tombstones",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if tombstone_bytes < 0 || tombstone_bytes > MAX_RECEIPT_STORE_BYTES as i64 {
+        return Err(storage_error("receipt tombstone bytes"));
+    }
     // SQLite integers are signed; convert only after the nonnegative bounds.
     Ok((count as u64, bytes as u64))
 }
@@ -831,6 +841,25 @@ impl ReceiptStore {
             tx.commit().map_err(storage_error)?;
             return Ok(());
         }
+        // Tombstone capture ids are a separate pool bounded by the receipt
+        // store's byte ceiling, as the ledger reuses its count ceiling. A full
+        // pool records the forget without them, flagged as truncated.
+        let tombstone_bytes: i64 = tx
+            .query_row(
+                "SELECT coalesce(sum(length(CAST(capture_ids AS BLOB))),0) FROM receipt_tombstones",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let (capture_ids_json, capture_ids_truncated) = if u64::try_from(tombstone_bytes)
+            .map_err(storage_error)?
+            + capture_ids_json.len() as u64
+            > self.capacity.1
+        {
+            ("[]".to_owned(), 1)
+        } else {
+            (capture_ids_json, capture_ids_truncated)
+        };
         require_one(
             tx.execute(
                 "INSERT INTO receipt_tombstones (
@@ -2230,5 +2259,43 @@ mod tests {
             );
         }
         assert_eq!(tombstone_count(&store), 0);
+    }
+
+    // #748 review: tombstone capture ids share one store-wide byte pool;
+    // once it is full a forget is still recorded, with its ids truncated.
+    #[test]
+    fn tombstone_capture_ids_share_a_store_wide_byte_pool() {
+        let (_directory, source, capture, _, receipts) = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+        let pins = std::collections::BTreeSet::new();
+        let ids = [capture.id().to_owned()];
+        let one = encode_capture_ids(&ids).unwrap().0.len() as u64;
+        store.persist(&capture, &source, &receipts).unwrap();
+        store.capacity.1 = one;
+        store.reclaim_forgotten(&source, &ids, &pins).unwrap();
+        store.capacity.1 = MAX_RECEIPT_STORE_BYTES;
+        store.persist(&capture, &source, &receipts).unwrap();
+        store.capacity.1 = one;
+        store.reclaim_forgotten(&source, &ids, &pins).unwrap();
+        let rows: Vec<(String, i64)> = store
+            .conn
+            .prepare(
+                "SELECT capture_ids, capture_ids_truncated FROM receipt_tombstones ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        // The second forget replaced every ledger row, so the first tombstone
+        // is orphaned and gone; the pool was full when the second was written.
+        assert_eq!(rows, vec![("[]".to_owned(), 1)]);
+        for receipt in &receipts {
+            assert!(matches!(
+                store.receipt_status(receipt.id()).unwrap(),
+                ReceiptStatus::Reclaimed { .. }
+            ));
+        }
     }
 }
