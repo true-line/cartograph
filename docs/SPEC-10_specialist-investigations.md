@@ -787,3 +787,138 @@ original request. This integration does not establish real-provider acceptance;
 the frozen V6 control remains immutable. Explicit V7 catalog entries and direct starts share the same availability
 gate, activated with the complete production path in this slice. Defaults stay
 unchanged.
+
+## Saved finding follow-up review (#730; US-0042)
+
+**Specified, pending implementation and verification.** AC-0293–0296 / T-0293–0296
+cover this first W8b dependency. It extends SPEC-03 review principles without
+completing W8b, H3/H4/H5 or #598. Existing investigation request/result/prompt/input,
+staging, history and citation encodings remain unchanged. Every finding retains
+its original Agentic/InferredWeak tier and historical limitations.
+
+### Exact subject and bounded current state
+
+Define a host-only typed FindingReviewBasisV1 with fixed serialization order:
+`schema_version:1`, execution namespace, investigation ID, saved intent hash,
+exact saved specialist, configured provider, scope and limits, result ID, exact
+immutable result-body hash and result-local finding ID. The subject is
+`investigation-finding-review-v1:` followed by lowercase BLAKE3 of the domain
+`cartograph:investigation-finding-review:v1` plus an actual zero byte and bounded
+JSON bytes of that typed basis. Fix serialization with an independent literal
+fixture. Bind all result fields, including citations, provenance, coverage and
+observed finishing identity through the whole-result hash. A finding ordinal alone
+is never durable identity; changing any finding in the result changes the subject.
+
+Resolve the saved execution task and family-aware validated result in one SQLite
+transaction. Retain hash verification, ledger/invocation/completion/disclosure and
+citation-binding qualification; require exactly one matching finding. Use saved
+specialist/provider/limits rather than today's catalog or runtime configuration.
+The configured provider binds requested model/endpoint/protocol, not executed
+weights. The result's reported response model is separately bound through its
+bytes; absent means unknown and a reported alias is not weight attestation. Display
+“Requested model (saved configuration)” and “Reported response model” or “Unknown”.
+Do not include mutable task revision, usage or live source availability in identity.
+
+The public subject contains only `investigation_id`, `result_id`, `finding_id`,
+`subject_id`. Caller supplies no basis, prose, citations, provider, namespace or
+source paths. Persist one row per `(task_id,result_id,finding_id)` containing unique
+subject ID, immutable result-body hash, positive signed-SQLite-compatible review
+revision, closed decision `accepted_for_follow_up|rejected_for_follow_up` and UTC
+review time. SQL guards prohibit delete, identity/hash replacement and updates
+other than revision+1. IDs retain existing 128-byte shape bounds, body hashes are
+64 lowercase hex characters, timestamps at most 32 bytes; preflight SQL types and
+UTF-8 lengths before allocation. No freeform notes, history stream or auto-pruning.
+
+### Explicit versioned storage migration
+
+Use the existing state.db/JobStore connection, without Jobs cascading foreign keys.
+At store open, migrate investigation_meta version 1→2 in one IMMEDIATE transaction.
+Validate the complete supported version-1 inventory and execution namespace before
+changes, including the established original-to-coverage upgrade path and any
+supported independently versioned optional extensions. Unknown versions, malformed
+metadata or unexpected review objects fail closed; do not adopt/repair partial
+layouts with IF NOT EXISTS.
+
+The existing metadata DDL checks version=1, so updating its value alone is invalid.
+Rebuild only investigation_meta with the exact corresponding version-2 DDL/check,
+retaining exactly singleton `(1,2,original_namespace)`, then create the review table
+and both guards. Validate the exact complete version-2 inventory and metadata before
+commit. Do not rewrite old archive bodies/hashes or create pending review rows.
+Fresh stores use that exact version-2 layout. Post-open helpers admit only version
+2; retain version-1 validation solely for migration, not a second readable layout.
+Existing read-reservation/admission extensions, where present on the implementation
+base, keep their own validators and bytes; this slice adds no optional namespace.
+Reopen is idempotent. Faults after metadata rebuild, after review DDL or before
+commit restore the entire old schema/version/bytes. Older binaries fail closed;
+no downgrade compatibility is promised. No writable_schema manipulation.
+
+### Metadata-only commands and transaction boundary
+
+Add off-thread `get_investigation_finding_reviews(investigationId,expectedResultId)`
+and `review_investigation_finding(requestJson)`; keep investigation_result and its
+response unchanged. Getter returns schema version, investigation/result IDs and
+one review observation per finding in original order: subject, revision, decision,
+reviewed_at. Missing persisted rows derive revision 0 and null decision/time;
+no-findings results return empty reviews. Internally validate original saved result
+and every task review row; orphan/malformed rows must not disappear through filters.
+Missing task/result/finding is not_found; a different expected result or valid but
+different subject is subject_changed; corrupt stored bindings are invalid_record.
+A review failure cannot make the separate valid historical result unreadable.
+
+Mutation accepts only schema_version 1, public subject, expected_revision and the
+closed decision. Reuse bounded raw-action JSON admission before typed allocation:
+reject duplicate/trailing/unknown fields, excess depth, malformed IDs and signed
+integer overflow. Begin IMMEDIATE, validate namespace/exact schema and saved basis,
+recompute subject, resolve current review and compare expected review revision.
+Mismatch returns review_conflict with current winner metadata. Insert revision 1
+or identity-matched UPDATE WHERE revision=expected, incrementing once; never upsert
+or compare task lifecycle revision. No worker execution lease is required for this
+review of immutable persisted content.
+
+Bound only metadata responses with existing MAX_RECORD_BYTES; use existing
+MAX_ACTION_BYTES for raw mutation ingress. Do not wrap/truncate the result or impose
+a smaller result ceiling. Count derives from the actual admitted result, not a new
+policy number. The existing MAX_RESULT_BYTES result contract remains authoritative.
+Charge review rows, scalar UTF-8 bytes and index allowances with checked arithmetic
+into existing per-task/global accounting (existing 256-byte row allowance); exceeding
+capacity rolls back. Terminal tasks receive no guarantee of unused reserved space.
+Bound the coherent response before commit. After commit emit
+`investigation-review://changed` with investigation_id, result_id, subject_id and
+review_revision; failed event delivery does not undo committed state. Lost response
+requires a durable read, never automatic write replay. Even a repeated identical
+decision with a stale revision conflicts. Getter and mutation return metadata only.
+
+### UI, historical evidence and side effects
+
+Join the unchanged result read with a separate exact-result-ID review read. Publish
+valid result independently of review success. Verify review membership/count/
+uniqueness and monotone revisions; separate selection and review-request generations
+prevent late responses replacing another task/result or newer review. Mutation
+responses update review metadata only, never the result. Failed reads retain the
+last known decision with explicit unavailable/stale observation, not invented pending.
+
+Use “Use for follow-up” / “Do not use for follow-up” controls and “Pending review”,
+“Accepted for follow-up”, “Rejected for follow-up” statuses. Keep the T3 badge and
+visible explanation that review changes neither graph/context nor evidence validity.
+Show revision/time, disable that finding's actions while pending and never optimistic
+update. On conflict show the winner and require a fresh deliberate action. Refresh
+through existing historical-task navigation, explicit Refresh, app focus and review
+invalidation with race guards. No new rail/global review list or no-findings controls.
+
+Corrupt saved result/ledger/citation bindings disable review. Structurally valid
+historical citations whose retained bytes are forgotten, unavailable, corrupt or
+operationally unreadable preserve their historical decision and existing distinct
+inspection observations. No current graph/checkout replacement or source lock/read
+belongs in review. The existing historical citation inspector remains the sole
+retained-byte access path. Live graph/catalog/provider/source changes do not rewrite
+historical review or imply current evidence freshness.
+
+Getter/mutation make zero provider and current-source acquisition calls; do not
+alter results, ledger/refs, recovered facts/Gap, proposals, context/export, job status,
+task lifecycle revision, model/tool counters or worker events. Opening/citing/finishing
+a result does not itself record review. Later evidence/execution consumers must
+revalidate independently. Tests must use real file-backed production worker/store
+fixtures, separate competing connections, migration fault points and deferred UI
+responses; literal DTO fixtures alone are insufficient. Existing golden bytes and
+prompt fingerprints remain unchanged. T-0293–0296 currently map only to UNEXECUTED
+procedures; replace/supplement mappings with real tests as implementation lands.
