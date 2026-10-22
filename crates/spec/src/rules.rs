@@ -278,7 +278,7 @@ fn relationships<'a>(
         .copied()
         .filter(|edge| {
             edge.src == node.id
-                && matches!(edge.label.as_str(), "GOVERNS" | "DEPENDS_ON")
+                && PARTITION_EDGE_LABELS.contains(&edge.label.as_str())
                 && visible.contains_key(edge.dst.as_str())
         })
         .collect();
@@ -717,11 +717,24 @@ pub(crate) fn inventory_selected(
     selection: InventorySelection,
     max_bytes: Option<usize>,
 ) -> Result<InventoryOutput, RuleInventoryLimitExceeded> {
+    inventory_selected_roots(nodes, edges, mode, selection, max_bytes, None)
+}
+
+/// Explicit observation roots; context rules remain lookup-only.
+pub(crate) fn inventory_selected_roots(
+    nodes: &[&Node],
+    edges: &[&Edge],
+    mode: ExportMode,
+    selection: InventorySelection,
+    max_bytes: Option<usize>,
+    roots: Option<&BTreeSet<String>>,
+) -> Result<InventoryOutput, RuleInventoryLimitExceeded> {
     let visible: BTreeMap<_, _> = nodes.iter().map(|node| (node.id.as_str(), *node)).collect();
     let mut rules: Vec<_> = nodes
         .iter()
         .copied()
         .filter(|node| node.label == "BusinessRule")
+        .filter(|node| roots.is_none_or(|roots| roots.contains(&node.id)))
         .collect();
     rules.sort_by(|left, right| left.id.cmp(&right.id));
     let observations = observations(&rules, edges, &visible, selection.markdown);
@@ -990,6 +1003,48 @@ pub(crate) fn logical_workspace_bytes(bytes: usize, rows: usize, values: usize) 
         std::mem::size_of::<RuleEvidenceIndex<'_>>(),
         std::mem::size_of::<AssertionView<'_, '_>>(),
     ])
+}
+
+/// Relationships actually queried by the source-rule inventory renderer.
+pub(crate) const PARTITION_EDGE_LABELS: &[&str] = &["GOVERNS", "DEPENDS_ON"];
+
+/// Graph identities dereferenced by rendering one typed observation. Lexical
+/// binding IDs are not graph nodes and are deliberately not acquired.
+pub(crate) fn partition_references(node: &Node) -> BTreeSet<String> {
+    let Ok(rule) = GuardedExitEvidence::from_value(node.props["rule"].clone()) else {
+        return BTreeSet::new();
+    };
+    let mut ids = BTreeSet::from([rule.owner_id]);
+    ids.extend(rule.interpretation.gap_ids.iter().cloned());
+    let mut resolution = |value: &DependencyResolution| match value {
+        DependencyResolution::Target { node_id } => {
+            ids.insert(node_id.clone());
+        }
+        DependencyResolution::Unresolved { gap_id } => {
+            ids.insert(gap_id.clone());
+        }
+        DependencyResolution::Binding { .. } => {}
+    };
+    for dependency in &rule.dependencies {
+        resolution(&dependency.resolution);
+    }
+    if let Some(definitions) = &rule.local_definitions {
+        for definition in definitions {
+            for dependency in &definition.dependencies {
+                resolution(&dependency.resolution);
+            }
+        }
+    }
+    if let Some(definitions) = &rule.local_definitions {
+        for definition in definitions {
+            for expression in &definition.expression.nodes {
+                if let DefinitionExpressionKind::Unsupported { gap_id } = &expression.kind {
+                    ids.insert(gap_id.clone());
+                }
+            }
+        }
+    }
+    ids
 }
 
 #[cfg(test)]

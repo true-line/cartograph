@@ -206,6 +206,15 @@ pub(crate) fn storage_error(error: rusqlite::Error) -> GraphError {
 }
 
 impl SqliteGraphStore {
+    /// Observe the current revision. This does not make a later independent
+    /// data read coherent with this token; use a revisioned read for that.
+    pub fn read_revision(&self) -> Result<StoreRevision, GraphError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let revision = read_store_revision(&transaction)?;
+        transaction.commit()?;
+        Ok(revision)
+    }
+
     /// Copy the complete bounded graph and its revision coherently.
     pub fn read_snapshot_with_revision_bounded(
         &self,

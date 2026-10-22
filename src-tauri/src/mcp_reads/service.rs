@@ -53,9 +53,7 @@ impl Policy {
         let e = w.evidence;
         let a = self.aggregate;
         let worker_budget = self.worker_budget()?;
-        let required = super::reservation::worker_bound::WorkerReservation::for_limits(w)
-            .ok_or(ReadError::InvalidRequest)?
-            .required_bytes;
+        let required = super::worker::required_reservation(w).ok_or(ReadError::InvalidRequest)?;
         if w.max_request_frame_bytes != t.read_frame_bytes
             || w.reserved_bytes.get() < required
             || w.scope.max_sources.get() > context_hub::coverage::MAX_COVERAGE_REPOS

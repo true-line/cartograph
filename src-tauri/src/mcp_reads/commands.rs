@@ -9,6 +9,8 @@ use tauri::Manager;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AdvancedPolicy {
+    #[serde(default)]
+    acquisition_mode: super::worker::AcquisitionMode,
     transport: TransportPolicy,
     graph: GraphPolicy,
     coverage: CoveragePolicy,
@@ -106,6 +108,7 @@ impl AdvancedPolicy {
                 session_lifetime: lifetime,
             },
             worker: super::worker::WorkerLimits {
+                acquisition_mode: self.acquisition_mode,
                 max_request_frame_bytes: t.read_frame_bytes,
                 graph: SnapshotReadLimits {
                     max_bytes: g.max_bytes.get(),
@@ -311,6 +314,48 @@ mod tests {
             serde_json::json!(baseline.checked_add(worker).unwrap());
         value
     }
+    #[test]
+    fn acquisition_policy_preserves_complete_default_and_requires_scoped_reservation() {
+        use super::super::worker::{AcquisitionMode, required_reservation};
+        assert_eq!(
+            serde_json::from_value::<AdvancedPolicy>(input())
+                .unwrap()
+                .materialize()
+                .worker
+                .acquisition_mode,
+            AcquisitionMode::Complete
+        );
+        let mut value = input();
+        value["acquisition_mode"] = serde_json::json!("scoped");
+        let policy = serde_json::from_value::<AdvancedPolicy>(value.clone())
+            .unwrap()
+            .materialize();
+        assert_eq!(policy.worker.acquisition_mode, AcquisitionMode::Scoped);
+        let required = required_reservation(policy.worker).unwrap();
+        let baseline =
+            super::super::reservation::TransportReservation::for_limits(policy.transport)
+                .unwrap()
+                .activation_bytes;
+        value["worker_reserved_bytes"] = serde_json::json!(required);
+        value["aggregate"]["max_reserved_bytes"] =
+            serde_json::json!(required.checked_add(baseline).unwrap());
+        assert!(
+            serde_json::from_value::<AdvancedPolicy>(value.clone())
+                .unwrap()
+                .into_policy()
+                .is_ok()
+        );
+        value["worker_reserved_bytes"] = serde_json::json!(required - 1);
+        assert!(
+            serde_json::from_value::<AdvancedPolicy>(value.clone())
+                .unwrap()
+                .into_policy()
+                .is_err()
+        );
+        value["acquisition_mode"] = serde_json::json!("fallback");
+        assert!(serde_json::from_value::<AdvancedPolicy>(value).is_err());
+    }
+
     #[test]
     fn explicit_policy_rejects_missing_zero_unknown_and_crossfield_limits() {
         // AC-0288: human activation supplies policy; no implicit convenience profile.

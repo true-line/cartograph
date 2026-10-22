@@ -14,6 +14,8 @@ pub enum ReadTool {
     Capabilities,
     /// Discover bounded context handles.
     Discover,
+    /// Read one selected fact under a scoped session basis.
+    ReadFact,
     /// List official artifacts.
     Artifacts,
     /// Read a selected artifact.
@@ -28,6 +30,7 @@ impl ReadTool {
         match self {
             Self::Capabilities => "cartograph_capabilities",
             Self::Discover => "cartograph_discover",
+            Self::ReadFact => "cartograph_read_fact",
             Self::Artifacts => "cartograph_artifacts",
             Self::ReadArtifact => "cartograph_read_artifact",
             Self::Evidence => "cartograph_evidence",

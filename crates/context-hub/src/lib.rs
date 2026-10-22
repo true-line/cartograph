@@ -15,6 +15,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod discovery;
+pub mod scoped;
 pub use discovery::{
     DISCOVERY_POLICY, DiscoveryCandidate, DiscoveryCursor, DiscoveryQuery, DiscoveryRequest,
     DiscoveryResponse,
@@ -96,6 +97,16 @@ pub struct ContextFact {
 }
 
 impl ContextFact {
+    /// Project one selected node without claiming a complete context snapshot.
+    pub fn from_node(node: Node) -> Self {
+        Self::new(FactReference::Node { id: node.id }, node.label, node.props)
+    }
+
+    /// Project one selected edge without claiming a complete context snapshot.
+    pub fn from_edge(edge: Edge) -> Self {
+        Self::new(edge_reference(&edge), edge.label, edge.props)
+    }
+
     fn new(reference: FactReference, label: String, mut properties: Value) -> Self {
         let raw = properties
             .as_object_mut()

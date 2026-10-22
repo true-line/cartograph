@@ -150,6 +150,7 @@ impl<'state> Dispatcher<'state> {
         arguments: Map<String, Value>,
     ) -> Result<Value, ReadError> {
         match tool {
+            ReadTool::ReadFact => Err(ReadError::InvalidRequest),
             ReadTool::Capabilities => {
                 let _: EmptyArgs = parse(arguments)?;
                 Ok(success(id, "Context capabilities.", self.capabilities()))
@@ -362,20 +363,22 @@ impl From<QualifiedDiscovery> for QualifiedRequest<DiscoveryRequest> {
     }
 }
 
-fn parse<T: serde::de::DeserializeOwned>(arguments: Map<String, Value>) -> Result<T, ReadError> {
+pub(super) fn parse<T: serde::de::DeserializeOwned>(
+    arguments: Map<String, Value>,
+) -> Result<T, ReadError> {
     serde_json::from_value(Value::Object(arguments)).map_err(|_| ReadError::InvalidRequest)
 }
-fn success(id: &Value, summary: &'static str, data: Value) -> Value {
+pub(super) fn success(id: &Value, summary: &'static str, data: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":summary}],"structuredContent":data,"isError":false}})
 }
-fn tool_error(id: &Value, error: ReadError) -> Value {
+pub(super) fn tool_error(id: &Value, error: ReadError) -> Value {
     let mut detail = json!({"error":error.to_string()});
     if let ReadError::EvidenceOmitted(kind) = error {
         detail["omission_kind"] = json!(kind);
     }
     json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":error.to_string()}],"structuredContent":detail,"isError":true}})
 }
-fn error_response(id: Option<&Value>, error: ReadError) -> Value {
+pub(super) fn error_response(id: Option<&Value>, error: ReadError) -> Value {
     let code = match error {
         ReadError::InvalidRequest => -32602,
         ReadError::StaleBasis => -32001,
@@ -388,13 +391,13 @@ fn error_response(id: Option<&Value>, error: ReadError) -> Value {
     }
     response
 }
-fn inner_cap(template: &Value, cap: usize) -> Result<usize, ReadError> {
+pub(super) fn inner_cap(template: &Value, cap: usize) -> Result<usize, ReadError> {
     let size = measure(template, cap).ok_or(ReadError::Limit)?;
     cap.checked_sub(size - 4)
         .filter(|inner| *inner > 0)
         .ok_or(ReadError::Limit)
 }
-fn fits(value: &impl Serialize, cap: usize) -> bool {
+pub(super) fn fits(value: &impl Serialize, cap: usize) -> bool {
     measure(value, cap).is_some()
 }
 fn measure(value: &impl Serialize, cap: usize) -> Option<usize> {
@@ -448,6 +451,10 @@ fn session_properties() -> Value {
 }
 fn tool_descriptor(tool: ReadTool) -> Value {
     let (description, input_schema) = match tool {
+        ReadTool::ReadFact => (
+            "Unavailable in complete-session mode.",
+            object_schema(json!({}), &[]),
+        ),
         ReadTool::Capabilities => (
             "Describe this frozen recovered-context session and implemented limits.",
             object_schema(json!({}), &[]),

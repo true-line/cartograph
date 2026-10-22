@@ -1,3 +1,4 @@
+// AC-0309 / T-0309: explicit activation mode and limitations.
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, within } from 'storybook/test';
 import { McpSettingsPanel } from './McpSettingsPanel';
@@ -17,6 +18,10 @@ export const ExplicitActivation: Story = {
     await userEvent.click(canvas.getByText('Required policy fields'));
     await expect(canvas.getByText(/max_source_registry_bytes/)).toBeVisible();
     await expect(canvas.getByText(/max_corpus_bytes/)).toBeVisible();
+    await expect(canvas.getByText(/"acquisition_mode": "complete"/)).toBeVisible();
+    await expect(canvas.getByText(/bounded discovery handles, selected fact detail, and retained evidence/)).toBeVisible();
+    await expect(canvas.getByText(/complete artifact compilation is unavailable/)).toBeVisible();
+    await expect(canvas.getByText(/a large component can exceed the supplied limits/)).toBeVisible();
     await userEvent.type(canvas.getByLabelText('Resource policy JSON'), 'invalid JSON');
     await expect(canvas.getByRole('button', { name: 'Enable read access' })).toBeDisabled();
     await userEvent.click(canvas.getByRole('button', { name: 'Refresh read service' }));

@@ -286,6 +286,21 @@ fn preflight(connection: &Connection, limits: CoverageReadLimits) -> Result<(), 
 }
 
 impl SqliteGraphStore {
+    /// Read bounded coverage and its revision in one transaction, without
+    /// materializing graph facts or claiming that coverage is complete.
+    pub fn read_coverage_records_with_revision_bounded(
+        &self,
+        limits: CoverageReadLimits,
+    ) -> Result<(crate::generation::StoreRevision, Vec<StoredCoverage>), GraphError> {
+        limits.validate()?;
+        let transaction = self.conn.unchecked_transaction()?;
+        let revision = crate::generation::read_store_revision(&transaction)?;
+        preflight(&transaction, limits)?;
+        let records = read_all(&transaction)?;
+        transaction.commit()?;
+        Ok((revision, records))
+    }
+
     /// Copy the complete graph and every recorded inventory from one read
     /// transaction, so a qualification never describes a different revision
     /// than the facts it accompanies.

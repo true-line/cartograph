@@ -31,6 +31,9 @@ pub(crate) mod dispatch;
 #[cfg(unix)]
 pub(crate) mod reservation;
 pub(crate) mod scope;
+pub(crate) mod scoped_dispatch;
+pub(crate) mod scoped_evidence;
+pub(crate) mod scoped_session;
 #[cfg(unix)]
 pub(crate) mod service;
 pub(crate) mod worker;
@@ -44,6 +47,8 @@ pub(crate) enum ReadError {
     Limit,
     #[error("storage_unavailable")]
     Storage,
+    #[error("artifact_unavailable")]
+    ArtifactUnavailable,
     #[error("evidence_unavailable")]
     EvidenceUnavailable,
     #[error("evidence_forgotten")]
@@ -247,6 +252,7 @@ fn digest(prefix: &str, value: &impl Serialize) -> Result<String, ReadError> {
 
 fn graph_error(error: GraphError) -> ReadError {
     match error {
+        GraphError::Generation(core_graph::GenerationError::Changed) => ReadError::StaleBasis,
         GraphError::SnapshotBounds(SnapshotBoundsError::InvalidLimits) => ReadError::InvalidRequest,
         GraphError::SnapshotBounds(
             SnapshotBoundsError::RowLimit

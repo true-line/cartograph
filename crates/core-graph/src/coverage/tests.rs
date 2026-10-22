@@ -251,3 +251,60 @@ fn bounded_coverage_read_admits_inventories_before_copying_them() {
         Err(GraphError::SnapshotBounds(SnapshotBoundsError::RowLimit))
     ));
 }
+
+// Scoped coverage acquisition must not materialize unrelated graph bodies.
+#[test]
+fn revisioned_coverage_is_bounded_and_independent_of_graph_body_size() {
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let inventory = record("acme/api", json!({"limited": true}));
+    assert!(publish(
+        &mut store,
+        "acme/api",
+        &["mod:a"],
+        Some(&inventory)
+    ));
+    store
+        .conn
+        .execute(
+            "UPDATE nodes SET props = ?1 WHERE id = 'mod:a'",
+            [json!({"large": "x".repeat(4096)}).to_string()],
+        )
+        .unwrap();
+    let (revision, records) = store
+        .read_coverage_records_with_revision_bounded(CoverageReadLimits {
+            max_records: 1,
+            max_bytes: 1024,
+        })
+        .unwrap();
+    assert_eq!(revision, store.read_revision().unwrap());
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].record, inventory);
+    assert!(
+        store
+            .read_coverage_records_with_revision_bounded(CoverageReadLimits {
+                max_records: 1,
+                max_bytes: 1
+            })
+            .is_err()
+    );
+    assert!(
+        store
+            .read_coverage_records_with_revision_bounded(CoverageReadLimits {
+                max_records: 0,
+                max_bytes: 1024
+            })
+            .is_err()
+    );
+    store
+        .conn
+        .execute("UPDATE coverage_inventories SET ingest_id = 'job-2'", [])
+        .unwrap();
+    let (next, records) = store
+        .read_coverage_records_with_revision_bounded(CoverageReadLimits {
+            max_records: 1,
+            max_bytes: 1024,
+        })
+        .unwrap();
+    assert_ne!(revision, next);
+    assert_eq!(records[0].record.ingest_id, "job-2");
+}

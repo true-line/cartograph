@@ -7,12 +7,18 @@
 //! from and why.
 
 use super::{
-    ContextError, ContextFact, ContextSnapshot, FactReference, MAX_RESPONSE_BYTES,
-    content_identity, validate_limit,
+    ContextError, ContextSnapshot, FactReference, MAX_RESPONSE_BYTES, content_identity,
+    validate_limit,
 };
 use core_prov::ConfidenceTier;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+
+mod matching;
+#[cfg(test)]
+use matching::contains_lowercase;
+use matching::lowercase;
+pub use matching::{BorrowedDiscoveryMatch, DiscoveryMatcher};
 
 /// Version of the matching rules below. A cursor issued under one version is
 /// rejected under any other.
@@ -52,42 +58,17 @@ impl DiscoveryQuery {
     /// The query as matched: trimmed and lowercased text, other terms
     /// unchanged. Cursors bind this form.
     fn normalized(&self) -> Result<Self, ContextError> {
-        // Preserve the existing raw-term ceiling and empty-term precedence,
-        // but establish them before cloning/collecting an owned normalized term.
-        let raw = match self {
+        let term = match self {
             Self::Identifier { id } => id.as_str(),
             Self::Name { name } => name.as_str(),
             Self::Text { text } => text.as_str(),
         };
-        let empty = match self {
-            Self::Text { text } => text.trim().is_empty(),
-            _ => raw.is_empty(),
+        let empty = if matches!(self, Self::Text { .. }) {
+            term.trim().is_empty()
+        } else {
+            term.is_empty()
         };
         if empty {
-            return Err(ContextError::EmptyDiscoveryTerm);
-        }
-        if raw.len() > MAX_TERM_BYTES {
-            return Err(ContextError::InvalidLimit {
-                name: "term_bytes",
-                requested: raw.len(),
-                maximum: MAX_TERM_BYTES,
-            });
-        }
-        let (term, normalized) = match self {
-            Self::Identifier { id } => (id.as_str(), self.clone()),
-            Self::Name { name } => (name.as_str(), self.clone()),
-            Self::Text { text } => (
-                text.as_str(),
-                Self::Text {
-                    text: lowercase(text.trim()).collect(),
-                },
-            ),
-        };
-        let matched = match &normalized {
-            Self::Text { text } => text.as_str(),
-            _ => term,
-        };
-        if matched.is_empty() {
             return Err(ContextError::EmptyDiscoveryTerm);
         }
         if term.len() > MAX_TERM_BYTES {
@@ -97,6 +78,13 @@ impl DiscoveryQuery {
                 maximum: MAX_TERM_BYTES,
             });
         }
+        // Admit the original UTF-8 term before cloning or Unicode expansion.
+        let normalized = match self {
+            Self::Text { text } => Self::Text {
+                text: lowercase(text.trim()).collect(),
+            },
+            _ => self.clone(),
+        };
         Ok(normalized)
     }
 }
@@ -269,67 +257,6 @@ impl DiscoveryQuery {
     }
 }
 
-/// A match borrowed from the snapshot; nothing is copied until the
-/// candidate is admitted to a page.
-#[derive(Clone, Copy)]
-struct Matched<'a> {
-    kind: MatchKind,
-    field: &'static str,
-    value: &'a str,
-}
-
-/// Per-character Unicode lowercasing, the one mapping applied to both the
-/// query and the compared fields. Unlike `str::to_lowercase` it has no
-/// context rules (such as final sigma), so both sides always agree.
-fn lowercase(text: &str) -> impl Iterator<Item = char> + Clone + '_ {
-    text.chars().flat_map(char::to_lowercase)
-}
-
-/// Whether `haystack` contains `needle` (already lowercased) after
-/// lowercasing. Every position of the lowercased stream is a candidate start,
-/// including scalars a single source character expands into; nothing is
-/// allocated.
-fn contains_lowercase(haystack: &str, needle: &str) -> bool {
-    let mut start = lowercase(haystack);
-    loop {
-        let mut rest = start.clone();
-        if needle.chars().all(|wanted| rest.next() == Some(wanted)) {
-            return true;
-        }
-        if start.next().is_none() {
-            return false;
-        }
-    }
-}
-
-/// The first policy match for `fact`, if any.
-fn match_fact<'a>(
-    query: &DiscoveryQuery,
-    fact: &'a ContextFact,
-    id: &'a str,
-) -> Option<Matched<'a>> {
-    let names = || {
-        NAME_FIELDS.iter().filter_map(|field| {
-            fact.properties[*field]
-                .as_str()
-                .map(|value| (*field, value))
-        })
-    };
-    let matched = |kind, (field, value)| Matched { kind, field, value };
-    match query {
-        DiscoveryQuery::Identifier { id: wanted } => {
-            (id == wanted).then(|| matched(MatchKind::ExactIdentifier, ("id", id)))
-        }
-        DiscoveryQuery::Name { name } => names()
-            .find(|(_, value)| value == name)
-            .map(|found| matched(MatchKind::ExactName, found)),
-        DiscoveryQuery::Text { text } => std::iter::once(("id", id))
-            .chain(names())
-            .find(|(_, value)| contains_lowercase(value, text))
-            .map(|found| matched(MatchKind::TextSubstring, found)),
-    }
-}
-
 /// A candidate borrowed from the snapshot, serialized exactly like
 /// [`DiscoveryCandidate`] so its size can be bounded before anything is
 /// copied.
@@ -420,13 +347,14 @@ impl ContextSnapshot {
     pub fn discover(&self, request: DiscoveryRequest) -> Result<DiscoveryResponse, ContextError> {
         validate_limit("max_candidates", request.max_candidates, MAX_CANDIDATES)?;
         validate_limit("max_bytes", request.max_bytes, MAX_RESPONSE_BYTES)?;
-        let query = request.query.normalized()?;
+        let matcher = DiscoveryMatcher::new(&request.query)?;
+        let query = matcher.query();
         let labels: BTreeSet<String> = request.labels.into_iter().collect();
         let query_id = content_identity(
             "discovery-query-v1",
             &QueryIdentity {
                 policy: DISCOVERY_POLICY,
-                query: &query,
+                query,
                 labels: &labels,
             },
         )?;
@@ -478,7 +406,7 @@ impl ContextSnapshot {
             {
                 coverage.nodes_without_name_fields += 1;
             }
-            if let Some(found) = match_fact(&query, fact, id) {
+            if let Some(found) = matcher.match_node(id, &fact.properties) {
                 matched.push((found.kind, id.as_str(), fact, found));
             }
         }
@@ -593,7 +521,12 @@ pub(crate) fn logical_workspace(
     });
     let normalized = MAX_TERM_BYTES.checked_mul(*LOWERCASE_BYTES_PER_SOURCE_BYTE)?;
     let degree = map::<&str, (usize, usize)>(limits.max_rows.checked_add(limits.max_rows)?)?;
-    let matching = slots::<(MatchKind, &str, &ContextFact, Matched<'_>)>(limits.max_rows)?;
+    let matching = slots::<(
+        MatchKind,
+        &str,
+        &crate::ContextFact,
+        BorrowedDiscoveryMatch<'_>,
+    )>(limits.max_rows)?;
     let current_view = size_of::<CandidateView<'_>>();
     let response = response_bytes.min(MAX_RESPONSE_BYTES);
     let typed_response = sum(&[

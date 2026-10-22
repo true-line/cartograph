@@ -13,6 +13,13 @@ use core_graph::{
 use serde::Serialize;
 use tauri::Manager;
 
+/// Share the receipt role vocabulary with bounded read-only consumers.
+pub(crate) fn receipt_range_role(
+    value: adapters_lang_ts::captured::RangeRole,
+) -> agents::TaskRangeRole {
+    super::evidence::role(value)
+}
+
 const REFRESH: &str =
     "Captured inspection target changed or is unavailable; refresh and select the source again.";
 /// Source-free evidence failures; absence does not establish why content is gone.

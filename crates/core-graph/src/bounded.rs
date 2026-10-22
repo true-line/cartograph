@@ -185,12 +185,12 @@ impl SqliteGraphStore {
     }
 }
 
-fn field(row: &rusqlite::Row<'_>, index: usize) -> Result<String, GraphError> {
+pub(crate) fn field(row: &rusqlite::Row<'_>, index: usize) -> Result<String, GraphError> {
     row.get(index)
         .map_err(|_| SnapshotBoundsError::InvalidRow.into())
 }
 
-fn preflight_schema(connection: &Connection) -> Result<(), GraphError> {
+pub(crate) fn preflight_schema(connection: &Connection) -> Result<(), GraphError> {
     // A view or generated expression could change between length and body
     // evaluation despite one read transaction. Only ordinary stored columns are
     // allowed here. Bound schema text before PRAGMA exposes default expressions.
@@ -285,14 +285,14 @@ fn preflight_rows(
     Ok((node_count, edge_count))
 }
 
-struct JsonBudget {
+pub(crate) struct JsonBudget {
     limits: SnapshotReadLimits,
     remaining: usize,
     failure: Option<SnapshotBoundsError>,
 }
 
 impl JsonBudget {
-    fn new(limits: SnapshotReadLimits) -> Self {
+    pub(crate) fn new(limits: SnapshotReadLimits) -> Self {
         Self {
             limits,
             remaining: limits.max_values,
@@ -300,7 +300,7 @@ impl JsonBudget {
         }
     }
 
-    fn enter(&mut self, depth: usize) -> Result<(), SnapshotBoundsError> {
+    pub(crate) fn enter(&mut self, depth: usize) -> Result<(), SnapshotBoundsError> {
         if depth > self.limits.max_depth {
             return Err(SnapshotBoundsError::JsonDepthLimit);
         }
@@ -312,7 +312,7 @@ impl JsonBudget {
     }
 }
 
-fn parse_properties(input: &str, budget: &mut JsonBudget) -> Result<Value, GraphError> {
+pub(crate) fn parse_properties(input: &str, budget: &mut JsonBudget) -> Result<Value, GraphError> {
     let mut decoder = serde_json::Deserializer::from_str(input);
     let parsed = JsonSeed { budget, depth: 4 }.deserialize(&mut decoder);
     let value = parsed.map_err(|_| {
@@ -486,6 +486,19 @@ impl Serialize for CanonicalGraph<'_> {
         let edges: Vec<_> = self.0.1.iter().map(CanonicalEdge).collect();
         (&nodes, &edges).serialize(serializer)
     }
+}
+
+/// Count canonical graph-row bytes without allocating a serialized buffer.
+pub(crate) fn canonical_graph_bytes(
+    graph: &(Vec<Node>, Vec<Edge>),
+    max_bytes: usize,
+) -> Result<usize, GraphError> {
+    let mut counter = ByteCounter {
+        remaining: max_bytes,
+    };
+    serde_json::to_writer(&mut counter, &CanonicalGraph(graph))
+        .map_err(|_| SnapshotBoundsError::CanonicalByteLimit)?;
+    Ok(max_bytes - counter.remaining)
 }
 
 #[cfg(test)]
