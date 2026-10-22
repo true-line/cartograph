@@ -596,6 +596,13 @@ fn lineage_exact_1024_ancestor_bound_and_nested_cycle_detection() {
     for id in &ids {
         store
             .connection
+            .execute(
+                "INSERT INTO work_packet_receipt_index_claims VALUES(?1)",
+                [id],
+            )
+            .unwrap();
+        store
+            .connection
             .execute("INSERT INTO work_packet_bodies VALUES(?1,X'00')", [id])
             .unwrap();
     }
@@ -1103,4 +1110,49 @@ fn ac0301_v1_migration_rejects_corrupt_oversized_and_extra_trigger_stores_unchan
             .unwrap();
         assert_eq!(version, 1);
     }
+}
+
+// AC-0301: a v1 writer that opened the store before migration cannot save a
+// packet without indexing its receipts, so a later forget cannot miss its pins.
+#[test]
+fn ac0301_already_open_v1_writer_is_fenced_after_migration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("shared.sqlite");
+    build_v1_store(&path, &[]);
+    let old = Connection::open(&path).unwrap();
+    old.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    let version: i64 = old
+        .query_row("SELECT version FROM work_packet_meta", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 1);
+
+    let mut migrated = PacketStore::open(&path).unwrap();
+    let packet = body_with_receipts("Old writer", "receipt:old-assoc", "receipt:old-excerpt");
+    let mut normalized = packet.clone();
+    normalized.normalize().unwrap();
+    let canonical = normalized.canonical_bytes().unwrap();
+    let id = packet_id(&canonical);
+    let mut old = old;
+    let transaction = old.transaction().unwrap();
+    let error = transaction
+        .execute(
+            "INSERT INTO work_packet_bodies(packet_id,body) VALUES(?1,?2)",
+            params![id, canonical],
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, rusqlite::Error::SqliteFailure(_, Some(ref msg)) if msg == "packet receipt index required"),
+        "{error:?}"
+    );
+    drop(transaction);
+    assert!(migrated.get(&id).is_err());
+
+    migrated.put(packet, &[], "t1").unwrap();
+    assert_eq!(
+        migrated
+            .referenced_receipts(&["receipt:old-assoc".into(), "receipt:old-excerpt".into()])
+            .unwrap()
+            .len(),
+        2
+    );
 }

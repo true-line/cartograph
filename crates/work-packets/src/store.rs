@@ -164,7 +164,31 @@ const SCHEMA_V1: &[(&str, &str, &str)] = &[
 
 const META_SCHEMA_V2: &str = "CREATE TABLE work_packet_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=2))";
 
+/// Objects v2 adds to v1. A body insert needs a matching index claim, which
+/// only v2 code writes in the same transaction as the body's receipt refs, so
+/// a v1 binary that opened the store before migration cannot save a packet
+/// whose cited receipts are missing from the index (it fails closed).
 const RECEIPT_REFS_SCHEMA: &[(&str, &str, &str)] = &[
+    (
+        "table",
+        "work_packet_receipt_index_claims",
+        "CREATE TABLE work_packet_receipt_index_claims(packet_id TEXT PRIMARY KEY) STRICT, WITHOUT ROWID",
+    ),
+    (
+        "trigger",
+        "work_packet_body_requires_receipt_index",
+        "CREATE TRIGGER work_packet_body_requires_receipt_index BEFORE INSERT ON work_packet_bodies WHEN NOT EXISTS(SELECT 1 FROM work_packet_receipt_index_claims WHERE packet_id=NEW.packet_id) BEGIN SELECT RAISE(ABORT,'packet receipt index required'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_receipt_index_claim_immutable_update",
+        "CREATE TRIGGER work_packet_receipt_index_claim_immutable_update BEFORE UPDATE ON work_packet_receipt_index_claims BEGIN SELECT RAISE(ABORT,'immutable packet receipt index claim'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_receipt_index_claim_immutable_delete",
+        "CREATE TRIGGER work_packet_receipt_index_claim_immutable_delete BEFORE DELETE ON work_packet_receipt_index_claims BEGIN SELECT RAISE(ABORT,'immutable packet receipt index claim'); END",
+    ),
     (
         "table",
         "work_packet_receipt_refs",
@@ -264,6 +288,26 @@ const SCHEMA: &[(&str, &str, &str)] = &[
         "work_packet_receipt_ref_immutable_delete",
         "CREATE TRIGGER work_packet_receipt_ref_immutable_delete BEFORE DELETE ON work_packet_receipt_refs BEGIN SELECT RAISE(ABORT,'immutable packet receipt ref'); END",
     ),
+    (
+        "table",
+        "work_packet_receipt_index_claims",
+        "CREATE TABLE work_packet_receipt_index_claims(packet_id TEXT PRIMARY KEY) STRICT, WITHOUT ROWID",
+    ),
+    (
+        "trigger",
+        "work_packet_body_requires_receipt_index",
+        "CREATE TRIGGER work_packet_body_requires_receipt_index BEFORE INSERT ON work_packet_bodies WHEN NOT EXISTS(SELECT 1 FROM work_packet_receipt_index_claims WHERE packet_id=NEW.packet_id) BEGIN SELECT RAISE(ABORT,'packet receipt index required'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_receipt_index_claim_immutable_update",
+        "CREATE TRIGGER work_packet_receipt_index_claim_immutable_update BEFORE UPDATE ON work_packet_receipt_index_claims BEGIN SELECT RAISE(ABORT,'immutable packet receipt index claim'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_receipt_index_claim_immutable_delete",
+        "CREATE TRIGGER work_packet_receipt_index_claim_immutable_delete BEFORE DELETE ON work_packet_receipt_index_claims BEGIN SELECT RAISE(ABORT,'immutable packet receipt index claim'); END",
+    ),
 ];
 
 /// Extract every receipt id cited by fact associations or source excerpts.
@@ -346,6 +390,10 @@ fn migrate_v1_to_v2(transaction: &Connection) -> PacketResult<()> {
         .optional()?
     {
         let body = load_body(transaction, &id)?;
+        transaction.execute(
+            "INSERT INTO work_packet_receipt_index_claims(packet_id) VALUES(?1)",
+            [&id],
+        )?;
         for receipt_id in receipt_ids(&body) {
             transaction.execute(
                 "INSERT OR IGNORE INTO work_packet_receipt_refs(packet_id,receipt_id) VALUES(?1,?2)",
@@ -472,6 +520,10 @@ impl PacketStore {
         check_combined_ancestors(&transaction, &detail.lineage.predecessor_ids, &id)?;
         validate_detail(&detail)?;
         if !exists {
+            transaction.execute(
+                "INSERT INTO work_packet_receipt_index_claims(packet_id) VALUES(?1)",
+                [&id],
+            )?;
             transaction.execute(
                 "INSERT INTO work_packet_bodies(packet_id,body) VALUES(?1,?2)",
                 params![id, canonical],
