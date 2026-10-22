@@ -34,7 +34,9 @@ export function buildRelay({ root = ROOT, platform = process.platform, env = pro
       return path.join(target, triple, 'release', 'cartograph-mcp');
     });
     run('lipo', ['-create', ...slices, '-output', temporary], options);
-    run('lipo', ['-verify_arch', 'arm64', 'x86_64', temporary], options);
+    for (const arch of ['arm64', 'x86_64']) {
+      run('lipo', [temporary, '-verify_arch', arch], options);
+    }
     renameSync(temporary, output);
     return output;
   } finally {

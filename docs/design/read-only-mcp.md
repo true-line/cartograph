@@ -272,11 +272,15 @@ Tauri build helper otherwise requests individual architecture suffixes. Packagin
 checks the bundled executable, both architectures and its signature before upload.
 A local locked release build of the ARM relay succeeded on 2026-10-22 UTC
 (Rust 1.96.1, app version 0.20.0; Mach-O arm64). The locked Tauri CLI 2.12.3
-was also installed. Installing the Intel standard library from the official Rust
-distribution failed with a TLS connection error; separate connection probes
-timed out. No Intel slice, universal bundle or notarized package is claimed.
-These build steps still need an actual universal package run; unit tests of build
-commands and the thin ARM build do not establish that result.
+was also installed. The Intel standard library download initially failed locally.
+The official archive was retrieved through the Mac Studio and verified against
+Rust 1.96.1's installed channel-manifest SHA-256 before rustup installed it from
+its cache. The actual package script now builds and combines both relay slices;
+native `lipo` verifies arm64 and x86_64 separately. A native regression test also
+compiles tiny Mach-O objects and exercises the actual combine/verify commands,
+rather than relying only on mocked argument checks. The universal app bundle,
+signing/notarization and installed-client lifecycle still need separate evidence;
+a universal relay alone does not establish those results.
 
 ### Separate-process smoke evidence
 

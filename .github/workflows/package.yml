@@ -311,7 +311,8 @@ jobs:
           test -d "$app"
           relay="$app/Contents/MacOS/cartograph-mcp"
           test -x "$relay"
-          lipo -verify_arch arm64 x86_64 "$relay"
+          lipo "$relay" -verify_arch arm64
+          lipo "$relay" -verify_arch x86_64
           codesign --verify --strict --verbose=2 "$relay"
           test -n "$dmg"
           test -f "$dmg"
