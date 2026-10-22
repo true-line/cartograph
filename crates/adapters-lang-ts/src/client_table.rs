@@ -176,7 +176,9 @@ fn scope_of(node: TsNode) -> TsNode {
 }
 
 /// `scope` and every node under it that is not inside a nested function.
-/// An arrow's expression body is itself the scope's only statement.
+/// An arrow's expression body is itself the scope's only statement. A
+/// nested function declaration is included, because its name binds here,
+/// but its body is another scope.
 fn scope_nodes(scope: TsNode) -> Vec<TsNode> {
     let mut out = Vec::new();
     let mut stack = vec![scope];
@@ -190,6 +192,9 @@ fn scope_nodes(scope: TsNode) -> Vec<TsNode> {
                     | "method_definition"
             )
         {
+            if node.kind() == "function_declaration" {
+                out.push(node);
+            }
             continue;
         }
         out.push(node);
@@ -400,31 +405,59 @@ fn method_option<'t>(cx: &FileCx, args: &[TsNode<'t>]) -> MethodOption<'t> {
     let Some(options) = through_binding(cx, *options).filter(|o| o.kind() == "object") else {
         return MethodOption::Unknown;
     };
-    // Later properties override earlier ones, spreads included.
+    // Later properties override earlier ones, spreads and keys the
+    // extractor cannot read included.
     let mut walk = options.walk();
     let mut proven = MethodOption::Absent;
     for property in options.named_children(&mut walk) {
-        match property.kind() {
-            "spread_element" => proven = MethodOption::Unknown,
-            "pair" | "shorthand_property_identifier" => {
-                let key = match property.kind() {
-                    "pair" => property.child_by_field_name("key"),
-                    _ => Some(property),
-                };
-                let value = match property.kind() {
-                    "pair" => property.child_by_field_name("value"),
-                    _ => Some(property),
-                };
-                if let (Some(key), Some(value)) = (key, value)
-                    && cx.text(&key).trim_matches(['"', '\'']) == "method"
-                {
-                    proven = MethodOption::Value(value);
-                }
-            }
-            _ => {}
+        let key = match property.kind() {
+            "shorthand_property_identifier" => Some(cx.text(&property).to_string()),
+            "pair" | "method_definition" => property
+                .child_by_field_name(if property.kind() == "pair" {
+                    "key"
+                } else {
+                    "name"
+                })
+                .and_then(|key| static_key(cx, key)),
+            "comment" => continue,
+            _ => None,
+        };
+        match (property.kind(), key.as_deref()) {
+            (_, Some(key)) if key != "method" => {}
+            ("shorthand_property_identifier", _) => proven = MethodOption::Value(property),
+            ("pair", Some(_)) => match property.child_by_field_name("value") {
+                Some(value) => proven = MethodOption::Value(value),
+                None => proven = MethodOption::Unknown,
+            },
+            // A spread, an accessor or method named `method`, or a computed
+            // key: any of them may set the method.
+            _ => proven = MethodOption::Unknown,
         }
     }
     proven
+}
+
+/// The name an object key spells exactly: `method`, `"method"`, or a
+/// computed `['method']`. `None` when the key is computed from anything else.
+fn static_key(cx: &FileCx, key: TsNode) -> Option<String> {
+    match key.kind() {
+        "property_identifier" | "private_property_identifier" | "number" => {
+            Some(cx.text(&key).to_string())
+        }
+        "string" => literal_text(cx, key),
+        "computed_property_name" => key
+            .named_child(0)
+            .filter(|inner| key.named_child_count() == 1 && inner.kind() == "string")
+            .and_then(|inner| literal_text(cx, inner)),
+        _ => None,
+    }
+}
+
+/// A string literal's characters without its quotes; `None` when an
+/// escape sequence makes the source spelling differ from the value.
+fn literal_text(cx: &FileCx, string: TsNode) -> Option<String> {
+    let text = cx.text(&string);
+    (!text.contains('\\')).then(|| text[1..text.len() - 1].to_string())
 }
 
 /// Names a wrapper binds to its route parameter's `field`: `route.path`,
@@ -546,9 +579,10 @@ fn path_binder(cx: &FileCx, at: TsNode, name: &str) -> bool {
                     .child_by_field_name("left")
                     .is_some_and(|left| cx.text(&left) == param) =>
             {
-                let substitutes = node
+                let call = node
                     .child_by_field_name("right")
-                    .filter(|right| right.kind() == "call_expression")
+                    .filter(|right| right.kind() == "call_expression");
+                let substitutes = call
                     .and_then(|call| call.child_by_field_name("function"))
                     .filter(|callee| callee.kind() == "member_expression")
                     .is_some_and(|callee| {
@@ -558,7 +592,10 @@ fn path_binder(cx: &FileCx, at: TsNode, name: &str) -> bool {
                             && callee
                                 .child_by_field_name("property")
                                 .is_some_and(|p| matches!(cx.text(&p), "replace" | "replaceAll"))
-                    });
+                    })
+                    && call
+                        .and_then(|call| call_args(call).first().copied())
+                        .is_some_and(|pattern| placeholder(cx, pattern));
                 if !substitutes {
                     return false;
                 }
@@ -567,6 +604,45 @@ fn path_binder(cx: &FileCx, at: TsNode, name: &str) -> bool {
         }
     }
     returns > 0
+}
+
+/// True when `pattern` can only match a route placeholder: `` `:${key}` ``,
+/// `` `{${key}}` ``, `':id'`, or `'{id}'`. Replacing anything else rewrites
+/// the route into some other URL.
+fn placeholder(cx: &FileCx, pattern: TsNode) -> bool {
+    let pattern = unwrap_assertions(pattern);
+    match pattern.kind() {
+        "string" => {
+            let Some(text) = literal_text(cx, pattern) else {
+                return false;
+            };
+            let name = text
+                .strip_prefix(':')
+                .or_else(|| text.strip_prefix('{').and_then(|t| t.strip_suffix('}')));
+            name.is_some_and(|name| {
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+        }
+        "template_string" => {
+            let mut walk = pattern.walk();
+            let parts: Vec<_> = pattern.named_children(&mut walk).collect();
+            let fragments: Vec<_> = parts
+                .iter()
+                .filter(|part| part.kind() == "string_fragment")
+                .map(|part| cx.text(part))
+                .collect();
+            let substitutions = parts
+                .iter()
+                .filter(|part| part.kind() == "template_substitution")
+                .count();
+            let text = cx.text(&pattern);
+            substitutions == 1
+                && parts.len() == fragments.len() + 1
+                && (fragments == [":"] && text.starts_with("`:${")
+                    || fragments == ["{", "}"] && text.starts_with("`{${"))
+        }
+        _ => false,
+    }
 }
 
 /// True when `node` is the route path itself, or a [`path_binder`] call

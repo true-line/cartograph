@@ -48,7 +48,12 @@ const callAPI = async function (route, params = {}) {
   fetchParam.body = "{}";
   return fetch(url, fetchParam);
 };
-function bindQueryParams(url, params) { return url; }
+function bindQueryParams(url, params) {
+  for (const key of Object.keys(params)) {
+    url = url.replace(`:${key}`, encodeURIComponent(params[key]));
+  }
+  return url;
+}
 export { callAPI, API_ROUTE };
 "#;
 
@@ -230,10 +235,12 @@ fn vue_components_call_wrappers_at_original_offsets() {
 }
 
 // AC-0315 (#757 review): a table or wrapper name that a parameter, a local,
-// a catch clause or an enclosing block rebinds is not the proven top-level
-// binding, and a wrapper that transforms the route path (other than a
-// proven placeholder binder) joins some other URL. None of these produce
-// a client call; a block that does not enclose the call shadows nothing.
+// a nested function declaration, a catch clause or an enclosing block
+// rebinds is not the proven top-level binding, and a wrapper that
+// transforms the route path (other than a binder that only substitutes
+// `:name` or `{name}` placeholders) joins some other URL. None of these
+// produce a client call; a block that does not enclose the call shadows
+// nothing.
 // (T-0315)
 #[test]
 fn shadowed_names_and_transformed_paths_produce_no_sites() {
@@ -248,6 +255,8 @@ fn shadowed_names_and_transformed_paths_produce_no_sites() {
                 "function local() { const API_ROUTE = other(); return callAPI(API_ROUTE.LOGIN); }\n",
                 "{ const API_ROUTE = other(); fetch('https://x' + API_ROUTE.LOGIN.path); }\n",
                 "try { go(); } catch (callAPI) { callAPI(API_ROUTE.LOGIN); }\n",
+                "function nested() { function callAPI() {} return callAPI(API_ROUTE.LOGIN); }\n",
+                "function table() { function API_ROUTE() {} return fetch('https://x' + API_ROUTE.LOGIN.path); }\n",
             ),
         ),
         (
@@ -270,6 +279,12 @@ fn shadowed_names_and_transformed_paths_produce_no_sites() {
                 "suffixed(API_ROUTE.LOGIN);\n",
                 "helped(API_ROUTE.LOGIN);\n",
                 "rewritten(API_ROUTE.LOGIN);\n",
+                "function swap(p) { p = p.replace('/api/auth/login', '/other'); return p; }\n",
+                "const swapped = (route) => fetch('https://x' + swap(route.path), { method: route.method });\n",
+                "function shape(p, k) { p = p.replace(`/${k}`, '/other'); return p; }\n",
+                "const shaped = (route) => fetch('https://x' + shape(route.path), { method: route.method });\n",
+                "swapped(API_ROUTE.LOGIN);\n",
+                "shaped(API_ROUTE.LOGIN);\n",
             ),
         ),
     ]);
@@ -279,7 +294,9 @@ fn shadowed_names_and_transformed_paths_produce_no_sites() {
 
 // AC-0315 (#757 review): only a proven absent `method` means GET. Options
 // the extractor cannot see, or a spread after the method, leave it
-// unknown; a method written after every spread still counts, and a wrapper
+// unknown, as does a computed key the extractor cannot spell or an accessor
+// named `method`; a static `['method']` key counts, and later properties
+// override earlier ones. A method written after every spread still counts, and a wrapper
 // whose route method a spread may override is not a wrapper. (T-0315)
 #[test]
 fn unknown_fetch_options_never_default_to_get() {
@@ -297,6 +314,13 @@ fn unknown_fetch_options_never_default_to_get() {
                 "const before = (route, o) => fetch(B + route.path, { method: route.method, ...o });\n",
                 "after(API_ROUTE.GET_USER_INFO);\n",
                 "before(API_ROUTE.GET_USER_INFO);\n",
+                "function e() { return fetch(B + API_ROUTE.LOGIN.path, { ['method']: 'patch' }); }\n",
+                "function f(k) { return fetch(B + API_ROUTE.LOGIN.path, { method: 'get', [k]: 'post' }); }\n",
+                "function g() { return fetch(B + API_ROUTE.LOGIN.path, { get method() { return 'post'; } }); }\n",
+                "function h(k) { return fetch(B + API_ROUTE.LOGIN.path, { [k]: 'post', 'method': 'delete', [`x`]: 1 }); }\n",
+                "function i() { return fetch(B + API_ROUTE.LOGIN.path, { method: 'put', toString() { return ''; } }); }\n",
+                "const computed = (route, k) => fetch(B + route.path, { method: route.method, [k]: 'x' });\n",
+                "computed(API_ROUTE.GET_USER_INFO);\n",
             ),
         ),
     ]);
@@ -313,6 +337,11 @@ fn unknown_fetch_options_never_default_to_get() {
             s("PUT", "/api/auth/login"),
             s("?", "/api/auth/login"),
             s("GET", "/api/user_info"),
+            s("PATCH", "/api/auth/login"),
+            s("?", "/api/auth/login"),
+            s("?", "/api/auth/login"),
+            s("?", "/api/auth/login"),
+            s("PUT", "/api/auth/login"),
         ]
     );
 }
