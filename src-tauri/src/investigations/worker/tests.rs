@@ -915,3 +915,6 @@ mod coverage_tests;
 mod completion_tests;
 
 pub(in crate::investigations) use completion_tests::with_public_start_fixture;
+
+#[path = "finding_review_integration_tests.rs"]
+mod finding_review_integration_tests;

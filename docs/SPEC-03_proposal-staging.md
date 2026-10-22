@@ -119,3 +119,28 @@ binds the actual retained receipt selections where available; only valid absent
 associations use the unverified working-tree path. Source coverage and a read-only
 current-basis assessment remain distinct from producing confidence and human
 review. Both versions remain awaiting reconciliation; H3 is not completed here.
+
+## Saved investigation finding follow-up review (#730)
+
+**Specified, pending implementation.** US-0042 / AC-0293–0296 extends the
+complete-identity, host-resolved ID-only and atomic review principles above to
+saved specialist findings. It does not reuse the candidate-edge AgentTask shape,
+ProposalDecision enum or proposal table. SPEC-10 defines its separate persistence,
+commands and UI contract. Existing staging v1/v2 records, request/result encodings,
+review semantics and curated-context eligibility remain unchanged.
+
+A finding review records only whether a human selects an exact historical finding
+for possible later work. **Accepted for follow-up** is neither graph/curation
+acceptance, evidence validation, execution permission nor acceptance under #598.
+The finding stays Agentic/InferredWeak; the original Gap and graph/context/export
+behavior remain unchanged. No fake edge proposal, provider restaging or implicit
+prompt injection may be used to manufacture this association. No team-session,
+packet dispatch, summon, roster or ACP execution capability is added.
+
+Identity binds the entire immutable result, its saved producing configuration and
+result-local finding ID. Human revision, decision and time remain outside identity.
+A current bounded row is changed only by expected-review-revision CAS; there is no
+audit stream or notes in this slice. Rejected findings remain readable with their
+citations. A later packet consumer must separately resolve this exact subject and
+revalidate evidence; this review cannot turn unavailable/invalid retained evidence
+into verified supplied evidence or authorize execution.

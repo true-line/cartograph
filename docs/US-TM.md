@@ -51,6 +51,8 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0039 | AC-0270 | semantic, app | P1 (#257) | — | ADR-0036 | T-0270 |
 | US-0040 | AC-0271..0278 | semantic, app, ui | P3 | — | ADR-0037, ADR-0038 | T-0271..0278 |
 
+| US-0042 | AC-0293..0296 | agents, app, ui | W8b / H4 dependency (#730) | — | — | T-0293..0296 |
+
 ## Coverage assertions
 - Every Must-priority US is anchored to an original milestone, post-M10 work, or a SPEC-01 delivery gate; a milestone label alone does not establish completion.
 - Every AC has at least one test ID reserved (T-XXXX), to be authored alongside the AC (test-trace mapping standard).

@@ -5519,6 +5519,8 @@ fn main() {
             investigations::commands::get_investigation,
             investigations::commands::investigation_events,
             investigations::commands::investigation_result,
+            investigations::finding_review_commands::get_investigation_finding_reviews,
+            investigations::finding_review_commands::review_investigation_finding,
             investigations::commands::investigation_consent,
             investigations::commands::approve_investigation_step,
             investigations::commands::decline_investigation_step,

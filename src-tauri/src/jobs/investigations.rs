@@ -50,8 +50,11 @@ mod source_validation;
 pub(crate) use source_validation::{CommittedSourceValidation, SourceValidationBasis};
 #[cfg(test)]
 pub(crate) use source_validation::{SourceValidationInitialData, captured_source_fixture};
+#[path = "investigations/finding_reviews.rs"]
+mod finding_reviews;
 #[path = "investigations/staged.rs"]
 mod staged;
+pub(crate) use finding_reviews::FindingReviewError;
 #[path = "investigations/storage.rs"]
 mod storage;
 #[cfg(test)]

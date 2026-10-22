@@ -30,9 +30,18 @@ fn legacy_schema() -> Vec<(String, String, String)> {
     objects
 }
 
-fn schema() -> Vec<(String, String, String)> {
+fn version_one_schema() -> Vec<(String, String, String)> {
     let mut objects = legacy_schema();
     objects.extend(super::coverage::schema());
+    objects
+}
+
+const META_V2: &str = "CREATE TABLE investigation_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=2), namespace TEXT NOT NULL) STRICT";
+
+fn schema() -> Vec<(String, String, String)> {
+    let mut objects = version_one_schema();
+    objects[0].2 = META_V2.into();
+    objects.extend(super::finding_reviews::schema());
     objects
 }
 
@@ -42,6 +51,14 @@ const OWNED: &str =
 pub(super) fn initialize(
     connection: &mut Connection,
     namespace: &ExecutionNamespace,
+) -> Result<(), InvestigationStoreError> {
+    initialize_with_hook(connection, namespace, |_| Ok(()))
+}
+
+fn initialize_with_hook(
+    connection: &mut Connection,
+    namespace: &ExecutionNamespace,
+    mut hook: impl FnMut(u8) -> Result<(), InvestigationStoreError>,
 ) -> Result<(), InvestigationStoreError> {
     connection.pragma_update(None, "synchronous", "FULL")?;
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -73,7 +90,31 @@ pub(super) fn initialize(
         }
         one(tx.execute("INSERT INTO investigation_coverage_meta VALUES (1,1)", [])?)?;
     }
+    let version: i64 = tx.query_row(
+        "SELECT version FROM investigation_meta WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    if version == 1 {
+        execution::validate(&tx, namespace)?;
+        validate_version_schema(&tx, 1)?;
+        validate_metadata(&tx, namespace, 1)?;
+        tx.execute_batch("DROP TABLE investigation_meta")?;
+        tx.execute_batch(META_V2)?;
+        one(tx.execute(
+            "INSERT INTO investigation_meta VALUES (1,2,?1)",
+            [&namespace.value],
+        )?)?;
+        hook(1)?;
+        for (_, _, sql) in super::finding_reviews::schema() {
+            tx.execute_batch(&sql)?;
+        }
+        hook(2)?;
+    } else if version != 2 {
+        return Err(InvestigationStoreError::Invalid);
+    }
     validate(&tx, namespace)?;
+    hook(3)?;
     tx.commit()?;
     Ok(())
 }
@@ -84,7 +125,7 @@ pub(super) fn validate(
 ) -> Result<(), InvestigationStoreError> {
     execution::validate(connection, namespace)?;
     validate_archive_schema(connection)?;
-    validate_legacy_metadata(connection, namespace)
+    validate_metadata(connection, namespace, 2)
 }
 
 /// Validate the complete extended SQL layout before archive helpers use it.
@@ -92,7 +133,18 @@ pub(super) fn validate(
 pub(super) fn validate_archive_schema(
     connection: &Connection,
 ) -> Result<(), InvestigationStoreError> {
-    let mut expected = schema();
+    validate_version_schema(connection, 2)
+}
+
+fn validate_version_schema(
+    connection: &Connection,
+    version: i64,
+) -> Result<(), InvestigationStoreError> {
+    let mut expected = if version == 1 {
+        version_one_schema()
+    } else {
+        schema()
+    };
     // Read reservations are optional: old stores do not acquire empty tables or
     // new charges on open. Only a complete, exact versioned additive namespace
     // is recognized; partial/foreign schemas fail before any body is read.
@@ -139,9 +191,17 @@ fn validate_legacy_metadata(
     connection: &Connection,
     namespace: &ExecutionNamespace,
 ) -> Result<(), InvestigationStoreError> {
+    validate_metadata(connection, namespace, 1)
+}
+
+fn validate_metadata(
+    connection: &Connection,
+    namespace: &ExecutionNamespace,
+    version: i64,
+) -> Result<(), InvestigationStoreError> {
     let rows: i64 =
         connection.query_row("SELECT count(*) FROM investigation_meta", [], |r| r.get(0))?;
-    let valid: bool = connection.query_row("SELECT coalesce(min(singleton=1 AND version=1 AND typeof(namespace)='text' AND length(CAST(namespace AS BLOB))=32 AND namespace=?1),0) FROM investigation_meta", [&namespace.value], |r| r.get(0))?;
+    let valid: bool = connection.query_row("SELECT coalesce(min(singleton=1 AND typeof(version)='integer' AND version=?2 AND typeof(namespace)='text' AND length(CAST(namespace AS BLOB))=32 AND namespace=?1),0) FROM investigation_meta", params![&namespace.value, version], |r| r.get(0))?;
     if rows != 1 || !valid {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -1027,6 +1087,7 @@ pub(super) fn stored_bytes_with_reads(
     let journal_bytes = super::staged::journal_bytes(connection, id)?;
     let completion_bytes = super::completion::stored_bytes(connection, id)?;
     let admission_bytes = super::admission_journal::stored_bytes(connection, id)?;
+    let review_bytes = super::finding_reviews::stored_bytes(connection, id)?;
     let read_charge = reads.capacity_charge(id)?.occupied()?;
     let refs: i64 = connection.query_row(
         "SELECT coalesce(sum(length(CAST(task_id AS BLOB))+length(CAST(source_id AS BLOB))+length(CAST(repo_key AS BLOB))+length(CAST(receipt_id AS BLOB))+128),0) FROM investigation_refs WHERE (?1 IS NULL OR task_id=?1)",
@@ -1037,6 +1098,7 @@ pub(super) fn stored_bytes_with_reads(
         .and_then(|bytes| bytes.checked_add(journal_bytes))
         .and_then(|bytes| bytes.checked_add(completion_bytes))
         .and_then(|bytes| bytes.checked_add(admission_bytes))
+        .and_then(|bytes| bytes.checked_add(review_bytes))
         .and_then(|bytes| bytes.checked_add(read_charge))
         .ok_or(InvestigationStoreError::Capacity)
 }
@@ -1306,3 +1368,32 @@ pub(super) fn insert_body(
         params![id, key, body, core_prov::content_hash(&body)],
     )?)
 }
+
+/// Construct an actual old layout for migration fixtures, never for runtime.
+#[cfg(test)]
+pub(super) fn version_one_fixture(connection: &Connection) {
+    for (name, kind, _) in super::finding_reviews::schema().into_iter().rev() {
+        connection
+            .execute_batch(&format!("DROP {} {name}", kind.to_uppercase()))
+            .unwrap();
+    }
+    let namespace: String = connection
+        .query_row("SELECT namespace FROM investigation_meta", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    connection
+        .execute_batch("DROP TABLE investigation_meta")
+        .unwrap();
+    connection.execute_batch(&legacy_schema()[0].2).unwrap();
+    connection
+        .execute(
+            "INSERT INTO investigation_meta VALUES (1,1,?1)",
+            [&namespace],
+        )
+        .unwrap();
+}
+
+#[cfg(test)]
+#[path = "finding_review_migration_tests.rs"]
+mod finding_review_migration_tests;

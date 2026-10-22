@@ -1238,3 +1238,122 @@ leak, unexpected route/redirect, ambiguity, mismatch, overwrite, hidden executio
 or forged host/runtime authority. This is not synthetic/Vendure/native acceptance;
 `delivery_pass` remains false and #598 stays open. Offline negatives are tested
 without HTTP, Cargo, model calls or provisioning.
+
+## MT-W8B-01 — Exact saved finding identity and reopen (AC-0293, T-0293)
+
+**Procedure: UNEXECUTED; #730 implementation available for verification.** This is a planned host
+integration verification, not authorization for a real-provider acceptance run.
+
+1. Using the production coordinator/worker with a scripted bounded provider and
+   real temporary file-backed stores, produce two cited findings. Record exact
+   result bytes/hash, original ledger and historical citation targets. Read review
+   metadata: both are pending at revision 0 and this read writes no review row.
+2. Use one finding for follow-up. Close/reopen the store/app, remove finished Job
+   rows through supported cleanup and reopen the task. Only the chosen finding
+   retains revision 1/decision/time; original result bytes/citations match exactly.
+3. In a second genuine run also containing finding-1, mix task/result/finding/
+   subject fields. Each mismatch fails without writes. Exercise changed valid
+   saved requested model/endpoint/protocol/scope/definition and reported-response
+   label (including absent); subject changes follow saved identity, not equal prose.
+4. Change current runtime/catalog availability after completion: the original
+   subject and historical decision remain readable. Corrupt saved result/ledger/
+   invocation/citation bindings in isolated negative fixtures: normal reads fail
+   closed, and no old subject applies to changed content. Verify the independent
+   literal subject serialization fixture as part of implementation tests.
+
+**Pass:** exact historical association survives restart/cleanup without identity
+substitution or body changes. **Fail:** result-local IDs, today's configuration or
+corrupt evidence can select/redefine another historical decision. Record fixtures,
+commands and actual outcomes on #730 before marking executed.
+
+## MT-W8B-02 — Versioned migration, bounded admission and CAS (AC-0294, T-0294)
+
+**Procedure: UNEXECUTED; #730 implementation available for verification.** Use isolated store copies
+and production migration/review helpers; never corrupt user data for this check.
+
+1. Open original pre-coverage and complete version-1 stores, including supported
+   existing optional extensions. Compare every historical body/hash/namespace;
+   only exact version-2 metadata/review schema appears, with zero review rows.
+   Check fresh creation and idempotent version-2 reopen. Unknown versions, extra/
+   partial/substituted review objects and malformed/orphan rows fail closed.
+2. Through test-only fault points in the production helper, fail after metadata
+   rebuild, after review DDL and before commit. A separate reopened connection
+   observes the complete original version-1 layout/bytes; no partial upgrade.
+3. Synchronize two independent connections before opposite revision-0 decisions.
+   Exactly one commits revision 1; loser receives the durable winner. Verify SQL
+   through a third reopened connection. Repeated stale request cannot increment;
+   a fresh deliberate revision-1 decision reaches revision 2.
+4. Force failure after review insert/before commit and exhaust actual task/global
+   capacity: no decision/counter/body changes. Exercise checked UTF-8 and row/index
+   accounting, oversized/deep/duplicate-key/trailing/unknown-field JSON, invalid
+   SQL scalar types, malformed identifiers and signed integer overflow.
+
+**Pass:** atomic exact migration and bounded current-state CAS, with all failures
+closed and unchanged. **Fail:** repair/partial migration, lost update, stale retry
+success, capacity bypass or changed immutable data. Replace/supplement the manual
+mapping with actual fault/race/admission tests when those exist.
+
+## MT-W8B-03 — Honest follow-up UI and result compatibility (AC-0295, T-0295)
+
+**Procedure: UNEXECUTED; #730 implementation available for verification.** Use mock/deferred IPC for
+race injection, then separately record any native app observation; a story alone
+is not native acceptance.
+
+1. Open a cited result in Investigations. Inspect a historical citation; choose
+   each follow-up decision deliberately. Verify qualified controls/status, unchanged
+   T3/InferredWeak badge, explanation, revision/time and pending-action disabling.
+   Reopen through history; no-findings result has zero review controls.
+2. Delay responses across task navigation, same-task reopen, pending metadata read
+   and a newer decision. No stale response replaces selection/result/review. Race
+   two decisions: show winner on conflict and require a deliberate retry.
+3. Commit a decision but drop its acknowledgment. UI does not claim success or
+   resubmit automatically; explicit refresh retrieves the committed revision.
+4. Fail review metadata reads while the unchanged legacy result API and historical
+   citation inspection succeed. Keep readable result and last-known decision with
+   unavailable/stale status, never invented pending. Exercise valid near-existing-
+   MAX_RESULT_BYTES result before/after review: bytes remain identical. New getter/
+   mutation return metadata only under existing response bounds at the admitted
+   maximum finding count; introduce no smaller result limit or result wrapper.
+
+**Pass:** honest bounded UI/API behavior independent of review availability.
+**Fail:** optimistic/lost-response success, stale overwrite, erased valid result,
+unqualified acceptance copy or changed legacy encodings. Record actual story/store
+and native evidence separately; update automated mappings only for real tests.
+
+## MT-W8B-04 — Review side effects and historical availability (AC-0296, T-0296)
+
+**Procedure: UNEXECUTED; #730 implementation available for verification.** Scripted host verification
+needs no real provider, installed runtime or current-checkout acquisition.
+
+1. Establish confirmed graph facts, a real Gap, recovered context/export and a cited
+   saved result. Snapshot graph/export/result/ledger/refs/job/task lifecycle revision
+   and model/tool counters. Instrument provider and current-source acquisition entry
+   points. Read reviews and record both decision directions.
+2. Compare all snapshots byte-for-byte: only review association changes; zero
+   provider/source-acquisition calls. No worker event/status change, graph proposal,
+   prompt injection or execution path appears. Rejection keeps original citations.
+3. With structurally valid saved bindings, make retained source unavailable/
+   forgotten/corrupt using isolated supported fixtures. The historical decision
+   remains; the existing inspector distinguishes availability/invalid/operational
+   observations without reading current checkout. Corrupt saved result/ledger/
+   citation binding itself disables review rather than repairing it.
+4. Verify UI/spec wording does not present accepted follow-up as verified evidence,
+   curated activation, execution authorization or #598 acceptance. Any later packet
+   consumer remains responsible for fresh independent evidence validation.
+
+**Automated evidence:** `finding_review_scripted_worker_preserves_graph_export_and_source_boundaries`
+executes the production worker against a scripted provider and real temporary
+stores. It establishes confirmed facts, a Gap and a retained citation; compares
+actual graph and export bytes plus non-review storage across both decisions; and
+observes provider, retained-source and registered-checkout access at their real
+entry points. An explicit historical inspection after checkout replacement still
+returns the original capture. This covers steps 1–2 and the no-current-checkout
+boundary. `finding_review_survives_confirmed_forget_and_retained_object_failures`
+covers step 3 with production preview/confirmation/forget and isolated missing or
+corrupt retained objects. Saved decisions/bindings survive reopen and subsequent
+CAS changes while inspection reports unavailable/invalid without checkout fallback.
+These host tests do not establish native UI observation.
+
+**Pass:** metadata-only human association and independent historical availability.
+**Fail:** changed source/graph/export/counters, provider invocation, fallback or
+promoted authority. This procedure does not pass W8b/H3/H4/H5 or real-provider gates.
