@@ -52,7 +52,7 @@ impl ReceiptOmission {
             ),
             Self::StoreCapacity => format!(
                 "{occurrences} receipts in {files} files did not fit the retained \
-                 receipt store; forget retained sources to free space, then recover again"
+                 receipt store, which cannot yet reclaim space"
             ),
         };
         format!(

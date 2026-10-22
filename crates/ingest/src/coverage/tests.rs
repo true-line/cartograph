@@ -311,9 +311,8 @@ fn receipt_omissions_are_a_named_limitation() {
             .reason
             .starts_with("5 TypeScript rule facts in 2 files")
     );
-    assert!(
-        both.unsupported[1]
-            .reason
-            .contains("forget retained sources")
-    );
+    // Forgetting sources frees no receipt rows yet (#725), so the reason
+    // offers no remediation that cannot work.
+    let store = &both.unsupported[1].reason;
+    assert!(store.contains("cannot yet reclaim space") && !store.contains("forget"));
 }
