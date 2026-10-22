@@ -14,6 +14,8 @@ use std::path::{Component, Path, PathBuf};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 
+mod sqlalchemy;
+
 const EXTRACTOR_ID: &str = "t0.adapter-python";
 
 /// Python extraction errors.
@@ -49,6 +51,7 @@ pub struct Extraction {
     receiver_defs: Vec<ReceiverDef>,
     pending_routes: Vec<PendingRoute>,
     mounts: Vec<Mount>,
+    orm_files: Vec<sqlalchemy::OrmFile>,
 }
 
 /// A module-level framework receiver: an application instance, or a Flask
@@ -251,6 +254,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
             retarget_props_commit(&mut edge.props, commit);
         }
     }
+    sqlalchemy::retarget(extraction, commit);
 }
 
 fn normalize_path(path: PathBuf) -> Option<String> {
@@ -1233,6 +1237,12 @@ pub fn extract_source(
     path: &str,
     id: &SourceId<'_>,
 ) -> Result<Extraction, ExtractError> {
+    let mut out = extract_file(source, path, id)?;
+    sqlalchemy::resolve(&mut out, id.repo);
+    Ok(out)
+}
+
+fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extraction, ExtractError> {
     let language: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&language)?;
@@ -1255,6 +1265,7 @@ pub fn extract_source(
     let bindings = parse_imports(&cx, root, &language, &mut out);
     let receivers = assignment_receivers(&cx, root, &language, &bindings, &mut out);
     collect_mounts(&cx, root, &language, &bindings, &mut out);
+    sqlalchemy::extract(&cx, root, &language, &bindings, &mut out);
     let function_query = Query::new(
         &language,
         "(function_definition name: (identifier) @name) @function",
@@ -1551,7 +1562,7 @@ pub fn extract_dir_incremental_with_progress(
             let fresh = if reusable {
                 None
             } else {
-                Some(extract_source(&source, path, id)?)
+                Some(extract_file(&source, path, id)?)
             };
             Ok::<_, ExtractError>((source_hash, fresh))
         },
@@ -1582,6 +1593,7 @@ pub fn extract_dir_incremental_with_progress(
             out.receiver_defs.extend(extraction.receiver_defs);
             out.pending_routes.extend(extraction.pending_routes);
             out.mounts.extend(extraction.mounts);
+            out.orm_files.extend(extraction.orm_files);
             Ok(())
         },
     );
@@ -1601,6 +1613,7 @@ pub fn extract_dir_incremental_with_progress(
         }
     }
     resolve_routes(&mut out, id.repo);
+    sqlalchemy::resolve(&mut out, id.repo);
     let local_names = local_module_names(root)?;
     let Extraction { nodes, edges, .. } = &mut out;
     core_graph::placeholder::close_over_endpoints(
