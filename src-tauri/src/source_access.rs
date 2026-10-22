@@ -17,6 +17,11 @@ pub(crate) fn with_registered_read<T>(
     repo: &str,
     read: impl FnOnce(&Path) -> Result<T, String>,
 ) -> Result<T, String> {
+    #[cfg(test)]
+    registry
+        .lock()
+        .map_err(|e| e.to_string())?
+        .observe_checkout_access();
     let source = registry
         .lock()
         .map_err(|e| e.to_string())?
@@ -74,6 +79,11 @@ impl SourceOperation {
         registry: &Mutex<SourceRegistry>,
         requested: impl IntoIterator<Item = (RegisteredSource, bool)>,
     ) -> Result<Self, String> {
+        #[cfg(test)]
+        registry
+            .lock()
+            .map_err(|e| e.to_string())?
+            .observe_checkout_access();
         let mut plan: BTreeMap<String, (RegisteredSource, bool)> = BTreeMap::new();
         for (source, write) in requested {
             if write && !source.is_managed() {

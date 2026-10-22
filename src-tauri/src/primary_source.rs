@@ -519,6 +519,8 @@ pub(crate) struct PrimarySourceStore {
     captures: Mutex<CaptureStore>,
     receipts: Mutex<ReceiptStore>,
     storage: PrivateStorage,
+    #[cfg(test)]
+    evidence_accesses: std::sync::atomic::AtomicUsize,
 }
 
 impl PrimarySourceStore {
@@ -532,10 +534,23 @@ impl PrimarySourceStore {
             captures: Mutex::new(captures),
             receipts: Mutex::new(receipts),
             storage,
+            #[cfg(test)]
+            evidence_accesses: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
+    /// Test observation of retained-source lease attempts, including historical
+    /// inspection. It does not count current-checkout reads or successful bytes.
+    #[cfg(test)]
+    pub(crate) fn evidence_access_attempts(&self) -> usize {
+        self.evidence_accesses
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn guard(&self, source: &str, exclusive: bool) -> Result<RetentionGuard, String> {
+        #[cfg(test)]
+        self.evidence_accesses
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         source_id(source)?;
         self.storage.verify()?;
         let file = private_file(&self.storage.locks, format!("{source}.lock").as_ref(), true)?;

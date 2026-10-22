@@ -1241,7 +1241,7 @@ without HTTP, Cargo, model calls or provisioning.
 
 ## MT-W8B-01 — Exact saved finding identity and reopen (AC-0293, T-0293)
 
-**Procedure: UNEXECUTED; #730 implementation pending.** This is a planned host
+**Procedure: UNEXECUTED; #730 implementation available for verification.** This is a planned host
 integration verification, not authorization for a real-provider acceptance run.
 
 1. Using the production coordinator/worker with a scripted bounded provider and
@@ -1268,7 +1268,7 @@ commands and actual outcomes on #730 before marking executed.
 
 ## MT-W8B-02 — Versioned migration, bounded admission and CAS (AC-0294, T-0294)
 
-**Procedure: UNEXECUTED; #730 implementation pending.** Use isolated store copies
+**Procedure: UNEXECUTED; #730 implementation available for verification.** Use isolated store copies
 and production migration/review helpers; never corrupt user data for this check.
 
 1. Open original pre-coverage and complete version-1 stores, including supported
@@ -1295,7 +1295,7 @@ mapping with actual fault/race/admission tests when those exist.
 
 ## MT-W8B-03 — Honest follow-up UI and result compatibility (AC-0295, T-0295)
 
-**Procedure: UNEXECUTED; #730 implementation pending.** Use mock/deferred IPC for
+**Procedure: UNEXECUTED; #730 implementation available for verification.** Use mock/deferred IPC for
 race injection, then separately record any native app observation; a story alone
 is not native acceptance.
 
@@ -1322,7 +1322,7 @@ and native evidence separately; update automated mappings only for real tests.
 
 ## MT-W8B-04 — Review side effects and historical availability (AC-0296, T-0296)
 
-**Procedure: UNEXECUTED; #730 implementation pending.** Scripted host verification
+**Procedure: UNEXECUTED; #730 implementation available for verification.** Scripted host verification
 needs no real provider, installed runtime or current-checkout acquisition.
 
 1. Establish confirmed graph facts, a real Gap, recovered context/export and a cited
@@ -1340,6 +1340,19 @@ needs no real provider, installed runtime or current-checkout acquisition.
 4. Verify UI/spec wording does not present accepted follow-up as verified evidence,
    curated activation, execution authorization or #598 acceptance. Any later packet
    consumer remains responsible for fresh independent evidence validation.
+
+**Automated evidence:** `finding_review_scripted_worker_preserves_graph_export_and_source_boundaries`
+executes the production worker against a scripted provider and real temporary
+stores. It establishes confirmed facts, a Gap and a retained citation; compares
+actual graph and export bytes plus non-review storage across both decisions; and
+observes provider, retained-source and registered-checkout access at their real
+entry points. An explicit historical inspection after checkout replacement still
+returns the original capture. This covers steps 1–2 and the no-current-checkout
+boundary. `finding_review_survives_confirmed_forget_and_retained_object_failures`
+covers step 3 with production preview/confirmation/forget and isolated missing or
+corrupt retained objects. Saved decisions/bindings survive reopen and subsequent
+CAS changes while inspection reports unavailable/invalid without checkout fallback.
+These host tests do not establish native UI observation.
 
 **Pass:** metadata-only human association and independent historical availability.
 **Fail:** changed source/graph/export/counters, provider invocation, fallback or

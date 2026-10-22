@@ -90,12 +90,26 @@ pub fn source_id_from_ingest_job_kind(kind: &str) -> Result<&str, String> {
 }
 
 pub struct SourceRegistry {
+    #[cfg(test)]
+    checkout_accesses: std::sync::atomic::AtomicUsize,
     conn: Connection,
     registry_id: String,
     app_data_dir: PathBuf,
 }
 
 impl SourceRegistry {
+    #[cfg(test)]
+    pub(crate) fn observe_checkout_access(&self) {
+        self.checkout_accesses
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkout_access_attempts(&self) -> usize {
+        self.checkout_accesses
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub fn open(
         state_path: impl AsRef<Path>,
         app_data_dir: impl AsRef<Path>,
@@ -138,6 +152,8 @@ impl SourceRegistry {
         read_sources(&tx, &app_data_dir, &registry_id, None)?;
         tx.commit().map_err(storage_error)?;
         Ok(Self {
+            #[cfg(test)]
+            checkout_accesses: std::sync::atomic::AtomicUsize::new(0),
             conn,
             registry_id,
             app_data_dir,
