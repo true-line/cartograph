@@ -206,7 +206,9 @@ fn prefixed(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(hash)
 }
 fn receipt(value: &str) -> bool {
-    prefixed(value, "ts-primary-v1:") || prefixed(value, "ts-primary-v2:")
+    prefixed(value, "ts-primary-v1:")
+        || prefixed(value, "ts-primary-v2:")
+        || prefixed(value, "ts-primary-v3:")
 }
 impl TaskFactKey {
     fn valid(&self) -> bool {

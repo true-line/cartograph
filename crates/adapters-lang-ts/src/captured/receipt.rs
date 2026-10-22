@@ -14,7 +14,7 @@ pub const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 pub const MAX_RECEIPT_RANGES: usize = 1024;
 const MAX_ID_BYTES: usize = 4096;
 const MAX_REPO_BYTES: usize = 256;
-const RECEIPT_SCHEMA_VERSION: u32 = 2;
+const RECEIPT_SCHEMA_VERSION: u32 = 3;
 
 struct Contract {
     prefix: &'static str,
@@ -50,6 +50,23 @@ fn contract(version: u32) -> Result<Contract, CapturedError> {
             // this pin under the same v2 contract; they must keep validating.
             parser_package_legacy: &["tree-sitter@0.26.12"],
         }),
+        3 => Ok(Contract {
+            prefix: "ts-primary-v3:",
+            producer: "t0.adapter-ts/direct-lexical-v3",
+            domain: b"cartograph:ts-primary-receipt:v3\0",
+            grammar_package: GRAMMAR_PACKAGE,
+            parser_package: PARSER_PACKAGE,
+            parser_package_legacy: &[],
+        }),
+        _ => Err(CapturedError::Invalid("receipt contract version")),
+    }
+}
+
+/// Map a receipt contract version to the rule-evidence schema version it binds.
+fn rule_schema_version(version: u32) -> Result<u32, CapturedError> {
+    match version {
+        1 => Ok(1),
+        2 | 3 => Ok(2),
         _ => Err(CapturedError::Invalid("receipt contract version")),
     }
 }
@@ -164,13 +181,28 @@ enum InputClosure {
     InputClosureNotEstablished,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Compact v3 wire range.
+///
+/// There is no explicit/full range form in v3: `validate()` already requires
+/// every range to be same-file, same-repo, and same-commit with equal evidence
+/// and capture offsets, so every valid range is derivable. An explicit form
+/// could therefore never be canonical.
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CompactRange {
+    role: RangeRole,
+    index: u32,
+    byte_start: u64,
+    byte_end: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Content {
     schema_version: u32,
     source_id: source_capture::SourceId,
     repo_key: String,
     file: CaptureFileRef,
+    commit_sha: Option<String>,
     producer_contract: String,
     grammar: Grammar,
     grammar_package: String,
@@ -180,6 +212,207 @@ struct Content {
     ranges: Vec<ReceiptRange>,
     source_scope: SourceScope,
     input_closure: InputClosure,
+}
+
+#[derive(Serialize)]
+struct WireContentFull<'a> {
+    schema_version: u32,
+    source_id: &'a source_capture::SourceId,
+    repo_key: &'a str,
+    file: &'a CaptureFileRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_sha: Option<&'a str>,
+    producer_contract: &'a str,
+    grammar: Grammar,
+    grammar_package: &'a str,
+    parser_package: &'a str,
+    fact_key: &'a FactKey,
+    fact_digest: &'a str,
+    ranges: &'a [ReceiptRange],
+    source_scope: SourceScope,
+    input_closure: InputClosure,
+}
+
+#[derive(Serialize)]
+struct WireContentCompact<'a> {
+    schema_version: u32,
+    source_id: &'a source_capture::SourceId,
+    repo_key: &'a str,
+    file: &'a CaptureFileRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_sha: Option<&'a str>,
+    producer_contract: &'a str,
+    grammar: Grammar,
+    grammar_package: &'a str,
+    parser_package: &'a str,
+    fact_key: &'a FactKey,
+    fact_digest: &'a str,
+    ranges: Vec<CompactRange>,
+    source_scope: SourceScope,
+    input_closure: InputClosure,
+}
+
+/// One decoded wire range: the v1/v2 full form or the v3 compact form. Each
+/// variant denies unknown fields, so an object matches at most one of them.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WireRange {
+    Full(ReceiptRange),
+    Compact(CompactRange),
+}
+
+/// Strict wire decoder for every contract version. Derived struct decoding
+/// keeps serde's duplicate-field and unknown-field rejection, so no receipt
+/// gains an alternate wire representation.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireContent {
+    schema_version: u32,
+    source_id: source_capture::SourceId,
+    repo_key: String,
+    file: CaptureFileRef,
+    #[serde(default, deserialize_with = "present_string")]
+    commit_sha: Option<String>,
+    producer_contract: String,
+    grammar: Grammar,
+    grammar_package: String,
+    parser_package: String,
+    fact_key: FactKey,
+    fact_digest: String,
+    ranges: Vec<WireRange>,
+    source_scope: SourceScope,
+    input_closure: InputClosure,
+}
+
+/// An optional field that, when present, must be a string: an explicit `null`
+/// would otherwise be a second encoding of an absent `commit_sha`.
+fn present_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
+#[derive(Serialize)]
+struct ExpandedReceipt<'a> {
+    receipt_id: &'a str,
+    content: WireContentFull<'a>,
+}
+
+impl Content {
+    fn as_full_wire<'a>(&'a self, commit_sha: Option<&'a str>) -> WireContentFull<'a> {
+        WireContentFull {
+            schema_version: self.schema_version,
+            source_id: &self.source_id,
+            repo_key: &self.repo_key,
+            file: &self.file,
+            commit_sha,
+            producer_contract: &self.producer_contract,
+            grammar: self.grammar,
+            grammar_package: &self.grammar_package,
+            parser_package: &self.parser_package,
+            fact_key: &self.fact_key,
+            fact_digest: &self.fact_digest,
+            ranges: &self.ranges,
+            source_scope: self.source_scope,
+            input_closure: self.input_closure,
+        }
+    }
+}
+
+impl Serialize for Content {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.schema_version == 3 {
+            let ranges = self
+                .ranges
+                .iter()
+                .map(|range| CompactRange {
+                    role: range.role,
+                    index: range.index,
+                    byte_start: range.evidence.byte_start,
+                    byte_end: range.evidence.byte_end,
+                })
+                .collect();
+            WireContentCompact {
+                schema_version: self.schema_version,
+                source_id: &self.source_id,
+                repo_key: &self.repo_key,
+                file: &self.file,
+                commit_sha: self.commit_sha.as_deref(),
+                producer_contract: &self.producer_contract,
+                grammar: self.grammar,
+                grammar_package: &self.grammar_package,
+                parser_package: &self.parser_package,
+                fact_key: &self.fact_key,
+                fact_digest: &self.fact_digest,
+                ranges,
+                source_scope: self.source_scope,
+                input_closure: self.input_closure,
+            }
+            .serialize(serializer)
+        } else {
+            self.as_full_wire(self.commit_sha.as_deref())
+                .serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Content {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = WireContent::deserialize(deserializer)?;
+        if wire.ranges.len() > MAX_RECEIPT_RANGES {
+            return Err(serde::de::Error::custom("receipt ranges exceed limit"));
+        }
+        let ranges = match (wire.schema_version, &wire.commit_sha) {
+            (1 | 2, None) => wire
+                .ranges
+                .into_iter()
+                .map(|range| match range {
+                    WireRange::Full(range) => Ok(range),
+                    WireRange::Compact(_) => Err(()),
+                })
+                .collect::<Result<Vec<_>, ()>>(),
+            (3, Some(commit_sha)) => wire
+                .ranges
+                .into_iter()
+                .map(|range| match range {
+                    // Expansion is bounded by the range-count check above.
+                    WireRange::Compact(range) => Ok(ReceiptRange {
+                        role: range.role,
+                        index: range.index,
+                        evidence: EvidenceRef {
+                            repo: wire.repo_key.clone(),
+                            path: wire.file.path.clone(),
+                            byte_start: range.byte_start,
+                            byte_end: range.byte_end,
+                            commit_sha: commit_sha.clone(),
+                        },
+                        captured: CaptureSpanRef {
+                            file: wire.file.clone(),
+                            byte_start: range.byte_start,
+                            byte_end: range.byte_end,
+                        },
+                    }),
+                    WireRange::Full(_) => Err(()),
+                })
+                .collect::<Result<Vec<_>, ()>>(),
+            _ => Err(()),
+        }
+        .map_err(|()| serde::de::Error::custom("receipt range form does not match its version"))?;
+        Ok(Self {
+            schema_version: wire.schema_version,
+            source_id: wire.source_id,
+            repo_key: wire.repo_key,
+            file: wire.file,
+            commit_sha: wire.commit_sha,
+            producer_contract: wire.producer_contract,
+            grammar: wire.grammar,
+            grammar_package: wire.grammar_package,
+            parser_package: wire.parser_package,
+            fact_key: wire.fact_key,
+            fact_digest: wire.fact_digest,
+            ranges,
+            source_scope: wire.source_scope,
+            input_closure: wire.input_closure,
+        })
+    }
 }
 
 /// Immutable metadata-only producer receipt, separate from graph properties.
@@ -322,7 +555,7 @@ fn inventory(
     if let Some(value) = props.get("rule") {
         let rule = GuardedExitEvidence::from_value(value.clone())
             .map_err(|_| CapturedError::Invalid("rule source inventory"))?;
-        if rule.schema_version != version {
+        if rule.schema_version != rule_schema_version(version)? {
             return Err(CapturedError::Invalid("rule and receipt version"));
         }
         push(RangeRole::RuleExit, 0, &rule.exit_source)?;
@@ -439,7 +672,7 @@ fn valid_inventory_shape(ranges: &[ReceiptRange], version: u32) -> bool {
             take(RangeRole::DependencyDeclaration, index);
             index += 1;
         }
-        if version == 2 {
+        if matches!(version, 2 | 3) {
             let mut definition = 0;
             let mut usage = 0;
             let mut expression = 0;
@@ -505,6 +738,7 @@ impl Receipt {
             source_id: file.reference().source_id.clone(),
             repo_key: id.repo.into(),
             file: file.reference().clone(),
+            commit_sha: (RECEIPT_SCHEMA_VERSION == 3).then(|| id.commit.into()),
             producer_contract: contract(RECEIPT_SCHEMA_VERSION)?.producer.into(),
             grammar: Grammar::for_path(&file.reference().path),
             grammar_package: contract(RECEIPT_SCHEMA_VERSION)?.grammar_package.into(),
@@ -609,6 +843,11 @@ impl Receipt {
         let content = &self.content;
         validate_identity(&content.file, &content.repo_key)?;
         let contract = contract(content.schema_version)?;
+        match (content.schema_version, &content.commit_sha) {
+            (1 | 2, None) => {}
+            (3, Some(commit_sha)) if bounded_identity(commit_sha, MAX_ID_BYTES) => {}
+            _ => return Err(CapturedError::Invalid("receipt contract")),
+        }
         if content.source_id != content.file.source_id
             || content.producer_contract != contract.producer
             || content.grammar_package != contract.grammar_package
@@ -653,6 +892,10 @@ impl Receipt {
                 || evidence.path != content.file.path
                 || !bounded_identity(&evidence.commit_sha, MAX_ID_BYTES)
                 || evidence.commit_sha != content.ranges[0].evidence.commit_sha
+                || content
+                    .commit_sha
+                    .as_ref()
+                    .is_some_and(|commit_sha| &evidence.commit_sha != commit_sha)
                 || evidence.byte_start != range.captured.byte_start
                 || evidence.byte_end != range.captured.byte_end
                 || evidence.byte_start >= evidence.byte_end
@@ -667,6 +910,17 @@ impl Receipt {
             .map_err(|_| CapturedError::Invalid("receipt serialization"))?
             .len()
             > MAX_RECEIPT_BYTES
+        {
+            return Err(CapturedError::Limit("receipt bytes"));
+        }
+        if content.schema_version == 3
+            && serde_json::to_vec(&ExpandedReceipt {
+                receipt_id: &self.receipt_id,
+                content: content.as_full_wire(None),
+            })
+            .map_err(|_| CapturedError::Invalid("receipt serialization"))?
+            .len()
+                > MAX_RECEIPT_BYTES
         {
             return Err(CapturedError::Limit("receipt bytes"));
         }
@@ -744,7 +998,7 @@ mod tests {
             .iter()
             .find(|receipt| receipt.ranges().len() > 1)
             .unwrap();
-        let cases: [fn(&mut Content); 9] = [
+        let cases: [fn(&mut Content); 7] = [
             |content| content.producer_contract = "t0.adapter-ts/direct-lexical-v1".into(),
             |content| content.grammar = Grammar::Tsx,
             |content| content.ranges[0].index = 1,
@@ -753,8 +1007,6 @@ mod tests {
                 content.ranges[0].evidence.byte_end = content.file.byte_len + 1;
                 content.ranges[0].captured.byte_end = content.file.byte_len + 1;
             },
-            |content| content.ranges[0].captured.file.digest = "0".repeat(64),
-            |content| content.ranges[1].evidence.commit_sha = "different".into(),
             |content| content.ranges = vec![content.ranges[0].clone(); MAX_RECEIPT_RANGES + 1],
             |content| {
                 content.fact_key = FactKey::Node {
@@ -768,6 +1020,23 @@ mod tests {
             receipt.receipt_id = content_id(&receipt.content).unwrap();
             assert!(receipt.validate().is_err());
             assert!(Receipt::from_json(&serde_json::to_string(&receipt).unwrap()).is_err());
+        }
+        for change in [
+            (|content: &mut Content| content.ranges[0].captured.file.digest = "0".repeat(64))
+                as fn(&mut Content),
+            |content| content.ranges[1].evidence.commit_sha = "different".into(),
+        ] {
+            let mut v3 = original.clone();
+            change(&mut v3.content);
+            v3.receipt_id = content_id(&v3.content).unwrap();
+            assert!(v3.validate().is_err());
+            let mut v2 = v3;
+            v2.content.schema_version = 2;
+            v2.content.producer_contract = "t0.adapter-ts/direct-lexical-v2".into();
+            v2.content.commit_sha = None;
+            v2.receipt_id = content_id(&v2.content).unwrap();
+            assert!(v2.validate().is_err());
+            assert!(Receipt::from_json(&serde_json::to_string(&v2).unwrap()).is_err());
         }
         // Omission also fails against the actual complete fact, even if an
         // internally valid provenance-only inventory was rehashed by a caller.
@@ -797,3 +1066,5 @@ mod tests {
 
 #[cfg(test)]
 mod v2_tests;
+#[cfg(test)]
+mod v3_tests;

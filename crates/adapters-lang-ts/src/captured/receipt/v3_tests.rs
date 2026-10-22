@@ -1,0 +1,255 @@
+use super::*;
+
+const CODE: &[u8] = b"function run(input:any){ const base = input.enabled; const ready = base === false; if (ready) return false; }";
+
+fn captured_rule_receipt() -> (Node, Receipt) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("source.ts"), CODE).unwrap();
+    let source = source_capture::SourceId::new("src_11111111111111111111111111111111").unwrap();
+    let capture = source_capture::capture_working_tree(
+        dir.path(),
+        &source,
+        &["source.ts".into()],
+        source_capture::CaptureLimits::default(),
+    )
+    .unwrap();
+    let (facts, receipts) = super::super::extract_file(
+        capture.file("source.ts").unwrap(),
+        &SourceId {
+            repo: "acme/project",
+            commit: "workdir",
+        },
+    )
+    .unwrap();
+    let node = facts
+        .nodes
+        .into_iter()
+        .find(|node| node.label == "BusinessRule")
+        .unwrap();
+    let receipt = receipts
+        .into_iter()
+        .find(|receipt| receipt.fact_key() == &FactKey::from_node(&node))
+        .unwrap();
+    (node, receipt)
+}
+
+fn as_v2(v3: &Receipt) -> Receipt {
+    let mut content = v3.content.clone();
+    content.schema_version = 2;
+    content.producer_contract = "t0.adapter-ts/direct-lexical-v2".into();
+    content.commit_sha = None;
+    Receipt {
+        receipt_id: content_id(&content).unwrap(),
+        content,
+    }
+}
+
+fn sign_wire(mut wire: serde_json::Value, version: u32) -> String {
+    let contract = contract(version).unwrap();
+    let mut input = contract.domain.to_vec();
+    input.extend(serde_json::to_vec(&canonical(wire["content"].clone())).unwrap());
+    wire["receipt_id"] = serde_json::Value::String(format!(
+        "{}{}",
+        contract.prefix,
+        core_prov::content_hash(&input)
+    ));
+    serde_json::to_string(&wire).unwrap()
+}
+
+#[test]
+fn receipt_v2_wire_identity_and_order_remain_unchanged() {
+    let file = format!(
+        "{{\"source_id\":\"src_{}\",\"capture_id\":\"capture-v1:{}\",\"path\":\"source.ts\",\"digest\":\"{}\",\"byte_len\":5}}",
+        "1".repeat(32),
+        "c".repeat(64),
+        "a".repeat(64)
+    );
+    let content_json = format!(
+        concat!(
+            "{{\"schema_version\":2,\"source_id\":\"src_{}\",\"repo_key\":\"acme/project\",\"file\":{},",
+            "\"producer_contract\":\"t0.adapter-ts/direct-lexical-v2\",\"grammar\":\"typescript\",",
+            "\"grammar_package\":\"tree-sitter-typescript@0.23.2\",\"parser_package\":\"tree-sitter@0.27.0\",",
+            "\"fact_key\":{{\"kind\":\"node\",\"id\":\"symbol:historical\"}},\"fact_digest\":\"node-v1:{}\",",
+            "\"ranges\":[{{\"role\":\"provenance\",\"index\":0,\"evidence\":{{\"repo\":\"acme/project\",",
+            "\"path\":\"source.ts\",\"byte_start\":0,\"byte_end\":5,\"commit_sha\":\"historical\"}},",
+            "\"captured\":{{\"file\":{},\"byte_start\":0,\"byte_end\":5}}}}],",
+            "\"source_scope\":\"primary_source_only\",\"input_closure\":\"input_closure_not_established\"}}"
+        ),
+        "1".repeat(32),
+        file,
+        "b".repeat(64),
+        file
+    );
+    let content: serde_json::Value = serde_json::from_str(&content_json).unwrap();
+    let mut bytes = b"cartograph:ts-primary-receipt:v2\0".to_vec();
+    bytes.extend(serde_json::to_vec(&content).unwrap());
+    let expected_id = format!("ts-primary-v2:{}", core_prov::content_hash(&bytes));
+    assert_eq!(
+        expected_id,
+        "ts-primary-v2:b9e95053d1c7a350b414225424f69736a283820028d18066f9f4a78ae5f5d1ba"
+    );
+    let original = format!("{{\"receipt_id\":\"{expected_id}\",\"content\":{content_json}}}");
+    let decoded = Receipt::from_json(&original).unwrap();
+    assert_eq!(decoded.id(), expected_id);
+    assert_eq!(decoded.to_json().unwrap(), original);
+}
+
+#[test]
+fn receipt_v3_parity_round_trip_and_size_reduction() {
+    let (node, v3) = captured_rule_receipt();
+    let v2 = as_v2(&v3);
+
+    v2.validate().unwrap();
+    v3.validate().unwrap();
+    assert_eq!(v2.ranges(), v3.ranges());
+    assert!(v2.matches_node(&node));
+    assert!(v3.matches_node(&node));
+    assert_ne!(v2.id(), v3.id());
+    assert!(v2.id().starts_with("ts-primary-v2:"));
+    assert!(v3.id().starts_with("ts-primary-v3:"));
+
+    let v2_json = v2.to_json().unwrap();
+    let v3_json = v3.to_json().unwrap();
+    assert!(
+        v3_json.len() * 3 <= v2_json.len(),
+        "expected v3 ({} bytes) to be at least 3x smaller than v2 ({} bytes)",
+        v3_json.len(),
+        v2_json.len()
+    );
+
+    let decoded_v3 = Receipt::from_json(&v3_json).unwrap();
+    assert_eq!(decoded_v3, v3);
+    assert_eq!(decoded_v3.to_json().unwrap(), v3_json);
+
+    let decoded_v2 = Receipt::from_json(&v2_json).unwrap();
+    assert_eq!(decoded_v2, v2);
+    assert_eq!(decoded_v2.to_json().unwrap(), v2_json);
+}
+
+#[test]
+fn receipt_v3_rejects_malformed_wire_and_oversized_expansions() {
+    let (_, v3) = captured_rule_receipt();
+    let v2 = as_v2(&v3);
+    let v3_wire = serde_json::to_value(&v3).unwrap();
+    let v2_wire = serde_json::to_value(&v2).unwrap();
+
+    // 1. A v3 range with an extra field.
+    let mut extra_range_field = v3_wire.clone();
+    extra_range_field["content"]["ranges"][0]["extra"] = serde_json::json!(true);
+    assert!(Receipt::from_json(&sign_wire(extra_range_field, 3)).is_err());
+
+    // 2. A v3 range in v2 full form.
+    let mut full_range_in_v3 = v3_wire.clone();
+    full_range_in_v3["content"]["ranges"][0] = serde_json::to_value(&v3.ranges()[0]).unwrap();
+    assert!(Receipt::from_json(&sign_wire(full_range_in_v3, 3)).is_err());
+
+    // 3. A v2 payload with a compact range.
+    let mut compact_range_in_v2 = v2_wire.clone();
+    compact_range_in_v2["content"]["ranges"][0] = v3_wire["content"]["ranges"][0].clone();
+    assert!(Receipt::from_json(&sign_wire(compact_range_in_v2, 2)).is_err());
+
+    // 4. A v2 payload with commit_sha.
+    let mut v2_with_commit = v2.clone();
+    v2_with_commit.content.commit_sha = Some("workdir".into());
+    v2_with_commit.receipt_id = content_id(&v2_with_commit.content).unwrap();
+    assert!(v2_with_commit.validate().is_err());
+    assert!(Receipt::from_json(&serde_json::to_string(&v2_with_commit).unwrap()).is_err());
+
+    // 5. A v3 payload missing commit_sha.
+    let mut v3_missing_commit = v3.clone();
+    v3_missing_commit.content.commit_sha = None;
+    v3_missing_commit.receipt_id = content_id(&v3_missing_commit.content).unwrap();
+    assert!(v3_missing_commit.validate().is_err());
+    assert!(Receipt::from_json(&serde_json::to_string(&v3_missing_commit).unwrap()).is_err());
+
+    // 6. A v3 commit_sha that is empty, oversized, or has control characters.
+    let oversized_sha = "a".repeat(MAX_ID_BYTES + 1);
+    for bad_sha in ["", "bad\nsha", "bad\0sha", oversized_sha.as_str()] {
+        let mut bad_commit = v3.clone();
+        bad_commit.content.commit_sha = Some(bad_sha.into());
+        for range in &mut bad_commit.content.ranges {
+            range.evidence.commit_sha = bad_sha.into();
+        }
+        bad_commit.receipt_id = content_id(&bad_commit.content).unwrap();
+        assert!(bad_commit.validate().is_err());
+        assert!(Receipt::from_json(&serde_json::to_string(&bad_commit).unwrap()).is_err());
+    }
+
+    // 7. Duplicate (role, index).
+    let mut duplicate = v3.clone();
+    let first = duplicate.ranges()[0].clone();
+    duplicate.content.ranges = vec![first.clone(), first];
+    duplicate.receipt_id = content_id(&duplicate.content).unwrap();
+    assert!(duplicate.validate().is_err());
+    assert!(Receipt::from_json(&serde_json::to_string(&duplicate).unwrap()).is_err());
+
+    // 8. More than MAX_RECEIPT_RANGES compact ranges.
+    let mut too_many_ranges = v3.clone();
+    too_many_ranges.content.ranges = (0..=MAX_RECEIPT_RANGES)
+        .map(|index| {
+            let mut range = v3.ranges()[0].clone();
+            range.role = RangeRole::Provenance;
+            range.index = index as u32;
+            range
+        })
+        .collect();
+    too_many_ranges.receipt_id = content_id(&too_many_ranges.content).unwrap();
+    let too_many_json = serde_json::to_string(&too_many_ranges).unwrap();
+    assert!(too_many_json.len() <= MAX_RECEIPT_BYTES);
+    assert!(matches!(
+        too_many_ranges.validate(),
+        Err(CapturedError::Limit("receipt ranges"))
+    ));
+    assert!(Receipt::from_json(&too_many_json).is_err());
+
+    // 9. A v3 receipt whose compact form fits within MAX_RECEIPT_BYTES but
+    // whose expanded (v2-shaped) form exceeds MAX_RECEIPT_BYTES.
+    let mut oversized_expansion = too_many_ranges;
+    oversized_expansion
+        .content
+        .ranges
+        .truncate(MAX_RECEIPT_RANGES);
+    oversized_expansion.receipt_id = content_id(&oversized_expansion.content).unwrap();
+    let compact_json = serde_json::to_string(&oversized_expansion).unwrap();
+    let expanded_bytes = serde_json::to_vec(&ExpandedReceipt {
+        receipt_id: &oversized_expansion.receipt_id,
+        content: oversized_expansion.content.as_full_wire(None),
+    })
+    .unwrap()
+    .len();
+    assert!(compact_json.len() <= MAX_RECEIPT_BYTES);
+    assert!(expanded_bytes > MAX_RECEIPT_BYTES);
+    assert!(matches!(
+        oversized_expansion.validate(),
+        Err(CapturedError::Limit("receipt bytes"))
+    ));
+    assert!(oversized_expansion.to_json().is_err());
+    assert!(Receipt::from_json(&compact_json).is_err());
+}
+
+#[test]
+fn receipt_wire_rejects_duplicate_keys_and_explicit_null_commit() {
+    // A duplicated key or an explicit `null` must not become a second wire
+    // encoding of the same receipt id, in any contract version.
+    let (_, v3) = captured_rule_receipt();
+    let v2 = as_v2(&v3);
+    for receipt in [&v2, &v3] {
+        let json = receipt.to_json().unwrap();
+        assert!(Receipt::from_json(&json).is_ok());
+        let repo = format!(
+            "\"repo_key\":{}",
+            serde_json::to_string(receipt.repo_key()).unwrap()
+        );
+        let duplicated = json.replacen(&repo, &format!("{repo},{repo}"), 1);
+        assert_ne!(duplicated, json);
+        assert!(Receipt::from_json(&duplicated).is_err());
+        let range_role = "\"role\":\"provenance\"";
+        let duplicated_in_range =
+            json.replacen(range_role, &format!("{range_role},{range_role}"), 1);
+        assert_ne!(duplicated_in_range, json);
+        assert!(Receipt::from_json(&duplicated_in_range).is_err());
+    }
+    let mut null_commit = serde_json::to_value(&v2).unwrap();
+    null_commit["content"]["commit_sha"] = serde_json::Value::Null;
+    assert!(Receipt::from_json(&serde_json::to_string(&null_commit).unwrap()).is_err());
+}

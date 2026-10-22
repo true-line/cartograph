@@ -163,6 +163,7 @@ fn legacy_guarded_exit_receipt_keeps_all_v1_roles_and_rejects_v2_rules() {
     }
     let mut content = new_receipt.content.clone();
     content.schema_version = 1;
+    content.commit_sha = None;
     content.producer_contract = "t0.adapter-ts/direct-lexical-v1".into();
     // v1's contract keeps its own frozen parser pin, independent of the
     // current v2 mint value.
@@ -208,12 +209,12 @@ fn captured_definition_receipt_v2_covers_every_source_occurrence() {
     // AC-0168 / AC-0169: the real immutable parser supplies all new citations.
     let (_dir, capture, facts, receipts) = captured(CODE);
     let (node, receipt) = rule_receipt(&facts, &receipts);
-    assert_eq!(receipt.content.schema_version, 2);
+    assert_eq!(receipt.content.schema_version, 3);
     assert_eq!(
         receipt.content.producer_contract,
-        "t0.adapter-ts/direct-lexical-v2"
+        "t0.adapter-ts/direct-lexical-v3"
     );
-    assert!(receipt.id().starts_with("ts-primary-v2:"));
+    assert!(receipt.id().starts_with("ts-primary-v3:"));
     // AC-0169: newly minted receipts must record the actual current parser
     // pin, not a stale frozen value, so 0.26- and 0.27-produced receipts are
     // genuinely distinguishable in hashed content.
@@ -324,10 +325,19 @@ fn receipt_v2_accepts_frozen_pre_upgrade_parser_pin_but_rejects_arbitrary_value(
     assert_eq!(original.content.parser_package, "tree-sitter@0.27.0");
 
     let mut legacy = original.clone();
+    legacy.content.schema_version = 2;
+    legacy.content.producer_contract = "t0.adapter-ts/direct-lexical-v2".into();
+    legacy.content.commit_sha = None;
     legacy.content.parser_package = "tree-sitter@0.26.12".into();
     legacy.receipt_id = content_id(&legacy.content).unwrap();
     legacy.validate().unwrap();
     assert!(Receipt::from_json(&serde_json::to_string(&legacy).unwrap()).is_ok());
+
+    let mut v3_legacy_pin = original.clone();
+    v3_legacy_pin.content.parser_package = "tree-sitter@0.26.12".into();
+    v3_legacy_pin.receipt_id = content_id(&v3_legacy_pin.content).unwrap();
+    assert!(v3_legacy_pin.validate().is_err());
+    assert!(Receipt::from_json(&serde_json::to_string(&v3_legacy_pin).unwrap()).is_err());
 
     let mut arbitrary = original.clone();
     arbitrary.content.parser_package = "tree-sitter@9.9.9".into();
@@ -386,6 +396,7 @@ fn receipt_v2_rejects_malformed_groups_and_complete_fact_mismatches() {
     assert!(!original.matches_node(&changed));
     let mut disguised_v1 = original.clone();
     disguised_v1.content.schema_version = 1;
+    disguised_v1.content.commit_sha = None;
     disguised_v1.content.producer_contract = "t0.adapter-ts/direct-lexical-v1".into();
     disguised_v1.receipt_id = content_id(&disguised_v1.content).unwrap();
     assert!(disguised_v1.validate().is_err());

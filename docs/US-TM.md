@@ -34,7 +34,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 
 | US-0027 | AC-0140..0147 | app, ingest, core-graph, ui | H3 | — | ADR-0019, ADR-0023 | T-0140..0147 |
 
-| US-0028 | AC-0148..0155, AC-0280, AC-0282, AC-0283, AC-0292 | adapters-lang-ts, source-capture, core-graph, ingest, app, ui | H3 | — | ADR-0024, ADR-0039 | T-0148..0155, T-0280, T-0282, T-0283, T-0292 |
+| US-0028 | AC-0148..0155, AC-0280, AC-0282, AC-0283, AC-0292, AC-0299 | adapters-lang-ts, source-capture, core-graph, ingest, app, ui | H3 | — | ADR-0024, ADR-0039, ADR-0046 | T-0148..0155, T-0280, T-0282, T-0283, T-0292, T-0299 |
 | US-0029 | AC-0156..0163 | app (durable Windows NTFS job storage), ui | post-M10 | — | ADR-0025 | T-0156..0163 |
 
 | US-0030 | AC-0164..0171 | adapters-lang-ts, core-graph, spec, context-hub, app, ui | H2 | — | ADR-0020, ADR-0024, ADR-0026 | T-0164..0171 |
@@ -113,3 +113,5 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0041 | Bounded query history with explicit runtime families (proposed) |
 
 | ADR-0042 | Prove continuation capacity before tool admission (proposed) |
+
+| ADR-0046 | Compact receipts, positive absence records and reclaimable retention (proposed; receipt v3 implemented) |
