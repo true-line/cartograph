@@ -47,7 +47,7 @@ On an M4 laptop, ingesting all three repos took 17.3 s, measured with an already
 | **Recall** | **44 / 45 (97.8%)** |
 | Documented share of recovered | 44 / 56 (78.6%) |
 
-Before Flask Blueprint support landed with this showcase, recall was **0 / 45**. Every API route is declared as `@api_bp.route(...)` on a Blueprint mounted with `url_prefix="/api"`, and the Python adapter recognised only `@app.route`. Blueprint and FastAPI `APIRouter` prefixes are now composed with their mounts, including mounts in other files. A prefix that can't be read becomes a `Gap`, and a router with no observed mount stays `InferredStrong`, marked `mount_not_observed` (`crates/adapters-lang-python/src/lib.rs`, `resolve_routes`).
+Before Flask Blueprint support landed with this showcase, recall was **0 / 45**. Every API route is declared as `@api_bp.route(...)` on a Blueprint mounted with `url_prefix="/api"`, and the Python adapter recognised only `@app.route`. Blueprint and FastAPI `APIRouter` prefixes are now composed with their mounts, including mounts in other files. A prefix that can't be read becomes a `Gap`, and a router with no observed mount stays `InferredStrong`, marked `mount_not_observed`. Nested mounts compose their whole chain (up to 16 levels). A cyclic chain, or a prefix built by `**kwargs` or `*args` expansion, becomes a `Gap` rather than a guessed path (`crates/adapters-lang-python/src/lib.rs`, `served_prefixes`).
 
 **The one miss is a documentation error.** `docs/api.md` documents `POST /api/notifications/:notification_id`, but the code registers `POST /api/notifications/<int:notification_id>/read` ([`app/api/views/notification.py:63`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/app/api/views/notification.py#L63)). Cartograph recovered the route the code actually serves.
 
@@ -59,7 +59,12 @@ Before Flask Blueprint support landed with this showcase, recall was **0 / 45**.
 
 The scorer lists all 12.
 
-All 248 recovered endpoints are Flask, and all are `Confirmed`: 239 mounted through a Blueprint and 9 declared directly on the app. This includes the web UI, OAuth and admin routes outside `/api`.
+All 248 recovered endpoints are Flask. This includes the web UI, OAuth and admin routes outside `/api`. Their confidence follows how much of the mount chain is proven:
+
+- **9 `Confirmed`**: declared directly on the app object created in `create_app()`.
+- **239 `InferredStrong`, marked `mount_receiver_annotated`**: SimpleLogin registers its Blueprints inside `register_blueprints(app: Flask)`. The receiver is a parameter annotated as `Flask`, not an app constructed in that function, so the type annotation is the only evidence that it is the served app. Cartograph composes the prefix, but it doesn't claim the mount is proven.
+
+No route was promoted to `Confirmed` from a receiver it couldn't prove.
 
 ## What else was recovered
 
@@ -84,7 +89,7 @@ The bundle has 26,910 assertions, 7,512 open gap findings in 25 cause classes an
 3. **No infrastructure.** `topology.md` is empty. The repo has a `Dockerfile`, `crontab.yml`, `example.env` and `alembic.ini`. None of these is infrastructure-as-code that Cartograph reads today, so the Infrastructure layer correctly shows its empty state. *Fill:* the observed-infrastructure producer (#734) plus container and cron config readers.
 4. **Documentation drift is not reported.** The notification mismatch above, and the 12 undocumented routes, were found by the external scorer. Cartograph's own `drift_register.md` reports 0, because it doesn't take documentation in as a contract. *Fill:* a documented-contract input (Markdown API reference or OpenAPI) compared against recovered routes, with drift cited on both sides (#739). For enterprises with outdated docs, this is the direct value.
 5. **No user stories.** `user_stories.md` reports *No Capability facts have been recovered yet*. Capabilities need the interpretation tier, which this deterministic run excludes by design.
-6. **Sources are recorded as `workdir`, not by commit.** All three are git checkouts at the commits above, but each coverage record shows `commit: "workdir"` (`ingest.json`). Citations therefore can't pin the commit they came from. *Fill:* record the HEAD commit when a local source is a clean git checkout (#740).
+6. **Sources are recorded as `workdir`, not by commit.** All three are git checkouts at the commits above, but each coverage record shows `commit: "workdir"` (`ingest.json`). Citations therefore can't pin the commit they came from. Stamping HEAD on a clean checkout would overclaim: working-tree capture is not a commit snapshot (SPEC-04). *Fill:* recover a Git source at a commit through the existing Git-object capture, so producers read that commit's blobs (#740).
 7. **TypeScript rule gaps dominate the count but not the impact.** Classes C-01 to C-09 account for 6,910 of the 7,512 gap findings. They are unresolved interpretation (return/throw consumers, predicates, mutation, loops), routed to T1, and they don't affect the HTTP contract.
 8. **Unresolved module edges.** There are 177 in Python (C-10) and 69 in Kotlin (C-12), plus 38 unresolved Kotlin imports (C-15). These are mostly third-party packages that aren't vendored in the checkout.
 

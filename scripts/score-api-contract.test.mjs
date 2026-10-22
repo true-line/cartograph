@@ -28,3 +28,17 @@ test('scores recall, documented precision, misses and undocumented routes', () =
   assert.deepEqual(result.undocumented, ['GET /api/internal/{}']);
   assert.equal(result.unusable_nodes, 1);
 });
+
+test('precision counts only matches inside the requested scope', () => {
+  // #741 review: a documented, recovered /health must not lift /api precision.
+  const documented = documentedEndpoints('#### GET /api/x\n#### GET /health\n');
+  const recovered = recoveredEndpoints([
+    { id: 'a', props: { method: 'GET', path: '/api/x' } },
+    { id: 'b', props: { method: 'GET', path: '/health' } },
+  ]);
+  const result = score(documented, recovered, '/api');
+  assert.equal(result.matched, 2);
+  assert.equal(result.recall, 1);
+  assert.equal(result.recovered_in_scope, 1);
+  assert.equal(result.documented_precision, 1);
+});

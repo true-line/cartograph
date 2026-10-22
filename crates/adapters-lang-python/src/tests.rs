@@ -307,10 +307,12 @@ from flask import Flask
 from app.api.base import api_bp
 from app.oauth.base import oauth_bp
 
-def register_blueprints(app: Flask):
+def create_app():
+    app = Flask(__name__)
     app.register_blueprint(api_bp)
     app.register_blueprint(oauth_bp, url_prefix="/oauth")
     app.register_blueprint(oauth_bp, url_prefix="/oauth2")
+    return app
 "#,
     );
     let extraction = extract_dir(dir.path(), &id()).unwrap();
@@ -440,5 +442,228 @@ fn routes_on_an_imported_app_instance_resolve_and_lookalikes_do_not() {
     assert_eq!(
         endpoint_facts(&extraction),
         vec![("GET".into(), "/health".into(), "Confirmed".into(), None)]
+    );
+}
+
+#[test]
+fn mount_receivers_must_be_proven_before_a_route_is_confirmed() {
+    // #741 review: a mount only confirms a path when its receiver is a proven
+    // application of the same framework. An annotated factory parameter is
+    // declared, not proven; a lookalike receiver never moves a route.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "routers.py",
+        r#"
+from fastapi import APIRouter
+users = APIRouter(prefix="/users")
+items = APIRouter(prefix="/items")
+orphans = APIRouter(prefix="/orphans")
+
+@users.get("/me")
+def me():
+    return {}
+
+@items.get("/all")
+def all_items():
+    return {}
+
+@orphans.get("/x")
+def orphan():
+    return {}
+"#,
+    );
+    write(
+        dir.path(),
+        "main.py",
+        r#"
+from fastapi import FastAPI
+from routers import users, items, orphans
+from registry import registry
+
+def wire(app: FastAPI):
+    app.include_router(users, prefix="/v1")
+
+def wire_untyped(app):
+    app.include_router(items, prefix="/v2")
+
+real = FastAPI()
+real.include_router(items, prefix="/v3")
+registry.include_router(items, prefix="/fake")
+registry.include_router(orphans, prefix="/fake")
+"#,
+    );
+    write(
+        dir.path(),
+        "registry.py",
+        "class Registry:\n    def include_router(self, router, prefix=''):\n        pass\nregistry = Registry()\n",
+    );
+    let facts = endpoint_facts(&extract_dir(dir.path(), &id()).unwrap());
+    let strong = "InferredStrong".to_string();
+    assert_eq!(
+        facts,
+        vec![
+            // A lookalike receiver alone never confirms; it stays inferred.
+            (
+                "GET".into(),
+                "/fake/orphans/x".into(),
+                strong.clone(),
+                Some("mount_receiver_unproven".into())
+            ),
+            (
+                "GET".into(),
+                "/v1/users/me".into(),
+                strong,
+                Some("mount_receiver_annotated".into())
+            ),
+            // The proven app confirms /v3; the untyped-parameter and lookalike
+            // mounts of the same router are dropped once a chain confirms it.
+            (
+                "GET".into(),
+                "/v3/items/all".into(),
+                "Confirmed".into(),
+                Some("mounted".into())
+            ),
+        ]
+    );
+}
+
+#[test]
+fn nested_router_mounts_compose_their_whole_chain() {
+    // #741 review: child -> parent -> app must serve under every prefix on the
+    // chain, for FastAPI routers and Flask nested blueprints alike.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "api.py",
+        r#"
+from fastapi import FastAPI, APIRouter
+child = APIRouter(prefix="/child")
+parent = APIRouter(prefix="/parent")
+
+@child.get("/x")
+def x():
+    return {}
+
+parent.include_router(child, prefix="/nested")
+app = FastAPI()
+app.include_router(parent, prefix="/v1")
+"#,
+    );
+    write(
+        dir.path(),
+        "web.py",
+        r#"
+from flask import Flask, Blueprint
+leaf = Blueprint("leaf", __name__, url_prefix="/leaf")
+outer = Blueprint("outer", __name__, url_prefix="/outer")
+
+@leaf.route("/page")
+def page():
+    return ""
+
+outer.register_blueprint(leaf)
+site = Flask(__name__)
+site.register_blueprint(outer)
+"#,
+    );
+    let facts = endpoint_facts(&extract_dir(dir.path(), &id()).unwrap());
+    let confirmed = "Confirmed".to_string();
+    let mounted = Some("mounted".to_string());
+    assert_eq!(
+        facts,
+        vec![
+            (
+                "GET".into(),
+                "/outer/leaf/page".into(),
+                confirmed.clone(),
+                mounted.clone()
+            ),
+            (
+                "GET".into(),
+                "/v1/parent/nested/child/x".into(),
+                confirmed,
+                mounted
+            ),
+        ]
+    );
+}
+
+#[test]
+fn expanded_or_cyclic_prefixes_become_gaps_not_paths() {
+    // #741 review: `**options` may carry the prefix, a Blueprint's sixth
+    // positional argument is its url_prefix, and a mount cycle has no path.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "api.py",
+        r#"
+from fastapi import FastAPI, APIRouter
+from flask import Blueprint
+opts = {"prefix": "/secret"}
+expanded = APIRouter(**opts)
+mounted_expanded = APIRouter()
+loop_a = APIRouter()
+loop_b = APIRouter()
+positional = Blueprint("p", __name__, None, None, None, "/pos")
+
+@expanded.get("/a")
+def a():
+    return {}
+
+@mounted_expanded.get("/b")
+def b():
+    return {}
+
+@loop_a.get("/c")
+def c():
+    return {}
+
+@positional.route("/d")
+def d():
+    return ""
+
+app = FastAPI()
+app.include_router(expanded)
+app.include_router(mounted_expanded, **opts)
+loop_a.include_router(loop_b)
+loop_b.include_router(loop_a)
+"#,
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let facts = endpoint_facts(&extraction);
+    // Only the positional Blueprint prefix is readable (its mount is not
+    // observed, so it stays inferred).
+    assert_eq!(
+        facts,
+        vec![(
+            "GET".into(),
+            "/pos/d".into(),
+            "InferredStrong".into(),
+            Some("mount_not_observed".into())
+        )]
+    );
+    let reasons: Vec<String> = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.id.starts_with("gap:route:"))
+        .map(|node| {
+            node.props["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(reasons.len(), 3, "{reasons:?}");
+    assert!(
+        reasons.iter().any(|reason| reason.contains("cyclic")),
+        "{reasons:?}"
+    );
+    assert_eq!(
+        reasons
+            .iter()
+            .filter(|reason| reason.as_str() == "router prefix is not a string literal")
+            .count(),
+        2
     );
 }

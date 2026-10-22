@@ -43,9 +43,13 @@ export function recoveredEndpoints(nodes) {
   return { found, unusable };
 }
 
+// Recall is over every documented endpoint; precision only over recoveries
+// under `prefix`, so its numerator counts scoped matches alone.
 export function score(documented, recovered, prefix = '') {
-  const scoped = [...recovered.found.keys()].filter((key) => key.split(' ')[1].startsWith(prefix));
+  const inScope = (key) => key.split(' ')[1].startsWith(prefix);
+  const scoped = [...recovered.found.keys()].filter(inScope);
   const matched = [...documented].filter((key) => recovered.found.has(key)).sort();
+  const scopedMatched = matched.filter(inScope);
   const missed = [...documented].filter((key) => !recovered.found.has(key)).sort();
   const undocumented = scoped.filter((key) => !documented.has(key)).sort();
   const ratio = (a, b) => (b === 0 ? null : Number((a / b).toFixed(4)));
@@ -54,7 +58,7 @@ export function score(documented, recovered, prefix = '') {
     recovered_in_scope: scoped.length,
     matched: matched.length,
     recall: ratio(matched.length, documented.size),
-    documented_precision: ratio(matched.length, scoped.length),
+    documented_precision: ratio(scopedMatched.length, scoped.length),
     missed,
     undocumented,
     unusable_nodes: recovered.unusable.length,
