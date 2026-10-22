@@ -46,16 +46,31 @@ fn write_export_file_with(
     write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
 ) -> Result<(), String> {
     let fail = |err: std::io::Error| format!("Failed to write export file: {err}");
-    let parent = match path.parent() {
+    // Replacing a symlink would swap the link for a file; write through it to
+    // its target instead, as the previous in-place write did.
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path).map_err(fail)?,
+        _ => path.to_path_buf(),
+    };
+    // An existing destination keeps its permissions; a new export stays
+    // owner-only (the temp file's mode) rather than widening to the umask.
+    let existing = std::fs::metadata(&target)
+        .ok()
+        .map(|meta| meta.permissions());
+    let parent = match target.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
     let (temp, mut file) = create_sibling(parent).map_err(fail)?;
     let written = write(&mut file, content.as_bytes())
         .and_then(|()| file.sync_all())
+        .and_then(|()| match existing {
+            Some(permissions) => file.set_permissions(permissions),
+            None => Ok(()),
+        })
         .and_then(|()| {
             drop(file);
-            std::fs::rename(&temp, path)
+            std::fs::rename(&temp, &target)
         });
     if let Err(err) = written {
         let _ = std::fs::remove_file(&temp);
@@ -75,11 +90,13 @@ fn create_sibling(parent: &Path) -> std::io::Result<(std::path::PathBuf, std::fs
             ".{FALLBACK_EXPORT_NAME}-{}-{n}.partial",
             std::process::id()
         ));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-        {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Owner-only from creation, so the content is never briefly readable
+        // by others before its final permissions are applied.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        match options.open(&temp) {
             Ok(file) => return Ok((temp, file)),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(err),
@@ -206,5 +223,40 @@ mod tests {
             std::fs::read_to_string(&target).unwrap(),
             "new export content"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_an_export_keeps_its_permissions_and_follows_symlinks() {
+        // #743 review: the atomic replace must not widen a restrictive mode,
+        // and a symlinked destination is written through, not replaced.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("private-export.json");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_export_file(&target, "new").unwrap();
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let fresh = dir.path().join("fresh-export.json");
+        write_export_file(&fresh, "new").unwrap();
+        assert_eq!(
+            std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o077,
+            0
+        );
+
+        let link = dir.path().join("linked-export.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_export_file(&link, "through link").unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "through link");
     }
 }
