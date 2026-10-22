@@ -278,6 +278,7 @@ mod tests {
                     "acme/api",
                     &[],
                     Some(&record),
+                    core_graph::source::SourceOmissions::NONE,
                 )
                 .unwrap()
         );

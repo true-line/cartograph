@@ -1,6 +1,37 @@
 use super::*;
 use crate::{GRAPH_SCHEMA_VERSION, GraphStore};
 
+/// Omission reads through the same-revision selection snapshot, returned in
+/// caller key order (selections themselves are sorted by fact identity).
+trait OmissionReads {
+    fn receipt_omission(&self, fact: &FactKey) -> Result<OmissionLookup, GraphError>;
+    fn receipt_omissions(&self, facts: &[FactKey]) -> Result<Vec<OmissionLookup>, GraphError>;
+}
+
+impl OmissionReads for SqliteGraphStore {
+    fn receipt_omission(&self, fact: &FactKey) -> Result<OmissionLookup, GraphError> {
+        Ok(self
+            .receipt_omissions(std::slice::from_ref(fact))?
+            .remove(0))
+    }
+
+    fn receipt_omissions(&self, facts: &[FactKey]) -> Result<Vec<OmissionLookup>, GraphError> {
+        let snapshot = self.read_source_selection_snapshot(facts)?;
+        Ok(facts
+            .iter()
+            .map(|fact| {
+                snapshot
+                    .selections
+                    .iter()
+                    .find(|selection| &selection.fact == fact)
+                    .expect("every requested fact is selected")
+                    .omission
+                    .clone()
+            })
+            .collect())
+    }
+}
+
 fn node(id: &str) -> Node {
     Node {
         id: id.into(),
@@ -494,7 +525,7 @@ fn association_schema_migrates_without_clearing_schema_four_facts_and_rejects_in
     drop(store);
     for corruption in [
         "DROP TABLE source_binding_meta",
-        "PRAGMA ignore_check_constraints=ON; UPDATE source_binding_meta SET version=2",
+        "PRAGMA ignore_check_constraints=ON; UPDATE source_binding_meta SET version=3",
         "DROP TRIGGER source_binding_node_update",
         "CREATE VIEW source_binding_unknown AS SELECT 1",
         "CREATE UNIQUE INDEX unrelated_unique_repo ON source_node_bindings(repo_key)",
@@ -581,7 +612,11 @@ fn source_selection_distinguishes_missing_absent_present_and_orders_unique_keys(
         selection.selections,
         expected
             .into_iter()
-            .map(|(fact, state)| FactSourceSelection { fact, state })
+            .map(|(fact, state)| FactSourceSelection {
+                fact,
+                state,
+                omission: OmissionLookup::Unrecorded,
+            })
             .collect::<Vec<_>>()
     );
     let empty = store.read_source_selection_snapshot(&[]).unwrap();
@@ -697,6 +732,7 @@ fn source_selection_is_coherent_across_graph_and_receipt_publication() {
                         fact_digest: binding.emitted_fact_digest.clone(),
                         binding,
                     },
+                    omission: OmissionLookup::Unrecorded,
                 }));
             }
             for selection in before.selections {
@@ -769,6 +805,7 @@ fn source_selection_keeps_malformed_and_orphan_associations_per_key() {
                 state: FactSourceState::Invalid {
                     fact_digest: (corruption != "orphan").then_some(binding.emitted_fact_digest),
                 },
+                omission: OmissionLookup::Unrecorded,
             }));
         }
         assert!(selection.selections.contains(&FactSourceSelection {
@@ -777,6 +814,7 @@ fn source_selection_keeps_malformed_and_orphan_associations_per_key() {
                 fact_digest: b.emitted_fact_digest.clone(),
                 binding: b,
             },
+            omission: OmissionLookup::Unrecorded,
         }));
         assert!(!format!("{:?}", selection.selections).contains("SOURCE_CANARY_"));
         assert!(store.conn.is_autocommit());
@@ -890,10 +928,13 @@ fn source_selection_global_failures_release_the_read_transaction() {
     ));
     assert!(store.conn.is_autocommit());
     store.put_node(&node("b")).unwrap();
+    // The repair is a row event, so only the revision differs.
+    let repaired = store.read_source_selection_snapshot(&keys).unwrap();
     assert_eq!(
-        store.read_source_selection_snapshot(&keys).unwrap(),
-        expected
+        (&repaired.graph, &repaired.selections),
+        (&expected.graph, &expected.selections)
     );
+    assert_ne!(repaired.revision, expected.revision);
     store
         .conn
         .execute_batch("DROP TRIGGER source_binding_node_update")
@@ -903,4 +944,835 @@ fn source_selection_global_failures_release_the_read_transaction() {
         Err(GraphError::SourceBinding("incompatible association schema"))
     ));
     assert!(store.conn.is_autocommit());
+}
+
+fn coverage_record(repo: &str) -> crate::coverage::CoverageRecord {
+    crate::coverage::CoverageRecord {
+        repo_key: repo.into(),
+        registered_source_id: None,
+        ingest_id: format!("ingest-{repo}"),
+        config_hash: "config-v1:0".into(),
+        inventory_json: "{}".into(),
+    }
+}
+
+#[test]
+fn fresh_store_is_version_two_and_exact_v1_migrates_with_empty_omission_tables() {
+    // AC-0314: fresh stores open at schema v2; an exact v1 store migrates in
+    // one immediate transaction with empty omission tables, while a v1 store
+    // with an extra object is rejected. (T-0314)
+    let fresh = SqliteGraphStore::open_in_memory().unwrap();
+    let fresh_version: i64 = fresh
+        .conn
+        .query_row("SELECT version FROM source_binding_meta", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(fresh_version, 2);
+
+    let directory = tempfile::tempdir().unwrap();
+    let v1_path = directory.path().join("exact-v1.db");
+    {
+        let connection = Connection::open(&v1_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE nodes (id TEXT PRIMARY KEY, label TEXT NOT NULL, props TEXT NOT NULL DEFAULT '{}') STRICT;
+                 CREATE TABLE edges (src TEXT NOT NULL REFERENCES nodes(id), dst TEXT NOT NULL REFERENCES nodes(id), label TEXT NOT NULL, props TEXT NOT NULL DEFAULT '{}', PRIMARY KEY (src,dst,label)) STRICT;
+                 INSERT INTO nodes(id,label) VALUES ('retained','Symbol');",
+            )
+            .unwrap();
+        for (_, _, sql) in SCHEMA_V1 {
+            connection.execute_batch(sql).unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO source_binding_meta(singleton, version) VALUES (1, 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", GRAPH_SCHEMA_VERSION)
+            .unwrap();
+    }
+
+    let migrated = SqliteGraphStore::open(&v1_path).unwrap();
+    let migrated_version: i64 = migrated
+        .conn
+        .query_row("SELECT version FROM source_binding_meta", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(migrated_version, 2);
+    let counts: (i64, i64, i64) = migrated
+        .conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM source_node_omissions),
+                    (SELECT count(*) FROM source_edge_omissions),
+                    (SELECT count(*) FROM source_omission_index)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(counts, (0, 0, 0));
+    assert_eq!(
+        migrated
+            .receipt_omission(&FactKey::Node {
+                id: "retained".into()
+            })
+            .unwrap(),
+        OmissionLookup::Unrecorded
+    );
+    drop(migrated);
+
+    let extra_path = directory.path().join("v1-extra.db");
+    {
+        let connection = Connection::open(&extra_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE nodes (id TEXT PRIMARY KEY, label TEXT NOT NULL, props TEXT NOT NULL DEFAULT '{}') STRICT;
+                 CREATE TABLE edges (src TEXT NOT NULL REFERENCES nodes(id), dst TEXT NOT NULL REFERENCES nodes(id), label TEXT NOT NULL, props TEXT NOT NULL DEFAULT '{}', PRIMARY KEY (src,dst,label)) STRICT;",
+            )
+            .unwrap();
+        for (_, _, sql) in SCHEMA_V1 {
+            connection.execute_batch(sql).unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO source_binding_meta(singleton, version) VALUES (1, 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch("CREATE INDEX source_binding_extra ON source_node_bindings(receipt_id)")
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", GRAPH_SCHEMA_VERSION)
+            .unwrap();
+    }
+    assert!(matches!(
+        SqliteGraphStore::open(&extra_path),
+        Err(GraphError::SourceBinding("incompatible association schema"))
+    ));
+}
+
+#[test]
+fn receipt_omissions_publish_lookup_and_require_complete_coverage() {
+    // AC-0314: published per-fact omission records return Omitted with their
+    // kind, unrecorded facts return NotOmitted only when every covered repo has
+    // a complete omission index, and SourceOmissions::NONE leaves a repo
+    // unrecorded. (T-0314)
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let n_omitted = node("repo/a:omitted");
+    let n_bound = node("repo/a:bound");
+    let e_omitted = edge("repo/a:omitted");
+    let patch_a = GraphPatch {
+        upsert_nodes: vec![n_omitted.clone(), n_bound.clone()],
+        upsert_edges: vec![e_omitted.clone()],
+        ..GraphPatch::default()
+    };
+    let cov_a = coverage_record("repo/a");
+    let omissions_a = [
+        SourceOmission {
+            fact: FactKey::from_node(&n_omitted),
+            emitted_fact_digest: node_digest(&n_omitted).unwrap(),
+            kind: ReceiptOmissionKind::Declarations,
+        },
+        SourceOmission {
+            fact: FactKey::from_edge(&e_omitted),
+            emitted_fact_digest: edge_digest(&e_omitted).unwrap(),
+            kind: ReceiptOmissionKind::Rules,
+        },
+    ];
+
+    // Before coverage is complete (incomplete producer), unrecorded facts are Unrecorded.
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &patch_a,
+                "repo/a",
+                &[node_binding(&n_bound, "repo/a", "r1")],
+                Some(&cov_a),
+                SourceOmissions {
+                    records: &omissions_a,
+                    complete: false,
+                },
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .receipt_omission(&FactKey::from_node(&n_omitted))
+            .unwrap(),
+        OmissionLookup::Omitted {
+            repo_key: "repo/a".into(),
+            kind: ReceiptOmissionKind::Declarations,
+        }
+    );
+    assert_eq!(
+        store
+            .receipt_omission(&FactKey::from_edge(&e_omitted))
+            .unwrap(),
+        OmissionLookup::Omitted {
+            repo_key: "repo/a".into(),
+            kind: ReceiptOmissionKind::Rules,
+        }
+    );
+    assert_eq!(
+        store
+            .receipt_omission(&FactKey::from_node(&n_bound))
+            .unwrap(),
+        OmissionLookup::Unrecorded
+    );
+
+    // Republish repo/a with complete = true; n_bound now resolves to NotOmitted.
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch::default(),
+                "repo/a",
+                &[node_binding(&n_bound, "repo/a", "r1")],
+                Some(&cov_a),
+                SourceOmissions {
+                    records: &omissions_a,
+                    complete: true,
+                },
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .receipt_omission(&FactKey::from_node(&n_bound))
+            .unwrap(),
+        OmissionLookup::NotOmitted
+    );
+
+    // A second repo published with coverage and SourceOmissions::NONE has no
+    // omission index row, so non-omitted facts degrade back to Unrecorded.
+    let n_b = node("repo/b:symbol");
+    let cov_b = coverage_record("repo/b");
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch {
+                    upsert_nodes: vec![n_b.clone()],
+                    ..GraphPatch::default()
+                },
+                "repo/b",
+                &[],
+                Some(&cov_b),
+                SourceOmissions::NONE,
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .receipt_omission(&FactKey::from_node(&n_omitted))
+            .unwrap(),
+        OmissionLookup::Omitted {
+            repo_key: "repo/a".into(),
+            kind: ReceiptOmissionKind::Declarations,
+        }
+    );
+    assert_eq!(
+        store
+            .receipt_omission(&FactKey::from_node(&n_bound))
+            .unwrap(),
+        OmissionLookup::Unrecorded
+    );
+    assert_eq!(
+        store.receipt_omission(&FactKey::from_node(&n_b)).unwrap(),
+        OmissionLookup::Unrecorded
+    );
+}
+
+#[test]
+fn receipt_omissions_deduplicate_by_smallest_kind_and_respect_bounds_and_rewrites() {
+    // AC-0314: duplicate facts keep the smallest kind by Ord; over MAX_OMISSIONS
+    // records an incomplete index with no rows; rewriting or deleting a fact
+    // removes its omission row; batch lookup rejects 66 keys. (T-0314)
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let n1 = node("repo/a:n1");
+    let n2 = node("repo/a:n2");
+    let cov_a = coverage_record("repo/a");
+    let expected = store.read_snapshot().unwrap();
+    let duplicate_omissions = [
+        SourceOmission {
+            fact: FactKey::from_node(&n1),
+            emitted_fact_digest: node_digest(&n1).unwrap(),
+            kind: ReceiptOmissionKind::StoreCapacity,
+        },
+        SourceOmission {
+            fact: FactKey::from_node(&n1),
+            emitted_fact_digest: node_digest(&n1).unwrap(),
+            kind: ReceiptOmissionKind::Rules,
+        },
+        SourceOmission {
+            fact: FactKey::from_node(&n1),
+            emitted_fact_digest: node_digest(&n1).unwrap(),
+            kind: ReceiptOmissionKind::Declarations,
+        },
+        SourceOmission {
+            fact: FactKey::from_node(&n2),
+            emitted_fact_digest: node_digest(&n2).unwrap(),
+            kind: ReceiptOmissionKind::StoreCapacity,
+        },
+        SourceOmission {
+            fact: FactKey::from_node(&n2),
+            emitted_fact_digest: node_digest(&n2).unwrap(),
+            kind: ReceiptOmissionKind::Rules,
+        },
+    ];
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch {
+                    upsert_nodes: vec![n1.clone(), n2.clone()],
+                    ..GraphPatch::default()
+                },
+                "repo/a",
+                &[],
+                Some(&cov_a),
+                SourceOmissions {
+                    records: &duplicate_omissions,
+                    complete: true,
+                },
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .receipt_omissions(&[FactKey::from_node(&n1), FactKey::from_node(&n2)])
+            .unwrap(),
+        vec![
+            OmissionLookup::Omitted {
+                repo_key: "repo/a".into(),
+                kind: ReceiptOmissionKind::Declarations,
+            },
+            OmissionLookup::Omitted {
+                repo_key: "repo/a".into(),
+                kind: ReceiptOmissionKind::Rules,
+            },
+        ]
+    );
+
+    // Rewriting n1 via a later patch fires the node trigger and removes its
+    // omission row, so lookup returns NotOmitted rather than Omitted.
+    let mut rewritten_n1 = n1.clone();
+    rewritten_n1.props = serde_json::json!({"rewritten": true});
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_if_snapshot_matches(
+                &expected,
+                &GraphPatch {
+                    upsert_nodes: vec![rewritten_n1.clone()],
+                    ..GraphPatch::default()
+                },
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store.receipt_omission(&FactKey::from_node(&n1)).unwrap(),
+        OmissionLookup::NotOmitted
+    );
+
+    // Deleting n2 removes it from the graph and lookup returns Unrecorded.
+    store.delete_node(&n2.id).unwrap();
+    assert_eq!(
+        store.receipt_omission(&FactKey::from_node(&n2)).unwrap(),
+        OmissionLookup::Unrecorded
+    );
+
+    // Exceeding MAX_OMISSIONS short-circuits before per-fact SQLite work, so
+    // testing MAX_OMISSIONS + 1 in-memory records exercises the real production
+    // constant without inserting 262,144 database rows.
+    let over_bound = vec![
+        SourceOmission {
+            fact: FactKey::from_node(&rewritten_n1),
+            emitted_fact_digest: node_digest(&rewritten_n1).unwrap(),
+            kind: ReceiptOmissionKind::Rules,
+        };
+        MAX_OMISSIONS + 1
+    ];
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch::default(),
+                "repo/a",
+                &[],
+                Some(&cov_a),
+                SourceOmissions {
+                    records: &over_bound,
+                    complete: true,
+                },
+            )
+            .unwrap()
+    );
+    let (node_rows, index_state, index_recorded): (i64, String, i64) = store
+        .conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM source_node_omissions), state, recorded
+             FROM source_omission_index WHERE repo_key = 'repo/a'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(node_rows, 0);
+    assert_eq!(index_state, "incomplete");
+    assert_eq!(index_recorded, (MAX_OMISSIONS + 1) as i64);
+    assert_eq!(
+        store
+            .receipt_omission(&FactKey::from_node(&rewritten_n1))
+            .unwrap(),
+        OmissionLookup::Unrecorded
+    );
+
+    // Batch lookup rejects 66 keys before database access.
+    let too_many: Vec<FactKey> = (0..=MAX_SOURCE_SELECTION_KEYS)
+        .map(|index| FactKey::Node {
+            id: format!("n-{index}"),
+        })
+        .collect();
+    assert!(matches!(
+        store.receipt_omissions(&too_many),
+        Err(GraphError::SourceBinding("too many source selection keys"))
+    ));
+}
+
+#[test]
+fn omission_only_publication_advances_revision_and_binds_selection_basis() {
+    // AC-0314: a publication whose only row events are omission records (an
+    // existing unbound fact, no bindings, no coverage, empty patch) still
+    // advances the store revision, and a revision-bound selection refuses the
+    // stale basis instead of pairing it with the new omission. (T-0314)
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let fact_node = node("repo/a:unbound");
+    let fact = FactKey::from_node(&fact_node);
+    let empty = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_if_snapshot_matches(
+                &empty,
+                &GraphPatch {
+                    upsert_nodes: vec![fact_node.clone()],
+                    ..GraphPatch::default()
+                },
+            )
+            .unwrap()
+    );
+    let limits = SnapshotReadLimits::default();
+    let before = store
+        .read_source_selection_snapshot_bounded(std::slice::from_ref(&fact), limits)
+        .unwrap();
+    assert_eq!(before.selections[0].omission, OmissionLookup::Unrecorded);
+
+    let records = [SourceOmission {
+        fact: fact.clone(),
+        emitted_fact_digest: node_digest(&fact_node).unwrap(),
+        kind: ReceiptOmissionKind::StoreCapacity,
+    }];
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch::default(),
+                "repo/a",
+                &[],
+                None,
+                SourceOmissions {
+                    records: &records,
+                    complete: true,
+                },
+            )
+            .unwrap()
+    );
+    let after = store
+        .read_source_selection_snapshot_bounded(std::slice::from_ref(&fact), limits)
+        .unwrap();
+    assert_eq!(after.graph, before.graph);
+    assert_eq!(
+        after.selections[0].omission,
+        OmissionLookup::Omitted {
+            repo_key: "repo/a".into(),
+            kind: ReceiptOmissionKind::StoreCapacity,
+        }
+    );
+    assert_ne!(after.revision, before.revision);
+    assert!(matches!(
+        store.read_source_selection_snapshot_at_revision_bounded(
+            &before.revision,
+            std::slice::from_ref(&fact),
+            limits,
+        ),
+        Err(GraphError::Generation(crate::GenerationError::Changed))
+    ));
+    assert_eq!(
+        store
+            .read_source_selection_snapshot_at_revision_bounded(
+                &after.revision,
+                std::slice::from_ref(&fact),
+                limits,
+            )
+            .unwrap(),
+        after
+    );
+
+    // Clearing the records with NONE is also a revision-advancing row event;
+    // republishing NONE with nothing recorded is not.
+    let expected = store.read_snapshot().unwrap();
+    store
+        .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+            &expected,
+            &GraphPatch::default(),
+            "repo/a",
+            &[],
+            None,
+            SourceOmissions::NONE,
+        )
+        .unwrap();
+    let cleared = store
+        .read_source_selection_snapshot_bounded(std::slice::from_ref(&fact), limits)
+        .unwrap();
+    assert_eq!(cleared.selections[0].omission, OmissionLookup::Unrecorded);
+    assert_ne!(cleared.revision, after.revision);
+}
+
+#[test]
+fn bounded_omission_reads_preflight_coverage_schema_and_reject_malformed_cells() {
+    // AC-0314: the bounded selection bounds the coverage schema before copying
+    // it, malformed omission cells are never positive evidence, and clearing a
+    // fact-free store with an omission index advances the revision. (T-0314)
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let fact_node = node("repo/a:omitted");
+    let fact = FactKey::from_node(&fact_node);
+    let records = [SourceOmission {
+        fact: fact.clone(),
+        emitted_fact_digest: node_digest(&fact_node).unwrap(),
+        kind: ReceiptOmissionKind::Rules,
+    }];
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch {
+                    upsert_nodes: vec![fact_node.clone()],
+                    ..GraphPatch::default()
+                },
+                "repo/a",
+                &[],
+                None,
+                SourceOmissions {
+                    records: &records,
+                    complete: true,
+                },
+            )
+            .unwrap()
+    );
+    let limits = SnapshotReadLimits::default();
+    let select = |store: &SqliteGraphStore| {
+        store
+            .read_source_selection_snapshot_bounded(std::slice::from_ref(&fact), limits)
+            .map(|snapshot| snapshot.selections[0].omission.clone())
+    };
+    assert!(matches!(
+        select(&store).unwrap(),
+        OmissionLookup::Omitted { .. }
+    ));
+
+    // Malformed cells (bypassing CHECK constraints) read as Unrecorded.
+    for corruption in [
+        "UPDATE source_node_omissions SET kind = 'bogus'",
+        "UPDATE source_node_omissions SET repo_key = printf('%.300c', 'r')",
+    ] {
+        let snapshot = store.conn.query_row(
+            "SELECT repo_key, kind FROM source_node_omissions",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        );
+        let (repo_key, kind) = snapshot.unwrap();
+        store
+            .conn
+            .execute_batch(&format!(
+                "PRAGMA ignore_check_constraints = 1; {corruption}; PRAGMA ignore_check_constraints = 0;"
+            ))
+            .unwrap();
+        assert_eq!(select(&store).unwrap(), OmissionLookup::Unrecorded);
+        store
+            .conn
+            .execute(
+                "UPDATE source_node_omissions SET repo_key = ?1, kind = ?2",
+                params![repo_key, kind],
+            )
+            .unwrap();
+        assert!(matches!(
+            select(&store).unwrap(),
+            OmissionLookup::Omitted { .. }
+        ));
+    }
+
+    // An oversized foreign coverage object is refused by the bounded preflight
+    // before the exact-schema decoder copies it.
+    let padding = "x".repeat(5000);
+    store
+        .conn
+        .execute_batch(&format!(
+            "CREATE TRIGGER coverage_foreign AFTER INSERT ON coverage_inventories BEGIN SELECT '{padding}'; END"
+        ))
+        .unwrap();
+    assert!(matches!(
+        select(&store),
+        Err(GraphError::SnapshotBounds(
+            SnapshotBoundsError::InvalidSchema
+        ))
+    ));
+    store
+        .conn
+        .execute_batch("DROP TRIGGER coverage_foreign")
+        .unwrap();
+
+    // Clearing a store whose only remaining row is an omission index advances
+    // the revision.
+    store.clear().unwrap();
+    let expected = store.read_snapshot().unwrap();
+    store
+        .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+            &expected,
+            &GraphPatch::default(),
+            "repo/a",
+            &[],
+            None,
+            SourceOmissions {
+                records: &[],
+                complete: true,
+            },
+        )
+        .unwrap();
+    let before = store
+        .read_snapshot_with_revision_bounded(limits)
+        .unwrap()
+        .revision;
+    store.clear().unwrap();
+    assert_ne!(
+        store
+            .read_snapshot_with_revision_bounded(limits)
+            .unwrap()
+            .revision,
+        before
+    );
+    let after = store
+        .read_snapshot_with_revision_bounded(limits)
+        .unwrap()
+        .revision;
+    store.clear().unwrap();
+    assert_eq!(
+        store
+            .read_snapshot_with_revision_bounded(limits)
+            .unwrap()
+            .revision,
+        after
+    );
+}
+
+#[test]
+fn omission_records_require_the_omitted_digest_and_no_retained_binding() {
+    // AC-0314: an omitted occurrence describes the published fact only when
+    // its emitted digest is the fact's current digest, and a fact whose
+    // primary receipt was retained (it has a binding) is never Omitted, even
+    // when another collapsed occurrence of it was omitted. (T-0314)
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let bound = node("repo/a:bound");
+    let stale = node("repo/a:stale");
+    let exact = node("repo/a:exact");
+    let older_stale = Node {
+        props: serde_json::json!({"prov": {"content_hash": "older"}, "name": "stale"}),
+        ..stale.clone()
+    };
+    let records = [
+        SourceOmission {
+            fact: FactKey::from_node(&bound),
+            emitted_fact_digest: node_digest(&bound).unwrap(),
+            kind: ReceiptOmissionKind::Rules,
+        },
+        SourceOmission {
+            fact: FactKey::from_node(&stale),
+            emitted_fact_digest: node_digest(&older_stale).unwrap(),
+            kind: ReceiptOmissionKind::Rules,
+        },
+        SourceOmission {
+            fact: FactKey::from_node(&exact),
+            emitted_fact_digest: node_digest(&older_stale).unwrap(),
+            kind: ReceiptOmissionKind::Declarations,
+        },
+        SourceOmission {
+            fact: FactKey::from_node(&exact),
+            emitted_fact_digest: node_digest(&exact).unwrap(),
+            kind: ReceiptOmissionKind::StoreCapacity,
+        },
+    ];
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch {
+                    upsert_nodes: vec![bound.clone(), stale.clone(), exact.clone()],
+                    ..GraphPatch::default()
+                },
+                "repo/a",
+                &[node_binding(&bound, "repo/a", "r1")],
+                Some(&coverage_record("repo/a")),
+                SourceOmissions {
+                    records: &records,
+                    complete: true,
+                },
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .receipt_omissions(&[
+                FactKey::from_node(&bound),
+                FactKey::from_node(&stale),
+                FactKey::from_node(&exact),
+            ])
+            .unwrap(),
+        vec![
+            OmissionLookup::NotOmitted,
+            OmissionLookup::NotOmitted,
+            // Only the occurrence emitted for the published content counts,
+            // even though the stale one has a smaller kind.
+            OmissionLookup::Omitted {
+                repo_key: "repo/a".into(),
+                kind: ReceiptOmissionKind::StoreCapacity,
+            },
+        ]
+    );
+    let malformed = [SourceOmission {
+        fact: FactKey::from_node(&exact),
+        emitted_fact_digest: "short".into(),
+        kind: ReceiptOmissionKind::Rules,
+    }];
+    let expected = store.read_snapshot().unwrap();
+    assert!(matches!(
+        store.apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+            &expected,
+            &GraphPatch::default(),
+            "repo/a",
+            &[],
+            None,
+            SourceOmissions {
+                records: &malformed,
+                complete: true,
+            },
+        ),
+        Err(GraphError::SourceBinding("invalid omission digest"))
+    ));
+}
+
+#[test]
+fn later_binding_from_another_repo_takes_precedence_over_existing_omission() {
+    // AC-0314: repo A records omissions for an unbound node and edge; repo B
+    // then binds both with an empty patch and SourceOmissions::NONE. A's rows
+    // survive B's repo-scoped replacement, but the selection never reports
+    // Omitted beside a current binding. (T-0314)
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let shared_node = node("shared");
+    let shared_edge = edge("shared");
+    let facts = [
+        FactKey::from_node(&shared_node),
+        FactKey::from_edge(&shared_edge),
+    ];
+    let records = [
+        SourceOmission {
+            fact: facts[0].clone(),
+            emitted_fact_digest: node_digest(&shared_node).unwrap(),
+            kind: ReceiptOmissionKind::Rules,
+        },
+        SourceOmission {
+            fact: facts[1].clone(),
+            emitted_fact_digest: edge_digest(&shared_edge).unwrap(),
+            kind: ReceiptOmissionKind::Declarations,
+        },
+    ];
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch {
+                    upsert_nodes: vec![shared_node.clone()],
+                    upsert_edges: vec![shared_edge.clone()],
+                    ..GraphPatch::default()
+                },
+                "repo/a",
+                &[],
+                None,
+                SourceOmissions {
+                    records: &records,
+                    complete: true,
+                },
+            )
+            .unwrap()
+    );
+    let omissions = |store: &SqliteGraphStore| {
+        store
+            .read_source_selection_snapshot(&facts)
+            .unwrap()
+            .selections
+            .into_iter()
+            .map(|selection| (selection.state, selection.omission))
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        omissions(&store)
+            .iter()
+            .all(|(_, omission)| matches!(omission, OmissionLookup::Omitted { .. }))
+    );
+
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch::default(),
+                "repo/b",
+                &[
+                    node_binding(&shared_node, "repo/b", "rb"),
+                    edge_binding(&shared_edge, "repo/b"),
+                ],
+                None,
+                SourceOmissions::NONE,
+            )
+            .unwrap()
+    );
+    let rows: i64 = store
+        .conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM source_node_omissions) + (SELECT count(*) FROM source_edge_omissions)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 2, "repo A's rows survive repo B's scoped replacement");
+    for (state, omission) in omissions(&store) {
+        assert!(
+            matches!(state, FactSourceState::Present { .. }),
+            "{state:?}"
+        );
+        assert!(
+            !matches!(omission, OmissionLookup::Omitted { .. }),
+            "{omission:?}"
+        );
+    }
 }

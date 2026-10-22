@@ -1768,3 +1768,75 @@ fn captured_ingest_names_declaration_receipt_omissions_in_coverage() {
     );
     assert!(inventory.limited);
 }
+
+// AC-0314: when receipt store capacity omits receipts during recovery,
+// publication records per-fact StoreCapacity omissions while keeping the
+// retained fact's source binding intact. (T-0314)
+#[test]
+fn captured_ingest_records_per_fact_store_capacity_omissions_and_retains_bound_fact() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(
+        root.join("rules.ts"),
+        "export function alpha(ok: boolean) { if (!ok) return false; return true; }\n\
+         export function beta() { return 2; }\n",
+    )
+    .unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 1;
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let graph = state.graph.lock().unwrap();
+    let bindings = graph
+        .source_bindings_for_repo(&registered.repo_key)
+        .unwrap();
+    assert_eq!(bindings.len(), 1);
+    let bound_fact = bindings[0].fact.clone();
+    assert_eq!(
+        graph.current_source_binding(&bound_fact).unwrap(),
+        Some(bindings[0].clone())
+    );
+    let bound_selection = graph
+        .read_source_selection_snapshot(std::slice::from_ref(&bound_fact))
+        .unwrap();
+    assert_eq!(
+        bound_selection.selections[0].omission,
+        core_graph::source::OmissionLookup::NotOmitted
+    );
+
+    let (nodes, edges) = graph.read_snapshot().unwrap();
+    let facts: Vec<_> = nodes
+        .iter()
+        .map(core_graph::source::FactKey::from_node)
+        .chain(edges.iter().map(core_graph::source::FactKey::from_edge))
+        .collect();
+    let omitted = core_graph::source::OmissionLookup::Omitted {
+        repo_key: registered.repo_key.clone(),
+        kind: core_graph::source::ReceiptOmissionKind::StoreCapacity,
+    };
+    let mut omitted_facts = Vec::new();
+    for chunk in facts.chunks(core_graph::source::MAX_SOURCE_SELECTION_KEYS) {
+        let selection = graph.read_source_selection_snapshot(chunk).unwrap();
+        omitted_facts.extend(
+            selection
+                .selections
+                .into_iter()
+                .filter(|selection| selection.omission == omitted)
+                .map(|selection| selection.fact),
+        );
+    }
+    assert!(
+        !omitted_facts.is_empty(),
+        "expected at least one StoreCapacity omission record"
+    );
+    assert!(!omitted_facts.contains(&bound_fact));
+}

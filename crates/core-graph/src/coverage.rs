@@ -91,6 +91,26 @@ fn owned_schema(connection: &Connection) -> Result<BTreeMap<String, (String, Str
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// Bound the owned coverage schema's object count, types and byte lengths in
+/// the caller's read transaction before [`check_schema`] copies SQL bodies.
+/// Used by bounded selection reads that consult coverage for omission outcomes.
+pub(crate) fn preflight_schema(connection: &Connection) -> Result<(), GraphError> {
+    let (count, valid): (i64, bool) = connection.query_row(
+        &format!("SELECT count(*), coalesce(min(typeof(name) = 'text' AND length(CAST(name AS BLOB)) <= 256 AND typeof(type) = 'text' AND length(CAST(type AS BLOB)) <= 16 AND typeof(sql) = 'text' AND length(CAST(sql AS BLOB)) <= 4096), 0) FROM sqlite_schema WHERE {OWNED_SCHEMA_WHERE}"),
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let expected = SCHEMA.len()
+        + if crate::generation::validate_optional(connection)? {
+            crate::generation::trigger_count_for_tables(&["coverage_inventories"])
+        } else {
+            0
+        };
+    if usize::try_from(count).ok() != Some(expected) || !valid {
+        return Err(crate::SnapshotBoundsError::InvalidSchema.into());
+    }
+    Ok(())
+}
+
 pub(crate) fn check_schema(connection: &Connection) -> Result<(), GraphError> {
     // Generation triggers are part of this owner's inventory. Validate their
     // metadata bounds before owned_schema allocates SQL strings.

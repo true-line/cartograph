@@ -34,6 +34,26 @@ pub enum ReceiptOmission {
     StoreCapacity,
 }
 
+impl From<ReceiptOmission> for core_graph::source::ReceiptOmissionKind {
+    fn from(omission: ReceiptOmission) -> Self {
+        match omission {
+            ReceiptOmission::Declarations => Self::Declarations,
+            ReceiptOmission::Rules => Self::Rules,
+            ReceiptOmission::StoreCapacity => Self::StoreCapacity,
+        }
+    }
+}
+
+impl From<core_graph::source::ReceiptOmissionKind> for ReceiptOmission {
+    fn from(kind: core_graph::source::ReceiptOmissionKind) -> Self {
+        match kind {
+            core_graph::source::ReceiptOmissionKind::Declarations => Self::Declarations,
+            core_graph::source::ReceiptOmissionKind::Rules => Self::Rules,
+            core_graph::source::ReceiptOmissionKind::StoreCapacity => Self::StoreCapacity,
+        }
+    }
+}
+
 impl ReceiptOmission {
     fn capability(self) -> &'static str {
         match self {

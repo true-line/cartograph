@@ -1,6 +1,6 @@
 # ADR-0046 — Compact receipts, positive absence records and reclaimable retention
 
-- **Status:** Proposed. Design r2 agreed with Codex (20261022T033000Z). Decisions 1 (receipt contract v3) and 3 (forget reclaim and pins) implemented; decisions 2, 4, 5 and 6 pending. Decision 3 adds three indexes so the store's integrity checks stay linear in tombstones and reclaims, and binds each capture-forgotten receipt to the exact tombstone that marked it; saved work packets also pin their cited receipts (#749).
+- **Status:** Proposed. Design r2 agreed with Codex (20261022T033000Z). Decisions 1 (receipt contract v3), 2 (per-fact omission records and lookup; see the implementation note under decision 2) and 3 (forget reclaim and pins) implemented; MCP absence-reason integration (#727) and decisions 4, 5 and 6 pending. Decision 3 adds three indexes so the store's integrity checks stay linear in tombstones and reclaims, and binds each capture-forgotten receipt to the exact tombstone that marked it; saved work packets also pin their cited receipts (#749).
 - **Date:** 2026-10-22
 - **Deciders:** Cartograph maintainers; Claude implementation, Codex cross-review
 - **Issue:** #725 (follows #722/#726; serves AC-0288 in #727)
@@ -28,6 +28,14 @@ Read-only MCP must distinguish *forgotten*, *omitted* and *missing* evidence. To
    - Each record is `(basis id, FactKey digest, kind ∈ {declarations, rules, store_capacity})`, stored per source revision next to the coverage record, with a per-file count index. Lookup is `(basis id, FactKey) → Option<ReceiptOmission>`.
    - Writes go through checked count/byte admission. Owner-set numbers count against the same retention accounting as receipts, and they are reclaimed with their revision when it is superseded and unpinned.
    - **If a revision's omission records cannot all be persisted, the revision records `omissions_incomplete` instead.** The resolver then reports "missing" for unrecorded facts, never "omitted". A partial set is never presented as complete.
+   - *Implementation note (#725).* Records live in the graph store beside the source bindings and describe the **current** graph, not each historical revision.
+     - Each publish replaces a repo's records.
+     - Each record carries the complete digest the omitted receipt was emitted for and is kept only when that equals the published fact's digest; a fact with any current binding is never recorded, and at selection a current binding from any repository overrides a surviving record. The fact triggers drop the record when the fact is rewritten.
+     - Lookup is `FactKey → Omitted | NotOmitted | Unrecorded`. It is answered only inside the bounded source-selection read, in the same transaction and against the same copied graph digest as the association state, so a consumer never pairs an omission with a different revision. The selection returns its store revision, and `read_source_selection_snapshot_at_revision_bounded` refuses a changed basis. Omission tables are not generation-watched; publication and `clear` advance the revision themselves whenever they write or delete omission rows. The bounded selection preflights the coverage schema before decoding it, and omission cells are type- and length-checked in SQL before copying; a malformed row is never `Omitted`. There is no standalone unbounded lookup.
+
+     This is equivalent to `(basis id, FactKey)` for the resolver, because step 4 runs only after the requested basis has been checked against the current graph; any other basis is already stale.
+
+     Records are bounded at 262,144 per repo in the graph store rather than counted against receipt retention. Over the bound, or when a producer has only per-file counts, the repo records `incomplete`.
 3. **Forget and pins.**
    - `forget` deletes capture bytes, as today. In the same transaction, under the retention guard, it reclaims exactly the receipt rows that the shared eligibility predicate (section 4) allows.
    - **Pinned receipts keep their metadata rows.** They are marked `capture_forgotten`, so a historical citation still resolves its identity and reports forgotten bytes instead of silently disappearing.
