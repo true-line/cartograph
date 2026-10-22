@@ -536,7 +536,8 @@ fn mount_receivers_need_their_reaching_definition() {
     let mut routers = String::from("from fastapi import APIRouter\n");
     for name in [
         "good", "over", "late", "inner", "cond", "shadow", "module", "loop", "matched", "classy",
-        "early", "lam", "walrus", "glob", "lamwal", "lamwalfn", "lamok", "lamdef",
+        "early", "lam", "walrus", "glob", "lamwal", "lamwalfn", "lamok", "lamdef", "lamcomp",
+        "gencomp", "compok",
     ] {
         routers.push_str(&format!(
             "{name} = APIRouter()\n@{name}.get(\"/x\")\ndef {name}_x():\n    return {{}}\n"
@@ -564,7 +565,7 @@ def make():
         "main.py",
         r#"
 from fastapi import FastAPI
-from routers import good, over, late, inner, cond, shadow, module, loop, matched, classy, early, lam, walrus, glob, lamwal, lamwalfn, lamok, lamdef
+from routers import good, over, late, inner, cond, shadow, module, loop, matched, classy, early, lam, walrus, glob, lamwal, lamwalfn, lamok, lamdef, lamcomp, gencomp, compok
 from fake import Fake
 
 app = FastAPI()
@@ -628,6 +629,17 @@ install_def()
 install_ok = lambda: app.include_router(lamok, prefix="/lamok")
 install_ok()
 
+fakes = [Fake()]
+install_lc = lambda: [app.include_router(lamcomp, prefix="/lamcomp") for app in fakes]
+install_lc()
+
+pairs = [(Fake(), 1)]
+install_gc = lambda: list(app.include_router(gencomp, prefix="/gencomp") for (app, _) in pairs)
+install_gc()
+
+install_co = lambda: [app.include_router(compok, prefix="/compok") for _ in fakes]
+install_co()
+
 def install_match(value):
     app = FastAPI()
     match value:
@@ -674,13 +686,16 @@ later = FastAPI()
         facts,
         vec![
             unproven("/classy/x"),
+            confirmed("/compok/x"),
             unproven("/cond/x"),
             unproven("/early/x"),
             confirmed("/flask/x"),
+            unproven("/gencomp/x"),
             confirmed("/global/x"),
             confirmed("/good/x"),
             unproven("/inner/x"),
             unproven("/lam/x"),
+            unproven("/lamcomp/x"),
             unproven("/lamdef/x"),
             confirmed("/lamok/x"),
             unproven("/lamwal/x"),

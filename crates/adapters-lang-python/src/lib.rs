@@ -740,14 +740,35 @@ fn module_binding_reaches(cx: &FileCx<'_>, use_node: TsNode<'_>, name: &str) -> 
     )
 }
 
-/// Whether a lambda between `use_node` and its enclosing function or class
-/// names `name` among its parameters, so the read is that parameter (#747).
-/// Any occurrence in the parameter list counts, which only fails closed.
-fn lambda_parameter_shadows(cx: &FileCx<'_>, use_node: TsNode<'_>, name: &str) -> bool {
+/// Whether a lambda or comprehension between `use_node` and its enclosing
+/// function or class binds `name`, so the read is that local and not the
+/// enclosing binding (#747). A lambda binds its parameters and the walruses in
+/// its body. A comprehension (list, set, dict or generator) binds its `for`
+/// targets, destructured ones included. Any occurrence in a parameter list or
+/// a `for` target counts, which only fails closed.
+fn scope_shadows(cx: &FileCx<'_>, use_node: TsNode<'_>, name: &str) -> bool {
     let mut ancestor = use_node.parent();
     while let Some(node) = ancestor {
         match node.kind() {
             "function_definition" | "class_definition" | "module" => return false,
+            "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression" => {
+                let mut walk = node.walk();
+                let mut stack: Vec<_> = node
+                    .named_children(&mut walk)
+                    .filter(|child| child.kind() == "for_in_clause")
+                    .filter_map(|clause| clause.child_by_field_name("left"))
+                    .collect();
+                while let Some(current) = stack.pop() {
+                    if current.kind() == "identifier" && cx.text(&current) == name {
+                        return true;
+                    }
+                    let mut walk = current.walk();
+                    stack.extend(current.named_children(&mut walk));
+                }
+            }
             "lambda" => {
                 if let Some(parameters) = node.child_by_field_name("parameters") {
                     let mut stack = vec![parameters];
@@ -803,7 +824,7 @@ fn mount_parent(
         return MountParent::Unproven;
     }
     let name = cx.text(&object);
-    if lambda_parameter_shadows(cx, object, name) {
+    if scope_shadows(cx, object, name) {
         return MountParent::Unproven;
     }
     if let Some(function) = enclosing_function_node(object) {
