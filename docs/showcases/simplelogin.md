@@ -137,5 +137,5 @@ Expected result to verify in `$OUT/verified-only/drift_register.md` under `## AP
 ## Known limits
 
 - Swift is unsupported; no iOS client was ingested.
-- There is no Terraform or other IaC in these repos, so the empty topology is expected (gap 3).
+- There is no Terraform or other IaC in these repos. The topology shows only what the source proves, currently one `localStorage` resource; the rest of the infrastructure is still unrecovered (gap 3).
 - Request parameters and response shapes were not scored. The scorer compares methods and paths only.
