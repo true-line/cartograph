@@ -84,15 +84,83 @@ fn normalize_key(path: &str) -> String {
         .join("/")
 }
 
-/// Read at most [`MAX_API_DOC_BYTES`] + 1 bytes from `path`, so a file that grows
-/// after its metadata was checked is still rejected without reading it whole.
-fn read_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
+/// Why [`read_anchored`] refused or failed to read a repo-relative file.
+enum AnchoredRead {
+    /// A component of the path does not exist.
+    NotFound,
+    /// A component is a symlink or not a directory, or the final entry is not
+    /// a regular file.
+    NotRegular,
+    /// The file holds more than [`MAX_API_DOC_BYTES`] bytes.
+    TooLarge,
+    /// Any other I/O failure.
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for AnchoredRead {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+/// Read the slash path `rel` beneath `root` without following any symlink or
+/// re-resolving the path, so the bytes are read from the exact entry that was
+/// checked. Each directory is opened by a single no-follow component. The file
+/// is opened no-follow and nonblocking, so a FIFO swapped in cannot block, and
+/// it is typed and size-checked on the opened handle. At most
+/// [`MAX_API_DOC_BYTES`] + 1 bytes are read, so a file that grows after the
+/// check is still rejected. This mirrors `source_capture`'s selected-file read.
+fn read_anchored(root: &Path, rel: &str) -> Result<Vec<u8>, AnchoredRead> {
+    use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
     use std::io::Read;
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(MAX_API_DOC_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    Ok(bytes)
+    let not_found = |err: std::io::Error| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            AnchoredRead::NotFound
+        } else {
+            AnchoredRead::NotRegular
+        }
+    };
+    let mut directory = cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
+    let mut components = rel.split('/').peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_some() {
+            directory = directory.open_dir_nofollow(component).map_err(not_found)?;
+            continue;
+        }
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No).nonblock(true);
+        let file = directory
+            .open_with(component, &options)
+            .map_err(not_found)?;
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() {
+            return Err(AnchoredRead::NotRegular);
+        }
+        if metadata.len() > MAX_API_DOC_BYTES {
+            return Err(AnchoredRead::TooLarge);
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_API_DOC_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_API_DOC_BYTES {
+            return Err(AnchoredRead::TooLarge);
+        }
+        return Ok(bytes);
+    }
+    Err(AnchoredRead::NotRegular)
+}
+
+/// Gap reason for a failed [`read_anchored`] of `what`.
+fn anchored_reason(what: &str, failure: AnchoredRead) -> String {
+    match failure {
+        AnchoredRead::NotFound => format!("{what} does not exist"),
+        AnchoredRead::NotRegular => {
+            format!(
+                "{what} must be a regular file inside the repository, with no symlink in its path"
+            )
+        }
+        AnchoredRead::TooLarge => format!("{what} exceeds the {MAX_API_DOC_BYTES} byte limit"),
+        AnchoredRead::Io(err) => format!("{what} cannot be read: {err}"),
+    }
 }
 
 /// Load `.cartograph/api-docs.toml` (if present under `root`), union its entries
@@ -149,24 +217,10 @@ pub fn load_api_docs(root: &Path, manifest_docs: &[ApiDocDeclaration]) -> Loaded
         };
     }
 
-    let canon_root = match dunce::canonicalize(root) {
-        Ok(canon) => canon,
-        Err(err) => {
-            return LoadedApiDocs {
-                declared: true,
-                docs: Vec::new(),
-                gaps: vec![ApiDocValidationGap {
-                    doc_path: API_DOCS_REL_PATH.into(),
-                    reason: format!("cannot canonicalize repository root: {err}"),
-                }],
-            };
-        }
-    };
-
     let mut docs = Vec::new();
     let mut gaps = Vec::new();
     for decl in &merged {
-        match validate_one_doc(root, &canon_root, decl) {
+        match validate_one_doc(root, decl) {
             Ok(valid) => docs.push(valid),
             Err(gap) => gaps.push(gap),
         }
@@ -180,80 +234,32 @@ pub fn load_api_docs(root: &Path, manifest_docs: &[ApiDocDeclaration]) -> Loaded
 }
 
 fn load_repo_config(root: &Path) -> Result<Vec<ApiDocDeclaration>, ApiDocValidationGap> {
-    let dot_cartograph = root.join(".cartograph");
-    match std::fs::symlink_metadata(&dot_cartograph) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(ApiDocValidationGap {
-                doc_path: API_DOCS_REL_PATH.into(),
-                reason: format!("cannot inspect .cartograph directory: {err}"),
-            });
-        }
-        Ok(meta) => {
-            if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
-                return Err(ApiDocValidationGap {
-                    doc_path: API_DOCS_REL_PATH.into(),
-                    reason: "invalid .cartograph/api-docs.toml: .cartograph must be a real directory, not a symlink".into(),
-                });
-            }
-        }
-    }
-
-    let cfg_path = root.join(API_DOCS_REL_PATH);
-    let meta = match std::fs::symlink_metadata(&cfg_path) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(ApiDocValidationGap {
-                doc_path: API_DOCS_REL_PATH.into(),
-                reason: format!("cannot inspect {API_DOCS_REL_PATH}: {err}"),
-            });
-        }
-        Ok(meta) => meta,
+    let gap = |reason: String| ApiDocValidationGap {
+        doc_path: API_DOCS_REL_PATH.into(),
+        reason,
     };
-
-    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
-        return Err(ApiDocValidationGap {
-            doc_path: API_DOCS_REL_PATH.into(),
-            reason: format!("invalid {API_DOCS_REL_PATH}: must be a regular file, not a symlink"),
-        });
-    }
-    if meta.len() > MAX_API_DOC_BYTES {
-        return Err(ApiDocValidationGap {
-            doc_path: API_DOCS_REL_PATH.into(),
-            reason: format!(
-                "invalid {API_DOCS_REL_PATH}: {} bytes exceeds {MAX_API_DOC_BYTES} byte limit",
-                meta.len()
-            ),
-        });
-    }
-
-    let bytes = read_bounded(&cfg_path).map_err(|err| ApiDocValidationGap {
-        doc_path: API_DOCS_REL_PATH.into(),
-        reason: format!("cannot read {API_DOCS_REL_PATH}: {err}"),
+    let bytes = match read_anchored(root, API_DOCS_REL_PATH) {
+        Ok(bytes) => bytes,
+        Err(AnchoredRead::NotFound) => return Ok(Vec::new()),
+        Err(failure) => {
+            return Err(gap(format!(
+                "invalid {}",
+                anchored_reason(API_DOCS_REL_PATH, failure)
+            )));
+        }
+    };
+    let raw = String::from_utf8(bytes).map_err(|err| {
+        gap(format!(
+            "invalid {API_DOCS_REL_PATH}: not valid UTF-8 ({err})"
+        ))
     })?;
-    if bytes.len() as u64 > MAX_API_DOC_BYTES {
-        return Err(ApiDocValidationGap {
-            doc_path: API_DOCS_REL_PATH.into(),
-            reason: format!(
-                "invalid {API_DOCS_REL_PATH}: {} bytes exceeds {MAX_API_DOC_BYTES} byte limit",
-                bytes.len()
-            ),
-        });
-    }
-    let raw = String::from_utf8(bytes).map_err(|err| ApiDocValidationGap {
-        doc_path: API_DOCS_REL_PATH.into(),
-        reason: format!("invalid {API_DOCS_REL_PATH}: not valid UTF-8 ({err})"),
-    })?;
-    let parsed: ApiDocsConfig = toml::from_str(&raw).map_err(|err| ApiDocValidationGap {
-        doc_path: API_DOCS_REL_PATH.into(),
-        reason: format!("malformed {API_DOCS_REL_PATH}: {err}"),
-    })?;
+    let parsed: ApiDocsConfig =
+        toml::from_str(&raw).map_err(|err| gap(format!("malformed {API_DOCS_REL_PATH}: {err}")))?;
     Ok(parsed.doc)
 }
 
 fn validate_one_doc(
     root: &Path,
-    canon_root: &Path,
     decl: &ApiDocDeclaration,
 ) -> Result<ValidatedApiDoc, ApiDocValidationGap> {
     let raw_path = decl.path.as_str();
@@ -300,7 +306,6 @@ fn validate_one_doc(
         });
     }
 
-    let mut current = root.to_path_buf();
     let mut norm_parts = Vec::new();
     for comp in Path::new(raw_path).components() {
         match comp {
@@ -311,21 +316,7 @@ fn validate_one_doc(
                         reason: format!("declared API doc path \"{raw_path}\" is not valid UTF-8"),
                     });
                 };
-                current.push(part);
                 norm_parts.push(part_str.to_string());
-                let meta =
-                    std::fs::symlink_metadata(&current).map_err(|err| ApiDocValidationGap {
-                        doc_path: raw_path.into(),
-                        reason: format!("declared API doc \"{raw_path}\" cannot be read: {err}"),
-                    })?;
-                if meta.file_type().is_symlink() {
-                    return Err(ApiDocValidationGap {
-                        doc_path: raw_path.into(),
-                        reason: format!(
-                            "declared API doc \"{raw_path}\" must not be a symlink or traverse a symlink"
-                        ),
-                    });
-                }
             }
             Component::CurDir => {}
             _ => {
@@ -338,7 +329,6 @@ fn validate_one_doc(
             }
         }
     }
-
     if norm_parts.is_empty() {
         return Err(ApiDocValidationGap {
             doc_path: raw_path.into(),
@@ -347,54 +337,10 @@ fn validate_one_doc(
     }
 
     let norm_path = norm_parts.join("/");
-    let meta = std::fs::symlink_metadata(&current).map_err(|err| ApiDocValidationGap {
+    let bytes = read_anchored(root, &norm_path).map_err(|failure| ApiDocValidationGap {
         doc_path: norm_path.clone(),
-        reason: format!("declared API doc \"{norm_path}\" cannot be read: {err}"),
+        reason: anchored_reason(&format!("declared API doc \"{norm_path}\""), failure),
     })?;
-    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
-        return Err(ApiDocValidationGap {
-            doc_path: norm_path.clone(),
-            reason: format!(
-                "declared API doc \"{norm_path}\" must be a regular file, not a symlink"
-            ),
-        });
-    }
-    if meta.len() > MAX_API_DOC_BYTES {
-        return Err(ApiDocValidationGap {
-            doc_path: norm_path.clone(),
-            reason: format!(
-                "declared API doc \"{norm_path}\" is {} bytes (exceeds {MAX_API_DOC_BYTES} byte limit)",
-                meta.len()
-            ),
-        });
-    }
-
-    let canon_file = dunce::canonicalize(&current).map_err(|err| ApiDocValidationGap {
-        doc_path: norm_path.clone(),
-        reason: format!("declared API doc \"{norm_path}\" cannot be canonicalized: {err}"),
-    })?;
-    if !canon_file.starts_with(canon_root) || canon_file == *canon_root {
-        return Err(ApiDocValidationGap {
-            doc_path: norm_path.clone(),
-            reason: format!(
-                "declared API doc \"{norm_path}\" resolves outside the repository root"
-            ),
-        });
-    }
-
-    let bytes = read_bounded(&canon_file).map_err(|err| ApiDocValidationGap {
-        doc_path: norm_path.clone(),
-        reason: format!("declared API doc \"{norm_path}\" cannot be read: {err}"),
-    })?;
-    if bytes.len() as u64 > MAX_API_DOC_BYTES {
-        return Err(ApiDocValidationGap {
-            doc_path: norm_path.clone(),
-            reason: format!(
-                "declared API doc \"{norm_path}\" is {} bytes (exceeds {MAX_API_DOC_BYTES} byte limit)",
-                bytes.len()
-            ),
-        });
-    }
     let contents = String::from_utf8(bytes).map_err(|err| ApiDocValidationGap {
         doc_path: norm_path.clone(),
         reason: format!("declared API doc \"{norm_path}\" is not valid UTF-8: {err}"),
@@ -549,5 +495,56 @@ prefix = "api"
         assert!(malformed.docs.is_empty());
         assert_eq!(malformed.gaps.len(), 1);
         assert!(malformed.gaps[0].reason.contains("malformed"));
+    }
+
+    // AC-0313 (#739): reads are anchored at the opened handle, so a FIFO at the
+    // declared path fails closed without blocking, and a symlinked ancestor or
+    // `.cartograph` directory is refused rather than followed out of the root.
+    #[cfg(unix)]
+    #[test]
+    fn api_doc_reads_refuse_fifos_and_symlinked_ancestors_without_following() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("api.md"), "#### GET /api/escape\n").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let fifo = root.join("docs/fifo.md");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::os::unix::fs::symlink(outside.path(), root.join("linked")).unwrap();
+        let declared = |path: &str| ApiDocDeclaration {
+            path: path.into(),
+            prefix: None,
+        };
+        let loaded = load_api_docs(root, &[declared("docs/fifo.md"), declared("linked/api.md")]);
+        assert!(loaded.docs.is_empty(), "{:?}", loaded.docs);
+        assert_eq!(loaded.gaps.len(), 2, "{:?}", loaded.gaps);
+        for gap in &loaded.gaps {
+            assert!(gap.reason.contains("no symlink in its path"), "{gap:?}");
+        }
+
+        let config_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("cfg")).unwrap();
+        std::fs::write(
+            outside.path().join("cfg/api-docs.toml"),
+            "[[doc]]\npath = \"api.md\"\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("cfg"),
+            config_root.path().join(".cartograph"),
+        )
+        .unwrap();
+        let refused = load_api_docs(config_root.path(), &[]);
+        assert!(refused.declared && refused.docs.is_empty());
+        assert_eq!(refused.gaps.len(), 1);
+        assert!(
+            refused.gaps[0].reason.contains("no symlink in its path"),
+            "{:?}",
+            refused.gaps
+        );
     }
 }

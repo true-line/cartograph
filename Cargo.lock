@@ -2455,6 +2455,8 @@ name = "ingest"
 version = "0.20.0"
 dependencies = [
  "adapters-fw",
+ "cap-fs-ext",
+ "cap-std",
  "core-graph",
  "core-prov",
  "core-redact",

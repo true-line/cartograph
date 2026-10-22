@@ -21,6 +21,9 @@ adapters-fw = { workspace = true }
 toml = "1.1"
 url = "2"
 dunce = "1"
+# Anchored no-follow reads of declared API docs, as in source-capture.
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
 # libgit2 bindings; vendored so CI needs no system libgit2.
 git2 = { version = "0.21", default-features = false, features = ["https", "vendored-libgit2", "vendored-openssl"] }
 
