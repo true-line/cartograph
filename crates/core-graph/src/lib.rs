@@ -16,6 +16,9 @@ pub mod source;
 
 pub use bounded::{SnapshotBoundsError, SnapshotReadLimits};
 pub use generation::{GenerationError, RevisionedSnapshot, StoreRevision};
+pub use source::{
+    FactKey, OmissionLookup, ReceiptOmissionKind, SourceBinding, SourceOmission, SourceOmissions,
+};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -417,7 +420,7 @@ impl SqliteGraphStore {
             // Pre-versioned or older-scheme db: clear the facts, keep the
             // shape. Deletion order respects the edge → node foreign keys.
             conn.execute_batch(
-                "DELETE FROM edges; DELETE FROM nodes; DELETE FROM coverage_inventories;",
+                "DELETE FROM edges; DELETE FROM nodes; DELETE FROM coverage_inventories; DELETE FROM source_omission_index;",
             )?;
             if had_fact_schema {
                 generation::bump(&transaction)?;
@@ -596,6 +599,7 @@ impl GraphStore for SqliteGraphStore {
         tx.execute("DELETE FROM edges", [])?;
         tx.execute("DELETE FROM nodes", [])?;
         coverage::clear(&tx)?;
+        source::clear(&tx)?;
         tx.commit()?;
         Ok(())
     }

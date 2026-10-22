@@ -742,6 +742,18 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
         stats.omitted_declaration_receipts,
         BTreeMap::from([("b.ts".to_string(), 2)])
     );
+    assert!(stats.omitted_receipt_facts_complete);
+    let expected_b_decls: Vec<_> = per_file[1]
+        .declarations
+        .iter()
+        .map(|(receipt, _)| {
+            (
+                receipt.fact_key().clone(),
+                core_graph::source::ReceiptOmissionKind::Declarations,
+            )
+        })
+        .collect();
+    assert_eq!(stats.omitted_receipt_facts, expected_b_decls);
     // A receipt-count ceiling equal to the rules admits no declaration.
     let (_, admitted, stats) = run(usize::MAX, rules.len()).unwrap();
     assert_eq!(admitted.len(), rules.len());
@@ -749,9 +761,21 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
         stats.omitted_declaration_receipts,
         BTreeMap::from([("a.ts".to_string(), 1), ("b.ts".to_string(), 2)])
     );
-    // AC-0292: a rule receipt that does not fit is omitted and named by file
-    // (#722); the extraction succeeds, keeps the fact, and admits no
-    // declaration ahead of the rule that lost.
+    assert!(stats.omitted_receipt_facts_complete);
+    let expected_all_decls: Vec<_> = per_file
+        .iter()
+        .flat_map(|file| &file.declarations)
+        .map(|(receipt, _)| {
+            (
+                receipt.fact_key().clone(),
+                core_graph::source::ReceiptOmissionKind::Declarations,
+            )
+        })
+        .collect();
+    assert_eq!(stats.omitted_receipt_facts, expected_all_decls);
+    // AC-0292, AC-0314: a rule receipt that does not fit is omitted and named by
+    // file (#722) and by fact key (#725); the extraction succeeds, keeps the
+    // fact, and admits no declaration ahead of the rule that lost. (T-0314)
     let (extraction, admitted, stats) = run(rule_bytes - 1, usize::MAX).unwrap();
     let kept = rules.iter().filter(|rule| admitted.contains(rule)).count();
     assert_eq!(kept, rules.len() - 1);
@@ -761,6 +785,23 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
     );
     let lost = rules.iter().find(|rule| !admitted.contains(rule)).unwrap();
     assert!(surviving_facts(&extraction)(lost.fact_key()));
+    assert!(stats.omitted_receipt_facts_complete);
+    let omitted_rule_keys: Vec<_> = stats
+        .omitted_receipt_facts
+        .iter()
+        .filter(|(_, kind)| *kind == core_graph::source::ReceiptOmissionKind::Rules)
+        .map(|(key, _)| key.clone())
+        .collect();
+    assert_eq!(omitted_rule_keys, vec![lost.fact_key().clone()]);
+    let omitted_decl_count = stats
+        .omitted_receipt_facts
+        .iter()
+        .filter(|(_, kind)| *kind == core_graph::source::ReceiptOmissionKind::Declarations)
+        .count() as u64;
+    assert_eq!(
+        omitted_decl_count,
+        stats.omitted_declaration_receipts.values().sum::<u64>()
+    );
     // Declarations only fill what the admitted rules left; none is admitted
     // past the byte budget, and every one left out is still named.
     let admitted_bytes: usize = admitted.iter().map(size).sum();
@@ -810,7 +851,9 @@ fn captured_declarations_are_bounded_per_file_before_admission() {
         (sized.declarations.len(), sized.omitted_declarations),
         (2, 1)
     );
-    // Producer omissions reach the directory stats under the file's name.
+    // Producer omissions reach the directory stats under the file's name and
+    // mark per-fact omission records incomplete because unminted per-file
+    // declarations have no FactKey (AC-0314, T-0314).
     let (_, receipts, stats) = extract_captured_dir_bounded(
         directory.path(),
         &parser_id(),
@@ -832,6 +875,8 @@ fn captured_declarations_are_bounded_per_file_before_admission() {
         stats.omitted_declaration_receipts,
         BTreeMap::from([("many.ts".to_string(), 2)])
     );
+    assert!(!stats.omitted_receipt_facts_complete);
+    assert!(stats.omitted_receipt_facts.is_empty());
 }
 
 // AC-0282: top-level variables, the first-level properties of their object

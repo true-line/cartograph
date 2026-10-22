@@ -51,6 +51,7 @@ impl Fixture {
                     &scoped.repo_key,
                     &[],
                     Some(&record),
+                    core_graph::source::SourceOmissions::NONE,
                 )
                 .unwrap()
         );

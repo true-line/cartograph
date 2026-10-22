@@ -20,6 +20,93 @@ const MAX_BINDINGS: usize = 100_000;
 /// Maximum raw selection entries, before duplicate identities are removed.
 pub const MAX_SOURCE_SELECTION_KEYS: usize = 65;
 
+/// Maximum per-repository omission records persisted before degrading to an
+/// incomplete index entry.
+pub const MAX_OMISSIONS: usize = 262_144;
+
+/// Bound that caused a recovered fact's primary receipt to be omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptOmissionKind {
+    /// Per-file or per-repository declaration receipt cap was reached.
+    Declarations,
+    /// Per-repository rule receipt cap was reached.
+    Rules,
+    /// Receipt store capacity cap was reached while persisting receipts.
+    StoreCapacity,
+}
+
+impl ReceiptOmissionKind {
+    /// Stable SQLite and wire token (`declarations`, `rules`, `store_capacity`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Declarations => "declarations",
+            Self::Rules => "rules",
+            Self::StoreCapacity => "store_capacity",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<Self, GraphError> {
+        match value {
+            "declarations" => Ok(Self::Declarations),
+            "rules" => Ok(Self::Rules),
+            "store_capacity" => Ok(Self::StoreCapacity),
+            _ => Err(GraphError::SourceBinding("invalid omission kind")),
+        }
+    }
+}
+
+/// Positive per-fact record that a primary receipt was omitted because a bound
+/// was reached.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceOmission {
+    /// Complete typed fact identity.
+    pub fact: FactKey,
+    /// Bound that omitted the fact's primary receipt.
+    pub kind: ReceiptOmissionKind,
+}
+
+/// Per-repository omission records published alongside a graph patch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceOmissions<'a> {
+    /// Omitted facts observed while extracting and persisting the repository.
+    pub records: &'a [SourceOmission],
+    /// Whether every omitted receipt produced a [`FactKey`].
+    pub complete: bool,
+}
+
+impl<'a> SourceOmissions<'a> {
+    /// No omission producer ran; leaves the repository unrecorded.
+    pub const NONE: Self = Self {
+        records: &[],
+        complete: false,
+    };
+}
+
+/// Outcome of checking whether a current graph fact's primary receipt was omitted.
+///
+/// [`Self::NotOmitted`] is not evidence that a receipt exists; only a
+/// [`SourceBinding`] is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum OmissionLookup {
+    /// The current fact matches a recorded receipt omission for `repo_key`.
+    Omitted {
+        /// Registered repository key that recorded the omission.
+        repo_key: String,
+        /// Bound that caused the receipt to be omitted.
+        kind: ReceiptOmissionKind,
+    },
+    /// Every covered repository has a complete omission index and none recorded
+    /// an omission for this current fact. This is not evidence that a receipt
+    /// exists; only a [`SourceBinding`] is.
+    NotOmitted,
+    /// The fact is absent, its omission record is stale, coverage is empty, or
+    /// any covered repository has a missing or incomplete omission index.
+    Unrecorded,
+}
+
 /// Unambiguous node or directed-edge identity, matching context FactReference.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -191,7 +278,9 @@ fn bounded(value: &str, maximum: usize) -> Result<(), GraphError> {
 
 // Exact owned SQL is checked before use. A partial/future schema is never
 // silently CREATE-repaired, and this version does not use graph user_version.
-const SCHEMA: &[(&str, &str, &str)] = &[
+const META_SCHEMA_V2: &str = "CREATE TABLE source_binding_meta (singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1), version INTEGER NOT NULL CHECK (version = 2)) STRICT";
+
+const SCHEMA_V1: &[(&str, &str, &str)] = &[
     (
         "table",
         "source_binding_meta",
@@ -249,7 +338,174 @@ const SCHEMA: &[(&str, &str, &str)] = &[
     ),
 ];
 
-const OWNED_SCHEMA_WHERE: &str = "name GLOB 'source_binding_*' OR name IN ('source_node_bindings', 'source_edge_bindings') OR (tbl_name IN ('source_binding_meta', 'source_node_bindings', 'source_edge_bindings') AND name NOT GLOB 'sqlite_*') OR (type = 'trigger' AND tbl_name IN ('nodes', 'edges'))";
+const OMISSIONS_SCHEMA: &[(&str, &str, &str)] = &[
+    (
+        "table",
+        "source_node_omissions",
+        "CREATE TABLE source_node_omissions (node_id TEXT PRIMARY KEY NOT NULL REFERENCES nodes(id) ON DELETE CASCADE CHECK (length(CAST(node_id AS BLOB)) BETWEEN 1 AND 8192), repo_key TEXT NOT NULL CHECK (length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256), kind TEXT NOT NULL CHECK (kind IN ('declarations','rules','store_capacity')), emitted_fact_digest TEXT NOT NULL CHECK (length(CAST(emitted_fact_digest AS BLOB)) = 72)) STRICT",
+    ),
+    (
+        "table",
+        "source_edge_omissions",
+        "CREATE TABLE source_edge_omissions (source TEXT NOT NULL CHECK (length(CAST(source AS BLOB)) BETWEEN 1 AND 8192), label TEXT NOT NULL CHECK (length(CAST(label AS BLOB)) BETWEEN 1 AND 256), destination TEXT NOT NULL CHECK (length(CAST(destination AS BLOB)) BETWEEN 1 AND 8192), repo_key TEXT NOT NULL CHECK (length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256), kind TEXT NOT NULL CHECK (kind IN ('declarations','rules','store_capacity')), emitted_fact_digest TEXT NOT NULL CHECK (length(CAST(emitted_fact_digest AS BLOB)) = 72), PRIMARY KEY (source, label, destination), FOREIGN KEY (source, destination, label) REFERENCES edges(src, dst, label) ON DELETE CASCADE) STRICT",
+    ),
+    (
+        "table",
+        "source_omission_index",
+        "CREATE TABLE source_omission_index (repo_key TEXT PRIMARY KEY NOT NULL CHECK (length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256), state TEXT NOT NULL CHECK (state IN ('complete','incomplete')), recorded INTEGER NOT NULL CHECK (recorded >= 0)) STRICT",
+    ),
+    (
+        "index",
+        "source_omission_nodes_repo",
+        "CREATE INDEX source_omission_nodes_repo ON source_node_omissions(repo_key)",
+    ),
+    (
+        "index",
+        "source_omission_edges_repo",
+        "CREATE INDEX source_omission_edges_repo ON source_edge_omissions(repo_key)",
+    ),
+    (
+        "trigger",
+        "source_omission_node_insert",
+        "CREATE TRIGGER source_omission_node_insert AFTER INSERT ON nodes BEGIN DELETE FROM source_node_omissions WHERE node_id = NEW.id; DELETE FROM source_edge_omissions WHERE source = NEW.id OR destination = NEW.id; END",
+    ),
+    (
+        "trigger",
+        "source_omission_node_update",
+        "CREATE TRIGGER source_omission_node_update BEFORE UPDATE ON nodes BEGIN DELETE FROM source_node_omissions WHERE node_id = OLD.id OR node_id = NEW.id; DELETE FROM source_edge_omissions WHERE OLD.id != NEW.id AND (source = OLD.id OR destination = OLD.id OR source = NEW.id OR destination = NEW.id); END",
+    ),
+    (
+        "trigger",
+        "source_omission_node_delete",
+        "CREATE TRIGGER source_omission_node_delete BEFORE DELETE ON nodes BEGIN DELETE FROM source_node_omissions WHERE node_id = OLD.id; DELETE FROM source_edge_omissions WHERE source = OLD.id OR destination = OLD.id; END",
+    ),
+    (
+        "trigger",
+        "source_omission_edge_insert",
+        "CREATE TRIGGER source_omission_edge_insert AFTER INSERT ON edges BEGIN DELETE FROM source_edge_omissions WHERE source = NEW.src AND label = NEW.label AND destination = NEW.dst; END",
+    ),
+    (
+        "trigger",
+        "source_omission_edge_update",
+        "CREATE TRIGGER source_omission_edge_update BEFORE UPDATE ON edges BEGIN DELETE FROM source_edge_omissions WHERE (source = OLD.src AND label = OLD.label AND destination = OLD.dst) OR (source = NEW.src AND label = NEW.label AND destination = NEW.dst); END",
+    ),
+    (
+        "trigger",
+        "source_omission_edge_delete",
+        "CREATE TRIGGER source_omission_edge_delete BEFORE DELETE ON edges BEGIN DELETE FROM source_edge_omissions WHERE source = OLD.src AND label = OLD.label AND destination = OLD.dst; END",
+    ),
+];
+
+const SCHEMA: &[(&str, &str, &str)] = &[
+    ("table", "source_binding_meta", META_SCHEMA_V2),
+    (
+        "table",
+        "source_node_bindings",
+        "CREATE TABLE source_node_bindings (node_id TEXT PRIMARY KEY NOT NULL REFERENCES nodes(id) ON DELETE CASCADE CHECK (length(CAST(node_id AS BLOB)) BETWEEN 1 AND 8192), repo_key TEXT NOT NULL CHECK (length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256), receipt_id TEXT NOT NULL CHECK (length(CAST(receipt_id AS BLOB)) BETWEEN 1 AND 256), emitted_fact_digest TEXT NOT NULL CHECK (length(CAST(emitted_fact_digest AS BLOB)) = 72)) STRICT",
+    ),
+    (
+        "table",
+        "source_edge_bindings",
+        "CREATE TABLE source_edge_bindings (source TEXT NOT NULL CHECK (length(CAST(source AS BLOB)) BETWEEN 1 AND 8192), label TEXT NOT NULL CHECK (length(CAST(label AS BLOB)) BETWEEN 1 AND 256), destination TEXT NOT NULL CHECK (length(CAST(destination AS BLOB)) BETWEEN 1 AND 8192), repo_key TEXT NOT NULL CHECK (length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256), receipt_id TEXT NOT NULL CHECK (length(CAST(receipt_id AS BLOB)) BETWEEN 1 AND 256), emitted_fact_digest TEXT NOT NULL CHECK (length(CAST(emitted_fact_digest AS BLOB)) = 72), PRIMARY KEY (source, label, destination), FOREIGN KEY (source, destination, label) REFERENCES edges(src, dst, label) ON DELETE CASCADE) STRICT",
+    ),
+    (
+        "index",
+        "source_binding_nodes_repo",
+        "CREATE INDEX source_binding_nodes_repo ON source_node_bindings(repo_key)",
+    ),
+    (
+        "index",
+        "source_binding_edges_repo",
+        "CREATE INDEX source_binding_edges_repo ON source_edge_bindings(repo_key)",
+    ),
+    (
+        "trigger",
+        "source_binding_node_insert",
+        "CREATE TRIGGER source_binding_node_insert AFTER INSERT ON nodes BEGIN DELETE FROM source_node_bindings WHERE node_id = NEW.id; DELETE FROM source_edge_bindings WHERE source = NEW.id OR destination = NEW.id; END",
+    ),
+    (
+        "trigger",
+        "source_binding_node_update",
+        "CREATE TRIGGER source_binding_node_update BEFORE UPDATE ON nodes BEGIN DELETE FROM source_node_bindings WHERE node_id = OLD.id OR node_id = NEW.id; DELETE FROM source_edge_bindings WHERE OLD.id != NEW.id AND (source = OLD.id OR destination = OLD.id OR source = NEW.id OR destination = NEW.id); END",
+    ),
+    (
+        "trigger",
+        "source_binding_node_delete",
+        "CREATE TRIGGER source_binding_node_delete BEFORE DELETE ON nodes BEGIN DELETE FROM source_node_bindings WHERE node_id = OLD.id; DELETE FROM source_edge_bindings WHERE source = OLD.id OR destination = OLD.id; END",
+    ),
+    (
+        "trigger",
+        "source_binding_edge_insert",
+        "CREATE TRIGGER source_binding_edge_insert AFTER INSERT ON edges BEGIN DELETE FROM source_edge_bindings WHERE source = NEW.src AND label = NEW.label AND destination = NEW.dst; END",
+    ),
+    (
+        "trigger",
+        "source_binding_edge_update",
+        "CREATE TRIGGER source_binding_edge_update BEFORE UPDATE ON edges BEGIN DELETE FROM source_edge_bindings WHERE (source = OLD.src AND label = OLD.label AND destination = OLD.dst) OR (source = NEW.src AND label = NEW.label AND destination = NEW.dst); END",
+    ),
+    (
+        "trigger",
+        "source_binding_edge_delete",
+        "CREATE TRIGGER source_binding_edge_delete BEFORE DELETE ON edges BEGIN DELETE FROM source_edge_bindings WHERE source = OLD.src AND label = OLD.label AND destination = OLD.dst; END",
+    ),
+    (
+        "table",
+        "source_node_omissions",
+        "CREATE TABLE source_node_omissions (node_id TEXT PRIMARY KEY NOT NULL REFERENCES nodes(id) ON DELETE CASCADE CHECK (length(CAST(node_id AS BLOB)) BETWEEN 1 AND 8192), repo_key TEXT NOT NULL CHECK (length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256), kind TEXT NOT NULL CHECK (kind IN ('declarations','rules','store_capacity')), emitted_fact_digest TEXT NOT NULL CHECK (length(CAST(emitted_fact_digest AS BLOB)) = 72)) STRICT",
+    ),
+    (
+        "table",
+        "source_edge_omissions",
+        "CREATE TABLE source_edge_omissions (source TEXT NOT NULL CHECK (length(CAST(source AS BLOB)) BETWEEN 1 AND 8192), label TEXT NOT NULL CHECK (length(CAST(label AS BLOB)) BETWEEN 1 AND 256), destination TEXT NOT NULL CHECK (length(CAST(destination AS BLOB)) BETWEEN 1 AND 8192), repo_key TEXT NOT NULL CHECK (length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256), kind TEXT NOT NULL CHECK (kind IN ('declarations','rules','store_capacity')), emitted_fact_digest TEXT NOT NULL CHECK (length(CAST(emitted_fact_digest AS BLOB)) = 72), PRIMARY KEY (source, label, destination), FOREIGN KEY (source, destination, label) REFERENCES edges(src, dst, label) ON DELETE CASCADE) STRICT",
+    ),
+    (
+        "table",
+        "source_omission_index",
+        "CREATE TABLE source_omission_index (repo_key TEXT PRIMARY KEY NOT NULL CHECK (length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256), state TEXT NOT NULL CHECK (state IN ('complete','incomplete')), recorded INTEGER NOT NULL CHECK (recorded >= 0)) STRICT",
+    ),
+    (
+        "index",
+        "source_omission_nodes_repo",
+        "CREATE INDEX source_omission_nodes_repo ON source_node_omissions(repo_key)",
+    ),
+    (
+        "index",
+        "source_omission_edges_repo",
+        "CREATE INDEX source_omission_edges_repo ON source_edge_omissions(repo_key)",
+    ),
+    (
+        "trigger",
+        "source_omission_node_insert",
+        "CREATE TRIGGER source_omission_node_insert AFTER INSERT ON nodes BEGIN DELETE FROM source_node_omissions WHERE node_id = NEW.id; DELETE FROM source_edge_omissions WHERE source = NEW.id OR destination = NEW.id; END",
+    ),
+    (
+        "trigger",
+        "source_omission_node_update",
+        "CREATE TRIGGER source_omission_node_update BEFORE UPDATE ON nodes BEGIN DELETE FROM source_node_omissions WHERE node_id = OLD.id OR node_id = NEW.id; DELETE FROM source_edge_omissions WHERE OLD.id != NEW.id AND (source = OLD.id OR destination = OLD.id OR source = NEW.id OR destination = NEW.id); END",
+    ),
+    (
+        "trigger",
+        "source_omission_node_delete",
+        "CREATE TRIGGER source_omission_node_delete BEFORE DELETE ON nodes BEGIN DELETE FROM source_node_omissions WHERE node_id = OLD.id; DELETE FROM source_edge_omissions WHERE source = OLD.id OR destination = OLD.id; END",
+    ),
+    (
+        "trigger",
+        "source_omission_edge_insert",
+        "CREATE TRIGGER source_omission_edge_insert AFTER INSERT ON edges BEGIN DELETE FROM source_edge_omissions WHERE source = NEW.src AND label = NEW.label AND destination = NEW.dst; END",
+    ),
+    (
+        "trigger",
+        "source_omission_edge_update",
+        "CREATE TRIGGER source_omission_edge_update BEFORE UPDATE ON edges BEGIN DELETE FROM source_edge_omissions WHERE (source = OLD.src AND label = OLD.label AND destination = OLD.dst) OR (source = NEW.src AND label = NEW.label AND destination = NEW.dst); END",
+    ),
+    (
+        "trigger",
+        "source_omission_edge_delete",
+        "CREATE TRIGGER source_omission_edge_delete BEFORE DELETE ON edges BEGIN DELETE FROM source_edge_omissions WHERE source = OLD.src AND label = OLD.label AND destination = OLD.dst; END",
+    ),
+];
+
+const OWNED_SCHEMA_WHERE: &str = "name GLOB 'source_binding_*' OR name GLOB 'source_omission_*' OR name IN ('source_node_bindings', 'source_edge_bindings', 'source_node_omissions', 'source_edge_omissions') OR (tbl_name IN ('source_binding_meta', 'source_node_bindings', 'source_edge_bindings', 'source_node_omissions', 'source_edge_omissions', 'source_omission_index') AND name NOT GLOB 'sqlite_*') OR (type = 'trigger' AND tbl_name IN ('nodes', 'edges'))";
 
 fn preflight_selection_schema(connection: &Connection) -> Result<(), GraphError> {
     // Only the opt-in bounded path changes admission behavior. Before the
@@ -289,28 +545,38 @@ fn owned_schema(connection: &Connection) -> Result<BTreeMap<String, (String, Str
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+fn matches_schema(
+    actual: &BTreeMap<String, (String, String)>,
+    expected: &[(&str, &str, &str)],
+) -> bool {
+    actual.len() == expected.len()
+        && expected.iter().all(|(kind, name, sql)| {
+            actual
+                .get(*name)
+                .map(|(actual_kind, actual_sql)| (actual_kind.as_str(), actual_sql.as_str()))
+                == Some((*kind, *sql))
+        })
+}
+
+fn has_version(connection: &Connection, version: i64) -> Result<bool, GraphError> {
+    let mut statement =
+        connection.prepare("SELECT singleton, version FROM source_binding_meta LIMIT 2")?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows == [(1, version)])
+}
+
 fn check_schema(connection: &Connection) -> Result<(), GraphError> {
     // Generation triggers are part of this owner's inventory. Validate their
     // metadata bounds before owned_schema allocates SQL strings.
     let generation = crate::generation::validate_for_owner(connection)?;
     let mut actual = owned_schema(connection)?;
     generation.strip_objects(&mut actual);
-    if actual.len() != SCHEMA.len()
-        || SCHEMA.iter().any(|(kind, name, sql)| {
-            actual
-                .get(*name)
-                .map(|(actual_kind, actual_sql)| (actual_kind.as_str(), actual_sql.as_str()))
-                != Some((*kind, *sql))
-        })
-    {
+    if !matches_schema(&actual, SCHEMA) {
         return Err(GraphError::SourceBinding("incompatible association schema"));
     }
-    let mut statement =
-        connection.prepare("SELECT singleton, version FROM source_binding_meta LIMIT 2")?;
-    let rows = statement
-        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if rows != [(1, 1)] {
+    if !has_version(connection, 2)? {
         return Err(GraphError::SourceBinding("unsupported association version"));
     }
     Ok(())
@@ -318,16 +584,35 @@ fn check_schema(connection: &Connection) -> Result<(), GraphError> {
 
 pub(crate) fn initialize(transaction: &Transaction<'_>) -> Result<(), GraphError> {
     let connection: &Connection = transaction;
-    if owned_schema(connection)?.is_empty() {
+    let generation = crate::generation::validate_for_owner(connection)?;
+    let mut actual = owned_schema(connection)?;
+    generation.strip_objects(&mut actual);
+    if actual.is_empty() {
         for (_, _, sql) in SCHEMA {
             transaction.execute_batch(sql)?;
         }
         transaction.execute(
-            "INSERT INTO source_binding_meta(singleton, version) VALUES (1, 1)",
+            "INSERT INTO source_binding_meta(singleton, version) VALUES (1, 2)",
+            [],
+        )?;
+    } else if matches_schema(&actual, SCHEMA_V1) && has_version(connection, 1)? {
+        for (_, _, sql) in OMISSIONS_SCHEMA {
+            transaction.execute_batch(sql)?;
+        }
+        transaction.execute_batch("DROP TABLE source_binding_meta")?;
+        transaction.execute_batch(META_SCHEMA_V2)?;
+        transaction.execute(
+            "INSERT INTO source_binding_meta(singleton, version) VALUES (1, 2)",
             [],
         )?;
     }
     check_schema(connection)?;
+    Ok(())
+}
+
+pub(crate) fn clear(transaction: &Transaction<'_>) -> Result<(), GraphError> {
+    check_schema(transaction)?;
+    transaction.execute("DELETE FROM source_omission_index", [])?;
     Ok(())
 }
 
@@ -356,6 +641,122 @@ fn load_binding(
         Ok(binding)
     })
     .transpose()
+}
+
+fn load_omission(
+    connection: &Connection,
+    fact: &FactKey,
+) -> Result<Option<(String, ReceiptOmissionKind, String)>, GraphError> {
+    let row: Option<(String, String, String)> = match fact {
+        FactKey::Node { id } => connection
+            .query_row(
+                "SELECT repo_key, kind, emitted_fact_digest FROM source_node_omissions WHERE node_id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?,
+        FactKey::Edge {
+            source,
+            label,
+            destination,
+        } => connection
+            .query_row(
+                "SELECT repo_key, kind, emitted_fact_digest FROM source_edge_omissions WHERE source = ?1 AND label = ?2 AND destination = ?3",
+                params![source, label, destination],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?,
+    };
+    row.map(|(repo_key, kind, emitted_fact_digest)| {
+        bounded(&repo_key, MAX_REPO_BYTES)?;
+        let kind = ReceiptOmissionKind::from_db(&kind)?;
+        Ok((repo_key, kind, emitted_fact_digest))
+    })
+    .transpose()
+}
+
+fn replace_omissions(
+    transaction: &Transaction<'_>,
+    repo_key: &str,
+    omissions: SourceOmissions<'_>,
+) -> Result<(), GraphError> {
+    transaction.execute(
+        "DELETE FROM source_node_omissions WHERE repo_key = ?1",
+        [repo_key],
+    )?;
+    transaction.execute(
+        "DELETE FROM source_edge_omissions WHERE repo_key = ?1",
+        [repo_key],
+    )?;
+    transaction.execute(
+        "DELETE FROM source_omission_index WHERE repo_key = ?1",
+        [repo_key],
+    )?;
+    if omissions == SourceOmissions::NONE {
+        return Ok(());
+    }
+    if omissions.records.len() > MAX_OMISSIONS {
+        let recorded = i64::try_from(omissions.records.len())
+            .map_err(|_| GraphError::SourceBinding("too many omissions"))?;
+        transaction.execute(
+            "INSERT INTO source_omission_index(repo_key, state, recorded) VALUES (?1, 'incomplete', ?2)",
+            params![repo_key, recorded],
+        )?;
+        return Ok(());
+    }
+    let mut by_fact: BTreeMap<&FactKey, ReceiptOmissionKind> = BTreeMap::new();
+    for omission in omissions.records {
+        omission.fact.validate()?;
+        by_fact
+            .entry(&omission.fact)
+            .and_modify(|existing| {
+                if omission.kind < *existing {
+                    *existing = omission.kind;
+                }
+            })
+            .or_insert(omission.kind);
+    }
+    let mut inserted: i64 = 0;
+    for (fact, kind) in by_fact {
+        let Some(emitted_fact_digest) = current_digest(transaction, fact)? else {
+            continue;
+        };
+        if load_binding(transaction, fact)?.is_some_and(|binding| binding.repo_key != repo_key) {
+            continue;
+        }
+        let changes = match fact {
+            FactKey::Node { id } => transaction.execute(
+                "INSERT OR IGNORE INTO source_node_omissions(node_id, repo_key, kind, emitted_fact_digest) VALUES (?1, ?2, ?3, ?4)",
+                params![id, repo_key, kind.as_str(), emitted_fact_digest],
+            )?,
+            FactKey::Edge {
+                source,
+                label,
+                destination,
+            } => transaction.execute(
+                "INSERT OR IGNORE INTO source_edge_omissions(source, label, destination, repo_key, kind, emitted_fact_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    source,
+                    label,
+                    destination,
+                    repo_key,
+                    kind.as_str(),
+                    emitted_fact_digest
+                ],
+            )?,
+        };
+        inserted += changes as i64;
+    }
+    let state = if omissions.complete {
+        "complete"
+    } else {
+        "incomplete"
+    };
+    transaction.execute(
+        "INSERT INTO source_omission_index(repo_key, state, recorded) VALUES (?1, ?2, ?3)",
+        params![repo_key, state, inserted],
+    )?;
+    Ok(())
 }
 
 enum SelectionBinding {
@@ -593,14 +994,20 @@ impl SqliteGraphStore {
         bindings: &[SourceBinding],
     ) -> Result<bool, GraphError> {
         self.apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
-            expected, patch, repo_key, bindings, None,
+            expected,
+            patch,
+            repo_key,
+            bindings,
+            None,
+            SourceOmissions::NONE,
         )
     }
 
     /// [`Self::apply_patch_with_source_bindings_if_snapshot_matches`], also
-    /// replacing this repo's recorded coverage inventory in the same write
-    /// transaction (AC-0239). `None` removes the old inventory, which no
-    /// longer describes the published facts.
+    /// replacing this repo's recorded coverage inventory and receipt omission
+    /// records in the same write transaction (AC-0239, AC-0314). `None` removes
+    /// the old inventory, which no longer describes the published facts, and
+    /// [`SourceOmissions::NONE`] leaves the repository omission state unrecorded.
     pub fn apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
         &mut self,
         expected: &(Vec<Node>, Vec<Edge>),
@@ -608,6 +1015,7 @@ impl SqliteGraphStore {
         repo_key: &str,
         bindings: &[SourceBinding],
         coverage: Option<&crate::coverage::CoverageRecord>,
+        omissions: SourceOmissions<'_>,
     ) -> Result<bool, GraphError> {
         bounded(repo_key, MAX_REPO_BYTES)?;
         if bindings.len() > MAX_BINDINGS {
@@ -668,9 +1076,73 @@ impl SqliteGraphStore {
                 return Err(GraphError::SourceBinding("association publication failed"));
             }
         }
+        replace_omissions(&transaction, repo_key, omissions)?;
         crate::coverage::replace(&transaction, repo_key, coverage)?;
         transaction.commit()?;
         Ok(true)
+    }
+
+    /// Check whether a current graph fact's primary receipt was omitted by a
+    /// deterministic receipt bound in one read transaction.
+    ///
+    /// [`OmissionLookup::NotOmitted`] is not evidence that a receipt exists;
+    /// only a [`SourceBinding`] is.
+    pub fn receipt_omission(&self, fact: &FactKey) -> Result<OmissionLookup, GraphError> {
+        Ok(self
+            .receipt_omissions(std::slice::from_ref(fact))?
+            .into_iter()
+            .next()
+            .expect("single fact lookup returns one outcome"))
+    }
+
+    /// Check whether each requested graph fact's primary receipt was omitted by
+    /// a deterministic receipt bound in one read transaction. Rejects more than
+    /// [`MAX_SOURCE_SELECTION_KEYS`] keys before database access.
+    ///
+    /// [`OmissionLookup::NotOmitted`] is not evidence that a receipt exists;
+    /// only a [`SourceBinding`] is.
+    pub fn receipt_omissions(&self, facts: &[FactKey]) -> Result<Vec<OmissionLookup>, GraphError> {
+        if facts.len() > MAX_SOURCE_SELECTION_KEYS {
+            return Err(GraphError::SourceBinding("too many source selection keys"));
+        }
+        for fact in facts {
+            fact.validate()?;
+        }
+        let transaction = self.conn.unchecked_transaction()?;
+        check_schema(&self.conn)?;
+        crate::coverage::check_schema(&self.conn)?;
+        let complete_coverage: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM coverage_inventories)
+                AND NOT EXISTS(
+                    SELECT 1 FROM coverage_inventories c
+                    WHERE NOT EXISTS(
+                        SELECT 1 FROM source_omission_index i
+                        WHERE i.repo_key = c.repo_key AND i.state = 'complete'
+                    )
+                )",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut results = Vec::with_capacity(facts.len());
+        for fact in facts {
+            let Some(fact_digest) = current_digest(&self.conn, fact)? else {
+                results.push(OmissionLookup::Unrecorded);
+                continue;
+            };
+            let state = match load_omission(&self.conn, fact)? {
+                Some((repo_key, kind, emitted_fact_digest))
+                    if emitted_fact_digest == fact_digest =>
+                {
+                    OmissionLookup::Omitted { repo_key, kind }
+                }
+                Some(_) => OmissionLookup::Unrecorded,
+                None if complete_coverage => OmissionLookup::NotOmitted,
+                None => OmissionLookup::Unrecorded,
+            };
+            results.push(state);
+        }
+        transaction.commit()?;
+        Ok(results)
     }
 
     /// Copy a binding and verify its complete fact in the same read revision.

@@ -132,7 +132,8 @@ fn generation_includes_binding_only_and_coverage_only_publications_and_invalidat
                 &GraphPatch::default(),
                 "repo/a",
                 &[binding(&node("a"))],
-                Some(&coverage)
+                Some(&coverage),
+                crate::source::SourceOmissions::NONE,
             )
             .unwrap()
     );
@@ -261,6 +262,7 @@ fn generation_migration_preserves_legacy_facts_bindings_and_instance() {
             "repo/a",
             &[binding(&node("a"))],
             Some(&coverage),
+            crate::source::SourceOmissions::NONE,
         )
         .unwrap();
     let coverage_before = store.coverage_records().unwrap();
@@ -544,6 +546,7 @@ fn generation_reset_overflow_after_deletions_restores_all_publication_state() {
             "repo/a",
             &bindings,
             Some(&coverage),
+            crate::source::SourceOmissions::NONE,
         )
         .unwrap();
     let coverage_before = store.coverage_records().unwrap();

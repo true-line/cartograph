@@ -438,6 +438,7 @@ fn extract_captured_dir_bounded(
                     .omitted_declaration_receipts
                     .entry(path.to_owned())
                     .or_default() += file_receipts.omitted_declarations;
+                stats.omitted_receipt_facts_complete = false;
             }
             for (receipt, bytes) in file_receipts.declarations {
                 if declaration_bytes + bytes > budget.bytes || declarations.len() == budget.receipts
@@ -446,6 +447,10 @@ fn extract_captured_dir_bounded(
                         .omitted_declaration_receipts
                         .entry(path.to_owned())
                         .or_default() += 1;
+                    stats.omitted_receipt_facts.push((
+                        receipt.fact_key().clone(),
+                        core_graph::source::ReceiptOmissionKind::Declarations,
+                    ));
                 } else {
                     declaration_bytes += bytes;
                     declarations.push((receipt, bytes));
@@ -465,6 +470,9 @@ fn extract_captured_dir_bounded(
     for (path, key) in omitted_rules {
         if surviving(&key) {
             *stats.omitted_rule_receipts.entry(path).or_default() += 1;
+            stats
+                .omitted_receipt_facts
+                .push((key, core_graph::source::ReceiptOmissionKind::Rules));
         }
     }
     drop(surviving);
@@ -480,6 +488,10 @@ fn extract_captured_dir_bounded(
                 .omitted_declaration_receipts
                 .entry(receipt.file().path.clone())
                 .or_default() += 1;
+            stats.omitted_receipt_facts.push((
+                receipt.fact_key().clone(),
+                core_graph::source::ReceiptOmissionKind::Declarations,
+            ));
         } else {
             receipt_bytes += bytes;
             receipts.push(receipt);

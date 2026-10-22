@@ -191,6 +191,7 @@ fn publish_inventory(
             &repo.repo_key,
             &bindings,
             Some(&record),
+            core_graph::source::SourceOmissions::NONE,
         )
         .map_err(|error| error.to_string())?
         || graph.read_snapshot().map_err(|error| error.to_string())? != snapshot

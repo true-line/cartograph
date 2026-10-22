@@ -696,7 +696,12 @@ impl ReceiptStore {
                 Some(_) => {}
                 None => {
                     batch.insert(receipt.id().to_owned(), json.clone());
-                    rows.push((receipt.id().to_owned(), receipt.file().path.clone(), json));
+                    rows.push((
+                        receipt.id().to_owned(),
+                        receipt.file().path.clone(),
+                        receipt.fact_key().clone(),
+                        json,
+                    ));
                 }
             }
         }
@@ -707,7 +712,7 @@ impl ReceiptStore {
             .map_err(storage_error)?;
         let (mut count, mut bytes) = receipt_storage(&tx)?;
         let mut retained = RetainedReceipts::default();
-        for (id, path, payload) in rows {
+        for (id, path, fact_key, payload) in rows {
             let old: Option<(String, String, String)> = tx
                 .query_row(
                     "SELECT source_id,repo_key,payload FROM receipts WHERE id=?1",
@@ -733,6 +738,7 @@ impl ReceiptStore {
             } else if count + 1 > self.capacity.0 || bytes + payload.len() as u64 > self.capacity.1
             {
                 *retained.omitted.entry(path).or_default() += 1;
+                retained.omitted_facts.push(fact_key);
                 continue;
             } else {
                 count += 1;
@@ -1141,11 +1147,12 @@ impl PrimarySourceStore {
 }
 
 /// Receipts one recovery actually retained, and those left out for lack of
-/// store capacity, by file path.
+/// store capacity, by file path and fact key.
 #[derive(Debug, Default)]
 pub(crate) struct RetainedReceipts {
     ids: std::collections::BTreeSet<String>,
     omitted: std::collections::BTreeMap<String, u64>,
+    pub(crate) omitted_facts: Vec<FactKey>,
 }
 
 impl RetainedReceipts {
@@ -1153,9 +1160,9 @@ impl RetainedReceipts {
     pub(crate) fn keep_retained(
         self,
         receipts: &mut Vec<Receipt>,
-    ) -> std::collections::BTreeMap<String, u64> {
+    ) -> (std::collections::BTreeMap<String, u64>, Vec<FactKey>) {
         receipts.retain(|receipt| self.ids.contains(receipt.id()));
-        self.omitted
+        (self.omitted, self.omitted_facts)
     }
 }
 
@@ -1671,7 +1678,7 @@ mod tests {
         store.capacity.0 = 1;
         for _ in 0..2 {
             let mut kept = receipts.clone();
-            let omitted = store
+            let (omitted, omitted_facts) = store
                 .persist(&capture, &source, &receipts)
                 .unwrap()
                 .keep_retained(&mut kept);
@@ -1683,18 +1690,22 @@ mod tests {
                     receipts.len() as u64 - 1
                 )])
             );
+            let expected_omitted_facts: Vec<_> = receipts[1..]
+                .iter()
+                .map(|receipt| receipt.fact_key().clone())
+                .collect();
+            assert_eq!(omitted_facts, expected_omitted_facts);
             assert_eq!(receipt_count(&store), 1);
         }
         // Room again: the omitted receipts are admitted on the next recovery.
         store.capacity.0 = MAX_RECEIPTS;
         let mut kept = receipts.clone();
-        assert!(
-            store
-                .persist(&capture, &source, &receipts)
-                .unwrap()
-                .keep_retained(&mut kept)
-                .is_empty()
-        );
+        let (omitted, omitted_facts) = store
+            .persist(&capture, &source, &receipts)
+            .unwrap()
+            .keep_retained(&mut kept);
+        assert!(omitted.is_empty());
+        assert!(omitted_facts.is_empty());
         assert_eq!(kept, receipts);
         assert_eq!(receipt_count(&store), receipts.len() as i64);
     }

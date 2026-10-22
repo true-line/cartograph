@@ -38,6 +38,7 @@ fn publish(
             repo,
             &[],
             coverage,
+            crate::source::SourceOmissions::NONE,
         )
         .unwrap()
 }
@@ -81,6 +82,7 @@ fn coverage_inventory_publishes_and_reads_with_its_facts() {
                 "acme/api",
                 &[],
                 Some(&other),
+                crate::source::SourceOmissions::NONE,
             )
             .unwrap()
     );
@@ -112,6 +114,7 @@ fn coverage_records_are_validated_and_their_bodies_hash_checked() {
                 "acme/api",
                 &[],
                 Some(&wrong_owner),
+                crate::source::SourceOmissions::NONE,
             )
             .is_err()
     );
@@ -125,6 +128,7 @@ fn coverage_records_are_validated_and_their_bodies_hash_checked() {
                 "acme/api",
                 &[],
                 Some(&not_object),
+                crate::source::SourceOmissions::NONE,
             )
             .is_err()
     );

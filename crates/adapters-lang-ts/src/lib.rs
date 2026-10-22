@@ -155,7 +155,7 @@ pub struct IncrementalCache {
 }
 
 /// Physical source-file work performed by one incremental extraction.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncrementalStats {
     /// Files parsed because their bytes were new or changed.
     pub recomputed_files: u64,
@@ -173,6 +173,26 @@ pub struct IncrementalStats {
     /// in the graph; only their primary citation is missing, and each named
     /// file says so instead of failing the whole extraction.
     pub omitted_rule_receipts: std::collections::BTreeMap<String, u64>,
+    /// Fact identities whose primary receipts were omitted during captured
+    /// extraction, paired with the bound that omitted them (#725).
+    pub omitted_receipt_facts: Vec<(core_graph::FactKey, core_graph::source::ReceiptOmissionKind)>,
+    /// True when every extraction receipt omission produced a [`core_graph::FactKey`];
+    /// false when a per-file declaration bound omitted unminted receipts by count only.
+    pub omitted_receipt_facts_complete: bool,
+}
+
+impl Default for IncrementalStats {
+    fn default() -> Self {
+        Self {
+            recomputed_files: 0,
+            reused_files: 0,
+            deleted_files: 0,
+            omitted_declaration_receipts: std::collections::BTreeMap::new(),
+            omitted_rule_receipts: std::collections::BTreeMap::new(),
+            omitted_receipt_facts: Vec::new(),
+            omitted_receipt_facts_complete: true,
+        }
+    }
 }
 
 fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {

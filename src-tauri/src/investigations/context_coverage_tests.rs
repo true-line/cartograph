@@ -72,7 +72,8 @@ impl Fixture {
                     &patch,
                     &scoped.repo_key,
                     &[],
-                    Some(&record)
+                    Some(&record),
+                    core_graph::source::SourceOmissions::NONE,
                 )
                 .unwrap()
         );

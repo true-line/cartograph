@@ -162,6 +162,7 @@ fn qualified_worker_refuses_inventory_capacity_before_model_dispatch() {
                     &source.repo_key,
                     &[],
                     Some(&record),
+                    core_graph::source::SourceOmissions::NONE,
                 )
                 .unwrap()
         );

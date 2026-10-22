@@ -1027,7 +1027,7 @@ struct DeclaredInputs {
 /// (AC-0238); unsupported capabilities come from the reconciled preflight.
 /// What producers read during one extraction, for the coverage inventory
 /// (AC-0238): inputs that the retained output alone cannot show.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ProducerReads {
     /// TypeScript files the adapter read, before any infra-only projection.
     ts_files: u64,
@@ -1040,6 +1040,51 @@ struct ProducerReads {
     omitted_rule_receipts: std::collections::BTreeMap<String, u64>,
     /// Receipts the retained store had no room for, by file (#722).
     omitted_stored_receipts: std::collections::BTreeMap<String, u64>,
+    /// Fact identities omitted during captured TypeScript extraction or store
+    /// persistence (#725).
+    omitted_receipt_facts: Vec<(
+        core_graph::source::FactKey,
+        core_graph::source::ReceiptOmissionKind,
+    )>,
+    /// Whether every omitted receipt had a fact key (#725).
+    omitted_receipt_facts_complete: bool,
+    /// Whether the captured TypeScript producer ran (#725).
+    captured_ts_ran: bool,
+}
+
+impl Default for ProducerReads {
+    fn default() -> Self {
+        Self {
+            ts_files: 0,
+            plugins: Vec::new(),
+            omitted_declaration_receipts: std::collections::BTreeMap::new(),
+            omitted_rule_receipts: std::collections::BTreeMap::new(),
+            omitted_stored_receipts: std::collections::BTreeMap::new(),
+            omitted_receipt_facts: Vec::new(),
+            omitted_receipt_facts_complete: true,
+            captured_ts_ran: false,
+        }
+    }
+}
+
+impl ProducerReads {
+    fn record_stored_omissions(&mut self, omitted_facts: Vec<core_graph::source::FactKey>) {
+        self.omitted_receipt_facts.extend(
+            omitted_facts
+                .into_iter()
+                .map(|fact| (fact, core_graph::source::ReceiptOmissionKind::StoreCapacity)),
+        );
+    }
+
+    fn source_omissions(&self) -> Vec<core_graph::source::SourceOmission> {
+        self.omitted_receipt_facts
+            .iter()
+            .map(|(fact, kind)| core_graph::source::SourceOmission {
+                fact: fact.clone(),
+                kind: *kind,
+            })
+            .collect()
+    }
 }
 
 /// Identity of the plugin and registry basis an inventory was recorded
@@ -1333,6 +1378,9 @@ fn extract_tree_with_registries(
             receipts.extend(produced);
             reads.omitted_declaration_receipts = stats.omitted_declaration_receipts.clone();
             reads.omitted_rule_receipts = stats.omitted_rule_receipts.clone();
+            reads.omitted_receipt_facts = stats.omitted_receipt_facts.clone();
+            reads.omitted_receipt_facts_complete = stats.omitted_receipt_facts_complete;
+            reads.captured_ts_ran = true;
             (extraction, stats)
         } else {
             adapters_lang_ts::extract_dir_incremental_with_progress(
@@ -1890,7 +1938,32 @@ fn load_into_graph(
 /// Publish `repo`'s facts, its source bindings and its coverage inventory in
 /// one write transaction; a publication without an inventory clears the
 /// repo's previous one rather than leaving it to describe other facts.
+#[cfg(test)]
 fn load_into_graph_with_bindings(
+    graph: &mut SqliteGraphStore,
+    extraction: &adapters_lang_ts::Extraction,
+    repo: &str,
+    root: &std::path::Path,
+    commit: &str,
+    bindings: &[core_graph::source::SourceBinding],
+    coverage: Option<&core_graph::coverage::CoverageRecord>,
+) -> Result<ReconcileStats, String> {
+    load_into_graph_with_bindings_and_omissions(
+        graph,
+        extraction,
+        repo,
+        root,
+        commit,
+        bindings,
+        coverage,
+        core_graph::source::SourceOmissions::NONE,
+    )
+}
+
+/// Publish `repo`'s facts, its source bindings, its coverage inventory and its
+/// per-fact receipt omission records in one write transaction.
+#[allow(clippy::too_many_arguments)]
+fn load_into_graph_with_bindings_and_omissions(
     graph: &mut SqliteGraphStore,
     extraction: &adapters_lang_ts::Extraction,
     repo: &str,
@@ -1898,6 +1971,7 @@ fn load_into_graph_with_bindings(
     commit: &str,
     bindings: &[core_graph::source::SourceBinding],
     coverage: Option<&core_graph::coverage::CoverageRecord>,
+    omissions: core_graph::source::SourceOmissions<'_>,
 ) -> Result<ReconcileStats, String> {
     let repo_prov = core_prov::Provenance::new(
         core_prov::Tier::Deterministic,
@@ -2001,7 +2075,7 @@ fn load_into_graph_with_bindings(
     }
     if !graph
         .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
-            &expected, &patch, repo, bindings, coverage,
+            &expected, &patch, repo, bindings, coverage, omissions,
         )
         .map_err(|error| error.to_string())?
     {
@@ -3872,11 +3946,13 @@ fn run_ingest<R: tauri::Runtime>(
     };
 
     cancelled()?;
-    reads.omitted_stored_receipts = state
+    let (omitted_stored_receipts, omitted_stored_facts) = state
         .primary_sources
         .persist(&primary, source, &receipts)
         .map_err(&fail)?
         .keep_retained(&mut receipts);
+    reads.omitted_stored_receipts = omitted_stored_receipts;
+    reads.record_stored_omissions(omitted_stored_facts);
     let bindings = primary_source::matching_bindings(&extraction, &receipts);
     // Scanned before publication so the inventory is published with the
     // facts it describes (AC-0239). Findings are still persisted only once
@@ -3914,6 +3990,15 @@ fn run_ingest<R: tauri::Runtime>(
     );
     let record =
         coverage_record(&coverage, source, job_id, &active_plugins, &registries).map_err(&fail)?;
+    let omission_records = reads.source_omissions();
+    let omissions = if reads.captured_ts_ran {
+        core_graph::source::SourceOmissions {
+            records: &omission_records,
+            complete: reads.omitted_receipt_facts_complete,
+        }
+    } else {
+        core_graph::source::SourceOmissions::NONE
+    };
     report_progress(app, state, execution, "load", 70.0)?;
     let mut published = OperationFacts::default();
     // Everything recovery reads from `root` has been read; recheck before
@@ -3923,7 +4008,7 @@ fn run_ingest<R: tauri::Runtime>(
         let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
         ensure_running_job(state, execution)?;
         published.record_load(
-            load_into_graph_with_bindings(
+            load_into_graph_with_bindings_and_omissions(
                 &mut graph,
                 &extraction,
                 &repo,
@@ -3931,6 +4016,7 @@ fn run_ingest<R: tauri::Runtime>(
                 commit,
                 &bindings,
                 Some(&record),
+                omissions,
             )
             .map_err(&fail)?
             .published,
@@ -4299,11 +4385,13 @@ fn add_repo_blocking<R: tauri::Runtime>(
     if job_cancelled(&state, &execution)? {
         return Err("cancelled".to_string());
     }
-    reads.omitted_stored_receipts = state
+    let (omitted_stored_receipts, omitted_stored_facts) = state
         .primary_sources
         .persist(&primary, &source, &receipts)
         .map_err(&fail)?
         .keep_retained(&mut receipts);
+    reads.omitted_stored_receipts = omitted_stored_receipts;
+    reads.record_stored_omissions(omitted_stored_facts);
     let bindings = primary_source::matching_bindings(&extraction, &receipts);
     // As for a local recovery (AC-0200, AC-0209, AC-0239): scanned from the
     // captured bytes the claims were proven on, before publication so the
@@ -4340,12 +4428,21 @@ fn add_repo_blocking<R: tauri::Runtime>(
     );
     let record =
         coverage_record(&coverage, &source, job_id, &active_plugins, &registries).map_err(&fail)?;
+    let omission_records = reads.source_omissions();
+    let omissions = if reads.captured_ts_ran {
+        core_graph::source::SourceOmissions {
+            records: &omission_records,
+            complete: reads.omitted_receipt_facts_complete,
+        }
+    } else {
+        core_graph::source::SourceOmissions::NONE
+    };
     let mut published = OperationFacts::default();
     {
         let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
         ensure_running_job(&state, &execution)?;
         published.record_load(
-            load_into_graph_with_bindings(
+            load_into_graph_with_bindings_and_omissions(
                 &mut graph,
                 &extraction,
                 &source.repo_key,
@@ -4353,6 +4450,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
                 &cloned.commit_sha,
                 &bindings,
                 Some(&record),
+                omissions,
             )
             .map_err(&fail)?
             .published,
@@ -4585,11 +4683,13 @@ fn add_system_blocking<R: tauri::Runtime>(
             .map_err(&fail)?
         };
         ensure_running_job(&state, &execution)?;
-        reads.omitted_stored_receipts = state
+        let (omitted_stored_receipts, omitted_stored_facts) = state
             .primary_sources
             .persist(&primary, source, &receipts)
             .map_err(&fail)?
             .keep_retained(&mut receipts);
+        reads.omitted_stored_receipts = omitted_stored_receipts;
+        reads.record_stored_omissions(omitted_stored_facts);
         let bindings = primary_source::matching_bindings(&extraction, &receipts);
         // Scanned before publication so each inventory is published with its
         // facts (AC-0239); findings persist only once the system is in.
@@ -4631,6 +4731,15 @@ fn add_system_blocking<R: tauri::Runtime>(
         );
         let record = coverage_record(&coverage, source, job_id, &active_plugins, &registries)
             .map_err(&fail)?;
+        let omission_records = reads.source_omissions();
+        let omissions = if reads.captured_ts_ran {
+            core_graph::source::SourceOmissions {
+                records: &omission_records,
+                complete: reads.omitted_receipt_facts_complete,
+            }
+        } else {
+            core_graph::source::SourceOmissions::NONE
+        };
         files += repo_layers.files();
         layers.add(repo_layers);
         delta.add(
@@ -4646,7 +4755,7 @@ fn add_system_blocking<R: tauri::Runtime>(
             let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
             ensure_running_job(&state, &execution)?;
             published.record_load(
-                load_into_graph_with_bindings(
+                load_into_graph_with_bindings_and_omissions(
                     &mut graph,
                     &extraction,
                     &repo,
@@ -4654,6 +4763,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                     &commit,
                     &bindings,
                     Some(&record),
+                    omissions,
                 )
                 .map_err(&fail)?
                 .published,
