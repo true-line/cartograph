@@ -77,6 +77,28 @@ fn scoped_protocol_advertises_real_routes_and_keeps_discovery_lean() {
             basis
         );
         assert_eq!(caps["result"]["structuredContent"]["mode"], "scoped");
+        let capabilities = &caps["result"]["structuredContent"];
+        assert_eq!(capabilities["evidence_absence_reason_available"], false);
+        assert_eq!(
+            capabilities["forgotten_receipt_classification"]["available"],
+            true
+        );
+        assert_eq!(
+            capabilities["forgotten_receipt_classification"]["scope"],
+            "exact_current_basis_binding_receipt_id"
+        );
+        assert_eq!(
+            capabilities["forgotten_receipt_classification"]["partial"],
+            true
+        );
+        assert_eq!(
+            capabilities["forgotten_receipt_classification"]["omitted_available"],
+            false
+        );
+        assert_eq!(
+            capabilities["forgotten_receipt_classification"]["unknown_is_forgotten"],
+            false
+        );
         let discovery = call(
             dispatch,
             ctx,

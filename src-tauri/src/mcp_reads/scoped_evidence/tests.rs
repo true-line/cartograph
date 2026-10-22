@@ -303,3 +303,123 @@ fn scoped_evidence_target_ingress_bounds_before_clone_and_rejects_unknown_nested
     ));
     assert!(ScopedEvidenceTarget::decode(&serde_json::json!({"schema_version": 2})).is_err());
 }
+
+// AC-0306 / T-0306: exact scoped retained-source identity and classification.
+#[test]
+fn scoped_evidence_exact_reclaimed_receipt_is_forgotten_not_unknown_or_forged() {
+    let f = Fixture::new();
+    let description = f.describe();
+    let proof = f.proof();
+    let source_id = f.scopes[0].registered_source_id.as_ref().unwrap();
+    let preview = crate::primary_source::preview(&f.state, source_id).unwrap();
+    crate::primary_source::forget(&f.state, source_id, &preview.fingerprint).unwrap();
+    // Supported forgetting leaves graph fact/binding revision intact.
+    f.check().unwrap();
+    assert!(matches!(
+        f.state
+            .primary_sources
+            .receipts
+            .lock()
+            .unwrap()
+            .receipt_status(&description.target.receipt_id)
+            .unwrap(),
+        crate::primary_source::ReceiptStatus::Reclaimed { .. }
+    ));
+    let db = rusqlite::Connection::open(f.private.join("retained-source/receipts.sqlite")).unwrap();
+    db.execute(
+        "UPDATE receipt_tombstones SET capture_ids='[]',capture_ids_truncated=1",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        describe(&f.state, &proof, 0, 65536, || f.check()).unwrap_err(),
+        ReadError::EvidenceForgotten
+    );
+    assert_eq!(
+        read(&f.state, &proof, &description.target, limits(), || f
+            .check())
+        .unwrap_err(),
+        ReadError::EvidenceForgotten
+    );
+    for field in ["receipt", "digest", "source"] {
+        let mut forged = description.target.clone();
+        match field {
+            "receipt" => forged.receipt_id = format!("ts-primary-v3:{}", "0".repeat(64)),
+            "digest" => forged.fact_digest = format!("node-v1:{}", "0".repeat(64)),
+            _ => {
+                forged.registered_source_id = format!("src_{}", "f".repeat(32));
+                forged.captured.file.source_id = forged.registered_source_id.clone();
+            }
+        }
+        forged.target_id = forged.content_id().unwrap();
+        assert_eq!(
+            read(&f.state, &proof, &forged, limits(), || f.check()).unwrap_err(),
+            ReadError::StaleBasis
+        );
+    }
+    db.execute(
+        "UPDATE receipt_tombstones SET source_id=?1",
+        [format!("src_{}", "f".repeat(32))],
+    )
+    .unwrap();
+    assert_eq!(
+        describe(&f.state, &proof, 0, 65536, || f.check()).unwrap_err(),
+        ReadError::EvidenceInvalid
+    );
+}
+
+// AC-0306 / T-0306: exact scoped retained-source identity and classification.
+#[test]
+fn scoped_forgotten_status_storage_failure_and_graph_drift_do_not_become_absence() {
+    let f = Fixture::new();
+    let description = f.describe();
+    let proof = f.proof();
+    let source_id = f.scopes[0].registered_source_id.as_ref().unwrap();
+    let preview = crate::primary_source::preview(&f.state, source_id).unwrap();
+    crate::primary_source::forget(&f.state, source_id, &preview.fingerprint).unwrap();
+    let db = rusqlite::Connection::open(f.private.join("retained-source/receipts.sqlite")).unwrap();
+    db.execute_batch("DROP TABLE receipt_reclaims").unwrap();
+    assert_eq!(
+        describe(&f.state, &proof, 0, 65536, || f.check()).unwrap_err(),
+        ReadError::Storage
+    );
+    f.state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&core_graph::Node {
+            id: "changed-after-forget".into(),
+            label: "Module".into(),
+            props: serde_json::json!({}),
+        })
+        .unwrap();
+    assert_eq!(
+        read(&f.state, &proof, &description.target, limits(), || f
+            .check())
+        .unwrap_err(),
+        ReadError::StaleBasis
+    );
+}
+
+// AC-0306 / T-0306: exact scoped retained-source identity and classification.
+#[test]
+fn scoped_target_preserves_canonical_v1_v2_v3_receipt_history() {
+    let f = Fixture::new();
+    let original = f.describe().target;
+    assert!(original.receipt_id.starts_with("ts-primary-v3:"));
+    for version in [1, 2, 3] {
+        let mut target = original.clone();
+        target.receipt_id = format!("ts-primary-v{version}:{}", "a".repeat(64));
+        target.target_id = target.content_id().unwrap();
+        target.validate().unwrap();
+        target.receipt_id.push('\n');
+        target.target_id = target.content_id().unwrap();
+        assert_eq!(target.validate().unwrap_err(), ReadError::InvalidRequest);
+    }
+    for prefix in ["ts-primary-v0:", "ts-primary-v4:", "other:"] {
+        let mut target = original.clone();
+        target.receipt_id = format!("{prefix}{}", "a".repeat(64));
+        target.target_id = target.content_id().unwrap();
+        assert_eq!(target.validate().unwrap_err(), ReadError::InvalidRequest);
+    }
+}

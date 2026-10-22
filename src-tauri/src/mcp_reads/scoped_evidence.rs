@@ -182,7 +182,7 @@ fn descriptor(
 fn resolve(
     state: &AppState,
     proof: &ScopedEvidenceProof,
-    expected_receipt: Option<&str>,
+    expected_target: Option<&ScopedEvidenceTarget>,
     ordinal: usize,
     revalidate: impl FnOnce() -> Result<(), ReadError>,
 ) -> Result<(ScopedEvidenceTarget, RetentionGuard, Receipt), ReadError> {
@@ -190,7 +190,7 @@ fn resolve(
         return Err(ReadError::InvalidRequest);
     }
     let preliminary = selected(state, proof)?;
-    if expected_receipt.is_some_and(|id| id != preliminary.receipt_id) {
+    if expected_target.is_some_and(|target| target.receipt_id != preliminary.receipt_id) {
         return Err(ReadError::StaleBasis);
     }
     let source = state
@@ -224,21 +224,43 @@ fn resolve(
         return Err(ReadError::StaleBasis);
     }
     revalidate()?;
-    let receipt = state
-        .primary_sources
-        .task_receipt(
-            &guard,
-            &checked.fact,
-            &checked.emitted_fact_digest,
-            &checked.repo_key,
-            &checked.receipt_id,
-        )
-        .map_err(retained)?;
+    if expected_target.is_some_and(|target| {
+        target.fact_digest != checked.emitted_fact_digest
+            || target.registered_source_id != source.source_id
+    }) {
+        return Err(ReadError::StaleBasis);
+    }
+    let unavailable = |receipt: Option<&Receipt>| -> Result<ReadError, ReadError> {
+        if state
+            .primary_sources
+            .task_binding_forgotten(&guard, &checked, receipt)
+            .map_err(retained)?
+        {
+            Ok(ReadError::EvidenceForgotten)
+        } else {
+            Ok(ReadError::EvidenceUnavailable)
+        }
+    };
+    let receipt = match state.primary_sources.task_receipt(
+        &guard,
+        &checked.fact,
+        &checked.emitted_fact_digest,
+        &checked.repo_key,
+        &checked.receipt_id,
+    ) {
+        Ok(receipt) => receipt,
+        Err(PinnedReadError::Unavailable) => return Err(unavailable(None)?),
+        Err(error) => return Err(retained(error)),
+    };
     let target = descriptor(proof, &receipt, ordinal)?;
-    state
+    match state
         .primary_sources
         .task_capture_present(&guard, &target.captured)
-        .map_err(retained)?;
+    {
+        Ok(()) => {}
+        Err(PinnedReadError::Unavailable) => return Err(unavailable(Some(&receipt))?),
+        Err(error) => return Err(retained(error)),
+    }
     Ok((target, guard, receipt))
 }
 
@@ -324,7 +346,7 @@ pub(crate) fn read(
     let (actual, guard, receipt) = resolve(
         state,
         proof,
-        Some(&target.receipt_id),
+        Some(target),
         target.receipt_inventory_index as usize,
         revalidate,
     )?;

@@ -1,7 +1,7 @@
 # Scoped MCP retrieval
 
 Status: implementation draft for #731. Depends on the storage revision contract
-in #744 and read-only MCP in #718. This document does not establish a shipped
+in merged #744/#750 and read-only MCP in #718/#727. This document does not establish a shipped
 capability, native acceptance, owner approval, or completed issue gate.
 
 ## Acquisition and disclosure
@@ -47,6 +47,14 @@ used as an existing complete-snapshot inspection target. Before reading bytes th
 host revalidates selected identity and source binding, acquires the retention
 guard, repeats the checks, and rechecks session qualifications. It uses the
 existing retained receipt/capture reader, never a checkout fallback.
+
+An unavailable receipt or capture is classified as forgotten only when the
+retention ledger proves it for the exact current binding under that guard.
+Supplied receipt, digest and source identities are checked before this lookup;
+missing bindings do not establish forgetting. Invalid metadata and operational
+failures keep their distinct errors. The scoped capability advertises this
+forgotten-only subset explicitly; broad absence classification remains false
+until the per-fact omission producer and consumer are implemented.
 
 Scoped `cartograph_read_artifact` supports three producer-qualified partition
 kinds: `data-model`, `rule-evidence` and `rule-evidence-index`. The catalog names
