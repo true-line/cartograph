@@ -759,6 +759,27 @@ fn lambda_parameter_shadows(cx: &FileCx<'_>, use_node: TsNode<'_>, name: &str) -
                         stack.extend(current.named_children(&mut walk));
                     }
                 }
+                // A walrus in the body binds in the lambda's own scope (PEP
+                // 572), comprehensions included; a nested lambda or def owns
+                // its walruses, and a use inside one is checked there first.
+                if let Some(body) = node.child_by_field_name("body") {
+                    let mut stack = vec![body];
+                    while let Some(current) = stack.pop() {
+                        match current.kind() {
+                            "lambda" | "function_definition" | "class_definition" => continue,
+                            "named_expression"
+                                if current
+                                    .child_by_field_name("name")
+                                    .is_some_and(|target| cx.text(&target) == name) =>
+                            {
+                                return true;
+                            }
+                            _ => {}
+                        }
+                        let mut walk = current.walk();
+                        stack.extend(current.named_children(&mut walk));
+                    }
+                }
             }
             _ => {}
         }
