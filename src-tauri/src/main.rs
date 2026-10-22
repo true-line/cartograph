@@ -36,6 +36,8 @@ mod registry_tests;
 mod semantic_cache_tests;
 mod semantic_evaluation;
 mod settings;
+#[cfg(test)]
+mod showcase_tests;
 mod source_access;
 mod sources;
 mod task_evidence;

@@ -46,6 +46,72 @@ pub struct Extraction {
     /// Recovered edges.
     pub edges: Vec<Edge>,
     pending_calls: Vec<PendingCall>,
+    receiver_defs: Vec<ReceiverDef>,
+    pending_routes: Vec<PendingRoute>,
+    mounts: Vec<Mount>,
+}
+
+/// A module-level framework receiver: an application instance, or a Flask
+/// `Blueprint` / FastAPI `APIRouter` whose routes are joined across files
+/// after every file is parsed.
+#[derive(Debug, Clone)]
+struct ReceiverDef {
+    key: (String, String),
+    framework: Framework,
+    router: bool,
+    /// Assigned at module scope, so a module-level or imported name proves it;
+    /// a function-local assignment proves only reads in its own function.
+    module_level: bool,
+    prefix: Prefix,
+    evidence: EvidenceRef,
+}
+
+/// A router prefix as written: absent, a string literal, or something this
+/// tier cannot evaluate (which becomes a Gap, never a guess).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Prefix {
+    Absent,
+    Literal(String),
+    Unknown,
+}
+
+/// A route decorator whose receiver is defined in this file as a router or
+/// imported from another local module; resolved once every file is known.
+#[derive(Debug, Clone)]
+struct PendingRoute {
+    receiver: (String, String),
+    verb: String,
+    path: String,
+    listed_methods: Vec<String>,
+    handler: String,
+    evidence: EvidenceRef,
+}
+
+/// `parent.register_blueprint(bp, url_prefix=...)` /
+/// `parent.include_router(r, prefix=...)`.
+#[derive(Debug, Clone)]
+struct Mount {
+    receiver: (String, String),
+    parent: MountParent,
+    framework: Framework,
+    prefix: Prefix,
+    evidence: EvidenceRef,
+}
+
+/// The object a mount call is made on (`parent` above).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MountParent {
+    /// A module-level or imported name, proven at the join against a
+    /// module-level `ReceiverDef` (an application, or a router mounted in turn).
+    Def((String, String)),
+    /// An application assigned from an import-proven factory in the enclosing
+    /// function.
+    LocalApp(Framework),
+    /// A parameter annotated with an import-proven application type: declared,
+    /// not proven, so routes under it stay InferredStrong.
+    AnnotatedApp(Framework),
+    /// An unannotated parameter, an attribute or any other expression.
+    Unproven,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +154,16 @@ impl FileCx<'_> {
         node.utf8_text(self.source).unwrap_or("")
     }
 
+    fn evidence(&self, node: &TsNode<'_>) -> EvidenceRef {
+        EvidenceRef {
+            repo: self.id.repo.into(),
+            path: self.path.into(),
+            byte_start: node.start_byte() as u64,
+            byte_end: node.end_byte() as u64,
+            commit_sha: self.id.commit.into(),
+        }
+    }
+
     fn prov(&self, node: &TsNode<'_>, fact: &str) -> serde_json::Value {
         self.prov_with_confidence(node, ConfidenceTier::Confirmed, fact)
     }
@@ -116,6 +192,22 @@ impl FileCx<'_> {
     }
 }
 
+fn prov_from(
+    evidence: Vec<EvidenceRef>,
+    confidence: ConfidenceTier,
+    fact: &str,
+) -> serde_json::Value {
+    let provenance = Provenance::new(
+        Tier::Deterministic,
+        confidence,
+        evidence,
+        EXTRACTOR_ID,
+        fact.as_bytes(),
+    )
+    .expect("Deterministic confidence is within its ceiling");
+    serde_json::to_value(provenance).expect("provenance serializes")
+}
+
 fn file_id(repo: &str, path: &str) -> String {
     format!("file:{repo}@{path}")
 }
@@ -142,6 +234,15 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     }
     for edge in &mut extraction.edges {
         retarget_props_commit(&mut edge.props, commit);
+    }
+    for def in &mut extraction.receiver_defs {
+        def.evidence.commit_sha = commit.into();
+    }
+    for route in &mut extraction.pending_routes {
+        route.evidence.commit_sha = commit.into();
+    }
+    for mount in &mut extraction.mounts {
+        mount.evidence.commit_sha = commit.into();
     }
     for pending in &mut extraction.pending_calls {
         retarget_props_commit(&mut pending.resolved.props, commit);
@@ -321,6 +422,203 @@ enum Framework {
     Flask,
 }
 
+/// An import-proven framework constructor: `(framework, is_router)`.
+fn receiver_factory(
+    callee: &str,
+    bindings: &HashMap<String, ImportBinding>,
+) -> Option<(Framework, bool)> {
+    if let Some(framework) = framework_factory(callee, bindings) {
+        return Some((framework, false));
+    }
+    let mut parts = callee.split('.');
+    let base = parts.next()?;
+    let member = parts.next();
+    let (module, exported) = match (bindings.get(base), member) {
+        (
+            Some(ImportBinding::Symbol {
+                module, exported, ..
+            }),
+            None,
+        ) => (module.as_str(), exported.as_str()),
+        (Some(ImportBinding::Module { module }), Some(member)) => (module.as_str(), member),
+        _ => return None,
+    };
+    match (module, exported) {
+        ("flask", "Blueprint") => Some((Framework::Flask, true)),
+        ("fastapi", "APIRouter") => Some((Framework::FastApi, true)),
+        _ => None,
+    }
+}
+
+/// The value of a keyword argument (`url_prefix=` / `prefix=`) on a call. A
+/// `**options` expansion may carry the keyword, so without an explicit one the
+/// prefix is Unknown rather than absent.
+fn keyword_prefix(cx: &FileCx<'_>, call: TsNode<'_>, keyword: &str) -> Prefix {
+    let mut expanded = false;
+    for argument in named_arguments(call) {
+        if argument.kind() == "dictionary_splat" {
+            expanded = true;
+            continue;
+        }
+        if argument.kind() != "keyword_argument" {
+            continue;
+        }
+        let (Some(name), Some(value)) = (
+            argument.child_by_field_name("name"),
+            argument.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        if cx.text(&name) == keyword {
+            return literal_string(cx, value).map_or(Prefix::Unknown, Prefix::Literal);
+        }
+    }
+    if expanded {
+        Prefix::Unknown
+    } else {
+        Prefix::Absent
+    }
+}
+
+/// A router constructor's own prefix. Flask's `Blueprint` also accepts
+/// `url_prefix` as its sixth positional argument, and a `*args` expansion may
+/// supply it; FastAPI's `APIRouter` takes `prefix` by keyword only.
+fn constructor_prefix(cx: &FileCx<'_>, call: TsNode<'_>, framework: Framework) -> Prefix {
+    let prefix = keyword_prefix(cx, call, prefix_keyword(framework));
+    if framework != Framework::Flask || prefix != Prefix::Absent {
+        return prefix;
+    }
+    let positional: Vec<TsNode<'_>> = named_arguments(call)
+        .into_iter()
+        .filter(|argument| !matches!(argument.kind(), "keyword_argument" | "comment"))
+        .collect();
+    if positional
+        .iter()
+        .any(|argument| argument.kind() == "list_splat")
+    {
+        return Prefix::Unknown;
+    }
+    match positional.get(5) {
+        Some(argument) => literal_string(cx, *argument).map_or(Prefix::Unknown, Prefix::Literal),
+        None => Prefix::Absent,
+    }
+}
+
+/// The nearest enclosing function definition of `node`.
+fn enclosing_function_node(node: TsNode<'_>) -> Option<TsNode<'_>> {
+    let mut parent = node.parent();
+    while let Some(current) = parent {
+        if current.kind() == "function_definition" {
+            return Some(current);
+        }
+        parent = current.parent();
+    }
+    None
+}
+
+/// Whether `name` is a parameter of `function`: `Some(annotation)` when it is,
+/// with the annotation's text if one is written.
+fn parameter_annotation<'s>(
+    cx: &'s FileCx<'_>,
+    function: TsNode<'_>,
+    name: &str,
+) -> Option<Option<&'s str>> {
+    let parameters = function.child_by_field_name("parameters")?;
+    let mut walk = parameters.walk();
+    for parameter in parameters.named_children(&mut walk) {
+        let (ident, annotation) = match parameter.kind() {
+            "identifier" => (Some(parameter), None),
+            "default_parameter" => (parameter.child_by_field_name("name"), None),
+            "typed_default_parameter" => (
+                parameter.child_by_field_name("name"),
+                parameter.child_by_field_name("type"),
+            ),
+            "typed_parameter" => {
+                let mut inner = parameter.walk();
+                let ident = parameter
+                    .named_children(&mut inner)
+                    .find(|child| child.kind() == "identifier");
+                (ident, parameter.child_by_field_name("type"))
+            }
+            _ => (None, None),
+        };
+        if ident.is_some_and(|ident| cx.text(&ident) == name) {
+            return Some(annotation.map(|annotation| cx.text(&annotation).trim()));
+        }
+    }
+    None
+}
+
+/// An application assigned to `name` from an import-proven factory inside
+/// `function` itself (nested functions and classes are other scopes).
+fn local_app_assignment(
+    cx: &FileCx<'_>,
+    function: TsNode<'_>,
+    name: &str,
+    bindings: &HashMap<String, ImportBinding>,
+) -> Option<Framework> {
+    let mut stack: Vec<TsNode<'_>> = function.child_by_field_name("body").into_iter().collect();
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "function_definition" | "class_definition") {
+            continue;
+        }
+        if node.kind() == "assignment"
+            && let (Some(left), Some(right)) = (
+                node.child_by_field_name("left"),
+                node.child_by_field_name("right"),
+            )
+            && left.kind() == "identifier"
+            && cx.text(&left) == name
+            && right.kind() == "call"
+            && let Some(framework) =
+                call_name(cx, right).and_then(|callee| framework_factory(&callee, bindings))
+        {
+            return Some(framework);
+        }
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+    }
+    None
+}
+
+/// What the object of a mount call is, as far as this file can prove it.
+fn mount_parent(
+    cx: &FileCx<'_>,
+    object: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> MountParent {
+    if object.kind() != "identifier" {
+        return MountParent::Unproven;
+    }
+    let name = cx.text(&object);
+    if let Some(function) = enclosing_function_node(object) {
+        if let Some(framework) = local_app_assignment(cx, function, name, bindings) {
+            return MountParent::LocalApp(framework);
+        }
+        if let Some(annotation) = parameter_annotation(cx, function, name) {
+            return annotation
+                .and_then(|annotation| framework_factory(annotation, bindings))
+                .map_or(MountParent::Unproven, MountParent::AnnotatedApp);
+        }
+    }
+    match bindings.get(name) {
+        Some(ImportBinding::Symbol {
+            target_file: Some(target),
+            exported,
+            ..
+        }) => MountParent::Def((target.clone(), exported.clone())),
+        Some(_) => MountParent::Unproven,
+        None => MountParent::Def((cx.path.to_string(), name.to_string())),
+    }
+}
+
+fn prefix_keyword(framework: Framework) -> &'static str {
+    match framework {
+        Framework::Flask => "url_prefix",
+        Framework::FastApi => "prefix",
+    }
+}
+
 fn framework_factory(callee: &str, bindings: &HashMap<String, ImportBinding>) -> Option<Framework> {
     let mut parts = callee.split('.');
     let base = parts.next()?;
@@ -353,6 +651,7 @@ fn assignment_receivers(
     root: TsNode<'_>,
     language: &tree_sitter::Language,
     bindings: &HashMap<String, ImportBinding>,
+    out: &mut Extraction,
 ) -> HashMap<String, Framework> {
     let query = Query::new(
         language,
@@ -372,13 +671,30 @@ fn assignment_receivers(
                 _ => {}
             }
         }
-        let (Some(variable), Some(callee)) = (variable, call.and_then(|call| call_name(cx, call)))
-        else {
+        let (Some(variable), Some(call)) = (variable, call) else {
             continue;
         };
-        if let Some(framework) = framework_factory(&callee, bindings) {
-            receivers.insert(variable, framework);
+        let Some(callee) = call_name(cx, call) else {
+            continue;
+        };
+        let Some((framework, router)) = receiver_factory(&callee, bindings) else {
+            continue;
+        };
+        if !router {
+            receivers.insert(variable.clone(), framework);
         }
+        out.receiver_defs.push(ReceiverDef {
+            key: (cx.path.to_string(), variable),
+            framework,
+            router,
+            module_level: enclosing_function_node(call).is_none(),
+            prefix: if router {
+                constructor_prefix(cx, call, framework)
+            } else {
+                Prefix::Absent
+            },
+            evidence: cx.evidence(&call),
+        });
     }
     receivers
 }
@@ -407,50 +723,37 @@ fn named_arguments(node: TsNode<'_>) -> Vec<TsNode<'_>> {
     arguments.named_children(&mut walk).collect()
 }
 
-fn decorator_methods(
+/// A `@receiver.verb("/path", methods=[...])` decorator, before the receiver
+/// is known to be a framework object.
+struct RouteDecorator<'tree> {
+    receiver: TsNode<'tree>,
+    verb: String,
+    path: String,
+    listed_methods: Vec<String>,
+}
+
+fn route_decorator<'tree>(
     cx: &FileCx<'_>,
-    decorator: TsNode<'_>,
-    receivers: &HashMap<String, Framework>,
-) -> Vec<(String, String, Framework)> {
+    decorator: TsNode<'tree>,
+) -> Option<RouteDecorator<'tree>> {
     let mut walk = decorator.walk();
-    let Some(call) = decorator
+    let call = decorator
         .named_children(&mut walk)
-        .find(|child| child.kind() == "call")
-    else {
-        return Vec::new();
-    };
-    let Some(function) = call.child_by_field_name("function") else {
-        return Vec::new();
-    };
+        .find(|child| child.kind() == "call")?;
+    let function = call.child_by_field_name("function")?;
     if function.kind() != "attribute" {
-        return Vec::new();
+        return None;
     }
-    let (Some(object), Some(attribute)) = (
-        function.child_by_field_name("object"),
-        function.child_by_field_name("attribute"),
-    ) else {
-        return Vec::new();
-    };
-    let Some(framework) = receivers.get(cx.text(&object)).copied() else {
-        return Vec::new();
-    };
-    let method = cx.text(&attribute);
+    let receiver = function.child_by_field_name("object")?;
+    let verb = cx
+        .text(&function.child_by_field_name("attribute")?)
+        .to_string();
     let arguments = named_arguments(call);
-    let Some(path) = arguments
+    let path = arguments
         .first()
         .copied()
-        .and_then(|argument| literal_string(cx, argument))
-    else {
-        return Vec::new();
-    };
-    const DIRECT_METHODS: &[&str] = &["get", "post", "put", "delete", "patch", "options", "head"];
-    if DIRECT_METHODS.contains(&method) {
-        return vec![(method.to_ascii_uppercase(), path, framework)];
-    }
-    if framework != Framework::Flask || method != "route" {
-        return Vec::new();
-    }
-    let mut methods = Vec::new();
+        .and_then(|argument| literal_string(cx, argument))?;
+    let mut listed_methods = Vec::new();
     for argument in arguments.iter().skip(1) {
         if argument.kind() != "keyword_argument" {
             continue;
@@ -465,20 +768,48 @@ fn decorator_methods(
             continue;
         }
         let mut walk = value.walk();
-        methods.extend(
+        listed_methods.extend(
             value
                 .named_children(&mut walk)
                 .filter_map(|item| literal_string(cx, item))
                 .map(|method| method.to_ascii_uppercase()),
         );
     }
-    if methods.is_empty() {
-        methods.push("GET".into());
+    Some(RouteDecorator {
+        receiver,
+        verb,
+        path,
+        listed_methods,
+    })
+}
+
+/// HTTP methods a decorator declares on a receiver of `framework`.
+fn methods_for(framework: Framework, verb: &str, listed: &[String]) -> Vec<String> {
+    const DIRECT_METHODS: &[&str] = &["get", "post", "put", "delete", "patch", "options", "head"];
+    if DIRECT_METHODS.contains(&verb) {
+        return vec![verb.to_ascii_uppercase()];
     }
-    methods
-        .into_iter()
-        .map(|method| (method, path.clone(), framework))
-        .collect()
+    if framework != Framework::Flask || verb != "route" {
+        return Vec::new();
+    }
+    if listed.is_empty() {
+        vec!["GET".into()]
+    } else {
+        listed.to_vec()
+    }
+}
+
+/// Join a router prefix and a route path the way Flask and FastAPI do.
+fn join_route(prefix: &str, path: &str) -> String {
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return path.to_string();
+    }
+    if path.starts_with('/') {
+        format!("{prefix}{path}")
+    } else {
+        format!("{prefix}/{path}")
+    }
 }
 
 fn enclosing_function(mut node: TsNode<'_>, functions: &HashMap<usize, String>) -> Option<String> {
@@ -540,6 +871,362 @@ fn classify_import(module: &str, local_names: &BTreeSet<String>) -> Boundary {
     }
 }
 
+/// `x.register_blueprint(bp, url_prefix=...)` and `x.include_router(r,
+/// prefix=...)` wherever they appear (often inside a factory function whose
+/// app is a parameter). The mounted router is resolved after the walk.
+fn collect_mounts(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    language: &tree_sitter::Language,
+    bindings: &HashMap<String, ImportBinding>,
+    out: &mut Extraction,
+) {
+    let query = Query::new(
+        language,
+        "(call function: (attribute attribute: (identifier) @verb)) @call",
+    )
+    .expect("static query");
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, root, cx.source);
+    while let Some(found) = matches.next() {
+        let (mut call, mut verb) = (None, None);
+        for capture in found.captures() {
+            match query.capture_names()[capture.index as usize] {
+                "call" => call = Some(capture.node),
+                "verb" => verb = Some(cx.text(&capture.node)),
+                _ => {}
+            }
+        }
+        let (Some(call), Some(verb)) = (call, verb) else {
+            continue;
+        };
+        let framework = match verb {
+            "register_blueprint" => Framework::Flask,
+            "include_router" => Framework::FastApi,
+            _ => continue,
+        };
+        let Some(first) = named_arguments(call).first().copied() else {
+            continue;
+        };
+        if first.kind() != "identifier" {
+            continue;
+        }
+        let Some(object) = call
+            .child_by_field_name("function")
+            .and_then(|function| function.child_by_field_name("object"))
+        else {
+            continue;
+        };
+        let name = cx.text(&first).to_string();
+        let receiver = match bindings.get(&name) {
+            Some(ImportBinding::Symbol {
+                target_file: Some(target),
+                exported,
+                ..
+            }) => (target.clone(), exported.clone()),
+            Some(_) => continue,
+            None => (cx.path.to_string(), name),
+        };
+        out.mounts.push(Mount {
+            receiver,
+            parent: mount_parent(cx, object, bindings),
+            framework,
+            prefix: keyword_prefix(cx, call, prefix_keyword(framework)),
+            evidence: cx.evidence(&call),
+        });
+    }
+}
+
+/// Longest mount chain followed from a router to its application.
+const MAX_MOUNT_DEPTH: usize = 16;
+
+const UNREADABLE_PREFIX: &str = "router prefix is not a string literal";
+
+/// One prefix a router's routes are served under, with the evidence and
+/// confidence of the mount chain that proves it.
+#[derive(Debug, Clone)]
+struct Served {
+    prefix: Prefix,
+    evidence: Vec<EvidenceRef>,
+    confidence: ConfidenceTier,
+    mount: Option<&'static str>,
+    reason: &'static str,
+}
+
+fn tier_rank(tier: ConfidenceTier) -> u8 {
+    match tier {
+        ConfidenceTier::Confirmed => 3,
+        ConfidenceTier::InferredStrong => 2,
+        ConfidenceTier::InferredWeak => 1,
+        ConfidenceTier::Gap => 0,
+    }
+}
+
+/// `outer` then `inner`, as a nested mount composes them.
+fn concat_prefix(outer: &Prefix, inner: &Prefix) -> Prefix {
+    match (outer, inner) {
+        (Prefix::Unknown, _) | (_, Prefix::Unknown) => Prefix::Unknown,
+        (Prefix::Absent, Prefix::Absent) => Prefix::Absent,
+        (Prefix::Absent, other) | (other, Prefix::Absent) => other.clone(),
+        (Prefix::Literal(outer), Prefix::Literal(inner)) => {
+            Prefix::Literal(join_route(outer, inner))
+        }
+    }
+}
+
+/// The prefix one mount gives a router (Flask: the mount's `url_prefix`
+/// replaces the blueprint's own; FastAPI: the mount's `prefix` is prepended).
+fn mount_contribution(framework: Framework, mount: &Prefix, declared: &Prefix) -> Prefix {
+    match (framework, mount) {
+        (_, Prefix::Unknown) => Prefix::Unknown,
+        (Framework::Flask, Prefix::Literal(prefix)) => Prefix::Literal(prefix.clone()),
+        (Framework::Flask, Prefix::Absent) => declared.clone(),
+        (Framework::FastApi, mount) => concat_prefix(mount, declared),
+    }
+}
+
+/// Every prefix the routes on `key` are served under, following mounts up to
+/// the application. A mount on a receiver that is not a proven application or
+/// router of the same framework never confirms a path: it stays InferredStrong,
+/// and is dropped whenever another chain confirms the router.
+fn served_prefixes(
+    key: &(String, String),
+    defs: &HashMap<(String, String), ReceiverDef>,
+    mounts: &HashMap<(String, String), Vec<Mount>>,
+    chain: &mut Vec<(String, String)>,
+) -> Vec<Served> {
+    let Some(def) = defs.get(key) else {
+        return Vec::new();
+    };
+    if !def.router {
+        return vec![Served {
+            prefix: Prefix::Absent,
+            evidence: vec![def.evidence.clone()],
+            confidence: ConfidenceTier::Confirmed,
+            mount: None,
+            reason: UNREADABLE_PREFIX,
+        }];
+    }
+    if chain.contains(key) || chain.len() >= MAX_MOUNT_DEPTH {
+        return vec![Served {
+            prefix: Prefix::Unknown,
+            evidence: vec![def.evidence.clone()],
+            confidence: ConfidenceTier::Gap,
+            mount: None,
+            reason: "router mount chain is cyclic or deeper than 16 mounts",
+        }];
+    }
+    let observed: Vec<&Mount> = mounts
+        .get(key)
+        .into_iter()
+        .flatten()
+        .filter(|mount| mount.framework == def.framework)
+        .collect();
+    if observed.is_empty() {
+        return vec![Served {
+            prefix: def.prefix.clone(),
+            evidence: vec![def.evidence.clone()],
+            confidence: ConfidenceTier::InferredStrong,
+            mount: Some("mount_not_observed"),
+            reason: UNREADABLE_PREFIX,
+        }];
+    }
+    chain.push(key.clone());
+    let mut served = Vec::new();
+    for mount in observed {
+        let own = mount_contribution(def.framework, &mount.prefix, &def.prefix);
+        let root = |confidence, label| Served {
+            prefix: Prefix::Absent,
+            evidence: Vec::new(),
+            confidence,
+            mount: Some(label),
+            reason: UNREADABLE_PREFIX,
+        };
+        let parents = match &mount.parent {
+            MountParent::Def(parent)
+                if defs.get(parent).is_some_and(|parent| {
+                    parent.module_level && parent.framework == def.framework
+                }) =>
+            {
+                served_prefixes(parent, defs, mounts, chain)
+            }
+            MountParent::LocalApp(framework) if *framework == def.framework => {
+                vec![root(ConfidenceTier::Confirmed, "mounted")]
+            }
+            MountParent::AnnotatedApp(framework) if *framework == def.framework => {
+                vec![root(
+                    ConfidenceTier::InferredStrong,
+                    "mount_receiver_annotated",
+                )]
+            }
+            _ => vec![root(
+                ConfidenceTier::InferredStrong,
+                "mount_receiver_unproven",
+            )],
+        };
+        for parent in parents {
+            let mut evidence = vec![def.evidence.clone(), mount.evidence.clone()];
+            evidence.extend(parent.evidence);
+            let prefix = concat_prefix(&parent.prefix, &own);
+            let reason = if parent.prefix == Prefix::Unknown {
+                parent.reason
+            } else {
+                UNREADABLE_PREFIX
+            };
+            served.push(Served {
+                prefix,
+                evidence,
+                confidence: if tier_rank(parent.confidence) < tier_rank(ConfidenceTier::Confirmed) {
+                    parent.confidence
+                } else {
+                    ConfidenceTier::Confirmed
+                },
+                mount: Some(parent.mount.unwrap_or("mounted")),
+                reason,
+            });
+        }
+    }
+    chain.pop();
+    if served
+        .iter()
+        .any(|served| served.confidence == ConfidenceTier::Confirmed)
+    {
+        served.retain(|served| served.mount != Some("mount_receiver_unproven"));
+    }
+    served
+}
+
+/// Join pending router routes with their definitions and the complete mount
+/// chain up to an application. A prefix this tier cannot read, a cyclic or
+/// over-deep chain, yields a Gap on the handler instead of an invented path. A
+/// router with no observed mount keeps its declared prefix at InferredStrong;
+/// so does one mounted only on an annotated parameter or an unproven receiver.
+fn resolve_routes(out: &mut Extraction, repo: &str) {
+    let defs: HashMap<(String, String), ReceiverDef> = std::mem::take(&mut out.receiver_defs)
+        .into_iter()
+        .map(|def| (def.key.clone(), def))
+        .collect();
+    let mut mounts: HashMap<(String, String), Vec<Mount>> = HashMap::new();
+    for mount in std::mem::take(&mut out.mounts) {
+        mounts
+            .entry(mount.receiver.clone())
+            .or_default()
+            .push(mount);
+    }
+    let mut emitted = BTreeSet::new();
+    for route in std::mem::take(&mut out.pending_routes) {
+        let Some(def) = defs.get(&route.receiver) else {
+            continue;
+        };
+        let methods = methods_for(def.framework, &route.verb, &route.listed_methods);
+        if methods.is_empty() {
+            continue;
+        }
+        for served in served_prefixes(&route.receiver, &defs, &mounts, &mut Vec::new()) {
+            let mount = served.mount;
+            let prefix = match served.prefix {
+                Prefix::Absent => String::new(),
+                Prefix::Literal(prefix) => prefix,
+                Prefix::Unknown => {
+                    let gap_id = format!(
+                        "gap:route:{repo}@{}@{}",
+                        route.evidence.path, route.evidence.byte_start
+                    );
+                    if emitted.insert(gap_id.clone()) {
+                        let mut evidence = vec![route.evidence.clone()];
+                        evidence.extend(served.evidence);
+                        out.nodes.push(Node {
+                            id: gap_id.clone(),
+                            label: "Gap".into(),
+                            props: serde_json::json!({
+                                "reason": served.reason,
+                                "route": route.path,
+                                "attempted_tiers": ["T0"],
+                                "prov": prov_from(evidence.clone(), ConfidenceTier::Gap, &format!("Gap {gap_id}")),
+                            }),
+                        });
+                        out.edges.push(Edge {
+                            src: gap_id.clone(),
+                            dst: route.handler.clone(),
+                            label: "HANDLES".into(),
+                            props: serde_json::json!({
+                                "prov": prov_from(evidence, ConfidenceTier::Gap, &format!("HANDLES {gap_id} -> {}", route.handler)),
+                            }),
+                        });
+                    }
+                    continue;
+                }
+            };
+            let path = join_route(&prefix, &route.path);
+            for method in &methods {
+                if !emitted.insert(format!("{method} {path} {}", route.handler)) {
+                    continue;
+                }
+                let mut evidence = vec![route.evidence.clone()];
+                evidence.extend(served.evidence.iter().cloned());
+                push_endpoint(
+                    out,
+                    repo,
+                    method,
+                    &path,
+                    &route.handler,
+                    def.framework,
+                    &evidence,
+                    served.confidence,
+                    mount,
+                );
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_endpoint(
+    out: &mut Extraction,
+    repo: &str,
+    method: &str,
+    route: &str,
+    handler: &str,
+    framework: Framework,
+    evidence: &[EvidenceRef],
+    confidence: ConfidenceTier,
+    mount: Option<&str>,
+) {
+    let endpoint = format!("ep:{repo}@{method}:{route}");
+    let framework_name = match framework {
+        Framework::FastApi => "fastapi",
+        Framework::Flask => "flask",
+    };
+    let mut props = serde_json::json!({
+        "method": method,
+        "path": route,
+        "handler_sym": handler,
+        "framework": framework_name,
+        "language": "python",
+        "prov": prov_from(evidence.to_vec(), confidence, &format!("Endpoint {endpoint}")),
+    });
+    if let Some(mount) = mount {
+        props["mount"] = mount.into();
+    }
+    out.nodes.push(Node {
+        id: endpoint.clone(),
+        label: "Endpoint".into(),
+        props,
+    });
+    out.edges.push(Edge {
+        src: endpoint.clone(),
+        dst: handler.to_string(),
+        label: "HANDLES".into(),
+        props: serde_json::json!({
+            "prov": prov_from(
+                evidence.to_vec(),
+                confidence,
+                &format!("HANDLES {endpoint} -> {handler}"),
+            ),
+        }),
+    });
+}
+
 /// Recover deterministic facts from one Python source file.
 pub fn extract_source(
     source: &[u8],
@@ -566,7 +1253,8 @@ pub fn extract_source(
     });
 
     let bindings = parse_imports(&cx, root, &language, &mut out);
-    let receivers = assignment_receivers(&cx, root, &language, &bindings);
+    let receivers = assignment_receivers(&cx, root, &language, &bindings, &mut out);
+    collect_mounts(&cx, root, &language, &bindings, &mut out);
     let function_query = Query::new(
         &language,
         "(function_definition name: (identifier) @name) @function",
@@ -632,31 +1320,48 @@ pub fn extract_source(
             .named_children(&mut walk)
             .filter(|child| child.kind() == "decorator")
         {
-            for (method, route, framework) in decorator_methods(&cx, decorator, &receivers) {
-                let endpoint = format!("ep:{}@{method}:{route}", id.repo);
-                let framework_name = match framework {
-                    Framework::FastApi => "fastapi",
-                    Framework::Flask => "flask",
-                };
-                out.nodes.push(Node {
-                    id: endpoint.clone(),
-                    label: "Endpoint".into(),
-                    props: serde_json::json!({
-                        "method": method,
-                        "path": route,
-                        "handler_sym": handler,
-                        "framework": framework_name,
-                        "language": "python",
-                        "prov": cx.prov(&decorator, &format!("Endpoint {endpoint}")),
-                    }),
-                });
-                out.edges.push(Edge {
-                    src: endpoint.clone(),
-                    dst: handler.clone(),
-                    label: "HANDLES".into(),
-                    props: serde_json::json!({
-                        "prov": cx.prov(&decorator, &format!("HANDLES {endpoint} -> {handler}")),
-                    }),
+            let Some(route) = route_decorator(&cx, decorator) else {
+                continue;
+            };
+            let receiver = cx.text(&route.receiver).to_string();
+            if let Some(framework) = receivers.get(&receiver).copied() {
+                for method in methods_for(framework, &route.verb, &route.listed_methods) {
+                    push_endpoint(
+                        &mut out,
+                        id.repo,
+                        &method,
+                        &route.path,
+                        handler,
+                        framework,
+                        &[cx.evidence(&decorator)],
+                        ConfidenceTier::Confirmed,
+                        None,
+                    );
+                }
+                continue;
+            }
+            // A router defined here, or a receiver imported from a local
+            // module: joined with its definition and mounts after the walk.
+            let key = match bindings.get(&receiver) {
+                Some(ImportBinding::Symbol {
+                    target_file: Some(target),
+                    exported,
+                    ..
+                }) => Some((target.clone(), exported.clone())),
+                Some(_) => None,
+                None if route.receiver.kind() == "identifier" => {
+                    Some((path.to_string(), receiver.clone()))
+                }
+                None => None,
+            };
+            if let Some(key) = key {
+                out.pending_routes.push(PendingRoute {
+                    receiver: key,
+                    verb: route.verb,
+                    path: route.path,
+                    listed_methods: route.listed_methods,
+                    handler: handler.clone(),
+                    evidence: cx.evidence(&decorator),
                 });
             }
         }
@@ -874,6 +1579,9 @@ pub fn extract_dir_incremental_with_progress(
             out.nodes.extend(extraction.nodes);
             out.edges.extend(extraction.edges);
             out.pending_calls.extend(extraction.pending_calls);
+            out.receiver_defs.extend(extraction.receiver_defs);
+            out.pending_routes.extend(extraction.pending_routes);
+            out.mounts.extend(extraction.mounts);
             Ok(())
         },
     );
@@ -892,6 +1600,7 @@ pub fn extract_dir_incremental_with_progress(
             out.edges.push(edge);
         }
     }
+    resolve_routes(&mut out, id.repo);
     let local_names = local_module_names(root)?;
     let Extraction { nodes, edges, .. } = &mut out;
     core_graph::placeholder::close_over_endpoints(
