@@ -112,6 +112,88 @@ export const LayerFilters: Story = {
   },
 };
 
+// #723: rule exits and rule gaps joined by DEPENDS_ON are not infrastructure.
+// A layer edge only pulls in a neighbor of a fact that natively belongs there.
+const ruleGapFixture: AtlasSnapshot = {
+  nodes: [
+    atlasNodes[0],
+    {
+      id: 'rule:local/shop@Checkout#exit-1',
+      label: 'BusinessRule',
+      props: { name: 'guarded exit', prov: prov('InferredStrong', 'Checkout.tsx') },
+    },
+    {
+      id: 'gap:rule:local/shop@Checkout#unresolved_call',
+      label: 'Gap',
+      props: { reason: 'unresolved_call', prov: prov('Gap', 'Checkout.tsx') },
+    },
+    {
+      id: 'gap:local/shop@orders-dlq',
+      label: 'Gap',
+      props: { reason: 'unresolved dead-letter target', prov: prov('Gap', 'infra.tf') },
+    },
+  ],
+  edges: [
+    {
+      src: 'rule:local/shop@Checkout#exit-1',
+      dst: 'gap:rule:local/shop@Checkout#unresolved_call',
+      label: 'DEPENDS_ON',
+      props: { prov: prov('Gap', 'Checkout.tsx') },
+    },
+    {
+      src: atlasNodes[0].id,
+      dst: 'gap:local/shop@orders-dlq',
+      label: 'DEPENDS_ON',
+      props: { prov: prov('Gap', 'infra.tf') },
+    },
+  ],
+};
+
+export const InfrastructureExcludesRuleGaps: Story = {
+  args: { snapshot: ruleGapFixture },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Infrastructure' }));
+    // The resource and the gap on its own dependency stay; the rule exit and
+    // its rule gap do not.
+    await waitFor(() => expect(canvas.getByRole('status')).toHaveTextContent('2 nodes · 1 edges'));
+  },
+};
+
+const extensionFixture: AtlasSnapshot = {
+  nodes: [
+    { id: 'ext:local/addon@src', label: 'Extension', props: { name: 'addon', prov: prov('Confirmed', 'manifest.json') } },
+    { id: 'perm:local/addon@storage', label: 'Permission', props: { name: 'storage', prov: prov('Confirmed', 'manifest.json') } },
+    { id: 'cmd:local/addon@open', label: 'Command', props: { name: 'open', prov: prov('Confirmed', 'manifest.json') } },
+    { id: 'ctx:local/addon@background', label: 'ExtensionContext', props: { name: 'background', prov: prov('Confirmed', 'manifest.json') } },
+  ],
+  edges: [
+    { src: 'ext:local/addon@src', dst: 'perm:local/addon@storage', label: 'GRANTS', props: { prov: prov('Confirmed', 'manifest.json') } },
+    { src: 'cmd:local/addon@open', dst: 'ctx:local/addon@background', label: 'HANDLES', props: { prov: prov('Confirmed', 'manifest.json') } },
+  ],
+};
+
+export const ClientKeepsExtensionRelationships: Story = {
+  args: { snapshot: extensionFixture },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Client' }));
+    // GRANTS and HANDLES are labelled cloud/server, but both of their
+    // endpoints are client-native, so they stay with the Client layer.
+    await waitFor(() => expect(canvas.getByRole('status')).toHaveTextContent('4 nodes · 2 edges'));
+  },
+};
+
+export const InfrastructureEmptyNamesSources: Story = {
+  args: { snapshot: { nodes: [atlasNodes[3]], edges: [] } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Infrastructure' }));
+    await expect(await canvas.findByText(/No infrastructure recovered/)).toBeInTheDocument();
+    await expect(canvas.getByText(/Terraform, Pulumi/)).toBeInTheDocument();
+  },
+};
+
 export const ConfidenceOverlay: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
