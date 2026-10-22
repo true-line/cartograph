@@ -337,3 +337,36 @@ fixed unavailable diagnostic without launching the fixture. It used the revoked
 or missing activation record; it does not establish a valid-record/dead-endpoint
 case. See `closed-app-no-launch.json`. Per-fact omission remains unimplemented
 and broad absence capability remains false.
+
+## Private Inspector connection lifecycle — supplemental 94c7cf3 run
+
+A follow-up on the same isolated `94c7cf3` ARM fixture used installed Inspector
+2.12.0 with a new private daemon and disposable catalog. A transparent stdio
+wrapper launched the packaged relay and retained actual JSON-RPC envelopes for
+initialize, initialized notification, tools/list and capabilities. Observed
+request IDs 0–3 each had exactly one matching response; the notification had no
+response. This supplements the earlier six-call artifact/source transcript; it
+does not retroactively add raw envelopes to that earlier run.
+
+While connected, `lsof` observed the relay executable, dyld, its working
+directory, standard pipes, kqueues and the local Unix socket. No application
+store file or network socket was open at that observation. The separate
+`otool -L` record shows libiconv and libSystem. These observations support the
+source/dependency audit; they are not a proof of every possible future process
+state or static dependency.
+
+The client disconnected and its disposable catalog entry was removed through
+the documented catalog-edit route. Inspector reported no configured servers
+and no live connections. Refreshing the app's Settings still showed the read
+service running: client removal does not revoke app access. Access was then
+explicitly disabled, the fixture quit, and relay termination and activation
+record absence were verified. The private daemon was stopped. The original
+configuration remains as evidence, separate from the now-empty live catalog.
+
+Evidence is in `mcp-fixture-94c7cf3/client-lifecycle/`: `protocol.jsonl`,
+`relay-open-files.txt`, `catalog-before.json`, `catalog-after-list.json`,
+`connections-after.json`, `ui-after-client-removal.txt` and `result.json`.
+This closes the previously unobserved process-inspection and client-entry
+removal cases for this fixture. Different-OS-user peer rejection, non-ARM
+execution and production signing remain unestablished. No provider execution,
+owner-store access or real-target ingestion occurred.
