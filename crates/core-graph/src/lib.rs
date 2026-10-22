@@ -8,12 +8,14 @@
 
 mod bounded;
 pub mod coverage;
+pub mod generation;
 pub mod omission;
 pub mod placeholder;
 pub mod rules;
 pub mod source;
 
 pub use bounded::{SnapshotBoundsError, SnapshotReadLimits};
+pub use generation::{GenerationError, RevisionedSnapshot, StoreRevision};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -64,7 +66,10 @@ pub struct GraphPatch {
 pub enum GraphError {
     /// Underlying storage failure.
     #[error("storage: {0}")]
-    Storage(#[from] rusqlite::Error),
+    Storage(#[source] rusqlite::Error),
+    /// Invalid, exhausted or stale mutation generation.
+    #[error(transparent)]
+    Generation(#[from] GenerationError),
     /// Host derived-state invalidation failed before graph deletion.
     #[error("derived state: {0}")]
     DerivedState(String),
@@ -77,6 +82,12 @@ pub enum GraphError {
     /// An opt-in bounded snapshot rejected its input or admission limits.
     #[error("bounded snapshot: {0}")]
     SnapshotBounds(#[from] SnapshotBoundsError),
+}
+
+impl From<rusqlite::Error> for GraphError {
+    fn from(error: rusqlite::Error) -> Self {
+        generation::storage_error(error)
+    }
 }
 
 /// Storage abstraction for the unified graph (ADR-0008).
@@ -367,6 +378,11 @@ impl SqliteGraphStore {
         // WAL is a no-op for in-memory databases; harmless to set anyway.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Schema observation, additive migration and destructive-reset decision
+        // share the writer lock; a waiting opener must reread the committed version.
+        let transaction = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+        generation::validate_optional(&conn)?;
+        let had_fact_schema: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name IN ('nodes','edges'))", [], |r| r.get(0))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS nodes (
                  id    TEXT PRIMARY KEY,
@@ -385,14 +401,15 @@ impl SqliteGraphStore {
         )?;
         // Private association metadata has its own schema version. Validate it
         // before any legacy fact-schema rebuild can remove existing facts.
-        source::initialize(&conn)?;
-        coverage::initialize(&conn)?;
+        source::initialize(&transaction)?;
+        coverage::initialize(&transaction)?;
         let version: u32 = conn.query_row("SELECT * FROM pragma_user_version", [], |r| r.get(0))?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS graph_instance (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance TEXT NOT NULL CHECK(length(instance)=32)) STRICT; INSERT INTO graph_instance SELECT 1,lower(hex(randomblob(16))) WHERE NOT EXISTS(SELECT 1 FROM graph_instance);")?;
         let valid: bool = conn.query_row("SELECT count(*)=1 AND coalesce(min(singleton=1 AND typeof(instance)='text' AND length(instance)=32 AND instance NOT GLOB '*[^0-9a-f]*'),0) FROM graph_instance", [], |r|r.get(0))?;
         if !valid {
             return Err(GraphError::Storage(rusqlite::Error::InvalidQuery));
         }
+        generation::initialize(&transaction)?;
         if version != GRAPH_SCHEMA_VERSION {
             if let Some(hook) = &reset_hook {
                 hook().map_err(GraphError::DerivedState)?;
@@ -402,8 +419,12 @@ impl SqliteGraphStore {
             conn.execute_batch(
                 "DELETE FROM edges; DELETE FROM nodes; DELETE FROM coverage_inventories;",
             )?;
+            if had_fact_schema {
+                generation::bump(&transaction)?;
+            }
             conn.pragma_update(None, "user_version", GRAPH_SCHEMA_VERSION)?;
         }
+        transaction.commit()?;
         Ok(Self {
             conn,
             reset_hook,

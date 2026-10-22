@@ -6,7 +6,7 @@
 //! the inventory is complete or still matches the repo's registration.
 
 use crate::{Edge, GraphError, Node, SnapshotBoundsError, SnapshotReadLimits, SqliteGraphStore};
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -92,7 +92,11 @@ fn owned_schema(connection: &Connection) -> Result<BTreeMap<String, (String, Str
 }
 
 pub(crate) fn check_schema(connection: &Connection) -> Result<(), GraphError> {
-    let actual = owned_schema(connection)?;
+    // Generation triggers are part of this owner's inventory. Validate their
+    // metadata bounds before owned_schema allocates SQL strings.
+    let generation = crate::generation::validate_for_owner(connection)?;
+    let mut actual = owned_schema(connection)?;
+    generation.strip_objects(&mut actual);
     if actual.len() != SCHEMA.len()
         || SCHEMA.iter().any(|(kind, name, sql)| {
             actual
@@ -114,8 +118,8 @@ pub(crate) fn check_schema(connection: &Connection) -> Result<(), GraphError> {
     Ok(())
 }
 
-pub(crate) fn initialize(connection: &Connection) -> Result<(), GraphError> {
-    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+pub(crate) fn initialize(transaction: &Transaction<'_>) -> Result<(), GraphError> {
+    let connection: &Connection = transaction;
     if owned_schema(connection)?.is_empty() {
         for (_, _, sql) in SCHEMA {
             transaction.execute_batch(sql)?;
@@ -126,7 +130,6 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), GraphError> {
         )?;
     }
     check_schema(connection)?;
-    transaction.commit()?;
     Ok(())
 }
 

@@ -259,7 +259,10 @@ fn preflight_selection_schema(connection: &Connection) -> Result<(), GraphError>
         &format!("SELECT count(*), coalesce(min(typeof(name) = 'text' AND length(CAST(name AS BLOB)) <= 256 AND typeof(type) = 'text' AND length(CAST(type AS BLOB)) <= 16 AND typeof(sql) = 'text' AND length(CAST(sql AS BLOB)) <= 4096), 0) FROM sqlite_schema WHERE {OWNED_SCHEMA_WHERE}"),
         [], |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    if usize::try_from(count).ok() != Some(SCHEMA.len()) || !valid {
+    let generation_present = crate::generation::validate_optional(connection)?;
+    // Six fact-table triggers plus six association-table triggers are visible here.
+    let expected = SCHEMA.len() + if generation_present { 12 } else { 0 };
+    if usize::try_from(count).ok() != Some(expected) || !valid {
         return Err(SnapshotBoundsError::InvalidSchema.into());
     }
     Ok(())
@@ -276,7 +279,11 @@ fn owned_schema(connection: &Connection) -> Result<BTreeMap<String, (String, Str
 }
 
 fn check_schema(connection: &Connection) -> Result<(), GraphError> {
-    let actual = owned_schema(connection)?;
+    // Generation triggers are part of this owner's inventory. Validate their
+    // metadata bounds before owned_schema allocates SQL strings.
+    let generation = crate::generation::validate_for_owner(connection)?;
+    let mut actual = owned_schema(connection)?;
+    generation.strip_objects(&mut actual);
     if actual.len() != SCHEMA.len()
         || SCHEMA.iter().any(|(kind, name, sql)| {
             actual
@@ -298,8 +305,8 @@ fn check_schema(connection: &Connection) -> Result<(), GraphError> {
     Ok(())
 }
 
-pub(crate) fn initialize(connection: &Connection) -> Result<(), GraphError> {
-    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+pub(crate) fn initialize(transaction: &Transaction<'_>) -> Result<(), GraphError> {
+    let connection: &Connection = transaction;
     if owned_schema(connection)?.is_empty() {
         for (_, _, sql) in SCHEMA {
             transaction.execute_batch(sql)?;
@@ -310,7 +317,6 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), GraphError> {
         )?;
     }
     check_schema(connection)?;
-    transaction.commit()?;
     Ok(())
 }
 
