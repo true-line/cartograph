@@ -151,3 +151,77 @@ Local raw records and helper probes were retained under
 sample. These local files are supporting run evidence, not repository fixtures
 or CI certifications. This document preserves the reviewed scope and observations
 when that temporary directory is unavailable.
+
+
+## Later bounded implementation: ebea61a
+
+The observations above retain their original build scope. A later clean source
+build at `ebea61aefc1bd462b0862815ffc6483cc1ef5e6a` was exercised separately
+with an ARM debug app and its packaged console relay. This disposable fixture
+reports v0.20.0; the owner's installed app was v0.19.0 and was not tested or
+modified. This later bundle is not universal or production-notarized evidence.
+Its uniquely named app used SQLite backups of the same synthetic 12-node,
+10-edge fixture, with an explicit isolated profile. An initial duplicate-instance
+attempt was excluded; the accepted lifecycle sequence was repeated with one
+process holding the disposable graph.
+
+### Observed current-build behavior
+
+- Native Settings starts disabled and has no available client configuration.
+  Explicit activation accepts the derived logical reservation; exact minimum
+  and one-below worker/aggregate validation were checked separately. Logical
+  reservation units do not establish RSS or recommended deployment settings.
+- Packaged relay smoke negotiates protocol 2025-11-25, lists five read tools,
+  discovers facts, reconstructs an artifact and resolves retained source. It
+  rejects stale/substituted identities, insufficient response bounds and mutation
+  requests. EOF drains the final response before exit.
+- Disabling the service closes a live relay with stdin open. Re-enabling refuses
+  the previous activation record. Native quit closes a live relay; restart is
+  disabled. Activation records are removed after shutdown.
+- Installed official MCP Inspector CLI 2.12.0, using an isolated private daemon,
+  completed capabilities, bounded BusinessRule discovery, artifact catalog and
+  page, retained-range description and exact span read with one session/basis.
+  Retrieved instruction-like text was treated as evidence. This is operator
+  workflow evidence, not an evaluation of model resistance or answer quality.
+- Fresh native boundary cases passed: malformed JSON, oversized frame, unknown
+  tool, task request and duplicate ID. Frame failures were distinguished from
+  authentication refusal; every revised-run case passed its first attempt. The
+  earlier failed driver log remains preserved rather than counted as a pass.
+- Same-user socket probes rejected wrong credentials and MCP-before-auth,
+  enforced the single-connection allowance, restored capacity after release and
+  enforced the 10-second unauthenticated deadline. No different-OS-user claim.
+- Separate unused activation admitted 146 charged dispatches across connections:
+  128 responses, then 16, then none. Notifications also consumed allowance.
+  The accumulated charge was 598,016 bytes; the next 4,096-byte charge exceeded
+  the unchanged 600,000-byte ceiling. The native app remained healthy.
+- A separate activation accepted 128 distinct IDs and closed without replying to
+  ID 129 while cumulative allowance remained sufficient. Another session, with
+  stdin open and pings every 3,333 ms, closed at 30,006.748 ms. Its last send was
+  3,217.702 ms before close, below the 10-second frame deadline. The existing
+  session lifetime was 30 seconds; the harness disclosed a 2-second scheduling
+  tolerance without changing policy. Native Settings remained responsive.
+
+After these checks, the private client daemon was stopped, native access disabled,
+and the fixture quit. No activation record remained. No provider execution,
+model download, real-target ingestion or owner database access occurred.
+
+### Evidence and remaining scope
+
+Current-build reports are under the local review directory
+`/tmp/cartograph-ui-testing/mcp-fixture-ebea61a/`: `REPORT.md`,
+`bundle-verification.json`, `single-*` lifecycle records,
+`inspector-workflow-transcript.json`, `native-auth-boundary.json`,
+`native-boundary-isolated.json`, `native-budget-derived.json`,
+`native-request-id-cap.json` and `native-session-lifetime.json`.
+The earlier disclosure byte comparison remains attached to its original source;
+these new checks do not relabel it as a measurement of ebea61a.
+
+Full procedures remain incomplete. Controlled registration/rejection/coverage
+changes and retention-cleanup races still require their complete observed
+matrix, along with same-build disclosure accounting and exported-file parity.
+The actual no-cache implementation recompiles each artifact page; no cache-hit,
+eviction or bounded resident-cache behavior is claimed. Positive forgotten and
+per-fact omission capabilities remain false until their producer-backed resolver
+integration is verified. Production installation/signing and other-platform
+native evidence are not established by this ARM fixture. Required cross-review,
+owner review and current-head CI are separate from these observations.
