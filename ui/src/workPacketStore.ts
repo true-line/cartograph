@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { saveExport } from './saveExport';
 import { invokeOr } from './tauri';
 import type { FactKey } from './primarySourceStore';
 import { packetFactKey, type GeneratePacketRequest, type PacketArtifactSelection, type PacketDecisionSelection,
@@ -122,15 +123,19 @@ export const useWorkPacketStore = create<WorkPacketState>((set, get) => {
       if (!assessed) throw new Error('Freshness assessment unavailable.');
       set({ detail: assessed });
     }),
-    exportPacket: () => run(async () => {
-      const detail = get().detail; if (!detail) return;
-      const exported = await invokeOr<PacketExport | null>('export_work_packet', null, { packetId: detail.packet_id });
-      if (!exported || exported.packet_id !== detail.packet_id) throw new Error('Export identity did not match the saved packet.');
-      const url = URL.createObjectURL(new Blob([exported.content], { type: 'text/markdown;charset=utf-8' }));
-      const anchor = document.createElement('a');
-      anchor.href = url; anchor.download = exported.file_name; anchor.click();
-      URL.revokeObjectURL(url);
-      set({ notice: 'Packet export prepared; local download requested.' });
-    }),
+    exportPacket: () => {
+      const priorNotice = get().notice;
+      return run(async () => {
+        const detail = get().detail;
+        if (!detail) {
+          set({ notice: priorNotice });
+          return;
+        }
+        const exported = await invokeOr<PacketExport | null>('export_work_packet', null, { packetId: detail.packet_id });
+        if (!exported || exported.packet_id !== detail.packet_id) throw new Error('Export identity did not match the saved packet.');
+        const outcome = await saveExport(exported.file_name, exported.content);
+        set({ notice: outcome === 'saved' ? 'Packet exported.' : priorNotice });
+      });
+    },
   };
 });
