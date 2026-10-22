@@ -556,10 +556,10 @@ fn participating_corrupt_or_forgotten_capture_never_falls_back_to_readable_check
         );
         assert_eq!(
             report.captured_validation_bytes,
-            if failure == "receipt" {
-                0
-            } else {
+            if failure == "object" {
                 ORIGINAL.len() as u64
+            } else {
+                0
             }
         );
         assert!(report.omissions.is_empty());

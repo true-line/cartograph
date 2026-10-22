@@ -21,9 +21,78 @@ use crate::sources::RegisteredSource;
 const MAX_RECEIPTS: u64 = 100_000;
 const MAX_RECEIPT_BYTES: u64 = 128 * 1024;
 const MAX_RECEIPT_STORE_BYTES: u64 = 64 * 1024 * 1024;
-const RECEIPTS_SCHEMA: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 131072)) STRICT";
-const META_SCHEMA: &str =
+const MAX_TOMBSTONE_CAPTURE_IDS_BYTES: u64 = 64 * 1024;
+const RECEIPTS_SCHEMA_V1: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 131072)) STRICT";
+const META_SCHEMA_V1: &str =
     "CREATE TABLE receipt_meta (version INTEGER PRIMARY KEY CHECK(version = 1)) STRICT";
+const RECEIPTS_ALTER_V2: &str = "ALTER TABLE receipts ADD COLUMN capture_forgotten_tombstone INTEGER REFERENCES receipt_tombstones(id)";
+const RECEIPTS_SCHEMA: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 131072), capture_forgotten_tombstone INTEGER REFERENCES receipt_tombstones(id)) STRICT";
+const TOMBSTONES_SCHEMA: &str = "CREATE TABLE receipt_tombstones (id INTEGER PRIMARY KEY, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, capture_ids TEXT NOT NULL CHECK(length(CAST(capture_ids AS BLOB)) <= 65536), capture_ids_truncated INTEGER NOT NULL CHECK (capture_ids_truncated IN (0,1)), forgotten_at TEXT NOT NULL, receipts_reclaimed INTEGER NOT NULL CHECK (receipts_reclaimed >= 0), receipts_retained_pinned INTEGER NOT NULL CHECK (receipts_retained_pinned >= 0)) STRICT";
+const RECLAIMS_SCHEMA: &str = "CREATE TABLE receipt_reclaims (receipt_id TEXT PRIMARY KEY NOT NULL, tombstone_id INTEGER NOT NULL REFERENCES receipt_tombstones(id)) STRICT";
+const META_SCHEMA: &str =
+    "CREATE TABLE receipt_meta (version INTEGER PRIMARY KEY CHECK(version = 2)) STRICT";
+/// Indexes that keep `receipt_storage`'s retention integrity checks linear;
+/// without them a valid store with many tombstones costs a quadratic scan on
+/// every open.
+const RECEIPT_INDEXES: [(&str, &str); 3] = [
+    (
+        "receipt_reclaims_by_tombstone",
+        "CREATE INDEX receipt_reclaims_by_tombstone ON receipt_reclaims (tombstone_id)",
+    ),
+    (
+        "receipt_tombstones_by_source",
+        "CREATE INDEX receipt_tombstones_by_source ON receipt_tombstones (source_id)",
+    ),
+    (
+        "receipts_by_forgotten_tombstone",
+        "CREATE INDEX receipts_by_forgotten_tombstone ON receipts (capture_forgotten_tombstone) WHERE capture_forgotten_tombstone IS NOT NULL",
+    ),
+];
+
+/// Delete tombstones that no reclaim-ledger row and no capture-forgotten
+/// receipt references, so tombstones stay bounded by those rows.
+fn delete_orphan_tombstones(tx: &Connection) -> Result<(), String> {
+    tx.execute(
+        "DELETE FROM receipt_tombstones
+         WHERE NOT EXISTS (
+             SELECT 1 FROM receipt_reclaims WHERE tombstone_id = receipt_tombstones.id
+         )
+         AND NOT EXISTS (
+             SELECT 1 FROM receipts WHERE capture_forgotten_tombstone = receipt_tombstones.id
+         )",
+        [],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+fn create_receipt_indexes(tx: &Connection) -> Result<(), String> {
+    for (_, ddl) in RECEIPT_INDEXES {
+        tx.execute_batch(ddl).map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+/// Summary of the forget operation that reclaimed or marked a receipt.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TombstoneSummary {
+    pub source_id: String,
+    pub forgotten_at: String,
+    pub receipts_reclaimed: u64,
+    pub receipts_retained_pinned: u64,
+}
+
+/// Identity-only receipt retention status (ADR-0046 decision 4).
+/// Basis and capture validation stay the caller's job.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum ReceiptStatus {
+    Present,
+    CaptureForgotten { tombstone: TombstoneSummary },
+    Reclaimed { tombstone: TombstoneSummary },
+    Unknown,
+}
 
 fn unavailable() -> String {
     "Captured primary source is unavailable; recover this source again or inspect the separately labeled current working tree.".into()
@@ -252,10 +321,12 @@ impl Drop for RetentionGuard {
     }
 }
 
-struct ReceiptStore {
+pub(crate) struct ReceiptStore {
     conn: Connection,
-    /// Retained receipt count and payload bytes; tests narrow them.
-    capacity: (u64, u64),
+    /// Retained receipt count (and reclaim ledger bound) and payload bytes; tests narrow them.
+    pub(crate) capacity: (u64, u64),
+    #[cfg(test)]
+    pub(crate) fail_next_reclaim: bool,
 }
 
 fn require_one(affected: usize) -> Result<(), String> {
@@ -265,40 +336,31 @@ fn require_one(affected: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn receipt_schema(conn: &Connection) -> Result<(), String> {
-    let objects: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(storage_error)?;
-    if objects != 2 {
-        return Err(storage_error("receipt schema objects"));
-    }
-    for (name, ddl) in [("receipts", RECEIPTS_SCHEMA), ("receipt_meta", META_SCHEMA)] {
-        let exact: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 AND sql=?2)",
-            params![name,ddl], |row| row.get(0)
-        ).map_err(storage_error)?;
+fn is_v1_migration_candidate(conn: &Connection) -> Result<bool, String> {
+    for (name, ddl) in [
+        ("receipts", RECEIPTS_SCHEMA_V1),
+        ("receipt_meta", META_SCHEMA_V1),
+    ] {
+        let exact: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 AND sql=?2)",
+                params![name, ddl],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
         if !exact {
-            return Err(storage_error("receipt schema"));
+            return Ok(false);
         }
     }
-    let valid: bool = conn.query_row(
+    conn.query_row(
         "SELECT count(*)=1 AND coalesce(min(typeof(version)='integer' AND version=1),0) FROM receipt_meta",
-        [], |row| row.get(0)
-    ).map_err(storage_error)?;
-    if !valid {
-        return Err(storage_error("receipt version"));
-    }
-    Ok(())
+        [],
+        |row| row.get(0),
+    )
+    .map_err(storage_error)
 }
 
-// Metadata-only preallocation checks apply even after open; indexed ownership
-// fields are not trusted just because a SQL predicate selected their row.
-fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
-    receipt_schema(conn)?;
+fn validate_v1_receipts(conn: &Connection) -> Result<(), String> {
     let count: i64 = conn
         .query_row("SELECT count(*) FROM receipts", [], |row| row.get(0))
         .map_err(storage_error)?;
@@ -329,8 +391,203 @@ fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
     if bytes < 0 || bytes > MAX_RECEIPT_STORE_BYTES as i64 {
         return Err(storage_error("receipt inventory bytes"));
     }
+    Ok(())
+}
+
+fn migrate_v1_to_v2(tx: &Connection) -> Result<(), String> {
+    validate_v1_receipts(tx)?;
+    tx.execute_batch(RECEIPTS_ALTER_V2).map_err(storage_error)?;
+    tx.execute_batch(TOMBSTONES_SCHEMA).map_err(storage_error)?;
+    tx.execute_batch(RECLAIMS_SCHEMA).map_err(storage_error)?;
+    create_receipt_indexes(tx)?;
+    tx.execute_batch("DROP TABLE receipt_meta")
+        .map_err(storage_error)?;
+    tx.execute_batch(META_SCHEMA).map_err(storage_error)?;
+    require_one(
+        tx.execute("INSERT INTO receipt_meta VALUES (2)", [])
+            .map_err(storage_error)?,
+    )
+}
+
+fn receipt_schema(conn: &Connection) -> Result<(), String> {
+    let objects: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if objects != 4 + RECEIPT_INDEXES.len() as i64 {
+        return Err(storage_error("receipt schema objects"));
+    }
+    for (name, ddl) in RECEIPT_INDEXES {
+        let exact: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1 AND sql=?2)",
+                params![name, ddl],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !exact {
+            return Err(storage_error("receipt schema"));
+        }
+    }
+    for (name, ddl) in [
+        ("receipts", RECEIPTS_SCHEMA),
+        ("receipt_tombstones", TOMBSTONES_SCHEMA),
+        ("receipt_reclaims", RECLAIMS_SCHEMA),
+        ("receipt_meta", META_SCHEMA),
+    ] {
+        let exact: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 AND sql=?2)",
+                params![name, ddl],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !exact {
+            return Err(storage_error("receipt schema"));
+        }
+    }
+    let valid: bool = conn
+        .query_row(
+            "SELECT count(*)=1 AND coalesce(min(typeof(version)='integer' AND version=2),0) FROM receipt_meta",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if !valid {
+        return Err(storage_error("receipt version"));
+    }
+    Ok(())
+}
+
+// Metadata-only preallocation checks apply even after open; indexed ownership
+// fields are not trusted just because a SQL predicate selected their row.
+fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
+    receipt_schema(conn)?;
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM receipts", [], |row| row.get(0))
+        .map_err(storage_error)?;
+    if count < 0 || count > MAX_RECEIPTS as i64 {
+        return Err(storage_error("receipt inventory count"));
+    }
+    let invalid: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM receipts WHERE typeof(id) != 'text'
+         OR length(CAST(id AS BLOB)) NOT BETWEEN 1 AND 256
+         OR typeof(source_id) != 'text' OR length(CAST(source_id AS BLOB)) != 36
+         OR typeof(repo_key) != 'text' OR length(CAST(repo_key AS BLOB)) NOT BETWEEN 1 AND 256
+         OR typeof(payload) != 'text' OR length(CAST(payload AS BLOB)) NOT BETWEEN 1 AND ?1
+         OR (capture_forgotten_tombstone IS NOT NULL
+             AND (typeof(capture_forgotten_tombstone) != 'integer'
+                  OR NOT EXISTS(SELECT 1 FROM receipt_tombstones
+                                WHERE receipt_tombstones.id = receipts.capture_forgotten_tombstone
+                                  AND receipt_tombstones.source_id = receipts.source_id))))",
+            [MAX_RECEIPT_BYTES as i64],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if invalid {
+        return Err(storage_error("receipt metadata bounds"));
+    }
+    let bytes: i64 = conn
+        .query_row(
+            "SELECT coalesce(sum(length(CAST(payload AS BLOB))),0) FROM receipts",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if bytes < 0 || bytes > MAX_RECEIPT_STORE_BYTES as i64 {
+        return Err(storage_error("receipt inventory bytes"));
+    }
+    let reclaim_count: i64 = conn
+        .query_row("SELECT count(*) FROM receipt_reclaims", [], |row| {
+            row.get(0)
+        })
+        .map_err(storage_error)?;
+    if reclaim_count < 0 || reclaim_count > MAX_RECEIPTS as i64 {
+        return Err(storage_error("receipt reclaim count"));
+    }
+    let invalid_reclaims: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM receipt_reclaims WHERE typeof(receipt_id) != 'text'
+         OR length(CAST(receipt_id AS BLOB)) NOT BETWEEN 1 AND 256
+         OR typeof(tombstone_id) != 'integer' OR tombstone_id <= 0
+         OR NOT EXISTS(SELECT 1 FROM receipt_tombstones WHERE id = receipt_reclaims.tombstone_id))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if invalid_reclaims {
+        return Err(storage_error("receipt reclaim bounds"));
+    }
+    let invalid_tombstones: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM receipt_tombstones WHERE typeof(id) != 'integer' OR id <= 0
+         OR typeof(source_id) != 'text' OR length(CAST(source_id AS BLOB)) != 36
+         OR source_id NOT GLOB 'src_*' OR trim(substr(source_id, 5), '0123456789abcdef') != ''
+         OR typeof(repo_key) != 'text' OR length(CAST(repo_key AS BLOB)) NOT BETWEEN 1 AND 256
+         OR typeof(capture_ids) != 'text' OR length(CAST(capture_ids AS BLOB)) NOT BETWEEN 2 AND ?1
+         OR typeof(capture_ids_truncated) != 'integer' OR capture_ids_truncated NOT IN (0, 1)
+         OR (capture_ids_truncated = 1 AND capture_ids != '[]')
+         OR typeof(forgotten_at) != 'text' OR length(CAST(forgotten_at AS BLOB)) != 20
+         OR forgotten_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z'
+         OR typeof(receipts_reclaimed) != 'integer' OR receipts_reclaimed NOT BETWEEN 0 AND ?2
+         OR typeof(receipts_retained_pinned) != 'integer' OR receipts_retained_pinned NOT BETWEEN 0 AND ?2
+         OR (receipts_reclaimed = 0 AND receipts_retained_pinned = 0)
+         OR (NOT EXISTS(SELECT 1 FROM receipt_reclaims WHERE tombstone_id = receipt_tombstones.id)
+             AND NOT EXISTS(SELECT 1 FROM receipts WHERE capture_forgotten_tombstone = receipt_tombstones.id)))",
+            params![MAX_TOMBSTONE_CAPTURE_IDS_BYTES as i64, MAX_RECEIPTS as i64],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if invalid_tombstones {
+        return Err(storage_error("receipt tombstone bounds"));
+    }
+    let tombstone_bytes: i64 = conn
+        .query_row(
+            "SELECT coalesce(sum(length(CAST(capture_ids AS BLOB))),0) FROM receipt_tombstones",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if tombstone_bytes < 0 || tombstone_bytes > MAX_RECEIPT_STORE_BYTES as i64 {
+        return Err(storage_error("receipt tombstone bytes"));
+    }
     // SQLite integers are signed; convert only after the nonnegative bounds.
     Ok((count as u64, bytes as u64))
+}
+
+fn encode_capture_ids(capture_ids: &[String]) -> Result<(String, i64), String> {
+    struct BoundedJson {
+        bytes: Vec<u8>,
+    }
+    impl std::io::Write for BoundedJson {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.len()
+                > (MAX_TOMBSTONE_CAPTURE_IDS_BYTES as usize).saturating_sub(self.bytes.len())
+            {
+                return Err(std::io::Error::other("capture_ids bound"));
+            }
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let ordered: std::collections::BTreeSet<&str> =
+        capture_ids.iter().map(String::as_str).collect();
+    let mut writer = BoundedJson { bytes: Vec::new() };
+    match serde_json::to_writer(&mut writer, &ordered) {
+        Ok(()) => {
+            let json = String::from_utf8(writer.bytes).map_err(storage_error)?;
+            Ok((json, 0))
+        }
+        Err(error) if error.is_io() => Ok(("[]".into(), 1)),
+        Err(error) => Err(storage_error(error)),
+    }
 }
 
 // The caller retains a transaction after receipt_storage validated all lengths.
@@ -373,11 +630,16 @@ impl ReceiptStore {
             .map_err(storage_error)?;
         if count == 0 {
             tx.execute_batch(RECEIPTS_SCHEMA).map_err(storage_error)?;
+            tx.execute_batch(TOMBSTONES_SCHEMA).map_err(storage_error)?;
+            tx.execute_batch(RECLAIMS_SCHEMA).map_err(storage_error)?;
+            create_receipt_indexes(&tx)?;
             tx.execute_batch(META_SCHEMA).map_err(storage_error)?;
             require_one(
-                tx.execute("INSERT INTO receipt_meta VALUES (1)", [])
+                tx.execute("INSERT INTO receipt_meta VALUES (2)", [])
                     .map_err(storage_error)?,
             )?;
+        } else if is_v1_migration_candidate(&tx)? {
+            migrate_v1_to_v2(&tx)?;
         }
         receipt_storage(&tx)?;
         tx.commit().map_err(storage_error)?;
@@ -391,6 +653,8 @@ impl ReceiptStore {
         Ok(Self {
             conn,
             capacity: (MAX_RECEIPTS, MAX_RECEIPT_STORE_BYTES),
+            #[cfg(test)]
+            fail_next_reclaim: false,
         })
     }
 
@@ -459,6 +723,13 @@ impl ReceiptStore {
                 {
                     return Err(storage_error("receipt collision"));
                 }
+                // The same bytes were captured again, so a pinned receipt that
+                // was marked forgotten is present once more.
+                tx.execute(
+                    "UPDATE receipts SET capture_forgotten_tombstone = NULL WHERE id = ?1",
+                    [&id],
+                )
+                .map_err(storage_error)?;
             } else if count + 1 > self.capacity.0 || bytes + payload.len() as u64 > self.capacity.1
             {
                 *retained.omitted.entry(path).or_default() += 1;
@@ -476,6 +747,7 @@ impl ReceiptStore {
             }
             retained.ids.insert(id);
         }
+        delete_orphan_tombstones(&tx)?;
         tx.commit().map_err(storage_error)?;
         Ok(retained)
     }
@@ -512,12 +784,226 @@ impl ReceiptStore {
         tx.commit().map_err(storage_error)?;
         Ok(ids)
     }
+
+    /// Reclaim unpinned receipts for `source` and mark pinned receipts as
+    /// capture-forgotten in one atomic transaction (ADR-0046 decision 3).
+    fn reclaim_forgotten(
+        &mut self,
+        source: &RegisteredSource,
+        capture_ids: &[String],
+        pins: &std::collections::BTreeSet<String>,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_reclaim) {
+            return Err(storage_error("injected reclaim failure"));
+        }
+        source_id(&source.source_id)?;
+        if source.repo_key.is_empty() || source.repo_key.len() > 256 {
+            return Err(storage_error("receipt ownership"));
+        }
+        let (capture_ids_json, capture_ids_truncated) = encode_capture_ids(capture_ids)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        receipt_storage(&tx)?;
+        let mut reclaimed = Vec::new();
+        let mut newly_marked = Vec::new();
+        {
+            let mut statement = tx
+                .prepare(
+                    "SELECT id, capture_forgotten_tombstone IS NOT NULL FROM receipts
+                     WHERE source_id = ?1 ORDER BY id",
+                )
+                .map_err(storage_error)?;
+            let mut rows = statement
+                .query([&source.source_id])
+                .map_err(storage_error)?;
+            while let Some(row) = rows.next().map_err(storage_error)? {
+                let id: String = row.get(0).map_err(storage_error)?;
+                let already_marked: bool = row.get(1).map_err(storage_error)?;
+                let receipt = stored_receipt(&tx, &id)?;
+                if receipt.source_id().as_str() != source.source_id
+                    || receipt.repo_key() != source.repo_key
+                {
+                    return Err(storage_error("receipt ownership"));
+                }
+                if !pins.contains(&id) {
+                    reclaimed.push(id);
+                } else if !already_marked {
+                    // A pinned row is bound once, to the forget that first
+                    // marked it, so its status never borrows a later operation.
+                    newly_marked.push(id);
+                }
+            }
+        }
+        if reclaimed.is_empty() && newly_marked.is_empty() {
+            tx.commit().map_err(storage_error)?;
+            return Ok(());
+        }
+        // Tombstone capture ids are a separate pool bounded by the receipt
+        // store's byte ceiling, as the ledger reuses its count ceiling. A full
+        // pool records the forget without them, flagged as truncated.
+        let tombstone_bytes: i64 = tx
+            .query_row(
+                "SELECT coalesce(sum(length(CAST(capture_ids AS BLOB))),0) FROM receipt_tombstones",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let (capture_ids_json, capture_ids_truncated) = if u64::try_from(tombstone_bytes)
+            .map_err(storage_error)?
+            + capture_ids_json.len() as u64
+            > self.capacity.1
+        {
+            ("[]".to_owned(), 1)
+        } else {
+            (capture_ids_json, capture_ids_truncated)
+        };
+        require_one(
+            tx.execute(
+                "INSERT INTO receipt_tombstones (
+                     source_id, repo_key, capture_ids, capture_ids_truncated,
+                     forgotten_at, receipts_reclaimed, receipts_retained_pinned
+                 ) VALUES (
+                     ?1, ?2, ?3, ?4,
+                     strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?5, ?6
+                 )",
+                params![
+                    source.source_id,
+                    source.repo_key,
+                    capture_ids_json,
+                    capture_ids_truncated,
+                    reclaimed.len() as i64,
+                    newly_marked.len() as i64,
+                ],
+            )
+            .map_err(storage_error)?,
+        )?;
+        let tombstone_id = tx.last_insert_rowid();
+        for id in &newly_marked {
+            require_one(
+                tx.execute(
+                    "UPDATE receipts SET capture_forgotten_tombstone = ?2 WHERE id = ?1",
+                    params![id, tombstone_id],
+                )
+                .map_err(storage_error)?,
+            )?;
+        }
+        for id in &reclaimed {
+            require_one(
+                tx.execute("DELETE FROM receipts WHERE id = ?1", [id])
+                    .map_err(storage_error)?,
+            )?;
+            require_one(
+                tx.execute(
+                    "INSERT OR REPLACE INTO receipt_reclaims (receipt_id, tombstone_id) VALUES (?1, ?2)",
+                    params![id, tombstone_id],
+                )
+                .map_err(storage_error)?,
+            )?;
+        }
+        let reclaim_count: i64 = tx
+            .query_row("SELECT count(*) FROM receipt_reclaims", [], |row| {
+                row.get(0)
+            })
+            .map_err(storage_error)?;
+        let max_reclaims = i64::try_from(self.capacity.0).unwrap_or(i64::MAX);
+        if reclaim_count > max_reclaims {
+            let excess = reclaim_count - max_reclaims;
+            tx.execute(
+                "DELETE FROM receipt_reclaims WHERE receipt_id IN (
+                     SELECT receipt_id FROM receipt_reclaims
+                     ORDER BY tombstone_id ASC, receipt_id ASC
+                     LIMIT ?1
+                 )",
+                [excess],
+            )
+            .map_err(storage_error)?;
+        }
+        delete_orphan_tombstones(&tx)?;
+        receipt_storage(&tx)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Look up the retention status of an exact receipt ID.
+    ///
+    /// This is the identity half of ADR-0046 decision 4. Basis and capture
+    /// validation stay the caller's job.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn receipt_status(&self, id: &str) -> Result<ReceiptStatus, String> {
+        let tx = self.conn.unchecked_transaction().map_err(storage_error)?;
+        receipt_storage(&tx)?;
+        if id.is_empty() || id.len() > 256 {
+            tx.commit().map_err(storage_error)?;
+            return Ok(ReceiptStatus::Unknown);
+        }
+        let present: Option<Option<i64>> = tx
+            .query_row(
+                "SELECT capture_forgotten_tombstone FROM receipts WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        if let Some(marked) = present {
+            stored_receipt(&tx, id)?;
+            let Some(tombstone_id) = marked else {
+                tx.commit().map_err(storage_error)?;
+                return Ok(ReceiptStatus::Present);
+            };
+            let tombstone: TombstoneSummary = tx
+                .query_row(
+                    "SELECT source_id, forgotten_at, receipts_reclaimed, receipts_retained_pinned
+                     FROM receipt_tombstones
+                     WHERE id = ?1",
+                    [tombstone_id],
+                    |row| {
+                        Ok(TombstoneSummary {
+                            source_id: row.get(0)?,
+                            forgotten_at: row.get(1)?,
+                            receipts_reclaimed: row.get::<_, i64>(2)? as u64,
+                            receipts_retained_pinned: row.get::<_, i64>(3)? as u64,
+                        })
+                    },
+                )
+                .map_err(storage_error)?;
+            source_id(&tombstone.source_id).map_err(storage_error)?;
+            tx.commit().map_err(storage_error)?;
+            return Ok(ReceiptStatus::CaptureForgotten { tombstone });
+        }
+        let tombstone: Option<TombstoneSummary> = tx
+            .query_row(
+                "SELECT t.source_id, t.forgotten_at, t.receipts_reclaimed, t.receipts_retained_pinned
+                 FROM receipt_reclaims r
+                 JOIN receipt_tombstones t ON t.id = r.tombstone_id
+                 WHERE r.receipt_id = ?1",
+                [id],
+                |row| {
+                    Ok(TombstoneSummary {
+                        source_id: row.get(0)?,
+                        forgotten_at: row.get(1)?,
+                        receipts_reclaimed: row.get::<_, i64>(2)? as u64,
+                        receipts_retained_pinned: row.get::<_, i64>(3)? as u64,
+                    })
+                },
+            )
+            .optional()
+            .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        if let Some(tombstone) = tombstone {
+            source_id(&tombstone.source_id).map_err(storage_error)?;
+            return Ok(ReceiptStatus::Reclaimed { tombstone });
+        }
+        Ok(ReceiptStatus::Unknown)
+    }
 }
 
 /// Private stores are locked only for short operations, never while parsing.
 pub(crate) struct PrimarySourceStore {
     captures: Mutex<CaptureStore>,
-    receipts: Mutex<ReceiptStore>,
+    pub(crate) receipts: Mutex<ReceiptStore>,
     storage: PrivateStorage,
     #[cfg(test)]
     evidence_accesses: std::sync::atomic::AtomicUsize,
@@ -874,7 +1360,12 @@ pub(crate) struct RetentionPreview {
     pub fingerprint: String,
 }
 
-fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<RetentionPreview, String> {
+struct LockedPreview {
+    preview: RetentionPreview,
+    pins: std::collections::BTreeSet<String>,
+}
+
+fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedPreview, String> {
     let inventory = state
         .primary_sources
         .captures
@@ -947,20 +1438,32 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<Retenti
         ))
         .map_err(storage_error)?,
     );
-    Ok(RetentionPreview {
-        source_id: source.source_id.clone(),
-        repo_key: source.repo_key.clone(),
-        display_name: source.display_name.clone(),
-        captures: inventory.len(),
-        files: inventory.iter().map(|capture| capture.file_count).sum(),
-        bytes: inventory.iter().map(|capture| capture.byte_len).sum(),
-        receipts: receipt_ids.len(),
-        current_references: current_count,
-        historical_references: receipt_ids.len().saturating_sub(current_count),
-        staged_references: staged_references.len(),
-        investigation_references: investigation_references.len(),
-        capture_ids,
-        fingerprint,
+    let pins = staged_references
+        .iter()
+        .map(|reference| reference.receipt_id.clone())
+        .chain(
+            investigation_references
+                .iter()
+                .map(|reference| reference.receipt_id.clone()),
+        )
+        .collect();
+    Ok(LockedPreview {
+        preview: RetentionPreview {
+            source_id: source.source_id.clone(),
+            repo_key: source.repo_key.clone(),
+            display_name: source.display_name.clone(),
+            captures: inventory.len(),
+            files: inventory.iter().map(|capture| capture.file_count).sum(),
+            bytes: inventory.iter().map(|capture| capture.byte_len).sum(),
+            receipts: receipt_ids.len(),
+            current_references: current_count,
+            historical_references: receipt_ids.len().saturating_sub(current_count),
+            staged_references: staged_references.len(),
+            investigation_references: investigation_references.len(),
+            capture_ids,
+            fingerprint,
+        },
+        pins,
     })
 }
 
@@ -977,14 +1480,14 @@ fn registered(state: &AppState, id: &str) -> Result<RegisteredSource, String> {
 pub(crate) fn preview(state: &AppState, id: &str) -> Result<RetentionPreview, String> {
     let source = registered(state, id)?;
     let _guard = state.primary_sources.guard(id, false)?;
-    preview_locked(state, &source)
+    Ok(preview_locked(state, &source)?.preview)
 }
 
 pub(crate) fn forget(state: &AppState, id: &str, fingerprint: &str) -> Result<u64, String> {
     let source = registered(state, id)?;
     let _guard = state.primary_sources.guard(id, true)?;
-    let preview = preview_locked(state, &source)?;
-    if preview.fingerprint != fingerprint {
+    let locked = preview_locked(state, &source)?;
+    if locked.preview.fingerprint != fingerprint {
         return Err("Retained source changed; refresh the preview before forgetting.".into());
     }
     // Serialize cache generation invalidation with preview snapshot and publication.
@@ -993,13 +1496,20 @@ pub(crate) fn forget(state: &AppState, id: &str, fingerprint: &str) -> Result<u6
     graph_guard
         .invalidate_derived_state()
         .map_err(storage_error)?;
-    state
+    let forgotten = state
         .primary_sources
         .captures
         .lock()
         .map_err(storage_error)?
-        .forget_source(&source_id(id)?, &preview.capture_ids)
-        .map_err(storage_error)
+        .forget_source(&source_id(id)?, &locked.preview.capture_ids)
+        .map_err(storage_error)?;
+    state
+        .primary_sources
+        .receipts
+        .lock()
+        .map_err(storage_error)?
+        .reclaim_forgotten(&source, &locked.preview.capture_ids, &locked.pins)?;
+    Ok(forgotten)
 }
 
 #[tauri::command]
@@ -1270,7 +1780,7 @@ mod tests {
         for mutation in [
             "CREATE TRIGGER suppress_receipt BEFORE INSERT ON receipts BEGIN SELECT RAISE(IGNORE); END",
             "CREATE INDEX unexpected_receipt_index ON receipts(source_id)",
-            "PRAGMA ignore_check_constraints=ON; UPDATE receipt_meta SET version=2",
+            "PRAGMA ignore_check_constraints=ON; UPDATE receipt_meta SET version=3",
             "DELETE FROM receipt_meta",
         ] {
             let directory = tempfile::tempdir().unwrap();
@@ -1282,6 +1792,7 @@ mod tests {
             assert!(store.persist(&capture, &source, &receipts).is_err());
             assert!(store.get(receipts[0].id()).is_err());
             assert!(store.ids(&source.source_id).is_err());
+            assert!(store.receipt_status(receipts[0].id()).is_err());
             assert_eq!(receipt_count(&store), count);
             drop(store);
             assert!(ReceiptStore::open(&path).is_err());
@@ -1299,6 +1810,8 @@ mod tests {
             "UPDATE receipts SET repo_key=printf('%0100000d',0) WHERE id=?1",
             "UPDATE receipts SET payload=printf('%0131073d',0) WHERE id=?1",
             "UPDATE receipts SET payload='do-not-echo-private-input' WHERE id=?1",
+            "UPDATE receipts SET capture_forgotten_tombstone=0 WHERE id=?1",
+            "UPDATE receipts SET capture_forgotten_tombstone=99 WHERE id=?1",
         ] {
             let directory = tempfile::tempdir().unwrap();
             let mut store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
@@ -1308,12 +1821,17 @@ mod tests {
                 .conn
                 .pragma_update(None, "ignore_check_constraints", true)
                 .unwrap();
+            store
+                .conn
+                .pragma_update(None, "foreign_keys", false)
+                .unwrap();
             store.conn.execute(mutation, [receipts[0].id()]).unwrap();
             let error = store
                 .get(receipts[0].id())
                 .expect_err("corrupt receipt must fail");
             assert!(!error.contains("do-not-echo-private-input"));
             assert!(store.ids(&source.source_id).is_err());
+            assert!(store.receipt_status(receipts[0].id()).is_err());
             assert!(store.persist(&capture, &source, &receipts).is_err());
             assert_eq!(receipt_count(&store), count);
         }
@@ -1447,5 +1965,337 @@ mod tests {
         std::fs::hard_link(&outside, root.join("captures.sqlite")).unwrap();
         assert!(PrimarySourceStore::open(directory.path()).is_err());
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+    }
+
+    fn schema_objects(conn: &Connection) -> Vec<(String, String, String, Option<String>)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT type, name, tbl_name, sql
+                 FROM sqlite_master
+                 WHERE name NOT GLOB 'sqlite_*'
+                 ORDER BY name",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    }
+
+    fn v1_rows(conn: &Connection) -> Vec<(String, String, String, String)> {
+        let mut stmt = conn
+            .prepare("SELECT id, source_id, repo_key, payload FROM receipts ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    }
+
+    #[test]
+    fn receipt_store_v1_to_v2_migration_is_atomic_exact_and_reopenable() {
+        let (_directory, source, _capture, _, receipts) = fixture();
+        assert!(receipts.len() >= 2);
+        let directory = tempfile::tempdir().unwrap();
+        let v1_path = directory.path().join("migrated-receipts.sqlite");
+        let conn = Connection::open(&v1_path).unwrap();
+        conn.execute_batch(RECEIPTS_SCHEMA_V1).unwrap();
+        conn.execute_batch(META_SCHEMA_V1).unwrap();
+        conn.execute("INSERT INTO receipt_meta VALUES (1)", [])
+            .unwrap();
+        let mut expected_rows = Vec::new();
+        for receipt in &receipts {
+            let payload = receipt.to_json().unwrap();
+            conn.execute(
+                "INSERT INTO receipts (id, source_id, repo_key, payload) VALUES (?1, ?2, ?3, ?4)",
+                params![receipt.id(), source.source_id, source.repo_key, payload],
+            )
+            .unwrap();
+            expected_rows.push((
+                receipt.id().to_owned(),
+                source.source_id.clone(),
+                source.repo_key.clone(),
+                payload,
+            ));
+        }
+        expected_rows.sort_by(|a, b| a.0.cmp(&b.0));
+        let expected_v1_objects = schema_objects(&conn);
+        assert_eq!(expected_v1_objects.len(), 2);
+
+        // Pre-create a conflicting table so migrate_v1_to_v2 fails after
+        // ALTER TABLE receipts ADD COLUMN ... and CREATE TABLE receipt_tombstones ...
+        conn.execute_batch("CREATE TABLE receipt_reclaims (x INTEGER)")
+            .unwrap();
+        drop(conn);
+        assert!(ReceiptStore::open(&v1_path).is_err());
+
+        let conn = Connection::open(&v1_path).unwrap();
+        conn.execute_batch("DROP TABLE receipt_reclaims").unwrap();
+        assert_eq!(schema_objects(&conn), expected_v1_objects);
+        assert_eq!(
+            conn.query_row("SELECT version FROM receipt_meta", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(v1_rows(&conn), expected_rows);
+
+        // An unexpected index on v1 also fails closed and rolls back completely.
+        conn.execute_batch("CREATE INDEX unexpected_v1_idx ON receipts(source_id)")
+            .unwrap();
+        drop(conn);
+        assert!(ReceiptStore::open(&v1_path).is_err());
+        let conn = Connection::open(&v1_path).unwrap();
+        conn.execute_batch("DROP INDEX unexpected_v1_idx").unwrap();
+        assert_eq!(schema_objects(&conn), expected_v1_objects);
+        assert_eq!(v1_rows(&conn), expected_rows);
+        drop(conn);
+
+        // Migrate v1 -> v2 atomically on open.
+        let migrated = ReceiptStore::open(&v1_path).unwrap();
+        let fresh_path = directory.path().join("fresh-receipts.sqlite");
+        let fresh = ReceiptStore::open(&fresh_path).unwrap();
+        let migrated_objects = schema_objects(&migrated.conn);
+        let fresh_objects = schema_objects(&fresh.conn);
+        assert_eq!(migrated_objects.len(), 4 + RECEIPT_INDEXES.len());
+        assert_eq!(migrated_objects, fresh_objects);
+
+        let mut migrated_rows: Vec<(String, String, String, String, i64)> = migrated
+            .conn
+            .prepare(
+                "SELECT id, source_id, repo_key, payload, capture_forgotten_tombstone IS NOT NULL
+                 FROM receipts
+                 ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            migrated_rows
+                .iter()
+                .map(|(id, src, repo, payload, _)| (
+                    id.clone(),
+                    src.clone(),
+                    repo.clone(),
+                    payload.clone()
+                ))
+                .collect::<Vec<_>>(),
+            expected_rows
+        );
+        assert!(migrated_rows.drain(..).all(|(_, _, _, _, cf)| cf == 0));
+        for receipt in &receipts {
+            assert_eq!(&migrated.get(receipt.id()).unwrap(), receipt);
+            assert_eq!(
+                migrated.receipt_status(receipt.id()).unwrap(),
+                ReceiptStatus::Present
+            );
+        }
+        let expected_storage = receipt_storage(&migrated.conn).unwrap();
+        drop(migrated);
+
+        // Reopen migrated v2 DB.
+        let reopened = ReceiptStore::open(&v1_path).unwrap();
+        assert_eq!(schema_objects(&reopened.conn), fresh_objects);
+        assert_eq!(receipt_storage(&reopened.conn).unwrap(), expected_storage);
+        for receipt in &receipts {
+            assert_eq!(&reopened.get(receipt.id()).unwrap(), receipt);
+            assert_eq!(
+                reopened.receipt_status(receipt.id()).unwrap(),
+                ReceiptStatus::Present
+            );
+        }
+    }
+
+    #[test]
+    fn receipt_store_bounds_tombstones_reclaims_and_capture_ids_truncation() {
+        let (_directory, source, capture, _, receipts) = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+        store.persist(&capture, &source, &receipts).unwrap();
+
+        let oversized_captures: Vec<String> =
+            (0..1100).map(|i| format!("capture-v1:{i:064x}")).collect();
+        let pins = std::collections::BTreeSet::from([receipts[0].id().to_owned()]);
+        store
+            .reclaim_forgotten(&source, &oversized_captures, &pins)
+            .unwrap();
+        let (capture_ids_json, truncated): (String, i64) = store
+            .conn
+            .query_row(
+                "SELECT capture_ids, capture_ids_truncated FROM receipt_tombstones",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(capture_ids_json, "[]");
+        assert_eq!(truncated, 1);
+
+        for mutation in [
+            "UPDATE receipt_tombstones SET source_id='src_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ'",
+            "UPDATE receipt_tombstones SET repo_key=''",
+            "UPDATE receipt_tombstones SET capture_ids='['",
+            "UPDATE receipt_tombstones SET capture_ids='[\"capture-v1:0\"]', capture_ids_truncated=1",
+            "UPDATE receipt_tombstones SET forgotten_at='2026-10-22 00:00:00Z'",
+            "UPDATE receipt_tombstones SET receipts_reclaimed=0, receipts_retained_pinned=0",
+            "UPDATE receipt_reclaims SET receipt_id='' WHERE rowid=1",
+            "PRAGMA foreign_keys=OFF; UPDATE receipt_reclaims SET tombstone_id=999",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+            store.persist(&capture, &source, &receipts).unwrap();
+            store
+                .reclaim_forgotten(&source, &[capture.id().to_owned()], &pins)
+                .unwrap();
+            store
+                .conn
+                .pragma_update(None, "ignore_check_constraints", true)
+                .unwrap();
+            store.conn.execute_batch(mutation).unwrap();
+            assert!(
+                store.receipt_status(receipts[0].id()).is_err(),
+                "mutation must fail validation: {mutation}"
+            );
+            assert!(store.ids(&source.source_id).is_err());
+        }
+    }
+
+    fn tombstone_count(store: &ReceiptStore) -> i64 {
+        store
+            .conn
+            .query_row("SELECT count(*) FROM receipt_tombstones", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    // #748 review: a pinned receipt binds the tombstone of the forget that
+    // marked it, so repeated forgets of the same source neither keep every
+    // later tombstone alive nor lend the old receipt a later operation.
+    #[test]
+    fn repeated_forgets_keep_tombstones_bounded_and_pinned_status_exact() {
+        let (_directory, source, capture, _, receipts) = fixture();
+        assert!(
+            receipts.len() >= 2,
+            "fixture must yield a pinned and an unpinned receipt"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+        store.persist(&capture, &source, &receipts).unwrap();
+        let pinned = receipts[0].id().to_owned();
+        let pins = std::collections::BTreeSet::from([pinned.clone()]);
+        store
+            .reclaim_forgotten(&source, &[capture.id().to_owned()], &pins)
+            .unwrap();
+        let first = match store.receipt_status(&pinned).unwrap() {
+            ReceiptStatus::CaptureForgotten { tombstone } => tombstone,
+            other => panic!("pinned receipt must be capture-forgotten, got {other:?}"),
+        };
+        assert_eq!(first.receipts_retained_pinned, 1);
+        let unpinned = receipts.len() as u64 - 1;
+        let ledger_bound = unpinned;
+        for _ in 0..6 {
+            store.capacity.0 = MAX_RECEIPTS;
+            store.persist(&capture, &source, &receipts[1..]).unwrap();
+            store.capacity.0 = ledger_bound;
+            store
+                .reclaim_forgotten(&source, &[capture.id().to_owned()], &pins)
+                .unwrap();
+            // The first tombstone (held by the pinned row) plus at most one
+            // per surviving ledger row.
+            assert!(tombstone_count(&store) <= 1 + ledger_bound as i64);
+            assert_eq!(
+                store.receipt_status(&pinned).unwrap(),
+                ReceiptStatus::CaptureForgotten {
+                    tombstone: first.clone()
+                }
+            );
+        }
+        assert_eq!(tombstone_count(&store), 2);
+        drop(store);
+        ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+    }
+
+    // #748 review: identical capture bytes reappearing make a pinned,
+    // capture-forgotten receipt present again, and a tombstone held only by
+    // that mark is dropped.
+    #[test]
+    fn recapturing_identical_bytes_clears_the_forgotten_mark() {
+        let (_directory, source, capture, _, receipts) = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+        store.persist(&capture, &source, &receipts).unwrap();
+        let pins: std::collections::BTreeSet<String> = receipts
+            .iter()
+            .map(|receipt| receipt.id().to_owned())
+            .collect();
+        store
+            .reclaim_forgotten(&source, &[capture.id().to_owned()], &pins)
+            .unwrap();
+        assert!(matches!(
+            store.receipt_status(receipts[0].id()).unwrap(),
+            ReceiptStatus::CaptureForgotten { .. }
+        ));
+        assert_eq!(tombstone_count(&store), 1);
+        let retained = store.persist(&capture, &source, &receipts).unwrap();
+        assert_eq!(retained.ids.len(), pins.len());
+        for receipt in &receipts {
+            assert_eq!(
+                store.receipt_status(receipt.id()).unwrap(),
+                ReceiptStatus::Present
+            );
+        }
+        assert_eq!(tombstone_count(&store), 0);
+    }
+
+    // #748 review: tombstone capture ids share one store-wide byte pool;
+    // once it is full a forget is still recorded, with its ids truncated.
+    #[test]
+    fn tombstone_capture_ids_share_a_store_wide_byte_pool() {
+        let (_directory, source, capture, _, receipts) = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+        let pins = std::collections::BTreeSet::new();
+        let ids = [capture.id().to_owned()];
+        let one = encode_capture_ids(&ids).unwrap().0.len() as u64;
+        store.persist(&capture, &source, &receipts).unwrap();
+        store.capacity.1 = one;
+        store.reclaim_forgotten(&source, &ids, &pins).unwrap();
+        store.capacity.1 = MAX_RECEIPT_STORE_BYTES;
+        store.persist(&capture, &source, &receipts).unwrap();
+        store.capacity.1 = one;
+        store.reclaim_forgotten(&source, &ids, &pins).unwrap();
+        let rows: Vec<(String, i64)> = store
+            .conn
+            .prepare(
+                "SELECT capture_ids, capture_ids_truncated FROM receipt_tombstones ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        // The second forget replaced every ledger row, so the first tombstone
+        // is orphaned and gone; the pool was full when the second was written.
+        assert_eq!(rows, vec![("[]".to_owned(), 1)]);
+        for receipt in &receipts {
+            assert!(matches!(
+                store.receipt_status(receipt.id()).unwrap(),
+                ReceiptStatus::Reclaimed { .. }
+            ));
+        }
     }
 }
