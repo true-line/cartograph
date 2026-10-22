@@ -620,7 +620,11 @@ pub(crate) fn initialize(transaction: &Transaction<'_>) -> Result<(), GraphError
 
 pub(crate) fn clear(transaction: &Transaction<'_>) -> Result<(), GraphError> {
     check_schema(transaction)?;
-    transaction.execute("DELETE FROM source_omission_index", [])?;
+    // The omission index is not generation-watched; an actual deletion is a
+    // row event even when no fact or coverage row is removed with it.
+    if transaction.execute("DELETE FROM source_omission_index", [])? > 0 {
+        crate::generation::bump(transaction)?;
+    }
     Ok(())
 }
 
@@ -651,36 +655,57 @@ fn load_binding(
     .transpose()
 }
 
+/// Omission row for `fact`. Cell types and byte lengths are checked in SQL
+/// before any body is copied; a malformed row is `Some(None)`, which callers
+/// treat as unrecorded rather than as positive evidence.
+#[allow(clippy::type_complexity)]
 fn load_omission(
     connection: &Connection,
     fact: &FactKey,
-) -> Result<Option<(String, ReceiptOmissionKind, String)>, GraphError> {
-    let row: Option<(String, String, String)> = match fact {
-        FactKey::Node { id } => connection
-            .query_row(
-                "SELECT repo_key, kind, emitted_fact_digest FROM source_node_omissions WHERE node_id = ?1",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?,
+) -> Result<Option<Option<(String, ReceiptOmissionKind, String)>>, GraphError> {
+    let table_and_key = match fact {
+        FactKey::Node { .. } => "source_node_omissions WHERE node_id = ?1",
+        FactKey::Edge { .. } => {
+            "source_edge_omissions WHERE source = ?1 AND label = ?2 AND destination = ?3"
+        }
+    };
+    let sql = format!(
+        "SELECT
+         CASE WHEN typeof(repo_key) = 'text' AND length(CAST(repo_key AS BLOB)) BETWEEN 1 AND {MAX_REPO_BYTES} THEN CAST(repo_key AS BLOB) END,
+         CASE WHEN typeof(kind) = 'text' AND length(CAST(kind AS BLOB)) BETWEEN 1 AND 16 THEN CAST(kind AS BLOB) END,
+         CASE WHEN typeof(emitted_fact_digest) = 'text' AND length(CAST(emitted_fact_digest AS BLOB)) = 72 THEN CAST(emitted_fact_digest AS BLOB) END
+         FROM {table_and_key}"
+    );
+    let read = |row: &rusqlite::Row<'_>| {
+        Ok((
+            row.get::<_, Option<Vec<u8>>>(0)?,
+            row.get::<_, Option<Vec<u8>>>(1)?,
+            row.get::<_, Option<Vec<u8>>>(2)?,
+        ))
+    };
+    let row = match fact {
+        FactKey::Node { id } => connection.query_row(&sql, [id], read).optional()?,
         FactKey::Edge {
             source,
             label,
             destination,
         } => connection
-            .query_row(
-                "SELECT repo_key, kind, emitted_fact_digest FROM source_edge_omissions WHERE source = ?1 AND label = ?2 AND destination = ?3",
-                params![source, label, destination],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
+            .query_row(&sql, params![source, label, destination], read)
             .optional()?,
     };
-    row.map(|(repo_key, kind, emitted_fact_digest)| {
-        bounded(&repo_key, MAX_REPO_BYTES)?;
-        let kind = ReceiptOmissionKind::from_db(&kind)?;
-        Ok((repo_key, kind, emitted_fact_digest))
-    })
-    .transpose()
+    let Some((repo_key, kind, emitted_fact_digest)) = row else {
+        return Ok(None);
+    };
+    let text = |bytes: Option<Vec<u8>>| bytes.and_then(|bytes| String::from_utf8(bytes).ok());
+    let (Some(repo_key), Some(kind), Some(emitted_fact_digest)) =
+        (text(repo_key), text(kind), text(emitted_fact_digest))
+    else {
+        return Ok(Some(None));
+    };
+    let Ok(kind) = ReceiptOmissionKind::from_db(&kind) else {
+        return Ok(Some(None));
+    };
+    Ok(Some(Some((repo_key, kind, emitted_fact_digest))))
 }
 
 /// Whether every coverage-recorded repo has a complete omission index, and at
@@ -713,7 +738,7 @@ pub(crate) fn selection_omission(
         return Ok(OmissionLookup::Unrecorded);
     };
     Ok(match load_omission(connection, fact)? {
-        Some((repo_key, kind, emitted_fact_digest)) if emitted_fact_digest == fact_digest => {
+        Some(Some((repo_key, kind, emitted_fact_digest))) if emitted_fact_digest == fact_digest => {
             OmissionLookup::Omitted { repo_key, kind }
         }
         Some(_) => OmissionLookup::Unrecorded,
@@ -1010,6 +1035,7 @@ impl SqliteGraphStore {
         let transaction = self.conn.unchecked_transaction()?;
         if limits.is_some() {
             preflight_selection_schema(&self.conn)?;
+            crate::coverage::preflight_schema(&self.conn)?;
         }
         check_schema(&self.conn)?;
         let revision = crate::generation::read_store_revision(&transaction)?;

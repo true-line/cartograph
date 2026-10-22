@@ -1437,3 +1437,139 @@ fn omission_only_publication_advances_revision_and_binds_selection_basis() {
     assert_eq!(cleared.selections[0].omission, OmissionLookup::Unrecorded);
     assert_ne!(cleared.revision, after.revision);
 }
+
+#[test]
+fn bounded_omission_reads_preflight_coverage_schema_and_reject_malformed_cells() {
+    // AC-0314: the bounded selection bounds the coverage schema before copying
+    // it, malformed omission cells are never positive evidence, and clearing a
+    // fact-free store with an omission index advances the revision. (T-0314)
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let fact_node = node("repo/a:omitted");
+    let fact = FactKey::from_node(&fact_node);
+    let records = [SourceOmission {
+        fact: fact.clone(),
+        kind: ReceiptOmissionKind::Rules,
+    }];
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch {
+                    upsert_nodes: vec![fact_node.clone()],
+                    ..GraphPatch::default()
+                },
+                "repo/a",
+                &[],
+                None,
+                SourceOmissions {
+                    records: &records,
+                    complete: true,
+                },
+            )
+            .unwrap()
+    );
+    let limits = SnapshotReadLimits::default();
+    let select = |store: &SqliteGraphStore| {
+        store
+            .read_source_selection_snapshot_bounded(std::slice::from_ref(&fact), limits)
+            .map(|snapshot| snapshot.selections[0].omission.clone())
+    };
+    assert!(matches!(
+        select(&store).unwrap(),
+        OmissionLookup::Omitted { .. }
+    ));
+
+    // Malformed cells (bypassing CHECK constraints) read as Unrecorded.
+    for corruption in [
+        "UPDATE source_node_omissions SET kind = 'bogus'",
+        "UPDATE source_node_omissions SET repo_key = printf('%.300c', 'r')",
+    ] {
+        let snapshot = store.conn.query_row(
+            "SELECT repo_key, kind FROM source_node_omissions",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        );
+        let (repo_key, kind) = snapshot.unwrap();
+        store
+            .conn
+            .execute_batch(&format!(
+                "PRAGMA ignore_check_constraints = 1; {corruption}; PRAGMA ignore_check_constraints = 0;"
+            ))
+            .unwrap();
+        assert_eq!(select(&store).unwrap(), OmissionLookup::Unrecorded);
+        store
+            .conn
+            .execute(
+                "UPDATE source_node_omissions SET repo_key = ?1, kind = ?2",
+                params![repo_key, kind],
+            )
+            .unwrap();
+        assert!(matches!(
+            select(&store).unwrap(),
+            OmissionLookup::Omitted { .. }
+        ));
+    }
+
+    // An oversized foreign coverage object is refused by the bounded preflight
+    // before the exact-schema decoder copies it.
+    let padding = "x".repeat(5000);
+    store
+        .conn
+        .execute_batch(&format!(
+            "CREATE TRIGGER coverage_foreign AFTER INSERT ON coverage_inventories BEGIN SELECT '{padding}'; END"
+        ))
+        .unwrap();
+    assert!(matches!(
+        select(&store),
+        Err(GraphError::SnapshotBounds(
+            SnapshotBoundsError::InvalidSchema
+        ))
+    ));
+    store
+        .conn
+        .execute_batch("DROP TRIGGER coverage_foreign")
+        .unwrap();
+
+    // Clearing a store whose only remaining row is an omission index advances
+    // the revision.
+    store.clear().unwrap();
+    let expected = store.read_snapshot().unwrap();
+    store
+        .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+            &expected,
+            &GraphPatch::default(),
+            "repo/a",
+            &[],
+            None,
+            SourceOmissions {
+                records: &[],
+                complete: true,
+            },
+        )
+        .unwrap();
+    let before = store
+        .read_snapshot_with_revision_bounded(limits)
+        .unwrap()
+        .revision;
+    store.clear().unwrap();
+    assert_ne!(
+        store
+            .read_snapshot_with_revision_bounded(limits)
+            .unwrap()
+            .revision,
+        before
+    );
+    let after = store
+        .read_snapshot_with_revision_bounded(limits)
+        .unwrap()
+        .revision;
+    store.clear().unwrap();
+    assert_eq!(
+        store
+            .read_snapshot_with_revision_bounded(limits)
+            .unwrap()
+            .revision,
+        after
+    );
+}
