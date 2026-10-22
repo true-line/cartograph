@@ -9,6 +9,7 @@ use super::{ExtractError, Extraction, IncrementalStats, SourceId};
 use adapters_fw::events::Registries;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::fs::{Dir, OpenOptions};
+use core_graph::source::FactKey;
 use core_graph::{Edge, Node};
 use source_capture::{Capture, CapturedFile};
 use source_walk::IgnoreRules;
@@ -412,19 +413,25 @@ fn extract_captured_dir_bounded(
     // stops once they alone could not fit, bounding the extra memory.
     let mut declarations = Vec::new();
     let mut declaration_bytes = 0;
+    let mut omitted_rules = Vec::new();
     let mut stats = IncrementalStats::default();
     source_walk::parallel::map_ordered(
         &paths,
         |path| extract_file_with(capture.file(path)?, id, registries, file_declarations),
         |path, (facts, file_receipts)| {
             on_file(path);
-            for receipt in &file_receipts.rules {
-                receipt_bytes += receipt.to_json()?.len();
-            }
-            if receipt_bytes > budget.bytes
-                || receipts.len() + file_receipts.rules.len() > budget.receipts
-            {
-                return Err(CapturedError::Limit("extraction receipt metadata"));
+            // Rule receipts are admitted greedily in manifest order (#722). One
+            // that does not fit is omitted by fact key, never retained, so a
+            // large repository degrades to named uncitable facts instead of
+            // failing, and memory stays within the budget.
+            for receipt in file_receipts.rules {
+                let bytes = receipt.to_json()?.len();
+                if receipt_bytes + bytes > budget.bytes || receipts.len() == budget.receipts {
+                    omitted_rules.push((path.to_owned(), receipt.fact_key().clone()));
+                } else {
+                    receipt_bytes += bytes;
+                    receipts.push(receipt);
+                }
             }
             if file_receipts.omitted_declarations > 0 {
                 *stats
@@ -445,7 +452,6 @@ fn extract_captured_dir_bounded(
                 }
             }
             super::append_extraction(&mut extraction, facts);
-            receipts.extend(file_receipts.rules);
             stats.recomputed_files += 1;
             Ok(())
         },
@@ -453,6 +459,15 @@ fn extract_captured_dir_bounded(
     super::complete_directory(&mut extraction, root, id)?;
     let matching = matcher(&extraction);
     receipts.retain(|receipt| matching(receipt));
+    // Count an omitted rule only when its fact survived directory completion,
+    // so the named omissions describe facts the graph actually holds.
+    let surviving = surviving_facts(&extraction);
+    for (path, key) in omitted_rules {
+        if surviving(&key) {
+            *stats.omitted_rule_receipts.entry(path).or_default() += 1;
+        }
+    }
+    drop(surviving);
     // Only declarations whose complete fact survived directory completion use
     // budget. Admission is greedy in deterministic manifest order: a declaration
     // that does not fit is skipped and a smaller later one may still be admitted.
@@ -480,6 +495,27 @@ fn retain_matching(receipts: &mut Vec<Receipt>, extraction: &Extraction) {
 }
 
 /// Complete-fact equality against the final extraction, never id-only lookup.
+fn surviving_facts(extraction: &Extraction) -> impl Fn(&FactKey) -> bool + '_ {
+    let nodes: std::collections::BTreeSet<&str> = extraction
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect();
+    let edges: std::collections::BTreeSet<(&str, &str, &str)> = extraction
+        .edges
+        .iter()
+        .map(|edge| (edge.src.as_str(), edge.label.as_str(), edge.dst.as_str()))
+        .collect();
+    move |key| match key {
+        FactKey::Node { id } => nodes.contains(id.as_str()),
+        FactKey::Edge {
+            source,
+            label,
+            destination,
+        } => edges.contains(&(source.as_str(), label.as_str(), destination.as_str())),
+    }
+}
+
 fn matcher(extraction: &Extraction) -> impl Fn(&Receipt) -> bool + '_ {
     let nodes: BTreeMap<_, _> = extraction
         .nodes
