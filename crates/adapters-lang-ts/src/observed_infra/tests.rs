@@ -215,6 +215,23 @@ new G.SecretsManagerClient({});
 "#,
         ),
         (
+            "src/cast.ts",
+            r#"
+import * as H from "@aws-sdk/client-sqs";
+import * as I from "@aws-sdk/client-sns";
+import * as J from "@aws-sdk/client-lambda";
+import * as K from "@aws-sdk/client-s3";
+Object.assign(H as any, { SQSClient: Fake });
+((I as any)).SNSClient = Fake;
+(J!)["LambdaClient"] = Fake;
+Reflect.set((K satisfies object), "S3Client", Fake);
+new H.SQSClient({});
+new I.SNSClient({});
+new J.LambdaClient({});
+new K.S3Client({});
+"#,
+        ),
+        (
             "src/local.ts",
             r#"
 import { S3Client } from "./fake-s3";
@@ -256,6 +273,12 @@ export const b = new Pool();
         .collect();
     assert_eq!(overwritten.len(), 1, "{overwritten:?}");
     assert!(overwritten[0].1.ends_with("observed:aws-secrets-manager"));
+    // Casts, `!` and parentheses still write the namespace they wrap.
+    let cast: Vec<_> = uses(&ex)
+        .into_iter()
+        .filter(|(src, _)| src.contains("cast.ts"))
+        .collect();
+    assert!(cast.is_empty(), "{cast:?}");
     let registry: Vec<_> = ex
         .edges
         .iter()
@@ -481,4 +504,132 @@ fn captured_recovery_reads_only_the_retained_bytes() {
     // The live tree, by contrast, sees today's bytes.
     let live = extract_dir(dir.path(), &id(), Registries::builtin()).unwrap();
     resource(&live, "observed:aws-s3");
+}
+
+// AC-0316: an HTTP API is one `http-api` resource per origin. Every call
+// whose URL starts with a proven absolute origin is a USES edge citing it,
+// whichever client made it; relative URLs and computed `fetch` URLs make
+// none, a host the head leaves open is never truncated to a wrong origin,
+// and a computed client URL is a Gap. (T-0316)
+#[test]
+fn http_calls_group_into_one_resource_per_origin() {
+    let src = r#"
+import axios from "axios";
+import ky from "ky";
+const API = "https://api.example.com";
+export async function load(id: string) {
+  await fetch("https://api.example.com/items");
+  await fetch(`${API}/items/${id}`);
+  await window.fetch(API + "/stats");
+  await axios.get("https://api.example.com/users?x=1");
+  await ky.post(`https://hooks.example.org/v1/${id}`);
+  const client = axios.create({ baseURL: "https://billing.example.net/api" });
+  await fetch("/relative/path");
+  await fetch(`https://${id}.example.com/x`);
+  await fetch(dynamicUrl(id));
+  await axios.get(dynamicUrl(id));
+  await axios.get("/relative");
+}
+function dynamicUrl(id: string) { return id; }
+"#;
+    let ex = extract(&[("src/api.ts", src)]);
+    let api = resource(&ex, "observed:http-api:https://api.example.com");
+    assert_eq!(api.props["kind"], "http-api");
+    assert_eq!(api.props["type"], "http-api");
+    assert_eq!(api.props["identity"], "https://api.example.com");
+    assert!(api.props.get("module").is_none());
+    // A resource shared by every client records none of their modules.
+    let hooks = resource(&ex, "observed:http-api:https://hooks.example.org");
+    assert!(hooks.props.get("module").is_none());
+    resource(&ex, "observed:http-api:https://billing.example.net");
+    let resources: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Resource")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(resources.len(), 3, "{resources:?}");
+    let to_api: Vec<_> = ex
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.dst
+                .ends_with("@observed:http-api:https://api.example.com")
+        })
+        .map(|edge| {
+            let (start, end) = span(edge);
+            (
+                edge.props["client"].as_str().unwrap(),
+                &src[start as usize..end as usize],
+            )
+        })
+        .collect();
+    assert_eq!(
+        to_api,
+        [
+            ("fetch", r#"fetch("https://api.example.com/items")"#),
+            ("fetch", "fetch(`${API}/items/${id}`)"),
+            ("fetch", r#"window.fetch(API + "/stats")"#),
+            ("axios", r#"axios.get("https://api.example.com/users?x=1")"#),
+        ]
+    );
+    // Only the computed axios URL is a Gap; the open host and the
+    // computed fetch are not guessed and not duplicated.
+    let gaps: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap")
+        .map(|node| node.props["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(gaps, ["runtime-computed http-api identity"]);
+}
+
+// AC-0316: `fetch` is the platform's only while the file binds neither it
+// nor the global receiver's property. (T-0316)
+#[test]
+fn shadowed_or_rewritten_fetch_is_not_observed() {
+    let ex = extract(&[
+        (
+            "src/a.ts",
+            r#"
+import fetch from "node-fetch-lookalike";
+export const a = () => fetch("https://api.example.com/a");
+"#,
+        ),
+        (
+            "src/b.ts",
+            r#"
+window.fetch = mock;
+export const b = () => window.fetch("https://api.example.com/b");
+"#,
+        ),
+        (
+            "src/c.ts",
+            r#"
+export function c(fetch: (u: string) => void) { fetch("https://api.example.com/c"); }
+"#,
+        ),
+    ]);
+    assert!(
+        ex.nodes.iter().all(|node| node.label != "Resource"),
+        "{:?}",
+        ex.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
+    );
+}
+
+// AC-0317: a URL led by an env reference names that variable, never a
+// value; a relative or empty head names nothing. (T-0317)
+#[test]
+fn env_led_http_urls_name_their_variable() {
+    let ex = extract(&[(
+        "src/env.ts",
+        r#"
+export const a = () => fetch(`${import.meta.env.VITE_API}/items`);
+export const b = () => fetch(process.env.API_URL + "/stats");
+"#,
+    )]);
+    let vite = resource(&ex, "observed:http-api:env:VITE_API");
+    assert_eq!(vite.props["env_key"], "VITE_API");
+    resource(&ex, "observed:http-api:env:API_URL");
+    assert_eq!(uses(&ex).len(), 2);
 }

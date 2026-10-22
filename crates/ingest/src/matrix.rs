@@ -191,6 +191,13 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     ),
     cell("TypeScript", "sdk-client", InfraResources, Supported, ""),
     cell("TypeScript", "auth-provider", InfraResources, Supported, ""),
+    cell(
+        "TypeScript",
+        "http-api",
+        InfraResources,
+        Partial,
+        "only calls whose URL starts with a proven absolute origin; relative URLs and runtime bases name no resource",
+    ),
     cell("JavaScript", CORE, Imports, Supported, ""),
     cell("JavaScript", CORE, Calls, Supported, ""),
     cell(

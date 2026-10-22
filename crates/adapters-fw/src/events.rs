@@ -204,6 +204,9 @@ pub enum ObservedFamily {
     SdkClient,
     /// An identity-provider client (Auth0, Clerk, NextAuth, Cognito).
     AuthProvider,
+    /// An HTTP API the code calls, one resource per origin (`fetch`,
+    /// axios, ky with a literal or const-resolved base URL).
+    HttpApi,
 }
 
 impl ObservedFamily {
@@ -213,6 +216,7 @@ impl ObservedFamily {
             ObservedFamily::BrowserStorage => "browser-storage",
             ObservedFamily::SdkClient => "sdk-client",
             ObservedFamily::AuthProvider => "auth-provider",
+            ObservedFamily::HttpApi => "http-api",
         }
     }
 }
@@ -679,6 +683,7 @@ mod tests {
             ObservedFamily::BrowserStorage,
             ObservedFamily::SdkClient,
             ObservedFamily::AuthProvider,
+            ObservedFamily::HttpApi,
         ] {
             assert!(
                 builtin.clients.iter().any(|c| c.family == family),
