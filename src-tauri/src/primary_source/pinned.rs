@@ -25,6 +25,28 @@ impl std::error::Error for PinnedReadError {}
 
 type AdmittedReceiptFields = (Option<String>, Option<String>, Option<String>);
 
+fn admitted_receipt_text(
+    value: rusqlite::types::ValueRef<'_>,
+) -> Result<Option<String>, PinnedReadError> {
+    match value {
+        rusqlite::types::ValueRef::Null => Ok(None),
+        rusqlite::types::ValueRef::Text(bytes) => std::str::from_utf8(bytes)
+            .map(|text| Some(text.to_owned()))
+            .map_err(|_| PinnedReadError::Invalid),
+        _ => Err(PinnedReadError::Invalid),
+    }
+}
+
+fn admitted_receipt_fields(
+    values: [rusqlite::types::ValueRef<'_>; 3],
+) -> Result<AdmittedReceiptFields, PinnedReadError> {
+    Ok((
+        admitted_receipt_text(values[0])?,
+        admitted_receipt_text(values[1])?,
+        admitted_receipt_text(values[2])?,
+    ))
+}
+
 pub(super) fn stored_receipt(conn: &Connection, id: &str) -> Result<Receipt, PinnedReadError> {
     // CASE projections keep malformed/oversized cells inside SQLite. They are
     // never copied into Rust Strings before admission. One statement also
@@ -39,10 +61,16 @@ pub(super) fn stored_receipt(conn: &Connection, id: &str) -> Result<Receipt, Pin
                CASE WHEN typeof(payload)='text' AND length(CAST(payload AS BLOB)) BETWEEN 1 AND ?2 THEN payload END
              FROM receipts WHERE id=?1",
             params![id, payload_limit],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                // SQLite TEXT can contain invalid UTF-8. Borrow the admitted
+                // bytes first so corrupt encoding is Invalid, while actual SQL
+                // access failures remain Operational.
+                Ok(admitted_receipt_fields([row.get_ref(0)?, row.get_ref(1)?, row.get_ref(2)?]))
+            },
         )
         .optional()
-        .map_err(|_| PinnedReadError::Operational)?;
+        .map_err(|_| PinnedReadError::Operational)?
+        .transpose()?;
     let (Some(source), Some(repo), Some(json)) = row.ok_or(PinnedReadError::Unavailable)? else {
         return Err(PinnedReadError::Invalid);
     };
@@ -169,7 +197,10 @@ impl PrimarySourceStore {
             .read_text_span(&range.captured)
             .map_err(capture_error)
     }
-    /// Explicit MCP admission, preserving ordinary task_text callers' policy.
+    /// MCP callers pass the admitted host file-validation and returned-span
+    /// maxima; the capture store also enforces its own hard/stored ceilings.
+    /// Ordinary task_text intentionally keeps its existing capture-store policy
+    /// without these additional per-session MCP limits.
     pub(crate) fn task_text_bounded(
         &self,
         guard: &RetentionGuard,

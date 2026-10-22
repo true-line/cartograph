@@ -41,7 +41,7 @@ fn receipt_projection_rejects_oversized_invalid_utf8_before_string_decode() {
 fn receipt_projection_counts_utf8_bytes_and_rejects_nontext_cells() {
     for column in ["source_id", "repo_key", "payload"] {
         let conn = corrupt_store();
-        for sql_value in ["NULL", "42", "X'7B7D'"] {
+        for sql_value in ["NULL", "42", "X'7B7D'", "CAST(X'FFFF' AS TEXT)"] {
             conn.execute_batch(&format!("UPDATE receipts SET {column}={sql_value}"))
                 .unwrap();
             assert_eq!(
@@ -50,6 +50,10 @@ fn receipt_projection_counts_utf8_bytes_and_rejects_nontext_cells() {
             );
         }
     }
+    assert_eq!(
+        stored_receipt(&Connection::open_in_memory().unwrap(), "r").unwrap_err(),
+        PinnedReadError::Operational
+    );
     let conn = corrupt_store();
     let mut utf8_boundary = "é".repeat(128).into_bytes();
     utf8_boundary.push(0xff);
