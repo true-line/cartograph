@@ -1,5 +1,6 @@
 //! Native save-panel export command and pure validation/write helpers (#729).
 
+use std::io::Write;
 use std::path::Path;
 
 /// Fallback file name used when a suggested export name has no usable basename.
@@ -29,9 +30,61 @@ pub fn sanitize_export_name(raw: &str) -> String {
 /// Write `content` to `path`, returning a short error message that never
 /// includes `content`. There is no size cap: a complete spec bundle is
 /// exported untruncated (AC-0218), as the browser download path did.
+///
+/// The bytes go to a new sibling file that is flushed and then renamed over
+/// `path`, so a failed or partial write leaves any existing file at `path`
+/// exactly as it was.
 pub fn write_export_file(path: &Path, content: &str) -> Result<(), String> {
-    std::fs::write(path, content.as_bytes())
-        .map_err(|err| format!("Failed to write export file: {err}"))
+    write_export_file_with(path, content, |file, bytes| file.write_all(bytes))
+}
+
+/// [`write_export_file`] with the byte copy injectable, so tests can fail it
+/// part-way.
+fn write_export_file_with(
+    path: &Path,
+    content: &str,
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let fail = |err: std::io::Error| format!("Failed to write export file: {err}");
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let (temp, mut file) = create_sibling(parent).map_err(fail)?;
+    let written = write(&mut file, content.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&temp, path)
+        });
+    if let Err(err) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(fail(err));
+    }
+    Ok(())
+}
+
+/// A new, exclusively created temporary file next to the export target.
+/// The name is fixed-length, so a long export name never exceeds the
+/// platform's file-name limit.
+fn create_sibling(parent: &Path) -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    loop {
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temp = parent.join(format!(
+            ".{FALLBACK_EXPORT_NAME}-{}-{n}.partial",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => return Ok((temp, file)),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 /// Show a native save panel with the sanitised suggested file name and write
@@ -125,5 +178,33 @@ mod tests {
         let err = write_export_file(dir.path(), secret).expect_err("writing to directory fails");
         assert!(!err.contains(secret));
         assert!(err.starts_with("Failed to write export file:"));
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_existing_export_untouched() {
+        // #736 review: a partial write must never truncate the file the user
+        // chose to overwrite, and must leave no temporary file behind.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("cartograph-spec-best-effort.json");
+        std::fs::write(&target, "previous export").expect("seed");
+        let err = write_export_file_with(&target, "new export content", |file, bytes| {
+            file.write_all(&bytes[..4])?;
+            Err(std::io::Error::other("disk full"))
+        })
+        .expect_err("injected failure");
+        assert!(err.starts_with("Failed to write export file:"));
+        assert!(!err.contains("new export content"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "previous export");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+
+        write_export_file(&target, "new export content").expect("replace");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "new export content"
+        );
     }
 }
