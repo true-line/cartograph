@@ -255,30 +255,53 @@ The macOS compile step builds both relay architectures and stages a universal
 binary. The external-binary overlay is applied during bundling only, because the
 Tauri build helper otherwise requests individual architecture suffixes. Packaging
 checks the bundled executable, both architectures and its signature before upload.
+A local locked release build of the ARM relay succeeded on 2026-10-22 UTC
+(Rust 1.96.1, app version 0.20.0; Mach-O arm64). The locked Tauri CLI 2.12.3
+was also installed. Installing the Intel standard library from the official Rust
+distribution failed with a TLS connection error; separate connection probes
+timed out. No Intel slice, universal bundle or notarized package is claimed.
 These build steps still need an actual universal package run; unit tests of build
-commands do not establish an installable or notarized package.
+commands and the thin ARM build do not establish that result.
 
 ### Separate-process smoke evidence
 
 The isolated app fixture explicitly runs `scripts/mcp-stdio-smoke.mjs` against
-a source-built relay. This Node client uses no model. Its expanded fixture
-captures and extracts temporary synthetic source, persists production receipts,
-then deletes the checkout before activation. It exercises initialization, the
-five-tool list, capabilities, two discovery pages, two artifact pages and a
-retained-source span. Rust verifies the returned span hash and source/confidence
-metadata against the original fixture, and verifies the graph remains unchanged.
+an ARM source-built release relay. This Node client uses no model. Three
+independent temporary AppState instances exercise retained evidence, missing
+captures and a curation-rejected fact. Production capture/extraction/receipt
+publication prepares the retained fixture; its checkout is deleted before
+activation. Returned spans match the original bytes and provenance, while the
+graph remains unchanged. Instruction-like text is actually returned within a
+span as data; no claim about model behavior follows from this transport test.
 
-Seven negative cases fail closed across the process boundary: stale discovery
-snapshot, stale context, substituted artifact content identity, stale evidence
-basis, substituted receipt, evidence byte cap and mutation tool. The run produced
-17 responses and 20,892 stdout bytes with no stderr bytes; the exact retained span
-was 13 bytes. Token counts remain unknown because no tokenizer was applied.
+The retained scenario exercises discovery and artifact pagination plus seven
+refusals: stale discovery snapshot, stale context, substituted artifact content,
+stale evidence basis, substituted receipt, evidence byte cap and mutation tool.
+The missing-capture scenario leaves a live replacement checkout canary in place
+and verifies refusal without reading or changing that substitute. The rejected
+fact has real synthetic citation evidence and a DecisionLog rejection; identifier
+discovery returns no candidate and its evidence request fails closed.
+
+The three-scenario release-relay run passed on 2026-10-22 UTC. Retained evidence
+returned a 99-byte exact span. Measured stdout bytes were 69,020 (retained), 65,655
+(missing capture) and 10,738 (rejected fact), respectively. No stderr was emitted.
+The same-fixture artifact comparison reconstructs all 10,457 content bytes in
+41 pages of at most 256 bytes and checks the identical content identity and hash
+against a full-content response. Including actual request/response LF framing and
+shared initialization, tool schemas, capabilities and catalog overhead, the
+full-content strategy used 23,884 wire bytes; complete pagination used 69,449,
+which is **45,565 bytes more**. Shared overhead was 12,000 bytes, including 5,837
+bytes of tool-input schemas. This is not a savings result. A comparison for a task that needs only selected
+pages requires its own measurement. Tokens and tokenizer identity remain
+explicitly unknown.
+
 The reproducible opt-in test is
 `mcp_scripted_stdio_client_smoke_against_isolated_app_service`, with an absolute
-`CARTOGRAPH_TEST_MCP_RELAY` pointing to the explicitly source-built relay.
+`CARTOGRAPH_TEST_MCP_RELAY` pointing to the explicitly source-built relay. Its
+policy limits are synthetic fixture allowances, not application defaults or
+capacity calibration. Controlled scenario/stage diagnostics identify failures
+without echoing arbitrary client output or source text.
 
-This is scripted external-process evidence, not an installed-client, signed
-package, model-quality or token-savings claim. Missing-capture and curation-rejection
-cases still have separate native tests rather than this external-client scenario.
-The client skill, remaining transport scenarios and packaged-client procedure
-remain required before issue closeout.
+These are scripted external-process results, not installed-client, signed-package,
+model-quality or H5 acceptance. The client skill and packaged-client lifecycle
+procedure remain required before issue closeout.

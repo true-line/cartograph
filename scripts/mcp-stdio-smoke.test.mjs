@@ -22,7 +22,8 @@ const names=['cartograph_capabilities','cartograph_discover','cartograph_artifac
 const fault=${JSON.stringify(fault)};
 const source={repo:'fixture/repo',path:'source.ts',commit_sha:'commit'};
 const candidate=n=>({reference:{kind:'node',id:'rule:'+n},confidence_tier:'confirmed',source});
-const target={fact:{kind:'node',id:'rule:1'},source,captured:{byte_start:0,byte_end:4},receipt_id:'receipt'};
+const evidenceText='UNTRUSTED_FIXTURE_INSTRUCTION 🧭';
+const target={fact:{kind:'node',id:'rule:1'},source,captured:{byte_start:0,byte_end:Buffer.byteLength(evidenceText)},receipt_id:'receipt'};
 readline.createInterface({input:process.stdin}).on('line',line=>{const q=JSON.parse(line);if(!('id' in q))return;
 const error=()=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,error:{code:-32602,message:'refused'}})+'\\n');
 let result;if(q.method==='initialize')result={protocolVersion:'2025-11-25'};
@@ -31,20 +32,23 @@ else {const name=q.params.name;const a=q.params.arguments;let data;
 if(name==='cartograph_capabilities')data={session_id:'session',basis_id:'basis',h3_curated_available:false};
 else if(name==='cartograph_discover'){
  const r=a.request.request;const cursor=r.cursor;
+ if(fault==='rejected-fact'){data={context:{response:{total_candidates:0,candidates:[],next_cursor:null}}};}else {
  if((cursor&&cursor.snapshot_id!=='snapshot')||(cursor&&a.request.context_id!=='context'))return error();
  data={context:{context_id:'context',coverage:{exhaustive:false},response:{snapshot_id:'snapshot',total_candidates:2,candidates:[candidate(cursor?2:1)],next_cursor:cursor?null:{snapshot_id:'snapshot',query_id:'query',policy:'discovery-v1',offset:1}}}};
- if(fault==='discovery')data.context.response.candidates.push(candidate(3));
+ if(fault==='discovery')data.context.response.candidates.push(candidate(3));}
 }
 else if(name==='cartograph_artifacts')data={artifacts:[{id:'rule-evidence'}]};
 else if(name==='cartograph_read_artifact'){
  if(a.expected_content_id&&a.expected_content_id!=='content')return error();
- data={artifact:{artifact_id:'rule-evidence',basis_id:'basis',content_id:'content',content:'x'.repeat(64),partial:true,offset:a.offset,next_offset:a.offset+64,structured_assertions_included:false}};
- if(fault==='artifact')data.artifact.content='x'.repeat(65);
+ const content='x'.repeat(600).slice(a.offset,a.offset+a.max_content_bytes);const next=a.offset+content.length;
+ data={artifact:{artifact_id:'rule-evidence',basis_id:'basis',content_id:'content',content,total_content_bytes:600,partial:next<600,offset:a.offset,next_offset:next<600?next:null,structured_assertions_included:false}};
+ if(fault==='artifact')data.artifact.content='x'.repeat(257);
 }
 else if(name==='cartograph_evidence'){
+ if(['missing-capture','rejected-fact'].includes(fault))return error();
  if(a.basis_id!=='basis'||(a.target&&a.target.receipt_id!=='receipt')||a.max_bytes<1024)return error();
  const common={basis_id:'basis',scope:'primary_source_only',input_closure:'input_closure_not_established',target};
- data=a.mode==='describe'?{description:{...common,total_ranges:1,next_ordinal:null}}:{span:{...common,text:'🧭'}};
+ data=a.mode==='describe'?{description:{...common,total_ranges:1,next_ordinal:null}}:{span:{...common,text:evidenceText}};
  if(fault==='evidence'&&data.span)data.span.text='wrong';
  if(fault==='provenance'&&data.description)data.description={...data.description,target:{...target,source:{...source,path:'other.ts'}}};
 }
@@ -54,14 +58,33 @@ const bytes=Buffer.from(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\\n');pr
 }
 test('independent protocol client measures discovery artifact and retained evidence frames', async (t) => {
   const report = await smoke(fixture(t, protocolRelay()));
-  assert.equal(report.responses.length, 17);
+  assert.ok(report.responses.length > report.scenario.artifact_pages);
   assert.equal(report.tokens, null);
-  assert.equal(report.scenario.evidence_bytes, 4);
-  assert.equal(report.scenario.evidence_sha256, 'c3dafe97536ac80c9176a8de7ff941aed2f56d03daca2e35ceae1d5c979925cd');
+  assert.equal(report.scenario.evidence_bytes, Buffer.byteLength('UNTRUSTED_FIXTURE_INSTRUCTION 🧭'));
+  assert.match(report.scenario.evidence_sha256, /^[a-f0-9]{64}$/u);
+  assert.equal(report.scenario.hostile_source_returned_as_data, true);
   assert.equal(report.scenario.refused_cases.length, 7);
   assert.equal(report.stdout_bytes, report.responses.reduce((sum, frame) => sum + frame.response_bytes + 1, 0));
   assert.ok(report.responses[1].tool_input_schema_bytes > 0);
   assert.ok(report.responses[8].tool_schema_and_text_overhead_bytes > 0);
+  const comparison = report.scenario.comparison;
+  assert.equal(comparison.content_bytes, 600);
+  assert.equal(comparison.progressive_pages, 3);
+  assert.equal(comparison.tokens, null);
+  assert.equal(comparison.progressive_wire_bytes - comparison.full_content_wire_bytes, comparison.wire_difference_bytes);
+  assert.ok(comparison.tools_input_schema_bytes > 0);
+  assert.ok(comparison.shared_protocol_wire_bytes > comparison.tools_input_schema_bytes);
+  assert.ok(comparison.wire_difference_bytes > 0); // this fixture does not save wire bytes
+});
+test('negative fixture scenarios require refusal and never accept retained text fallback', async (t) => {
+  for (const scenario of ['missing-capture', 'rejected-fact']) {
+    const options = fixture(t, protocolRelay(scenario)); options.scenario = scenario; options.fact = 'rule:rejected';
+    const report = await smoke(options);
+    assert.equal(report.scenario.name, scenario);
+    assert.equal(report.scenario.evidence_refused, true);
+    assert.equal(report.scenario.evidence_sha256, undefined);
+    await assert.rejects(smoke({ ...fixture(t, protocolRelay()), scenario, fact: 'rule:rejected' }));
+  }
 });
 test('scenario rejects unbounded pages and evidence/provenance substitutions', async (t) => {
   for (const fault of ['discovery', 'artifact', 'evidence', 'provenance']) await assert.rejects(smoke(fixture(t, protocolRelay(fault))));
