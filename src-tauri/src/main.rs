@@ -1031,6 +1031,10 @@ struct ProducerReads {
     plugins: Vec<(String, ingest::coverage::ProducerCount)>,
     /// Captured TypeScript declarations left without a receipt, by file.
     omitted_declaration_receipts: std::collections::BTreeMap<String, u64>,
+    /// Captured TypeScript rule facts left without a receipt, by file (#722).
+    omitted_rule_receipts: std::collections::BTreeMap<String, u64>,
+    /// Receipts the retained store had no room for, by file (#722).
+    omitted_stored_receipts: std::collections::BTreeMap<String, u64>,
 }
 
 /// Identity of the plugin and registry basis an inventory was recorded
@@ -1319,6 +1323,7 @@ fn extract_tree_with_registries(
             .map_err(|e| e.to_string())?;
             receipts.extend(produced);
             reads.omitted_declaration_receipts = stats.omitted_declaration_receipts.clone();
+            reads.omitted_rule_receipts = stats.omitted_rule_receipts.clone();
             (extraction, stats)
         } else {
             adapters_lang_ts::extract_dir_incremental_with_progress(
@@ -3818,10 +3823,11 @@ fn run_ingest<R: tauri::Runtime>(
     };
 
     cancelled()?;
-    state
+    reads.omitted_stored_receipts = state
         .primary_sources
         .persist(&primary, source, &receipts)
-        .map_err(&fail)?;
+        .map_err(&fail)?
+        .keep_retained(&mut receipts);
     let bindings = primary_source::matching_bindings(&extraction, &receipts);
     // Scanned before publication so the inventory is published with the
     // facts it describes (AC-0239). Findings are still persisted only once
@@ -3844,7 +3850,18 @@ fn run_ingest<R: tauri::Runtime>(
         &reads,
     )
     .with_unsupported(&preflight)
-    .with_receipt_omissions(&reads.omitted_declaration_receipts);
+    .with_receipt_omissions(
+        ingest::coverage::ReceiptOmission::Declarations,
+        &reads.omitted_declaration_receipts,
+    )
+    .with_receipt_omissions(
+        ingest::coverage::ReceiptOmission::Rules,
+        &reads.omitted_rule_receipts,
+    )
+    .with_receipt_omissions(
+        ingest::coverage::ReceiptOmission::StoreCapacity,
+        &reads.omitted_stored_receipts,
+    );
     let record =
         coverage_record(&coverage, source, job_id, &active_plugins, &registries).map_err(&fail)?;
     report_progress(app, state, execution, "load", 70.0)?;
@@ -4228,10 +4245,11 @@ fn add_repo_blocking<R: tauri::Runtime>(
     if job_cancelled(&state, &execution)? {
         return Err("cancelled".to_string());
     }
-    state
+    reads.omitted_stored_receipts = state
         .primary_sources
         .persist(&primary, &source, &receipts)
-        .map_err(&fail)?;
+        .map_err(&fail)?
+        .keep_retained(&mut receipts);
     let bindings = primary_source::matching_bindings(&extraction, &receipts);
     // As for a local recovery (AC-0200, AC-0209, AC-0239): scanned from the
     // captured bytes the claims were proven on, before publication so the
@@ -4253,7 +4271,18 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &reads,
     )
     .with_unsupported(&preflight)
-    .with_receipt_omissions(&reads.omitted_declaration_receipts);
+    .with_receipt_omissions(
+        ingest::coverage::ReceiptOmission::Declarations,
+        &reads.omitted_declaration_receipts,
+    )
+    .with_receipt_omissions(
+        ingest::coverage::ReceiptOmission::Rules,
+        &reads.omitted_rule_receipts,
+    )
+    .with_receipt_omissions(
+        ingest::coverage::ReceiptOmission::StoreCapacity,
+        &reads.omitted_stored_receipts,
+    );
     let record =
         coverage_record(&coverage, &source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let mut published = OperationFacts::default();
@@ -4500,10 +4529,11 @@ fn add_system_blocking<R: tauri::Runtime>(
             .map_err(&fail)?
         };
         ensure_running_job(&state, &execution)?;
-        state
+        reads.omitted_stored_receipts = state
             .primary_sources
             .persist(&primary, source, &receipts)
-            .map_err(&fail)?;
+            .map_err(&fail)?
+            .keep_retained(&mut receipts);
         let bindings = primary_source::matching_bindings(&extraction, &receipts);
         // Scanned before publication so each inventory is published with its
         // facts (AC-0239); findings persist only once the system is in.
@@ -4528,7 +4558,18 @@ fn add_system_blocking<R: tauri::Runtime>(
             &reads,
         )
         .with_unsupported(&report)
-        .with_receipt_omissions(&reads.omitted_declaration_receipts);
+        .with_receipt_omissions(
+            ingest::coverage::ReceiptOmission::Declarations,
+            &reads.omitted_declaration_receipts,
+        )
+        .with_receipt_omissions(
+            ingest::coverage::ReceiptOmission::Rules,
+            &reads.omitted_rule_receipts,
+        )
+        .with_receipt_omissions(
+            ingest::coverage::ReceiptOmission::StoreCapacity,
+            &reads.omitted_stored_receipts,
+        );
         let record = coverage_record(&coverage, source, job_id, &active_plugins, &registries)
             .map_err(&fail)?;
         files += repo_layers.files();

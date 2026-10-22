@@ -254,6 +254,8 @@ impl Drop for RetentionGuard {
 
 struct ReceiptStore {
     conn: Connection,
+    /// Retained receipt count and payload bytes; tests narrow them.
+    capacity: (u64, u64),
 }
 
 fn require_one(affected: usize) -> Result<(), String> {
@@ -386,20 +388,24 @@ impl ReceiptStore {
             return Err(storage_error("receipt database changed"));
         }
         sqlite_sidecars(&parent, name)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            capacity: (MAX_RECEIPTS, MAX_RECEIPT_STORE_BYTES),
+        })
     }
 
+    /// Retain `receipts` in order until the store's capacity is reached
+    /// (#722). Integrity failures still reject the whole batch; a receipt that
+    /// only lacks room is left out and counted under its file path, and the
+    /// ids actually retained (new or already stored) are returned with them.
     fn persist(
         &mut self,
         capture: &Capture,
         source: &RegisteredSource,
         receipts: &[Receipt],
-    ) -> Result<(), String> {
-        if receipts.len() as u64 > MAX_RECEIPTS {
-            return Err(storage_error("receipt batch count"));
-        }
-        let mut rows = std::collections::BTreeMap::new();
-        let mut batch_bytes = 0u64;
+    ) -> Result<RetainedReceipts, String> {
+        let mut rows = Vec::new();
+        let mut batch = std::collections::BTreeMap::new();
         for receipt in receipts {
             if receipt.source_id().as_str() != source.source_id
                 || receipt.repo_key() != source.repo_key
@@ -421,24 +427,23 @@ impl ReceiptStore {
             if json.len() as u64 > MAX_RECEIPT_BYTES {
                 return Err(storage_error("receipt bounds"));
             }
-            if let Some(old) = rows.get(receipt.id()) {
-                if old != &json {
-                    return Err(storage_error("receipt batch collision"));
+            match batch.get(receipt.id()) {
+                Some(old) if old != &json => return Err(storage_error("receipt batch collision")),
+                Some(_) => {}
+                None => {
+                    batch.insert(receipt.id().to_owned(), json.clone());
+                    rows.push((receipt.id().to_owned(), receipt.file().path.clone(), json));
                 }
-            } else {
-                batch_bytes += json.len() as u64;
-                if batch_bytes > MAX_RECEIPT_STORE_BYTES {
-                    return Err(storage_error("receipt batch bytes"));
-                }
-                rows.insert(receipt.id().to_owned(), json);
             }
         }
+        drop(batch);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let (mut count, mut bytes) = receipt_storage(&tx)?;
-        for (id, payload) in rows {
+        let mut retained = RetainedReceipts::default();
+        for (id, path, payload) in rows {
             let old: Option<(String, String, String)> = tx
                 .query_row(
                     "SELECT source_id,repo_key,payload FROM receipts WHERE id=?1",
@@ -454,12 +459,13 @@ impl ReceiptStore {
                 {
                     return Err(storage_error("receipt collision"));
                 }
+            } else if count + 1 > self.capacity.0 || bytes + payload.len() as u64 > self.capacity.1
+            {
+                *retained.omitted.entry(path).or_default() += 1;
+                continue;
             } else {
                 count += 1;
                 bytes += payload.len() as u64;
-                if count > MAX_RECEIPTS || bytes > MAX_RECEIPT_STORE_BYTES {
-                    return Err("Retained receipt metadata capacity reached. Existing evidence is preserved; this recovery was not published.".into());
-                }
                 require_one(
                     tx.execute(
                         "INSERT INTO receipts (id,source_id,repo_key,payload) VALUES (?1,?2,?3,?4)",
@@ -468,8 +474,10 @@ impl ReceiptStore {
                     .map_err(storage_error)?,
                 )?;
             }
+            retained.ids.insert(id);
         }
-        tx.commit().map_err(storage_error)
+        tx.commit().map_err(storage_error)?;
+        Ok(retained)
     }
 
     fn get(&self, id: &str) -> Result<Receipt, String> {
@@ -601,23 +609,46 @@ impl PrimarySourceStore {
         })
     }
 
+    /// Retain the capture and as many `receipts` as the store has room for
+    /// (#722). Callers keep only [`RetainedReceipts::ids`] for bindings, so
+    /// no binding cites a receipt the store does not hold.
     pub(crate) fn persist(
         &self,
         input: &PrimaryInput,
         source: &RegisteredSource,
         receipts: &[Receipt],
-    ) -> Result<(), String> {
+    ) -> Result<RetainedReceipts, String> {
         self.storage.verify()?;
         if let Some(capture) = &input.capture {
             self.captures.lock().map_err(storage_error)?.persist(capture).map_err(|_| "Source retention failed or reached capacity. Use retained-source controls to free space; recovery was not published.".to_string())?;
             self.receipts
                 .lock()
                 .map_err(storage_error)?
-                .persist(capture, source, receipts)?;
+                .persist(capture, source, receipts)
         } else if !receipts.is_empty() {
-            return Err(storage_error("uncaptured receipts"));
+            Err(storage_error("uncaptured receipts"))
+        } else {
+            Ok(RetainedReceipts::default())
         }
-        Ok(())
+    }
+}
+
+/// Receipts one recovery actually retained, and those left out for lack of
+/// store capacity, by file path.
+#[derive(Debug, Default)]
+pub(crate) struct RetainedReceipts {
+    ids: std::collections::BTreeSet<String>,
+    omitted: std::collections::BTreeMap<String, u64>,
+}
+
+impl RetainedReceipts {
+    /// Drop every receipt the store did not retain and return the omissions.
+    pub(crate) fn keep_retained(
+        self,
+        receipts: &mut Vec<Receipt>,
+    ) -> std::collections::BTreeMap<String, u64> {
+        receipts.retain(|receipt| self.ids.contains(receipt.id()));
+        self.omitted
     }
 }
 
@@ -1081,6 +1112,46 @@ mod tests {
         .unwrap();
         assert!(!receipts.is_empty());
         (directory, source, capture, extraction, receipts)
+    }
+
+    // AC-0292: a full receipt store keeps what fits in order, names the rest
+    // by file instead of refusing the recovery, keeps already-stored evidence,
+    // and returns only retained ids for bindings (#722).
+    #[test]
+    fn full_receipt_store_retains_in_order_and_names_omissions() {
+        let (_directory, source, capture, _, receipts) = fixture();
+        assert!(receipts.len() >= 2);
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+        store.capacity.0 = 1;
+        for _ in 0..2 {
+            let mut kept = receipts.clone();
+            let omitted = store
+                .persist(&capture, &source, &receipts)
+                .unwrap()
+                .keep_retained(&mut kept);
+            assert_eq!(kept, receipts[..1]);
+            assert_eq!(
+                omitted,
+                std::collections::BTreeMap::from([(
+                    "rule.ts".to_string(),
+                    receipts.len() as u64 - 1
+                )])
+            );
+            assert_eq!(receipt_count(&store), 1);
+        }
+        // Room again: the omitted receipts are admitted on the next recovery.
+        store.capacity.0 = MAX_RECEIPTS;
+        let mut kept = receipts.clone();
+        assert!(
+            store
+                .persist(&capture, &source, &receipts)
+                .unwrap()
+                .keep_retained(&mut kept)
+                .is_empty()
+        );
+        assert_eq!(kept, receipts);
+        assert_eq!(receipt_count(&store), receipts.len() as i64);
     }
 
     #[test]

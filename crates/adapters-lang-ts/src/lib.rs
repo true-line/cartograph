@@ -168,6 +168,11 @@ pub struct IncrementalStats {
     /// (#691). Never silent: each named file has declarations that are not
     /// citable evidence. Bounded by the captured file count.
     pub omitted_declaration_receipts: std::collections::BTreeMap<String, u64>,
+    /// Captured rule receipts left out, by file path, once earlier rule
+    /// receipts filled the extraction receipt budget (#722). The facts remain
+    /// in the graph; only their primary citation is missing, and each named
+    /// file says so instead of failing the whole extraction.
+    pub omitted_rule_receipts: std::collections::BTreeMap<String, u64>,
 }
 
 fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {

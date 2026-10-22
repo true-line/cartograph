@@ -255,15 +255,19 @@ fn receipt_omissions_are_a_named_limitation() {
     };
     let full = RepoCoverage::from_facts(&facts).with_unsupported(&PreflightReport::default());
     assert_eq!(
-        full.clone()
-            .with_receipt_omissions(&std::collections::BTreeMap::new()),
+        full.clone().with_receipt_omissions(
+            ReceiptOmission::Declarations,
+            &std::collections::BTreeMap::new()
+        ),
         full
     );
     let omitted = std::collections::BTreeMap::from([
         ("src/b.ts".to_string(), 2),
         ("src/a.ts".to_string(), 3),
     ]);
-    let limited = full.with_receipt_omissions(&omitted);
+    let limited = full
+        .clone()
+        .with_receipt_omissions(ReceiptOmission::Declarations, &omitted);
     assert!(limited.limited);
     let entry = &limited.unsupported[0];
     assert_eq!(
@@ -283,5 +287,33 @@ fn receipt_omissions_are_a_named_limitation() {
         entry
             .reason
             .ends_with("a tool limitation, not a system gap")
+    );
+    // AC-0292: rule and store-capacity omissions are named separately, each
+    // under its own capability, and both limit the inventory (#722).
+    let both = full
+        .with_receipt_omissions(ReceiptOmission::Rules, &omitted)
+        .with_receipt_omissions(ReceiptOmission::StoreCapacity, &omitted);
+    assert!(both.limited);
+    let named: Vec<_> = both
+        .unsupported
+        .iter()
+        .map(|entry| (entry.capability.as_str(), entry.occurrences))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            (RULE_RECEIPT_OMISSION_CAPABILITY, 5),
+            (STORED_RECEIPT_OMISSION_CAPABILITY, 5)
+        ]
+    );
+    assert!(
+        both.unsupported[0]
+            .reason
+            .starts_with("5 TypeScript rule facts in 2 files")
+    );
+    assert!(
+        both.unsupported[1]
+            .reason
+            .contains("forget retained sources")
     );
 }

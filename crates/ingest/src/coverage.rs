@@ -14,6 +14,52 @@ pub const INVENTORY_ID: &str = "coverage@1";
 
 /// Capability naming declarations left without a primary receipt.
 pub const RECEIPT_OMISSION_CAPABILITY: &str = "ts-declaration-receipts";
+/// Capability naming rule facts left without a primary receipt (#722).
+pub const RULE_RECEIPT_OMISSION_CAPABILITY: &str = "ts-rule-receipts";
+/// Capability naming receipts the app's receipt store had no room to keep.
+pub const STORED_RECEIPT_OMISSION_CAPABILITY: &str = "receipt-store-capacity";
+
+/// Why a recovered fact has no retained primary receipt. Each kind is a tool
+/// limitation named in coverage, never a gap in the system under study.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptOmission {
+    /// Declarations that did not fit once rule receipts were admitted.
+    Declarations,
+    /// Rule facts whose receipts did not fit the extraction budget.
+    Rules,
+    /// Receipts the retained receipt store could not keep.
+    StoreCapacity,
+}
+
+impl ReceiptOmission {
+    fn capability(self) -> &'static str {
+        match self {
+            Self::Declarations => RECEIPT_OMISSION_CAPABILITY,
+            Self::Rules => RULE_RECEIPT_OMISSION_CAPABILITY,
+            Self::StoreCapacity => STORED_RECEIPT_OMISSION_CAPABILITY,
+        }
+    }
+
+    fn reason(self, occurrences: u64, files: usize) -> String {
+        let what = match self {
+            Self::Declarations => format!(
+                "{occurrences} TypeScript declarations in {files} files exceeded the \
+                 primary receipt bounds"
+            ),
+            Self::Rules => format!(
+                "{occurrences} TypeScript rule facts in {files} files exceeded the \
+                 extraction receipt budget"
+            ),
+            Self::StoreCapacity => format!(
+                "{occurrences} receipts in {files} files did not fit the retained \
+                 receipt store; forget retained sources to free space, then recover again"
+            ),
+        };
+        format!(
+            "{what} and cannot be cited from captured source: a tool limitation, not a system gap"
+        )
+    }
+}
 
 /// Layer hints that select application producers (SPEC-00 §3).
 pub const APPLICATION_LAYERS: &[&str] = &["server", "events", "client"];
@@ -387,12 +433,13 @@ impl RepoCoverage {
         self
     }
 
-    /// Add declarations the TypeScript adapter left without a primary receipt
-    /// because a receipt bound was reached (#691, #693), so an uncitable
-    /// declaration is a named limitation, never a silent omission. Apply after
+    /// Add facts left without a primary receipt because a receipt bound was
+    /// reached (#691, #693, #722), so an uncitable fact is a named limitation
+    /// of `kind`, never a silent omission. Apply after
     /// [`RepoCoverage::with_unsupported`], which replaces the list.
     pub fn with_receipt_omissions(
         mut self,
+        kind: ReceiptOmission,
         omitted: &std::collections::BTreeMap<String, u64>,
     ) -> Self {
         let occurrences: u64 = omitted.values().sum();
@@ -400,15 +447,10 @@ impl RepoCoverage {
             && occurrences > 0
         {
             self.unsupported.push(UnsupportedCapability {
-                capability: RECEIPT_OMISSION_CAPABILITY.into(),
+                capability: kind.capability().into(),
                 occurrences,
                 first_site: first.clone(),
-                reason: format!(
-                    "{occurrences} TypeScript declarations in {} files exceeded the \
-                     primary receipt bounds and cannot be cited from captured source: \
-                     a tool limitation, not a system gap",
-                    omitted.len()
-                ),
+                reason: kind.reason(occurrences, omitted.len()),
             });
             self.refresh_limited();
         }

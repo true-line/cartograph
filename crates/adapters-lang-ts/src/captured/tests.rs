@@ -687,8 +687,8 @@ export const pick = (items: string[]) => items[0];
 }
 
 // AC-0280: declarations use only the budget left after every rule receipt, in
-// manifest order; a declaration that loses is named by file, and the rule
-// receipt bound itself still fails exactly as before.
+// manifest order; a declaration that loses is named by file, and so is a
+// rule receipt that loses its own budget (#722).
 #[test]
 fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
     let directory = tempfile::tempdir().unwrap();
@@ -749,11 +749,26 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
         stats.omitted_declaration_receipts,
         BTreeMap::from([("a.ts".to_string(), 1), ("b.ts".to_string(), 2)])
     );
-    // Rule receipts that do not fit still fail; declarations never cause it.
-    assert!(matches!(
-        run(rule_bytes - 1, usize::MAX),
-        Err(CapturedError::Limit("extraction receipt metadata"))
-    ));
+    // AC-0292: a rule receipt that does not fit is omitted and named by file
+    // (#722); the extraction succeeds, keeps the fact, and admits no
+    // declaration ahead of the rule that lost.
+    let (extraction, admitted, stats) = run(rule_bytes - 1, usize::MAX).unwrap();
+    let kept = rules.iter().filter(|rule| admitted.contains(rule)).count();
+    assert_eq!(kept, rules.len() - 1);
+    assert_eq!(
+        stats.omitted_rule_receipts,
+        BTreeMap::from([("a.ts".to_string(), 1)])
+    );
+    let lost = rules.iter().find(|rule| !admitted.contains(rule)).unwrap();
+    assert!(surviving_facts(&extraction)(lost.fact_key()));
+    // Declarations only fill what the admitted rules left; none is admitted
+    // past the byte budget, and every one left out is still named.
+    let admitted_bytes: usize = admitted.iter().map(size).sum();
+    assert!(admitted_bytes < rule_bytes);
+    assert_eq!(
+        admitted.len() - kept + stats.omitted_declaration_receipts.values().sum::<u64>() as usize,
+        3
+    );
 }
 
 // AC-0280: the producer itself stops minting at a file's own declaration bound,
