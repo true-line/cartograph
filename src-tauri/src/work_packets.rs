@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use tauri::Manager;
 
 pub(crate) struct PacketRuntime {
-    store: Mutex<::work_packets::PacketStore>,
+    pub(crate) store: Mutex<::work_packets::PacketStore>,
 }
 impl PacketRuntime {
     pub(crate) fn open(path: &std::path::Path) -> ::work_packets::PacketResult<Self> {
@@ -21,7 +21,7 @@ impl PacketRuntime {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct PacketHostError {
-    code: &'static str,
+    pub(crate) code: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     current_review: Option<ReviewConflict>,
 }
@@ -90,8 +90,9 @@ pub(crate) async fn list_work_packets(
     app: tauri::AppHandle,
 ) -> Result<Vec<::work_packets::PacketSummary>, PacketHostError> {
     packet_worker(move || {
-        let runtime = app.state::<PacketRuntime>();
-        let store = runtime
+        let state = app.state::<crate::AppState>();
+        let store = state
+            .work_packets
             .store
             .lock()
             .map_err(|_| PacketHostError::storage())?;
@@ -108,8 +109,9 @@ pub(crate) async fn get_work_packet(
     app: tauri::AppHandle,
 ) -> Result<::work_packets::PacketDetail, PacketHostError> {
     packet_worker(move || {
-        let runtime = app.state::<PacketRuntime>();
-        let store = runtime
+        let state = app.state::<crate::AppState>();
+        let store = state
+            .work_packets
             .store
             .lock()
             .map_err(|_| PacketHostError::storage())?;
@@ -132,8 +134,9 @@ pub(crate) async fn review_work_packet(
     app: tauri::AppHandle,
 ) -> Result<::work_packets::PacketDetail, PacketHostError> {
     packet_worker(move || {
-        let runtime = app.state::<PacketRuntime>();
-        let mut store = runtime
+        let state = app.state::<crate::AppState>();
+        let mut store = state
+            .work_packets
             .store
             .lock()
             .map_err(|_| PacketHostError::storage())?;
@@ -162,8 +165,9 @@ pub(crate) async fn export_work_packet(
     app: tauri::AppHandle,
 ) -> Result<PacketExport, PacketHostError> {
     packet_worker(move || {
-        let runtime = app.state::<PacketRuntime>();
-        let detail = runtime
+        let state = app.state::<crate::AppState>();
+        let detail = state
+            .work_packets
             .store
             .lock()
             .map_err(|_| PacketHostError::storage())?
@@ -183,9 +187,9 @@ pub(crate) async fn export_work_packet(
 
 #[derive(Debug, Serialize)]
 pub(crate) struct PreparedSelection {
-    snapshot_id: String,
-    facts: Vec<FactSelection>,
-    interpretation_decisions: Vec<DecisionSelection>,
+    pub(crate) snapshot_id: String,
+    pub(crate) facts: Vec<FactSelection>,
+    pub(crate) interpretation_decisions: Vec<DecisionSelection>,
 }
 
 fn snapshot_limits() -> SnapshotReadLimits {
@@ -217,7 +221,7 @@ fn admit_serialized(value: &impl Serialize, maximum: usize) -> Result<(), String
         .map_err(|_| "limit_exceeded".into())
 }
 
-fn prepare_selection(
+pub(crate) fn prepare_selection(
     graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
     facts: &[FactKey],
@@ -656,7 +660,7 @@ fn decision_relationship(
     }
 }
 
-fn generate(
+pub(crate) fn generate(
     state: &crate::AppState,
     runtime: &PacketRuntime,
     json: &str,
@@ -1004,12 +1008,22 @@ fn generate(
             return Err(conflict());
         }
     }
-    runtime
+    // `guards` holds each cited source's shared `task_guard` until after `put`
+    // commits, so a packet written under that guard cannot interleave with an
+    // exclusive forget. A guard that could not be taken (a forget is running)
+    // would let `put` index receipts that forget is about to reclaim, so the
+    // save is refused and the caller retries (ADR-0046 shared predicate).
+    if guards.values().any(Result::is_err) {
+        return Err(conflict());
+    }
+    let detail = runtime
         .store
         .lock()
         .map_err(|_| PacketHostError::storage())?
         .put(body, &request.supersedes, &timestamp()?)
-        .map_err(Into::into)
+        .map_err(Into::into);
+    drop(guards);
+    detail
 }
 #[tauri::command]
 pub(crate) async fn generate_work_packet(
@@ -1017,11 +1031,8 @@ pub(crate) async fn generate_work_packet(
     app: tauri::AppHandle,
 ) -> Result<packets::PacketDetail, PacketHostError> {
     packet_worker(move || {
-        generate(
-            &app.state::<crate::AppState>(),
-            &app.state::<PacketRuntime>(),
-            &request_json,
-        )
+        let state = app.state::<crate::AppState>();
+        generate(&state, &state.work_packets, &request_json)
     })
     .await
 }
@@ -1369,11 +1380,8 @@ pub(crate) async fn assess_work_packet(
     app: tauri::AppHandle,
 ) -> Result<packets::PacketDetail, PacketHostError> {
     packet_worker(move || {
-        assess(
-            &app.state::<crate::AppState>(),
-            &app.state::<PacketRuntime>(),
-            &packet_id,
-        )
+        let state = app.state::<crate::AppState>();
+        assess(&state, &state.work_packets, &packet_id)
     })
     .await
 }

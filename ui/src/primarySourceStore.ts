@@ -48,6 +48,7 @@ export interface RetentionPreview extends RetainedSource {
   historical_references: number;
   staged_references?: number;
   investigation_references?: number;
+  packet_references?: number;
   fingerprint: string;
 }
 

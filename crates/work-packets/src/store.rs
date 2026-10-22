@@ -98,7 +98,8 @@ pub struct PacketSummary {
     pub execution: ExecutionState,
 }
 
-const SCHEMA: &[(&str, &str, &str)] = &[
+/// Frozen v1 SQLite schema accepted for one-way migration to v2.
+const SCHEMA_V1: &[(&str, &str, &str)] = &[
     (
         "table",
         "work_packet_meta",
@@ -161,6 +162,252 @@ const SCHEMA: &[(&str, &str, &str)] = &[
     ),
 ];
 
+const META_SCHEMA_V2: &str = "CREATE TABLE work_packet_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=2))";
+
+/// Objects v2 adds to v1. A body insert needs a matching index claim, which
+/// only v2 code writes in the same transaction as the body's receipt refs, so
+/// a v1 binary that opened the store before migration cannot save a packet
+/// whose cited receipts are missing from the index (it fails closed).
+const RECEIPT_REFS_SCHEMA: &[(&str, &str, &str)] = &[
+    (
+        "table",
+        "work_packet_receipt_index_claims",
+        "CREATE TABLE work_packet_receipt_index_claims(packet_id TEXT PRIMARY KEY) STRICT, WITHOUT ROWID",
+    ),
+    (
+        "trigger",
+        "work_packet_body_requires_receipt_index",
+        "CREATE TRIGGER work_packet_body_requires_receipt_index BEFORE INSERT ON work_packet_bodies WHEN NOT EXISTS(SELECT 1 FROM work_packet_receipt_index_claims WHERE packet_id=NEW.packet_id) BEGIN SELECT RAISE(ABORT,'packet receipt index required'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_receipt_index_claim_immutable_update",
+        "CREATE TRIGGER work_packet_receipt_index_claim_immutable_update BEFORE UPDATE ON work_packet_receipt_index_claims BEGIN SELECT RAISE(ABORT,'immutable packet receipt index claim'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_receipt_index_claim_immutable_delete",
+        "CREATE TRIGGER work_packet_receipt_index_claim_immutable_delete BEFORE DELETE ON work_packet_receipt_index_claims BEGIN SELECT RAISE(ABORT,'immutable packet receipt index claim'); END",
+    ),
+    (
+        "table",
+        "work_packet_receipt_refs",
+        "CREATE TABLE work_packet_receipt_refs(packet_id TEXT NOT NULL REFERENCES work_packet_bodies(packet_id), receipt_id TEXT NOT NULL, PRIMARY KEY(packet_id,receipt_id)) STRICT, WITHOUT ROWID",
+    ),
+    (
+        "index",
+        "work_packet_receipt_refs_receipt_id",
+        "CREATE INDEX work_packet_receipt_refs_receipt_id ON work_packet_receipt_refs(receipt_id)",
+    ),
+    (
+        "trigger",
+        "work_packet_receipt_ref_immutable_update",
+        "CREATE TRIGGER work_packet_receipt_ref_immutable_update BEFORE UPDATE ON work_packet_receipt_refs BEGIN SELECT RAISE(ABORT,'immutable packet receipt ref'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_receipt_ref_immutable_delete",
+        "CREATE TRIGGER work_packet_receipt_ref_immutable_delete BEFORE DELETE ON work_packet_receipt_refs BEGIN SELECT RAISE(ABORT,'immutable packet receipt ref'); END",
+    ),
+];
+
+const SCHEMA: &[(&str, &str, &str)] = &[
+    ("table", "work_packet_meta", META_SCHEMA_V2),
+    (
+        "table",
+        "work_packet_bodies",
+        "CREATE TABLE work_packet_bodies(packet_id TEXT PRIMARY KEY, body BLOB NOT NULL)",
+    ),
+    (
+        "table",
+        "work_packet_reviews",
+        "CREATE TABLE work_packet_reviews(packet_id TEXT PRIMARY KEY REFERENCES work_packet_bodies(packet_id), revision INTEGER NOT NULL, status TEXT NOT NULL, note TEXT)",
+    ),
+    (
+        "table",
+        "work_packet_lineage",
+        "CREATE TABLE work_packet_lineage(packet_id TEXT NOT NULL REFERENCES work_packet_bodies(packet_id), predecessor_id TEXT NOT NULL REFERENCES work_packet_bodies(packet_id), PRIMARY KEY(packet_id,predecessor_id), CHECK(packet_id<>predecessor_id))",
+    ),
+    (
+        "table",
+        "work_packet_events",
+        "CREATE TABLE work_packet_events(event_id INTEGER PRIMARY KEY,packet_id TEXT NOT NULL REFERENCES work_packet_bodies(packet_id),kind TEXT NOT NULL,at TEXT NOT NULL,revision INTEGER,note TEXT)",
+    ),
+    (
+        "table",
+        "work_packet_assessments",
+        "CREATE TABLE work_packet_assessments(packet_id TEXT PRIMARY KEY REFERENCES work_packet_bodies(packet_id), assessment BLOB NOT NULL)",
+    ),
+    (
+        "table",
+        "work_packet_receipt_refs",
+        "CREATE TABLE work_packet_receipt_refs(packet_id TEXT NOT NULL REFERENCES work_packet_bodies(packet_id), receipt_id TEXT NOT NULL, PRIMARY KEY(packet_id,receipt_id)) STRICT, WITHOUT ROWID",
+    ),
+    (
+        "index",
+        "work_packet_receipt_refs_receipt_id",
+        "CREATE INDEX work_packet_receipt_refs_receipt_id ON work_packet_receipt_refs(receipt_id)",
+    ),
+    (
+        "trigger",
+        "work_packet_body_immutable_update",
+        "CREATE TRIGGER work_packet_body_immutable_update BEFORE UPDATE ON work_packet_bodies BEGIN SELECT RAISE(ABORT,'immutable packet body'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_body_immutable_delete",
+        "CREATE TRIGGER work_packet_body_immutable_delete BEFORE DELETE ON work_packet_bodies BEGIN SELECT RAISE(ABORT,'immutable packet body'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_lineage_immutable_update",
+        "CREATE TRIGGER work_packet_lineage_immutable_update BEFORE UPDATE ON work_packet_lineage BEGIN SELECT RAISE(ABORT,'immutable packet lineage'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_lineage_immutable_delete",
+        "CREATE TRIGGER work_packet_lineage_immutable_delete BEFORE DELETE ON work_packet_lineage BEGIN SELECT RAISE(ABORT,'immutable packet lineage'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_event_immutable_update",
+        "CREATE TRIGGER work_packet_event_immutable_update BEFORE UPDATE ON work_packet_events BEGIN SELECT RAISE(ABORT,'immutable packet event'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_event_immutable_delete",
+        "CREATE TRIGGER work_packet_event_immutable_delete BEFORE DELETE ON work_packet_events BEGIN SELECT RAISE(ABORT,'immutable packet event'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_receipt_ref_immutable_update",
+        "CREATE TRIGGER work_packet_receipt_ref_immutable_update BEFORE UPDATE ON work_packet_receipt_refs BEGIN SELECT RAISE(ABORT,'immutable packet receipt ref'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_receipt_ref_immutable_delete",
+        "CREATE TRIGGER work_packet_receipt_ref_immutable_delete BEFORE DELETE ON work_packet_receipt_refs BEGIN SELECT RAISE(ABORT,'immutable packet receipt ref'); END",
+    ),
+    (
+        "table",
+        "work_packet_receipt_index_claims",
+        "CREATE TABLE work_packet_receipt_index_claims(packet_id TEXT PRIMARY KEY) STRICT, WITHOUT ROWID",
+    ),
+    (
+        "trigger",
+        "work_packet_body_requires_receipt_index",
+        "CREATE TRIGGER work_packet_body_requires_receipt_index BEFORE INSERT ON work_packet_bodies WHEN NOT EXISTS(SELECT 1 FROM work_packet_receipt_index_claims WHERE packet_id=NEW.packet_id) BEGIN SELECT RAISE(ABORT,'packet receipt index required'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_receipt_index_claim_immutable_update",
+        "CREATE TRIGGER work_packet_receipt_index_claim_immutable_update BEFORE UPDATE ON work_packet_receipt_index_claims BEGIN SELECT RAISE(ABORT,'immutable packet receipt index claim'); END",
+    ),
+    (
+        "trigger",
+        "work_packet_receipt_index_claim_immutable_delete",
+        "CREATE TRIGGER work_packet_receipt_index_claim_immutable_delete BEFORE DELETE ON work_packet_receipt_index_claims BEGIN SELECT RAISE(ABORT,'immutable packet receipt index claim'); END",
+    ),
+];
+
+/// Extract every receipt id cited by fact associations or source excerpts.
+fn receipt_ids(body: &PacketBody) -> BTreeSet<String> {
+    body.evidence
+        .facts
+        .iter()
+        .filter_map(|fact| {
+            fact.source_association
+                .value()
+                .map(|binding| binding.receipt_id.clone())
+        })
+        .chain(
+            body.evidence
+                .source_excerpts
+                .iter()
+                .map(|excerpt| excerpt.receipt_id.clone()),
+        )
+        .collect()
+}
+
+/// Read owned `sqlite_schema` entries after the caller has bounded their count and lengths.
+fn read_schema(
+    transaction: &Connection,
+    predicate: &str,
+) -> PacketResult<std::collections::BTreeMap<String, (String, String)>> {
+    let mut statement = transaction.prepare(&format!(
+        "SELECT name, type, sql FROM sqlite_schema WHERE {predicate}"
+    ))?;
+    Ok(statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1)?, row.get::<_, String>(2)?),
+            ))
+        })?
+        .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?)
+}
+
+/// Compare the owned `sqlite_schema` snapshot against an exact DDL inventory.
+fn matches_schema(
+    actual: &std::collections::BTreeMap<String, (String, String)>,
+    expected: &[(&str, &str, &str)],
+) -> bool {
+    actual.len() == expected.len()
+        && expected.iter().all(|(kind, name, sql)| {
+            actual.get(*name).map(|(k, s)| (k.as_str(), s.as_str())) == Some((*kind, *sql))
+        })
+}
+
+/// Verify the singleton `work_packet_meta` row carries `version`.
+fn has_version(transaction: &Connection, version: i64) -> PacketResult<bool> {
+    Ok(transaction.query_row(
+        "SELECT count(*)=1 AND coalesce(min(typeof(singleton)='integer' AND singleton=1 AND typeof(version)='integer' AND version=?1),0) FROM work_packet_meta",
+        [version],
+        |row| row.get(0),
+    )?)
+}
+
+/// Migrate an exact v1 packet store to v2 and backfill receipt references.
+fn migrate_v1_to_v2(transaction: &Connection) -> PacketResult<()> {
+    for (_, _, sql) in RECEIPT_REFS_SCHEMA {
+        transaction.execute_batch(sql)?;
+    }
+    let invalid_id: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM work_packet_bodies WHERE typeof(packet_id)!='text' OR length(CAST(packet_id AS BLOB))>256)",
+        [],
+        |r| r.get(0),
+    )?;
+    if invalid_id {
+        return Err(PacketError::InvalidInput("packet identity"));
+    }
+    let mut after: Option<String> = None;
+    while let Some(id) = transaction
+        .query_row(
+            "SELECT packet_id FROM work_packet_bodies WHERE (?1 IS NULL OR packet_id>?1) ORDER BY packet_id LIMIT 1",
+            [after.as_deref()],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        let body = load_body(transaction, &id)?;
+        transaction.execute(
+            "INSERT INTO work_packet_receipt_index_claims(packet_id) VALUES(?1)",
+            [&id],
+        )?;
+        for receipt_id in receipt_ids(&body) {
+            transaction.execute(
+                "INSERT OR IGNORE INTO work_packet_receipt_refs(packet_id,receipt_id) VALUES(?1,?2)",
+                params![&id, receipt_id],
+            )?;
+        }
+        after = Some(id);
+    }
+    transaction.execute_batch("DROP TABLE work_packet_meta")?;
+    transaction.execute_batch(META_SCHEMA_V2)?;
+    transaction.execute("INSERT INTO work_packet_meta VALUES(1,2)", [])?;
+    Ok(())
+}
+
 fn admit_schema(connection: &mut Connection) -> PacketResult<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Include extra triggers/indexes on owned tables, regardless of their names.
@@ -171,36 +418,26 @@ fn admit_schema(connection: &mut Connection) -> PacketResult<()> {
         [], |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let incompatible = || PacketError::InvalidInput("incompatible packet store schema");
-    if count != 0 && (usize::try_from(count).ok() != Some(SCHEMA.len()) || !bounded) {
+    let count_usize = usize::try_from(count).ok();
+    if count != 0
+        && (!bounded || (count_usize != Some(SCHEMA.len()) && count_usize != Some(SCHEMA_V1.len())))
+    {
         return Err(incompatible());
     }
     if count == 0 {
         for (_, _, sql) in SCHEMA {
             transaction.execute_batch(sql)?;
         }
-        transaction.execute("INSERT INTO work_packet_meta VALUES(1,1)", [])?;
+        transaction.execute("INSERT INTO work_packet_meta VALUES(1,2)", [])?;
+    } else if count_usize == Some(SCHEMA_V1.len()) {
+        let actual = read_schema(&transaction, predicate)?;
+        if !matches_schema(&actual, SCHEMA_V1) || !has_version(&transaction, 1)? {
+            return Err(incompatible());
+        }
+        migrate_v1_to_v2(&transaction)?;
     }
-    let mut statement = transaction.prepare(&format!(
-        "SELECT name, type, sql FROM sqlite_schema WHERE {predicate}"
-    ))?;
-    let actual = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                (row.get::<_, String>(1)?, row.get::<_, String>(2)?),
-            ))
-        })?
-        .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
-    drop(statement);
-    if actual.len() != SCHEMA.len()
-        || SCHEMA.iter().any(|(kind, name, sql)| {
-            actual.get(*name).map(|(k, s)| (k.as_str(), s.as_str())) != Some((*kind, *sql))
-        })
-    {
-        return Err(incompatible());
-    }
-    let valid_version: bool = transaction.query_row("SELECT count(*)=1 AND coalesce(min(typeof(singleton)='integer' AND singleton=1 AND typeof(version)='integer' AND version=1),0) FROM work_packet_meta", [], |row| row.get(0))?;
-    if !valid_version {
+    let actual = read_schema(&transaction, predicate)?;
+    if !matches_schema(&actual, SCHEMA) || !has_version(&transaction, 2)? {
         return Err(incompatible());
     }
     transaction.commit()?;
@@ -284,9 +521,19 @@ impl PacketStore {
         validate_detail(&detail)?;
         if !exists {
             transaction.execute(
+                "INSERT INTO work_packet_receipt_index_claims(packet_id) VALUES(?1)",
+                [&id],
+            )?;
+            transaction.execute(
                 "INSERT INTO work_packet_bodies(packet_id,body) VALUES(?1,?2)",
                 params![id, canonical],
             )?;
+            for receipt_id in receipt_ids(&detail.body) {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO work_packet_receipt_refs(packet_id,receipt_id) VALUES(?1,?2)",
+                    params![id, receipt_id],
+                )?;
+            }
             transaction.execute("INSERT INTO work_packet_reviews(packet_id,revision,status,note) VALUES(?1,0,'draft',NULL)",[&id])?;
         }
         for predecessor in &detail.lineage.predecessor_ids {
@@ -422,6 +669,33 @@ impl PacketStore {
         transaction.commit()?;
         Ok(detail)
     }
+    /// Return the subset of `candidates` referenced by any saved packet body.
+    pub fn referenced_receipts(&self, candidates: &[String]) -> PacketResult<BTreeSet<String>> {
+        let json = serde_json::to_string(candidates)
+            .map_err(|_| PacketError::InvalidInput("receipt candidates"))?;
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT r.receipt_id FROM work_packet_receipt_refs r JOIN json_each(?1) c ON r.receipt_id = c.value",
+        )?;
+        let mut rows = statement.query([&json])?;
+        let mut referenced = BTreeSet::new();
+        while let Some(row) = rows.next()? {
+            if referenced.len() >= candidates.len() {
+                return Err(PacketError::InvalidInput("receipt reference"));
+            }
+            let id = match row.get_ref(0)? {
+                rusqlite::types::ValueRef::Text(bytes)
+                    if !bytes.is_empty() && bytes.len() <= 256 =>
+                {
+                    std::str::from_utf8(bytes)
+                        .map_err(|_| PacketError::InvalidInput("receipt reference"))?
+                        .to_owned()
+                }
+                _ => return Err(PacketError::InvalidInput("receipt reference")),
+            };
+            referenced.insert(id);
+        }
+        Ok(referenced)
+    }
 }
 fn metadata_text(value: &str, maximum: usize) -> PacketResult<()> {
     if value.trim().is_empty() {
@@ -487,23 +761,26 @@ pub fn validate_detail(detail: &PacketDetail) -> PacketResult<()> {
     bounded_json(detail, MAX_RESPONSE_BYTES)?;
     Ok(())
 }
-fn load_detail(connection: &Connection, id: &str) -> PacketResult<PacketDetail> {
+/// Load one stored packet body with a bounded length precheck and canonical-identity verification.
+fn load_body(connection: &Connection, id: &str) -> PacketResult<PacketBody> {
     if !valid_packet_id(id) {
         return Err(PacketError::InvalidInput("packet identity"));
     }
-    let length: Option<i64> = connection
+    let length: Option<Option<i64>> = connection
         .query_row(
             "SELECT length(CAST(body AS BLOB)) FROM work_packet_bodies WHERE packet_id=?1",
             [id],
             |r| r.get(0),
         )
         .optional()?;
-    let length = length.ok_or(PacketError::NotFound)?;
+    let length = length
+        .ok_or(PacketError::NotFound)?
+        .ok_or(PacketError::InvalidInput("stored body"))?;
     if length > MAX_BODY_BYTES as i64 {
         return Err(PacketError::LimitExceeded("stored body"));
     }
     let bytes: Vec<u8> = connection.query_row(
-        "SELECT body FROM work_packet_bodies WHERE packet_id=?1",
+        "SELECT CAST(body AS BLOB) FROM work_packet_bodies WHERE packet_id=?1",
         [id],
         |r| r.get(0),
     )?;
@@ -511,6 +788,11 @@ fn load_detail(connection: &Connection, id: &str) -> PacketResult<PacketDetail> 
     if body.canonical_bytes()? != bytes || packet_id(&bytes) != id {
         return Err(PacketError::InvalidInput("stored canonical identity"));
     }
+    Ok(body)
+}
+
+fn load_detail(connection: &Connection, id: &str) -> PacketResult<PacketDetail> {
+    let body = load_body(connection, id)?;
     let (revision, status, note_length): (i64, ReviewStatus, Option<i64>) = connection.query_row(
         "SELECT revision,status,length(CAST(note AS BLOB)) FROM work_packet_reviews WHERE packet_id=?1",
         [id],
@@ -635,3 +917,29 @@ fn read_id(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
 #[cfg(test)]
 #[path = "packet_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    // T-0301: v2 is exactly v1 with the v2 meta table plus the receipt-ref
+    // objects, so the hand-written inventories cannot drift apart.
+    #[test]
+    fn v2_schema_is_v1_plus_receipt_refs() {
+        let mut expected: Vec<_> = SCHEMA_V1
+            .iter()
+            .map(|(kind, name, sql)| {
+                if *name == "work_packet_meta" {
+                    (*kind, *name, META_SCHEMA_V2)
+                } else {
+                    (*kind, *name, *sql)
+                }
+            })
+            .chain(RECEIPT_REFS_SCHEMA.iter().copied())
+            .collect();
+        let mut actual = SCHEMA.to_vec();
+        expected.sort_unstable();
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
+    }
+}

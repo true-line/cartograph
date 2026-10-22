@@ -30,6 +30,7 @@ pub(crate) fn app_state(app_data: &Path) -> AppState {
         proposals: Mutex::new(
             agents::ProposalStore::open(app_data.join("proposals.sqlite")).unwrap(),
         ),
+        work_packets: work_packets::PacketRuntime::open(&state_path).unwrap(),
         extraction_caches: Mutex::new(ExtractionCaches::default()),
         embedding_cache: None,
         sources: Arc::new(Mutex::new(sources)),

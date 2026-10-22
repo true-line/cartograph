@@ -1033,6 +1033,12 @@ impl PrimarySourceStore {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Hold the exclusive guard a forget takes, so tests can race against it.
+    #[cfg(test)]
+    pub(crate) fn exclusive_guard_for_test(&self, source: &str) -> RetentionGuard {
+        self.guard(source, true).unwrap()
+    }
+
     fn guard(&self, source: &str, exclusive: bool) -> Result<RetentionGuard, String> {
         #[cfg(test)]
         self.evidence_accesses
@@ -1357,6 +1363,8 @@ pub(crate) struct RetentionPreview {
     /// Actual investigation/receipt uses, including selected present bindings
     /// whose original source text has not been requested.
     pub investigation_references: usize,
+    /// Receipts of this source cited by saved work packets.
+    pub packet_references: usize,
     pub fingerprint: String,
 }
 
@@ -1425,9 +1433,18 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
         .map_err(storage_error)?
         .investigation_receipt_references(&source.source_id)
         .map_err(storage_error)?;
+    let packet_references: Vec<String> = state
+        .work_packets
+        .store
+        .lock()
+        .map_err(storage_error)?
+        .referenced_receipts(&receipt_ids)
+        .map_err(storage_error)?
+        .into_iter()
+        .collect();
     let fingerprint = core_prov::content_hash(
         &serde_json::to_vec(&(
-            "retained-source-preview-v3",
+            "retained-source-preview-v4",
             &source.source_id,
             &source.repo_key,
             &capture_ids,
@@ -1435,6 +1452,7 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
             &current_bindings,
             &staged_references,
             &investigation_references,
+            &packet_references,
         ))
         .map_err(storage_error)?,
     );
@@ -1446,6 +1464,7 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
                 .iter()
                 .map(|reference| reference.receipt_id.clone()),
         )
+        .chain(packet_references.iter().cloned())
         .collect();
     Ok(LockedPreview {
         preview: RetentionPreview {
@@ -1460,6 +1479,7 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
             historical_references: receipt_ids.len().saturating_sub(current_count),
             staged_references: staged_references.len(),
             investigation_references: investigation_references.len(),
+            packet_references: packet_references.len(),
             capture_ids,
             fingerprint,
         },
