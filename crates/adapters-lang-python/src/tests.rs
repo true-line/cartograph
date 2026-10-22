@@ -1783,7 +1783,8 @@ fn local_mount_receivers_need_the_definition_that_reaches_the_call() {
     // later construction and nested scopes fail closed.
     let dir = tempfile::tempdir().unwrap();
     let routers = [
-        "ok", "closure", "over", "late", "nl", "branch", "loop", "inner", "glob",
+        "ok", "closure", "over", "late", "nl", "branch", "loop", "inner", "glob", "early", "with",
+        "exc", "imp", "star", "mod", "named",
     ];
     let mut source = String::from("from fastapi import APIRouter\n");
     for name in routers {
@@ -1798,6 +1799,7 @@ fn local_mount_receivers_need_the_definition_that_reaches_the_call() {
         r#"
 from fastapi import FastAPI
 from routers import r_ok, r_closure, r_over, r_late, r_nl, r_branch, r_loop, r_inner, r_glob
+from routers import r_early, r_with, r_exc, r_imp, r_star, r_mod, r_named
 from fake import Fake
 
 def genuine():
@@ -1846,6 +1848,49 @@ def inner_constructor():
         app = FastAPI()
     app.include_router(r_inner, prefix="/wrong")
 
+def closure_called_early():
+    def wire():
+        app.include_router(r_early, prefix="/wrong")
+    wire()
+    app = FastAPI()
+
+def with_alias(manager):
+    app = FastAPI()
+    with manager as app:
+        pass
+    def wire():
+        app.include_router(r_with, prefix="/wrong")
+    return wire
+
+def except_alias():
+    app = FastAPI()
+    try:
+        pass
+    except Exception as app:
+        pass
+    app.include_router(r_exc, prefix="/wrong")
+
+def import_mentions_only():
+    app = FastAPI()
+    from settings import app as app_settings
+    import settings.app
+    app.include_router(r_imp, prefix="/v1")
+
+def star_import():
+    app = FastAPI()
+    from settings import *
+    app.include_router(r_star, prefix="/wrong")
+
+def module_import():
+    app = FastAPI()
+    import app.sub
+    app.include_router(r_mod, prefix="/wrong")
+
+def from_import():
+    app = FastAPI()
+    from settings import app
+    app.include_router(r_named, prefix="/wrong")
+
 def global_rebind():
     global app
     app = FastAPI()
@@ -1877,14 +1922,21 @@ def global_rebind():
         facts,
         vec![
             fact("/v1/closure/x", "Confirmed", "mounted"),
+            fact("/v1/imp/x", "Confirmed", "mounted"),
             fact("/v1/ok/x", "Confirmed", "mounted"),
             unproven("branch"),
+            unproven("early"),
+            unproven("exc"),
             unproven("glob"),
             unproven("inner"),
             unproven("late"),
             unproven("loop"),
+            unproven("mod"),
+            unproven("named"),
             unproven("nl"),
             unproven("over"),
+            unproven("star"),
+            unproven("with"),
         ]
     );
 }

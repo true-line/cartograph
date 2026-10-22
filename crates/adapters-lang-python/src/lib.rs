@@ -631,7 +631,7 @@ fn scope_binding<'t>(cx: &FileCx<'_>, function: TsNode<'t>, name: &str) -> Scope
             "named_expression" => node
                 .child_by_field_name("name")
                 .is_some_and(|ident| cx.text(&ident) == name),
-            "as_pattern" => node
+            "as_pattern" | "except_clause" => node
                 .child_by_field_name("alias")
                 .is_some_and(|alias| target_binds(cx, alias, name)),
             "delete_statement" => {
@@ -639,9 +639,8 @@ fn scope_binding<'t>(cx: &FileCx<'_>, function: TsNode<'t>, name: &str) -> Scope
                 node.named_children(&mut walk)
                     .any(|target| target_binds(cx, target, name))
             }
-            "import_statement" | "import_from_statement" | "case_pattern" => {
-                mentions(cx, node, name)
-            }
+            "import_statement" | "import_from_statement" => import_binds(cx, node, name),
+            "case_pattern" => mentions(cx, node, name),
             _ => false,
         };
         if binds {
@@ -651,6 +650,29 @@ fn scope_binding<'t>(cx: &FileCx<'_>, function: TsNode<'t>, name: &str) -> Scope
         stack.extend(node.named_children(&mut walk));
     }
     binding
+}
+
+/// Whether an import statement binds `name`: an `as` alias, the first part
+/// of an unaliased `import a.b`, or the name of `from m import a`. A
+/// wildcard may bind anything.
+fn import_binds(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+    let mut walk = node.walk();
+    if node
+        .named_children(&mut walk)
+        .any(|child| child.kind() == "wildcard_import")
+    {
+        return true;
+    }
+    let from = node.kind() == "import_from_statement";
+    let mut walk = node.walk();
+    node.children_by_field_name("name", &mut walk)
+        .any(|imported| match imported.kind() {
+            "aliased_import" => imported
+                .child_by_field_name("alias")
+                .is_some_and(|alias| cx.text(&alias) == name),
+            _ if from => cx.text(&imported).trim() == name,
+            _ => cx.text(&imported).split('.').next().map(str::trim) == Some(name),
+        })
 }
 
 /// Whether a `nonlocal` statement anywhere under `node` names `name`.
@@ -684,7 +706,6 @@ fn local_receiver<'s>(
     bindings: &HashMap<String, ImportBinding>,
 ) -> LocalReceiver<'s> {
     let mut scope = enclosing_function_node(object);
-    let mut nearest = true;
     while let Some(function) = scope {
         let binding = scope_binding(cx, function, name);
         let parameter = parameter_annotation(cx, function, name);
@@ -709,16 +730,16 @@ fn local_receiver<'s>(
             let [write] = binding.writes[..] else {
                 return LocalReceiver::Unproven;
             };
-            // In the call's own scope a constructor after the call cannot be
-            // the value it sees. A closure runs after its definer's body.
-            if nearest && write.end_byte() > object.start_byte() {
+            // A constructor after the call may not have run when it does.
+            // In an outer scope that is any write after the definition of
+            // the closure making the call, which may be invoked first.
+            if write.end_byte() > object.start_byte() {
                 return LocalReceiver::Unproven;
             }
             return factory_assignment(cx, write, name, bindings)
                 .map_or(LocalReceiver::Unproven, LocalReceiver::App);
         }
         scope = enclosing_function_node(function);
-        nearest = false;
     }
     LocalReceiver::Free
 }
