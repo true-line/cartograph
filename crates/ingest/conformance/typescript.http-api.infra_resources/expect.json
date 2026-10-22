@@ -1,0 +1,19 @@
+{
+  "nodes": [
+    {
+      "label": "Resource",
+      "id": "res:local/p@observed:http-api:https://api.example.com",
+      "props": {
+        "kind": "http-api",
+        "observed": true
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "USES",
+      "src": "sym:local/p@api.ts#loadItems",
+      "dst": "res:local/p@observed:http-api:https://api.example.com"
+    }
+  ]
+}

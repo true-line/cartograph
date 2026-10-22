@@ -180,6 +180,166 @@
       "export": "openDB",
       "form": "call",
       "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "axios",
+      "module": "axios",
+      "export": "default",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "axios",
+      "module": "axios",
+      "export": "get",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "axios",
+      "module": "axios",
+      "export": "delete",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "axios",
+      "module": "axios",
+      "export": "head",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "axios",
+      "module": "axios",
+      "export": "options",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "axios",
+      "module": "axios",
+      "export": "post",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "axios",
+      "module": "axios",
+      "export": "put",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "axios",
+      "module": "axios",
+      "export": "patch",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "axios",
+      "module": "axios",
+      "export": "request",
+      "form": "call",
+      "identity": {
+        "key": "url"
+      }
+    },
+    {
+      "family": "http-api",
+      "provider": "axios",
+      "module": "axios",
+      "export": "create",
+      "form": "call",
+      "identity": {
+        "key": "baseURL"
+      }
+    },
+    {
+      "family": "http-api",
+      "provider": "ky",
+      "module": "ky",
+      "export": "default",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "ky",
+      "module": "ky",
+      "export": "get",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "ky",
+      "module": "ky",
+      "export": "delete",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "ky",
+      "module": "ky",
+      "export": "head",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "ky",
+      "module": "ky",
+      "export": "post",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "ky",
+      "module": "ky",
+      "export": "put",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "ky",
+      "module": "ky",
+      "export": "patch",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "http-api",
+      "provider": "ky",
+      "module": "ky",
+      "export": "create",
+      "form": "call",
+      "identity": {
+        "key": "prefixUrl"
+      }
+    },
+    {
+      "family": "http-api",
+      "provider": "ky",
+      "module": "ky",
+      "export": "extend",
+      "form": "call",
+      "identity": {
+        "key": "prefixUrl"
+      }
     }
   ]
 }

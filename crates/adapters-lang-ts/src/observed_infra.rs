@@ -9,6 +9,11 @@
 //! - **Browser storage globals**: `indexedDB.open(name)`, `caches.open(name)`
 //!   and any `localStorage`/`sessionStorage` use, unless the file binds the
 //!   name itself (fail closed, like a shadowed `chrome`).
+//! - **HTTP APIs**: the global `fetch(url)` and registry HTTP clients (axios,
+//!   ky). Each call whose URL starts with a proven absolute `http(s)` origin
+//!   uses one `http-api` resource per origin. A relative URL names no other
+//!   origin and is skipped; a runtime-computed one is a Gap, except for
+//!   `fetch`, whose computed URLs the client-call pass already records.
 //!
 //! Each proven site becomes a `USES` edge from its enclosing symbol to one
 //! `Resource` per provider and instance identity (`props.observed = true`,
@@ -295,6 +300,7 @@ fn collect_scopes(cx: &FileCx, root: TsNode) -> Scopes {
                     && let Some(object) = node
                         .child_by_field_name("arguments")
                         .and_then(|args| args.named_child(0))
+                        .map(write_object)
                         .filter(|object| object.kind() == "identifier")
                 {
                     scopes
@@ -556,15 +562,203 @@ fn client_identity(
     args: TsNode,
     spec: &IdentityArg,
     scopes: &Scopes,
+    family: ObservedFamily,
 ) -> Option<IdentityExpr> {
-    let value = match spec {
-        IdentityArg::First => {
-            let mut walk = args.walk();
-            args.named_children(&mut walk).next()?
+    let first = {
+        let mut walk = args.walk();
+        args.named_children(&mut walk)
+            .find(|arg| arg.kind() != "comment")
+    };
+    if family == ObservedFamily::HttpApi {
+        // An HTTP config object names its URL by a top-level property the
+        // object provably ends with (#765 review): `axios({ url })`,
+        // `axios.create({ baseURL })`.
+        let first = first?;
+        let object = unwrap_assertions(first);
+        let key = match spec {
+            IdentityArg::First if object.kind() != "object" => {
+                return Some(url_head(cx, first, scopes));
+            }
+            IdentityArg::First => "url",
+            IdentityArg::Key(key) => key.as_str(),
+        };
+        if object.kind() != "object" {
+            return None;
         }
+        return match effective_property(cx, object, key)? {
+            Some(value) => Some(url_head(cx, value, scopes)),
+            None => Some(IdentityExpr::Computed(cx.text(&object).to_string())),
+        };
+    }
+    let value = match spec {
+        IdentityArg::First => first?,
         IdentityArg::Key(key) => pair_value_in_args(cx, &args, key)?,
     };
     Some(classify(cx, value, scopes))
+}
+
+/// The value an object literal provably ends with for `key`, looking at its
+/// own top-level properties only: the last `key: v` or shorthand `key`
+/// wins. `Some(None)` when a later spread, computed key or method may
+/// override it (or a spread may supply it), `None` when nothing names it.
+fn effective_property<'t>(
+    cx: &FileCx,
+    object: TsNode<'t>,
+    key: &str,
+) -> Option<Option<TsNode<'t>>> {
+    let mut found: Option<Option<TsNode<'t>>> = None;
+    let mut walk = object.walk();
+    for property in object.named_children(&mut walk) {
+        match property.kind() {
+            "pair" => match property.child_by_field_name("key") {
+                Some(name) if name.kind() == "computed_property_name" => {
+                    found = Some(None);
+                }
+                Some(name) if property_name(cx, name).as_deref() == Some(key) => {
+                    found = Some(property.child_by_field_name("value"));
+                }
+                _ => {}
+            },
+            "shorthand_property_identifier" if cx.text(&property) == key => {
+                found = Some(Some(property));
+            }
+            "spread_element" => found = Some(None),
+            "method_definition" => {
+                let name = property.child_by_field_name("name");
+                if name.is_none_or(|name| {
+                    name.kind() == "computed_property_name"
+                        || property_name(cx, name).as_deref() == Some(key)
+                }) {
+                    found = Some(None);
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// A property key's name: an identifier or a string literal.
+fn property_name(cx: &FileCx, name: TsNode) -> Option<String> {
+    match name.kind() {
+        "property_identifier" => Some(cx.text(&name).to_string()),
+        _ => crate::literal_string(cx, name),
+    }
+}
+
+/// The URL an HTTP call's argument starts with, as far as the file proves
+/// it: the known leading text of a literal, a literal `const`, a template
+/// or a `+` concatenation, or a leading env reference. Text cut short by an
+/// unknown piece is kept only once its authority is closed
+/// (`https://api.example.com/` + id); a head that leaves the host open
+/// (`https://` + tenant) is computed, never a truncated origin.
+fn url_head(cx: &FileCx, node: TsNode, scopes: &Scopes) -> IdentityExpr {
+    match url_parts(cx, node, scopes, String::new()) {
+        Head::Env(key) => IdentityExpr::EnvRef(key),
+        Head::Text(text, true) => IdentityExpr::Literal(canonical_origin(&text)),
+        Head::Text(text, false) => match text.split_once("://") {
+            Some((_, rest)) if rest.contains(['/', '?', '#']) => {
+                IdentityExpr::Literal(canonical_origin(&text))
+            }
+            None if !text.is_empty() => IdentityExpr::Literal(text),
+            _ => IdentityExpr::Computed(cx.text(&node).to_string()),
+        },
+    }
+}
+
+/// A URL with its origin in canonical form, so one origin is one resource
+/// (#765 review): scheme and host lowercased and the scheme's default port
+/// dropped. Userinfo and the rest are kept for `recorded_literal` to cut.
+fn canonical_origin(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let (userinfo, host) = match authority.rsplit_once('@') {
+        Some((userinfo, host)) => (Some(userinfo), host),
+        None => (None, authority),
+    };
+    let mut host = host.to_ascii_lowercase();
+    let default = match scheme.as_str() {
+        "http" => Some(":80"),
+        "https" => Some(":443"),
+        _ => None,
+    };
+    if let Some(port) = default
+        && host.ends_with(port)
+    {
+        host.truncate(host.len() - port.len());
+    }
+    match userinfo {
+        Some(userinfo) => format!("{scheme}://{userinfo}@{host}{tail}"),
+        None => format!("{scheme}://{host}{tail}"),
+    }
+}
+
+/// A URL's known leading text: `Text(text, complete)`, or an env
+/// reference that leads it.
+enum Head {
+    Text(String, bool),
+    Env(String),
+}
+
+fn url_parts(cx: &FileCx, node: TsNode, scopes: &Scopes, lead: String) -> Head {
+    let node = unwrap_assertions(node);
+    match node.kind() {
+        "parenthesized_expression" => match node.named_child(0) {
+            Some(inner) => url_parts(cx, inner, scopes, lead),
+            None => Head::Text(lead, false),
+        },
+        "template_string" => {
+            let mut lead = lead;
+            let mut walk = node.walk();
+            for child in node.named_children(&mut walk) {
+                match child.kind() {
+                    "string_fragment" => lead.push_str(cx.text(&child)),
+                    "template_substitution" => {
+                        let Some(inner) = child.named_child(0) else {
+                            return Head::Text(lead, false);
+                        };
+                        match url_parts(cx, inner, scopes, lead) {
+                            Head::Text(text, true) => lead = text,
+                            head => return head,
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Head::Text(lead, true)
+        }
+        "binary_expression"
+            if node
+                .child_by_field_name("operator")
+                .is_some_and(|op| cx.text(&op) == "+") =>
+        {
+            let (Some(left), Some(right)) = (
+                node.child_by_field_name("left"),
+                node.child_by_field_name("right"),
+            ) else {
+                return Head::Text(lead, false);
+            };
+            match url_parts(cx, left, scopes, lead) {
+                Head::Text(text, true) => url_parts(cx, right, scopes, text),
+                head => head,
+            }
+        }
+        _ => match classify(cx, node, scopes) {
+            IdentityExpr::Literal(value) => Head::Text(lead + &value, true),
+            IdentityExpr::EnvRef(key) if lead.is_empty() => Head::Env(key),
+            _ => Head::Text(lead, false),
+        },
+    }
+}
+
+/// Whether a literal URL is absolute `http(s)`, so it names an origin.
+fn absolute_http(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.starts_with("http://") || value.starts_with("https://")
 }
 
 /// `(module, export)` a callee names through the binding visible at it:
@@ -581,6 +775,25 @@ const REFLECTIVE_WRITES: &[&str] = &[
     "Reflect.setPrototypeOf",
 ];
 
+/// The object a write reaches through casts, `!` and parentheses:
+/// `(A as any)`, `A!` and `((A))` all write `A` (#758 review).
+fn write_object(node: TsNode) -> TsNode {
+    let mut current = node;
+    while matches!(
+        current.kind(),
+        "as_expression"
+            | "satisfies_expression"
+            | "non_null_expression"
+            | "parenthesized_expression"
+    ) {
+        let Some(inner) = current.named_child(0) else {
+            return current;
+        };
+        current = inner;
+    }
+    current
+}
+
 /// Record every `X.p` or `X[k]` a write target reaches, destructuring
 /// patterns included. Deeper members (`X.config.region`) write a property
 /// of something else and are not recorded.
@@ -590,7 +803,7 @@ fn member_targets(cx: &FileCx, target: TsNode, out: &mut HashMap<String, HashSet
         "member_expression" | "subscript_expression" => {
             let Some(object) = target
                 .child_by_field_name("object")
-                .map(unwrap_assertions)
+                .map(write_object)
                 .filter(|object| object.kind() == "identifier")
             else {
                 return;
@@ -675,6 +888,41 @@ fn storage_global(
     (object.kind() != "identifier" || scopes.global(name, object)).then_some(entry)
 }
 
+/// Whether a callee is the platform `fetch`: the bare global, or a
+/// global receiver's `fetch`, neither bound nor written by the file.
+fn global_fetch(cx: &FileCx, callee: TsNode, scopes: &Scopes) -> bool {
+    match callee.kind() {
+        // Bare `fetch` and `window.fetch` are one global property: a write
+        // through any alias voids both spellings (#765 review).
+        "identifier" => {
+            cx.text(&callee) == "fetch"
+                && scopes.global("fetch", callee)
+                && !fetch_rewritten(scopes)
+        }
+        "member_expression" => {
+            let (Some(receiver), Some(property)) = (
+                callee.child_by_field_name("object"),
+                callee.child_by_field_name("property"),
+            ) else {
+                return false;
+            };
+            receiver.kind() == "identifier"
+                && GLOBAL_OBJECTS.contains(&cx.text(&receiver))
+                && scopes.global(cx.text(&receiver), receiver)
+                && cx.text(&property) == "fetch"
+                && !fetch_rewritten(scopes)
+        }
+        _ => false,
+    }
+}
+
+/// Whether the file writes `fetch` through any global object.
+fn fetch_rewritten(scopes: &Scopes) -> bool {
+    GLOBAL_OBJECTS
+        .iter()
+        .any(|global| scopes.member_written(global, "fetch"))
+}
+
 fn extract_file(
     source: &[u8],
     path: &str,
@@ -733,7 +981,9 @@ fn extract_file(
                     })
                 {
                     let identity = match (&client.identity, args) {
-                        (Some(spec), Some(args)) => client_identity(&cx, args, spec, &scopes),
+                        (Some(spec), Some(args)) => {
+                            client_identity(&cx, args, spec, &scopes, client.family)
+                        }
                         _ => None,
                     };
                     let (symbol, byte_start, byte_end) = site(node);
@@ -743,6 +993,32 @@ fn extract_file(
                         module: Some(client.module.clone()),
                         identity,
                         registry: Some(client.registry.clone()),
+                        symbol,
+                        path: path.to_string(),
+                        byte_start,
+                        byte_end,
+                    });
+                    continue;
+                }
+                // The global `fetch(url)` or `window.fetch(url)`.
+                if form == ClientForm::Call
+                    && global_fetch(&cx, callee, &scopes)
+                    && let Some(args) = args
+                {
+                    let identity = client_identity(
+                        &cx,
+                        args,
+                        &IdentityArg::First,
+                        &scopes,
+                        ObservedFamily::HttpApi,
+                    );
+                    let (symbol, byte_start, byte_end) = site(node);
+                    sites.push(Site {
+                        family: ObservedFamily::HttpApi,
+                        provider: "fetch".into(),
+                        module: None,
+                        identity,
+                        registry: None,
                         symbol,
                         path: path.to_string(),
                         byte_start,
@@ -760,8 +1036,15 @@ fn extract_file(
                     && let Some((_, Some(method), provider)) = storage_global(&cx, object, &scopes)
                     && cx.text(&property) == *method
                 {
-                    let identity = args
-                        .and_then(|args| client_identity(&cx, args, &IdentityArg::First, &scopes));
+                    let identity = args.and_then(|args| {
+                        client_identity(
+                            &cx,
+                            args,
+                            &IdentityArg::First,
+                            &scopes,
+                            ObservedFamily::BrowserStorage,
+                        )
+                    });
                     let (symbol, byte_start, byte_end) = site(node);
                     sites.push(Site {
                         family: ObservedFamily::BrowserStorage,
@@ -904,6 +1187,27 @@ fn assemble(id: &SourceId, sites: &[Site]) -> Extraction {
     let mut out = Extraction::default();
     let mut resources: BTreeMap<String, Node> = BTreeMap::new();
     for site in sites {
+        let http = site.family == ObservedFamily::HttpApi;
+        // An HTTP call names an origin only through an absolute URL. One
+        // with no URL, or a relative one, is the caller's own origin or a
+        // base set elsewhere; a computed `fetch` is already the client-call
+        // pass's Gap.
+        if http
+            && !match &site.identity {
+                Some(IdentityExpr::Literal(value)) => absolute_http(value),
+                Some(IdentityExpr::EnvRef(_)) => true,
+                Some(IdentityExpr::Computed(_)) => site.provider != "fetch",
+                None => false,
+            }
+        {
+            continue;
+        }
+        // Every HTTP client of one origin uses the same resource.
+        let provider = if http {
+            "http-api"
+        } else {
+            site.provider.as_str()
+        };
         let span = (site.byte_start, site.byte_end);
         let src = site
             .symbol
@@ -912,6 +1216,9 @@ fn assemble(id: &SourceId, sites: &[Site]) -> Extraction {
         let mut edge_props = serde_json::Map::new();
         if let Some(registry) = &site.registry {
             edge_props.insert("registry".into(), serde_json::json!(registry.name));
+        }
+        if http {
+            edge_props.insert("client".into(), serde_json::json!(site.provider));
         }
         // Instance identity: `None` = the provider alone, `Err` = a Gap
         // (reason, raw text a Gap may keep). A literal that cannot be
@@ -924,10 +1231,7 @@ fn assemble(id: &SourceId, sites: &[Site]) -> Extraction {
                     serde_json::json!({ "identity": value }),
                 ))),
                 None => Err((
-                    format!(
-                        "{} identity withheld: literal is not recordable",
-                        site.provider
-                    ),
+                    format!("{} identity withheld: literal is not recordable", provider),
                     None,
                 )),
             },
@@ -936,21 +1240,21 @@ fn assemble(id: &SourceId, sites: &[Site]) -> Extraction {
                 serde_json::json!({ "env_key": key }),
             ))),
             Some(IdentityExpr::Computed(raw)) => Err((
-                format!("runtime-computed {} identity", site.provider),
+                format!("runtime-computed {} identity", provider),
                 Some(withheld_raw(raw)),
             )),
         };
         match identity {
             Ok(instance) => {
                 let logical_id = match &instance {
-                    Some((name, _)) => format!("observed:{}:{name}", site.provider),
-                    None => format!("observed:{}", site.provider),
+                    Some((name, _)) => format!("observed:{}:{name}", provider),
+                    None => format!("observed:{}", provider),
                 };
                 let resource_id = format!("res:{}@{logical_id}", id.repo);
                 resources.entry(resource_id.clone()).or_insert_with(|| {
                     let mut props = serde_json::json!({
-                        "type": site.provider,
-                        "provider": site.provider,
+                        "type": provider,
+                        "provider": provider,
                         "kind": site.family.as_str(),
                         "observed": true,
                         "logical_id": logical_id,
@@ -959,7 +1263,7 @@ fn assemble(id: &SourceId, sites: &[Site]) -> Extraction {
                             &format!("Resource {resource_id}"),
                         ),
                     });
-                    if let Some(module) = &site.module {
+                    if let Some(module) = site.module.as_ref().filter(|_| !http) {
                         props["module"] = serde_json::json!(module);
                     }
                     if let Some((_, extra)) = &instance
@@ -1000,7 +1304,7 @@ fn assemble(id: &SourceId, sites: &[Site]) -> Extraction {
                         "reason": reason,
                         "raw": raw,
                         "kind": site.family.as_str(),
-                        "provider": site.provider,
+                        "provider": provider,
                         "attempted_tiers": ["T0"],
                         "prov": prov_value(
                             id, &site.path, span, ConfidenceTier::Gap,
