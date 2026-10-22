@@ -53,6 +53,7 @@ pub(crate) struct SkillFile {
     content: String,
 }
 
+/// Returns packaged skill files only when they exactly match the embedded canonical bytes.
 /// No activation, installation, configuration mutation or provider access.
 #[tauri::command]
 pub(crate) fn mcp_reads_client_skill(app: tauri::AppHandle) -> ClientSkill {
