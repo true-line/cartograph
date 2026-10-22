@@ -95,7 +95,7 @@ it('AC-0295 ignores a late failed write from a previous selection generation', a
 it('AC-0295 review events recover through an exact-result metadata read only', async () => {
   const commands: string[] = [];
   mockIPC((command, args) => { commands.push(command); expect(args).toEqual({ investigationId: result.investigation_id, expectedResultId: result.result_id }); return snapshot(rows(1)); });
-  store.getState().invalidateReview(rows(1)[0]);
+  store.getState().invalidateReview({ investigation_id: result.investigation_id, result_id: result.result_id, subject_id: rows(1)[0].subject.subject_id, review_revision: 1 });
   await vi.waitFor(() => expect(store.getState().findingReviews[0]?.revision).toBe(1));
   expect(commands).toEqual(['get_investigation_finding_reviews']);
 });
@@ -116,4 +116,32 @@ it('AC-0295 rejects malformed canonical timestamps and equal-revision contradict
   await store.getState().refreshReviews();
   expect(store.getState().findingReviews).toEqual(rows(1));
   expect(store.getState().reviewError).toMatch(/unavailable/);
+});
+
+it('AC-0295 ignores stale, malformed and other-result invalidations without trusting event state', async () => {
+  store.setState({ findingReviews: rows(1) });
+  const read = vi.fn(() => snapshot(rows(2)));
+  mockIPC(read);
+  const message = { investigation_id: result.investigation_id, result_id: result.result_id, subject_id: rows(1)[0].subject.subject_id, review_revision: 1 };
+  for (const invalid of [message, { ...message, result_id: 'other-result' }, { ...message, investigation_id: 'other-investigation' }, { ...message, review_revision: 0 }, { ...message, review_revision: 1.5 }, { ...message, subject_id: `${message.subject_id}\n` }, rows(2)[0]]) {
+    store.getState().invalidateReview(invalid as typeof message);
+  }
+  expect(read).not.toHaveBeenCalled();
+  expect(store.getState().findingReviews).toEqual(rows(1));
+  const pending = deferred<FindingReviews>();
+  mockIPC(() => pending.promise);
+  store.getState().invalidateReview({ ...message, review_revision: 2 });
+  expect(store.getState().findingReviews).toEqual(rows(1));
+  pending.resolve(snapshot(rows(2)));
+  await vi.waitFor(() => expect(store.getState().findingReviews[0].revision).toBe(2));
+});
+it('AC-0295 mutation acknowledgement also checks the selected investigation identity', async () => {
+  store.setState({ findingReviews: rows() });
+  const pending = deferred<FindingReview>();
+  mockIPC(() => pending.promise);
+  const write = store.getState().reviewFinding(result.findings[0].finding_id, 'accepted_for_follow_up');
+  store.setState({ selectedId: 'another-investigation' });
+  pending.resolve(rows(1)[0]);
+  await write;
+  expect(store.getState().findingReviews).toEqual(rows());
 });

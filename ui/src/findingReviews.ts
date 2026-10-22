@@ -2,6 +2,13 @@ import type { InvestigationResult } from './investigationTypes';
 export type FindingReviewDecision = 'accepted_for_follow_up' | 'rejected_for_follow_up';
 export interface FindingReviewSubject { investigation_id: string; result_id: string; finding_id: string; subject_id: string }
 export interface FindingReview { subject: FindingReviewSubject; revision: number; decision: FindingReviewDecision | null; reviewed_at: string | null }
+export interface FindingReviewChanged { investigation_id: string; result_id: string; subject_id: string; review_revision: number }
+export function validReviewChanged(value: FindingReviewChanged | null, result: InvestigationResult): value is FindingReviewChanged {
+  return !!value && fields(value, ['investigation_id', 'result_id', 'subject_id', 'review_revision']) &&
+    value.investigation_id === result.investigation_id && value.result_id === result.result_id &&
+    typeof value.subject_id === 'string' && /^investigation-finding-review-v1:[0-9a-f]{64}(?![\s\S])/.test(value.subject_id) &&
+    Number.isSafeInteger(value.review_revision) && value.review_revision > 0;
+}
 export interface FindingReviews { schema_version: 1; investigation_id: string; result_id: string; reviews: FindingReview[] }
 const fields = (value: object, keys: string[]) => Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
 export function sameReviewSubject(a: FindingReviewSubject, b: FindingReviewSubject): boolean {

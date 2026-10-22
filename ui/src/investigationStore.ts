@@ -1,4 +1,4 @@
-import { sameReviewSubject, mergeReviews, validReview, validReviews, type FindingReview, type FindingReviews, type FindingReviewDecision } from './findingReviews';
+import { validReviewChanged, type FindingReviewChanged, sameReviewSubject, mergeReviews, validReview, validReviews, type FindingReview, type FindingReviews, type FindingReviewDecision } from './findingReviews';
 import { isCompletionDisclosure, isCompletionSpecialist, isExpandedSpecialist } from './investigationFamilies';
 import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
 import { investigationPolicy, obligationEnvelope, validObligation, validObligationChoices, validObligationEnvelope } from './investigationObligations';
@@ -169,7 +169,7 @@ export interface InvestigationState {
   reviewError: string | null;
   refreshReviews: () => Promise<void>;
   reviewFinding: (findingId: string, decision: FindingReviewDecision) => Promise<void>;
-  invalidateReview: (observation: FindingReview) => void;
+  invalidateReview: (message: FindingReviewChanged) => void;
   catalog: InvestigationCatalog | null;
   catalogLoading: boolean;
   catalogError: string | null;
@@ -320,10 +320,10 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       }
     },
     reviewFinding: async (findingId, decision) => {
-      const { result, selectionGeneration, findingReviews, reviewBusy, reviewLoading, reviewError } = get();
+      const { selectedId, result, selectionGeneration, findingReviews, reviewBusy, reviewLoading, reviewError } = get();
       const row = findingReviews.find((r) => r.subject.finding_id === findingId);
       if (!result || !row || reviewBusy || reviewLoading || reviewError) return;
-      const current = () => get().selectionGeneration === selectionGeneration && get().result?.result_id === result.result_id;
+      const current = () => get().selectedId === selectedId && get().selectionGeneration === selectionGeneration && get().result?.result_id === result.result_id;
       set({ reviewBusy: true, reviewError: null });
       try {
         const value = await invokeOr<FindingReview | null>('review_investigation_finding', null, { requestJson: JSON.stringify({ schema_version: 1, subject: row.subject, expected_revision: row.revision, decision }) });
@@ -344,9 +344,11 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         set({ reviewBusy: false, reviewError: 'The review outcome could not be confirmed. Refresh reviews to recover the saved decision before choosing again. No automatic retry was made.' });
       }
     },
-    invalidateReview: (observation) => {
-      const { result } = get();
-      if (result && validReview(observation, result)) void get().refreshReviews();
+    invalidateReview: (message) => {
+      const { result, findingReviews } = get();
+      if (!result || !validReviewChanged(message, result)) return;
+      const known = findingReviews.find((row) => row.subject.subject_id === message.subject_id);
+      if (!known || message.review_revision > known.revision) void get().refreshReviews();
     },
     catalog: null, catalogLoading: false, catalogError: null,
     history: [], nextCursor: null, historyLoading: false, historyError: null,

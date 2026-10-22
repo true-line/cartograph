@@ -245,7 +245,7 @@ export default function App() {
     void (async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
-        const stopReviews = await listen<import('./findingReviews').FindingReview>('investigation-review://changed', (event) =>
+        const stopReviews = await listen<import('./findingReviews').FindingReviewChanged>('investigation-review://changed', (event) =>
           useInvestigationStore.getState().invalidateReview(event.payload));
         if (disposed) stopReviews(); else unlisten = stopReviews;
         const stop = await listen<InvestigationChanged>('investigation://changed', (event) =>
