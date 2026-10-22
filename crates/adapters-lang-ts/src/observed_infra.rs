@@ -564,27 +564,86 @@ fn client_identity(
     scopes: &Scopes,
     family: ObservedFamily,
 ) -> Option<IdentityExpr> {
-    let value = match spec {
-        IdentityArg::First => {
-            let mut walk = args.walk();
-            let first = args
-                .named_children(&mut walk)
-                .find(|arg| arg.kind() != "comment")?;
-            // `axios({ url })`: an HTTP call configured by one object
-            // names its URL there (#765 review).
-            if family == ObservedFamily::HttpApi && unwrap_assertions(first).kind() == "object" {
-                pair_value_in_args(cx, &args, "url")?
-            } else {
-                first
+    let first = {
+        let mut walk = args.walk();
+        args.named_children(&mut walk)
+            .find(|arg| arg.kind() != "comment")
+    };
+    if family == ObservedFamily::HttpApi {
+        // An HTTP config object names its URL by a top-level property the
+        // object provably ends with (#765 review): `axios({ url })`,
+        // `axios.create({ baseURL })`.
+        let first = first?;
+        let object = unwrap_assertions(first);
+        let key = match spec {
+            IdentityArg::First if object.kind() != "object" => {
+                return Some(url_head(cx, first, scopes));
             }
+            IdentityArg::First => "url",
+            IdentityArg::Key(key) => key.as_str(),
+        };
+        if object.kind() != "object" {
+            return None;
         }
+        return match effective_property(cx, object, key)? {
+            Some(value) => Some(url_head(cx, value, scopes)),
+            None => Some(IdentityExpr::Computed(cx.text(&object).to_string())),
+        };
+    }
+    let value = match spec {
+        IdentityArg::First => first?,
         IdentityArg::Key(key) => pair_value_in_args(cx, &args, key)?,
     };
-    Some(if family == ObservedFamily::HttpApi {
-        url_head(cx, value, scopes)
-    } else {
-        classify(cx, value, scopes)
-    })
+    Some(classify(cx, value, scopes))
+}
+
+/// The value an object literal provably ends with for `key`, looking at its
+/// own top-level properties only: the last `key: v` or shorthand `key`
+/// wins. `Some(None)` when a later spread, computed key or method may
+/// override it (or a spread may supply it), `None` when nothing names it.
+fn effective_property<'t>(
+    cx: &FileCx,
+    object: TsNode<'t>,
+    key: &str,
+) -> Option<Option<TsNode<'t>>> {
+    let mut found: Option<Option<TsNode<'t>>> = None;
+    let mut walk = object.walk();
+    for property in object.named_children(&mut walk) {
+        match property.kind() {
+            "pair" => match property.child_by_field_name("key") {
+                Some(name) if name.kind() == "computed_property_name" => {
+                    found = Some(None);
+                }
+                Some(name) if property_name(cx, name).as_deref() == Some(key) => {
+                    found = Some(property.child_by_field_name("value"));
+                }
+                _ => {}
+            },
+            "shorthand_property_identifier" if cx.text(&property) == key => {
+                found = Some(Some(property));
+            }
+            "spread_element" => found = Some(None),
+            "method_definition" => {
+                let name = property.child_by_field_name("name");
+                if name.is_none_or(|name| {
+                    name.kind() == "computed_property_name"
+                        || property_name(cx, name).as_deref() == Some(key)
+                }) {
+                    found = Some(None);
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// A property key's name: an identifier or a string literal.
+fn property_name(cx: &FileCx, name: TsNode) -> Option<String> {
+    match name.kind() {
+        "property_identifier" => Some(cx.text(&name).to_string()),
+        _ => crate::literal_string(cx, name),
+    }
 }
 
 /// The URL an HTTP call's argument starts with, as far as the file proves

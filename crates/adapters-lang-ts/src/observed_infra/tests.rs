@@ -654,3 +654,42 @@ export const b = () => fetch(process.env.API_URL + "/stats");
     resource(&ex, "observed:http-api:env:API_URL");
     assert_eq!(uses(&ex).len(), 2);
 }
+
+// AC-0317: an HTTP config object names its URL only by a top-level
+// property it provably ends with: the last one wins, a nested `url` is not
+// the call's, and a later spread, computed key or method that may
+// override it leaves the origin unproven (#765 review). (T-0317)
+#[test]
+fn http_config_urls_need_the_effective_top_level_property() {
+    let src = r#"
+import axios from "axios";
+export async function load(config: object, k: string) {
+  await axios({ metadata: { url: "https://nested.example" }, url: "https://top.example/a" });
+  await axios({ url: "https://first.example", url: "https://last.example/b" });
+  await axios({ ...config, url: "https://explicit.example/c" });
+  await axios({ url: "https://spread.example", ...config });
+  await axios({ url: "https://computed.example", [k]: "x" });
+  await axios({ url: "https://getter.example", get url() { return k; } });
+  axios.create({ baseURL: "https://base.example/v1", ...config });
+  axios.create({ headers: { baseURL: "https://inner.example" } });
+}
+"#;
+    let ex = extract(&[("src/config.ts", src)]);
+    let mut resources: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Resource")
+        .map(|node| node.id.rsplit('@').next().unwrap())
+        .collect();
+    resources.sort();
+    assert_eq!(
+        resources,
+        [
+            "observed:http-api:https://explicit.example",
+            "observed:http-api:https://last.example",
+            "observed:http-api:https://top.example",
+        ]
+    );
+    let gaps = ex.nodes.iter().filter(|node| node.label == "Gap").count();
+    assert_eq!(gaps, 4, "{:?}", ex.nodes);
+}
