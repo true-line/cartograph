@@ -414,7 +414,7 @@ fn finding_review_survives_confirmed_forget_and_retained_object_failures() {
                 forgotten.investigation_references,
                 preview.investigation_references
             );
-            assert_eq!(forgotten.receipts, preview.receipts);
+            assert_eq!(forgotten.receipts, preview.investigation_references);
         } else {
             let path = fixture.app_data.join("retained-source/captures.sqlite");
             assert!(path.is_file());
@@ -434,16 +434,16 @@ fn finding_review_survives_confirmed_forget_and_retained_object_failures() {
                 )
                 .unwrap();
             assert!(changed > 0, "fault must affect existing retained objects");
+            assert_eq!(
+                stored_rows(&fixture.app_data.join("retained-source/receipts.sqlite")),
+                receipts_before
+            );
         }
         // Forget may invalidate derived graph caches; it must preserve raw facts,
-        // receipt identities and the whole saved history outside review metadata.
+        // pinned receipt identities and the whole saved history outside review metadata.
         assert_eq!(
             stored_rows(&fixture.app_data.join("state.db")),
             history_before
-        );
-        assert_eq!(
-            stored_rows(&fixture.app_data.join("retained-source/receipts.sqlite")),
-            receipts_before
         );
         assert_eq!(
             state.graph.lock().unwrap().read_snapshot().unwrap(),

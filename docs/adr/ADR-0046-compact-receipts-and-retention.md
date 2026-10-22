@@ -1,6 +1,6 @@
 # ADR-0046 — Compact receipts, positive absence records and reclaimable retention
 
-- **Status:** Proposed. Design r2 agreed with Codex (20261022T033000Z). Decision 1 (receipt contract v3) implemented; decisions 2–6 pending.
+- **Status:** Proposed. Design r2 agreed with Codex (20261022T033000Z). Decisions 1 (receipt contract v3) and 3 (forget reclaim and pins) implemented; decisions 2, 4, 5 and 6 pending. Decision 3 adds three indexes so the store's integrity checks stay linear in tombstones and reclaims.
 - **Date:** 2026-10-22
 - **Deciders:** Cartograph maintainers; Claude implementation, Codex cross-review
 - **Issue:** #725 (follows #722/#726; serves AC-0288 in #727)

@@ -620,7 +620,7 @@ fn primary_source_republication_invalidates_historical_retention_preview() {
         current.captures as u64
     );
     assert!(primary_source::read(&state, &fact, &original.receipt_id, 0).is_err());
-    assert_eq!(receipt_rows(&app_data), original_receipts);
+    assert!(receipt_rows(&app_data).is_empty());
 }
 
 #[test]
@@ -704,7 +704,12 @@ fn primary_source_investigation_references_bind_forget_confirmation() {
     let forgotten = primary_source::preview(&state, &source.source_id).unwrap();
     assert_eq!(forgotten.captures, 0);
     assert_eq!(forgotten.investigation_references, 2);
-    assert_eq!(receipt_rows(&app_data), receipts);
+    assert_eq!(forgotten.receipts, 1);
+    let pinned_receipts: Vec<_> = receipts
+        .into_iter()
+        .filter(|(id, ..)| id == &binding.receipt_id)
+        .collect();
+    assert_eq!(receipt_rows(&app_data), pinned_receipts);
     for (id, ledger) in [&first_id, &second_id].into_iter().zip(retained) {
         assert_eq!(
             state.jobs.lock().unwrap().investigation_ledger(id).unwrap(),
@@ -840,8 +845,12 @@ fn primary_source_same_name_sources_forget_only_previewed_retention() {
         (forgotten.captures, forgotten.files, forgotten.bytes),
         (0, 0, 0)
     );
-    assert_eq!(forgotten.receipts, preview.receipts);
-    assert_eq!(receipt_rows(&app_data), receipts);
+    assert_eq!(forgotten.receipts, 0);
+    let second_receipts: Vec<_> = receipts
+        .into_iter()
+        .filter(|(_, source_id, ..)| source_id == &second_source.source_id)
+        .collect();
+    assert_eq!(receipt_rows(&app_data), second_receipts);
     assert_eq!(
         state.graph.lock().unwrap().read_snapshot().unwrap(),
         snapshot
@@ -868,7 +877,7 @@ fn primary_source_same_name_sources_forget_only_previewed_retention() {
     let state = app_state(&app_data);
     assert_original_ranges(&state, &second_description, STABLE_A);
     assert!(primary_source::read(&state, &first_fact, &first_description.receipt_id, 0).is_err());
-    assert_eq!(receipt_rows(&app_data), receipts);
+    assert_eq!(receipt_rows(&app_data), second_receipts);
     assert_eq!(
         serde_json::to_value(state.jobs.lock().unwrap().list().unwrap()).unwrap(),
         jobs
@@ -1068,5 +1077,640 @@ fn primary_source_persistence_rejects_foreign_receipts_before_publication() {
     assert_ne!(
         primary_source::describe(&state, &fact).unwrap().receipt_id,
         old.receipt_id
+    );
+}
+
+fn retain_staged_proposal_reference(
+    state: &AppState,
+    source: &RegisteredSource,
+    receipt: &Receipt,
+) -> agents::StagedProposal {
+    use agents::*;
+    use core_prov::EvidenceRef;
+    let evidence = |id: &str, path: &str, text: &str| AgentEvidence {
+        id: id.into(),
+        source: EvidenceRef {
+            repo: source.repo_key.clone(),
+            path: path.into(),
+            byte_start: 0,
+            byte_end: text.len() as u64,
+            commit_sha: "workdir".into(),
+        },
+        text: text.into(),
+    };
+    let task = AgentTask {
+        action_id: "escalate:prepared".into(),
+        gap_id: "gap:resolution".into(),
+        source_id: "symbol:source".into(),
+        edge_label: "CALLS".into(),
+        existing_confidence: ConfidenceTier::Gap,
+        source_evidence_ids: vec!["source".into(), "gap".into()],
+        evidence: vec![
+            evidence(
+                "source",
+                &receipt.file().path,
+                "source private marker 73194",
+            ),
+            evidence("gap", "gap.ts", "uncited private marker 76213"),
+            evidence("target", "target.ts", "target private marker 97814"),
+        ],
+        candidates: vec![AgentCandidate {
+            node_id: "symbol:target".into(),
+            label: "Symbol".into(),
+            summary: "unpublished candidate summary 87613".into(),
+            evidence_ids: vec!["target".into()],
+        }],
+    };
+    let fact = |id: &str| TaskFactKey::Node { id: id.into() };
+    let digest = format!("node-v1:{}", "d".repeat(64));
+    let mut selected_facts = vec![
+        TaskFactSelection {
+            fact: fact(&task.source_id),
+            fact_digest: receipt.fact_digest().to_owned(),
+            binding: Some(TaskSourceAssociation {
+                repo_key: source.repo_key.clone(),
+                receipt_id: receipt.id().to_owned(),
+                emitted_fact_digest: receipt.fact_digest().to_owned(),
+            }),
+        },
+        TaskFactSelection {
+            fact: fact(&task.gap_id),
+            fact_digest: digest.clone(),
+            binding: None,
+        },
+        TaskFactSelection {
+            fact: fact(&task.candidates[0].node_id),
+            fact_digest: digest,
+            binding: None,
+        },
+        TaskFactSelection {
+            fact: TaskFactKey::Edge {
+                source: task.source_id.clone(),
+                label: task.edge_label.clone(),
+                destination: task.gap_id.clone(),
+            },
+            fact_digest: format!("edge-v1:{}", "e".repeat(64)),
+            binding: None,
+        },
+    ];
+    selected_facts.sort_by(|a, b| a.fact.cmp(&b.fact));
+    let snapshot_id = format!("context-v1:{}", "f".repeat(64));
+    let source_basis = TaskSourceBasisV2 {
+        schema_version: 2,
+        graph_snapshot_id: snapshot_id.clone(),
+        selected_facts,
+        evidence: vec![
+            TaskEvidenceOrigin {
+                evidence_id: "source".into(),
+                fact: fact(&task.source_id),
+                role: TaskRangeRole::Provenance,
+                index: 0,
+                origin: TaskEvidenceKind::CapturedPrimarySource {
+                    registered_source_id: source.source_id.clone(),
+                    receipt_id: receipt.id().to_owned(),
+                    receipt_inventory_index: 0,
+                    captured: TaskCaptureSpanRef {
+                        file: TaskCaptureFileRef {
+                            source_id: source.source_id.clone(),
+                            capture_id: receipt.file().capture_id.clone(),
+                            path: receipt.file().path.clone(),
+                            digest: receipt.file().digest.clone(),
+                            byte_len: receipt.file().byte_len,
+                        },
+                        byte_start: 0,
+                        byte_end: task.evidence[0].text.len() as u64,
+                    },
+                    scope: PrimarySourceScope::PrimarySourceOnly,
+                    input_closure: InputClosureStatus::InputClosureNotEstablished,
+                },
+            },
+            TaskEvidenceOrigin {
+                evidence_id: "gap".into(),
+                fact: fact(&task.gap_id),
+                role: TaskRangeRole::Provenance,
+                index: 0,
+                origin: TaskEvidenceKind::WorkingTreeUnverified,
+            },
+            TaskEvidenceOrigin {
+                evidence_id: "target".into(),
+                fact: fact(&task.candidates[0].node_id),
+                role: TaskRangeRole::Provenance,
+                index: 0,
+                origin: TaskEvidenceKind::WorkingTreeUnverified,
+            },
+        ],
+        selection: SelectionReport {
+            metadata_lookahead: 3,
+            acquisition_attempts: 3,
+            supplied_evidence: 3,
+            supplied_candidates: 1,
+            captured_validation_bytes: receipt.file().byte_len,
+            limits: SelectionLimits::default(),
+            omissions: vec![],
+            metadata_preselected_not_read: 0,
+            unread_tail: false,
+            stop_reason: SelectionStopReason::NeighborhoodExhausted,
+        },
+    };
+    struct PreparedFixtureProvider;
+    impl llm::LlmProvider for PreparedFixtureProvider {
+        fn id(&self) -> &str {
+            "fixture:prepared-proposal"
+        }
+        fn locality(&self) -> llm::Locality {
+            llm::Locality::Local
+        }
+        fn capabilities(&self) -> llm::ProviderCaps {
+            llm::ProviderCaps {
+                embeddings: false,
+                chat: true,
+                tool_use: false,
+            }
+        }
+        fn embed(&self, _: &[String]) -> Result<Vec<llm::Embedding>, llm::ProviderError> {
+            Err(llm::ProviderError::Unsupported("embeddings"))
+        }
+        fn complete(
+            &self,
+            _: &llm::ProviderCompletionRequest,
+        ) -> Result<llm::Completion, llm::ProviderError> {
+            Ok(llm::Completion {
+                text: json!({
+                    "target_id": "symbol:target",
+                    "annotation": "Possible target link",
+                    "citations": ["source", "target"]
+                })
+                .to_string(),
+            })
+        }
+    }
+    let prepared = PreparedAgentTask::new(task, source_basis).unwrap();
+    let proposal = AgentBroker::bounded_default()
+        .propose_prepared(
+            &PreparedFixtureProvider,
+            &llm::EgressFirewall::new(llm::EgressPolicy::local_only()),
+            &prepared,
+            None,
+        )
+        .unwrap();
+    state
+        .proposals
+        .lock()
+        .unwrap()
+        .stage_prepared(&prepared, &proposal, 1, &snapshot_id)
+        .unwrap()
+}
+
+fn receipt_store_accounting(app_data: &Path) -> (u64, u64) {
+    let conn = rusqlite::Connection::open_with_flags(
+        app_data.join("retained-source/receipts.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM receipts", [], |r| r.get(0))
+        .unwrap();
+    let bytes: i64 = conn
+        .query_row(
+            "SELECT coalesce(sum(length(CAST(payload AS BLOB))),0) FROM receipts",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    (count as u64, bytes as u64)
+}
+
+#[test]
+fn primary_source_forget_reclaims_unpinned_and_retains_pinned_receipts_as_capture_forgotten() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    assert!(parsed.receipts.len() >= 3);
+    let bindings = publish(&state, &source, &parsed);
+    let rule_fact = FactKey::from_node(&rule_node(&parsed));
+    let inv_binding = bindings
+        .iter()
+        .find(|binding| binding.fact == rule_fact)
+        .unwrap()
+        .clone();
+    let staged_receipt = parsed
+        .receipts
+        .iter()
+        .find(|receipt| {
+            receipt.id() != inv_binding.receipt_id
+                && matches!(receipt.fact_key(), FactKey::Node { .. })
+        })
+        .unwrap()
+        .clone();
+    let unpinned_receipts: Vec<Receipt> = parsed
+        .receipts
+        .iter()
+        .filter(|receipt| {
+            receipt.id() != inv_binding.receipt_id && receipt.id() != staged_receipt.id()
+        })
+        .cloned()
+        .collect();
+    assert!(!unpinned_receipts.is_empty());
+    let reclaimed_bytes: u64 = unpinned_receipts
+        .iter()
+        .map(|receipt| receipt.to_json().unwrap().len() as u64)
+        .sum();
+    let (count_before, bytes_before) = receipt_store_accounting(&app_data);
+    assert_eq!(count_before, parsed.receipts.len() as u64);
+    for receipt in &parsed.receipts {
+        assert_eq!(
+            state
+                .primary_sources
+                .receipts
+                .lock()
+                .unwrap()
+                .receipt_status(receipt.id())
+                .unwrap(),
+            primary_source::ReceiptStatus::Present
+        );
+    }
+    drop(parsed);
+
+    retain_investigation_selection(&state, &source, &inv_binding, "reclaim-inv-pin");
+    retain_staged_proposal_reference(&state, &source, &staged_receipt);
+
+    let preview = primary_source::preview(&state, &source.source_id).unwrap();
+    assert_eq!(preview.investigation_references, 1);
+    assert_eq!(preview.staged_references, 1);
+    assert_eq!(preview.receipts, count_before as usize);
+
+    assert_eq!(
+        primary_source::forget(&state, &source.source_id, &preview.fingerprint).unwrap(),
+        preview.captures as u64
+    );
+
+    let (count_after, bytes_after) = receipt_store_accounting(&app_data);
+    assert_eq!(count_after, 2);
+    assert_eq!(count_before - count_after, unpinned_receipts.len() as u64);
+    assert_eq!(bytes_before - bytes_after, reclaimed_bytes);
+
+    let conn = rusqlite::Connection::open_with_flags(
+        app_data.join("retained-source/receipts.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut stored_pinned: Vec<(String, i64)> = conn
+        .prepare("SELECT id, capture_forgotten FROM receipts ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let mut expected_pinned = vec![
+        (inv_binding.receipt_id.clone(), 1),
+        (staged_receipt.id().to_owned(), 1),
+    ];
+    expected_pinned.sort();
+    assert_eq!(stored_pinned, expected_pinned);
+    stored_pinned.clear();
+
+    let receipts_guard = state.primary_sources.receipts.lock().unwrap();
+    let inv_status = receipts_guard
+        .receipt_status(&inv_binding.receipt_id)
+        .unwrap();
+    let staged_status = receipts_guard.receipt_status(staged_receipt.id()).unwrap();
+    let tombstone = match &inv_status {
+        primary_source::ReceiptStatus::CaptureForgotten { tombstone } => tombstone.clone(),
+        other => panic!("expected CaptureForgotten, got {other:?}"),
+    };
+    assert_eq!(
+        staged_status,
+        primary_source::ReceiptStatus::CaptureForgotten {
+            tombstone: tombstone.clone()
+        }
+    );
+    assert_eq!(tombstone.source_id, source.source_id);
+    assert_eq!(tombstone.receipts_reclaimed, unpinned_receipts.len() as u64);
+    assert_eq!(tombstone.receipts_retained_pinned, 2);
+    assert_eq!(tombstone.forgotten_at.len(), 20);
+    assert!(tombstone.forgotten_at.ends_with('Z'));
+
+    for unpinned in &unpinned_receipts {
+        assert_eq!(
+            receipts_guard.receipt_status(unpinned.id()).unwrap(),
+            primary_source::ReceiptStatus::Reclaimed {
+                tombstone: tombstone.clone()
+            }
+        );
+    }
+}
+
+#[test]
+fn primary_source_forget_retry_after_reclaim_failure_completes_reclaim() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    let all_ids: Vec<String> = parsed.receipts.iter().map(|r| r.id().to_owned()).collect();
+    let bindings = publish(&state, &source, &parsed);
+    let rule_fact = FactKey::from_node(&rule_node(&parsed));
+    let pinned_binding = bindings
+        .into_iter()
+        .find(|binding| binding.fact == rule_fact)
+        .unwrap();
+    drop(parsed);
+
+    retain_investigation_selection(&state, &source, &pinned_binding, "retry-inv-pin");
+    let first_preview = primary_source::preview(&state, &source.source_id).unwrap();
+    assert_eq!(first_preview.captures, 1);
+    assert_eq!(first_preview.receipts, all_ids.len());
+
+    state
+        .primary_sources
+        .receipts
+        .lock()
+        .unwrap()
+        .fail_next_reclaim = true;
+    let err = primary_source::forget(&state, &source.source_id, &first_preview.fingerprint)
+        .expect_err("injected reclaim failure must fail forget");
+    assert_eq!(
+        err,
+        "Retained source storage is unavailable or invalid; no source was substituted."
+    );
+
+    // Captures were deleted first, but receipts remain untouched until retry.
+    let retry_preview = primary_source::preview(&state, &source.source_id).unwrap();
+    assert_eq!(retry_preview.captures, 0);
+    assert!(retry_preview.capture_ids.is_empty());
+    assert_eq!(retry_preview.receipts, all_ids.len());
+    assert_ne!(retry_preview.fingerprint, first_preview.fingerprint);
+    for id in &all_ids {
+        assert_eq!(
+            state
+                .primary_sources
+                .receipts
+                .lock()
+                .unwrap()
+                .receipt_status(id)
+                .unwrap(),
+            primary_source::ReceiptStatus::Present
+        );
+    }
+
+    assert_eq!(
+        primary_source::forget(&state, &source.source_id, &retry_preview.fingerprint).unwrap(),
+        0
+    );
+    let after_retry = primary_source::preview(&state, &source.source_id).unwrap();
+    assert_eq!(after_retry.captures, 0);
+    assert_eq!(after_retry.receipts, 1);
+
+    let receipts_guard = state.primary_sources.receipts.lock().unwrap();
+    for id in &all_ids {
+        let status = receipts_guard.receipt_status(id).unwrap();
+        if id == &pinned_binding.receipt_id {
+            assert!(matches!(
+                status,
+                primary_source::ReceiptStatus::CaptureForgotten { .. }
+            ));
+        } else {
+            assert!(matches!(
+                status,
+                primary_source::ReceiptStatus::Reclaimed { .. }
+            ));
+        }
+    }
+}
+
+#[test]
+fn primary_source_reclaim_ledger_prunes_oldest_rows_and_orphaned_tombstones() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let first_root = directory(dir.path(), "first");
+    let second_root = directory(dir.path(), "second");
+    let third_root = directory(dir.path(), "third");
+    for root in [&first_root, &second_root, &third_root] {
+        std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    }
+    let state = app_state(&app_data);
+    let first_source = register_local_source(&state, &first_root).unwrap();
+    let second_source = register_local_source(&state, &second_root).unwrap();
+    let third_source = register_local_source(&state, &third_root).unwrap();
+
+    let first_parsed = parse(&state, &first_source, || {});
+    publish(&state, &first_source, &first_parsed);
+    let mut first_ids: Vec<String> = first_parsed
+        .receipts
+        .iter()
+        .map(|r| r.id().to_owned())
+        .collect();
+    first_ids.sort();
+    assert_eq!(first_ids.len(), 3);
+    drop(first_parsed);
+
+    // Narrow capacity to 3 so the reclaim ledger holds at most 3 rows.
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 3;
+
+    let preview1 = primary_source::preview(&state, &first_source.source_id).unwrap();
+    primary_source::forget(&state, &first_source.source_id, &preview1.fingerprint).unwrap();
+    for id in &first_ids {
+        assert!(matches!(
+            state
+                .primary_sources
+                .receipts
+                .lock()
+                .unwrap()
+                .receipt_status(id)
+                .unwrap(),
+            primary_source::ReceiptStatus::Reclaimed { .. }
+        ));
+    }
+
+    // Second source: 1 pinned receipt + 2 unpinned receipts -> pushes reclaim ledger from 3 to 5,
+    // pruning the 2 oldest rows (first_ids[0] and first_ids[1]) while keeping first_ids[2].
+    let second_parsed = parse(&state, &second_source, || {});
+    let second_bindings = publish(&state, &second_source, &second_parsed);
+    let second_rule = FactKey::from_node(&rule_node(&second_parsed));
+    let second_pinned = second_bindings
+        .into_iter()
+        .find(|b| b.fact == second_rule)
+        .unwrap();
+    let mut second_unpinned: Vec<String> = second_parsed
+        .receipts
+        .iter()
+        .map(|r| r.id().to_owned())
+        .filter(|id| id != &second_pinned.receipt_id)
+        .collect();
+    second_unpinned.sort();
+    assert_eq!(second_unpinned.len(), 2);
+    drop(second_parsed);
+
+    retain_investigation_selection(&state, &second_source, &second_pinned, "prune-second-pin");
+    let preview2 = primary_source::preview(&state, &second_source.source_id).unwrap();
+    primary_source::forget(&state, &second_source.source_id, &preview2.fingerprint).unwrap();
+
+    {
+        let receipts_guard = state.primary_sources.receipts.lock().unwrap();
+        assert_eq!(
+            receipts_guard.receipt_status(&first_ids[0]).unwrap(),
+            primary_source::ReceiptStatus::Unknown
+        );
+        assert_eq!(
+            receipts_guard.receipt_status(&first_ids[1]).unwrap(),
+            primary_source::ReceiptStatus::Unknown
+        );
+        assert!(matches!(
+            receipts_guard.receipt_status(&first_ids[2]).unwrap(),
+            primary_source::ReceiptStatus::Reclaimed { .. }
+        ));
+        assert!(matches!(
+            receipts_guard
+                .receipt_status(&second_pinned.receipt_id)
+                .unwrap(),
+            primary_source::ReceiptStatus::CaptureForgotten { .. }
+        ));
+        for id in &second_unpinned {
+            assert!(matches!(
+                receipts_guard.receipt_status(id).unwrap(),
+                primary_source::ReceiptStatus::Reclaimed { .. }
+            ));
+        }
+    }
+
+    // Third source: 3 unpinned receipts (raise capacity.0 to 4 during persist because second_pinned
+    // occupies 1 slot in receipts, then narrow capacity.0 back to 3 before forget).
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 4;
+    let third_parsed = parse(&state, &third_source, || {});
+    publish(&state, &third_source, &third_parsed);
+    let mut third_ids: Vec<String> = third_parsed
+        .receipts
+        .iter()
+        .map(|r| r.id().to_owned())
+        .collect();
+    third_ids.sort();
+    assert_eq!(third_ids.len(), 3);
+    drop(third_parsed);
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 3;
+
+    let preview3 = primary_source::preview(&state, &third_source.source_id).unwrap();
+    primary_source::forget(&state, &third_source.source_id, &preview3.fingerprint).unwrap();
+
+    {
+        let receipts_guard = state.primary_sources.receipts.lock().unwrap();
+        for id in &first_ids {
+            assert_eq!(
+                receipts_guard.receipt_status(id).unwrap(),
+                primary_source::ReceiptStatus::Unknown
+            );
+        }
+        for id in &second_unpinned {
+            assert_eq!(
+                receipts_guard.receipt_status(id).unwrap(),
+                primary_source::ReceiptStatus::Unknown
+            );
+        }
+        // second_source still has a pinned capture_forgotten receipt, so its tombstone survives.
+        assert!(matches!(
+            receipts_guard
+                .receipt_status(&second_pinned.receipt_id)
+                .unwrap(),
+            primary_source::ReceiptStatus::CaptureForgotten { .. }
+        ));
+        for id in &third_ids {
+            assert!(matches!(
+                receipts_guard.receipt_status(id).unwrap(),
+                primary_source::ReceiptStatus::Reclaimed { .. }
+            ));
+        }
+    }
+
+    // first_source's tombstone is now completely orphaned and must be deleted.
+    let conn = rusqlite::Connection::open_with_flags(
+        app_data.join("retained-source/receipts.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let tombstone_sources: Vec<String> = conn
+        .prepare("SELECT source_id FROM receipt_tombstones ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        tombstone_sources,
+        vec![second_source.source_id, third_source.source_id]
+    );
+}
+
+#[test]
+fn primary_source_forget_then_reimport_same_directory_preserves_old_and_new_statuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let first = parse(&state, &source, || {});
+    let first_bindings = publish(&state, &source, &first);
+    let rule_fact = FactKey::from_node(&rule_node(&first));
+    let pinned_binding = first_bindings
+        .into_iter()
+        .find(|binding| binding.fact == rule_fact)
+        .unwrap();
+    let old_unpinned_ids: Vec<String> = first
+        .receipts
+        .iter()
+        .map(|receipt| receipt.id().to_owned())
+        .filter(|id| id != &pinned_binding.receipt_id)
+        .collect();
+    assert!(!old_unpinned_ids.is_empty());
+    drop(first);
+
+    retain_investigation_selection(&state, &source, &pinned_binding, "reimport-pin");
+    let preview = primary_source::preview(&state, &source.source_id).unwrap();
+    primary_source::forget(&state, &source.source_id, &preview.fingerprint).unwrap();
+
+    // Re-import the same directory after updating source.ts.
+    std::fs::write(root.join("source.ts"), STABLE_B).unwrap();
+    let reimported_source = register_local_source(&state, &root).unwrap();
+    assert_eq!(reimported_source.source_id, source.source_id);
+    let second = parse(&state, &reimported_source, || {});
+    publish(&state, &reimported_source, &second);
+    let new_ids: Vec<String> = second
+        .receipts
+        .iter()
+        .map(|receipt| receipt.id().to_owned())
+        .collect();
+    assert!(!new_ids.is_empty());
+    drop(second);
+
+    let receipts_guard = state.primary_sources.receipts.lock().unwrap();
+    for new_id in &new_ids {
+        assert_ne!(new_id, &pinned_binding.receipt_id);
+        assert!(!old_unpinned_ids.contains(new_id));
+        assert_eq!(
+            receipts_guard.receipt_status(new_id).unwrap(),
+            primary_source::ReceiptStatus::Present
+        );
+    }
+    assert!(matches!(
+        receipts_guard
+            .receipt_status(&pinned_binding.receipt_id)
+            .unwrap(),
+        primary_source::ReceiptStatus::CaptureForgotten { .. }
+    ));
+    for old_id in &old_unpinned_ids {
+        assert!(matches!(
+            receipts_guard.receipt_status(old_id).unwrap(),
+            primary_source::ReceiptStatus::Reclaimed { .. }
+        ));
+    }
+    let unrelated = format!("ts-primary-v2:{}", "0".repeat(64));
+    assert_eq!(
+        receipts_guard.receipt_status(&unrelated).unwrap(),
+        primary_source::ReceiptStatus::Unknown
     );
 }
