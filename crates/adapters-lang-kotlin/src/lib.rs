@@ -49,6 +49,10 @@ pub struct Extraction {
     pub nodes: Vec<Node>,
     /// Recovered edges.
     pub edges: Vec<Edge>,
+    /// Retrofit client calls (#737), stitched by the `events` crate.
+    pub fetch_sites: Vec<adapters_fw::client::FetchSite>,
+    /// Retrofit builder base URLs, joined to `fetch_sites` repo-wide.
+    retrofit_bases: Vec<adapters_fw::client::FetchBase>,
     pending_calls: Vec<PendingCall>,
     declared_types: Vec<Declared>,
     declared_functions: Vec<Declared>,
@@ -934,6 +938,13 @@ pub fn extract_source(
         }
     }
 
+    // Retrofit client calls (#737): interface methods now, base URL at the
+    // directory join.
+    out.fetch_sites
+        .extend(retrofit::sites(&cx, &functions, &imports));
+    out.retrofit_bases
+        .extend(retrofit::bases(&cx, root, &imports));
+
     // Calls: same-scope unqualified/this calls resolve locally; calls
     // proven by an import (a type/object receiver, or an imported top-level
     // function) resolve repo-wide at the directory join, failing closed to
@@ -1200,10 +1211,17 @@ pub fn extract_dir_incremental_with_progress(
             out.declared_types.extend(extraction.declared_types);
             out.declared_functions.extend(extraction.declared_functions);
             out.packages.extend(extraction.packages);
+            out.fetch_sites.extend(extraction.fetch_sites);
+            out.retrofit_bases.extend(extraction.retrofit_bases);
             Ok(())
         },
     );
     merged?;
+    adapters_fw::client::join_repo_base(
+        &mut out.fetch_sites,
+        &out.retrofit_bases,
+        retrofit::LIBRARY,
+    );
 
     // Directory join: an imported FQN resolves only to a declaration this
     // repo makes exactly once — a duplicate FQN (the same class in two
@@ -1314,6 +1332,8 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
     extract_dir_incremental(root, id, &mut IncrementalCache::default())
         .map(|(extraction, _)| extraction)
 }
+
+mod retrofit;
 
 #[cfg(test)]
 mod tests;

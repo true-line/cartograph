@@ -43,7 +43,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 
 | US-0032 | AC-0180..0191, AC-0204, AC-0234..0236, AC-0260..0262, AC-0267, AC-0279, AC-0281, AC-0286, AC-0287 | agents (immutable @1/@2 history, compact @3 disclosure, explicit @4 turn progress and available specialist replacement), llm (bounded transport @2), core-graph, context-hub, app (complete query-page budgets), ui | H4 | — | ADR-0019, ADR-0024, ADR-0025, ADR-0028, ADR-0040, ADR-0041, ADR-0042 | T-0180..0191, T-0204, T-0234..0236, T-0260..0262, T-0267, T-0279, T-0281, T-0286, T-0287 |
 | US-0033 | AC-0237..0239, AC-0264..0266, AC-0268 | ingest, context-hub, agents, app, ui, adapters-lang-ts | P1 (ROADMAP) | — | ADR-0036 | T-0237..0239, T-0264..0266, T-0268 |
-| US-0034 | AC-0240..0241 | events, ingest, app | P1 (ROADMAP) | F-* | ADR-0002, ADR-0036 | T-0240..0241 |
+| US-0034 | AC-0240..0241, AC-0315 | events, ingest, app, adapters-lang-ts, adapters-lang-kotlin, adapters-lang-java | P1 (ROADMAP) | F-* | ADR-0002, ADR-0036 | T-0240..0241, T-0315 |
 | US-0035 | AC-0242..0245 | spec, core-prov, core-graph, app, ui | P1 (ROADMAP) | — | ADR-0036 | T-0242..0245 |
 | US-0036 | AC-0246..0247 | spec, app, ui | P2 (ROADMAP) | F-* | ADR-0036 | T-0246..0247 |
 | US-0037 | AC-0248..0252 | agents, spec, app, ui | P3 (ROADMAP) | — | ADR-0019, ADR-0036 | T-0248..0252 |

@@ -30,6 +30,7 @@ dependencies = [
 name = "adapters-lang-java"
 version = "0.21.0"
 dependencies = [
+ "adapters-fw",
  "core-graph",
  "core-prov",
  "serde_json",
@@ -45,6 +46,7 @@ dependencies = [
 name = "adapters-lang-kotlin"
 version = "0.21.0"
 dependencies = [
+ "adapters-fw",
  "adapters-lang-java",
  "core-graph",
  "core-prov",

@@ -80,11 +80,32 @@ The bundle has 26,910 assertions, 7,512 open gap findings in 25 cause classes an
 
 ## Gaps, ranked by impact
 
-1. **No client-to-server links across the three repos.** Both clients call the server, but neither call site becomes a fact that can be matched to a recovered endpoint:
-   - The Android app declares its API as Retrofit annotations (`@GET("api/…")`, `@POST("api/…")` in `core/network/src/main/java/io/simplelogin/core/network/ApiService.kt`), and the Kotlin adapter does not recognise them.
-   - The extension keeps a `{method, path}` table (`src/popup/APIService.js:7` onward) and joins it to a configured base URL at runtime, so its calls end as `runtime-computed fetch URL` gaps (class C-17, 11 instances).
+1. **Client-to-server links: resolved by #737.** Before #737, neither client produced a call fact that could be matched to a recovered endpoint. The Android app declares its API as Retrofit annotations (`core/network/src/main/java/io/simplelogin/core/network/ApiService.kt`), which the Kotlin adapter did not recognise. The extension keeps a `{method, path}` table (`src/popup/APIService.js:7` onward) and joins it to a base URL read from storage at runtime, so its calls ended as `runtime-computed fetch URL` gaps. Now both become client calls carrying the base URL they join, and a system manifest binds them to the server. Ingesting the three repos through the manifest below links:
+   - **all 41** Retrofit methods in the Android app, to 37 distinct server endpoints. They join the app's one `Retrofit.Builder().baseUrl("https://app.simplelogin.io")`;
+   - **18 of 20** extension calls, to 14 distinct endpoints, through `callAPI(API_ROUTE.X)` and direct `fetch(apiUrl + API_ROUTE.X.path)`. The other two stay Gaps: the `fetch` inside the `callAPI` wrapper itself, and an unrelated computed URL in `src/content_script/input_tools.js`.
 
-   Cross-repo stitching (`t0.http-cross-repo`) exists, but it needs a client fact plus a system manifest binding. *Fill:* adapter work (Retrofit; table-driven client maps, #737) and a system manifest for the showcase. This gap blocks the "one app, several repos" view.
+   Together the clients reach 43 distinct server endpoints, 8 of them from both. Every link cites the `declared-service` binding (`fetches.json`). The extension's runtime base is author-declared in the manifest `env` by its source text, with the value of the extension's own default (`SLStorage.DEFAULT_SETTINGS`). Without that declaration its calls stay Gaps naming the route-table entry. The same run fixed route matching for Flask `<int:id>` parameters, which until then matched no client path.
+
+   ```toml
+   [[repos]]
+   url = "app"
+   [[repos]]
+   url = "browser-extension"
+   [[repos]]
+   url = "Simple-Login-Android"
+
+   [env]
+   "SETTINGS.apiUrl" = "https://app.simplelogin.io"
+   "apiUrl" = "https://app.simplelogin.io"
+   "this.apiUrl" = "https://app.simplelogin.io"
+
+   [[services]]
+   name = "simplelogin"
+   repo = "app"
+   base_urls = ["https://app.simplelogin.io"]
+   ```
+
+   Save it as `$SRC/cartograph.system.toml` and run the showcase with `CARTOGRAPH_SHOWCASE_MANIFEST=$SRC/cartograph.system.toml` in place of `CARTOGRAPH_SHOWCASE_SOURCES`. The run also writes `fetches.json`, listing every client call with its target endpoint or Gap reason.
 2. **Data model: resolved by #738.** `app/models.py` declares 80 SQLAlchemy models. Before #738, `data_model.md` reported *No DataEntity facts have been recovered yet*. With the SQLAlchemy producer, all 80 become Confirmed `DataEntity` facts with cited columns, linked by 82 `REFERENCES` edges, one per entity pair. Five `ForeignKey` targets that are not string literals stay `Gap`s. The 275 Alembic revisions in `migrations/versions/` are not read yet. Migration history is a separate producer. (The node and edge totals in the table above were measured before #738.)
 3. **No infrastructure.** `topology.md` is empty. The repo has a `Dockerfile`, `crontab.yml`, `example.env` and `alembic.ini`. None of these is infrastructure-as-code that Cartograph reads today, so the Infrastructure layer correctly shows its empty state. *Fill:* the observed-infrastructure producer (#734) plus container and cron config readers.
 4. **Documentation drift is not reported.** The notification mismatch above, and the 12 undocumented routes, were found by the external scorer. Cartograph's own `drift_register.md` reports 0, because it doesn't take documentation in as a contract. *Fill:* a documented-contract input (Markdown API reference or OpenAPI) compared against recovered routes, with drift cited on both sides (#739). For enterprises with outdated docs, this is the direct value.

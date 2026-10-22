@@ -2608,6 +2608,8 @@ fn extract_source_recording(
                     path: path.into(),
                     byte_start: site.start_byte() as u64,
                     byte_end: site.end_byte() as u64,
+                    base: None,
+                    entry: None,
                 });
             };
 
@@ -3380,6 +3382,7 @@ mod bundler_alias;
 mod callable;
 pub mod captured;
 pub mod chrome_messaging;
+pub mod client_table;
 pub(crate) mod const_resolution;
 pub mod declarations;
 pub mod indexeddb;

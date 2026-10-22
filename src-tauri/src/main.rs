@@ -1444,6 +1444,18 @@ fn extract_tree_with_registries(
             adapters_lang_ts::chrome_messaging::extract_dir(root, &ts_id)
                 .map_err(|e| e.to_string())?,
         );
+        // Table-driven HTTP clients (#737): a joined call replaces the
+        // generic computed-URL site the TS pass recorded at the same call.
+        let joined =
+            adapters_lang_ts::client_table::extract_dir(root, &ts_id).map_err(|e| e.to_string())?;
+        let joined_at: std::collections::BTreeSet<(&str, u64)> = joined
+            .iter()
+            .map(|site| (site.path.as_str(), site.byte_start))
+            .collect();
+        extraction
+            .fetch_sites
+            .retain(|site| !joined_at.contains(&(site.path.as_str(), site.byte_start)));
+        extraction.fetch_sites.extend(joined);
         // IndexedDB schema/store declarations and repository operations
         // become the cited data model (DataEntity + READS/WRITES).
         let idb =
@@ -1531,6 +1543,7 @@ fn extract_tree_with_registries(
         };
         extraction.nodes.extend(java.nodes);
         extraction.edges.extend(java.edges);
+        extraction.fetch_sites.extend(java.fetch_sites);
 
         let kotlin_id = adapters_lang_kotlin::SourceId { repo, commit };
         let mut kotlin_progress = |path: &str| on_file(&format!("Reading Kotlin sources — {path}"));
@@ -1557,6 +1570,7 @@ fn extract_tree_with_registries(
         };
         extraction.nodes.extend(kotlin.nodes);
         extraction.edges.extend(kotlin.edges);
+        extraction.fetch_sites.extend(kotlin.fetch_sites);
     }
     if wants_infra {
         let tf_id = iac::SourceId { repo, commit };

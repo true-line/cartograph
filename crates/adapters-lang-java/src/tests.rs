@@ -1,4 +1,5 @@
 use super::*;
+use adapters_fw::events::IdentityExpr;
 use core_graph::{Edge, Node};
 
 fn write(dir: &Path, rel: &str, content: &str) {
@@ -2203,5 +2204,157 @@ public class Owner {
     assert_eq!(
         gap.props["prov"]["evidence"][0]["path"],
         "src/main/java/com/demo/Owner.java"
+    );
+}
+
+// --- Retrofit client calls (#737) ------------------------------------------
+
+fn retrofit_sites(files: &[(&str, &str)]) -> Vec<adapters_fw::client::FetchSite> {
+    let dir = tempfile::tempdir().unwrap();
+    for (rel, content) in files {
+        write(dir.path(), rel, content);
+    }
+    extract_dir(dir.path(), &id()).unwrap().fetch_sites
+}
+
+const JAVA_API: &str = r#"package io.demo;
+
+import retrofit2.http.GET;
+import retrofit2.http.HTTP;
+import retrofit2.http.POST;
+
+public interface ApiService {
+    @GET("api/stats")
+    Call<Stats> stats();
+
+    @POST(value = "api/auth/login")
+    Call<Token> login(@Body Login body);
+
+    @HTTP(method = "DELETE", path = "api/mailboxes/{id}", hasBody = true)
+    Call<Ok> deleteMailbox(@Path("id") int id);
+
+    @GET(PREFIX + "aliases")
+    Call<Aliases> aliases();
+
+    @retrofit2.http.PUT("api/setting")
+    Call<Ok> setting();
+}
+"#;
+
+// AC-0315: import-proven Retrofit annotations on Java interface methods
+// become client calls joined to the repo's one literal builder base; a class
+// method and a same-named annotation from another package do not. (T-0315)
+#[test]
+fn retrofit_interface_methods_become_joined_client_calls() {
+    let module = r#"package io.demo;
+
+import retrofit2.Retrofit;
+
+class Module {
+    Retrofit provide() {
+        return new Retrofit.Builder().baseUrl("https://app.example.io/").build();
+    }
+}
+"#;
+    let other = r#"package io.other;
+
+import com.other.GET;
+
+interface Unrelated {
+    @GET("api/unrelated")
+    void unrelated();
+}
+
+class NotAnInterface {
+    @retrofit2.http.GET("api/never")
+    void never() {}
+}
+"#;
+    let sites = retrofit_sites(&[
+        ("src/ApiService.java", JAVA_API),
+        ("src/Module.java", module),
+        ("src/Other.java", other),
+    ]);
+    let summary: Vec<_> = sites
+        .iter()
+        .map(|s| {
+            (
+                s.method.as_str(),
+                s.url.clone(),
+                s.entry.as_deref().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (
+                "GET",
+                IdentityExpr::Literal("api/stats".into()),
+                "ApiService.stats"
+            ),
+            (
+                "POST",
+                IdentityExpr::Literal("api/auth/login".into()),
+                "ApiService.login"
+            ),
+            (
+                "DELETE",
+                IdentityExpr::Literal("api/mailboxes/{id}".into()),
+                "ApiService.deleteMailbox"
+            ),
+            (
+                "GET",
+                IdentityExpr::Computed("@GET(PREFIX + \"aliases\")".into()),
+                "ApiService.aliases"
+            ),
+            (
+                "PUT",
+                IdentityExpr::Literal("api/setting".into()),
+                "ApiService.setting"
+            ),
+        ]
+    );
+    for site in &sites {
+        let base = site.base.as_ref().unwrap();
+        assert_eq!(
+            base.url,
+            IdentityExpr::Literal("https://app.example.io/".into())
+        );
+        assert_eq!(base.path, "src/Module.java");
+    }
+}
+
+// AC-0315: two distinct Java builder bases cannot be chosen between, and an
+// unimported builder proves nothing. (T-0315)
+#[test]
+fn retrofit_bases_must_be_unique_and_proven() {
+    let builder = |import: &str, url: &str| {
+        format!(
+            "package io.demo;\n{import}\nclass M {{ Object r = new Retrofit.Builder().baseUrl(\"{url}\").build(); }}\n"
+        )
+    };
+    let two = retrofit_sites(&[
+        ("ApiService.java", JAVA_API),
+        (
+            "A.java",
+            &builder("import retrofit2.Retrofit;", "https://a.io/"),
+        ),
+        (
+            "B.java",
+            &builder("import retrofit2.Retrofit;", "https://b.io/"),
+        ),
+    ]);
+    assert_eq!(
+        two[0].base.as_ref().unwrap().url,
+        IdentityExpr::Computed("2 distinct Retrofit base URL candidates".into())
+    );
+    let unproven = retrofit_sites(&[
+        ("ApiService.java", JAVA_API),
+        ("A.java", &builder("", "https://a.io/")),
+    ]);
+    assert_eq!(
+        unproven[0].base.as_ref().unwrap().url,
+        IdentityExpr::Computed("no Retrofit base URL in repo".into())
     );
 }

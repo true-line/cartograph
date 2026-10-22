@@ -61,6 +61,9 @@ pub struct ConfigIndex {
     /// Origins the system manifest binds; absolute calls to them wait for
     /// the system pass (#589).
     deferred_origins: std::collections::BTreeSet<String>,
+    /// Keys the system manifest declared, the only source for a base URL a
+    /// client reads from runtime state (#737).
+    manifest_keys: std::collections::BTreeSet<String>,
 }
 
 impl ConfigIndex {
@@ -113,7 +116,17 @@ impl ConfigIndex {
         for (key, value) in env {
             self.env
                 .insert(key.clone(), (value.clone(), source.to_string()));
+            self.manifest_keys.insert(key.clone());
         }
+    }
+
+    /// Resolve a runtime expression (`SETTINGS.apiUrl`) only when the system
+    /// manifest declares it by its source text; env files never do (#737).
+    pub fn resolve_declared(&self, expr: &str) -> Option<(&str, &str)> {
+        self.manifest_keys
+            .contains(expr)
+            .then(|| self.resolve(expr))
+            .flatten()
     }
 }
 
@@ -348,15 +361,73 @@ fn url_path(url: &str) -> String {
 }
 
 /// True when a concrete request path matches an endpoint's route pattern:
-/// exact segments, or `:param` segments matching any single segment.
+/// exact segments, or parameter segments matching any single segment. A
+/// parameter is written `:id` (Express), `<id>`/`<int:id>` (Flask) or
+/// `{id}` (FastAPI, Spring).
 fn route_matches(pattern: &str, concrete: &str) -> bool {
+    let param = |p: &str| {
+        p.starts_with(':')
+            || (p.len() > 2 && p.starts_with('<') && p.ends_with('>'))
+            || (p.len() > 2 && p.starts_with('{') && p.ends_with('}'))
+    };
     let ps: Vec<&str> = pattern.split('/').collect();
     let cs: Vec<&str> = concrete.split('/').collect();
     ps.len() == cs.len()
         && ps
             .iter()
             .zip(&cs)
-            .all(|(p, c)| p == c || (p.starts_with(':') && !c.is_empty()))
+            .all(|(p, c)| p == c || (param(p) && !c.is_empty()))
+}
+
+/// The request URL of a fetch site and how it resolved, or why it did not.
+/// A joined site (#737) resolves its base like any identity, a runtime
+/// expression only through a system-manifest declaration, and joins its
+/// literal path to it.
+fn resolve_site_url(
+    site: &adapters_fw::client::FetchSite,
+    cfg: &ConfigIndex,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let entry = site.entry.as_deref().unwrap_or("client call");
+    let classify = |expr: &IdentityExpr, joined: bool| -> Result<(String, String), String> {
+        match expr {
+            IdentityExpr::Literal(url) => Ok((url.clone(), "literal".into())),
+            IdentityExpr::EnvRef(key) => cfg
+                .resolve(key)
+                .map(|(value, file)| (value.to_string(), format!("config:{file}")))
+                .ok_or_else(|| match joined {
+                    true => format!("env key {key} (base URL of {entry}) not found in any env file in the repo"),
+                    false => format!("env key {key} not found in any env file in the repo"),
+                }),
+            IdentityExpr::Computed(text) if joined => cfg
+                .resolve_declared(text)
+                .map(|(value, file)| (value.to_string(), format!("config:{file}")))
+                .ok_or_else(|| {
+                    format!("runtime base URL `{text}` of {entry} is not declared in the system manifest")
+                }),
+            IdentityExpr::Computed(_) => Err("runtime-computed fetch URL".into()),
+        }
+    };
+    let Some(base) = &site.base else {
+        return match classify(&site.url, false) {
+            Ok((url, source)) => (Some(url), Some(source), None),
+            Err(reason) => (None, None, Some(reason)),
+        };
+    };
+    let IdentityExpr::Literal(path) = &site.url else {
+        return (
+            None,
+            None,
+            Some(format!("runtime-computed path of {entry}")),
+        );
+    };
+    match classify(&base.url, true) {
+        Ok((url, source)) => (
+            Some(adapters_fw::client::join_base(&url, path, base.join)),
+            Some(format!("base:{source}")),
+            None,
+        ),
+        Err(reason) => (None, None, Some(reason)),
+    }
 }
 
 /// Stitch data-fetch sites against recovered endpoints (US-0005, AC-0014):
@@ -395,16 +466,15 @@ pub fn stitch_fetches(
             )
         };
 
-        let resolved_url: Option<String> = match &site.url {
-            IdentityExpr::Literal(u) => Some(u.clone()),
-            IdentityExpr::EnvRef(key) => cfg.resolve(key).map(|(value, _)| value.to_string()),
-            IdentityExpr::Computed(_) => None,
-        };
-        let url_source: Option<String> = match &site.url {
-            IdentityExpr::Literal(_) => Some("literal".into()),
-            IdentityExpr::EnvRef(key) => cfg.resolve(key).map(|(_, file)| format!("config:{file}")),
-            IdentityExpr::Computed(_) => None,
-        };
+        let (resolved_url, url_source, unresolved) = resolve_site_url(site, cfg);
+        // A joined call cites its client entry and the join that built it.
+        let join = site.base.as_ref().map(|base| {
+            serde_json::json!({
+                "entry": site.entry,
+                "path": base.path,
+                "byte_start": base.byte_start,
+            })
+        });
         let resolved: Option<(String, String)> = resolved_url
             .as_deref()
             .zip(url_source.clone())
@@ -420,12 +490,7 @@ pub fn stitch_fetches(
                 http_binding::DEFERRED_REASON_PREFIX,
                 deferred.as_deref().unwrap_or_default()
             )),
-            (None, _) => Err(match &site.url {
-                IdentityExpr::EnvRef(key) => {
-                    format!("env key {key} not found in any env file in the repo")
-                }
-                _ => "runtime-computed fetch URL".to_string(),
-            }),
+            (None, _) => Err(unresolved.unwrap_or_else(|| "runtime-computed fetch URL".into())),
             (Some(_), "?") => Err("runtime-computed HTTP method".to_string()),
             (Some((path, resolver)), method) => {
                 let hits: Vec<&str> = endpoints
@@ -446,18 +511,22 @@ pub fn stitch_fetches(
 
         match outcome {
             Ok((ep_id, resolver)) => {
+                let mut props = serde_json::json!({
+                    "method": site.method,
+                    "resolver": resolver,
+                    "prov": fetch_prov(
+                        ConfidenceTier::Confirmed,
+                        &format!("FETCHES -> {ep_id}"),
+                    ),
+                });
+                if let Some(join) = &join {
+                    props["join"] = join.clone();
+                }
                 out.edges.push(Edge {
                     src,
                     dst: ep_id.to_string(),
                     label: "FETCHES".into(),
-                    props: serde_json::json!({
-                        "method": site.method,
-                        "resolver": resolver,
-                        "prov": fetch_prov(
-                            ConfidenceTier::Confirmed,
-                            &format!("FETCHES -> {ep_id}"),
-                        ),
-                    }),
+                    props,
                 });
             }
             Err(reason) => {
@@ -467,6 +536,9 @@ pub fn stitch_fetches(
                     "attempted_tiers": ["T0"],
                     "prov": fetch_prov(ConfidenceTier::Gap, &format!("Gap {gap_id}")),
                 });
+                if let Some(join) = &join {
+                    props["join"] = join.clone();
+                }
                 // The resolved request, for system-wide binding (#589).
                 if let (Some(url), Some(source)) = (resolved_url.as_ref(), url_source.as_ref()) {
                     props["request"] = serde_json::json!({
