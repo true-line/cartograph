@@ -52,6 +52,27 @@ impl DiscoveryQuery {
     /// The query as matched: trimmed and lowercased text, other terms
     /// unchanged. Cursors bind this form.
     fn normalized(&self) -> Result<Self, ContextError> {
+        // Preserve the existing raw-term ceiling and empty-term precedence,
+        // but establish them before cloning/collecting an owned normalized term.
+        let raw = match self {
+            Self::Identifier { id } => id.as_str(),
+            Self::Name { name } => name.as_str(),
+            Self::Text { text } => text.as_str(),
+        };
+        let empty = match self {
+            Self::Text { text } => text.trim().is_empty(),
+            _ => raw.is_empty(),
+        };
+        if empty {
+            return Err(ContextError::EmptyDiscoveryTerm);
+        }
+        if raw.len() > MAX_TERM_BYTES {
+            return Err(ContextError::InvalidLimit {
+                name: "term_bytes",
+                requested: raw.len(),
+                maximum: MAX_TERM_BYTES,
+            });
+        }
         let (term, normalized) = match self {
             Self::Identifier { id } => (id.as_str(), self.clone()),
             Self::Name { name } => (name.as_str(), self.clone()),
@@ -549,3 +570,87 @@ impl ContextSnapshot {
 
 #[cfg(test)]
 mod tests;
+
+/// Module-owned private borrowed matching/index roles. Graph fields are matched
+/// through lowercase iterators and never copied into a lowercased graph string.
+pub(crate) fn logical_workspace(
+    limits: core_graph::SnapshotReadLimits,
+    response_bytes: usize,
+) -> Option<usize> {
+    use crate::logical::{count, json_bytes, map, slots, string_wire, sum};
+    use std::{mem::size_of, sync::LazyLock};
+    static LOWERCASE_BYTES_PER_SOURCE_BYTE: LazyLock<usize> = LazyLock::new(|| {
+        (0..=u32::from(char::MAX))
+            .filter_map(char::from_u32)
+            .map(|c| {
+                c.to_lowercase()
+                    .map(char::len_utf8)
+                    .sum::<usize>()
+                    .div_ceil(c.len_utf8())
+            })
+            .max()
+            .unwrap_or(1)
+    });
+    let normalized = MAX_TERM_BYTES.checked_mul(*LOWERCASE_BYTES_PER_SOURCE_BYTE)?;
+    let degree = map::<&str, (usize, usize)>(limits.max_rows.checked_add(limits.max_rows)?)?;
+    let matching = slots::<(MatchKind, &str, &ContextFact, Matched<'_>)>(limits.max_rows)?;
+    let current_view = size_of::<CandidateView<'_>>();
+    let response = response_bytes.min(MAX_RESPONSE_BYTES);
+    let typed_response = sum(&[
+        json_bytes(response)?,
+        slots::<DiscoveryCandidate>(MAX_CANDIDATES.min(response.checked_add(1)?))?,
+        size_of::<DiscoveryResponse>(),
+    ])?;
+    let fixed_query = count(&(
+        "discovery-query-v1",
+        DISCOVERY_POLICY,
+        DiscoveryQuery::Text {
+            text: String::new(),
+        },
+    ))?;
+    let query_identity = sum(&[
+        json_bytes(string_wire(normalized)?.checked_add(fixed_query)?)?,
+        string_wire(normalized)?,
+        normalized,
+    ])?;
+    sum(&[
+        degree,
+        matching,
+        current_view,
+        typed_response,
+        query_identity,
+    ])
+}
+
+#[cfg(test)]
+mod logical_normalization_tests {
+    use super::*;
+    #[test]
+    fn preallocation_admission_preserves_kelvin_and_whitespace_semantics() {
+        assert_eq!(
+            DiscoveryQuery::Text {
+                text: "  K  ".into()
+            }
+            .normalized()
+            .unwrap(),
+            DiscoveryQuery::Text { text: "k".into() }
+        );
+        assert!(matches!(
+            DiscoveryQuery::Text {
+                text: " ".repeat(MAX_TERM_BYTES + 1)
+            }
+            .normalized(),
+            Err(ContextError::EmptyDiscoveryTerm)
+        ));
+        assert!(matches!(
+            DiscoveryQuery::Text {
+                text: "K".repeat(MAX_TERM_BYTES)
+            }
+            .normalized(),
+            Err(ContextError::InvalidLimit {
+                name: "term_bytes",
+                ..
+            })
+        ));
+    }
+}

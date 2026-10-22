@@ -11,6 +11,8 @@ use std::{
 };
 use tauri::Manager;
 
+pub(crate) const READ_BUFFER_BYTES: usize = 8192;
+
 /// No implicit numeric profile. Source rows/bytes and event-file bytes are
 /// aggregate per scope observation. Filesystem entry/metadata caps apply to each
 /// scan (event directory, or user+project plugin discovery for one repo).
@@ -191,7 +193,7 @@ fn read_file(
         .and_then(|max| max.checked_add(1))
         .unwrap_or(usize::MAX);
     let mut bytes = Vec::new();
-    let mut buffer = [0_u8; 8192];
+    let mut buffer = [0_u8; READ_BUFFER_BYTES];
     while bytes.len() < semantic_bytes {
         let take = buffer
             .len()

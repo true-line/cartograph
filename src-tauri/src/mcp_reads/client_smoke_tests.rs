@@ -195,6 +195,11 @@ fn mcp_scripted_stdio_client_smoke_against_isolated_app_service() {
             },
             export_mode: spec::ExportMode::VerifiedOnly,
         };
+        policy.worker.reserved_bytes = nz(
+            super::reservation::worker_bound::WorkerReservation::for_limits(policy.worker)
+                .unwrap()
+                .required_bytes,
+        );
         let baseline = super::reservation::TransportReservation::for_limits(policy.transport)
             .unwrap()
             .activation_bytes;

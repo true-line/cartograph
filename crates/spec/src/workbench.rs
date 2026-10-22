@@ -1,6 +1,8 @@
 //! Deterministic full-spec bundle for the M9 Spec Workbench (US-0012).
 
 use crate::TOPOLOGY_EDGE_LABELS;
+pub(crate) mod accounting;
+pub use accounting::{COMPILE_WORKSPACE_MODEL, CompileWorkspaceBound, logical_compile_bound};
 pub(crate) mod diagrams;
 mod producers;
 mod registers;
@@ -12,7 +14,8 @@ use core_prov::{ConfidenceTier, Provenance, Tier};
 use flowtracer::{Flow, FlowStatus, Hop};
 pub use selected::{
     ArtifactDescriptor, ArtifactSelectionError, SelectedArtifactLimit, SelectedArtifactOutcome,
-    SelectedCompileLimits, artifact_catalog, compile_spec_selected, project_recovered_facts,
+    SelectedCompileLimits, artifact_catalog, compile_spec_selected,
+    compile_spec_selected_with_security, project_recovered_facts,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -326,6 +329,9 @@ fn matrix_class_id(index: usize) -> String {
     format!("M-{:02}", index + 1)
 }
 
+const PROJECTION_GAP_REJECTED: &str = "inference rejected by Workbench curation";
+const PROJECTION_GAP_VERIFIED_ONLY: &str = "weak inference excluded by verified-only export";
+
 fn project_flows(
     flows: &[Flow],
     mode: ExportMode,
@@ -342,9 +348,9 @@ fn project_flows(
                         hop.clone()
                     } else {
                         let reason = if rejected_hashes.contains(&hop.provenance.content_hash) {
-                            "inference rejected by Workbench curation"
+                            PROJECTION_GAP_REJECTED
                         } else {
-                            "weak inference excluded by verified-only export"
+                            PROJECTION_GAP_VERIFIED_ONLY
                         };
                         projection_gap(hop, reason)
                     }

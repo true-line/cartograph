@@ -68,6 +68,12 @@ impl ReadSession {
         {
             return Err(ReadError::InvalidRequest);
         }
+        let security = spec::security_projection_bound(
+            self.graph_limits.max_bytes,
+            self.graph_limits.max_rows,
+            self.graph_limits.max_values,
+        )
+        .ok_or(ReadError::Limit)?;
         let flows = match flowtracer::trace_bounded(&self.raw_nodes, &self.raw_edges, trace_limits)
         {
             Ok(flows) => flows,
@@ -78,7 +84,7 @@ impl ReadSession {
                 });
             }
         };
-        let outcome = spec::compile_spec_selected(
+        let outcome = spec::compile_spec_selected_with_security(
             &self.raw_nodes,
             &self.raw_edges,
             &flows,
@@ -86,6 +92,10 @@ impl ReadSession {
             &self.rejected_hashes,
             &[id],
             compile_limits,
+            spec::SecurityLimits {
+                max_rows: security.rows,
+                max_output_bytes: security.bytes,
+            },
         )
         .map_err(|_| ReadError::InvalidRequest)?
         .into_iter()

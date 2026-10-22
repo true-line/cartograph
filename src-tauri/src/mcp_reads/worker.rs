@@ -10,16 +10,19 @@ use std::num::NonZeroUsize;
 use tauri::Manager;
 use tokio::sync::{mpsc, oneshot};
 
+pub(crate) const WORKER_MODEL: &str = "mcp-worker-payload-v1";
+
 #[derive(Clone, Copy)]
 pub(crate) struct WorkerLimits {
+    pub max_request_frame_bytes: NonZeroUsize,
     pub graph: core_graph::SnapshotReadLimits,
     pub coverage: core_graph::coverage::CoverageReadLimits,
     pub scope: super::scope::ScopeLimits,
     pub dispatch: DispatchLimits,
     pub evidence: EvidenceWorkLimits,
-    /// Host-supplied worker accounting reservation. A complete derived minimum
-    /// for raw/projected/index/compiler copies is not yet enforced. Transport
-    /// payload is reserved separately; neither ledger is an RSS guarantee.
+    /// Host-supplied logical worker reservation, checked against the derived
+    /// phase minimum before worker admission. Transport is reserved separately;
+    /// neither ledger is an RSS guarantee.
     pub reserved_bytes: NonZeroUsize,
 }
 
@@ -30,6 +33,7 @@ struct Request {
 
 pub(crate) struct Worker {
     requests: mpsc::Sender<Request>,
+    max_request_frame_bytes: NonZeroUsize,
 }
 impl Worker {
     /// Called only by the authenticated connection factory. Activation policy
@@ -41,6 +45,8 @@ impl Worker {
         limits: WorkerLimits,
         budget: WorkBudget,
     ) -> Result<Self, ReadError> {
+        #[cfg(unix)]
+        validate_reservation(limits)?;
         let permit = budget
             .try_acquire(limits.reserved_bytes, 0)
             .map_err(|_| ReadError::Limit)?;
@@ -100,19 +106,57 @@ impl Worker {
             }
         });
         initialized.await.map_err(|_| ReadError::Storage)??;
-        Ok(Self { requests })
+        Ok(Self {
+            requests,
+            max_request_frame_bytes: limits.max_request_frame_bytes,
+        })
     }
 
     pub(crate) async fn receive(
         &mut self,
         value: serde_json::Value,
     ) -> Result<DispatchAction, ReadError> {
+        let mut counter = RequestCounter {
+            size: 0,
+            limit: self.max_request_frame_bytes.get(),
+        };
+        serde_json::to_writer(&mut counter, &value).map_err(|_| ReadError::Limit)?;
         let (reply, response) = oneshot::channel();
         self.requests
             .send(Request { value, reply })
             .await
             .map_err(|_| ReadError::Storage)?;
         response.await.map_err(|_| ReadError::Storage)?
+    }
+}
+
+#[cfg(unix)]
+fn validate_reservation(limits: WorkerLimits) -> Result<(), ReadError> {
+    let required = super::reservation::worker_bound::WorkerReservation::for_limits(limits)
+        .ok_or(ReadError::Limit)?
+        .required_bytes;
+    if limits.reserved_bytes.get() < required {
+        return Err(ReadError::Limit);
+    }
+    Ok(())
+}
+
+struct RequestCounter {
+    size: usize,
+    limit: usize,
+}
+impl std::io::Write for RequestCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let next = self
+            .size
+            .checked_add(bytes.len())
+            .filter(|n| *n <= self.limit)
+            .ok_or_else(|| std::io::Error::other("request limit"))?;
+        self.size = next;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -141,7 +185,8 @@ pub(crate) mod tests {
         NonZeroUsize::new(n).unwrap()
     }
     pub(crate) fn limits() -> WorkerLimits {
-        WorkerLimits {
+        let limits = WorkerLimits {
+            max_request_frame_bytes: nz(65536),
             graph: core_graph::SnapshotReadLimits::default(),
             coverage: core_graph::coverage::CoverageReadLimits::default(),
             scope: super::super::scope::tests::limits(),
@@ -166,7 +211,61 @@ pub(crate) mod tests {
                 max_span_bytes: NonZeroU64::new(1024).unwrap(),
             },
             reserved_bytes: nz(1_000_000),
-        }
+        };
+        #[cfg(unix)]
+        let limits = {
+            let mut limits = limits;
+            limits.reserved_bytes = nz(
+                super::super::reservation::worker_bound::WorkerReservation::for_limits(limits)
+                    .unwrap()
+                    .required_bytes,
+            );
+            limits
+        };
+        limits
+    }
+    #[cfg(unix)]
+    #[test]
+    fn worker_floor_accepts_exact_and_refuses_one_below() {
+        let mut limits = limits();
+        assert_eq!(validate_reservation(limits), Ok(()));
+        let required =
+            super::super::reservation::worker_bound::WorkerReservation::for_limits(limits)
+                .unwrap()
+                .required_bytes;
+        assert_eq!(limits.reserved_bytes.get(), required);
+        limits.reserved_bytes = nz(required - 1);
+        assert_eq!(validate_reservation(limits), Err(ReadError::Limit));
+    }
+    #[test]
+    fn direct_worker_request_cap_rejects_before_queueing_and_accepts_exact() {
+        tauri::async_runtime::block_on(async {
+            let value = serde_json::json!({"text":"\u{0001}é"});
+            let bytes = serde_json::to_vec(&value).unwrap().len();
+            let (requests, mut incoming) = mpsc::channel::<Request>(1);
+            let mut worker = Worker {
+                requests,
+                max_request_frame_bytes: nz(bytes - 1),
+            };
+            assert_eq!(
+                worker.receive(value.clone()).await.unwrap_err(),
+                ReadError::Limit
+            );
+            assert!(matches!(
+                incoming.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            worker.max_request_frame_bytes = nz(bytes);
+            let expected = value.clone();
+            let responder = tauri::async_runtime::spawn(async move {
+                let request = incoming.recv().await.unwrap();
+                assert_eq!(request.value, expected);
+                request.reply.send(Ok(DispatchAction::Ignore)).unwrap();
+            });
+            let response = worker.receive(value).await;
+            responder.await.unwrap();
+            assert_eq!(response.unwrap(), DispatchAction::Ignore);
+        });
     }
     #[test]
     fn mcp_worker_uses_real_app_stores_and_stops_after_activation_revocation() {
@@ -181,7 +280,7 @@ pub(crate) mod tests {
         app.manage(crate::registered_source_tests::app_state(dir.path()));
         let budget = WorkBudget::new(WorkLimits {
             max_workers: nz(1),
-            max_reserved_bytes: nz(1_000_000),
+            max_reserved_bytes: super::tests::limits().reserved_bytes,
             max_cumulative_read_bytes: 10_000,
         });
         tauri::async_runtime::block_on(async {
@@ -240,7 +339,7 @@ mod native_tests {
         let handle = app.handle().clone();
         let budget = WorkBudget::new(WorkLimits {
             max_workers: nz(1),
-            max_reserved_bytes: nz(1_000_000),
+            max_reserved_bytes: super::tests::limits().reserved_bytes,
             max_cumulative_read_bytes: 100_000,
         });
         tauri::async_runtime::block_on(async move {

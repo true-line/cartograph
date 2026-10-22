@@ -41,6 +41,8 @@ pub enum SelectedArtifactLimit {
     /// Coherent shared projection could not complete within the ADR budget.
     /// This does not report the selected artifact's eventual output size.
     AdrDerivation(crate::AdrLimitExceeded),
+    /// Complete security projection exceeded its explicit admission.
+    SecurityDerivation(crate::SecurityLimitExceeded),
 }
 /// A complete artifact or explicit limit outcome, in official artifact order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,16 +225,37 @@ pub(crate) fn project(
     rejected: &BTreeSet<String>,
     adr: Option<crate::AdrLimits>,
 ) -> Result<Projection, crate::AdrLimitExceeded> {
+    project_with_security(nodes, edges, flows, mode, rejected, adr, None).map_err(|limit| {
+        match limit {
+            SelectedArtifactLimit::AdrDerivation(limit) => limit,
+            _ => unreachable!("legacy projection has no security/output limit"),
+        }
+    })
+}
+fn project_with_security(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    adr: Option<crate::AdrLimits>,
+    security: Option<crate::SecurityLimits>,
+) -> Result<Projection, SelectedArtifactLimit> {
     let (selected_nodes, selected_edges) = project_recovered_facts(nodes, edges, mode, rejected);
     let base_nodes: Vec<_> = selected_nodes.into_iter().cloned().collect();
     let base_edges: Vec<_> = selected_edges.into_iter().cloned().collect();
     let flows = project_flows(flows, mode, rejected);
     let derived = if let Some(limits) = adr {
-        crate::derive_adr_facts_bounded(&base_nodes, &base_edges, &flows, limits)?
+        crate::derive_adr_facts_bounded(&base_nodes, &base_edges, &flows, limits)
+            .map_err(SelectedArtifactLimit::AdrDerivation)?
     } else {
         crate::derive_adr_facts(&base_nodes, &base_edges, &flows)
     };
-    let security = crate::security::derive_security_findings(&base_nodes, &base_edges);
+    let security = match security {
+        Some(limits) => crate::derive_security_findings_bounded(&base_nodes, &base_edges, limits)
+            .map_err(SelectedArtifactLimit::SecurityDerivation)?,
+        None => crate::security::derive_security_findings(&base_nodes, &base_edges),
+    };
     let mut nodes = base_nodes;
     nodes.extend(derived.nodes);
     nodes.extend(security);
@@ -358,6 +381,55 @@ pub fn compile_spec_selected(
     requested_ids: &[&str],
     limits: SelectedCompileLimits,
 ) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
+    compile_selected(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected,
+        (requested_ids, limits, None),
+    )
+}
+
+/// Selected compilation with additional complete security-output admission.
+/// The legacy selected compiler retains its original security behavior. All
+/// produced artifacts preserve ordinary schemas, hashes, content and order.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "additive security admission preserves the existing selected compiler arguments"
+)]
+pub fn compile_spec_selected_with_security(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    requested_ids: &[&str],
+    limits: SelectedCompileLimits,
+    security: crate::SecurityLimits,
+) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
+    compile_selected(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected,
+        (requested_ids, limits, Some(security)),
+    )
+}
+fn compile_selected(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    selection: (
+        &[&str],
+        SelectedCompileLimits,
+        Option<crate::SecurityLimits>,
+    ),
+) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
+    let (requested_ids, limits, security) = selection;
     for (index, id) in requested_ids.iter().enumerate() {
         if !ARTIFACTS.iter().any(|a| a.id == *id) {
             return Err(ArtifactSelectionError::UnknownArtifact { index });
@@ -370,14 +442,22 @@ pub fn compile_spec_selected(
     if selected.is_empty() {
         return Ok(Vec::new());
     }
-    let projection = match project(nodes, edges, flows, mode, rejected, Some(limits.adr)) {
+    let projection = match project_with_security(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected,
+        Some(limits.adr),
+        security,
+    ) {
         Ok(value) => value,
         Err(limit) => {
             return Ok(selected
                 .into_iter()
                 .map(|a| SelectedArtifactOutcome::Limited {
                     artifact_id: a.id.into(),
-                    limit: SelectedArtifactLimit::AdrDerivation(limit),
+                    limit,
                 })
                 .collect());
         }
@@ -454,3 +534,7 @@ pub(crate) fn bundle_from_filtered(
         security_count,
     }
 }
+
+#[cfg(test)]
+#[path = "selected_security_tests.rs"]
+mod security_tests;

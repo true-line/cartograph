@@ -962,6 +962,36 @@ thread_local! {
     static INDEX_RENDERS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};
 }
 
+pub(crate) fn logical_workspace_bytes(bytes: usize, rows: usize, values: usize) -> Option<usize> {
+    use crate::workbench::accounting::{json_bytes, map_slots, set_slots, slots, sum};
+    sum(&[
+        map_slots::<&str, &Node>(rows)?,
+        slots::<&Node>(rows)?, // visible/rules
+        slots::<Observation<'_>>(rows)?,
+        slots::<Assertion<'_>>(rows)?,
+        slots::<GuardedExitEvidence>(rows)?,
+        json_bytes(bytes)?, // retained parsed rule fields
+        json_bytes(bytes)?, // retained typed assertion provenance and omissions
+        slots::<core_graph::omission::Omission>(rows)?,
+        set_slots::<String>(rows)?,
+        bytes,
+        rows.checked_mul(2)?,  // deduplicated asserted edge IDs
+        bytes,                 // current concatenated edge ID before set clone/insertion
+        slots::<&Edge>(rows)?, // one rule's relationships, borrowed
+        map_slots::<Option<(&str, &str)>, Vec<&Observation<'_>>>(rows)?,
+        slots::<(Option<(&str, &str)>, Vec<&Observation<'_>>)>(rows)?,
+        slots::<&Observation<'_>>(rows)?,
+        slots::<RuleFileIndex<'_>>(rows)?,
+        slots::<DisplayString<AssertionText<'_>>>(rows)?, // member IDs
+        slots::<DisplayString<AssertionText<'_>>>(rows)?, // relationship IDs
+        slots::<&Assertion<'_>>(rows)?,
+        slots::<&str>(values)?,
+        rows.checked_mul(usize::MAX.to_string().len().checked_add("R-".len())?)?,
+        std::mem::size_of::<RuleEvidenceIndex<'_>>(),
+        std::mem::size_of::<AssertionView<'_, '_>>(),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

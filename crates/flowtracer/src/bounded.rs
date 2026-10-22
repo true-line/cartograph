@@ -301,8 +301,97 @@ struct ProvenanceView<'a> {
     method: MethodView<'a>,
 }
 impl<'a> ProvenanceView<'a> {
+    // Do not construct source-bearing serde_json diagnostics or buffer an
+    // internally-tagged enum's unknown fields during tracing. Match this private
+    // view's accepted serde shape using borrows and closed enum/scalar checks.
+    fn borrow(value: &'a serde_json::Value) -> Option<Self> {
+        use serde_json::Value;
+        // Serde accepts both a string and an externally tagged unit object for
+        // these two public unit enums. Preserve that historical input behavior.
+        fn unit(value: &Value) -> Option<&str> {
+            match value {
+                Value::String(name) => Some(name),
+                Value::Object(map) if map.len() == 1 => {
+                    let (name, value) = map.iter().next()?;
+                    value.is_null().then_some(name)
+                }
+                _ => None,
+            }
+        }
+        fn field<'v>(value: &'v Value, name: &str, index: usize) -> Option<&'v Value> {
+            match value {
+                Value::Object(map) => map.get(name),
+                Value::Array(values) => values.get(index),
+                _ => None,
+            }
+        }
+        // Derived struct deserializers also accept their positional sequence
+        // representation; the final method field alone has a default.
+        if !value.is_object() && !value.as_array().is_some_and(|v| (5..=6).contains(&v.len())) {
+            return None;
+        }
+        let tier = match unit(field(value, "tier", 0)?)? {
+            "Deterministic" => Tier::Deterministic,
+            "Dynamic" => Tier::Dynamic,
+            "Semantic" => Tier::Semantic,
+            "Agentic" => Tier::Agentic,
+            _ => return None,
+        };
+        let confidence_tier = match unit(field(value, "confidence_tier", 1)?)? {
+            "Confirmed" => ConfidenceTier::Confirmed,
+            "InferredStrong" => ConfidenceTier::InferredStrong,
+            "InferredWeak" => ConfidenceTier::InferredWeak,
+            "Gap" => ConfidenceTier::Gap,
+            _ => return None,
+        };
+        let evidence = field(value, "evidence", 2)?
+            .as_array()?
+            .iter()
+            .map(|entry| {
+                if !entry.is_object() && entry.as_array().is_none_or(|v| v.len() != 5) {
+                    return None;
+                }
+                Some(EvidenceView {
+                    repo: field(entry, "repo", 0)?.as_str()?,
+                    path: field(entry, "path", 1)?.as_str()?,
+                    byte_start: field(entry, "byte_start", 2)?.as_u64()?,
+                    byte_end: field(entry, "byte_end", 3)?.as_u64()?,
+                    commit_sha: field(entry, "commit_sha", 4)?.as_str()?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let method = match field(value, "method", 5) {
+            None => MethodView::Unrecorded,
+            Some(method) => {
+                let kind = field(method, "kind", 0)?.as_str()?;
+                let sequence_len = method.as_array().map(Vec::len);
+                match kind {
+                    "rule" if sequence_len.is_none_or(|n| n == 3) => MethodView::Rule {
+                        rule: field(method, "rule", 1)?.as_str()?,
+                        version: field(method, "version", 2)?.as_str()?,
+                    },
+                    "model" if sequence_len.is_none_or(|n| n == 2) => MethodView::Model {
+                        model: field(method, "model", 1)?.as_str()?,
+                    },
+                    "human" if sequence_len.is_none_or(|n| n == 2) => MethodView::Human {
+                        actor: field(method, "actor", 1)?.as_str()?,
+                    },
+                    "unrecorded" if sequence_len.is_none_or(|n| n == 1) => MethodView::Unrecorded,
+                    _ => return None,
+                }
+            }
+        };
+        Some(Self {
+            tier,
+            confidence_tier,
+            evidence,
+            extractor_id: Cow::Borrowed(field(value, "extractor_id", 3)?.as_str()?),
+            content_hash: Cow::Borrowed(field(value, "content_hash", 4)?.as_str()?),
+            method,
+        })
+    }
     fn new(edge: &'a Edge) -> Self {
-        if let Ok(view) = Self::deserialize(&edge.props["prov"]) {
+        if let Some(view) = Self::borrow(&edge.props["prov"]) {
             let validation = Provenance {
                 tier: view.tier,
                 confidence_tier: view.confidence_tier,
@@ -600,3 +689,8 @@ mod tests {
         }
     }
 }
+
+mod workspace;
+pub use workspace::{
+    TRACE_WORKSPACE_MODEL, TraceGraphBound, TraceWorkspaceBound, logical_workspace_bound,
+};

@@ -8,7 +8,7 @@
 
 #[path = "discovery/bounded.rs"]
 mod bounded;
-pub use bounded::{DiscoveryError, DiscoveryLimits, discover_bounded};
+pub use bounded::{DiscoveryError, DiscoveryLimits, HASH_READ_BUFFER_BYTES, discover_bounded};
 
 use core_prov::content_hash;
 use std::collections::BTreeMap;

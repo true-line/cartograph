@@ -2,7 +2,11 @@
 //!
 //! These units cover named buffers and JSON/header roles, not allocator slack,
 //! SQLite caches, executor tasks, native stacks, kernel buffers or process RSS.
-//! The worker's graph/compiler reservation is a separate, unfinished model.
+//! The worker's phase minimum is composed separately in worker_bound.
+pub(crate) mod evidence;
+pub(crate) mod session;
+pub(crate) mod worker_bound;
+
 use mcp_local::activation::ActivationLimits;
 use serde_json::Value;
 use std::mem::size_of;

@@ -53,7 +53,12 @@ impl Policy {
         let e = w.evidence;
         let a = self.aggregate;
         let worker_budget = self.worker_budget()?;
-        if w.scope.max_sources.get() > context_hub::coverage::MAX_COVERAGE_REPOS
+        let required = super::reservation::worker_bound::WorkerReservation::for_limits(w)
+            .ok_or(ReadError::InvalidRequest)?
+            .required_bytes;
+        if w.max_request_frame_bytes != t.read_frame_bytes
+            || w.reserved_bytes.get() < required
+            || w.scope.max_sources.get() > context_hub::coverage::MAX_COVERAGE_REPOS
             || g.max_bytes == 0
             || g.max_bytes > SnapshotReadLimits::MAX_BYTES
             || g.max_rows == 0
@@ -455,6 +460,17 @@ mod tests {
     }
 
     #[test]
+    fn policy_enforces_exact_worker_floor_and_transport_frame_binding() {
+        let mut candidate = policy();
+        assert_eq!(candidate.validate(), Ok(()));
+        candidate.worker.reserved_bytes = nz(candidate.worker.reserved_bytes.get() - 1);
+        assert_eq!(candidate.validate(), Err(ReadError::InvalidRequest));
+        candidate = policy();
+        candidate.worker.max_request_frame_bytes =
+            nz(candidate.transport.read_frame_bytes.get() - 1);
+        assert_eq!(candidate.validate(), Err(ReadError::InvalidRequest));
+    }
+    #[test]
     fn shared_policy_accepts_exact_existing_numeric_boundaries() {
         use core_graph::{SnapshotReadLimits, coverage::CoverageReadLimits};
         let mut candidate = policy();
@@ -475,7 +491,20 @@ mod tests {
             candidate.worker.evidence.max_file_validation_bytes;
         candidate.aggregate.max_cumulative_read_bytes =
             candidate.worker.evidence.max_file_validation_bytes.get();
-        candidate.worker.reserved_bytes = candidate.worker_budget().unwrap().max_reserved_bytes;
+        candidate.worker.reserved_bytes = nz(
+            super::super::reservation::worker_bound::WorkerReservation::for_limits(
+                candidate.worker,
+            )
+            .unwrap()
+            .required_bytes,
+        );
+        let transport =
+            super::super::reservation::TransportReservation::for_limits(candidate.transport)
+                .unwrap()
+                .activation_bytes;
+        candidate.aggregate.max_reserved_bytes = nz(transport
+            .checked_add(candidate.worker.reserved_bytes.get())
+            .unwrap());
         assert_eq!(candidate.validate(), Ok(()));
     }
 

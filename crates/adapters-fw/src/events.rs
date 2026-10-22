@@ -14,6 +14,8 @@
 //! entry carries the identity of the file that declared it, and that
 //! identity lands in the provenance of every fact the entry produces.
 
+pub mod logical;
+
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
@@ -206,6 +208,7 @@ pub const MAX_REGISTRY_BYTES: usize = 64 * 1024;
 /// Most extension files one layering accepts.
 pub const MAX_EXTENSION_FILES: usize = 32;
 const MAX_ENTRIES: usize = 256;
+const MAX_VERSION_BYTES: usize = 64;
 const SDK_SCHEMA: &str = "cartograph-event-sdk-registry@1";
 const BACKING_SCHEMA: &str = "cartograph-channel-backing-registry@1";
 const BUILTIN_SDKS: &str = include_str!("../registries/event-sdks.json");
@@ -280,7 +283,7 @@ fn valid_name(value: &str) -> bool {
 }
 
 fn valid_version(value: &str) -> bool {
-    (1..=64).contains(&value.len())
+    (1..=MAX_VERSION_BYTES).contains(&value.len())
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))

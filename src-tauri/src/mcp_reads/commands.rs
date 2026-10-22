@@ -80,6 +80,13 @@ pub(crate) enum CommandError {
 #[cfg(unix)]
 impl AdvancedPolicy {
     fn into_policy(self) -> Result<super::service::Policy, CommandError> {
+        let policy = self.materialize();
+        policy.validate().map_err(|_| CommandError::InvalidPolicy)?;
+        Ok(policy)
+    }
+
+    // Pure field conversion; every activation path uses into_policy validation.
+    fn materialize(self) -> super::service::Policy {
         use core_graph::{SnapshotReadLimits, coverage::CoverageReadLimits};
         use std::time::Duration;
         let t = self.transport;
@@ -90,7 +97,7 @@ impl AdvancedPolicy {
         let a = self.aggregate;
         let deadline = Duration::from_millis(t.frame_deadline_ms.get());
         let lifetime = Duration::from_millis(t.session_lifetime_ms.get());
-        let policy = super::service::Policy {
+        super::service::Policy {
             transport: mcp_local::activation::ActivationLimits {
                 max_connections: t.max_connections,
                 read_frame_bytes: t.read_frame_bytes,
@@ -99,6 +106,7 @@ impl AdvancedPolicy {
                 session_lifetime: lifetime,
             },
             worker: super::worker::WorkerLimits {
+                max_request_frame_bytes: t.read_frame_bytes,
                 graph: SnapshotReadLimits {
                     max_bytes: g.max_bytes.get(),
                     max_rows: g.max_rows.get(),
@@ -138,9 +146,7 @@ impl AdvancedPolicy {
                 max_cumulative_read_bytes: a.max_cumulative_read_bytes.get(),
             },
             export_mode: self.export_mode,
-        };
-        policy.validate().map_err(|_| CommandError::InvalidPolicy)?;
-        Ok(policy)
+        }
     }
 }
 
@@ -288,20 +294,21 @@ mod tests {
             "aggregate":{"max_workers":1,"max_reserved_bytes":1,"max_cumulative_read_bytes":1},
             "worker_reserved_bytes":1,"export_mode":"verified-only"
         });
-        let t: TransportPolicy = serde_json::from_value(value["transport"].clone()).unwrap();
-        let baseline = super::super::reservation::TransportReservation::for_limits(
-            mcp_local::activation::ActivationLimits {
-                max_connections: t.max_connections,
-                read_frame_bytes: t.read_frame_bytes,
-                write_frame_bytes: t.write_frame_bytes,
-                frame_deadline: std::time::Duration::from_millis(t.frame_deadline_ms.get()),
-                session_lifetime: std::time::Duration::from_millis(t.session_lifetime_ms.get()),
-            },
-        )
-        .unwrap()
-        .activation_bytes;
+        // Derive the exact logical floor from these explicit fixture inputs.
+        let policy = serde_json::from_value::<AdvancedPolicy>(value.clone())
+            .unwrap()
+            .materialize();
+        let worker =
+            super::super::reservation::worker_bound::WorkerReservation::for_limits(policy.worker)
+                .unwrap()
+                .required_bytes;
+        let baseline =
+            super::super::reservation::TransportReservation::for_limits(policy.transport)
+                .unwrap()
+                .activation_bytes;
+        value["worker_reserved_bytes"] = serde_json::json!(worker);
         value["aggregate"]["max_reserved_bytes"] =
-            serde_json::json!(baseline.checked_add(1).unwrap());
+            serde_json::json!(baseline.checked_add(worker).unwrap());
         value
     }
     #[test]
@@ -313,6 +320,15 @@ mod tests {
                 .into_policy()
                 .is_ok()
         );
+        let mut below_floor = input();
+        let floor = below_floor["worker_reserved_bytes"].as_u64().unwrap();
+        below_floor["worker_reserved_bytes"] = serde_json::json!(floor - 1);
+        assert!(matches!(
+            serde_json::from_value::<AdvancedPolicy>(below_floor)
+                .unwrap()
+                .into_policy(),
+            Err(CommandError::InvalidPolicy)
+        ));
         let mut missing = input();
         missing["transport"]
             .as_object_mut()

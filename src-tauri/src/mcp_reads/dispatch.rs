@@ -249,9 +249,31 @@ impl<'state> Dispatcher<'state> {
     }
 
     fn capabilities(&self) -> Value {
-        json!({"session_id":self.session_id,"basis_id":self.basis_id,"basis":self.session.basis(),"implemented_tools":self.implemented().into_iter().map(ReadTool::name).collect::<Vec<_>>(),"structured_content_required":true,"h3_curated_available":false,"evidence_available":self.evidence.is_some(),"evidence_absence_reason_available":false,"receipt_omission_classification":{"available":false,"pending_issue":725},"context_fact_kinds":["node","edge"],"discovery_fact_kinds":["node"],"relations_access":{"via":"official_artifacts","query_tool_available":false},"flows_access":{"via":"official_artifact","artifact_id":"flow-dossiers"},"limits":{"graph":{"scope":"complete_recovered_graph","max_rows":self.session.graph_limits.max_rows,"hard_max_rows":core_graph::SnapshotReadLimits::MAX_ROWS,"max_bytes":self.session.graph_limits.max_bytes,"max_depth":self.session.graph_limits.max_depth,"max_values":self.session.graph_limits.max_values},"max_response_bytes":self.limits.max_response_bytes.get(),"max_request_ids":self.limits.max_request_ids.get(),"evidence":self.evidence.as_ref().map(|backend|json!({"max_file_validation_bytes":backend.limits.max_file_validation_bytes.get(),"max_span_bytes":backend.limits.max_span_bytes.get()})),"trace":{"max_flows":self.limits.trace.max_flows,"max_hops":self.limits.trace.max_hops,"max_output_bytes":self.limits.trace.max_output_bytes},"selected_compile":{"max_bytes":self.limits.compile.max_bytes,"adr":{"max_rows":self.limits.compile.adr.max_rows,"max_output_bytes":self.limits.compile.adr.max_output_bytes}}}})
+        capabilities_value(
+            &self.session_id,
+            &self.basis_id,
+            self.session.basis(),
+            &self.implemented(),
+            self.session.graph_limits,
+            self.limits,
+            self.evidence.as_ref().map(|b| b.limits),
+        )
     }
 }
+
+fn capabilities_value(
+    session_id: &str,
+    basis_id: &str,
+    basis: &super::ReadBasis,
+    tools: &[ReadTool],
+    graph: core_graph::SnapshotReadLimits,
+    limits: DispatchLimits,
+    evidence: Option<EvidenceWorkLimits>,
+) -> Value {
+    json!({"session_id":session_id,"basis_id":basis_id,"basis":basis,"implemented_tools":tools.iter().copied().map(ReadTool::name).collect::<Vec<_>>(),"worker_reservation_model":super::worker::WORKER_MODEL,"structured_content_required":true,"h3_curated_available":false,"evidence_available":evidence.is_some(),"evidence_absence_reason_available":false,"receipt_omission_classification":{"available":false,"pending_issue":725},"context_fact_kinds":["node","edge"],"discovery_fact_kinds":["node"],"relations_access":{"via":"official_artifacts","query_tool_available":false},"flows_access":{"via":"official_artifact","artifact_id":"flow-dossiers"},"limits":{"graph":{"scope":"complete_recovered_graph","max_rows":graph.max_rows,"hard_max_rows":core_graph::SnapshotReadLimits::MAX_ROWS,"max_bytes":graph.max_bytes,"max_depth":graph.max_depth,"max_values":graph.max_values},"max_response_bytes":limits.max_response_bytes.get(),"max_request_ids":limits.max_request_ids.get(),"evidence":evidence.map(|e|json!({"max_file_validation_bytes":e.max_file_validation_bytes.get(),"max_span_bytes":e.max_span_bytes.get()})),"trace":{"max_flows":limits.trace.max_flows,"max_hops":limits.trace.max_hops,"max_output_bytes":limits.trace.max_output_bytes},"selected_compile":{"max_bytes":limits.compile.max_bytes,"adr":{"max_rows":limits.compile.adr.max_rows,"max_output_bytes":limits.compile.adr.max_output_bytes}}}})
+}
+mod logical;
+pub(crate) use logical::logical_protocol_workspace_bytes;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -407,6 +429,9 @@ fn limit_value(limit: ArtifactLimit) -> Value {
         }
         ArtifactLimit::Compiler(spec::SelectedArtifactLimit::AdrDerivation(limit)) => {
             json!({"stage":"adr_derivation","resource":match limit.limit {spec::AdrLimit::Rows=>"rows",spec::AdrLimit::OutputBytes=>"output_bytes"},"maximum":limit.maximum})
+        }
+        ArtifactLimit::Compiler(spec::SelectedArtifactLimit::SecurityDerivation(limit)) => {
+            json!({"stage":"security_derivation","resource":match limit.limit {spec::SecurityLimit::Rows=>"rows",spec::SecurityLimit::OutputBytes=>"output_bytes"},"maximum":limit.maximum})
         }
     }
 }

@@ -23,16 +23,29 @@ impl std::fmt::Display for PinnedReadError {
 
 impl std::error::Error for PinnedReadError {}
 
+type AdmittedReceiptFields = (Option<String>, Option<String>, Option<String>);
+
 pub(super) fn stored_receipt(conn: &Connection, id: &str) -> Result<Receipt, PinnedReadError> {
-    let row: Option<(String, String, String)> = conn
+    // CASE projections keep malformed/oversized cells inside SQLite. They are
+    // never copied into Rust Strings before admission. One statement also
+    // preserves a coherent selection for callers already holding a transaction.
+    let payload_limit =
+        i64::try_from(captured::MAX_RECEIPT_BYTES).map_err(|_| PinnedReadError::Invalid)?;
+    let row: Option<AdmittedReceiptFields> = conn
         .query_row(
-            "SELECT source_id,repo_key,payload FROM receipts WHERE id=?1",
-            [id],
+            "SELECT
+               CASE WHEN typeof(source_id)='text' AND length(CAST(source_id AS BLOB)) BETWEEN 1 AND 256 THEN source_id END,
+               CASE WHEN typeof(repo_key)='text' AND length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256 THEN repo_key END,
+               CASE WHEN typeof(payload)='text' AND length(CAST(payload AS BLOB)) BETWEEN 1 AND ?2 THEN payload END
+             FROM receipts WHERE id=?1",
+            params![id, payload_limit],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(|_| PinnedReadError::Operational)?;
-    let (source, repo, json) = row.ok_or(PinnedReadError::Unavailable)?;
+    let (Some(source), Some(repo), Some(json)) = row.ok_or(PinnedReadError::Unavailable)? else {
+        return Err(PinnedReadError::Invalid);
+    };
     let receipt = Receipt::from_json(&json).map_err(|_| PinnedReadError::Invalid)?;
     if receipt.id() != id
         || receipt.source_id().as_str() != source
@@ -229,3 +242,7 @@ impl PrimarySourceStore {
             .map_err(capture_error)
     }
 }
+
+#[cfg(test)]
+#[path = "pinned/preflight_tests.rs"]
+mod preflight_tests;

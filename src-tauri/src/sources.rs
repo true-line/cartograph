@@ -14,10 +14,11 @@ pub(crate) use retained_view::{RetainedSourceError, RetainedSourceView};
 
 // Bound UTF-8 byte lengths before fetching retained strings. Paths allow the
 // Windows long-path range; origin validation additionally applies ingest's cap.
-const MAX_PATH_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_PATH_BYTES: usize = 128 * 1024;
 const MAX_ORIGIN_BYTES: usize = 128 * 1024;
 const MAX_DISPLAY_BYTES: usize = 4096;
 const MAX_REPO_BYTES: usize = 512;
+const ID_SUFFIX_BYTES: usize = 32;
 const ID_RETRIES: usize = 8;
 const JOB_PREFIX: &str = "ingest-source-v1:";
 const STORE_ERROR: &str = "Source registry storage is unavailable or invalid";
@@ -41,6 +42,48 @@ pub struct RegisteredSource {
     ready: bool,
     registry_id: String,
     app_data_dir: PathBuf,
+}
+
+/// Per-row host owner metadata copied in addition to admitted SQL text.
+pub(crate) fn source_owner_metadata_bytes(rows: usize) -> Option<usize> {
+    rows.checked_mul(
+        MAX_PATH_BYTES
+            .checked_add("reg_".len())?
+            .checked_add(ID_SUFFIX_BYTES)?,
+    )
+}
+
+/// One selected registry observation, including its validation temporaries.
+/// lookup's coherent check_state SQL bounds every raw cell before decoding.
+/// Logical payload/header roles only; allocator slack and SQLite are excluded.
+pub(crate) fn selected_source_peak_bytes() -> Option<usize> {
+    use context_hub::logical::{slots, sum};
+    sum(&[
+        "src_".len().checked_add(ID_SUFFIX_BYTES)?,
+        MAX_REPO_BYTES,
+        MAX_PATH_BYTES, // decoded root
+        MAX_DISPLAY_BYTES,
+        "managed".len(),
+        MAX_ORIGIN_BYTES,  // origin key
+        MAX_ORIGIN_BYTES,  // clone URL
+        MAX_REPO_BYTES,    // optional GitHub repository
+        MAX_DISPLAY_BYTES, // ManagedOrigin display clone
+        source_owner_metadata_bytes(1)?,
+        MAX_REPO_BYTES, // expected_repo validation clone
+        MAX_PATH_BYTES
+            .checked_add("/sources/src_/checkout".len())?
+            .checked_add(ID_SUFFIX_BYTES)?, // ManagedCheckout root
+        MAX_PATH_BYTES
+            .checked_add("/sources/src_".len())?
+            .checked_add(ID_SUFFIX_BYTES)?, // ManagedCheckout slot
+        MAX_PATH_BYTES, // ManagedCheckout app_data_dir
+        MAX_PATH_BYTES.checked_add("/sources".len())?, // intermediate join
+        "reg_".len().checked_add(ID_SUFFIX_BYTES)?, // ManagedCheckout registry identity
+        "src_".len().checked_add(ID_SUFFIX_BYTES)?, // ManagedCheckout source identity
+        slots::<RegisteredSource>(1)?,
+        std::mem::size_of::<ingest::managed::ManagedCheckout>(),
+        "reg_".len().checked_add(ID_SUFFIX_BYTES)?, // check_state return
+    ])
 }
 
 impl RegisteredSource {
@@ -351,7 +394,7 @@ impl SourceRegistry {
 
 fn valid_id(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(|suffix| {
-        suffix.len() == 32
+        suffix.len() == ID_SUFFIX_BYTES
             && suffix
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))

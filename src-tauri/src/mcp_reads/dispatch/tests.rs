@@ -394,3 +394,21 @@ fn limited_artifacts_preserve_stage_and_obey_client_cap() {
         "response_limit"
     );
 }
+
+#[test]
+fn security_derivation_limits_preserve_closed_stage_resource_shape() {
+    for (resource, name) in [
+        (spec::SecurityLimit::Rows, "rows"),
+        (spec::SecurityLimit::OutputBytes, "output_bytes"),
+    ] {
+        assert_eq!(
+            limit_value(ArtifactLimit::Compiler(
+                spec::SelectedArtifactLimit::SecurityDerivation(spec::SecurityLimitExceeded {
+                    limit: resource,
+                    maximum: 7
+                })
+            )),
+            json!({"stage":"security_derivation","resource":name,"maximum":7})
+        );
+    }
+}

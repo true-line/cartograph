@@ -7,6 +7,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Streaming hash input buffer; artifact bodies are never materialized.
+pub const HASH_READ_BUFFER_BYTES: usize = 8192;
+
 /// Explicit aggregate admission across every supplied root and directory entry.
 #[derive(Debug, Clone, Copy)]
 pub struct DiscoveryLimits {
@@ -198,7 +201,7 @@ fn scan(
 
 fn hash_reader(reader: &mut impl Read, remaining: &mut u64) -> Result<String, DiscoveryError> {
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 8192];
+    let mut buffer = [0_u8; HASH_READ_BUFFER_BYTES];
     loop {
         let take = buffer
             .len()

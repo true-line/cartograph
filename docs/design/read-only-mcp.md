@@ -277,8 +277,8 @@ The MCP worker uses scalar plugin enablement and exact gate checks, bounded
 streaming artifact hashes, bounded corpus reads before parsing, and bounded
 source-registry and event-directory materialization. Official accepted event
 registry identities and bounded malformed-file rejections match normal reads.
-These input ceilings do not establish a complete allocation model or an RSS
-bound; the host-supplied worker reservation still requires separate validation.
+These input ceilings feed the derived logical worker minimum described below.
+They do not establish an allocator or RSS bound.
 
 
 Client configuration points to the packaged sibling `cartograph-mcp` executable
@@ -385,8 +385,22 @@ receives only the aggregate remainder; overflow or insufficient space rejects
 activation. Logical JSON header/index charges are deliberately uniform accounting
 units, not claims about allocator or B-tree layout.
 
-The caller-supplied worker reservation still lacks a derived complete graph,
-projection and compiler minimum. Transport accounting excludes allocator slack,
-SQLite/executor/kernel caches and native stacks; it is not a heap/RSS ceiling.
-Receipt payload SQL preflight and the complete worker phase model remain open.
-Aggregate reservation tests do not prove total worker memory containment.
+The `mcp-worker-payload-v1` model derives a minimum from module-owned acquisition,
+retained session, tracing, projection/compiler, discovery, evidence and protocol
+construction roles. Admission reserves the greater of acquisition and retained
+session plus request IDs, decoded arguments and the largest sequential request
+phase. Checked arithmetic rejects overflow. Activation and direct worker startup
+reject a caller reservation below this minimum; the worker also counts request
+serialization before queueing and enforces the activation's input-frame bound.
+Fixed tool schemas and capability metadata are counted even when the configured
+response ceiling is smaller than their construction workspace. Security-derived
+rows and bytes are admitted before supporting-node materialization.
+
+Receipt lookup checks SQL cell type and byte length before decoding identity or
+payload fields, then applies the existing canonical receipt validation. Missing
+and malformed rows remain distinct; no omission or forgotten classification is
+inferred from either result.
+
+Both logical accounting models exclude allocator slack, SQLite/executor/kernel
+caches and native stacks; neither is a heap/RSS ceiling. The tests establish
+checked admission and logical role coverage, not total process memory containment.

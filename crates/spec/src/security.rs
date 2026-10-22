@@ -1,5 +1,16 @@
 //! Deterministic security projection over explicit auth and IAM facts (US-0015).
 
+mod bounded;
+mod maxima;
+mod support;
+#[cfg(test)]
+pub(crate) use bounded::MATERIALIZED as SECURITY_OUTPUT_MATERIALIZATIONS;
+pub use bounded::{
+    SecurityLimit, SecurityLimitExceeded, SecurityLimits, SecurityProjectionSize,
+    derive_security_findings_bounded, security_projection_size,
+};
+pub use maxima::security_projection_bound;
+
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance, Tier};
 

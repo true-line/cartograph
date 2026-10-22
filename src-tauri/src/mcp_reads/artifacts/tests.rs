@@ -353,3 +353,63 @@ fn full_response_caps_count_escaped_text_and_exact_metadata_envelope() {
         }
     }
 }
+
+#[test]
+fn security_reservation_bound_overflow_fails_before_tracing_or_compilation() {
+    // AC-0288: derived admission is checked, never silently saturated.
+    let mut session = fixture(ExportMode::VerifiedOnly);
+    session.graph_limits.max_bytes = usize::MAX;
+    assert!(matches!(
+        session.compile_artifact("topology", trace_limits(), compile_limits()),
+        Err(ReadError::Limit)
+    ));
+    assert!(matches!(
+        session.compile_artifact("unknown", trace_limits(), compile_limits()),
+        Err(ReadError::InvalidRequest)
+    ));
+}
+
+#[test]
+fn mcp_security_artifact_preserves_legacy_compiler_identity() {
+    let source = fixture(ExportMode::BestEffort);
+    let mut endpoint = source.raw_nodes[0].clone();
+    endpoint.id = "endpoint:public".into();
+    endpoint.label = "Endpoint".into();
+    endpoint.props["authenticated"] = json!(false);
+    endpoint.props["method"] = json!("GET");
+    endpoint.props["path"] = json!("/public\0\n\"\\🧭");
+    let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+    graph.put_node(&endpoint).unwrap();
+    let session = ReadSession::acquire(
+        &Mutex::new(graph),
+        &Mutex::new(DecisionLog::open(":memory:").unwrap()),
+        || Ok(vec![]),
+        SnapshotReadLimits::default(),
+        CoverageReadLimits::default(),
+        ExportMode::BestEffort,
+    )
+    .unwrap();
+    let ArtifactCompilation::Produced(actual) = session
+        .compile_artifact("security-view", trace_limits(), compile_limits())
+        .unwrap()
+    else {
+        panic!("admitted security fixture")
+    };
+    let flows =
+        flowtracer::trace_bounded(&session.raw_nodes, &session.raw_edges, trace_limits()).unwrap();
+    let expected = spec::compile_spec_selected(
+        &session.raw_nodes,
+        &session.raw_edges,
+        &flows,
+        session.basis.export_mode,
+        &session.rejected_hashes,
+        &["security-view"],
+        compile_limits(),
+    )
+    .unwrap();
+    let spec::SelectedArtifactOutcome::Produced(expected) = &expected[0] else {
+        panic!("legacy security fixture")
+    };
+    assert_eq!(&actual.artifact, expected);
+    assert!(actual.artifact.content.contains("Unauthenticated endpoint"));
+}
