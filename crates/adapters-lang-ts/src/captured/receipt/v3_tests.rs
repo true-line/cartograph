@@ -253,3 +253,37 @@ fn receipt_wire_rejects_duplicate_keys_and_explicit_null_commit() {
     null_commit["content"]["commit_sha"] = serde_json::Value::Null;
     assert!(Receipt::from_json(&serde_json::to_string(&null_commit).unwrap()).is_err());
 }
+
+#[test]
+fn expansion_preflight_is_exact_for_the_ranges_validate_measures() {
+    // #745 review: the decoder sizes the v2-shaped expansion before cloning
+    // shared identity into each range. It must equal the real serialization,
+    // so it neither admits an oversized expansion nor rejects a valid receipt.
+    let (_, v3) = captured_rule_receipt();
+    let wire: Vec<WireRange> = v3
+        .ranges()
+        .iter()
+        .map(|range| {
+            WireRange::Compact(CompactRange {
+                role: range.role,
+                index: range.index,
+                byte_start: range.evidence.byte_start,
+                byte_end: range.evidence.byte_end,
+            })
+        })
+        .collect();
+    let commit = v3.content.commit_sha.as_deref().unwrap();
+    assert_eq!(
+        expanded_range_bytes(&wire, v3.repo_key(), v3.file(), commit),
+        Some(serde_json::to_vec(v3.ranges()).unwrap().len())
+    );
+    assert_eq!(
+        expanded_range_bytes(&[], v3.repo_key(), v3.file(), commit),
+        Some(2)
+    );
+    let mixed = vec![WireRange::Full(v3.ranges()[0].clone())];
+    assert_eq!(
+        expanded_range_bytes(&mixed, v3.repo_key(), v3.file(), commit),
+        None
+    );
+}

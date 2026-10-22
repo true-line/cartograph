@@ -354,6 +354,56 @@ impl Serialize for Content {
     }
 }
 
+/// Exact serialized size of the v2-shaped ranges a v3 range list expands to,
+/// computed without cloning the shared identity into each range. It is a lower
+/// bound on the expanded receipt that `validate()` measures, so preflighting
+/// it never rejects a receipt `validate()` would accept, while a near-limit
+/// compact payload can't allocate its expansion first. `None` if not a v3
+/// compact list or the arithmetic overflows.
+fn expanded_range_bytes(
+    ranges: &[WireRange],
+    repo_key: &str,
+    file: &CaptureFileRef,
+    commit_sha: &str,
+) -> Option<usize> {
+    let digits = |value: u64| value.checked_ilog10().map_or(1, |log| log as usize + 1);
+    // One template range with every variable part zero-length or "0".
+    let template = serde_json::to_vec(&ReceiptRange {
+        role: RangeRole::Provenance,
+        index: 0,
+        evidence: EvidenceRef {
+            repo: repo_key.to_owned(),
+            path: file.path.clone(),
+            byte_start: 0,
+            byte_end: 0,
+            commit_sha: commit_sha.to_owned(),
+        },
+        captured: CaptureSpanRef {
+            file: file.clone(),
+            byte_start: 0,
+            byte_end: 0,
+        },
+    })
+    .ok()?
+    .len();
+    let provenance = serde_json::to_vec(&RangeRole::Provenance).ok()?.len();
+    let fixed = template.checked_sub(provenance + 5)?;
+    let mut total = ranges.len().saturating_sub(1) + 2;
+    for range in ranges {
+        let WireRange::Compact(range) = range else {
+            return None;
+        };
+        let role = serde_json::to_vec(&range.role).ok()?.len();
+        total = total
+            .checked_add(fixed)?
+            .checked_add(role)?
+            .checked_add(digits(u64::from(range.index)))?
+            .checked_add(2 * digits(range.byte_start))?
+            .checked_add(2 * digits(range.byte_end))?;
+    }
+    Some(total)
+}
+
 impl<'de> Deserialize<'de> for Content {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = WireContent::deserialize(deserializer)?;
@@ -369,11 +419,17 @@ impl<'de> Deserialize<'de> for Content {
                     WireRange::Compact(_) => Err(()),
                 })
                 .collect::<Result<Vec<_>, ()>>(),
+            (3, Some(commit_sha))
+                if expanded_range_bytes(&wire.ranges, &wire.repo_key, &wire.file, commit_sha)
+                    .is_none_or(|bytes| bytes > MAX_RECEIPT_BYTES) =>
+            {
+                return Err(serde::de::Error::custom("receipt expansion exceeds limit"));
+            }
             (3, Some(commit_sha)) => wire
                 .ranges
                 .into_iter()
                 .map(|range| match range {
-                    // Expansion is bounded by the range-count check above.
+                    // `expanded_range_bytes` admitted these clones above.
                     WireRange::Compact(range) => Ok(ReceiptRange {
                         role: range.role,
                         index: range.index,
