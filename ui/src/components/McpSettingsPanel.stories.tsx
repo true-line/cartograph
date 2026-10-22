@@ -3,7 +3,7 @@ import { expect, fn, userEvent, within } from 'storybook/test';
 import { McpSettingsPanel } from './McpSettingsPanel';
 const meta = {
   title: 'Surfaces/McpSettingsPanel', component: McpSettingsPanel,
-  args: { status: 'disabled', busy: false, available: true, error: null, configuration: null,
+  args: { status: 'disabled', busy: false, available: true, error: null, configuration: null, skill: null, skillBusy: false, onSkill: fn(),
     onEnable: fn(), onDisable: fn(), onRefresh: fn(), onConfiguration: fn() },
 } satisfies Meta<typeof McpSettingsPanel>;
 export default meta;

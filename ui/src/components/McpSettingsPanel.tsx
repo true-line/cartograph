@@ -1,12 +1,19 @@
 import { useState } from 'react';
 
 export type McpStatus = 'disabled' | 'running' | 'stopped' | 'draining' | 'cleanup_failed' | 'unavailable';
+export type McpClientSkill = { status: 'unavailable' } | {
+  status: 'available'; app_version: string; skill_path: string;
+  files: { path: string; content: string }[];
+};
 export interface McpSettingsPanelProps {
   status: McpStatus;
   busy: boolean;
   available: boolean;
   error: string | null;
   configuration: string | null;
+  skill: McpClientSkill | null;
+  skillBusy: boolean;
+  onSkill: () => void;
   onEnable: (policy: Record<string, unknown>) => void;
   onDisable: () => void;
   onRefresh: () => void;
@@ -66,7 +73,21 @@ export function McpSettingsPanel(props: McpSettingsPanelProps) {
       <button disabled={disabled} onClick={props.onRefresh}>Refresh read service</button>
       <button disabled={disabled || props.status !== 'running'}
         onClick={props.onConfiguration}>Show client configuration</button>
+      <button disabled={!props.available || props.skillBusy} onClick={props.onSkill}>
+        {props.skillBusy ? 'Loading packaged client skill…' : 'Show packaged client skill'}
+      </button>
     </div>
+    {props.skill?.status === 'unavailable' && <p role="alert">The packaged client skill is unavailable or does not match this build. Reinstall a complete matching app bundle.</p>}
+    {props.skill?.status === 'available' && <section className="mcp-client-skill" aria-label="Packaged client skill">
+      <h4>Client skill · Cartograph {props.skill.app_version}</h4>
+      <p>Skill location: <code>{props.skill.skill_path}</code></p>
+      <p>Read SKILL.md first, then open references as needed. To install, use your client’s supported skill installation workflow with this complete folder.
+        To remove it, use that client’s removal workflow. Installation and removal are separate requested actions;
+        showing these files does not change client settings or enable read access.</p>
+      {props.skill.files.map((file) => file.path === 'SKILL.md'
+        ? <pre key={file.path} aria-label="Packaged SKILL.md">{file.content}</pre>
+        : <details key={file.path}><summary>{file.path}</summary><pre>{file.content}</pre></details>)}
+    </section>}
     {props.status === 'draining' && <p>Previous reads are finishing. Refresh before enabling a new session.</p>}
     {props.status === 'cleanup_failed' && <p role="alert">Read access was revoked, but endpoint cleanup could not be verified. New access is blocked.</p>}
     {props.error && <p role="alert">{props.error}</p>}

@@ -1421,8 +1421,13 @@ See [native acceptance](acceptance/read-only-mcp-native.md) for exact client,
 builds, transcripts, measurements and limitations. No model/provider run is required or
 implicitly authorized by this procedure.
 
-1. Record independent client/version, MCP protocol, packaged app/relay build and
-   fixed fixture basis. Follow the shipped skill from capability discovery to a
+1. With read access disabled, use Show packaged client skill beside client
+   configuration. Record the app version and verified skill location; check the
+   entrypoint and all reference files against the built revision. On a disposable
+   bundle copy, remove or modify a packaged reference and confirm explicit
+   unavailability without service activation or client settings changes. Restore
+   the fixture before continuing. Record independent client/version, MCP protocol,
+   packaged app/relay build and fixed fixture basis. Follow the shipped skill from capability discovery to a
    narrowly scoped query, official artifact page and exact retained source span.
 2. Save a redacted transcript with schemas, request IDs, qualified responses,
    citations and explicit limited/stale/unavailable outcomes. Verify retrieved
