@@ -31,6 +31,7 @@ export interface RepoCoverage {
   inventory: string;
   repo: string;
   commit: string;
+  commit_note?: string;
   layer_hints: string[];
   producers: ProducerCoverage[];
   missing_inputs: MissingInput[];

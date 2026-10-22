@@ -20,6 +20,7 @@ mod job_execution;
 #[cfg(test)]
 mod job_execution_host_tests;
 mod jobs;
+mod local_commit;
 mod metrics;
 #[cfg(test)]
 mod name_unique_tests;
@@ -1087,6 +1088,7 @@ fn coverage_record(
 fn repo_coverage(
     repo: &str,
     commit: &str,
+    commit_note: Option<&str>,
     hints: &[String],
     layers: &LayerBreakdown,
     extraction: &adapters_lang_ts::Extraction,
@@ -1111,6 +1113,7 @@ fn repo_coverage(
     RepoCoverage::from_facts(&CoverageFacts {
         repo,
         commit,
+        commit_note,
         layer_hints: hints,
         deterministic: vec![
             (
@@ -3785,6 +3788,8 @@ fn run_ingest<R: tauri::Runtime>(
     report_progress(app, state, execution, "scan", 5.0)?;
     let root = operation.root(&source.repo_key).map_err(&fail)?;
     let repo = source.repo_key.clone();
+    let local = local_commit::local_commit(root);
+    let commit = local.as_str();
 
     cancelled()?;
     report_progress(app, state, execution, "extract", 15.0)?;
@@ -3807,7 +3812,7 @@ fn run_ingest<R: tauri::Runtime>(
         extract_tree_with_registries(
             root,
             &repo,
-            "workdir",
+            commit,
             &[],
             &std::collections::BTreeMap::new(),
             &std::collections::BTreeSet::new(),
@@ -3845,7 +3850,8 @@ fn run_ingest<R: tauri::Runtime>(
     .map_err(&fail)?;
     let coverage = repo_coverage(
         &repo,
-        "workdir",
+        commit,
+        local.commit_note(),
         &[],
         &layers,
         &extraction,
@@ -3869,6 +3875,9 @@ fn run_ingest<R: tauri::Runtime>(
         coverage_record(&coverage, source, job_id, &active_plugins, &registries).map_err(&fail)?;
     report_progress(app, state, execution, "load", 70.0)?;
     let mut published = OperationFacts::default();
+    // Everything recovery reads from `root` has been read; recheck before
+    // taking the graph lock so a full status scan never blocks other jobs.
+    local.ensure_unchanged(root).map_err(&fail)?;
     {
         let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
         ensure_running_job(state, execution)?;
@@ -3878,7 +3887,7 @@ fn run_ingest<R: tauri::Runtime>(
                 &extraction,
                 &repo,
                 root,
-                "workdir",
+                commit,
                 &bindings,
                 Some(&record),
             )
@@ -3899,7 +3908,7 @@ fn run_ingest<R: tauri::Runtime>(
         state,
         job_id,
         &repo,
-        "workdir",
+        commit,
         &layers,
         &std::collections::BTreeSet::from([repo.clone()]),
     )
@@ -3914,7 +3923,7 @@ fn run_ingest<R: tauri::Runtime>(
     {
         let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
         let job = updated_job(
-            jobs.finish_execution(execution, &[format!("graph:{repo}@workdir")])
+            jobs.finish_execution(execution, &[format!("graph:{repo}@{commit}")])
                 .map_err(|e| e.to_string())?,
         );
         emit_job(app, &job);
@@ -4267,6 +4276,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
     let coverage = repo_coverage(
         &source.repo_key,
         &cloned.commit_sha,
+        None,
         &[],
         &layers,
         &extraction,
@@ -4483,13 +4493,13 @@ fn add_system_blocking<R: tauri::Runtime>(
         }
         let root = operation.root(&source.repo_key).map_err(&fail)?;
         let repo = source.repo_key.clone();
-        let commit = if *remote {
-            cloned_commits
+        let local = (!*remote).then(|| local_commit::local_commit(root));
+        let commit = match &local {
+            Some(local) => local.as_str().to_string(),
+            None => cloned_commits
                 .get(&source.source_id)
                 .ok_or("missing managed clone result")?
-                .clone()
-        } else {
-            "workdir".to_string()
+                .clone(),
         };
         // state_json travels with the manifest, so it resolves against the
         // manifest dir — same rule as local repo paths.
@@ -4550,6 +4560,9 @@ fn add_system_blocking<R: tauri::Runtime>(
         let coverage = repo_coverage(
             &repo,
             &commit,
+            local
+                .as_ref()
+                .and_then(local_commit::LocalCommit::commit_note),
             &entry.layers,
             &repo_layers,
             &extraction,
@@ -4582,6 +4595,10 @@ fn add_system_blocking<R: tauri::Runtime>(
             repo_delta.reused_files,
             repo_delta.deleted_files,
         );
+        // Recheck outside the graph lock; `root` is fully read by now.
+        if let Some(local) = &local {
+            local.ensure_unchanged(root).map_err(&fail)?;
+        }
         {
             let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
             ensure_running_job(&state, &execution)?;
@@ -11026,6 +11043,7 @@ export function App() {
         let coverage = super::repo_coverage(
             &repo,
             "workdir",
+            None,
             &[],
             &layers,
             &extraction,

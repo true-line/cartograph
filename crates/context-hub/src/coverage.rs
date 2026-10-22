@@ -152,6 +152,14 @@ fn derive(repo: &str, inventory_json: &str) -> Result<Derived, ContextError> {
         .as_str()
         .ok_or_else(invalid)?
         .to_string();
+    if let Some(note) = inventory.get("commit_note")
+        && !note.is_null()
+        && !note
+            .as_str()
+            .is_some_and(|text| text.len() <= 256 && !text.contains('\0'))
+    {
+        return Err(invalid());
+    }
     let layer_hints = inventory["layer_hints"]
         .as_array()
         .ok_or_else(invalid)?

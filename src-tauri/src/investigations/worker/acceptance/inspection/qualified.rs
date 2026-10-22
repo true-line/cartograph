@@ -9,7 +9,7 @@ const PREVIEW_CAPACITY: usize = 1024 * 1024; // Conservative fixture-only previe
 const GATE_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn inventory(repo: &str) -> String {
-    serde_json::to_string(&RepoCoverage {inventory:ingest::coverage::INVENTORY_ID.into(),repo:repo.into(),commit:"workdir".into(),layer_hints:vec![],
+    serde_json::to_string(&RepoCoverage {inventory:ingest::coverage::INVENTORY_ID.into(),repo:repo.into(),commit:"workdir".into(),commit_note:None,layer_hints:vec![],
         producers:vec![ProducerCoverage {id:"harness-generated-synthetic-control@1".into(),kind:ProducerKind::Observational,
             covers:"synthetic control input".into(),state:ProducerState::MissingInput,files:0,nodes:0,edges:0,inputs:vec![],
             stopping_reason:"Harness-generated synthetic control inventory: the named control producer did not run because its optional control input was not declared. This record is not a full ingest-pipeline coverage claim.".into()}],

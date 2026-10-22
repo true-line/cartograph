@@ -55,6 +55,7 @@ fn inventory_reports_each_producer_input_and_capability_with_a_scoped_reason() {
     let facts = CoverageFacts {
         repo: "acme/api",
         commit: "0123abc",
+        commit_note: None,
         layer_hints: &hints,
         deterministic: vec![
             ("t0.adapter-ts", count(4)),
@@ -169,6 +170,7 @@ fn inventory_is_limited_only_by_recorded_exclusions_missing_inputs_or_unsupporte
     let facts = CoverageFacts {
         repo: "local/app",
         commit: "workdir",
+        commit_note: None,
         layer_hints: &[],
         deterministic: vec![("t0.adapter-ts", count(3))],
         plugins: Vec::new(),
@@ -223,6 +225,7 @@ fn excluded_observation_reports_a_declared_input_as_unread() {
     let facts = CoverageFacts {
         repo: "acme/api",
         commit: "0123abc",
+        commit_note: None,
         layer_hints: &hints,
         observations: vec![state],
         ..CoverageFacts::default()
@@ -248,6 +251,7 @@ fn receipt_omissions_are_a_named_limitation() {
     let facts = CoverageFacts {
         repo: "local/app",
         commit: "workdir",
+        commit_note: None,
         layer_hints: &[],
         deterministic: vec![("t0.adapter-ts", count(3))],
         plugins: Vec::new(),
@@ -315,4 +319,84 @@ fn receipt_omissions_are_a_named_limitation() {
     // offers no remediation that cannot work.
     let store = &both.unsupported[1].reason;
     assert!(store.contains("cannot yet reclaim space") && !store.contains("forget"));
+}
+
+// AC-0310: old serialized coverage without `commit_note` deserializes with
+// `commit_note: None`, new coverage with `commit_note: None` serializes
+// byte-identically to the pre-existing shape, and `commit_note` is bounded at
+// 256 UTF-8 bytes on a char boundary. (T-0310)
+#[test]
+fn commit_note_round_trips_and_none_serializes_byte_identically() {
+    #[derive(Serialize)]
+    struct LegacyRepoCoverage<'a> {
+        inventory: &'a str,
+        repo: &'a str,
+        commit: &'a str,
+        layer_hints: &'a [String],
+        producers: &'a [ProducerCoverage],
+        missing_inputs: &'a [MissingInput],
+        unsupported: &'a [UnsupportedCapability],
+        limited: bool,
+    }
+
+    let facts = CoverageFacts {
+        repo: "local/app",
+        commit: "0123456789abcdef0123456789abcdef01234567",
+        commit_note: None,
+        layer_hints: &[],
+        deterministic: vec![("t0.adapter-ts", count(1))],
+        plugins: Vec::new(),
+        observations: Vec::new(),
+    };
+    let without_note = RepoCoverage::from_facts(&facts);
+    assert_eq!(without_note.commit_note, None);
+
+    let serialized = serde_json::to_string(&without_note).unwrap();
+    assert!(
+        !serialized.contains("commit_note"),
+        "`commit_note: None` must omit the field: {serialized}"
+    );
+    let legacy = LegacyRepoCoverage {
+        inventory: &without_note.inventory,
+        repo: &without_note.repo,
+        commit: &without_note.commit,
+        layer_hints: &without_note.layer_hints,
+        producers: &without_note.producers,
+        missing_inputs: &without_note.missing_inputs,
+        unsupported: &without_note.unsupported,
+        limited: without_note.limited,
+    };
+    let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&without_note).unwrap(),
+        legacy_bytes,
+        "new coverage with `commit_note: None` must serialize byte-identically to legacy JSON"
+    );
+    let parsed_legacy: RepoCoverage = serde_json::from_slice(&legacy_bytes).unwrap();
+    assert_eq!(parsed_legacy, without_note);
+
+    let with_note = RepoCoverage::from_facts(&CoverageFacts {
+        commit: "workdir",
+        commit_note: Some("3 modified or untracked files"),
+        ..facts.clone()
+    });
+    assert_eq!(
+        with_note.commit_note.as_deref(),
+        Some("3 modified or untracked files")
+    );
+    let note_json = serde_json::to_string(&with_note).unwrap();
+    let round_trip: RepoCoverage = serde_json::from_str(&note_json).unwrap();
+    assert_eq!(round_trip, with_note);
+
+    // 256-byte cap on a UTF-8 char boundary.
+    let overlong = format!("{}é", "a".repeat(MAX_COMMIT_NOTE_BYTES - 1));
+    assert_eq!(overlong.len(), MAX_COMMIT_NOTE_BYTES + 1);
+    let bounded = RepoCoverage::from_facts(&CoverageFacts {
+        commit: "workdir",
+        commit_note: Some(&overlong),
+        ..facts
+    });
+    let note = bounded.commit_note.unwrap();
+    assert!(note.len() <= MAX_COMMIT_NOTE_BYTES);
+    assert_eq!(note.len(), MAX_COMMIT_NOTE_BYTES - 1);
 }

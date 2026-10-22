@@ -29,7 +29,8 @@ export function CoverageInventory({ coverage }: { coverage: RepoCoverage[] }) {
           >
             <summary>
               <strong>{repo.repo}</strong>{" "}
-              <code>@{repo.commit.slice(0, 12)}</code>{" "}
+              <code>@{repo.commit.slice(0, 12)}</code>
+              {repo.commit_note ? ` (${repo.commit_note})` : ""}{" "}
               <span
                 className={
                   repo.limited ? "coverage-limited" : "coverage-scoped"

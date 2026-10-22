@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 /// Versioned identity of the inventory rules, recorded on every inventory.
 pub const INVENTORY_ID: &str = "coverage@1";
 
+/// Maximum UTF-8 byte length of [`RepoCoverage::commit_note`].
+pub const MAX_COMMIT_NOTE_BYTES: usize = 256;
+
 /// Capability naming declarations left without a primary receipt.
 pub const RECEIPT_OMISSION_CAPABILITY: &str = "ts-declaration-receipts";
 /// Capability naming rule facts left without a primary receipt (#722).
@@ -158,6 +161,9 @@ pub struct RepoCoverage {
     pub repo: String,
     /// Commit SHA, or `workdir` for a local tree.
     pub commit: String,
+    /// Why `commit` is `workdir`, e.g. "3 modified or untracked files"; absent for a commit SHA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_note: Option<String>,
     /// Layer hints the ingest applied; empty selects every layer.
     pub layer_hints: Vec<String>,
     /// Every catalogued producer and gated plugin, in report order.
@@ -208,6 +214,8 @@ pub struct CoverageFacts<'a> {
     pub repo: &'a str,
     /// Commit SHA, or `workdir` for a local tree.
     pub commit: &'a str,
+    /// Why `commit` is `workdir`, e.g. "3 modified or untracked files"; absent for a commit SHA.
+    pub commit_note: Option<&'a str>,
     /// Layer hints the ingest applied.
     pub layer_hints: &'a [String],
     /// Facts each deterministic producer published, by extractor id. A
@@ -388,10 +396,14 @@ impl RepoCoverage {
                 stopping_reason,
             });
         }
+        let commit_note = facts
+            .commit_note
+            .map(|note| note[..note.floor_char_boundary(MAX_COMMIT_NOTE_BYTES)].to_string());
         let mut coverage = RepoCoverage {
             inventory: INVENTORY_ID.to_string(),
             repo: facts.repo.to_string(),
             commit: facts.commit.to_string(),
+            commit_note,
             layer_hints: facts.layer_hints.to_vec(),
             producers,
             missing_inputs,
