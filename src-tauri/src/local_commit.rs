@@ -168,16 +168,29 @@ pub(crate) fn local_commit(root: &Path) -> LocalCommit {
     LocalCommit::Clean { sha }
 }
 
-/// Untracked files recovery reads that `git status` does not report.
+/// Inputs recovery reads whose bytes `git status` does not vouch for.
 ///
 /// Recovery reads every file the tree's own `.gitignore` files allow, plus
 /// `.env` files regardless of `.gitignore` (`events::env_files`). Status also
 /// honors `.git/info/exclude` and `core.excludesFile`, which the untrusted
 /// `.git/config` controls, and skips ignored `.env` files, so such an input
-/// would otherwise stamp a SHA on facts it does not contain. Files inside a
-/// submodule are tracked by its gitlink, which status already checks.
+/// would otherwise stamp a SHA on facts it does not contain. Three more cases
+/// are counted:
+/// - each `.gitignore` the walk applies must itself be tracked, since an
+///   untracked one can ignore itself and still change what recovery reads;
+/// - index entries marked assume-unchanged or skip-worktree, which libgit2
+///   reports unmodified whatever their bytes (fail closed on any);
+/// - files inside a submodule are tracked by its gitlink, which status checks.
 fn untracked_inputs(repo: &git2::Repository, root: &Path) -> Result<usize, ()> {
     let index = repo.index().map_err(drop)?;
+    let flagged = index
+        .iter()
+        .filter(|entry| {
+            git2::IndexEntryFlag::from_bits_truncate(entry.flags).is_valid()
+                || git2::IndexEntryExtendedFlag::from_bits_truncate(entry.flags_extended)
+                    .is_skip_worktree()
+        })
+        .count();
     let tracked = |rel: &str| {
         let path = Path::new(rel);
         index.get_path(path, 0).is_some()
@@ -189,14 +202,37 @@ fn untracked_inputs(repo: &git2::Repository, root: &Path) -> Result<usize, ()> {
                         .is_some_and(|entry| entry.mode == GITLINK_MODE)
             })
     };
-    let walked = source_walk::files(root, &|name| name == ".git", source_walk::Gitignores::Honor)
-        .map_err(drop)?;
+    let mut dirs = Vec::new();
+    let walked = source_walk::files_until(
+        root,
+        &|name| name == ".git",
+        source_walk::Gitignores::Honor,
+        &mut |step| {
+            dirs.push(step.dir.to_owned());
+            std::ops::ControlFlow::Continue(())
+        },
+    )
+    .map_err(drop)?
+    .ok_or(())?;
+    // The walk applies a directory's `.gitignore` when it is a regular file,
+    // even one that ignores itself and so never appears in `walked`.
+    let gitignores = dirs.into_iter().filter_map(|dir| {
+        let rel = if dir.is_empty() {
+            ".gitignore".to_owned()
+        } else {
+            format!("{dir}/.gitignore")
+        };
+        std::fs::symlink_metadata(root.join(&rel))
+            .is_ok_and(|meta| meta.is_file())
+            .then_some(rel)
+    });
     let inputs: std::collections::BTreeSet<String> = walked
         .into_iter()
         .map(|file| file.rel)
+        .chain(gitignores)
         .chain(events::env_files(root).map_err(drop)?)
         .collect();
-    Ok(inputs.iter().filter(|rel| !tracked(rel)).count())
+    Ok(flagged.saturating_add(inputs.iter().filter(|rel| !tracked(rel)).count()))
 }
 
 fn is_valid_sha(sha: &str) -> bool {
@@ -382,6 +418,57 @@ mod tests {
                 reason: "1 modified or untracked files".into()
             }
         );
+    }
+
+    // AC-0310: an untracked `.gitignore` that ignores itself (and tracked
+    // sources) still changes what recovery reads, so it keeps `workdir`.
+    // (T-0310)
+    #[test]
+    fn untracked_self_ignoring_gitignore_keeps_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        init_clean_repo(
+            dir.path(),
+            &[
+                ("src/app.ts", b"export const ok = 1;\n"),
+                ("src/b.ts", b"export const b = 1;\n"),
+            ],
+        );
+        fs::write(dir.path().join("src/.gitignore"), b".gitignore\nb.ts\n").unwrap();
+        assert_eq!(
+            local_commit(dir.path()),
+            LocalCommit::Workdir {
+                reason: "1 modified or untracked files".into()
+            }
+        );
+    }
+
+    // AC-0310: assume-unchanged and skip-worktree entries hide modified bytes
+    // from status, so either flag keeps `workdir`. (T-0310)
+    #[test]
+    fn assume_unchanged_or_skip_worktree_entries_keep_workdir() {
+        for extended in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            init_clean_repo(dir.path(), &[("src/app.ts", b"export const ok = 1;\n")]);
+            let repo = git2::Repository::open(dir.path()).unwrap();
+            let mut index = repo.index().unwrap();
+            let mut entry = index.get_path(Path::new("src/app.ts"), 0).unwrap();
+            if extended {
+                entry.flags |= git2::IndexEntryFlag::EXTENDED.bits();
+                entry.flags_extended |= git2::IndexEntryExtendedFlag::SKIP_WORKTREE.bits();
+            } else {
+                entry.flags |= git2::IndexEntryFlag::VALID.bits();
+            }
+            index.add(&entry).unwrap();
+            index.write().unwrap();
+            fs::write(dir.path().join("src/app.ts"), b"export const ok = 2;\n").unwrap();
+            assert_eq!(
+                local_commit(dir.path()),
+                LocalCommit::Workdir {
+                    reason: "1 modified or untracked files".into()
+                },
+                "skip-worktree={extended}"
+            );
+        }
     }
 
     // AC-0310: hostile `.git/config` (`core.fsmonitor`, `filter.*.clean`),
