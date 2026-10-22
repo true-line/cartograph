@@ -685,7 +685,7 @@ fn load_omission(
 
 /// Whether every coverage-recorded repo has a complete omission index, and at
 /// least one exists. Read inside the caller's selection transaction.
-fn omission_coverage_complete(connection: &Connection) -> Result<bool, GraphError> {
+pub(crate) fn omission_coverage_complete(connection: &Connection) -> Result<bool, GraphError> {
     crate::coverage::check_schema(connection)?;
     Ok(connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM coverage_inventories)
@@ -703,7 +703,7 @@ fn omission_coverage_complete(connection: &Connection) -> Result<bool, GraphErro
 
 /// Omission outcome for `fact` given its digest in the copied (bounded) graph
 /// revision, so no unbounded fact read happens here.
-fn selection_omission(
+pub(crate) fn selection_omission(
     connection: &Connection,
     fact: &FactKey,
     fact_digest: Option<&str>,
