@@ -235,6 +235,112 @@ fn through_binding<'t>(cx: &FileCx, node: TsNode<'t>) -> Option<TsNode<'t>> {
     Some(node)
 }
 
+/// True when `name` at `node` may not be the top-level binding of that
+/// name: an enclosing function declares it or takes it as a parameter, a
+/// block below the program rebinds it, or the program declares it twice.
+fn locally_bound(cx: &FileCx, node: TsNode, name: &str) -> bool {
+    let declares = |decl: TsNode| match decl.kind() {
+        "variable_declarator" | "function_declaration" | "class_declaration" => decl
+            .child_by_field_name("name")
+            .is_some_and(|n| binds(cx, n, name)),
+        "catch_clause" => decl
+            .child_by_field_name("parameter")
+            .is_some_and(|n| binds(cx, n, name)),
+        "for_in_statement" => decl
+            .child_by_field_name("left")
+            .is_some_and(|n| binds(cx, n, name)),
+        _ => false,
+    };
+    let mut scope = scope_of(node);
+    while scope.kind() != "program" {
+        let in_params = scope
+            .child_by_field_name("parameters")
+            .or_else(|| scope.child_by_field_name("parameter"))
+            .is_some_and(|params| binds(cx, params, name));
+        if in_params
+            || scope_nodes(scope)
+                .into_iter()
+                .any(|n| n != scope && declares(n))
+        {
+            return true;
+        }
+        // A named function expression binds its own name inside itself.
+        if scope.kind() == "function_expression"
+            && scope
+                .child_by_field_name("name")
+                .is_some_and(|n| cx.text(&n) == name)
+        {
+            return true;
+        }
+        scope = match scope.parent() {
+            Some(parent) => scope_of(parent),
+            None => return true,
+        };
+    }
+    let program = scope;
+    let top_level = |decl: TsNode| {
+        let mut statement = decl;
+        if decl.kind() == "variable_declarator"
+            && let Some(parent) = decl.parent()
+        {
+            statement = parent;
+        }
+        let mut parent = statement.parent();
+        if parent.is_some_and(|p| p.kind() == "export_statement") {
+            parent = parent.and_then(|p| p.parent());
+        }
+        parent == Some(program)
+    };
+    let declarations: Vec<_> = scope_nodes(program)
+        .into_iter()
+        .filter(|n| declares(*n))
+        .collect();
+    // A block-scoped declaration shadows only inside its own block.
+    let encloses = |decl: TsNode| {
+        // A catch or for-of binding is scoped to the statement it heads.
+        let mut block = match decl.kind() {
+            "catch_clause" | "for_in_statement" => Some(decl),
+            _ => decl.parent(),
+        };
+        while let Some(b) = block {
+            if matches!(
+                b.kind(),
+                "statement_block" | "for_statement" | "for_in_statement" | "catch_clause"
+            ) {
+                break;
+            }
+            block = b.parent();
+        }
+        block
+            .is_some_and(|b| b.start_byte() <= node.start_byte() && node.end_byte() <= b.end_byte())
+    };
+    let top: Vec<_> = declarations
+        .iter()
+        .filter(|decl| top_level(**decl))
+        .collect();
+    top.len() > 1
+        || declarations
+            .iter()
+            .any(|decl| !top_level(*decl) && encloses(*decl))
+}
+
+/// True when the binding pattern `pattern` introduces `name`.
+fn binds(cx: &FileCx, pattern: TsNode, name: &str) -> bool {
+    let mut stack = vec![pattern];
+    while let Some(node) = stack.pop() {
+        if matches!(
+            node.kind(),
+            "identifier" | "shorthand_property_identifier_pattern"
+        ) && cx.text(&node) == name
+        {
+            return true;
+        }
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+    }
+    false
+}
+
 /// `left + right` split, when `node` is a string concatenation.
 fn concat<'t>(cx: &FileCx, node: TsNode<'t>) -> Option<(TsNode<'t>, TsNode<'t>)> {
     if node.kind() != "binary_expression" {
@@ -275,16 +381,50 @@ fn entry_ref(cx: &FileCx, node: TsNode) -> Option<(String, String)> {
         .then(|| (cx.text(&object).to_string(), cx.text(&property).to_string()))
 }
 
+/// What a fetch call's options prove about its `method`.
+enum MethodOption<'t> {
+    /// No options argument, or an object literal without `method`: GET.
+    Absent,
+    /// The `method` value, written after any spread that could override it.
+    Value(TsNode<'t>),
+    /// Options the extractor cannot see (`fetch(url, options)`), or a
+    /// spread that may supply the method: never assumed to be GET.
+    Unknown,
+}
+
 /// The `method` option of a fetch call's second argument.
-fn method_option<'t>(cx: &FileCx, args: &[TsNode<'t>]) -> Option<TsNode<'t>> {
-    let options = through_binding(cx, *args.get(1)?)?;
-    if options.kind() != "object" {
-        return None;
+fn method_option<'t>(cx: &FileCx, args: &[TsNode<'t>]) -> MethodOption<'t> {
+    let Some(options) = args.get(1) else {
+        return MethodOption::Absent;
+    };
+    let Some(options) = through_binding(cx, *options).filter(|o| o.kind() == "object") else {
+        return MethodOption::Unknown;
+    };
+    // Later properties override earlier ones, spreads included.
+    let mut walk = options.walk();
+    let mut proven = MethodOption::Absent;
+    for property in options.named_children(&mut walk) {
+        match property.kind() {
+            "spread_element" => proven = MethodOption::Unknown,
+            "pair" | "shorthand_property_identifier" => {
+                let key = match property.kind() {
+                    "pair" => property.child_by_field_name("key"),
+                    _ => Some(property),
+                };
+                let value = match property.kind() {
+                    "pair" => property.child_by_field_name("value"),
+                    _ => Some(property),
+                };
+                if let (Some(key), Some(value)) = (key, value)
+                    && cx.text(&key).trim_matches(['"', '\'']) == "method"
+                {
+                    proven = MethodOption::Value(value);
+                }
+            }
+            _ => {}
+        }
     }
-    object_entries(cx, options)
-        .into_iter()
-        .find(|(key, _)| key == "method")
-        .map(|(_, node)| node)
+    proven
 }
 
 /// Names a wrapper binds to its route parameter's `field`: `route.path`,
@@ -325,6 +465,128 @@ fn route_names(cx: &FileCx, body: TsNode, param: &str, field: &str) -> BTreeSet<
         }
     }
     names
+}
+
+/// True when `node` is exactly one of `names`, not an expression over it.
+fn is_name(cx: &FileCx, node: TsNode, names: &BTreeSet<String>) -> bool {
+    let mut node = unwrap_assertions(node);
+    while node.kind() == "parenthesized_expression" {
+        match node.named_child(0) {
+            Some(inner) => node = unwrap_assertions(inner),
+            None => return false,
+        }
+    }
+    matches!(node.kind(), "identifier" | "member_expression") && names.contains(cx.text(&node))
+}
+
+/// A same-file top-level function named `name` that only substitutes
+/// placeholders in its first parameter and returns it: every assignment to
+/// the parameter is `p = p.replace(…)` (or `replaceAll`) and every return
+/// is `return p`. Its result keeps the route's path template, so the join
+/// still names that route (`bindQueryParams(path, params)`).
+fn path_binder(cx: &FileCx, at: TsNode, name: &str) -> bool {
+    let mut program = at;
+    while let Some(parent) = program.parent() {
+        program = parent;
+    }
+    let mut walk = program.walk();
+    let functions: Vec<_> = program
+        .named_children(&mut walk)
+        .filter_map(|statement| {
+            let statement = match statement.kind() {
+                "export_statement" => statement.child_by_field_name("declaration")?,
+                _ => statement,
+            };
+            match statement.kind() {
+                "function_declaration" => (statement
+                    .child_by_field_name("name")
+                    .is_some_and(|n| cx.text(&n) == name))
+                .then_some(statement),
+                _ => None,
+            }
+        })
+        .collect();
+    let [function] = functions.as_slice() else {
+        return false;
+    };
+    let Some(param) = function
+        .child_by_field_name("parameters")
+        .and_then(|params| params.named_child(0))
+        .and_then(|first| match first.kind() {
+            "identifier" => Some(first),
+            _ => first.child_by_field_name("pattern"),
+        })
+        .filter(|param| param.kind() == "identifier")
+    else {
+        return false;
+    };
+    let param = cx.text(&param);
+    let Some(body) = function.child_by_field_name("body") else {
+        return false;
+    };
+    let mut returns = 0;
+    for node in scope_nodes(body) {
+        match node.kind() {
+            "return_statement" => {
+                let returned = node.named_child(0);
+                if !returned.is_some_and(|r| r.kind() == "identifier" && cx.text(&r) == param) {
+                    return false;
+                }
+                returns += 1;
+            }
+            "augmented_assignment_expression" | "update_expression"
+                if node
+                    .named_child(0)
+                    .is_some_and(|target| cx.text(&target) == param) =>
+            {
+                return false;
+            }
+            "assignment_expression"
+                if node
+                    .child_by_field_name("left")
+                    .is_some_and(|left| cx.text(&left) == param) =>
+            {
+                let substitutes = node
+                    .child_by_field_name("right")
+                    .filter(|right| right.kind() == "call_expression")
+                    .and_then(|call| call.child_by_field_name("function"))
+                    .filter(|callee| callee.kind() == "member_expression")
+                    .is_some_and(|callee| {
+                        callee
+                            .child_by_field_name("object")
+                            .is_some_and(|object| cx.text(&object) == param)
+                            && callee
+                                .child_by_field_name("property")
+                                .is_some_and(|p| matches!(cx.text(&p), "replace" | "replaceAll"))
+                    });
+                if !substitutes {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    returns > 0
+}
+
+/// True when `node` is the route path itself, or a [`path_binder`] call
+/// taking it as its first argument: anything else (`path + "/x"`) is some
+/// other URL.
+fn route_path(cx: &FileCx, node: TsNode, names: &BTreeSet<String>) -> bool {
+    if is_name(cx, node, names) {
+        return true;
+    }
+    let node = unwrap_assertions(node);
+    node.kind() == "call_expression"
+        && node
+            .child_by_field_name("function")
+            .filter(|f| f.kind() == "identifier")
+            .is_some_and(|f| {
+                !locally_bound(cx, node, cx.text(&f)) && path_binder(cx, node, cx.text(&f))
+            })
+        && call_args(node)
+            .first()
+            .is_some_and(|first| is_name(cx, *first, names))
 }
 
 /// True when `node` or a descendant reads one of `names`.
@@ -376,10 +638,14 @@ fn wrapper_join(cx: &FileCx, function: TsNode) -> Option<Join> {
         }
         let args = call_args(node);
         let (base, rest) = concat(cx, through_binding(cx, *args.first()?)?)?;
-        if !mentions(cx, rest, &paths) || mentions(cx, base, &paths) {
+        // The route's path itself, untransformed: `route.path + "/x"` is
+        // some other URL.
+        if !route_path(cx, rest, &paths) || mentions(cx, base, &paths) {
             return None;
         }
-        let method = method_option(cx, &args)?;
+        let MethodOption::Value(method) = method_option(cx, &args) else {
+            return None;
+        };
         methods.contains(cx.text(&method)).then(|| Join {
             base: classify_base(cx, base),
             path: cx.path.to_string(),
@@ -536,9 +802,13 @@ fn extract_file(
                     let Some(entry) = entry_field(&cx, rest, "path") else {
                         continue;
                     };
+                    if locally_bound(&cx, *node, &entry.0) {
+                        continue;
+                    }
                     let method = match method_option(&cx, &args) {
-                        None => Method::Default,
-                        Some(m) => match literal_string(&cx, m) {
+                        MethodOption::Absent => Method::Default,
+                        MethodOption::Unknown => Method::Computed,
+                        MethodOption::Value(m) => match literal_string(&cx, m) {
                             Some(lit) => Method::Literal(lit.to_ascii_uppercase()),
                             None if entry_field(&cx, m, "method").as_ref() == Some(&entry) => {
                                 Method::Route
@@ -552,7 +822,10 @@ fn extract_file(
                         byte_start: base.start_byte() as u64,
                     };
                     index.calls.push(site(None, Some(join), entry, method));
-                } else if let Some(entry) = args.first().and_then(|arg| entry_ref(&cx, *arg)) {
+                } else if let Some(entry) = args.first().and_then(|arg| entry_ref(&cx, *arg))
+                    && !locally_bound(&cx, *node, callee)
+                    && !locally_bound(&cx, *node, &entry.0)
+                {
                     // Wrapper call: `callAPI(T.K, …)`, proven at directory level.
                     index
                         .calls

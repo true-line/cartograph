@@ -228,3 +228,91 @@ fn vue_components_call_wrappers_at_original_offsets() {
     let start = usize::try_from(sites[0].byte_start).unwrap();
     assert!(component[start..].starts_with("callAPI(API_ROUTE.GET_USER_INFO)"));
 }
+
+// AC-0315 (#757 review): a table or wrapper name that a parameter, a local,
+// a catch clause or an enclosing block rebinds is not the proven top-level
+// binding, and a wrapper that transforms the route path (other than a
+// proven placeholder binder) joins some other URL. None of these produce
+// a client call; a block that does not enclose the call shadows nothing.
+// (T-0315)
+#[test]
+fn shadowed_names_and_transformed_paths_produce_no_sites() {
+    let sites = extract(&[
+        ("src/APIService.js", SERVICE),
+        (
+            "src/shadow.js",
+            concat!(
+                "import { API_ROUTE, callAPI } from './APIService';\n",
+                "function run(API_ROUTE) { return fetch('https://x' + API_ROUTE.LOGIN.path); }\n",
+                "function wrap(callAPI) { return callAPI(API_ROUTE.LOGIN); }\n",
+                "function local() { const API_ROUTE = other(); return callAPI(API_ROUTE.LOGIN); }\n",
+                "{ const API_ROUTE = other(); fetch('https://x' + API_ROUTE.LOGIN.path); }\n",
+                "try { go(); } catch (callAPI) { callAPI(API_ROUTE.LOGIN); }\n",
+            ),
+        ),
+        (
+            "src/outside.js",
+            concat!(
+                "import { API_ROUTE, callAPI } from './APIService';\n",
+                "{ const API_ROUTE = other(); }\n",
+                "callAPI(API_ROUTE.LOGIN);\n",
+            ),
+        ),
+        (
+            "src/transform.js",
+            concat!(
+                "import { API_ROUTE } from './APIService';\n",
+                "const suffixed = (route) => fetch('https://x' + (route.path + '/other'), { method: route.method });\n",
+                "function suffix(u) { return u + '/x'; }\n",
+                "const helped = (route) => fetch('https://x' + suffix(route.path), { method: route.method });\n",
+                "function rewrite(u) { u = u + '/x'; return u; }\n",
+                "const rewritten = (route) => fetch('https://x' + rewrite(route.path), { method: route.method });\n",
+                "suffixed(API_ROUTE.LOGIN);\n",
+                "helped(API_ROUTE.LOGIN);\n",
+                "rewritten(API_ROUTE.LOGIN);\n",
+            ),
+        ),
+    ]);
+    let paths: Vec<_> = sites.iter().map(|site| site.path.as_str()).collect();
+    assert_eq!(paths, ["src/outside.js"], "{:?}", summary(&sites));
+}
+
+// AC-0315 (#757 review): only a proven absent `method` means GET. Options
+// the extractor cannot see, or a spread after the method, leave it
+// unknown; a method written after every spread still counts, and a wrapper
+// whose route method a spread may override is not a wrapper. (T-0315)
+#[test]
+fn unknown_fetch_options_never_default_to_get() {
+    let sites = extract(&[
+        ("src/APIService.js", SERVICE),
+        (
+            "src/options.js",
+            concat!(
+                "import { API_ROUTE } from './APIService';\n",
+                "function a(options) { return fetch(B + API_ROUTE.LOGIN.path, options); }\n",
+                "function b(o) { return fetch(B + API_ROUTE.LOGIN.path, { ...o }); }\n",
+                "function c(o) { return fetch(B + API_ROUTE.LOGIN.path, { ...o, method: 'put' }); }\n",
+                "function d(o) { return fetch(B + API_ROUTE.LOGIN.path, { method: 'put', ...o }); }\n",
+                "const after = (route, o) => fetch(B + route.path, { ...o, method: route.method });\n",
+                "const before = (route, o) => fetch(B + route.path, { method: route.method, ...o });\n",
+                "after(API_ROUTE.GET_USER_INFO);\n",
+                "before(API_ROUTE.GET_USER_INFO);\n",
+            ),
+        ),
+    ]);
+    let methods: Vec<_> = summary(&sites)
+        .into_iter()
+        .map(|(method, path, _, _)| (method, path))
+        .collect();
+    let s = |m: &str, p: &str| (m.to_string(), p.to_string());
+    assert_eq!(
+        methods,
+        [
+            s("?", "/api/auth/login"),
+            s("?", "/api/auth/login"),
+            s("PUT", "/api/auth/login"),
+            s("?", "/api/auth/login"),
+            s("GET", "/api/user_info"),
+        ]
+    );
+}
