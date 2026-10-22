@@ -80,6 +80,22 @@ fn scoped_protocol_advertises_real_routes_and_keeps_discovery_lean() {
         let capabilities = &caps["result"]["structuredContent"];
         assert_eq!(capabilities["evidence_absence_reason_available"], false);
         assert_eq!(
+            capabilities["receipt_omission_classification"]["available"],
+            true
+        );
+        assert_eq!(
+            capabilities["receipt_omission_classification"]["partial"],
+            true
+        );
+        assert_eq!(
+            capabilities["receipt_omission_classification"]["unknown_is_omitted"],
+            false
+        );
+        assert_eq!(
+            capabilities["receipt_omission_classification"]["kinds"],
+            json!(["declarations", "rules", "store_capacity"])
+        );
+        assert_eq!(
             capabilities["forgotten_receipt_classification"]["available"],
             true
         );

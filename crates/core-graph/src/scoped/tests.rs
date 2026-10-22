@@ -605,3 +605,136 @@ fn scoped_binary_queries_override_column_default_collations() {
         );
     }
 }
+
+// AC-0306: omission evidence is selected in the same bounded pinned transaction.
+#[test]
+fn scoped_selected_omission_is_digest_bound_and_does_not_decode_unselected_rows() {
+    use crate::source::{OmissionLookup, ReceiptOmissionKind, SourceOmission, SourceOmissions};
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let selected = node("selected");
+    store.put_node(&selected).unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO nodes(id,label,props) VALUES('poison','Symbol','not json')",
+            [],
+        )
+        .unwrap();
+    let key = FactKey::from_node(&selected);
+    // Independent expected snapshot avoids decoding the deliberately corrupt unrelated row.
+    store
+        .conn
+        .execute("DELETE FROM nodes WHERE id='poison'", [])
+        .unwrap();
+    let snapshot = store.read_snapshot().unwrap();
+    let omissions = [SourceOmission {
+        fact: key.clone(),
+        emitted_fact_digest: node_digest(&selected).unwrap(),
+        kind: ReceiptOmissionKind::Rules,
+    }];
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &snapshot,
+                &GraphPatch::default(),
+                "fixture",
+                &[],
+                None,
+                SourceOmissions {
+                    records: &omissions,
+                    complete: true
+                }
+            )
+            .unwrap()
+    );
+    store
+        .conn
+        .execute(
+            "INSERT INTO nodes(id,label,props) VALUES('poison','Symbol','not json')",
+            [],
+        )
+        .unwrap();
+    let revision = store.read_revision().unwrap();
+    let result = store
+        .read_selected_facts_at_revision(std::slice::from_ref(&key), &revision, limits(1))
+        .unwrap();
+    assert_eq!(result.nodes, vec![selected.clone()]);
+    assert_eq!(
+        result.selections[0].omission,
+        OmissionLookup::Omitted {
+            repo_key: "fixture".into(),
+            kind: ReceiptOmissionKind::Rules
+        }
+    );
+    store
+        .conn
+        .execute(
+            "UPDATE source_node_omissions SET emitted_fact_digest=?1",
+            [format!("node-v1:{}", "0".repeat(64))],
+        )
+        .unwrap();
+    let result = store
+        .read_selected_facts_at_revision(&[key], &revision, limits(1))
+        .unwrap();
+    assert_eq!(result.selections[0].omission, OmissionLookup::Unrecorded);
+}
+
+// AC-0306: omission and graph observations share the exact SQLite snapshot.
+#[test]
+fn scoped_selected_omission_is_pinned_while_supported_publication_commits() {
+    use crate::source::{OmissionLookup, ReceiptOmissionKind, SourceOmission, SourceOmissions};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("graph.db");
+    let mut reader = SqliteGraphStore::open(&path).unwrap();
+    let fact = node("selected");
+    reader.put_node(&fact).unwrap();
+    let key = FactKey::from_node(&fact);
+    let snapshot = reader.read_snapshot().unwrap();
+    let omissions = [SourceOmission {
+        fact: key.clone(),
+        emitted_fact_digest: node_digest(&fact).unwrap(),
+        kind: ReceiptOmissionKind::Declarations,
+    }];
+    reader
+        .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+            &snapshot,
+            &GraphPatch::default(),
+            "repo",
+            &[],
+            None,
+            SourceOmissions {
+                records: &omissions,
+                complete: true,
+            },
+        )
+        .unwrap();
+    let revision = reader.read_revision().unwrap();
+    let mut writer = SqliteGraphStore::open(&path).unwrap();
+    reader.set_source_binding_after_lookup_hook(move || {
+        assert!(
+            writer.apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &snapshot,
+                &GraphPatch::default(),
+                "repo",
+                &[],
+                None,
+                SourceOmissions::NONE
+            )?
+        );
+        Ok(())
+    });
+    let selected = reader
+        .read_selected_facts_at_revision(std::slice::from_ref(&key), &revision, limits(1))
+        .unwrap();
+    assert_eq!(
+        selected.selections[0].omission,
+        OmissionLookup::Omitted {
+            repo_key: "repo".into(),
+            kind: ReceiptOmissionKind::Declarations
+        }
+    );
+    assert!(matches!(
+        reader.read_selected_facts_at_revision(&[key], &revision, limits(1)),
+        Err(GraphError::Generation(GenerationError::Changed))
+    ));
+}

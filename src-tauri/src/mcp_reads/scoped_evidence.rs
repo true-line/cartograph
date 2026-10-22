@@ -6,7 +6,7 @@ use crate::{
 };
 use adapters_lang_ts::captured::Receipt;
 use agents::{TaskCaptureFileRef, TaskCaptureSpanRef, TaskFactKey};
-use core_graph::source::{FactSourceState, SourceBinding};
+use core_graph::source::{FactSourceSelection, FactSourceState, OmissionLookup, SourceBinding};
 use serde::Serialize;
 use std::io::{self, Write};
 
@@ -43,7 +43,10 @@ fn retained(error: PinnedReadError) -> ReadError {
         PinnedReadError::Operational => ReadError::Storage,
     }
 }
-fn selected(state: &AppState, proof: &ScopedEvidenceProof) -> Result<SourceBinding, ReadError> {
+fn selected(
+    state: &AppState,
+    proof: &ScopedEvidenceProof,
+) -> Result<FactSourceSelection, ReadError> {
     let selected = state
         .graph
         .lock()
@@ -59,20 +62,25 @@ fn selected(state: &AppState, proof: &ScopedEvidenceProof) -> Result<SourceBindi
             }
             other => super::graph_error(other),
         })?;
-    match selected
+    selected
         .selections
         .into_iter()
         .next()
-        .map(|selection| selection.state)
-    {
-        Some(FactSourceState::Present {
+        .ok_or(ReadError::EvidenceInvalid)
+}
+fn binding(
+    selection: FactSourceSelection,
+    proof: &ScopedEvidenceProof,
+) -> Result<SourceBinding, ReadError> {
+    match selection.state {
+        FactSourceState::Present {
             fact_digest,
             binding,
-        }) if binding.fact == *proof.fact() && binding.emitted_fact_digest == fact_digest => {
+        } if binding.fact == *proof.fact() && binding.emitted_fact_digest == fact_digest => {
             Ok(binding)
         }
-        Some(FactSourceState::Invalid { .. }) => Err(ReadError::EvidenceInvalid),
-        Some(FactSourceState::Missing | FactSourceState::Absent { .. }) => {
+        FactSourceState::Invalid { .. } => Err(ReadError::EvidenceInvalid),
+        FactSourceState::Missing | FactSourceState::Absent { .. } => {
             Err(ReadError::EvidenceUnavailable)
         }
         _ => Err(ReadError::EvidenceInvalid),
@@ -189,7 +197,47 @@ fn resolve(
     if ordinal >= 1024 {
         return Err(ReadError::InvalidRequest);
     }
-    let preliminary = selected(state, proof)?;
+    let selection = selected(state, proof)?;
+    if matches!(selection.state, FactSourceState::Absent { .. }) {
+        if expected_target.is_some() {
+            return Err(ReadError::StaleBasis);
+        }
+        if let OmissionLookup::Omitted { repo_key, kind } = &selection.omission {
+            let source = state
+                .sources
+                .lock()
+                .map_err(|_| ReadError::Storage)?
+                .get_by_repo(repo_key)
+                .map_err(|_| ReadError::Storage)?
+                .ok_or(ReadError::EvidenceUnavailable)?;
+            let _guard = state
+                .primary_sources
+                .task_guard(&source.source_id)
+                .map_err(retained)?;
+            let checked = selected(state, proof)?;
+            if checked != selection {
+                return Err(ReadError::StaleBasis);
+            }
+            let after = state
+                .sources
+                .lock()
+                .map_err(|_| ReadError::Storage)?
+                .get_by_repo(repo_key)
+                .map_err(|_| ReadError::Storage)?
+                .ok_or(ReadError::StaleBasis)?;
+            if source.source_id != after.source_id
+                || source.repo_key != after.repo_key
+                || source.root() != after.root()
+                || source.is_managed() != after.is_managed()
+                || source.clone_url() != after.clone_url()
+            {
+                return Err(ReadError::StaleBasis);
+            }
+            revalidate()?;
+            return Err(ReadError::EvidenceOmitted(*kind));
+        }
+    }
+    let preliminary = binding(selection, proof)?;
     if expected_target.is_some_and(|target| target.receipt_id != preliminary.receipt_id) {
         return Err(ReadError::StaleBasis);
     }
@@ -204,7 +252,7 @@ fn resolve(
         .primary_sources
         .task_guard(&source.source_id)
         .map_err(retained)?;
-    let checked = selected(state, proof)?;
+    let checked = binding(selected(state, proof)?, proof)?;
     if checked != preliminary {
         return Err(ReadError::StaleBasis);
     }

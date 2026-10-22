@@ -451,6 +451,8 @@ impl SqliteGraphStore {
         preflight_schema(&transaction)?;
         source::preflight_selection_schema(&transaction)?;
         source::check_schema(&transaction)?;
+        crate::coverage::preflight_schema(&transaction)?;
+        let complete_coverage = source::omission_coverage_complete(&transaction)?;
         let mut remaining_bytes = limits.max_bytes;
         let mut budget = budget(limits)?;
         let (mut nodes, mut edges, mut selections) = (Vec::new(), Vec::new(), Vec::new());
@@ -493,6 +495,12 @@ impl SqliteGraphStore {
                 Kind::Edge => e.first().map(source::edge_digest).transpose()?,
             };
             let binding = source::load_selection_binding(&transaction, fact)?;
+            let omission = source::selection_omission(
+                &transaction,
+                fact,
+                digest.as_deref(),
+                complete_coverage,
+            )?;
             #[cfg(any(test, feature = "test-support"))]
             if let Some(after_lookup) = self.source_binding_after_lookup.borrow_mut().take() {
                 after_lookup()?;
@@ -517,6 +525,7 @@ impl SqliteGraphStore {
             selections.push(FactSourceSelection {
                 fact: fact.clone(),
                 state,
+                omission,
             });
         }
         edges.sort_by(|a, b| (&a.src, &a.dst, &a.label).cmp(&(&b.src, &b.dst, &b.label)));

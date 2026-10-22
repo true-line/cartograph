@@ -9,61 +9,10 @@ use context_hub::logical::{self, count, json, json_bytes, map, set, slots, strin
 use core_graph::{Edge, Node};
 use std::mem::size_of;
 
-// Exact private schema admission ceilings in core-graph generation/source/coverage.
-// These are schema-object counts, not graph or policy ceilings.
-const GENERATION_OBJECTS: usize = 16;
-const SOURCE_OBJECTS: usize = 11;
-const SOURCE_GENERATION_OBJECTS: usize = 12;
-const COVERAGE_OBJECTS: usize = 2;
-const COVERAGE_GENERATION_OBJECTS: usize = 3;
-const SCHEMA_NAME_BYTES: usize = 256;
-const SCHEMA_TYPE_BYTES: usize = 16;
-const SCHEMA_SQL_BYTES: usize = 4096;
-
-fn schema_map(objects: usize) -> Option<usize> {
-    sum(&[
-        objects.checked_mul(sum(&[
-            SCHEMA_NAME_BYTES,
-            SCHEMA_TYPE_BYTES,
-            SCHEMA_SQL_BYTES,
-        ])?)?,
-        map::<String, (String, String)>(objects)?,
-    ])
-}
+// Shared exact schema inventory includes omission objects and generation metadata.
 fn metadata() -> Option<usize> {
-    let expected_generation = sum(&[
-        GENERATION_OBJECTS.checked_mul(sum(&[
-            SCHEMA_NAME_BYTES,
-            SCHEMA_TYPE_BYTES,
-            SCHEMA_SQL_BYTES,
-        ])?)?,
-        slots::<(String, String, String)>(GENERATION_OBJECTS)?,
-    ])?;
-    let generation = sum(&[
-        expected_generation,
-        schema_map(GENERATION_OBJECTS)?,
-        // Current expected type/SQL clones during exact comparison.
-        SCHEMA_TYPE_BYTES,
-        SCHEMA_SQL_BYTES,
-        slots::<String>(2)?,
-        slots::<(i64, i64, i64)>(2)?,
-    ])?;
-    // An owned schema map can remain live while generation is revalidated;
-    // source and coverage checks run sequentially, not simultaneously.
-    let source = sum(&[
-        schema_map(SOURCE_OBJECTS.checked_add(SOURCE_GENERATION_OBJECTS)?)?,
-        schema_map(SOURCE_OBJECTS)?,
-        generation,
-    ])?;
-    let coverage = sum(&[
-        schema_map(COVERAGE_OBJECTS.checked_add(COVERAGE_GENERATION_OBJECTS)?)?,
-        schema_map(COVERAGE_OBJECTS)?,
-        generation,
-    ])?;
-    // Ordinary-table preflight admits SQL <=4096 before reading xinfo. One
-    // current xinfo/index row plus the bounded index name is owned at a time.
-    let primary_key = sum(&[SCHEMA_SQL_BYTES, SCHEMA_NAME_BYTES, slots::<String>(4)?])?;
-    Some(source.max(coverage).max(generation).max(primary_key))
+    let primary_key = sum(&[4096, 256, slots::<String>(4)?])?;
+    Some(super::schema::workspace_bytes()?.max(primary_key))
 }
 fn fixed_basis() -> Option<usize> {
     let basis = context_hub::scoped::ScopedReadBasis::new(
@@ -124,6 +73,14 @@ fn associations(limits: core_graph::SnapshotReadLimits) -> Option<usize> {
         slots::<core_graph::source::FactSourceSelection>(keys)?,
         slots::<core_graph::source::SourceBinding>(keys)?,
         binding_values,
+        // Each selected omission owns a bounded repo key; SQL cell vectors and
+        // decoded strings coexist before authoritative lookup validation.
+        keys.checked_mul(256)?,
+        slots::<Option<Vec<u8>>>(3)?,
+        slots::<String>(3)?,
+        256,
+        16,
+        72,
         // Current SQL BLOBs coexist with decoded binding String fields.
         256,
         256,
@@ -258,7 +215,7 @@ mod tests {
                     .unwrap()
                     .required_bytes
         );
-        assert!(metadata().unwrap() >= schema_map(23).unwrap());
+        assert!(metadata().unwrap() >= super::super::schema::workspace_bytes().unwrap());
         let mut offered = limits;
         offered.reserved_bytes = std::num::NonZeroUsize::new(1).unwrap();
         assert_eq!(required_bytes(offered), Some(bound));

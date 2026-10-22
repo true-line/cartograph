@@ -423,3 +423,168 @@ fn scoped_target_preserves_canonical_v1_v2_v3_receipt_history() {
         assert_eq!(target.validate().unwrap_err(), ReadError::InvalidRequest);
     }
 }
+
+// AC-0306: real production bounded receipt publication, no synthetic receipt facts.
+#[test]
+fn scoped_real_store_capacity_omission_is_guarded_and_stale_safe() {
+    use core_graph::source::{OmissionLookup, ReceiptOmissionKind};
+    use tauri::Manager;
+    let temp = tempfile::tempdir().unwrap();
+    let private = temp.path().join("private");
+    let root = temp.path().join("project");
+    std::fs::create_dir_all(&private).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("rules.ts"), "export function alpha(ok: boolean) { if (!ok) return false; return true; }\nexport function beta() { return 2; }\n").unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(crate::registered_source_tests::app_state(&private));
+    app.manage(crate::PreflightRuns::default());
+    let state = app.state::<AppState>();
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 1;
+    let source = crate::register_local_source(&state, &root).unwrap();
+    let operation = crate::source_operation(&state, vec![(source.clone(), false)]).unwrap();
+    let (_, execution) = crate::start_job(&state, &source.ingest_job_kind()).unwrap();
+    crate::run_ingest(&source, &operation, &execution, app.handle(), &state).unwrap();
+    let scopes = vec![ScopedRepo {
+        repo_key: source.repo_key.clone(),
+        registered_source_id: Some(source.source_id.clone()),
+        config_hash: "fixture-config".into(),
+        layer_hints: None,
+    }];
+    let session = Fixture::session(&state, &scopes);
+    let graph = state.graph.lock().unwrap();
+    let (nodes, _) = graph.read_snapshot().unwrap();
+    let revision = graph.read_revision().unwrap();
+    let key = nodes
+        .iter()
+        .map(FactKey::from_node)
+        .find(|key| {
+            matches!(
+                graph
+                    .read_selected_facts_at_revision(
+                        std::slice::from_ref(key),
+                        &revision,
+                        SnapshotReadLimits::default()
+                    )
+                    .unwrap()
+                    .selections[0]
+                    .omission,
+                OmissionLookup::Omitted {
+                    kind: ReceiptOmissionKind::StoreCapacity,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    drop(graph);
+    let mut scope = || Ok(scopes.clone());
+    let proof = session
+        .authorize_evidence(
+            &mut ScopedReadContext {
+                graph: &state.graph,
+                decisions: &state.decisions,
+                scope: &mut scope,
+            },
+            session.basis_id(),
+            &key,
+        )
+        .unwrap();
+    let check = || {
+        let mut scope = || Ok(scopes.clone());
+        session.check_current(&mut ScopedReadContext {
+            graph: &state.graph,
+            decisions: &state.decisions,
+            scope: &mut scope,
+        })
+    };
+    let describe = || super::describe(&state, &proof, 0, 65536, check).unwrap_err();
+    assert_eq!(
+        describe(),
+        ReadError::EvidenceOmitted(ReceiptOmissionKind::StoreCapacity)
+    );
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(
+            private
+                .join("retained-source/locks")
+                .join(format!("{}.lock", source.source_id)),
+        )
+        .unwrap();
+    lock.try_lock().unwrap();
+    assert_eq!(describe(), ReadError::Storage);
+    drop(lock);
+    assert_eq!(
+        super::describe(&state, &proof, 0, 65536, || Err(ReadError::StaleBasis)).unwrap_err(),
+        ReadError::StaleBasis
+    );
+    // Test-only metadata changes retain the real producer's exact fact digest.
+    // They exercise all closed reasons and unknown/malformed lookup outcomes.
+    let db = rusqlite::Connection::open(private.join("graph.db")).unwrap();
+    let FactKey::Node { id } = &key else {
+        unreachable!()
+    };
+    for kind in [
+        ReceiptOmissionKind::Declarations,
+        ReceiptOmissionKind::Rules,
+    ] {
+        db.execute(
+            "UPDATE source_node_omissions SET kind=?1 WHERE node_id=?2",
+            rusqlite::params![kind.as_str(), id],
+        )
+        .unwrap();
+        assert_eq!(describe(), ReadError::EvidenceOmitted(kind));
+        let wire = crate::mcp_reads::dispatch::tool_error(
+            &serde_json::Value::Null,
+            ReadError::EvidenceOmitted(kind),
+        );
+        assert_eq!(
+            wire["result"]["structuredContent"]["error"],
+            "evidence_omitted"
+        );
+        assert_eq!(
+            wire["result"]["structuredContent"]["omission_kind"],
+            kind.as_str()
+        );
+    }
+    // A lookup mutation between pinned observations is stale even though this
+    // unsupported raw SQL does not advance the normal producer revision.
+    let db_path = private.join("graph.db");
+    let changed_id = id.clone();
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .set_source_binding_after_lookup_hook(move || {
+            rusqlite::Connection::open(db_path)
+                .unwrap()
+                .execute(
+                    "UPDATE source_node_omissions SET kind='store_capacity' WHERE node_id=?1",
+                    [&changed_id],
+                )
+                .unwrap();
+            Ok(())
+        });
+    assert_eq!(describe(), ReadError::StaleBasis);
+    db.execute(
+        "UPDATE source_node_omissions SET emitted_fact_digest=?1 WHERE node_id=?2",
+        rusqlite::params![format!("node-v1:{}", "0".repeat(64)), id],
+    )
+    .unwrap();
+    assert_eq!(describe(), ReadError::EvidenceUnavailable);
+    db.execute("DELETE FROM source_node_omissions WHERE node_id=?1", [id])
+        .unwrap();
+    assert_eq!(describe(), ReadError::EvidenceUnavailable);
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&core_graph::Node {
+            id: "mutation".into(),
+            label: "Symbol".into(),
+            props: serde_json::json!({}),
+        })
+        .unwrap();
+    assert_eq!(describe(), ReadError::StaleBasis);
+}

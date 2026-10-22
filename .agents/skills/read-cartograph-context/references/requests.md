@@ -110,4 +110,5 @@ an authoritative current-fact producer omission at the checked basis. It returns
 no source target or span and does not authorize recapture, ingestion or checkout
 access. Unknown absence is never omission; `NotOmitted` does not mean a receipt
 is available. This separate partial capability also leaves broad
-`evidence_absence_reason_available` false.
+`evidence_absence_reason_available` false. Complete and scoped modes advertise
+this support independently; check the current session's live capabilities.

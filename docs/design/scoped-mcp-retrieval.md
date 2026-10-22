@@ -53,8 +53,20 @@ retention ledger proves it for the exact current binding under that guard.
 Supplied receipt, digest and source identities are checked before this lookup;
 missing bindings do not establish forgetting. Invalid metadata and operational
 failures keep their distinct errors. The scoped capability advertises this
-forgotten-only subset explicitly; broad absence classification remains false
-until the per-fact omission producer and consumer are implemented.
+partial forgotten classification separately from receipt omission.
+
+For an unbound current fact, describe-only evidence requests can return
+`evidence_omitted` with structured `omission_kind`: `declarations`, `rules` or
+`store_capacity`. The indexed producer omission, complete fact digest and store
+revision are selected in one bounded transaction, then the exact selection and
+registered source are rechecked under the retention guard before session
+qualifications are rechecked. This result returns no target or span.
+`NotOmitted` and `Unrecorded` remain unavailable; missing bindings alone prove
+neither omission nor forgetting. A supplied evidence target that loses its
+binding is stale, and a current binding and its exact forgotten classification
+take precedence over omission metadata. The separate partial
+`receipt_omission_classification` capability advertises this support; broad
+`evidence_absence_reason_available` remains false.
 
 Scoped `cartograph_read_artifact` supports three producer-qualified partition
 kinds: `data-model`, `rule-evidence` and `rule-evidence-index`. The catalog names
@@ -123,6 +135,10 @@ The scoped worker reservation accounts for simultaneous retained and transient
 owners: revision/schema validation, coverage and policy observations, raw and
 projected rows, candidate handles, selected endpoint closure, binding/digest
 scratch, receipt/capture buffers, protocol descriptors and response envelopes.
+Omission checks include two selected fact/omission comparison owners and bounded
+SQL cell decoding. Source-v2 omission objects use the shared exact source,
+coverage and generation schema workspace; primary-key preflight scratch remains
+separate. These additions do not raise policy ceilings.
 Partition work adds closure maps/current indexed pages, frontier and typed rule
 reference sets before graph lookup, projection/native rendering, qualified
 header/body/assertion owners and serialized protocol Values while the frozen

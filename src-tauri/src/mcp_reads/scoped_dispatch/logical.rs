@@ -59,6 +59,9 @@ pub(crate) fn logical_protocol_workspace_bytes(
         ReadError::ArtifactUnavailable,
         ReadError::EvidenceUnavailable,
         ReadError::EvidenceForgotten,
+        ReadError::EvidenceOmitted(core_graph::source::ReceiptOmissionKind::Declarations),
+        ReadError::EvidenceOmitted(core_graph::source::ReceiptOmissionKind::Rules),
+        ReadError::EvidenceOmitted(core_graph::source::ReceiptOmissionKind::StoreCapacity),
         ReadError::EvidenceInvalid,
         ReadError::InvalidRequest,
     ] {
