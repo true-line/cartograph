@@ -69,11 +69,8 @@ impl ConfigIndex {
     /// visited in sorted order and the first definition of a key wins, so
     /// the index is deterministic regardless of walk order (US-0014).
     pub fn from_dir(root: &Path) -> Result<Self, StitchError> {
-        let mut files = Vec::new();
-        collect_env_files(root, &mut files)?;
-        files.sort();
         let mut index = ConfigIndex::default();
-        for rel in files {
+        for rel in env_files(root)? {
             let content = std::fs::read_to_string(root.join(&rel))?;
             for line in content.lines() {
                 let line = line.trim();
@@ -123,14 +120,19 @@ impl ConfigIndex {
 /// Env files are local configuration that repositories conventionally
 /// `.gitignore` — yet they are exactly what identity resolution reads, so this
 /// walk deliberately disregards `.gitignore` (#248); only the fixed skips apply.
-fn collect_env_files(root: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
+///
+/// Returns their repo-relative paths, sorted. Public so a clean-checkout
+/// check can prove every env file recovery reads is tracked (#740).
+pub fn env_files(root: &Path) -> std::io::Result<Vec<String>> {
     let skip = |name: &str| name == "node_modules" || name == "dist" || name.starts_with('.');
-    for file in source_walk::files(root, &skip, source_walk::Gitignores::Disregard)? {
-        if file.name == ".env" || file.name.starts_with(".env.") {
-            out.push(file.rel);
-        }
-    }
-    Ok(())
+    let mut files: Vec<String> =
+        source_walk::files(root, &skip, source_walk::Gitignores::Disregard)?
+            .into_iter()
+            .filter(|file| file.name == ".env" || file.name.starts_with(".env."))
+            .map(|file| file.rel)
+            .collect();
+    files.sort();
+    Ok(files)
 }
 
 fn prov(

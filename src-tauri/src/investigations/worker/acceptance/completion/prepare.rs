@@ -121,7 +121,7 @@ fn validate_binding(binding: &PreparationBinding) -> Result<(), String> {
 }
 fn inventory(repo: &str) -> Result<String, String> {
     serde_json::to_string(&RepoCoverage {
-        inventory: ingest::coverage::INVENTORY_ID.into(), repo: repo.into(), commit: "workdir".into(), layer_hints: vec![],
+        inventory: ingest::coverage::INVENTORY_ID.into(), repo: repo.into(), commit: "workdir".into(), commit_note: None, layer_hints: vec![],
         producers: vec![ProducerCoverage { id: "harness-generated-synthetic-control@1".into(), kind: ProducerKind::Observational, covers: "synthetic control input".into(), state: ProducerState::MissingInput, files: 0, nodes: 0, edges: 0, inputs: vec![], stopping_reason: "Harness-generated synthetic control inventory: the named control producer did not run because its optional control input was not declared. This record is not a full ingest-pipeline coverage claim.".into() }],
         missing_inputs: vec![MissingInput { input: "synthetic_control_input".into(), producer: "harness-generated-synthetic-control@1".into(), reason: "Optional synthetic control input was not declared for this recorded scope.".into() }], unsupported: vec![], limited: true,
     }).map_err(|error| error.to_string())

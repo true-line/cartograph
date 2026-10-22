@@ -219,6 +219,23 @@ fn qualification_refuses_inconsistent_inventories() {
         CoverageQualification::new(&twice, &[]),
         Err(ContextError::InvalidCoverage(_))
     ));
+
+    // Optional `commit_note` on a workdir inventory is accepted when bounded.
+    let with_note = json!({
+        "inventory": "coverage@1",
+        "repo": "acme/api",
+        "commit": "workdir",
+        "commit_note": "3 modified or untracked files",
+        "layer_hints": ["server", "infra"],
+        "producers": [{"producer": "t0.test", "state": "ran"}],
+        "unsupported": [],
+        "limited": false,
+    })
+    .to_string();
+    let qualified =
+        CoverageQualification::new(&scope, &[stored("acme/api", "job-1", with_note)]).unwrap();
+    assert_eq!(qualified.repos[0].status, CoverageStatus::Recorded);
+    assert_eq!(qualified.repos[0].commit.as_deref(), Some("workdir"));
 }
 
 // AC-0239: the coverage identity binds the recorded basis behind an identical
