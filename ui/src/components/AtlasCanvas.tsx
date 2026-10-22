@@ -54,6 +54,7 @@ function edgeLayers(edge: GraphEdge): GraphLayer[] {
   switch (edge.label) {
     case 'DEPENDS_ON':
     case 'REFERENCES':
+    case 'USES':
       return ['infra'];
     case 'TRIGGERS':
     case 'ROUTES':

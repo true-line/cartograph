@@ -160,6 +160,49 @@ export const InfrastructureExcludesRuleGaps: Story = {
   },
 };
 
+// #734: observed infrastructure. A Resource the code is seen using brings
+// its calling symbol into Infrastructure through USES; a Gap on a computed
+// identity has no native endpoint there, so it stays out.
+const observedFixture: AtlasSnapshot = {
+  nodes: [
+    {
+      id: 'res:local/app@observed:indexeddb:inventory',
+      label: 'Resource',
+      props: { type: 'indexeddb', kind: 'browser-storage', observed: true, prov: prov('Confirmed', 'db.ts') },
+    },
+    { id: 'sym:local/app@db.ts#openDb', label: 'Symbol', props: { name: 'openDb', prov: prov('Confirmed', 'db.ts') } },
+    { id: 'sym:local/app@db.ts#connect', label: 'Symbol', props: { name: 'connect', prov: prov('Confirmed', 'db.ts') } },
+    {
+      id: 'gap:observed:local/app@db.ts@90',
+      label: 'Gap',
+      props: { reason: 'runtime-computed mongodb identity', prov: prov('Gap', 'db.ts') },
+    },
+  ],
+  edges: [
+    {
+      src: 'sym:local/app@db.ts#openDb',
+      dst: 'res:local/app@observed:indexeddb:inventory',
+      label: 'USES',
+      props: { prov: prov('Confirmed', 'db.ts') },
+    },
+    {
+      src: 'sym:local/app@db.ts#connect',
+      dst: 'gap:observed:local/app@db.ts@90',
+      label: 'USES',
+      props: { prov: prov('Gap', 'db.ts') },
+    },
+  ],
+};
+
+export const InfrastructureShowsObservedResourceUsers: Story = {
+  args: { snapshot: observedFixture },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Infrastructure' }));
+    await waitFor(() => expect(canvas.getByRole('status')).toHaveTextContent('2 nodes · 1 edges'));
+  },
+};
+
 const extensionFixture: AtlasSnapshot = {
   nodes: [
     { id: 'ext:local/addon@src', label: 'Extension', props: { name: 'addon', prov: prov('Confirmed', 'manifest.json') } },

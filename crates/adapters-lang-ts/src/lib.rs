@@ -3391,6 +3391,7 @@ pub(crate) mod const_resolution;
 pub mod declarations;
 pub mod indexeddb;
 mod local_definitions;
+pub mod observed_infra;
 pub(crate) mod resolution;
 mod rule_evidence;
 mod source_expression;

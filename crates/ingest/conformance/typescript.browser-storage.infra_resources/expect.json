@@ -1,0 +1,19 @@
+{
+  "nodes": [
+    {
+      "label": "Resource",
+      "id": "res:local/p@observed:indexeddb:inventory",
+      "props": {
+        "kind": "browser-storage",
+        "observed": true
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "USES",
+      "src": "sym:local/p@db.ts#openInventory",
+      "dst": "res:local/p@observed:indexeddb:inventory"
+    }
+  ]
+}

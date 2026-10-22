@@ -1,0 +1,19 @@
+{
+  "nodes": [
+    {
+      "label": "Resource",
+      "id": "res:local/p@observed:auth0:shop.eu.auth0.com",
+      "props": {
+        "kind": "auth-provider",
+        "observed": true
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "USES",
+      "src": "sym:local/p@auth.ts#login",
+      "dst": "res:local/p@observed:auth0:shop.eu.auth0.com"
+    }
+  ]
+}

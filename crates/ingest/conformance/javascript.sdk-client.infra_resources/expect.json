@@ -1,0 +1,12 @@
+{
+  "nodes": [
+    {
+      "label": "Resource",
+      "id": "res:local/p@observed:postgres:env:DATABASE_URL",
+      "props": {
+        "kind": "sdk-client",
+        "env_key": "DATABASE_URL"
+      }
+    }
+  ]
+}

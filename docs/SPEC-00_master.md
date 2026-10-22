@@ -91,6 +91,14 @@ preview resource events are T1 overlays keyed by Pulumi type + logical name;
 they enrich existing T0 resources only, retain separate observed provenance,
 and redact Pulumi secret wrappers before storage.
 
+Code with no IaC still shows what it runs on. Observed infrastructure (#734)
+turns proven client sites into `Resource{observed: true, kind}` nodes with
+`USES` edges from the calling symbol. Proven sites are browser storage
+globals, and SDK or auth clients listed in the versioned
+`observed-clients.json` registry and import- or require-proven from their
+module. URL identities keep only scheme and authority, env references keep
+only the variable name, and computed identities become Gaps.
+
 ### 3.2 Cloud → Topology + Capability Resolution
 A hand-curated **Capability Registry** maps resource types to runtime semantics deterministically. Examples (AWS):
 - `aws_lambda_event_source_mapping` ⇒ `TRIGGERS(SQS|Kinesis|DynamoDB-stream → Lambda)` edge.

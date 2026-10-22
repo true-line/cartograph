@@ -1471,6 +1471,20 @@ fn extract_tree_with_registries(
         layers.webext.edges += distinct_edge_count(&idb.edges);
         extraction.nodes.extend(idb.nodes);
         extraction.edges.extend(idb.edges);
+        // Observed infrastructure (#734): storage, SDK and auth clients the
+        // code proves it talks to, beside any IaC-declared resources.
+        let observed = match primary {
+            Some(capture) => {
+                adapters_lang_ts::observed_infra::extract_captured(capture, &ts_id, registries)
+                    .map_err(|e| e.to_string())?
+            }
+            None => adapters_lang_ts::observed_infra::extract_dir(root, &ts_id, registries)
+                .map_err(|e| e.to_string())?,
+        };
+        layers.ts.nodes += distinct_node_count(&observed.nodes);
+        layers.ts.edges += distinct_edge_count(&observed.edges);
+        extraction.nodes.extend(observed.nodes);
+        extraction.edges.extend(observed.edges);
     }
     if wants_server {
         let python_id = adapters_lang_python::SourceId { repo, commit };
@@ -9103,7 +9117,16 @@ ORDERS_QUEUE = "https://sqs.example/orders"
         // Layer hint applied: the infra repo contributed no TS facts.
         let files = store.nodes_with_label("File").unwrap();
         assert!(files.iter().all(|f| !f.id.contains("script.ts")));
-        assert_eq!(store.nodes_with_label("Resource").unwrap().len(), 1);
+        // One declared queue from the infra repo; the API repo's SQS client
+        // is observed infrastructure beside it (#734).
+        let (observed, declared): (Vec<_>, Vec<_>) = store
+            .nodes_with_label("Resource")
+            .unwrap()
+            .into_iter()
+            .partition(|r| r.props["observed"] == true);
+        assert_eq!(declared.len(), 1);
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].id, "res:local/api@observed:aws-sqs");
 
         // Manifest identity applied: the env-ref channel resolved Confirmed
         // via the manifest, not a Gap.

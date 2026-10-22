@@ -182,6 +182,15 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     ),
     cell("TypeScript", "node-events", EventSites, Supported, ""),
     cell("TypeScript", "indexeddb", DataModel, Supported, ""),
+    cell(
+        "TypeScript",
+        "browser-storage",
+        InfraResources,
+        Supported,
+        "",
+    ),
+    cell("TypeScript", "sdk-client", InfraResources, Supported, ""),
+    cell("TypeScript", "auth-provider", InfraResources, Supported, ""),
     cell("JavaScript", CORE, Imports, Supported, ""),
     cell("JavaScript", CORE, Calls, Supported, ""),
     cell(
@@ -197,6 +206,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("JavaScript", "route-table", HttpClientCalls, Supported, ""),
     cell("JavaScript", "chrome-messaging", EventSites, Supported, ""),
     cell("JavaScript", "indexeddb", DataModel, Supported, ""),
+    cell("JavaScript", "sdk-client", InfraResources, Supported, ""),
     cell("Vue", CORE, Imports, Supported, ""),
     cell("Vue", CORE, Calls, Supported, ""),
     cell("Vue", "fetch", HttpClientCalls, Supported, ""),
