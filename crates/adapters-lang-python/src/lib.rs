@@ -553,36 +553,170 @@ fn parameter_annotation<'s>(
     None
 }
 
-/// An application assigned to `name` from an import-proven factory inside
-/// `function` itself (nested functions and classes are other scopes).
-fn local_app_assignment(
+/// Whether `child` is the `field` child of `parent`.
+fn is_field(parent: TsNode<'_>, field: &str, child: TsNode<'_>) -> bool {
+    parent
+        .child_by_field_name(field)
+        .is_some_and(|node| node.id() == child.id())
+}
+
+/// Whether the identifier `ident` is in a position that binds its name, read
+/// by climbing to the statement that owns it. Over-approximates (any capture in
+/// a `case` pattern, any comprehension target), which only ever fails closed.
+fn binds_name(ident: TsNode<'_>, scope: TsNode<'_>) -> bool {
+    let mut ancestor = ident.parent();
+    while let Some(node) = ancestor
+        && node.id() != scope.id()
+    {
+        if node.kind() == "case_pattern" {
+            return true;
+        }
+        ancestor = node.parent();
+    }
+    let mut child = ident;
+    while let Some(parent) = child.parent() {
+        if parent.id() == scope.id() {
+            return false;
+        }
+        match parent.kind() {
+            "pattern_list"
+            | "tuple_pattern"
+            | "list_pattern"
+            | "tuple"
+            | "list"
+            | "parenthesized_expression"
+            | "list_splat_pattern"
+            | "list_splat"
+            | "as_pattern_target"
+            | "dotted_name" => {}
+            "assignment" | "augmented_assignment" | "for_statement" | "for_in_clause" => {
+                return is_field(parent, "left", child);
+            }
+            "named_expression" => return is_field(parent, "name", child),
+            "as_pattern" | "aliased_import" => return is_field(parent, "alias", child),
+            "import_from_statement" => return !is_field(parent, "module_name", child),
+            "function_definition" | "class_definition" => {
+                return is_field(parent, "name", child);
+            }
+            "import_statement"
+            | "future_import_statement"
+            | "global_statement"
+            | "nonlocal_statement"
+            | "delete_statement" => return true,
+            _ => return false,
+        }
+        child = parent;
+    }
+    false
+}
+
+/// Every statement in `scope` that binds `name`, outside nested function,
+/// class and lambda bodies (other scopes). A nested definition's own name
+/// still binds here.
+fn binding_sites<'t>(cx: &FileCx<'_>, scope: TsNode<'t>, name: &str) -> Vec<TsNode<'t>> {
+    let mut sites: Vec<TsNode<'t>> = Vec::new();
+    let mut stack = vec![scope];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "identifier" && cx.text(&node) == name && binds_name(node, scope) {
+            let mut site = node;
+            while let Some(parent) = site.parent()
+                && parent.id() != scope.id()
+                && !matches!(parent.kind(), "block" | "module")
+            {
+                site = parent;
+            }
+            if !sites.iter().any(|known| known.id() == site.id()) {
+                sites.push(site);
+            }
+            continue;
+        }
+        let mut walk = node.walk();
+        for child in node.named_children(&mut walk) {
+            if node.id() != scope.id()
+                && matches!(
+                    node.kind(),
+                    "function_definition" | "class_definition" | "lambda"
+                )
+                && !is_field(node, "name", child)
+            {
+                continue;
+            }
+            stack.push(child);
+        }
+    }
+    sites
+}
+
+/// `site` is `name = <import-proven factory>()` written directly in `body`, so
+/// it runs unconditionally before every later statement of that body.
+fn unconditional_factory_assignment(
+    cx: &FileCx<'_>,
+    site: TsNode<'_>,
+    body: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> Option<Framework> {
+    if site.kind() != "expression_statement" || site.parent()?.id() != body.id() {
+        return None;
+    }
+    let mut walk = site.walk();
+    let assignment = site
+        .named_children(&mut walk)
+        .find(|child| child.kind() == "assignment")?;
+    let left = assignment.child_by_field_name("left")?;
+    let right = assignment.child_by_field_name("right")?;
+    if left.kind() != "identifier" || right.kind() != "call" {
+        return None;
+    }
+    call_name(cx, right).and_then(|callee| framework_factory(&callee, bindings))
+}
+
+/// How `name` is bound in `function` at the use starting at `use_start`.
+enum LocalBinding {
+    /// Not bound in the function: a parameter or an outer name.
+    Free,
+    /// One unconditional factory assignment that runs before the use.
+    App(Framework),
+    /// Rebound, conditionally bound, bound after the use, or bound otherwise.
+    Unproven,
+}
+
+/// Prove the reaching definition of `name` at `use_start` (#747). Only a sole
+/// binding that is an unconditional factory assignment before the use proves
+/// an application; anything else fails closed.
+fn local_binding(
     cx: &FileCx<'_>,
     function: TsNode<'_>,
     name: &str,
+    use_start: usize,
     bindings: &HashMap<String, ImportBinding>,
-) -> Option<Framework> {
-    let mut stack: Vec<TsNode<'_>> = function.child_by_field_name("body").into_iter().collect();
-    while let Some(node) = stack.pop() {
-        if matches!(node.kind(), "function_definition" | "class_definition") {
-            continue;
+) -> LocalBinding {
+    let Some(body) = function.child_by_field_name("body") else {
+        return LocalBinding::Unproven;
+    };
+    match binding_sites(cx, body, name).as_slice() {
+        [] => LocalBinding::Free,
+        [site] if site.end_byte() <= use_start => {
+            unconditional_factory_assignment(cx, *site, body, bindings)
+                .map_or(LocalBinding::Unproven, LocalBinding::App)
         }
-        if node.kind() == "assignment"
-            && let (Some(left), Some(right)) = (
-                node.child_by_field_name("left"),
-                node.child_by_field_name("right"),
-            )
-            && left.kind() == "identifier"
-            && cx.text(&left) == name
-            && right.kind() == "call"
-            && let Some(framework) =
-                call_name(cx, right).and_then(|callee| framework_factory(&callee, bindings))
-        {
-            return Some(framework);
-        }
-        let mut walk = node.walk();
-        stack.extend(node.named_children(&mut walk));
+        _ => LocalBinding::Unproven,
     }
-    None
+}
+
+/// Whether `node` is a statement written directly at module scope whose
+/// variable `name` has no other binding there, so a module-level read of the
+/// name reaches it (#747).
+fn sole_module_binding(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+    let mut statement = node;
+    while let Some(parent) = statement.parent() {
+        if parent.kind() == "module" {
+            return binding_sites(cx, parent, name)
+                .iter()
+                .all(|site| site.id() == statement.id());
+        }
+        statement = parent;
+    }
+    false
 }
 
 /// What the object of a mount call is, as far as this file can prove it.
@@ -596,13 +730,28 @@ fn mount_parent(
     }
     let name = cx.text(&object);
     if let Some(function) = enclosing_function_node(object) {
-        if let Some(framework) = local_app_assignment(cx, function, name, bindings) {
-            return MountParent::LocalApp(framework);
+        match local_binding(cx, function, name, object.start_byte(), bindings) {
+            LocalBinding::App(framework) => return MountParent::LocalApp(framework),
+            LocalBinding::Unproven => return MountParent::Unproven,
+            LocalBinding::Free => {}
         }
         if let Some(annotation) = parameter_annotation(cx, function, name) {
             return annotation
                 .and_then(|annotation| framework_factory(annotation, bindings))
                 .map_or(MountParent::Unproven, MountParent::AnnotatedApp);
+        }
+        // A name bound by an enclosing function is a closure variable that may
+        // be rebound before this function runs; never read it as the global.
+        let mut outer = enclosing_function_node(function);
+        while let Some(scope) = outer {
+            if parameter_annotation(cx, scope, name).is_some()
+                || scope
+                    .child_by_field_name("body")
+                    .is_some_and(|body| !binding_sites(cx, body, name).is_empty())
+            {
+                return MountParent::Unproven;
+            }
+            outer = enclosing_function_node(scope);
         }
     }
     match bindings.get(name) {
@@ -687,11 +836,13 @@ fn assignment_receivers(
         if !router {
             receivers.insert(variable.clone(), framework);
         }
+        let module_level =
+            enclosing_function_node(call).is_none() && sole_module_binding(cx, call, &variable);
         out.receiver_defs.push(ReceiverDef {
             key: (cx.path.to_string(), variable),
             framework,
             router,
-            module_level: enclosing_function_node(call).is_none(),
+            module_level,
             prefix: if router {
                 constructor_prefix(cx, call, framework)
             } else {

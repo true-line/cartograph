@@ -529,6 +529,130 @@ registry.include_router(orphans, prefix="/fake")
 }
 
 #[test]
+fn mount_receivers_need_their_reaching_definition() {
+    // #747: an application assignment proves a mount only when it is the sole
+    // binding of the name in that scope, unconditional and before the mount.
+    let dir = tempfile::tempdir().unwrap();
+    let mut routers = String::from("from fastapi import APIRouter\n");
+    for name in [
+        "good", "over", "late", "inner", "cond", "shadow", "module", "loop", "matched",
+    ] {
+        routers.push_str(&format!(
+            "{name} = APIRouter()\n@{name}.get(\"/x\")\ndef {name}_x():\n    return {{}}\n"
+        ));
+    }
+    write(dir.path(), "routers.py", &routers);
+    write(
+        dir.path(),
+        "flaskapp.py",
+        r#"
+from flask import Flask, Blueprint
+bp = Blueprint("bp", __name__)
+
+@bp.route("/x")
+def bp_x():
+    return ""
+
+def make():
+    app = Flask(__name__)
+    app.register_blueprint(bp, url_prefix="/flask")
+"#,
+    );
+    write(
+        dir.path(),
+        "main.py",
+        r#"
+from fastapi import FastAPI
+from routers import good, over, late, inner, cond, shadow, module, loop, matched
+from fake import Fake
+
+app = FastAPI()
+
+def install_good():
+    app = FastAPI()
+    app.include_router(good, prefix="/good")
+
+def install_overwritten():
+    app = FastAPI()
+    app = Fake()
+    app.include_router(over, prefix="/over")
+
+def install_late():
+    app.include_router(late, prefix="/late")
+    app = FastAPI()
+
+def install_outer():
+    app = FastAPI()
+    def install_inner():
+        app.include_router(inner, prefix="/inner")
+    install_inner()
+
+def install_conditional(flag):
+    if flag:
+        app = FastAPI()
+    app.include_router(cond, prefix="/cond")
+
+def install_shadowing():
+    app = Fake()
+    app.include_router(shadow, prefix="/shadow")
+
+def install_loop(apps):
+    app = FastAPI()
+    for app in apps:
+        app.include_router(loop, prefix="/loop")
+
+def install_match(value):
+    app = FastAPI()
+    match value:
+        case Fake(app=app):
+            pass
+    app.include_router(matched, prefix="/matched")
+
+real = FastAPI()
+real = Fake()
+real.include_router(module, prefix="/module")
+"#,
+    );
+    write(
+        dir.path(),
+        "fake.py",
+        "class Fake:\n    def include_router(self, router, prefix=''):\n        pass\n",
+    );
+    let facts = endpoint_facts(&extract_dir(dir.path(), &id()).unwrap());
+    let unproven = |path: &str| {
+        (
+            "GET".to_string(),
+            path.to_string(),
+            "InferredStrong".to_string(),
+            Some("mount_receiver_unproven".to_string()),
+        )
+    };
+    let confirmed = |path: &str| {
+        (
+            "GET".to_string(),
+            path.to_string(),
+            "Confirmed".to_string(),
+            Some("mounted".to_string()),
+        )
+    };
+    assert_eq!(
+        facts,
+        vec![
+            unproven("/cond/x"),
+            confirmed("/flask/x"),
+            confirmed("/good/x"),
+            unproven("/inner/x"),
+            unproven("/late/x"),
+            unproven("/loop/x"),
+            unproven("/matched/x"),
+            unproven("/module/x"),
+            unproven("/over/x"),
+            unproven("/shadow/x"),
+        ]
+    );
+}
+
+#[test]
 fn nested_router_mounts_compose_their_whole_chain() {
     // #741 review: child -> parent -> app must serve under every prefix on the
     // chain, for FastAPI routers and Flask nested blueprints alike.
