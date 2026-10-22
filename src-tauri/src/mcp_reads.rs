@@ -25,6 +25,7 @@ use std::{
 };
 
 pub(crate) mod artifacts;
+pub(crate) mod client_skill;
 pub(crate) mod commands;
 pub(crate) mod dispatch;
 #[cfg(unix)]

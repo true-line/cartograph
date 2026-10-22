@@ -218,3 +218,20 @@ coverage explanations, and trustworthy output are launch requirements.
 Protocol references: [ACP overview](https://agentclientprotocol.com/protocol/v1/overview),
 [ACP sessions](https://agentclientprotocol.com/protocol/v1/session-setup),
 [MCP Tasks](https://modelcontextprotocol.io/extensions/tasks/overview).
+
+## Packaged read-only client skill (#732)
+
+The desktop bundle includes the canonical `read-cartograph-context` skill tree,
+including every referenced document. Settings exposes **Show packaged client
+skill** beside client configuration, independently of read-service activation.
+The read-only command reports the running app version, verified skill location,
+and skill-relative file names with text. It reads only the fixed packaged tree;
+file sizes are bounded before reading and bytes must match the sources embedded
+at build time. Missing, changed or symlink-substituted descendants yield explicit
+unavailability without changing the read service or its configuration.
+
+The interface displays SKILL.md first and reference documents on demand. It
+explains that installation and removal use the chosen client's supported workflow
+and require a separate user request. Cartograph neither writes client settings
+nor installs files into global skill locations. This delivery does not establish
+Windows MCP transport support or authorize provider execution.

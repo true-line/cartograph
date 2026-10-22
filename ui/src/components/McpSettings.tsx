@@ -1,13 +1,35 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { McpSettingsPanel, type McpStatus } from './McpSettingsPanel';
+import { McpSettingsPanel, type McpClientSkill, type McpStatus } from './McpSettingsPanel';
 
 export function McpSettings({ available }: { available: boolean }) {
+  return <McpSettingsSession key={String(available)} available={available} />;
+}
+
+function McpSettingsSession({ available }: { available: boolean }) {
   const [status, setStatus] = useState<McpStatus>('unavailable');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [configuration, setConfiguration] = useState<string | null>(null);
+  const [skill, setSkill] = useState<McpClientSkill | null>(null);
+  const [skillBusy, setSkillBusy] = useState(false);
+  const skillGeneration = useRef(0);
   const generation = useRef(0);
+  useEffect(() => () => { skillGeneration.current += 1; }, []);
+  const showSkill = async () => {
+    const ticket = ++skillGeneration.current;
+    if (!available) return;
+    setSkillBusy(true);
+    setSkill(null);
+    try {
+      const result = await invoke<McpClientSkill>('mcp_reads_client_skill');
+      if (ticket === skillGeneration.current) setSkill(result);
+    } catch {
+      if (ticket === skillGeneration.current) setSkill({ status: 'unavailable' });
+    } finally {
+      if (ticket === skillGeneration.current) setSkillBusy(false);
+    }
+  };
   const run = useCallback(async (operation?: () => Promise<unknown>, showConfig = false) => {
     const ticket = ++generation.current;
     if (!available) { setStatus('unavailable'); setConfiguration(null); setBusy(false); return; }
@@ -52,6 +74,7 @@ export function McpSettings({ available }: { available: boolean }) {
     return () => { generation.current += 1; };
   }, [available]);
   return <McpSettingsPanel status={available ? status : 'unavailable'} available={available} busy={available && busy} error={available ? error : null}
+    skill={available ? skill : null} skillBusy={available && skillBusy} onSkill={() => void showSkill()}
     configuration={available ? configuration : null} onRefresh={() => void run()}
     onEnable={(policy) => void run(() => invoke('mcp_reads_enable', { policy }))}
     onDisable={() => void run(() => invoke('mcp_reads_disable'))}

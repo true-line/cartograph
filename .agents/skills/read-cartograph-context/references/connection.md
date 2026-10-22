@@ -26,7 +26,19 @@ The implementation is Unix-only, with macOS packaging integration. Windows MCP
 transport is unavailable. Check the build-specific acceptance report for packaging and installed-client
 validation; a source-built relay fixture alone does not establish either.
 
+Find the build-matched skill in Settings → Read-only MCP → Show packaged client
+skill, beside Show client configuration. Discovery works while read access is
+disabled. The view shows the running app version, verified SKILL.md location,
+and the complete reference tree. Missing or modified packaged files are reported
+as unavailable; use a complete matching app bundle instead of silently borrowing
+another release's skill. Showing the skill does not enable access or change any
+client settings.
+
 For skill installation, retain this complete skill folder and its references in
 the selected client's supported skill location using that client's normal
 installation workflow. Installation/removal is a separate requested action; do
 not copy into global client configuration merely because the skill was read.
+
+To remove an installed copy, use that client's supported removal workflow for
+this skill. Removing a skill does not disconnect MCP or revoke access: remove the
+client MCP entry and disable Cartograph read access separately when requested.
