@@ -148,7 +148,7 @@ impl FactKey {
         }
     }
 
-    fn validate(&self) -> Result<(), GraphError> {
+    pub(crate) fn validate(&self) -> Result<(), GraphError> {
         match self {
             Self::Node { id } => bounded(id, MAX_ID_BYTES),
             Self::Edge {
@@ -519,7 +519,7 @@ const SCHEMA: &[(&str, &str, &str)] = &[
 
 const OWNED_SCHEMA_WHERE: &str = "name GLOB 'source_binding_*' OR name GLOB 'source_omission_*' OR name IN ('source_node_bindings', 'source_edge_bindings', 'source_node_omissions', 'source_edge_omissions') OR (tbl_name IN ('source_binding_meta', 'source_node_bindings', 'source_edge_bindings', 'source_node_omissions', 'source_edge_omissions', 'source_omission_index') AND name NOT GLOB 'sqlite_*') OR (type = 'trigger' AND tbl_name IN ('nodes', 'edges'))";
 
-fn preflight_selection_schema(connection: &Connection) -> Result<(), GraphError> {
+pub(crate) fn preflight_selection_schema(connection: &Connection) -> Result<(), GraphError> {
     // Only the opt-in bounded path changes admission behavior. Before the
     // existing exact-schema decoder copies SQL/name bodies, bound their count,
     // types and UTF-8 byte lengths in the same read transaction.
@@ -579,7 +579,7 @@ fn has_version(connection: &Connection, version: i64) -> Result<bool, GraphError
     Ok(rows == [(1, version)])
 }
 
-fn check_schema(connection: &Connection) -> Result<(), GraphError> {
+pub(crate) fn check_schema(connection: &Connection) -> Result<(), GraphError> {
     // Generation triggers are part of this owner's inventory. Validate their
     // metadata bounds before owned_schema allocates SQL strings.
     let generation = crate::generation::validate_for_owner(connection)?;
@@ -858,13 +858,13 @@ fn replace_omissions(
     Ok(())
 }
 
-enum SelectionBinding {
+pub(crate) enum SelectionBinding {
     Absent,
     Invalid,
     Present(SourceBinding),
 }
 
-fn load_selection_binding(
+pub(crate) fn load_selection_binding(
     connection: &Connection,
     fact: &FactKey,
 ) -> Result<SelectionBinding, GraphError> {

@@ -12,6 +12,7 @@ pub mod generation;
 pub mod omission;
 pub mod placeholder;
 pub mod rules;
+pub mod scoped;
 pub mod source;
 
 pub use bounded::{SnapshotBoundsError, SnapshotReadLimits};

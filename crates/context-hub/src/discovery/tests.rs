@@ -392,3 +392,108 @@ fn discovery_bounds_the_whole_candidate_before_copying_it() {
     assert_eq!(bounded_len(&view, exact.len()), Ok(exact.len()));
     assert!(bounded_len(&view, exact.len() - 1).is_err());
 }
+
+// #731: scoped windows and full discovery share first-field and Unicode policy.
+#[test]
+fn borrowed_window_matching_conforms_to_complete_discovery() {
+    let snapshot = ContextSnapshot::new(
+        vec![
+            node("a", "Symbol", json!({"name":"İstanbul", "title":"other"})),
+            node("b", "Symbol", json!({"name":"same", "route":"same"})),
+            node("c", "Symbol", json!({"name":42, "title":"same"})),
+            node("d", "Symbol", json!({})),
+        ],
+        vec![],
+    )
+    .unwrap();
+    for query in [
+        DiscoveryQuery::Identifier { id: "d".into() },
+        DiscoveryQuery::Name {
+            name: "same".into(),
+        },
+        DiscoveryQuery::Text {
+            text: "  \u{307}STAN  ".into(),
+        },
+        DiscoveryQuery::Text {
+            text: "missing".into(),
+        },
+    ] {
+        let matcher = DiscoveryMatcher::new(&query).unwrap();
+        let mut window_matches = Vec::new();
+        for window in snapshot.facts.chunks(2) {
+            for fact in window {
+                let FactReference::Node { id } = &fact.reference else {
+                    continue;
+                };
+                if let Some(found) = matcher.match_node(id, &fact.properties) {
+                    window_matches.push((
+                        fact.reference.clone(),
+                        found.kind,
+                        found.field.to_string(),
+                        found.value.to_string(),
+                    ));
+                }
+            }
+        }
+        let complete = snapshot
+            .discover(DiscoveryRequest {
+                query,
+                labels: vec![],
+                max_candidates: MAX_CANDIDATES,
+                max_bytes: MAX_RESPONSE_BYTES,
+                cursor: None,
+            })
+            .unwrap();
+        let complete_matches: Vec<_> = complete
+            .candidates
+            .into_iter()
+            .map(|c| {
+                (
+                    c.reference,
+                    c.match_reason.kind,
+                    c.match_reason.field,
+                    c.match_reason.value,
+                )
+            })
+            .collect();
+        assert_eq!(window_matches, complete_matches);
+    }
+    assert!(DiscoveryMatcher::new(&DiscoveryQuery::Text { text: "  ".into() }).is_err());
+    assert!(
+        DiscoveryMatcher::new(&DiscoveryQuery::Identifier {
+            id: "x".repeat(MAX_TERM_BYTES + 1)
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn scoped_query_digest_binds_normalized_query_and_exact_labels_before_allocation() {
+    let a = DiscoveryMatcher::new(&DiscoveryQuery::Text {
+        text: "  CHECKOUT ".into(),
+    })
+    .unwrap();
+    let b = DiscoveryMatcher::new(&DiscoveryQuery::Text {
+        text: "checkout".into(),
+    })
+    .unwrap();
+    let labels = BTreeSet::from(["Symbol".to_owned()]);
+    assert_eq!(
+        a.query_digest(&labels).unwrap(),
+        b.query_digest(&labels).unwrap()
+    );
+    assert_ne!(
+        a.query_digest(&labels).unwrap(),
+        a.query_digest(&BTreeSet::new()).unwrap()
+    );
+    assert_ne!(
+        a.query_digest(&labels).unwrap(),
+        a.query_digest(&BTreeSet::from(["symbol".to_owned()]))
+            .unwrap()
+    );
+    let oversized = BTreeSet::from(["x".repeat(MAX_RESPONSE_BYTES)]);
+    assert!(matches!(
+        a.query_digest(&oversized),
+        Err(ContextError::ResponseBudgetExceeded { .. })
+    ));
+}
