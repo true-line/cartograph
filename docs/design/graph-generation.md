@@ -44,6 +44,8 @@ Row triggers cover already-open older writers and direct SQL data mutations
 while the owned schema remains intact. They do not protect against a writer
 that deliberately disables or rewrites the schema. Fresh older application
 versions may reject the extended exact schema; do not claim downgrade support.
+Restored database files retain instance identity and may roll generation back;
+file-level restores are not detected. Continuation across a restore is unsupported.
 
 ## Mutation boundary
 
@@ -133,3 +135,27 @@ registration, coverage or receipt qualifications.
 The existing #731 synthetic harness supplies a before-change acquisition
 baseline. It is not evidence of generation correctness, memory bounds or the
 performance of a future scoped implementation.
+
+## Release publication comparison (PR #750 review)
+
+An optimized release build compared published `d3d13c936a6b635682f660780775328c435cd872`
+against baseline `f79bbda285d90cc70293ca5a422525512d5bb10c` using three fresh-database
+process runs per version and size. Production release settings included thin LTO,
+one codegen unit and abort-on-panic. Each timed call published an empty-to-chain
+GraphPatch and validated readback; setup and readback were outside the timed call.
+
+| Combined node/edge rows | Baseline median | Generation median | Ratio |
+| --- | ---: | ---: | ---: |
+| 60,001 | 965.817 ms | 1,389.360 ms | 1.4385× (+43.85%) |
+| 250,001 | 4,039.043 ms | 5,884.529 ms | 1.4569× (+45.69%) |
+
+All 12 publication and readback assertions passed. The release result confirms a
+material publication-time tradeoff for the owner to review. It does not isolate
+trigger cost from all implementation differences, measure typed source-binding
+or coverage publication, predict full application ingestion time, or establish
+RSS bounds. Runs were interleaved on a shared machine with warm caches, not a
+controlled cold-cache performance experiment. Exact source archives, release
+binaries, locks, compiler settings and pre/post hashes are retained with the
+external task artifact `750-release-measure/REPORT.md` and raw results. The later
+metadata-count cleanup is outside this measured head and does not change the
+publication trigger mechanism.

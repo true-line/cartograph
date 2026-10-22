@@ -8,6 +8,7 @@ const TABLE: &str = "CREATE TABLE graph_generation (singleton INTEGER PRIMARY KE
 const OWNED: &str =
     "name GLOB 'graph_generation*' OR (tbl_name = 'graph_generation' AND name NOT GLOB 'sqlite_*')";
 const EXHAUSTED: &str = "graph generation exhausted";
+const OPERATIONS: [&str; 3] = ["INSERT", "UPDATE", "DELETE"];
 const WATCHED: &[&str] = &[
     "nodes",
     "edges",
@@ -49,10 +50,19 @@ pub struct RevisionedSnapshot {
     pub graph: (Vec<Node>, Vec<Edge>),
 }
 
+/// Derive metadata admission from the same registry used to generate triggers.
+pub(crate) fn trigger_count_for_tables(tables: &[&str]) -> usize {
+    WATCHED
+        .iter()
+        .filter(|table| tables.contains(table))
+        .count()
+        * OPERATIONS.len()
+}
+
 fn schema() -> Vec<(String, String, String)> {
     let mut result = vec![("table".into(), "graph_generation".into(), TABLE.into())];
     for table in WATCHED {
-        for operation in ["INSERT", "UPDATE", "DELETE"] {
+        for operation in OPERATIONS {
             let name = format!(
                 "graph_generation_{table}_{}",
                 operation.to_ascii_lowercase()

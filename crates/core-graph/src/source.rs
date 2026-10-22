@@ -260,8 +260,19 @@ fn preflight_selection_schema(connection: &Connection) -> Result<(), GraphError>
         [], |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let generation_present = crate::generation::validate_optional(connection)?;
-    // Six fact-table triggers plus six association-table triggers are visible here.
-    let expected = SCHEMA.len() + if generation_present { 12 } else { 0 };
+    // These are the watched tables selected by OWNED_SCHEMA_WHERE. Derive the
+    // trigger count from the generation registry rather than duplicating it.
+    let expected = SCHEMA.len()
+        + if generation_present {
+            crate::generation::trigger_count_for_tables(&[
+                "nodes",
+                "edges",
+                "source_node_bindings",
+                "source_edge_bindings",
+            ])
+        } else {
+            0
+        };
     if usize::try_from(count).ok() != Some(expected) || !valid {
         return Err(SnapshotBoundsError::InvalidSchema.into());
     }
