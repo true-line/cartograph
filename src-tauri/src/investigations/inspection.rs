@@ -42,6 +42,18 @@ fn snapshot_typed(
     fact: &TaskFactKey,
     limits: SnapshotReadLimits,
 ) -> Result<(String, SourceBinding), InspectionError> {
+    snapshot_typed_at(state, fact, limits, None, false)
+}
+
+/// Only MCP distinguishes a current unbound fact from a changed selection.
+/// Expected receipt targets still require their original association.
+fn snapshot_typed_at(
+    state: &AppState,
+    fact: &TaskFactKey,
+    limits: SnapshotReadLimits,
+    expected_snapshot: Option<&str>,
+    allow_unbound: bool,
+) -> Result<(String, SourceBinding), InspectionError> {
     let snapshot = state
         .graph
         .lock()
@@ -51,12 +63,21 @@ fn snapshot_typed(
             core_graph::GraphError::SnapshotBounds(_) => InspectionError::Limit,
             _ => InspectionError::Operational,
         })?;
-    let binding = match snapshot.selections.into_iter().next().map(|s| s.state) {
-        Some(FactSourceState::Present { binding, .. }) => binding,
-        _ => return Err(InspectionError::Stale),
-    };
     let context = ContextSnapshot::new(snapshot.graph.0, snapshot.graph.1)
         .map_err(|_| InspectionError::Operational)?;
+    if expected_snapshot.is_some_and(|expected| expected != context.id()) {
+        return Err(InspectionError::Stale);
+    }
+    let binding = match snapshot.selections.into_iter().next().map(|s| s.state) {
+        Some(FactSourceState::Present { binding, .. }) => binding,
+        Some(FactSourceState::Absent { .. }) if allow_unbound => {
+            return Err(InspectionError::Unavailable);
+        }
+        Some(FactSourceState::Invalid { .. }) if expected_snapshot.is_some() => {
+            return Err(InspectionError::Invalid);
+        }
+        _ => return Err(InspectionError::Stale),
+    };
     Ok((context.id().into(), binding))
 }
 pub(crate) fn graph_snapshot_for_receipt(
@@ -211,7 +232,17 @@ fn resolve_receipt_inner(
     if ordinal >= 1024 {
         return Err(InspectionError::OrdinalOutOfRange);
     }
-    let (snapshot_id, preliminary) = snapshot_typed(state, fact, limits)?;
+    let (snapshot_id, preliminary) = if classify_forgotten {
+        snapshot_typed_at(
+            state,
+            fact,
+            limits,
+            Some(expected_snapshot),
+            expected_receipt.is_none(),
+        )?
+    } else {
+        snapshot_typed(state, fact, limits)?
+    };
     if snapshot_id != expected_snapshot
         || expected_receipt.is_some_and(|receipt| preliminary.receipt_id != receipt)
     {

@@ -296,3 +296,44 @@ Per-fact omission classification still lacks its producer contract; the new
 forgotten-only capability is explicitly partial and broad absence remains false.
 No cache exists to exercise eviction. Other-platform MCP, production signing,
 owner review and current-head CI are not established by these fixture runs.
+
+
+## Controlled qualification follow-up — current unbound selections
+
+The controlled driver was extended after the `94c7cf3` native run. It exposed
+a classification defect: a current visible fact lacking a source binding was
+reported stale. The production resolver now checks the expected bounded raw
+snapshot identity before classifying that absence as `evidence_unavailable`.
+A changed graph, removed fact, or previously supplied receipt target whose
+association disappeared remains stale. Invalid binding metadata remains invalid.
+The desktop Inspector retains its existing stale-selection behavior.
+
+The post-fix driver executed the working-tree patch on signed docs-only base
+`e1f3efc0b4331660d286e3447edd1ac817a58b43`. Its production patch and before/after
+SHA256 inventories are retained under `mcp-fixture-94c7cf3`; temporary test
+adapters were removed and restored bytes verified. This is not an unchanged
+`94c7cf3` binary rerun. Focused MCP tests passed 60 tests with one existing
+ignored scaling test; the external driver passed two tests with none ignored.
+
+Observed cases include both-mode confirmed, inferred-strong and inferred-weak
+controls; rejected adjacency; official selected artifact parity; discovery
+query/context refusal; 71 UTF-8 artifact pages per mode; and content identity
+and response-cap refusals. Qualification controls include explicitly synthetic
+cited BusinessRules and do not claim adapter-produced inferred facts. Actual
+registration and rejection changes inside acquisition brackets refused stale
+results. Coverage-only publication invalidated replay into a fresh session;
+the original immutable session remained coherent.
+
+Retention evidence composes the production receipt resolver's held guard with
+the bounded span reader: supported forget refused while the guard was held,
+retained bytes remained readable after the isolated checkout was deleted, and
+forget succeeded after release with subsequent evidence classified forgotten.
+This is not a paused single native MCP request and does not independently prove
+every literal concurrency step in MT-W8A-01. The report is
+`qualified-matrix-postfix-report.md`, with its events and exact source patch.
+
+A separate closed-app packaged-relay probe returned exit 1, zero stdout and the
+fixed unavailable diagnostic without launching the fixture. It used the revoked
+or missing activation record; it does not establish a valid-record/dead-endpoint
+case. See `closed-app-no-launch.json`. Per-fact omission remains unimplemented
+and broad absence capability remains false.

@@ -1,6 +1,8 @@
 # Read-only MCP implementation contract
 
-Status: in progress for #718; no installed-client or Windows acceptance claimed.
+Status: in progress for #718. Scoped installed-client evidence is recorded in
+[the native acceptance report](../acceptance/read-only-mcp-native.md); full manual
+and Windows MCP acceptance remain unestablished.
 Decision: [ADR-0044](../adr/ADR-0044-read-only-mcp.md).
 Trace: US-0041 / AC-0288..0290 / T-0288..0290.
 
@@ -24,10 +26,12 @@ an individual missing binding. A receipt omission is neither a
 forgotten capture nor an ordinary failed read.
 
 The current resolver preserves typed failures as `evidence_unavailable`
-(receipt/capture absent), `evidence_invalid` (retained evidence cannot be
-validated), `stale_basis` (selection/identity changed), and `storage_unavailable`
-(operational failure). Invalid does not identify the underlying cause: the
-retention layer also uses that category for its own read bounds. Explicit MCP
+(binding/receipt/capture absent at an unchanged current basis),
+`evidence_invalid` (retained evidence cannot be validated), `stale_basis` (selection/identity changed), and `storage_unavailable`
+(operational failure). Check the expected recovered-graph identity before
+classifying an absent binding: a changed basis stays stale; a still-visible fact
+with no binding is unavailable, not proof of omission or forgetting. Invalid does
+not identify the underlying cause: the retention layer also uses that category for its own read bounds. Explicit MCP
 admission limits still return `response_limit`. These fixed codes contain no
 source text or filesystem diagnostics; existing desktop inspection callers keep
 their original refresh message.

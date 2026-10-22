@@ -2588,3 +2588,108 @@ fn mcp_unknown_missing_receipt_is_not_forgotten_and_status_errors_are_operationa
         ReadError::Storage
     );
 }
+
+#[test]
+fn mcp_current_unbound_fact_is_unavailable_without_weakening_stale_or_invalid_checks() {
+    // AC-0288: current absence must not collapse into stale or infer omission.
+    use crate::mcp_reads::ReadError;
+    use core_graph::GraphStore;
+    let temp = tempfile::tempdir().unwrap();
+    let private = directory(temp.path(), "private");
+    let root = directory(temp.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&private);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    let rule = rule_node(&parsed);
+    publish(&state, &source, &parsed);
+    drop(parsed);
+    let raw = rusqlite::Connection::open(private.join("graph.db")).unwrap();
+    let fact = agents::TaskFactKey::Node {
+        id: rule.id.clone(),
+    };
+    let bound = mcp_forgotten_session(&state, &source);
+    let target = bound
+        .describe_evidence(&state, &bound.basis_id().unwrap(), &fact, 0, 65536)
+        .unwrap()
+        .target;
+    raw.execute(
+        "DELETE FROM source_node_bindings WHERE node_id=?1",
+        [&rule.id],
+    )
+    .unwrap();
+    let unbound = mcp_forgotten_session(&state, &source);
+    let basis = unbound.basis_id().unwrap();
+    assert_eq!(
+        unbound
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::EvidenceUnavailable
+    );
+    // A previously supplied receipt target still requires that exact binding.
+    assert_eq!(
+        bound
+            .read_evidence(
+                &state,
+                &bound.basis_id().unwrap(),
+                &target,
+                crate::mcp_reads::evidence::EvidenceLimits {
+                    max_file_validation_bytes: 4096,
+                    max_span_bytes: 1024,
+                    max_response_bytes: 65536
+                }
+            )
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+    assert!(matches!(
+        crate::investigations::inspection::resolve_typed(
+            &state,
+            &fact,
+            &unbound.basis().recovered_graph_id,
+            &target.receipt_id,
+            0
+        ),
+        Err(crate::investigations::inspection::InspectionError::Stale)
+    ));
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&Node {
+            id: "unrelated:changed".into(),
+            label: "Module".into(),
+            props: json!({}),
+        })
+        .unwrap();
+    assert_eq!(
+        unbound
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+    let fresh = mcp_forgotten_session(&state, &source);
+    assert_eq!(
+        fresh
+            .describe_evidence(&state, &fresh.basis_id().unwrap(), &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::EvidenceUnavailable
+    );
+    raw.execute("INSERT INTO source_node_bindings(node_id,repo_key,receipt_id,emitted_fact_digest) VALUES (?1,?2,?3,?4)", rusqlite::params![rule.id,source.repo_key,target.receipt_id,format!("node-v1:{}","0".repeat(64))]).unwrap();
+    assert_eq!(
+        fresh
+            .describe_evidence(&state, &fresh.basis_id().unwrap(), &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::EvidenceInvalid
+    );
+    raw.execute("DELETE FROM edges WHERE src=?1 OR dst=?1", [&rule.id])
+        .unwrap();
+    raw.execute("DELETE FROM nodes WHERE id=?1", [&rule.id])
+        .unwrap();
+    assert_eq!(
+        fresh
+            .describe_evidence(&state, &fresh.basis_id().unwrap(), &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+}
