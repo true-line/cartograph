@@ -190,6 +190,11 @@ pub struct FactSourceSelection {
     pub fact: FactKey,
     /// Association and complete-fact state in the copied graph revision.
     pub state: FactSourceState,
+    /// Receipt omission outcome read in the same transaction as `state`,
+    /// against the copied graph's fact digest (AC-0314). Only
+    /// [`OmissionLookup::Omitted`] is evidence; [`OmissionLookup::NotOmitted`]
+    /// never means a receipt exists.
+    pub omission: OmissionLookup,
 }
 
 /// A source association never establishes receipt availability or source truth.
@@ -675,6 +680,45 @@ fn load_omission(
     .transpose()
 }
 
+/// Whether every coverage-recorded repo has a complete omission index, and at
+/// least one exists. Read inside the caller's selection transaction.
+fn omission_coverage_complete(connection: &Connection) -> Result<bool, GraphError> {
+    crate::coverage::check_schema(connection)?;
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM coverage_inventories)
+            AND NOT EXISTS(
+                SELECT 1 FROM coverage_inventories c
+                WHERE NOT EXISTS(
+                    SELECT 1 FROM source_omission_index i
+                    WHERE i.repo_key = c.repo_key AND i.state = 'complete'
+                )
+            )",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// Omission outcome for `fact` given its digest in the copied (bounded) graph
+/// revision, so no unbounded fact read happens here.
+fn selection_omission(
+    connection: &Connection,
+    fact: &FactKey,
+    fact_digest: Option<&str>,
+    complete_coverage: bool,
+) -> Result<OmissionLookup, GraphError> {
+    let Some(fact_digest) = fact_digest else {
+        return Ok(OmissionLookup::Unrecorded);
+    };
+    Ok(match load_omission(connection, fact)? {
+        Some((repo_key, kind, emitted_fact_digest)) if emitted_fact_digest == fact_digest => {
+            OmissionLookup::Omitted { repo_key, kind }
+        }
+        Some(_) => OmissionLookup::Unrecorded,
+        None if complete_coverage => OmissionLookup::NotOmitted,
+        None => OmissionLookup::Unrecorded,
+    })
+}
+
 fn replace_omissions(
     transaction: &Transaction<'_>,
     repo_key: &str,
@@ -948,9 +992,12 @@ impl SqliteGraphStore {
             Some(limits) => self.read_snapshot_rows_bounded(limits)?,
             None => self.read_snapshot_rows(None, None)?,
         };
+        let complete_coverage = omission_coverage_complete(&self.conn)?;
         let mut selections = Vec::with_capacity(unique.len());
         for fact in unique {
             let fact_digest = snapshot_digest(&graph, fact)?;
+            let omission =
+                selection_omission(&self.conn, fact, fact_digest.as_deref(), complete_coverage)?;
             let binding = load_selection_binding(&self.conn, fact)?;
             #[cfg(any(test, feature = "test-support"))]
             {
@@ -977,6 +1024,7 @@ impl SqliteGraphStore {
             selections.push(FactSourceSelection {
                 fact: fact.clone(),
                 state,
+                omission,
             });
         }
         transaction.commit()?;
@@ -1080,69 +1128,6 @@ impl SqliteGraphStore {
         crate::coverage::replace(&transaction, repo_key, coverage)?;
         transaction.commit()?;
         Ok(true)
-    }
-
-    /// Check whether a current graph fact's primary receipt was omitted by a
-    /// deterministic receipt bound in one read transaction.
-    ///
-    /// [`OmissionLookup::NotOmitted`] is not evidence that a receipt exists;
-    /// only a [`SourceBinding`] is.
-    pub fn receipt_omission(&self, fact: &FactKey) -> Result<OmissionLookup, GraphError> {
-        Ok(self
-            .receipt_omissions(std::slice::from_ref(fact))?
-            .into_iter()
-            .next()
-            .expect("single fact lookup returns one outcome"))
-    }
-
-    /// Check whether each requested graph fact's primary receipt was omitted by
-    /// a deterministic receipt bound in one read transaction. Rejects more than
-    /// [`MAX_SOURCE_SELECTION_KEYS`] keys before database access.
-    ///
-    /// [`OmissionLookup::NotOmitted`] is not evidence that a receipt exists;
-    /// only a [`SourceBinding`] is.
-    pub fn receipt_omissions(&self, facts: &[FactKey]) -> Result<Vec<OmissionLookup>, GraphError> {
-        if facts.len() > MAX_SOURCE_SELECTION_KEYS {
-            return Err(GraphError::SourceBinding("too many source selection keys"));
-        }
-        for fact in facts {
-            fact.validate()?;
-        }
-        let transaction = self.conn.unchecked_transaction()?;
-        check_schema(&self.conn)?;
-        crate::coverage::check_schema(&self.conn)?;
-        let complete_coverage: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM coverage_inventories)
-                AND NOT EXISTS(
-                    SELECT 1 FROM coverage_inventories c
-                    WHERE NOT EXISTS(
-                        SELECT 1 FROM source_omission_index i
-                        WHERE i.repo_key = c.repo_key AND i.state = 'complete'
-                    )
-                )",
-            [],
-            |row| row.get(0),
-        )?;
-        let mut results = Vec::with_capacity(facts.len());
-        for fact in facts {
-            let Some(fact_digest) = current_digest(&self.conn, fact)? else {
-                results.push(OmissionLookup::Unrecorded);
-                continue;
-            };
-            let state = match load_omission(&self.conn, fact)? {
-                Some((repo_key, kind, emitted_fact_digest))
-                    if emitted_fact_digest == fact_digest =>
-                {
-                    OmissionLookup::Omitted { repo_key, kind }
-                }
-                Some(_) => OmissionLookup::Unrecorded,
-                None if complete_coverage => OmissionLookup::NotOmitted,
-                None => OmissionLookup::Unrecorded,
-            };
-            results.push(state);
-        }
-        transaction.commit()?;
-        Ok(results)
     }
 
     /// Copy a binding and verify its complete fact in the same read revision.

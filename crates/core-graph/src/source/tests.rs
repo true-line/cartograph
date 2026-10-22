@@ -1,6 +1,37 @@
 use super::*;
 use crate::{GRAPH_SCHEMA_VERSION, GraphStore};
 
+/// Omission reads through the same-revision selection snapshot, returned in
+/// caller key order (selections themselves are sorted by fact identity).
+trait OmissionReads {
+    fn receipt_omission(&self, fact: &FactKey) -> Result<OmissionLookup, GraphError>;
+    fn receipt_omissions(&self, facts: &[FactKey]) -> Result<Vec<OmissionLookup>, GraphError>;
+}
+
+impl OmissionReads for SqliteGraphStore {
+    fn receipt_omission(&self, fact: &FactKey) -> Result<OmissionLookup, GraphError> {
+        Ok(self
+            .receipt_omissions(std::slice::from_ref(fact))?
+            .remove(0))
+    }
+
+    fn receipt_omissions(&self, facts: &[FactKey]) -> Result<Vec<OmissionLookup>, GraphError> {
+        let snapshot = self.read_source_selection_snapshot(facts)?;
+        Ok(facts
+            .iter()
+            .map(|fact| {
+                snapshot
+                    .selections
+                    .iter()
+                    .find(|selection| &selection.fact == fact)
+                    .expect("every requested fact is selected")
+                    .omission
+                    .clone()
+            })
+            .collect())
+    }
+}
+
 fn node(id: &str) -> Node {
     Node {
         id: id.into(),
@@ -581,7 +612,11 @@ fn source_selection_distinguishes_missing_absent_present_and_orders_unique_keys(
         selection.selections,
         expected
             .into_iter()
-            .map(|(fact, state)| FactSourceSelection { fact, state })
+            .map(|(fact, state)| FactSourceSelection {
+                fact,
+                state,
+                omission: OmissionLookup::Unrecorded,
+            })
             .collect::<Vec<_>>()
     );
     let empty = store.read_source_selection_snapshot(&[]).unwrap();
@@ -697,6 +732,7 @@ fn source_selection_is_coherent_across_graph_and_receipt_publication() {
                         fact_digest: binding.emitted_fact_digest.clone(),
                         binding,
                     },
+                    omission: OmissionLookup::Unrecorded,
                 }));
             }
             for selection in before.selections {
@@ -769,6 +805,7 @@ fn source_selection_keeps_malformed_and_orphan_associations_per_key() {
                 state: FactSourceState::Invalid {
                     fact_digest: (corruption != "orphan").then_some(binding.emitted_fact_digest),
                 },
+                omission: OmissionLookup::Unrecorded,
             }));
         }
         assert!(selection.selections.contains(&FactSourceSelection {
@@ -777,6 +814,7 @@ fn source_selection_keeps_malformed_and_orphan_associations_per_key() {
                 fact_digest: b.emitted_fact_digest.clone(),
                 binding: b,
             },
+            omission: OmissionLookup::Unrecorded,
         }));
         assert!(!format!("{:?}", selection.selections).contains("SOURCE_CANARY_"));
         assert!(store.conn.is_autocommit());

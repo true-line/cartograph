@@ -1805,24 +1805,35 @@ fn captured_ingest_records_per_fact_store_capacity_omissions_and_retains_bound_f
         graph.current_source_binding(&bound_fact).unwrap(),
         Some(bindings[0].clone())
     );
+    let bound_selection = graph
+        .read_source_selection_snapshot(std::slice::from_ref(&bound_fact))
+        .unwrap();
     assert_eq!(
-        graph.receipt_omission(&bound_fact).unwrap(),
+        bound_selection.selections[0].omission,
         core_graph::source::OmissionLookup::NotOmitted
     );
 
     let (nodes, edges) = graph.read_snapshot().unwrap();
-    let omitted_facts: Vec<_> = nodes
+    let facts: Vec<_> = nodes
         .iter()
         .map(core_graph::source::FactKey::from_node)
         .chain(edges.iter().map(core_graph::source::FactKey::from_edge))
-        .filter(|fact| {
-            graph.receipt_omission(fact).unwrap()
-                == core_graph::source::OmissionLookup::Omitted {
-                    repo_key: registered.repo_key.clone(),
-                    kind: core_graph::source::ReceiptOmissionKind::StoreCapacity,
-                }
-        })
         .collect();
+    let omitted = core_graph::source::OmissionLookup::Omitted {
+        repo_key: registered.repo_key.clone(),
+        kind: core_graph::source::ReceiptOmissionKind::StoreCapacity,
+    };
+    let mut omitted_facts = Vec::new();
+    for chunk in facts.chunks(core_graph::source::MAX_SOURCE_SELECTION_KEYS) {
+        let selection = graph.read_source_selection_snapshot(chunk).unwrap();
+        omitted_facts.extend(
+            selection
+                .selections
+                .into_iter()
+                .filter(|selection| selection.omission == omitted)
+                .map(|selection| selection.fact),
+        );
+    }
     assert!(
         !omitted_facts.is_empty(),
         "expected at least one StoreCapacity omission record"
