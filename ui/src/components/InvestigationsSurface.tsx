@@ -257,7 +257,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
             <details className="investigation-section"><summary>Specialist, provider and consumed limits</summary>
               <p>{state.detail.specialist.name} · <code>{state.detail.specialist.id}</code> · T3 / InferredWeak</p>
               <p>Prompt fingerprint: <code>{state.detail.specialist.prompt_fingerprint}</code></p>
-              <p>Configured model: <code>{state.detail.provider.provider_id} / {state.detail.provider.model}</code></p>
+              <p>Requested model (saved configuration): <code>{state.detail.provider.provider_id} / {state.detail.provider.model}</code></p>
               <p>Model invocations used: {state.detail.usage.model_invocations} / {state.detail.limits.model_invocations};
                 tool actions used: {state.detail.usage.tool_actions} / {state.detail.limits.tool_actions}.</p>
               <p>Admitted facts: {state.detail.usage.selected_facts}; copied evidence: {state.detail.usage.evidence_items} items / {state.detail.usage.evidence_bytes} bytes.</p>
@@ -269,7 +269,8 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
             {state.detail.error && <p className="error-text" role="alert">{state.detail.error}</p>}
           </>}
           <InvestigationActivity events={state.events} />
-          <InvestigationFindings result={state.result} citations={state.detail?.citations ?? []}
+          <InvestigationFindings reviews={state.findingReviews} reviewLoading={state.reviewLoading} reviewBusy={state.reviewBusy} reviewError={state.reviewError}
+            onRefreshReviews={() => void state.refreshReviews()} onReview={(id, decision) => void state.reviewFinding(id, decision)} result={state.result} citations={state.detail?.citations ?? []}
             citationId={state.citationId} read={state.citationRead} loading={state.citationLoading} error={state.citationError}
             onRead={(id) => void state.readCitation(id)} onClose={state.clearCitation} />
         </>}

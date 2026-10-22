@@ -5,6 +5,7 @@ pub(crate) mod completion_choices;
 mod context;
 mod events;
 mod evidence;
+pub(crate) mod finding_review_commands;
 mod history;
 pub(crate) mod inspection;
 mod recovery;

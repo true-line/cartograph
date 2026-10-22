@@ -277,7 +277,7 @@ export const CompletedExecutionCanHaveUnmetRequirements: Story = {
   history: [inspectionDetail('inv-fixture')], result: { ...investigationResult(), schema_version: 3, inspection_assessment: inspectionAssessment() } }) },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole('status')).toHaveTextContent('Execution completed');
+    await expect(canvas.getByText('Execution completed', { selector: 'p[role="status"]' })).toBeVisible();
     await expect(canvas.getByText(/Requirement unmet:/)).toBeVisible();
     await expect(canvas.getByText('A local stock guard is present')).toBeVisible();
     await expect(canvas.getByText(/Source inspections: Required sources missing · 1 required/)).toBeVisible();
@@ -325,7 +325,7 @@ export const TerminalInspectionWithoutResultIsNotAssessed: Story = {
       inspection_status: 'not_assessed', inspection_assessment: undefined })] }) },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole('status')).toHaveTextContent('Failed');
+    await expect(canvas.getByText('Failed', { selector: 'p[role="status"]' })).toBeVisible();
     await expect(canvas.getByText('Source inspections: Not assessed · 1 required')).toBeVisible();
     await expect(canvas.getByText('Source inspections: Assessment unavailable')).toBeVisible();
     await expect(canvas.queryByText(/Requirement met:/)).not.toBeInTheDocument();
@@ -388,7 +388,7 @@ export const ActualSavedV6BackendFixture: Story = {
     history: [backendQualified.detail as InvestigationDetail] }) },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole('status')).toHaveTextContent('Execution completed');
+    await expect(canvas.getByText('Execution completed', { selector: 'p[role="status"]' })).toBeVisible();
     await expect(canvas.getByText('Insufficient evidence to support an answer.')).toBeVisible();
     await expect(canvas.getByText('Limited recorded coverage.')).toBeVisible();
     await expect(canvas.queryByText(/Requirement met:/)).not.toBeInTheDocument();

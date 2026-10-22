@@ -9,6 +9,7 @@ mod completion;
 mod coverage;
 mod coverage_protocol;
 mod disclosure;
+mod finding_review;
 mod input;
 mod inspection;
 // Separate completion families preserve every legacy generation and identity.
@@ -34,6 +35,7 @@ pub use completion::*;
 pub use coverage::*;
 pub use coverage_protocol::*;
 pub use disclosure::*;
+pub use finding_review::*;
 pub use input::*;
 pub use inspection::*;
 pub use obligations::*;

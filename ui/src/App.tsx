@@ -245,9 +245,12 @@ export default function App() {
     void (async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
+        const stopReviews = await listen<import('./findingReviews').FindingReview>('investigation-review://changed', (event) =>
+          useInvestigationStore.getState().invalidateReview(event.payload));
+        if (disposed) stopReviews(); else unlisten = stopReviews;
         const stop = await listen<InvestigationChanged>('investigation://changed', (event) =>
           useInvestigationStore.getState().invalidate(event.payload));
-        if (disposed) stop(); else unlisten = stop;
+        if (disposed) stop(); else unlisten = () => { stop(); stopReviews(); };
       } catch { /* Browser previews have no event bridge. */ }
     })();
     return () => { disposed = true; unlisten?.(); };

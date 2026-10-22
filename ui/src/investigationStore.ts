@@ -1,3 +1,4 @@
+import { sameReviewSubject, mergeReviews, validReview, validReviews, type FindingReview, type FindingReviews, type FindingReviewDecision } from './findingReviews';
 import { isCompletionDisclosure, isCompletionSpecialist, isExpandedSpecialist } from './investigationFamilies';
 import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
 import { investigationPolicy, obligationEnvelope, validObligation, validObligationChoices, validObligationEnvelope } from './investigationObligations';
@@ -162,6 +163,13 @@ export function mergeInvestigationEvents(
 }
 
 export interface InvestigationState {
+  findingReviews: FindingReview[];
+  reviewLoading: boolean;
+  reviewBusy: boolean;
+  reviewError: string | null;
+  refreshReviews: () => Promise<void>;
+  reviewFinding: (findingId: string, decision: FindingReviewDecision) => Promise<void>;
+  invalidateReview: (observation: FindingReview) => void;
   catalog: InvestigationCatalog | null;
   catalogLoading: boolean;
   catalogError: string | null;
@@ -224,6 +232,7 @@ export interface InvestigationState {
   clearCitation: () => void;
 }
 
+let reviewRequest = 0;
 let catalogRequest = 0;
 let historyRequest = 0;
 let detailRequest = 0;
@@ -294,6 +303,51 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
   };
 
   return {
+    findingReviews: [], reviewLoading: false, reviewBusy: false, reviewError: null,
+    refreshReviews: async () => {
+      const { selectedId, selectionGeneration, result } = get();
+      if (!selectedId || !result) return;
+      const request = ++reviewRequest;
+      const current = () => get().selectionGeneration === selectionGeneration && get().selectedId === selectedId && get().result?.result_id === result.result_id && request === reviewRequest;
+      set({ reviewLoading: true });
+      try {
+        const value = await invokeOr<FindingReviews | null>('get_investigation_finding_reviews', null, { investigationId: selectedId, expectedResultId: result.result_id });
+        if (!current()) return;
+        if (!validReviews(value, result)) throw new Error('Invalid review join');
+        set({ findingReviews: mergeReviews(get().findingReviews, value.reviews), reviewLoading: false, reviewError: null });
+      } catch {
+        if (current()) set({ reviewLoading: false, reviewError: 'Review state unavailable. Refresh reviews before making a decision. Historical findings remain readable.' });
+      }
+    },
+    reviewFinding: async (findingId, decision) => {
+      const { result, selectionGeneration, findingReviews, reviewBusy, reviewLoading, reviewError } = get();
+      const row = findingReviews.find((r) => r.subject.finding_id === findingId);
+      if (!result || !row || reviewBusy || reviewLoading || reviewError) return;
+      const current = () => get().selectionGeneration === selectionGeneration && get().result?.result_id === result.result_id;
+      set({ reviewBusy: true, reviewError: null });
+      try {
+        const value = await invokeOr<FindingReview | null>('review_investigation_finding', null, { requestJson: JSON.stringify({ schema_version: 1, subject: row.subject, expected_revision: row.revision, decision }) });
+        if (!current()) return;
+        if (!value || !validReview(value, result) || !sameReviewSubject(value.subject, row.subject) || value.revision !== row.revision + 1 || value.decision !== decision) throw new Error('Unconfirmed write');
+        set({ findingReviews: mergeReviews(get().findingReviews, get().findingReviews.map((r) => r.subject.finding_id === findingId ? value : r)), reviewBusy: false });
+      } catch (error) {
+        if (!current()) return;
+        if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'conflict' && 'current' in error) {
+          const winner = error.current as FindingReview;
+          if (validReview(winner, result) && sameReviewSubject(winner.subject, row.subject)) {
+            try {
+              set({ findingReviews: mergeReviews(get().findingReviews, get().findingReviews.map((r) => r.subject.finding_id === findingId ? winner : r)), reviewBusy: false, reviewError: 'Another decision won. The saved winner is shown. Refresh reviews, then deliberately choose again.' });
+              return;
+            } catch { /* Inconsistent observations require a read. */ }
+          }
+        }
+        set({ reviewBusy: false, reviewError: 'The review outcome could not be confirmed. Refresh reviews to recover the saved decision before choosing again. No automatic retry was made.' });
+      }
+    },
+    invalidateReview: (observation) => {
+      const { result } = get();
+      if (result && validReview(observation, result)) void get().refreshReviews();
+    },
     catalog: null, catalogLoading: false, catalogError: null,
     history: [], nextCursor: null, historyLoading: false, historyError: null,
     selectedId: null, selectionGeneration: 0, detail: null, result: null, events: [],
@@ -520,6 +574,8 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     },
     open: async (id) => {
       ++detailRequest;
+      ++reviewRequest;
+      set({ findingReviews: [], reviewLoading: false, reviewBusy: false, reviewError: null });
       ++citationRequest;
       ++actionRequest;
       ++locationRequest;
@@ -624,8 +680,10 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           consentOpen: state.consentOpen && state.consent?.step_id === consent?.step_id &&
             state.consent?.preview.payload_hash === consent?.preview.payload_hash,
           loading: false, error: null }));
+        await get().refreshReviews();
       } catch {
         if (current()) set({ loading: false, consent: null, consentOpen: false,
+          reviewError: 'Saved investigation binding could not be refreshed. Refresh before reviewing; historical findings remain visible.',
           error: 'The investigation could not be refreshed consistently. Saved findings and activity remain visible; refresh to reconnect.' });
       }
     },

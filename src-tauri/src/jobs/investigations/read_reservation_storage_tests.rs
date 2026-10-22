@@ -123,6 +123,7 @@ fn read_reservation_production_preserves_original_coverage_migration_and_rejects
     let mut store = JobStore::open(&path).unwrap();
     let id = start(&mut store, "legacy");
     let original = saved(&store.conn, &id);
+    storage::version_one_fixture(&store.conn);
     for (name, kind, _) in crate::jobs::investigations::coverage::schema()
         .into_iter()
         .rev()
@@ -138,7 +139,12 @@ fn read_reservation_production_preserves_original_coverage_migration_and_rejects
     assert_eq!(saved(&store.conn, &id), original);
     assert_eq!(namespace_count(&store.conn).unwrap(), 0);
     let migrated = layout(&store.conn);
-    assert!(legacy.iter().all(|entry| migrated.contains(entry)));
+    assert!(
+        legacy
+            .iter()
+            .filter(|entry| entry.0 != "investigation_meta")
+            .all(|entry| migrated.contains(entry))
+    );
     {
         let tx = store.conn.transaction().unwrap();
         initialize(&tx).unwrap();
