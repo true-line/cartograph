@@ -18,6 +18,17 @@ questions, have them raise issues, hand work to other agents with issues and
 requirements detailed enough to execute. Then let humans and agents find the
 holes together and fill them, with updates to Cartograph or plugins for it.
 
+## Who it is for
+
+Enterprise estates are the hardest case and the main one: many repositories,
+documentation that is outdated or missing, journeys nobody recorded, and
+business flows that exist only in code, so there is nothing to test against.
+Cartograph should give such a team an explorable view of the whole estate,
+from systems down to the line that implements a rule, with every layer
+labeled by its evidence and the agent team on hand to answer questions about
+what is in view. Consumer apps and single repos are the same problem at a
+smaller scale. See ROADMAP §8.
+
 ## Vision elements
 
 These ids are the shared vocabulary of the plan, the discussions, and the
@@ -67,6 +78,16 @@ The restated vision keeps the integrity principles and the on-ramp, and widens
 the deliverable from a recovered spec to the reconstructed lifecycle, with the
 agent team inside the product rather than only around it. The recovery engine
 and the context hub are its evidence foundation, not its end state.
+
+## Beyond v1: targets without source
+
+v1 reconstructs from source because business rules, user journeys and the
+roles infrastructure plays can only be confirmed with the code. v2 adds
+targets without source: a website, mobile app, desktop app or similar
+artifact, broken down through observation (structure, bundles, network
+traffic, binaries, runtime behavior). Observation layers on top of v1 and
+fills its missing pieces. It stays separately labeled evidence that can support
+or contradict a claim but never confirms a rule alone. See ROADMAP §8.
 
 ## Earlier staged roadmap (ADR-0007, for the record)
 

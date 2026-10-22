@@ -159,3 +159,28 @@ and how extensibility is measured.
    unit. A versioned work packet keeps evidence, intent, acceptance and
    return separable and reviewable; issues are rendered from it at publish
    time.
+
+### Amendment — 2026-10-21: the agent team no longer waits on acceptance
+
+The owner amended decision 7 on 2026-10-21 (#717). The desktop app is the
+human seat on a mixed team. Agents run on local models or through ACP in any
+harness that supports it, or through an adapter or bridge built for one. Humans
+work alongside them in the app. Gating that team on a real-provider acceptance
+run stalled it, so decision 7 now reads:
+
+7. **The team is built behind a review boundary, not behind acceptance.** The
+   durable coordinator, the roster, ACP hosting with harness adapters and
+   bridges, local-model agents and the in-app human seat can be built now.
+   Every agent output is a staged proposal (SPEC-03), a finding at its own
+   tier, or a work packet (decision 6). A human reviews it, and it never
+   confirms a fact or raises its tier. MCP gives agents read access (W8a), and
+   ACP is how Cartograph hosts and drives them (W8b). Protocols never confer
+   trust. The coordinator enforces tool allowlists, egress per tier, ancestry
+   and delegation-depth limits, and shared budgets (SPEC-01). Real-provider
+   acceptance (#598, AC-0191) now gates only the claim that a specialist run
+   is accepted evidence, not the existence of the team.
+
+Alternative 5 changes accordingly. A general chat, roster or pool can be
+built now under this boundary, and the named specialists stay as its first
+members.
+
