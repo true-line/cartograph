@@ -1679,3 +1679,100 @@ fn omission_records_require_the_omitted_digest_and_no_retained_binding() {
         Err(GraphError::SourceBinding("invalid omission digest"))
     ));
 }
+
+#[test]
+fn later_binding_from_another_repo_takes_precedence_over_existing_omission() {
+    // AC-0314: repo A records omissions for an unbound node and edge; repo B
+    // then binds both with an empty patch and SourceOmissions::NONE. A's rows
+    // survive B's repo-scoped replacement, but the selection never reports
+    // Omitted beside a current binding. (T-0314)
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let shared_node = node("shared");
+    let shared_edge = edge("shared");
+    let facts = [
+        FactKey::from_node(&shared_node),
+        FactKey::from_edge(&shared_edge),
+    ];
+    let records = [
+        SourceOmission {
+            fact: facts[0].clone(),
+            emitted_fact_digest: node_digest(&shared_node).unwrap(),
+            kind: ReceiptOmissionKind::Rules,
+        },
+        SourceOmission {
+            fact: facts[1].clone(),
+            emitted_fact_digest: edge_digest(&shared_edge).unwrap(),
+            kind: ReceiptOmissionKind::Declarations,
+        },
+    ];
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch {
+                    upsert_nodes: vec![shared_node.clone()],
+                    upsert_edges: vec![shared_edge.clone()],
+                    ..GraphPatch::default()
+                },
+                "repo/a",
+                &[],
+                None,
+                SourceOmissions {
+                    records: &records,
+                    complete: true,
+                },
+            )
+            .unwrap()
+    );
+    let omissions = |store: &SqliteGraphStore| {
+        store
+            .read_source_selection_snapshot(&facts)
+            .unwrap()
+            .selections
+            .into_iter()
+            .map(|selection| (selection.state, selection.omission))
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        omissions(&store)
+            .iter()
+            .all(|(_, omission)| matches!(omission, OmissionLookup::Omitted { .. }))
+    );
+
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch::default(),
+                "repo/b",
+                &[
+                    node_binding(&shared_node, "repo/b", "rb"),
+                    edge_binding(&shared_edge, "repo/b"),
+                ],
+                None,
+                SourceOmissions::NONE,
+            )
+            .unwrap()
+    );
+    let rows: i64 = store
+        .conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM source_node_omissions) + (SELECT count(*) FROM source_edge_omissions)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 2, "repo A's rows survive repo B's scoped replacement");
+    for (state, omission) in omissions(&store) {
+        assert!(
+            matches!(state, FactSourceState::Present { .. }),
+            "{state:?}"
+        );
+        assert!(
+            !matches!(omission, OmissionLookup::Omitted { .. }),
+            "{omission:?}"
+        );
+    }
+}

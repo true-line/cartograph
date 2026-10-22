@@ -741,7 +741,15 @@ pub(crate) fn selection_omission(
     let Some(fact_digest) = fact_digest else {
         return Ok(OmissionLookup::Unrecorded);
     };
-    Ok(match load_omission(connection, fact)? {
+    // Binding precedence: any current association row, from any repository,
+    // means a primary receipt is held for this fact, so an omission row left
+    // by an earlier publication (possibly another repository's) never reads
+    // as Omitted beside it.
+    let omission = match load_selection_binding(connection, fact)? {
+        SelectionBinding::Absent => load_omission(connection, fact)?,
+        SelectionBinding::Invalid | SelectionBinding::Present(_) => None,
+    };
+    Ok(match omission {
         Some(Some((repo_key, kind, emitted_fact_digest))) if emitted_fact_digest == fact_digest => {
             OmissionLookup::Omitted { repo_key, kind }
         }
