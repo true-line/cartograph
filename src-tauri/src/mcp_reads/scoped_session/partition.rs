@@ -63,6 +63,11 @@ impl ScopedReadSession {
         .ok_or(ReadError::Limit)?;
         let artifact_bytes = max_bytes.checked_sub(overhead).ok_or(ReadError::Limit)?;
         self.check_external_qualifications(ctx)?;
+        // The scoped reader borrows the store connection and cannot escape its
+        // transaction callback. Keep the graph guard through compilation so
+        // acquisition and rendering share that pinned revision. This bounded
+        // critical section can delay publication on this store handle; releasing
+        // it earlier requires an owned acquired-partition boundary.
         let artifact = ctx
             .graph
             .lock()

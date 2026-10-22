@@ -608,3 +608,126 @@ fn nested_typed_rule_vectors_are_charged_by_values_before_row_admission() {
         .is_none()
     );
 }
+
+fn compile_with_policy(
+    store: &SqliteGraphStore,
+    root: &str,
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    limits: SnapshotReadLimits,
+) -> Result<PartitionArtifact, PartitionError> {
+    store.with_scoped_reader(&store.read_revision().unwrap(), limits, |reader| {
+        compile_partition_selected(
+            reader,
+            PartitionArtifactKind::DataModel,
+            root,
+            &format!("mcp-scoped-session-v1:{}", "a".repeat(64)),
+            mode,
+            rejected,
+            100_000,
+        )
+    })
+}
+#[test]
+fn projected_components_do_not_cross_rejected_below_mode_or_hidden_middle_bridges() {
+    for scenario in ["rejected", "below-mode", "hidden-middle"] {
+        let mut store = SqliteGraphStore::open_in_memory().unwrap();
+        for id in ["a", "c"] {
+            store
+                .put_node(&node(id, "DataEntity", ConfidenceTier::Confirmed))
+                .unwrap();
+        }
+        let mut rejected = BTreeSet::new();
+        let mode = if scenario == "rejected" {
+            ExportMode::BestEffort
+        } else {
+            ExportMode::VerifiedOnly
+        };
+        if scenario == "hidden-middle" {
+            store
+                .put_node(&node("b", "DataEntity", ConfidenceTier::InferredWeak))
+                .unwrap();
+            store.put_edge(&edge("a", "b", "REFERENCES")).unwrap();
+            store.put_edge(&edge("b", "c", "REFERENCES")).unwrap();
+        } else {
+            let mut bridge = edge("a", "c", "REFERENCES");
+            bridge.props = node("bridge", "Symbol", ConfidenceTier::InferredWeak).props;
+            if scenario == "rejected" {
+                rejected.insert(
+                    bridge.props["prov"]["content_hash"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                );
+            }
+            store.put_edge(&bridge).unwrap();
+        }
+        let a = compile_with_policy(&store, "a", mode, &rejected, SnapshotReadLimits::default())
+            .unwrap();
+        let c = compile_with_policy(&store, "c", mode, &rejected, SnapshotReadLimits::default())
+            .unwrap();
+        assert_eq!(a.roots, ["a"], "{scenario}");
+        assert_eq!(c.roots, ["c"], "{scenario}");
+        assert_ne!(a.partition_basis_id, c.partition_basis_id, "{scenario}");
+        assert_ne!(a.content_id, c.content_id, "{scenario}");
+        assert!(
+            !a.assertions
+                .iter()
+                .any(|assertion| assertion.subject_id == "c")
+        );
+        assert!(
+            !c.assertions
+                .iter()
+                .any(|assertion| assertion.subject_id == "a")
+        );
+        if scenario != "hidden-middle" {
+            let joined = compile_with_policy(
+                &store,
+                "a",
+                ExportMode::BestEffort,
+                &BTreeSet::new(),
+                SnapshotReadLimits::default(),
+            )
+            .unwrap();
+            assert_eq!(joined.roots, ["a", "c"]);
+        }
+    }
+}
+#[test]
+fn hidden_boundary_is_charged_without_expanding_its_large_reach() {
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    for i in 0..24 {
+        store
+            .put_node(&node(
+                &format!("entity:{i}"),
+                "DataEntity",
+                ConfidenceTier::Confirmed,
+            ))
+            .unwrap();
+    }
+    for i in 0..23 {
+        let mut relation = edge(
+            &format!("entity:{i}"),
+            &format!("entity:{}", i + 1),
+            "REFERENCES",
+        );
+        if i == 0 {
+            relation.props = node("hidden-bridge", "Symbol", ConfidenceTier::InferredWeak).props;
+        }
+        store.put_edge(&relation).unwrap();
+    }
+    let artifact = compile_with_policy(
+        &store,
+        "entity:0",
+        ExportMode::VerifiedOnly,
+        &BTreeSet::new(),
+        SnapshotReadLimits {
+            max_rows: 8,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(artifact.roots, ["entity:0"]);
+    assert!(artifact.acquisition.visits > 1);
+    assert!(artifact.acquisition.visits <= 8);
+}

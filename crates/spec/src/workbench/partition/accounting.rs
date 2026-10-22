@@ -102,6 +102,13 @@ pub fn logical_partition_bound(
         slots::<&Edge>(n)?,
         set_slots::<&str>(n)?,
         set_slots::<&str>(n)?,
+        set_slots::<&str>(n)?,             // projected entity IDs
+        set_slots::<&str>(n)?,             // projected available endpoint IDs
+        map_slots::<&str, Vec<&str>>(n)?,  // entity adjacency
+        slots::<&str>(n.checked_add(n)?)?, // both adjacency directions
+        set_slots::<&str>(n)?,             // projected component
+        set_slots::<&str>(n)?,             // projected frontier
+        set_slots::<&str>(n)?,             // retained incident context IDs
     ])?;
     let renderer_bytes =
         crate::logical_compile_bound(graph, trace, limits)?.renderer_workspace_bytes;

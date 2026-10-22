@@ -67,8 +67,12 @@ the whole request. Missing required context or exhausted acquisition/output
 limits produce unavailable/limited, with no prefix artifact or content identity.
 
 A data partition exhausts both directions of the native data-model relation set
-(`READS`, `WRITES`, `MAPS_TO`, `REFERENCES`) for its connected DataEntity component,
-and includes required incident context endpoints. A rule partition renders one
+(`READS`, `WRITES`, `MAPS_TO`, `REFERENCES`) for its projected visible DataEntity
+component, and includes required incident context endpoints. Hidden, rejected or
+below-mode bridges are inspected and charged at the visible boundary, but never
+expanded. High-degree boundary rows can still exhaust the
+acquisition limit; hidden components cannot join visible roots or render as
+part of their component. A rule partition renders one
 explicit BusinessRule observation plus its outgoing native inventory relations;
 its owner, dependency targets, unresolved/interpretation gaps and local-definition
 references are acquired as rendering context. Context observations never become
@@ -80,7 +84,7 @@ predicates, consumer effects, source truth or behavioral completeness.
 The compiler shares official projection/rendering, including hidden BusinessRule
 relationship policy, but returns `cartograph.spec-partition/<kind>@1`,
 `spec-partition-basis-v1` and `spec-partition-artifact-v1` identities. The basis
-binds sorted stored closure, semantic roots, artifact kind, StoreRevision and
+binds sorted projected component/context facts, semantic roots, artifact kind, StoreRevision and
 qualified scoped session/export mode. The requested data entry is response
 metadata; two visible entries in the same component produce identical canonical
 content/basis/content IDs. Acquisition counters are disclosed outside that

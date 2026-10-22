@@ -99,16 +99,19 @@ intact.
 AC-0311/T-0311 and AC-0312/T-0312 add producer-specific partitions without
 changing the complete compiler or its admission ceiling. Only a private closure
 built through a pinned, bounded storage reader is accepted. Data partitions
-exhaust the whole connected DataEntity component for the native relation set and
+exhaust the projected visible DataEntity component for the native relation set and
 include required context endpoints. Rule partitions select one explicit
 BusinessRule observation with its owner/dependency/gap context; context rules
 remain lookup-only. Native projection/renderers, tier/provenance and hidden
 BusinessRule relationship policy are shared. Over-limit or missing required
 closure refuses the artifact, never a truncated prefix or an empty-complete view.
-Flows remain unavailable pending a separate explicit-seed tracer closure.
+Hidden/rejected/below-mode bridges consume boundary acquisition charges without
+expanding hidden reach or joining visible roots. Boundary degree can still
+exhaust the acquisition limit. Flows remain unavailable pending a separate
+explicit-seed tracer closure.
 
 Partition schema/basis/content domains are separate from complete artifacts and
-context-v1. Sorted closure and semantic roots bind the expected StoreRevision,
+context-v1. Sorted projected component/context facts and semantic roots bind the expected StoreRevision,
 artifact kind and qualified session. The requested data entry appears only in
 the response envelope, so two visible entries in one component share canonical
 content and identity; acquisition counters do not affect that identity. Stored

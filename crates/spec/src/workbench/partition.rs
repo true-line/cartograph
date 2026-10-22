@@ -53,10 +53,11 @@ pub struct PartitionArtifact {
     pub content: String,
     /// Complete native assertions for this output.
     pub assertions: Vec<SpecAssertion>,
-    /// Charged acquisition work; excluded from root-independent artifact hash.
+    /// Cumulative work of this request's reader; excluded from artifact identity.
     pub acquisition: PartitionAcquisition,
 }
-/// Charged work, independent of component artifact identity.
+/// Cumulative reader work; production uses one reader per partition request.
+/// These counters are independent of component artifact identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PartitionAcquisition {
     /// Raw visited records, including duplicates and missing probes.
@@ -160,13 +161,19 @@ fn acquire(
     reader: &mut ScopedGraphReader<'_>,
     kind: PartitionArtifactKind,
     root: &str,
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
 ) -> Result<ClosedPartition, PartitionError> {
     let mut closed = ClosedPartition {
         nodes: BTreeMap::new(),
         edges: BTreeMap::new(),
     };
     closed.node(reader, root)?;
-    if closed.nodes[root].label != kind.root_label() {
+    if closed.nodes[root].label != kind.root_label()
+        || !included(&provenance(&closed.nodes[root].props, root), mode, rejected)
+        || (kind == PartitionArtifactKind::DataModel
+            && provenance(&closed.nodes[root].props, root).confidence_tier == ConfidenceTier::Gap)
+    {
         return Err(PartitionError::Unavailable);
     }
     let mut frontier = BTreeSet::from([root.to_owned()]);
@@ -185,7 +192,16 @@ fn acquire(
                     crate::rules::PARTITION_EDGE_LABELS.contains(&edge.label.as_str())
                 };
                 if relevant {
-                    closed.edge(reader, edge)?;
+                    admit_edge(
+                        &mut closed,
+                        reader,
+                        edge,
+                        kind,
+                        mode,
+                        rejected,
+                        &mut frontier,
+                        &done,
+                    )?;
                 }
             }
             if page.remaining == Remaining::Exhausted {
@@ -202,7 +218,16 @@ fn acquire(
                 let page = reader.incoming(&id, incoming, reader.limits().max_rows)?;
                 for edge in page.edges {
                     if DATA_PARTITION_EDGE_LABELS.contains(&edge.label.as_str()) {
-                        closed.edge(reader, edge)?;
+                        admit_edge(
+                            &mut closed,
+                            reader,
+                            edge,
+                            kind,
+                            mode,
+                            rejected,
+                            &mut frontier,
+                            &done,
+                        )?;
                     }
                 }
                 if page.remaining == Remaining::Exhausted {
@@ -211,11 +236,6 @@ fn acquire(
                 incoming = page.next_incoming;
                 if incoming.is_none() {
                     return Err(PartitionError::Unavailable);
-                }
-            }
-            for node in closed.nodes.values() {
-                if node.label == "DataEntity" && !done.contains(&node.id) {
-                    frontier.insert(node.id.clone());
                 }
             }
         } else {
@@ -229,6 +249,97 @@ fn acquire(
     }
     Ok(closed)
 }
+// Boundary rows/endpoints are charged even when hidden. Only producer-visible
+// DataEntity-to-DataEntity links expand the frontier; hidden reach is not scanned.
+#[allow(clippy::too_many_arguments)]
+fn admit_edge(
+    closed: &mut ClosedPartition,
+    reader: &mut ScopedGraphReader<'_>,
+    edge: Edge,
+    kind: PartitionArtifactKind,
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    frontier: &mut BTreeSet<String>,
+    done: &BTreeSet<String>,
+) -> Result<(), PartitionError> {
+    let endpoints = [edge.src.clone(), edge.dst.clone()];
+    let edge_provenance = provenance(&edge.props, &edge_identity(&edge));
+    let traversable = included(&edge_provenance, mode, rejected)
+        && edge_provenance.confidence_tier != ConfidenceTier::Gap;
+    closed.edge(reader, edge)?;
+    if kind == PartitionArtifactKind::DataModel
+        && traversable
+        && endpoints.iter().all(|id| {
+            let node = &closed.nodes[id];
+            let p = provenance(&node.props, id);
+            node.label == "DataEntity"
+                && p.confidence_tier != ConfidenceTier::Gap
+                && included(&p, mode, rejected)
+        })
+    {
+        for id in endpoints {
+            if !done.contains(&id) {
+                frontier.insert(id);
+            }
+        }
+    }
+    Ok(())
+}
+// Compute the component on projected producer inputs, not raw hidden bridges.
+fn restrict_component<'a>(
+    nodes: &mut Vec<&'a Node>,
+    edges: &mut Vec<&'a Edge>,
+    root: &str,
+) -> Result<(), PartitionError> {
+    let entities: BTreeSet<&str> = nodes
+        .iter()
+        .filter(|n| {
+            n.label == "DataEntity"
+                && provenance(&n.props, &n.id).confidence_tier != ConfidenceTier::Gap
+        })
+        .map(|n| n.id.as_str())
+        .collect();
+    if !entities.contains(root) {
+        return Err(PartitionError::Unavailable);
+    }
+    let available: BTreeSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    let mut neighbors: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for edge in edges.iter().filter(|e| {
+        DATA_PARTITION_EDGE_LABELS.contains(&e.label.as_str())
+            && provenance(&e.props, &edge_identity(e)).confidence_tier != ConfidenceTier::Gap
+    }) {
+        if entities.contains(edge.src.as_str()) && entities.contains(edge.dst.as_str()) {
+            neighbors.entry(&edge.src).or_default().push(&edge.dst);
+            neighbors.entry(&edge.dst).or_default().push(&edge.src);
+        }
+    }
+    let mut component = BTreeSet::new();
+    let mut frontier = BTreeSet::from([root]);
+    while let Some(id) = frontier.pop_first() {
+        if component.insert(id) {
+            for next in neighbors.get(id).into_iter().flatten() {
+                if !component.contains(next) {
+                    frontier.insert(*next);
+                }
+            }
+        }
+    }
+    edges.retain(|e| {
+        DATA_PARTITION_EDGE_LABELS.contains(&e.label.as_str())
+            && provenance(&e.props, &edge_identity(e)).confidence_tier != ConfidenceTier::Gap
+            && (component.contains(e.src.as_str()) || component.contains(e.dst.as_str()))
+            && available.contains(e.src.as_str())
+            && available.contains(e.dst.as_str())
+    });
+    let context: BTreeSet<&str> = edges
+        .iter()
+        .flat_map(|e| [e.src.as_str(), e.dst.as_str()])
+        .chain(component)
+        .collect();
+    nodes.retain(|n| context.contains(n.id.as_str()));
+    Ok(())
+}
+
 /// Compile one producer-specific closed partition inside the caller's pinned
 /// reader transaction. The requested entry root is deliberately absent from
 /// component identity/header: callers put it only in their response envelope.
@@ -255,18 +366,24 @@ pub fn compile_partition_selected(
     {
         return Err(PartitionError::InvalidRequest);
     }
-    let closed = acquire(reader, kind, requested_root)?;
+    let closed = acquire(reader, kind, requested_root, mode, rejected)?;
     let nodes: Vec<_> = closed.nodes.into_values().collect();
     let edges: Vec<_> = closed.edges.into_values().collect();
-    let (visible_nodes, visible_edges) =
+    let (mut visible_nodes, mut visible_edges) =
         selected::project_recovered_facts(&nodes, &edges, mode, rejected);
+    if kind == PartitionArtifactKind::DataModel {
+        restrict_component(&mut visible_nodes, &mut visible_edges, requested_root)?;
+    }
     if !visible_nodes.iter().any(|n| n.id == requested_root) {
         return Err(PartitionError::Unavailable);
     }
     let roots: Vec<String> = if kind == PartitionArtifactKind::DataModel {
         visible_nodes
             .iter()
-            .filter(|n| n.label == "DataEntity")
+            .filter(|n| {
+                n.label == "DataEntity"
+                    && provenance(&n.props, &n.id).confidence_tier != ConfidenceTier::Gap
+            })
             .map(|n| n.id.clone())
             .collect()
     } else {
@@ -280,8 +397,8 @@ pub fn compile_partition_selected(
             reader.revision(),
             session_basis_id,
             mode,
-            &nodes,
-            &edges,
+            &visible_nodes,
+            &visible_edges,
         ),
     );
     let mut header = String::new();
@@ -330,9 +447,9 @@ pub fn compile_partition_selected(
             .map_err(|_| PartitionError::Limit)?;
             (
                 if selection.markdown {
-                    output.markdown.unwrap()
+                    output.markdown.ok_or(PartitionError::Unavailable)?
                 } else {
-                    output.index.unwrap()
+                    output.index.ok_or(PartitionError::Unavailable)?
                 },
                 output.assertions,
             )
