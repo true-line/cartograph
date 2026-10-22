@@ -17,6 +17,8 @@ const REFRESH: &str =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InspectionError {
     Stale,
+    OrdinalOutOfRange,
+    Limit,
     Unavailable,
     Invalid,
     Operational,
@@ -32,21 +34,22 @@ impl From<crate::primary_source::PinnedReadError> for InspectionError {
     }
 }
 fn snapshot(state: &AppState, fact: &TaskFactKey) -> Result<(String, SourceBinding), String> {
-    snapshot_typed(state, fact).map_err(|_| REFRESH.into())
+    snapshot_typed(state, fact, SnapshotReadLimits::default()).map_err(|_| REFRESH.into())
 }
 fn snapshot_typed(
     state: &AppState,
     fact: &TaskFactKey,
+    limits: SnapshotReadLimits,
 ) -> Result<(String, SourceBinding), InspectionError> {
     let snapshot = state
         .graph
         .lock()
         .map_err(|_| InspectionError::Operational)?
-        .read_source_selection_snapshot_bounded(
-            &[crate::task_evidence::graph_fact(fact)],
-            SnapshotReadLimits::default(),
-        )
-        .map_err(|_| InspectionError::Operational)?;
+        .read_source_selection_snapshot_bounded(&[crate::task_evidence::graph_fact(fact)], limits)
+        .map_err(|error| match error {
+            core_graph::GraphError::SnapshotBounds(_) => InspectionError::Limit,
+            _ => InspectionError::Operational,
+        })?;
     let binding = match snapshot.selections.into_iter().next().map(|s| s.state) {
         Some(FactSourceState::Present { binding, .. }) => binding,
         _ => return Err(InspectionError::Stale),
@@ -120,10 +123,28 @@ pub(crate) fn resolve_typed(
     expected_receipt: &str,
     ordinal: usize,
 ) -> Result<(InvestigationInspectionTarget, RetentionGuard), InspectionError> {
+    resolve_typed_bounded(
+        state,
+        fact,
+        expected_snapshot,
+        expected_receipt,
+        ordinal,
+        SnapshotReadLimits::default(),
+    )
+}
+
+pub(crate) fn resolve_typed_bounded(
+    state: &AppState,
+    fact: &TaskFactKey,
+    expected_snapshot: &str,
+    expected_receipt: &str,
+    ordinal: usize,
+    limits: SnapshotReadLimits,
+) -> Result<(InvestigationInspectionTarget, RetentionGuard), InspectionError> {
     if ordinal >= 1024 {
-        return Err(InspectionError::Stale);
+        return Err(InspectionError::OrdinalOutOfRange);
     }
-    let (snapshot_id, preliminary) = snapshot_typed(state, fact)?;
+    let (snapshot_id, preliminary) = snapshot_typed(state, fact, limits)?;
     if snapshot_id != expected_snapshot || preliminary.receipt_id != expected_receipt {
         return Err(InspectionError::Stale);
     }
@@ -138,7 +159,7 @@ pub(crate) fn resolve_typed(
         .primary_sources
         .task_guard(&source.source_id)
         .map_err(InspectionError::from)?;
-    let (checked_id, binding) = snapshot_typed(state, fact)?;
+    let (checked_id, binding) = snapshot_typed(state, fact, limits)?;
     if checked_id != snapshot_id || binding != preliminary {
         return Err(InspectionError::Stale);
     }
@@ -165,6 +186,11 @@ pub(crate) fn resolve_typed(
             &binding.receipt_id,
         )
         .map_err(InspectionError::from)?;
+    // A caller-selected range outside this receipt cannot become valid by
+    // reconnecting to the same graph; reserve Stale for changed identities.
+    if ordinal >= receipt.ranges().len() {
+        return Err(InspectionError::OrdinalOutOfRange);
+    }
     let target = descriptor(&receipt, &snapshot_id, ordinal).map_err(|_| InspectionError::Stale)?;
     state
         .primary_sources

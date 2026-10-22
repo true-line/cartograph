@@ -7,6 +7,8 @@ fn inspection_error(error: crate::investigations::inspection::InspectionError) -
     use crate::investigations::inspection::InspectionError;
     match error {
         InspectionError::Stale => ReadError::StaleBasis,
+        InspectionError::OrdinalOutOfRange => ReadError::InvalidRequest,
+        InspectionError::Limit => ReadError::Limit,
         InspectionError::Unavailable => ReadError::EvidenceUnavailable,
         InspectionError::Invalid => ReadError::EvidenceInvalid,
         InspectionError::Operational => ReadError::Storage,
@@ -71,12 +73,13 @@ impl ReadSession {
             .current_source_binding(&crate::task_evidence::graph_fact(fact))
             .map_err(|_| ReadError::Storage)?
             .ok_or(ReadError::StaleBasis)?;
-        let (target, guard) = crate::investigations::inspection::resolve_typed(
+        let (target, guard) = crate::investigations::inspection::resolve_typed_bounded(
             state,
             fact,
             &self.basis.recovered_graph_id,
             &binding.receipt_id,
             ordinal,
+            self.graph_limits,
         )
         .map_err(inspection_error)?;
         let receipt = state
@@ -109,23 +112,20 @@ impl ReadSession {
     }
 
     fn evidence_fact_visible(&self, fact: &TaskFactKey) -> bool {
-        // Reuse the entire compiler projection, including hidden-rule adjacency.
-        let (nodes, edges) = spec::project_recovered_facts(
-            &self.raw_nodes,
-            &self.raw_edges,
-            self.basis.export_mode,
-            &self.rejected_hashes,
-        );
-        match fact {
-            TaskFactKey::Node { id } => nodes.iter().any(|n| &n.id == id),
+        // Frozen from the complete compiler projection, including hidden-rule adjacency.
+        let reference = match fact {
+            TaskFactKey::Node { id } => context_hub::FactReference::Node { id: id.clone() },
             TaskFactKey::Edge {
                 source,
                 label,
                 destination,
-            } => edges
-                .iter()
-                .any(|e| &e.src == source && &e.label == label && &e.dst == destination),
-        }
+            } => context_hub::FactReference::Edge {
+                source: source.clone(),
+                label: label.clone(),
+                destination: destination.clone(),
+            },
+        };
+        self.visible_facts.contains(&reference)
     }
 
     pub(crate) fn read_evidence(
@@ -178,12 +178,13 @@ impl ReadSession {
         {
             return Err(ReadError::Limit);
         }
-        let (actual, guard) = crate::investigations::inspection::resolve_typed(
+        let (actual, guard) = crate::investigations::inspection::resolve_typed_bounded(
             state,
             &target.fact,
             &self.basis.recovered_graph_id,
             &target.receipt_id,
             target.receipt_inventory_index as usize,
+            self.graph_limits,
         )
         .map_err(inspection_error)?;
         if actual != *target {

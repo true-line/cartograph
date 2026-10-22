@@ -67,6 +67,8 @@ pub(crate) struct ReadBasis {
 /// hashes remain private for later selected compilation from exactly this basis.
 pub(crate) struct ReadSession {
     basis: ReadBasis,
+    graph_limits: SnapshotReadLimits,
+    visible_facts: BTreeSet<context_hub::FactReference>,
     raw_nodes: Vec<Node>,
     raw_edges: Vec<Edge>,
     rejected_hashes: BTreeSet<String>,
@@ -108,6 +110,17 @@ impl ReadSession {
             .to_owned();
         let (nodes, edges) =
             spec::project_recovered_facts(&raw_nodes, &raw_edges, mode, &rejected_hashes);
+        let visible_facts = nodes
+            .iter()
+            .map(|node| context_hub::FactReference::Node {
+                id: node.id.clone(),
+            })
+            .chain(edges.iter().map(|edge| context_hub::FactReference::Edge {
+                source: edge.src.clone(),
+                label: edge.label.clone(),
+                destination: edge.dst.clone(),
+            }))
+            .collect();
         let snapshot = Arc::new(
             ContextSnapshot::new(
                 nodes.into_iter().cloned().collect(),
@@ -131,6 +144,8 @@ impl ReadSession {
         };
         Ok(Self {
             basis,
+            graph_limits,
+            visible_facts,
             raw_nodes,
             raw_edges,
             rejected_hashes,

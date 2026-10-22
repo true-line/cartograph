@@ -1962,6 +1962,30 @@ fn mcp_retained_span_uses_session_receipt_and_refuses_changed_or_over_budget_evi
         spec::ExportMode::VerifiedOnly,
     )
     .unwrap();
+    let row_count = {
+        let (nodes, edges) = state.graph.lock().unwrap().read_snapshot().unwrap();
+        nodes.len() + edges.len()
+    };
+    let bounded_session = ReadSession::acquire(
+        &state.graph,
+        &state.decisions,
+        || Ok(vec![]),
+        core_graph::SnapshotReadLimits {
+            max_rows: row_count,
+            ..core_graph::SnapshotReadLimits::default()
+        },
+        core_graph::coverage::CoverageReadLimits::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap();
+    let bounded_basis = bounded_session.basis_id().unwrap();
+    assert_eq!(
+        bounded_session
+            .describe_evidence(&state, &bounded_basis, &fact, 0, 65536)
+            .unwrap()
+            .target,
+        target
+    );
     let basis = session.basis_id().unwrap();
     let described = session
         .describe_evidence(&state, &basis, &fact, 0, 65536)
@@ -1974,11 +1998,23 @@ fn mcp_retained_span_uses_session_receipt_and_refuses_changed_or_over_budget_evi
             .unwrap_err(),
         ReadError::Limit
     );
+    // AC-0288: invalid ordinal input must not trigger stale-basis reconnects.
+    // Cover the actual receipt boundary as well as the resolver's hard cap.
+    for ordinal in [described.total_ranges, 1024, usize::MAX] {
+        assert_eq!(
+            session
+                .describe_evidence(&state, &basis, &fact, ordinal, 65536)
+                .unwrap_err(),
+            ReadError::InvalidRequest
+        );
+    }
+    // Failed selection leaves the same immutable session usable.
     assert_eq!(
         session
-            .describe_evidence(&state, &basis, &fact, usize::MAX, 65536)
-            .unwrap_err(),
-        ReadError::StaleBasis
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap()
+            .target,
+        target
     );
     let limits = || EvidenceLimits {
         max_file_validation_bytes: ORIGINAL.len() as u64,
@@ -2122,6 +2158,23 @@ fn mcp_retained_span_uses_session_receipt_and_refuses_changed_or_over_budget_evi
     unknown["target"]["source"]["injected"] = json!(true);
     let rejected = answer(wire.receive(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"cartograph_evidence","arguments":unknown}})));
     assert_eq!(rejected["error"]["code"], -32602);
+    // AC-0288: later graph growth must use the session's admitted limits in
+    // both describe and read, rather than the resolver's larger defaults.
+    let mut extra = rule.clone();
+    extra.id.push_str(":extra-row");
+    state.graph.lock().unwrap().put_node(&extra).unwrap();
+    assert_eq!(
+        bounded_session
+            .describe_evidence(&state, &bounded_basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::Limit
+    );
+    assert_eq!(
+        bounded_session
+            .read_evidence(&state, &bounded_basis, &target, limits())
+            .unwrap_err(),
+        ReadError::Limit
+    );
     let mut changed = rule;
     changed.props["mcp_changed"] = json!(true);
     state.graph.lock().unwrap().put_node(&changed).unwrap();

@@ -416,3 +416,48 @@ fn query_and_discovery_preserve_actual_qualification_and_stale_cursors() {
     request.context_id = Some(session.basis().context_id.clone());
     assert!(session.discover(request).is_ok());
 }
+
+#[test]
+fn frozen_evidence_visibility_preserves_hidden_rule_adjacency_and_policy() {
+    // AC-0288: evidence visibility uses the same complete compiler projection.
+    let (graph, decisions) = fixture();
+    let mut rule = graph_node(&assertion("rule:hidden", ConfidenceTier::InferredWeak));
+    rule.label = "BusinessRule".into();
+    let edge = Edge {
+        src: "module:confirmed".into(),
+        label: "HAS_RULE".into(),
+        dst: rule.id.clone(),
+        props: graph_node(&assertion("edge:confirmed", ConfidenceTier::Confirmed)).props,
+    };
+    {
+        let mut graph = graph.lock().unwrap();
+        graph.put_node(&rule).unwrap();
+        graph.put_edge(&edge).unwrap();
+    }
+    let hidden = FactReference::Node { id: rule.id };
+    let adjacent = FactReference::Edge {
+        source: edge.src,
+        label: edge.label,
+        destination: edge.dst,
+    };
+    let verified = acquire(&graph, &decisions, ExportMode::VerifiedOnly);
+    let best = acquire(&graph, &decisions, ExportMode::BestEffort);
+    assert!(!verified.visible_facts.contains(&hidden));
+    assert!(!verified.visible_facts.contains(&adjacent));
+    assert!(best.visible_facts.contains(&hidden));
+    assert!(best.visible_facts.contains(&adjacent));
+    decisions
+        .lock()
+        .unwrap()
+        .record_assertion(
+            &assertion("rule:hidden", ConfidenceTier::InferredWeak),
+            AssertionDecision::Rejected,
+            None,
+        )
+        .unwrap();
+    let rejected = acquire(&graph, &decisions, ExportMode::BestEffort);
+    assert!(!rejected.visible_facts.contains(&hidden));
+    assert!(!rejected.visible_facts.contains(&adjacent));
+    assert!(best.visible_facts.contains(&hidden));
+    assert!(best.visible_facts.contains(&adjacent));
+}
