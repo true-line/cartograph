@@ -8,9 +8,6 @@ pub const FALLBACK_EXPORT_NAME: &str = "cartograph-export";
 /// Maximum UTF-8 byte length for a sanitised suggested file name.
 pub const MAX_EXPORT_NAME_BYTES: usize = 255;
 
-/// Maximum export payload size (64 MiB).
-pub const MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
-
 /// Sanitise a suggested file name: keep only the basename after any `/` or `\`,
 /// strip control characters, cap at [`MAX_EXPORT_NAME_BYTES`] on a UTF-8
 /// character boundary, and fall back to [`FALLBACK_EXPORT_NAME`].
@@ -29,18 +26,10 @@ pub fn sanitize_export_name(raw: &str) -> String {
     truncated.to_string()
 }
 
-/// Reject export payloads larger than [`MAX_EXPORT_BYTES`] (64 MiB).
-pub fn check_export_size(content: &str) -> Result<(), String> {
-    if content.len() > MAX_EXPORT_BYTES {
-        return Err("Export exceeds the 64 MiB maximum size.".to_string());
-    }
-    Ok(())
-}
-
-/// Validate size and write `content` to `path`, returning a short error message
-/// that never includes `content`.
+/// Write `content` to `path`, returning a short error message that never
+/// includes `content`. There is no size cap: a complete spec bundle is
+/// exported untruncated (AC-0218), as the browser download path did.
 pub fn write_export_file(path: &Path, content: &str) -> Result<(), String> {
-    check_export_size(content)?;
     std::fs::write(path, content.as_bytes())
         .map_err(|err| format!("Failed to write export file: {err}"))
 }
@@ -52,7 +41,6 @@ pub(crate) async fn save_export_file(
     suggested_name: String,
     content: String,
 ) -> Result<bool, String> {
-    check_export_size(&content)?;
     let file_name = sanitize_export_name(&suggested_name);
     let Some(handle) = rfd::AsyncFileDialog::new()
         .set_file_name(&file_name)
@@ -120,17 +108,6 @@ mod tests {
         let sanitized_emoji = sanitize_export_name(&emoji);
         assert!(sanitized_emoji.len() <= MAX_EXPORT_NAME_BYTES);
         assert_eq!(sanitized_emoji.len(), 252);
-    }
-
-    #[test]
-    fn rejects_content_larger_than_64_mib_without_echoing_content() {
-        let at_limit = "x".repeat(MAX_EXPORT_BYTES);
-        assert!(check_export_size(&at_limit).is_ok());
-
-        let over_limit = "y".repeat(MAX_EXPORT_BYTES + 1);
-        let err = check_export_size(&over_limit).expect_err("over 64 MiB must fail");
-        assert!(!err.contains("yyyy"));
-        assert!(err.contains("64 MiB"));
     }
 
     #[test]
