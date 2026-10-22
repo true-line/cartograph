@@ -194,6 +194,73 @@ struct BackingEntry {
     attribute: String,
 }
 
+/// The infrastructure family an observed client belongs to (#734).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObservedFamily {
+    /// Client-side storage (IndexedDB wrappers, Web Storage, Cache API).
+    BrowserStorage,
+    /// A cloud or service SDK client (AWS SDK v3, Stripe, MongoDB, …).
+    SdkClient,
+    /// An identity-provider client (Auth0, Clerk, NextAuth, Cognito).
+    AuthProvider,
+}
+
+impl ObservedFamily {
+    /// Wire spelling, recorded as the resource's `kind`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ObservedFamily::BrowserStorage => "browser-storage",
+            ObservedFamily::SdkClient => "sdk-client",
+            ObservedFamily::AuthProvider => "auth-provider",
+        }
+    }
+}
+
+/// How an observed client is created from its imported binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientForm {
+    /// `new <Export>(…)`.
+    New,
+    /// `<Export>(…)`, a factory function.
+    Call,
+}
+
+/// A client constructor or factory whose call site is observed
+/// infrastructure when the code has no IaC for it (#734): the call proves
+/// the code talks to `provider`, and `identity`, when declared, names
+/// which instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedClient {
+    /// Infrastructure family.
+    pub family: ObservedFamily,
+    /// Provider recorded as the resource type (`aws-s3`, `stripe`).
+    pub provider: String,
+    /// npm module the binding must be imported (or required) from.
+    pub module: String,
+    /// Exported name, or `default` for the module's default export.
+    pub export: String,
+    /// Constructor or factory call.
+    pub form: ClientForm,
+    /// Where the instance identity lives, if the client declares one.
+    pub identity: Option<IdentityArg>,
+    /// The file that declared this entry.
+    pub registry: RegistryIdentity,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientEntry {
+    family: ObservedFamily,
+    provider: String,
+    module: String,
+    export: String,
+    form: ClientForm,
+    #[serde(default)]
+    identity: Option<IdentityArg>,
+}
+
 /// A registry data file that was rejected whole.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RegistryRejection {
@@ -211,8 +278,10 @@ const MAX_ENTRIES: usize = 256;
 const MAX_VERSION_BYTES: usize = 64;
 const SDK_SCHEMA: &str = "cartograph-event-sdk-registry@1";
 const BACKING_SCHEMA: &str = "cartograph-channel-backing-registry@1";
+const CLIENT_SCHEMA: &str = "cartograph-observed-client-registry@1";
 const BUILTIN_SDKS: &str = include_str!("../registries/event-sdks.json");
 const BUILTIN_BACKINGS: &str = include_str!("../registries/channel-backings.json");
+const BUILTIN_CLIENTS: &str = include_str!("../registries/observed-clients.json");
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -236,6 +305,8 @@ struct RegistryFile {
     batch_keys: Vec<BatchEntry>,
     #[serde(default)]
     backings: Vec<BackingEntry>,
+    #[serde(default)]
+    clients: Vec<ClientEntry>,
 }
 
 /// The effective event registries: every accepted file's entries, in
@@ -250,6 +321,8 @@ pub struct Registries {
     pub batch_keys: Vec<BatchKey>,
     /// Resource types backing channels.
     pub backings: Vec<ChannelBacking>,
+    /// Client constructors observed as infrastructure (#734).
+    pub clients: Vec<ObservedClient>,
     /// Identities of the accepted files, in layering order.
     pub sources: Vec<RegistryIdentity>,
     /// Files rejected whole, in the order offered.
@@ -261,6 +334,7 @@ static BUILTIN: LazyLock<Registries> = LazyLock::new(|| {
     for (name, bytes) in [
         ("builtin:event-sdks.json", BUILTIN_SDKS),
         ("builtin:channel-backings.json", BUILTIN_BACKINGS),
+        ("builtin:observed-clients.json", BUILTIN_CLIENTS),
     ] {
         // The embedded files are validated by this crate's tests; a broken
         // built-in can never ship, so failing here is a build defect.
@@ -328,18 +402,22 @@ impl Registries {
         if !valid_version(&file.version) {
             return Err("invalid version".into());
         }
-        let entries =
-            file.sdks.len() + file.qualifiers.len() + file.batch_keys.len() + file.backings.len();
+        let entries = file.sdks.len()
+            + file.qualifiers.len()
+            + file.batch_keys.len()
+            + file.backings.len()
+            + file.clients.len();
         if entries == 0 || entries > MAX_ENTRIES {
             return Err(format!("must declare 1..={MAX_ENTRIES} entries"));
         }
+        let event_entries = file.sdks.len() + file.qualifiers.len() + file.batch_keys.len();
         match file.schema.as_str() {
-            SDK_SCHEMA if file.backings.is_empty() => {}
-            BACKING_SCHEMA
-                if file.sdks.is_empty()
-                    && file.qualifiers.is_empty()
-                    && file.batch_keys.is_empty() => {}
-            SDK_SCHEMA | BACKING_SCHEMA => return Err("entries outside its schema".into()),
+            SDK_SCHEMA if file.backings.is_empty() && file.clients.is_empty() => {}
+            BACKING_SCHEMA if event_entries == 0 && file.clients.is_empty() => {}
+            CLIENT_SCHEMA if event_entries == 0 && file.backings.is_empty() => {}
+            SDK_SCHEMA | BACKING_SCHEMA | CLIENT_SCHEMA => {
+                return Err("entries outside its schema".into());
+            }
             _ => return Err("unknown schema".into()),
         }
         let registry = RegistryIdentity {
@@ -432,7 +510,39 @@ impl Registries {
                 registry: registry.clone(),
             });
         }
+        let mut clients = self.clients.clone();
+        for client in file.clients {
+            let identity_valid = match &client.identity {
+                Some(IdentityArg::Key(key)) => valid_name(key),
+                Some(IdentityArg::First) | None => true,
+            };
+            if !valid_kind(&client.provider)
+                || !valid_name(&client.module)
+                || !valid_name(&client.export)
+                || !identity_valid
+            {
+                return Err(format!("invalid client entry for {:?}", client.provider));
+            }
+            if clients.iter().any(|c: &ObservedClient| {
+                c.module == client.module && c.export == client.export && c.form == client.form
+            }) {
+                return Err(format!(
+                    "client {:?} of {:?} is already registered",
+                    client.export, client.module
+                ));
+            }
+            clients.push(ObservedClient {
+                family: client.family,
+                provider: client.provider,
+                module: client.module,
+                export: client.export,
+                form: client.form,
+                identity: client.identity,
+                registry: registry.clone(),
+            });
+        }
         self.sources.push(registry);
+        self.clients = clients;
         self.sdks = sdks;
         self.qualifiers = qualifiers;
         self.batch_keys = batch_keys;
@@ -550,8 +660,63 @@ mod tests {
         let names: Vec<&str> = registries.sources.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
-            ["builtin:event-sdks.json", "builtin:channel-backings.json"]
+            [
+                "builtin:event-sdks.json",
+                "builtin:channel-backings.json",
+                "builtin:observed-clients.json"
+            ]
         );
+    }
+
+    // AC-0316: observed clients are registry data like event SDKs: the
+    // built-in file names each family, an extension adds entries carrying
+    // its identity, and a duplicate shape, an invalid provider or a client
+    // entry under another schema rejects the file whole. (T-0316)
+    #[test]
+    fn observed_clients_layer_like_every_registry() {
+        let builtin = Registries::builtin();
+        for family in [
+            ObservedFamily::BrowserStorage,
+            ObservedFamily::SdkClient,
+            ObservedFamily::AuthProvider,
+        ] {
+            assert!(
+                builtin.clients.iter().any(|c| c.family == family),
+                "{family:?}"
+            );
+        }
+        let extra = r#"{"schema":"cartograph-observed-client-registry@1","version":"x-1",
+            "clients":[{"family":"sdk-client","provider":"algolia","module":"algoliasearch",
+              "export":"algoliasearch","form":"call"}]}"#;
+        let layered = Registries::layered(&[file("algolia.json", extra)]);
+        assert!(layered.rejected.is_empty(), "{:?}", layered.rejected);
+        let added = layered.clients.last().unwrap();
+        assert_eq!(added.provider, "algolia");
+        assert_eq!(added.registry.name, "extension:algolia.json");
+        assert_eq!(layered.clients.len(), builtin.clients.len() + 1);
+        let cases = [
+            (
+                "duplicate.json",
+                r#"{"schema":"cartograph-observed-client-registry@1","version":"x",
+                "clients":[{"family":"sdk-client","provider":"payments","module":"stripe",
+                  "export":"default","form":"new"}]}"#
+                    .to_string(),
+            ),
+            (
+                "bad-provider.json",
+                extra.replace("algolia\"", "Algolia Search\""),
+            ),
+            ("bad-family.json", extra.replace("sdk-client", "queue")),
+            (
+                "wrong-schema.json",
+                extra.replace("observed-client", "event-sdk"),
+            ),
+        ];
+        for (name, json) in cases {
+            let layered = Registries::layered(&[file(name, &json)]);
+            assert_eq!(layered.rejected.len(), 1, "{name} was accepted");
+            assert_eq!(layered.clients, builtin.clients, "{name}");
+        }
     }
 
     #[test]
@@ -659,6 +824,6 @@ mod tests {
             .collect();
         let layered = Registries::layered(&files);
         assert_eq!(layered.rejected.len(), 1);
-        assert_eq!(layered.sources.len(), 2 + MAX_EXTENSION_FILES);
+        assert_eq!(layered.sources.len(), 3 + MAX_EXTENSION_FILES);
     }
 }

@@ -1,0 +1,12 @@
+{
+  "nodes": [
+    {
+      "label": "Resource",
+      "id": "res:local/p@observed:aws-s3",
+      "props": {
+        "kind": "sdk-client",
+        "observed": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,185 @@
+{
+  "schema": "cartograph-observed-client-registry@1",
+  "version": "ts-2026.10",
+  "clients": [
+    {
+      "family": "sdk-client",
+      "provider": "aws-s3",
+      "module": "@aws-sdk/client-s3",
+      "export": "S3Client",
+      "form": "new"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-dynamodb",
+      "module": "@aws-sdk/client-dynamodb",
+      "export": "DynamoDBClient",
+      "form": "new"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-sqs",
+      "module": "@aws-sdk/client-sqs",
+      "export": "SQSClient",
+      "form": "new"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-sns",
+      "module": "@aws-sdk/client-sns",
+      "export": "SNSClient",
+      "form": "new"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-lambda",
+      "module": "@aws-sdk/client-lambda",
+      "export": "LambdaClient",
+      "form": "new"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-secrets-manager",
+      "module": "@aws-sdk/client-secrets-manager",
+      "export": "SecretsManagerClient",
+      "form": "new"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "firebase",
+      "module": "firebase/app",
+      "export": "initializeApp",
+      "form": "call",
+      "identity": {
+        "key": "projectId"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "supabase",
+      "module": "@supabase/supabase-js",
+      "export": "createClient",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "stripe",
+      "module": "stripe",
+      "export": "default",
+      "form": "new"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "mongodb",
+      "module": "mongodb",
+      "export": "MongoClient",
+      "form": "new",
+      "identity": "first"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "postgres",
+      "module": "pg",
+      "export": "Pool",
+      "form": "new",
+      "identity": {
+        "key": "connectionString"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "postgres",
+      "module": "pg",
+      "export": "Client",
+      "form": "new",
+      "identity": {
+        "key": "connectionString"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "redis",
+      "module": "redis",
+      "export": "createClient",
+      "form": "call",
+      "identity": {
+        "key": "url"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "redis",
+      "module": "ioredis",
+      "export": "default",
+      "form": "new"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "prisma",
+      "module": "@prisma/client",
+      "export": "PrismaClient",
+      "form": "new"
+    },
+    {
+      "family": "auth-provider",
+      "provider": "auth0",
+      "module": "@auth0/auth0-spa-js",
+      "export": "createAuth0Client",
+      "form": "call",
+      "identity": {
+        "key": "domain"
+      }
+    },
+    {
+      "family": "auth-provider",
+      "provider": "auth0",
+      "module": "@auth0/auth0-spa-js",
+      "export": "Auth0Client",
+      "form": "new",
+      "identity": {
+        "key": "domain"
+      }
+    },
+    {
+      "family": "auth-provider",
+      "provider": "clerk",
+      "module": "@clerk/clerk-js",
+      "export": "Clerk",
+      "form": "new"
+    },
+    {
+      "family": "auth-provider",
+      "provider": "next-auth",
+      "module": "next-auth",
+      "export": "default",
+      "form": "call"
+    },
+    {
+      "family": "auth-provider",
+      "provider": "aws-cognito",
+      "module": "amazon-cognito-identity-js",
+      "export": "CognitoUserPool",
+      "form": "new",
+      "identity": {
+        "key": "UserPoolId"
+      }
+    },
+    {
+      "family": "browser-storage",
+      "provider": "indexeddb",
+      "module": "dexie",
+      "export": "default",
+      "form": "new",
+      "identity": "first"
+    },
+    {
+      "family": "browser-storage",
+      "provider": "indexeddb",
+      "module": "idb",
+      "export": "openDB",
+      "form": "call",
+      "identity": "first"
+    }
+  ]
+}
