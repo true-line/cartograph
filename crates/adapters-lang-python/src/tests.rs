@@ -236,3 +236,209 @@ fn import_targets_carry_provenance_and_only_proven_externals_confirm() {
     assert_eq!(boundary("mod:requests"), ("external".into(), Confirmed));
     assert_eq!(boundary("mod:orders.models"), ("unresolved".into(), Gap));
 }
+
+fn endpoint_facts(extraction: &Extraction) -> Vec<(String, String, String, Option<String>)> {
+    let mut facts = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| {
+            (
+                node.props["method"].as_str().unwrap().to_string(),
+                node.props["path"].as_str().unwrap().to_string(),
+                node.props["prov"]["confidence_tier"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                node.props["mount"].as_str().map(str::to_string),
+            )
+        })
+        .collect::<Vec<_>>();
+    facts.sort();
+    facts
+}
+
+fn write(dir: &std::path::Path, path: &str, source: &str) {
+    let path = dir.join(path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, source).unwrap();
+}
+
+#[test]
+fn flask_blueprint_routes_join_their_prefix_and_mounts_across_files() {
+    // #721: a Blueprint defined in one module, routed in others and mounted
+    // by the app factory, the way SimpleLogin and most Flask apps are laid out.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/api/base.py",
+        "from flask import Blueprint\napi_bp = Blueprint(name=\"api\", import_name=__name__, url_prefix=\"/api\")\n",
+    );
+    write(
+        dir.path(),
+        "app/api/views/alias.py",
+        r#"
+from app.api.base import api_bp
+
+@api_bp.route("/aliases/<int:alias_id>", methods=["GET", "DELETE"])
+def alias(alias_id):
+    return ""
+
+@api_bp.route("/aliases/<int:alias_id>/toggle", methods=["POST"])
+def toggle(alias_id):
+    return ""
+"#,
+    );
+    write(
+        dir.path(),
+        "app/oauth/base.py",
+        "from flask import Blueprint\noauth_bp = Blueprint(name=\"oauth\", import_name=__name__, url_prefix=\"/oauth\")\n",
+    );
+    write(
+        dir.path(),
+        "app/oauth/views.py",
+        "from app.oauth.base import oauth_bp\n\n@oauth_bp.route(\"/token\", methods=[\"POST\"])\ndef token():\n    return \"\"\n",
+    );
+    write(
+        dir.path(),
+        "server.py",
+        r#"
+from flask import Flask
+from app.api.base import api_bp
+from app.oauth.base import oauth_bp
+
+def register_blueprints(app: Flask):
+    app.register_blueprint(api_bp)
+    app.register_blueprint(oauth_bp, url_prefix="/oauth")
+    app.register_blueprint(oauth_bp, url_prefix="/oauth2")
+"#,
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let mounted = Some("mounted".to_string());
+    let confirmed = "Confirmed".to_string();
+    assert_eq!(
+        endpoint_facts(&extraction),
+        vec![
+            (
+                "DELETE".into(),
+                "/api/aliases/<int:alias_id>".into(),
+                confirmed.clone(),
+                mounted.clone()
+            ),
+            (
+                "GET".into(),
+                "/api/aliases/<int:alias_id>".into(),
+                confirmed.clone(),
+                mounted.clone()
+            ),
+            (
+                "POST".into(),
+                "/api/aliases/<int:alias_id>/toggle".into(),
+                confirmed.clone(),
+                mounted.clone()
+            ),
+            (
+                "POST".into(),
+                "/oauth/token".into(),
+                confirmed.clone(),
+                mounted.clone()
+            ),
+            ("POST".into(), "/oauth2/token".into(), confirmed, mounted),
+        ]
+    );
+    // Evidence cites the decorator, the Blueprint definition and the mount.
+    let endpoint = extraction
+        .nodes
+        .iter()
+        .find(|node| node.id == "ep:local/python-service@POST:/oauth2/token")
+        .unwrap();
+    let paths = endpoint.props["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|evidence| evidence["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        vec!["app/oauth/views.py", "app/oauth/base.py", "server.py"]
+    );
+    assert!(edge_pairs(&extraction, "HANDLES").contains(&(
+        "ep:local/python-service@POST:/oauth2/token",
+        "sym:local/python-service@app/oauth/views.py#token"
+    )));
+}
+
+#[test]
+fn fastapi_router_prefixes_compose_and_unmounted_or_unreadable_prefixes_stay_honest() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "routers/items.py",
+        "from fastapi import APIRouter\nrouter = APIRouter(prefix=\"/items\")\n\n@router.get(\"/{item_id}\")\ndef read(item_id):\n    return {}\n",
+    );
+    write(
+        dir.path(),
+        "routers/orphan.py",
+        "from fastapi import APIRouter\norphan = APIRouter(prefix=\"/orphan\")\n\n@orphan.post(\"/run\")\ndef run():\n    return {}\n",
+    );
+    write(
+        dir.path(),
+        "routers/dynamic.py",
+        "from fastapi import APIRouter\nimport settings\ndynamic = APIRouter(prefix=settings.PREFIX)\n\n@dynamic.get(\"/x\")\ndef x():\n    return {}\n",
+    );
+    write(
+        dir.path(),
+        "main.py",
+        "from fastapi import FastAPI\nfrom routers.items import router\nfrom routers.dynamic import dynamic\napp = FastAPI()\napp.include_router(router, prefix=\"/v1\")\napp.include_router(dynamic)\n",
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        endpoint_facts(&extraction),
+        vec![
+            (
+                "GET".into(),
+                "/v1/items/{item_id}".into(),
+                "Confirmed".into(),
+                Some("mounted".into())
+            ),
+            (
+                "POST".into(),
+                "/orphan/run".into(),
+                "InferredStrong".into(),
+                Some("mount_not_observed".into())
+            ),
+        ]
+    );
+    let gap = extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "Gap" && node.id.starts_with("gap:route:"))
+        .expect("an unreadable prefix becomes a Gap");
+    assert_eq!(gap.props["route"], "/x");
+    assert!(edge_pairs(&extraction, "HANDLES").contains(&(
+        gap.id.as_str(),
+        "sym:local/python-service@routers/dynamic.py#x"
+    )));
+}
+
+#[test]
+fn routes_on_an_imported_app_instance_resolve_and_lookalikes_do_not() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "web/__init__.py", "");
+    write(
+        dir.path(),
+        "web/app.py",
+        "from flask import Flask\napp = Flask(__name__)\n",
+    );
+    write(
+        dir.path(),
+        "web/views.py",
+        "from web.app import app\nfrom web.helpers import thing\n\n@app.route(\"/health\")\ndef health():\n    return \"\"\n\n@thing.route(\"/nope\")\ndef nope():\n    return \"\"\n",
+    );
+    write(dir.path(), "web/helpers.py", "thing = object()\n");
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        endpoint_facts(&extraction),
+        vec![("GET".into(), "/health".into(), "Confirmed".into(), None)]
+    );
+}
