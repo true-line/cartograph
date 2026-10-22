@@ -521,7 +521,12 @@ pub(crate) fn logical_workspace(
     });
     let normalized = MAX_TERM_BYTES.checked_mul(*LOWERCASE_BYTES_PER_SOURCE_BYTE)?;
     let degree = map::<&str, (usize, usize)>(limits.max_rows.checked_add(limits.max_rows)?)?;
-    let matching = slots::<(MatchKind, &str, &ContextFact, Matched<'_>)>(limits.max_rows)?;
+    let matching = slots::<(
+        MatchKind,
+        &str,
+        &crate::ContextFact,
+        BorrowedDiscoveryMatch<'_>,
+    )>(limits.max_rows)?;
     let current_view = size_of::<CandidateView<'_>>();
     let response = response_bytes.min(MAX_RESPONSE_BYTES);
     let typed_response = sum(&[

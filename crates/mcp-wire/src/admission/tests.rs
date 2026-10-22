@@ -256,3 +256,23 @@ fn unsupported_task_and_cursor_are_not_silently_ignored() {
         }
     );
 }
+
+#[test]
+fn selected_fact_tool_requires_explicit_host_implementation() {
+    let call = request(
+        json!(1),
+        "tools/call",
+        json!({"name":"cartograph_read_fact","arguments":{}}),
+    );
+    assert_eq!(
+        code(ready(&[ReadTool::Discover]).receive(call.clone())),
+        -32602
+    );
+    assert!(matches!(
+        ready(&[ReadTool::ReadFact]).receive(call),
+        Action::Call {
+            tool: ReadTool::ReadFact,
+            ..
+        }
+    ));
+}

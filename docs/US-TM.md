@@ -50,7 +50,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0038 | AC-0253..0255, AC-0263 | ingest, adapters-fw, dynamic, adapters-plugin-host, app, ui | P1 (ROADMAP) | — | ADR-0017, ADR-0036 | T-0253..0255, T-0263 |
 | US-0039 | AC-0270 | semantic, app | P1 (#257) | — | ADR-0036 | T-0270 |
 | US-0040 | AC-0271..0278 | semantic, app, ui | P3 | — | ADR-0037, ADR-0038 | T-0271..0278 |
-| US-0041 | AC-0288..0290 | spec, context-hub, mcp-wire, mcp-local, mcp-relay, app, ui | W8a (#718, #732 packaged client skill) | — | ADR-0044 | T-0288..0290 |
+| US-0041 | AC-0288..0290, AC-0304..0309 | core-graph, spec, context-hub, mcp-wire, mcp-local, mcp-relay, app, ui | W8a (#718, #732 packaged client skill) | — | ADR-0044 | T-0288..0290, T-0304..0309 |
 
 | US-0042 | AC-0293..0296 | agents, app, ui | W8b / H4 dependency (#730) | — | — | T-0293..0296 |
 

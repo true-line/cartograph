@@ -20,6 +20,7 @@ export interface McpSettingsPanelProps {
   onConfiguration: () => void;
 }
 const policyShape = {
+  acquisition_mode: 'complete',
   transport: { max_connections: null, read_frame_bytes: null, write_frame_bytes: null, frame_deadline_ms: null, session_lifetime_ms: null },
   graph: { max_bytes: null, max_rows: null, max_depth: null, max_values: null },
   coverage: { max_records: null, max_bytes: null },
@@ -52,6 +53,11 @@ export function McpSettingsPanel(props: McpSettingsPanelProps) {
         The backend checks all required limits before opening access. Byte reservations are
         accounting limits, not a guarantee of process memory usage. The aggregate
         reservation must cover all connection payloads plus at least one worker.</p>
+      <p>Acquisition mode is complete or scoped. Complete mode reads the whole recovered graph
+        within the supplied limits and supports complete artifact compilation. Scoped mode provides
+        bounded discovery handles, selected fact detail, and retained evidence with partial coverage;
+        complete artifact compilation is unavailable. The template uses complete mode to preserve
+        the existing behavior.</p>
       <details><summary>Required policy fields</summary>
         <p>Replace every null with a positive integer. Times are milliseconds and sizes are bytes.
           Scope source and registry limits apply per observation; artifact and corpus bytes apply per repo.

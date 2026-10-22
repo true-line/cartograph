@@ -11,9 +11,25 @@ use tauri::Manager;
 use tokio::sync::{mpsc, oneshot};
 
 pub(crate) const WORKER_MODEL: &str = "mcp-worker-payload-v1";
+pub(crate) const SCOPED_WORKER_MODEL: &str = "mcp-scoped-worker-payload-v1";
+
+/// Human-selected acquisition strategy; failures never switch strategies.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AcquisitionMode {
+    #[default]
+    Complete,
+    Scoped,
+}
+
+enum ActiveDispatcher<'a> {
+    Complete(Box<Dispatcher<'a>>),
+    Scoped(Box<super::scoped_dispatch::ScopedDispatcher<'a>>),
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct WorkerLimits {
+    pub acquisition_mode: AcquisitionMode,
     pub max_request_frame_bytes: NonZeroUsize,
     pub graph: core_graph::SnapshotReadLimits,
     pub coverage: core_graph::coverage::CoverageReadLimits,
@@ -56,26 +72,53 @@ impl Worker {
             // Own the permit in the actual worker, not in the async waiter.
             let _permit = permit;
             let state = app.state::<crate::AppState>();
+            let mut scope = || super::scope::coverage_scope(&app, &state, limits.scope);
+            let mut context = super::scoped_session::ScopedReadContext {
+                graph: &state.graph,
+                decisions: &state.decisions,
+                scope: &mut scope,
+            };
             let result = (|| {
                 _permit.check_active().map_err(|_| ReadError::Limit)?;
                 if ready.is_closed() {
                     return Err(ReadError::Storage);
                 }
-                let session = ReadSession::acquire(
-                    &state.graph,
-                    &state.decisions,
-                    || super::scope::coverage_scope(&app, &state, limits.scope),
-                    limits.graph,
-                    limits.coverage,
-                    mode,
-                )?;
-                Dispatcher::with_evidence(
-                    session,
-                    session_id,
-                    limits.dispatch,
-                    &state,
-                    limits.evidence,
-                )
+                match limits.acquisition_mode {
+                    AcquisitionMode::Complete => {
+                        let session = ReadSession::acquire(
+                            &state.graph,
+                            &state.decisions,
+                            || super::scope::coverage_scope(&app, &state, limits.scope),
+                            limits.graph,
+                            limits.coverage,
+                            mode,
+                        )?;
+                        Dispatcher::with_evidence(
+                            session,
+                            session_id,
+                            limits.dispatch,
+                            &state,
+                            limits.evidence,
+                        )
+                        .map(|dispatcher| ActiveDispatcher::Complete(Box::new(dispatcher)))
+                    }
+                    AcquisitionMode::Scoped => {
+                        let session = super::scoped_session::ScopedReadSession::acquire(
+                            &mut context,
+                            limits.graph,
+                            limits.coverage,
+                            mode,
+                        )?;
+                        super::scoped_dispatch::ScopedDispatcher::new(
+                            session,
+                            session_id,
+                            limits.dispatch,
+                            &state,
+                            limits.evidence,
+                        )
+                        .map(|dispatcher| ActiveDispatcher::Scoped(Box::new(dispatcher)))
+                    }
+                }
             })();
             let mut dispatcher = match result {
                 Ok(dispatcher) => dispatcher,
@@ -98,7 +141,12 @@ impl Worker {
                     let _ = request.reply.send(Err(ReadError::Limit));
                     break;
                 }
-                let action = dispatcher.receive(request.value);
+                let action = match &mut dispatcher {
+                    ActiveDispatcher::Complete(dispatcher) => dispatcher.receive(request.value),
+                    ActiveDispatcher::Scoped(dispatcher) => {
+                        dispatcher.receive(request.value, &mut context)
+                    }
+                };
                 let close = matches!(action, DispatchAction::Close);
                 if request.reply.send(Ok(action)).is_err() || close {
                     break;
@@ -132,13 +180,24 @@ impl Worker {
 
 #[cfg(unix)]
 fn validate_reservation(limits: WorkerLimits) -> Result<(), ReadError> {
-    let required = super::reservation::worker_bound::WorkerReservation::for_limits(limits)
-        .ok_or(ReadError::Limit)?
-        .required_bytes;
+    let required = required_reservation(limits).ok_or(ReadError::Limit)?;
     if limits.reserved_bytes.get() < required {
         return Err(ReadError::Limit);
     }
     Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn required_reservation(limits: WorkerLimits) -> Option<usize> {
+    match limits.acquisition_mode {
+        AcquisitionMode::Complete => Some(
+            super::reservation::worker_bound::WorkerReservation::for_limits(limits)?.required_bytes,
+        ),
+        AcquisitionMode::Scoped => super::reservation::scoped_bound::required_bytes(limits)?
+            .checked_add(super::scoped_dispatch::logical_protocol_workspace_bytes(
+                limits,
+            )?),
+    }
 }
 
 struct RequestCounter {
@@ -186,6 +245,7 @@ pub(crate) mod tests {
     }
     pub(crate) fn limits() -> WorkerLimits {
         let limits = WorkerLimits {
+            acquisition_mode: AcquisitionMode::Complete,
             max_request_frame_bytes: nz(65536),
             graph: core_graph::SnapshotReadLimits::default(),
             coverage: core_graph::coverage::CoverageReadLimits::default(),
@@ -431,3 +491,6 @@ mod native_tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+mod scoped_tests;

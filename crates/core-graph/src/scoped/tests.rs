@@ -1,3 +1,4 @@
+// AC-0304 / T-0304: bounded windows and selected fact storage.
 use super::*;
 use crate::{
     GraphPatch, GraphStore,
