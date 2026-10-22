@@ -370,3 +370,63 @@ This closes the previously unobserved process-inspection and client-entry
 removal cases for this fixture. Different-OS-user peer rejection, non-ARM
 execution and production signing remain unestablished. No provider execution,
 owner-store access or real-target ingestion occurred.
+
+## Native receipt-omission follow-up — 2026-10-22, a7915641
+
+A separately identified ARM macOS debug fixture was built from clean signed
+`a79156416ce7fd2508c4bc37c54bc46d118354ee`, tree
+`2bde9044ce81f0201c62d1c4fe9ffa7e14b687c5`, version 0.20.0. Its identifier was
+`ai.cartograph.fixture.omissiona791`; the embedded disposable profile was verified.
+Preparation-only ignored test helpers were restored before the native build.
+They used real capture and `run_ingest` with fixture-only receipt capacity one,
+plus the existing per-file declaration bound, to preserve retained,
+`store_capacity`-omitted and unrecorded controls. No omission rows were inserted
+manually. The generated graph had 1,034 nodes and 1,031 edges; no owner database,
+real target or provider was used.
+
+Native Settings enabled the explicit policy derived from current production
+reservation functions. Derivation accepted the exact worker/aggregate floors
+and refused each one-below value; offered policy ceilings were unchanged.
+These are logical accounting units, not RSS measurements. On one authenticated
+session, the external Node client used the fixture's packaged relay and recorded
+exact JSON-RPC requests and results:
+
+- The current unbound omitted fact returned `isError: true`,
+  `error: "evidence_omitted"` and `omission_kind: "store_capacity"`, with no
+  target or span. The separate omission capability was available and partial;
+  broad `evidence_absence_reason_available` remained false.
+- A current retained binding yielded a descriptor and exact 13-byte span,
+  `return false;`. Its SHA-256 was
+  `dabbdf16b8204c2b7217958e893ae2d600d2f01a226e3e0d8e7d1ef950819832`,
+  independently calculated from the prepared source bytes at the manifest's
+  original range. The native descriptor/read targets matched; the fixture's
+  separate BLAKE3 manifest hash was preserved and labeled.
+- The genuine unrecorded control returned `evidence_unavailable`, never an
+  inferred omission. All calls retained the same acquired session and basis.
+- Relay EOF drained cleanly with exit zero, no signal and no stderr. Native
+  access was disabled and the fixture quit; cleanup found no fixture processes
+  or connection records.
+
+Two failed harness attempts remain recorded. Run 1 supplied the wrong connection
+record path and failed initialization; the real record used a generated
+`mcp-runtime/mcp-*/connection.json` subdirectory. Run 2 reached retained read but
+the client incorrectly compared SHA-256 with the manifest's BLAKE3 digest.
+The client was corrected to calculate expected SHA-256 independently from the
+prepared source file, checking containment and byte bounds. Run 3 passed every
+assertion; returned text was never used as its own expected-value oracle.
+
+Artifacts are under
+`/tmp/cartograph-ui-testing/mcp-fixture-a791-omission`: `fixture-manifest.json`,
+`accounting-receipt.json`, `bundle-verification.json`,
+`native-omission-result.json`, `native-omission-result-run2.json`,
+`native-omission-result-run3.json`, the preserved pre-correction client and
+`cleanup.json`. Reports contain no bearer credential or raw relay stderr.
+
+This supersedes the earlier omission-pending labels for this consumer branch;
+it does not relabel historical binaries or qualification/guard observations.
+The retained guard-composition evidence remains separately attributed above.
+This run does not establish native results for every omission kind, Windows or
+non-ARM execution, production signing, different-OS-user peer rejection, or a
+complete MT-W8A-02 pass. Those are not implied by the positive omission result.
+No requirement to run all three omission kinds natively is introduced; the
+closed kind inventory and wire behavior retain their automated evidence.

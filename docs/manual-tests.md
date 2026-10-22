@@ -1362,8 +1362,12 @@ promoted authority. This procedure does not pass W8b/H3/H4/H5 or real-provider g
 
 **Status: PARTIAL, scoped evidence recorded.** AC-0288; #718.
 See [native acceptance](acceptance/read-only-mcp-native.md) for observed controlled
-acquisition, paging and guarded retention. Explicit omission remains pending. Use a disposable, prepopulated fixture
-profile, with separately authorized fixture setup. No provider calls.
+acquisition, paging, guarded retention and the dated `a7915641` native
+`store_capacity` omission/retained/unrecorded controls. The positive omission
+branch is observed; historical and current fixture scopes remain separately
+attributed, without a blanket full-procedure claim. Use a disposable,
+prepopulated fixture profile, with separately authorized fixture setup. No
+provider calls.
 
 1. Record app/build, fixture graph and retained-capture identities. Open a session
    in each export mode. Record original graph ID, filtered projection ID, producer
