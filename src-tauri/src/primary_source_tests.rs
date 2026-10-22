@@ -1359,7 +1359,7 @@ fn primary_source_forget_reclaims_unpinned_and_retains_pinned_receipts_as_captur
     )
     .unwrap();
     let mut stored_pinned: Vec<(String, i64)> = conn
-        .prepare("SELECT id, capture_forgotten FROM receipts ORDER BY id")
+        .prepare("SELECT id, capture_forgotten_tombstone IS NOT NULL FROM receipts ORDER BY id")
         .unwrap()
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
