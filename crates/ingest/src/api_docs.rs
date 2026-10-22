@@ -168,17 +168,12 @@ fn anchored_reason(what: &str, failure: AnchoredRead) -> String {
 /// declaration against `root`.
 ///
 /// A malformed `.cartograph/api-docs.toml` yields one [`ApiDocValidationGap`]
-/// and no validated documents.
+/// and contributes no declarations; manifest declarations, an independent
+/// source, are still validated and processed.
 pub fn load_api_docs(root: &Path, manifest_docs: &[ApiDocDeclaration]) -> LoadedApiDocs {
-    let repo_docs = match load_repo_config(root) {
-        Ok(docs) => docs,
-        Err(gap) => {
-            return LoadedApiDocs {
-                declared: true,
-                docs: Vec::new(),
-                gaps: vec![gap],
-            };
-        }
+    let (repo_docs, config_gap) = match load_repo_config(root) {
+        Ok(docs) => (docs, None),
+        Err(gap) => (Vec::new(), Some(gap)),
     };
 
     let mut merged: Vec<ApiDocDeclaration> = Vec::new();
@@ -200,7 +195,14 @@ pub fn load_api_docs(root: &Path, manifest_docs: &[ApiDocDeclaration]) -> Loaded
     }
 
     if merged.is_empty() {
-        return LoadedApiDocs::default();
+        return match config_gap {
+            Some(gap) => LoadedApiDocs {
+                declared: true,
+                docs: Vec::new(),
+                gaps: vec![gap],
+            },
+            None => LoadedApiDocs::default(),
+        };
     }
 
     let max_count = merged.len().max(repo_docs.len()).max(manifest_docs.len());
@@ -208,17 +210,20 @@ pub fn load_api_docs(root: &Path, manifest_docs: &[ApiDocDeclaration]) -> Loaded
         return LoadedApiDocs {
             declared: true,
             docs: Vec::new(),
-            gaps: vec![ApiDocValidationGap {
-                doc_path: API_DOCS_REL_PATH.into(),
-                reason: format!(
-                    "declared {max_count} API reference docs; at most {MAX_API_DOCS} are allowed"
-                ),
-            }],
+            gaps: config_gap
+                .into_iter()
+                .chain([ApiDocValidationGap {
+                    doc_path: API_DOCS_REL_PATH.into(),
+                    reason: format!(
+                        "declared {max_count} API reference docs; at most {MAX_API_DOCS} are allowed"
+                    ),
+                }])
+                .collect(),
         };
     }
 
     let mut docs = Vec::new();
-    let mut gaps = Vec::new();
+    let mut gaps: Vec<ApiDocValidationGap> = config_gap.into_iter().collect();
     for decl in &merged {
         match validate_one_doc(root, decl) {
             Ok(valid) => docs.push(valid),
@@ -238,6 +243,20 @@ fn load_repo_config(root: &Path) -> Result<Vec<ApiDocDeclaration>, ApiDocValidat
         doc_path: API_DOCS_REL_PATH.into(),
         reason,
     };
+    // A repository that never opted in may already use `.cartograph` as a
+    // plain file; only a directory (or a symlink, refused below without being
+    // followed) can hold a declaration.
+    let config_dir = API_DOCS_REL_PATH
+        .split('/')
+        .next()
+        .expect("config path has a first component");
+    match cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())
+        .and_then(|dir| dir.symlink_metadata(config_dir))
+    {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Ok(meta) if !meta.is_dir() && !meta.file_type().is_symlink() => return Ok(Vec::new()),
+        _ => {}
+    }
     let bytes = match read_anchored(root, API_DOCS_REL_PATH) {
         Ok(bytes) => bytes,
         Err(AnchoredRead::NotFound) => return Ok(Vec::new()),
@@ -481,8 +500,8 @@ prefix = "api"
         assert_eq!(too_many.gaps.len(), 1);
         assert!(too_many.gaps[0].reason.contains("at most 16"));
 
-        // 6. Malformed `.cartograph/api-docs.toml` produces one Gap and no docs,
-        // even when manifest entries exist.
+        // 6. Malformed `.cartograph/api-docs.toml` produces one Gap and no repo
+        // declarations; the independent manifest declarations still load.
         std::fs::write(root.join(API_DOCS_REL_PATH), "[[doc]\npath = 123\n").unwrap();
         let malformed = load_api_docs(
             root,
@@ -492,9 +511,19 @@ prefix = "api"
             }],
         );
         assert!(malformed.declared);
-        assert!(malformed.docs.is_empty());
         assert_eq!(malformed.gaps.len(), 1);
         assert!(malformed.gaps[0].reason.contains("malformed"));
+        assert_eq!(malformed.docs.len(), 1, "{:?}", malformed.docs);
+        assert_eq!(malformed.docs[0].path, "docs/api.md");
+        assert_eq!(malformed.docs[0].prefix.as_deref(), Some("/api"));
+
+        // 7. A `.cartograph` regular file is not an opt-in: no declaration and
+        // no Gap, so the drift register of a non-participating repo is unchanged.
+        let plain = tempfile::tempdir().unwrap();
+        std::fs::write(plain.path().join(".cartograph"), "unrelated tool state\n").unwrap();
+        let not_declared = load_api_docs(plain.path(), &[]);
+        assert!(!not_declared.declared);
+        assert!(not_declared.docs.is_empty() && not_declared.gaps.is_empty());
     }
 
     // AC-0313 (#739): reads are anchored at the opened handle, so a FIFO at the

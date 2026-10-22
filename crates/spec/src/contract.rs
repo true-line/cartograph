@@ -945,6 +945,29 @@ fn emit_documented_not_served_drift(
     }
 }
 
+/// Confidence a recovered endpoint contributes to a served-side finding. An
+/// endpoint without typed provenance is never treated as Confirmed.
+fn endpoint_confidence(node: &Node) -> ConfidenceTier {
+    typed_provenance(&node.props)
+        .map(|prov| prov.confidence_tier)
+        .unwrap_or(ConfidenceTier::InferredWeak)
+}
+
+/// Weakest of the cited confidences, so a finding never claims more certainty
+/// than the recovered endpoints it depends on (Confirmed when none are cited).
+fn weakest_confidence(tiers: impl IntoIterator<Item = ConfidenceTier>) -> ConfidenceTier {
+    let rank = |tier: ConfidenceTier| match tier {
+        ConfidenceTier::Confirmed => 0,
+        ConfidenceTier::InferredStrong => 1,
+        ConfidenceTier::InferredWeak => 2,
+        ConfidenceTier::Gap => 3,
+    };
+    tiers
+        .into_iter()
+        .max_by_key(|tier| rank(*tier))
+        .unwrap_or(ConfidenceTier::Confirmed)
+}
+
 fn emit_served_undocumented_drift(
     facts: &mut ContractFacts,
     repo: &str,
@@ -965,14 +988,14 @@ fn emit_served_undocumented_drift(
     }
     let prov = Provenance::new(
         Tier::Deterministic,
-        ConfidenceTier::Confirmed,
+        weakest_confidence(ep_nodes.iter().map(|node| endpoint_confidence(node))),
         cited,
         CONTRACT_DRIFT_EXTRACTOR_ID,
         serde_json::to_vec(&("served-undocumented", repo, key))
             .expect("drift identity serializes")
             .as_slice(),
     )
-    .expect("Confirmed is within the deterministic confidence ceiling")
+    .expect("endpoint confidence is within the deterministic confidence ceiling")
     .with_method(crate::spec_rule(CONTRACT_DRIFT_EXTRACTOR_ID));
 
     let served_summary = format_served_summary(ep_nodes);
@@ -1005,12 +1028,12 @@ fn emit_served_undocumented_drift(
         }
         let edge_prov = Provenance::new(
             Tier::Deterministic,
-            ConfidenceTier::Confirmed,
+            endpoint_confidence(ep_node),
             edge_ev,
             CONTRACT_DRIFT_EXTRACTOR_ID,
             format!("{drift_id} SERVED_AS {}", ep_node.id).as_bytes(),
         )
-        .expect("Confirmed is within the deterministic confidence ceiling")
+        .expect("endpoint confidence is within the deterministic confidence ceiling")
         .with_method(crate::spec_rule(CONTRACT_DRIFT_EXTRACTOR_ID));
         facts.edges.push(Edge {
             src: drift_id.clone(),
@@ -1059,7 +1082,11 @@ fn emit_method_mismatch_drift(
 
     let prov = Provenance::new(
         Tier::Deterministic,
-        ConfidenceTier::Confirmed,
+        weakest_confidence(
+            matched_ep_nodes
+                .iter()
+                .map(|node| endpoint_confidence(node)),
+        ),
         cited,
         CONTRACT_DRIFT_EXTRACTOR_ID,
         serde_json::to_vec(&(
@@ -1072,7 +1099,7 @@ fn emit_method_mismatch_drift(
         .expect("drift identity serializes")
         .as_slice(),
     )
-    .expect("Confirmed is within the deterministic confidence ceiling")
+    .expect("endpoint confidence is within the deterministic confidence ceiling")
     .with_method(crate::spec_rule(CONTRACT_DRIFT_EXTRACTOR_ID));
 
     let documented_summary = format_documented_summary(&matched_doc_nodes);
@@ -1120,12 +1147,12 @@ fn emit_method_mismatch_drift(
             .unwrap_or_default();
         let edge_prov = Provenance::new(
             Tier::Deterministic,
-            ConfidenceTier::Confirmed,
+            endpoint_confidence(ep_node),
             edge_ev,
             CONTRACT_DRIFT_EXTRACTOR_ID,
             format!("{drift_id} SERVED_AS {}", ep_node.id).as_bytes(),
         )
-        .expect("Confirmed is within the deterministic confidence ceiling")
+        .expect("endpoint confidence is within the deterministic confidence ceiling")
         .with_method(crate::spec_rule(CONTRACT_DRIFT_EXTRACTOR_ID));
         facts.edges.push(Edge {
             src: drift_id.clone(),
@@ -1324,6 +1351,58 @@ mod tests {
                     .unwrap_or("")
                     .contains("expected \"3.x\"")
         }));
+    }
+
+    // AC-0313 (#739): served-side findings never claim more certainty than the
+    // recovered endpoints they cite; an InferredStrong endpoint (for example a
+    // route on an unmounted router) yields InferredStrong drift and edges.
+    #[test]
+    fn contract_drift_inherits_weakest_endpoint_confidence() {
+        let docs = vec![DeclaredApiDoc {
+            path: "docs/api.md".into(),
+            prefix: Some("/api".into()),
+            contents: "#### POST /api/disjoint\n".into(),
+        }];
+        let inferred = |method: &str, path: &str| {
+            let mut node = endpoint_node("acme/svc", method, path, "app.py");
+            let mut prov = typed_provenance(&node.props).unwrap();
+            prov.confidence_tier = ConfidenceTier::InferredStrong;
+            node.props["prov"] = serde_json::to_value(prov).unwrap();
+            node
+        };
+        let candidates = vec![
+            inferred("GET", "/api/unmounted"),
+            inferred("PUT", "/api/disjoint"),
+            endpoint_node("acme/svc", "GET", "/api/confirmed", "app.py"),
+        ];
+        let facts = extract_contract_facts("acme/svc", "abc1234", &docs, &[], &candidates);
+        let tier_of = |props: &serde_json::Value| typed_provenance(props).unwrap().confidence_tier;
+        let drift = |key: &str| {
+            facts
+                .nodes
+                .iter()
+                .find(|n| is_drift_node(n) && n.props["key"] == key)
+                .unwrap()
+        };
+        for (key, expected) in [
+            ("GET /api/unmounted", ConfidenceTier::InferredStrong),
+            ("/api/disjoint", ConfidenceTier::InferredStrong),
+            ("GET /api/confirmed", ConfidenceTier::Confirmed),
+        ] {
+            let node = drift(key);
+            assert_eq!(tier_of(&node.props), expected, "{key}");
+            for edge in facts
+                .edges
+                .iter()
+                .filter(|e| e.src == node.id && e.label == "SERVED_AS")
+            {
+                assert_eq!(tier_of(&edge.props), expected, "{key} SERVED_AS");
+            }
+        }
+        assert_eq!(
+            weakest_confidence([ConfidenceTier::Confirmed, ConfidenceTier::InferredWeak]),
+            ConfidenceTier::InferredWeak
+        );
     }
 
     // AC-0313 (#739): drift comparison covers documented-not-served
