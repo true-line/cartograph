@@ -590,6 +590,43 @@ pub fn derive_adr_facts_bounded(
     derive_inner(nodes, edges, flows, Some(limits))
 }
 
+pub(crate) fn logical_workspace_bytes(
+    bytes: usize,
+    rows: usize,
+    values: usize,
+    trace: flowtracer::TraceLimits,
+    limits: AdrLimits,
+) -> Option<usize> {
+    use crate::workbench::accounting::{json, json_bytes, map_slots, set_slots, slots, sum};
+    let projected_bytes = bytes.checked_add(limits.max_output_bytes)?;
+    let projected_rows = rows.checked_add(limits.max_rows)?;
+    let projected_values = values.checked_add(limits.max_output_bytes)?;
+    sum(&[
+        // derive_inner clones the base graph and recovered rows before drift.
+        json(projected_bytes, projected_values)?,
+        slots::<Node>(projected_rows)?,
+        slots::<Edge>(projected_rows)?,
+        json_bytes(projected_bytes)?, // once-per-row typed provenance arrays
+        slots::<Option<Provenance>>(projected_rows)?,
+        map_slots::<&str, &Node>(projected_rows)?,
+        set_slots::<&str>(projected_rows)?,   // governed targets
+        set_slots::<&str>(projected_values)?, // forbidden labels
+        slots::<(&Edge, &Provenance)>(projected_rows)?,
+        slots::<(&String, &String, &String)>(projected_rows)?,
+        map_slots::<EvidenceKey<'_>, &EvidenceRef>(projected_values)?,
+        slots::<&EvidenceRef>(projected_values)?,
+        set_slots::<&str>(trace.max_flows)?,
+        slots::<&str>(trace.max_flows)?, // triggers
+        slots::<(&str, &str)>(2)?,       // literal drift targets
+        slots::<EdgeView<'_, OnlyProvenance<'_>>>(2)?,
+        slots::<Node>(limits.max_rows)?,
+        slots::<Edge>(limits.max_rows)?, // final sort scratch, one at a time but sum named roles
+        json_bytes(projected_bytes)?,    // one current input parse/identity view
+        std::mem::size_of::<Budget>(),
+        std::mem::size_of::<AdrFacts>(),
+    ])
+}
+
 #[cfg(test)]
 #[path = "adr/bounded_tests.rs"]
 mod bounded_tests;

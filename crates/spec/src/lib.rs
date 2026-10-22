@@ -32,6 +32,10 @@ pub use rules::use_case::{
     check_use_case_acceptance, project_use_case,
 };
 mod security;
+pub use security::{
+    SecurityLimit, SecurityLimitExceeded, SecurityLimits, SecurityProjectionSize,
+    derive_security_findings_bounded, security_projection_bound, security_projection_size,
+};
 mod views;
 mod workbench;
 pub use adr::{
@@ -49,10 +53,11 @@ pub use views::{
     SpecViewBundle, compile_spec_views, compile_spec_with_views,
 };
 pub use workbench::{
-    ArtifactSelectionError, ExportMode, SelectedArtifactLimit, SelectedArtifactOutcome,
-    SelectedCompileLimits, SpecArtifact, SpecAssertion, SpecBundle, compile_spec,
-    compile_spec_selected, count_gap_findings, is_drift_edge, is_drift_node, is_gap_edge,
-    is_gap_node, provenance,
+    ArtifactDescriptor, ArtifactSelectionError, COMPILE_WORKSPACE_MODEL, CompileWorkspaceBound,
+    ExportMode, SelectedArtifactLimit, SelectedArtifactOutcome, SelectedCompileLimits,
+    SpecArtifact, SpecAssertion, SpecBundle, artifact_catalog, compile_spec, compile_spec_selected,
+    compile_spec_selected_with_security, count_gap_findings, is_drift_edge, is_drift_node,
+    is_gap_edge, is_gap_node, logical_compile_bound, project_recovered_facts, provenance,
 };
 
 /// Edge labels that appear on the topology map — callers use this to query

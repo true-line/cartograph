@@ -397,8 +397,8 @@ test('macOS packaging compiles with no signing secrets in the environment (#480)
   const step = (name) => steps.find((block) => block.startsWith(`      - name: ${name}`)) ?? '';
   const index = (name) => steps.findIndex((block) => block.startsWith(`      - name: ${name}`));
 
-  assert.match(manifest.scripts['package:macos:compile'], /^tauri build --no-bundle --target universal-apple-darwin$/u);
-  assert.match(manifest.scripts['package:macos:bundle'], /^tauri bundle --bundles app,dmg --target universal-apple-darwin$/u);
+  assert.match(manifest.scripts['package:macos:compile'], /^node scripts\/build-mcp-relay\.mjs && tauri build --no-bundle --target universal-apple-darwin$/u);
+  assert.match(manifest.scripts['package:macos:bundle'], /^tauri bundle --bundles app,dmg --target universal-apple-darwin --config src-tauri\/tauri\.mcp-bundle\.conf\.json$/u);
 
   const compile = step('Compile universal binary without signing secrets');
   assert.match(compile, /npm run package:macos:compile/u);

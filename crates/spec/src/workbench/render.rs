@@ -506,6 +506,26 @@ impl<'a> Origins<'a> {
     }
 }
 
+pub(super) fn logical_fixed_headers() -> Option<usize> {
+    super::accounting::sum(&[
+        std::mem::size_of::<State>(),
+        std::mem::size_of::<Text>(),
+        std::mem::size_of::<Assertions>(),
+        std::mem::size_of::<Counter>(),
+        std::mem::size_of::<AssertionView<'_>>(),
+    ])
+}
+
+pub(super) fn logical_origin_bytes(rows: usize) -> Option<usize> {
+    use super::accounting::{map_slots, slots, sum};
+    sum(&[
+        std::mem::size_of::<Origins<'_>>(),
+        map_slots::<(&str, &str, &str), Option<Origin>>(rows)?,
+        map_slots::<&str, Option<Origin>>(rows)?,
+        slots::<Omission>(rows)?,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

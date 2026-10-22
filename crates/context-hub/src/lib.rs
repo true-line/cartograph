@@ -6,6 +6,7 @@
 //! part of this first recovered-graph projection.
 
 pub mod coverage;
+pub mod logical;
 
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance};

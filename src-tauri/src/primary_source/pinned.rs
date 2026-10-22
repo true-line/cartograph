@@ -23,16 +23,57 @@ impl std::fmt::Display for PinnedReadError {
 
 impl std::error::Error for PinnedReadError {}
 
+type AdmittedReceiptFields = (Option<String>, Option<String>, Option<String>);
+
+fn admitted_receipt_text(
+    value: rusqlite::types::ValueRef<'_>,
+) -> Result<Option<String>, PinnedReadError> {
+    match value {
+        rusqlite::types::ValueRef::Null => Ok(None),
+        rusqlite::types::ValueRef::Text(bytes) => std::str::from_utf8(bytes)
+            .map(|text| Some(text.to_owned()))
+            .map_err(|_| PinnedReadError::Invalid),
+        _ => Err(PinnedReadError::Invalid),
+    }
+}
+
+fn admitted_receipt_fields(
+    values: [rusqlite::types::ValueRef<'_>; 3],
+) -> Result<AdmittedReceiptFields, PinnedReadError> {
+    Ok((
+        admitted_receipt_text(values[0])?,
+        admitted_receipt_text(values[1])?,
+        admitted_receipt_text(values[2])?,
+    ))
+}
+
 pub(super) fn stored_receipt(conn: &Connection, id: &str) -> Result<Receipt, PinnedReadError> {
-    let row: Option<(String, String, String)> = conn
+    // CASE projections keep malformed/oversized cells inside SQLite. They are
+    // never copied into Rust Strings before admission. One statement also
+    // preserves a coherent selection for callers already holding a transaction.
+    let payload_limit =
+        i64::try_from(captured::MAX_RECEIPT_BYTES).map_err(|_| PinnedReadError::Invalid)?;
+    let row: Option<AdmittedReceiptFields> = conn
         .query_row(
-            "SELECT source_id,repo_key,payload FROM receipts WHERE id=?1",
-            [id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            "SELECT
+               CASE WHEN typeof(source_id)='text' AND length(CAST(source_id AS BLOB)) BETWEEN 1 AND 256 THEN source_id END,
+               CASE WHEN typeof(repo_key)='text' AND length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256 THEN repo_key END,
+               CASE WHEN typeof(payload)='text' AND length(CAST(payload AS BLOB)) BETWEEN 1 AND ?2 THEN payload END
+             FROM receipts WHERE id=?1",
+            params![id, payload_limit],
+            |row| {
+                // SQLite TEXT can contain invalid UTF-8. Borrow the admitted
+                // bytes first so corrupt encoding is Invalid, while actual SQL
+                // access failures remain Operational.
+                Ok(admitted_receipt_fields([row.get_ref(0)?, row.get_ref(1)?, row.get_ref(2)?]))
+            },
         )
         .optional()
-        .map_err(|_| PinnedReadError::Operational)?;
-    let (source, repo, json) = row.ok_or(PinnedReadError::Unavailable)?;
+        .map_err(|_| PinnedReadError::Operational)?
+        .transpose()?;
+    let (Some(source), Some(repo), Some(json)) = row.ok_or(PinnedReadError::Unavailable)? else {
+        return Err(PinnedReadError::Invalid);
+    };
     let receipt = Receipt::from_json(&json).map_err(|_| PinnedReadError::Invalid)?;
     if receipt.id() != id
         || receipt.source_id().as_str() != source
@@ -104,6 +145,51 @@ impl PrimarySourceStore {
             .map_err(|_| PinnedReadError::Operational)
     }
 
+    /// Positive retention classification for a binding already checked against
+    /// the caller's exact graph basis. Never call this with a client receipt ID
+    /// alone. Reclaimed metadata cannot attest old ranges or full receipt fields.
+    pub(crate) fn task_binding_forgotten(
+        &self,
+        guard: &RetentionGuard,
+        binding: &core_graph::source::SourceBinding,
+        validated_receipt: Option<&Receipt>,
+    ) -> Result<bool, PinnedReadError> {
+        self.validate_task_guard(guard, &guard.source_id)?;
+        let store = self
+            .receipts
+            .lock()
+            .map_err(|_| PinnedReadError::Operational)?;
+        let status = store
+            .receipt_status(&binding.receipt_id)
+            .map_err(|_| PinnedReadError::Operational)?;
+        match status {
+            ReceiptStatus::Present | ReceiptStatus::Unknown => Ok(false),
+            ReceiptStatus::CaptureForgotten { tombstone } => {
+                if tombstone.source_id != guard.source_id {
+                    return Err(PinnedReadError::Invalid);
+                }
+                // receipt_status already validates the current stored receipt.
+                // Reuse the original guarded read instead of a third decode.
+                let receipt = validated_receipt.ok_or(PinnedReadError::Unavailable)?;
+                if receipt.id() != binding.receipt_id
+                    || receipt.source_id().as_str() != guard.source_id
+                    || receipt.repo_key() != binding.repo_key
+                    || receipt.fact_key() != &binding.fact
+                    || receipt.fact_digest() != binding.emitted_fact_digest
+                {
+                    return Err(PinnedReadError::Invalid);
+                }
+                Ok(true)
+            }
+            ReceiptStatus::Reclaimed { tombstone } => {
+                if tombstone.source_id != guard.source_id {
+                    return Err(PinnedReadError::Invalid);
+                }
+                Ok(true)
+            }
+        }
+    }
+
     pub(crate) fn task_receipt(
         &self,
         guard: &RetentionGuard,
@@ -156,6 +242,29 @@ impl PrimarySourceStore {
             .read_text_span(&range.captured)
             .map_err(capture_error)
     }
+    /// MCP callers pass the admitted host file-validation and returned-span
+    /// maxima; the capture store also enforces its own hard/stored ceilings.
+    /// Ordinary task_text intentionally keeps its existing capture-store policy
+    /// without these additional per-session MCP limits.
+    pub(crate) fn task_text_bounded(
+        &self,
+        guard: &RetentionGuard,
+        receipt: &Receipt,
+        range_index: usize,
+        max_file_bytes: u64,
+        max_span_bytes: u64,
+    ) -> Result<String, PinnedReadError> {
+        self.validate_task_guard(guard, receipt.source_id().as_str())?;
+        let range = receipt
+            .ranges()
+            .get(range_index)
+            .ok_or(PinnedReadError::Invalid)?;
+        self.captures
+            .lock()
+            .map_err(|_| PinnedReadError::Operational)?
+            .read_text_span_bounded(&range.captured, max_file_bytes, max_span_bytes)
+            .map_err(capture_error)
+    }
 }
 
 fn capture_error(error: CaptureError) -> PinnedReadError {
@@ -179,16 +288,13 @@ impl PrimarySourceStore {
     ) -> Result<(), PinnedReadError> {
         self.validate_task_guard(guard, &span.file.source_id)?;
         let source = source_capture::SourceId::new(&span.file.source_id).map_err(capture_error)?;
-        let inventory = self
+        let present = self
             .captures
             .lock()
             .map_err(|_| PinnedReadError::Operational)?
-            .source_inventory(&source)
+            .capture_belongs_to_source(&source, &span.file.capture_id)
             .map_err(capture_error)?;
-        if !inventory
-            .iter()
-            .any(|capture| capture.capture_id == span.file.capture_id)
-        {
+        if !present {
             return Err(PinnedReadError::Unavailable);
         }
         Ok(())
@@ -212,3 +318,7 @@ impl PrimarySourceStore {
             .map_err(capture_error)
     }
 }
+
+#[cfg(test)]
+#[path = "pinned/preflight_tests.rs"]
+mod preflight_tests;

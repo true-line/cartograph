@@ -272,10 +272,60 @@ impl CaptureStore {
     /// does not block this read. `load` still validates every captured object.
     pub fn read_span(&self, reference: &CaptureSpanRef) -> Result<Vec<u8>> {
         let transaction = self.connection.unchecked_transaction()?;
-        let bytes = read_bound_span_file(&transaction, reference, MAX_SPAN_BYTES)?;
+        let bytes = read_bound_span_file(&transaction, reference, MAX_SPAN_BYTES, None)?;
         let span = bytes[reference.byte_start as usize..reference.byte_end as usize].to_vec();
         transaction.commit()?;
         Ok(span)
+    }
+
+    /// Read one retained span under explicit host file/span admission. Actual
+    /// object type and length are checked in the same read transaction before
+    /// copying its blob; a corrupt length cannot exceed the host's file bound.
+    /// Input/manifest checks remain independent of any RSS guarantee.
+    pub fn read_span_bounded(
+        &self,
+        reference: &CaptureSpanRef,
+        max_file_bytes: u64,
+        max_span_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        if reference.file.byte_len > max_file_bytes {
+            return Err(CaptureError::Limit("selected file bytes"));
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        let bytes = read_bound_span_file(
+            &transaction,
+            reference,
+            max_span_bytes.min(MAX_SPAN_BYTES),
+            Some(max_file_bytes),
+        )?;
+        let span = bytes[reference.byte_start as usize..reference.byte_end as usize].to_vec();
+        transaction.commit()?;
+        Ok(span)
+    }
+
+    /// Strict UTF-8 counterpart of [`Self::read_span_bounded`].
+    pub fn read_text_span_bounded(
+        &self,
+        reference: &CaptureSpanRef,
+        max_file_bytes: u64,
+        max_span_bytes: u64,
+    ) -> Result<String> {
+        String::from_utf8(self.read_span_bounded(reference, max_file_bytes, max_span_bytes)?)
+            .map_err(|_| CaptureError::Encoding)
+    }
+
+    /// Validate only the selected canonical manifest and source ownership. No
+    /// unrelated capture inventory or raw source object is materialized.
+    pub fn capture_belongs_to_source(&self, source: &SourceId, capture_id: &str) -> Result<bool> {
+        let transaction = self.connection.unchecked_transaction()?;
+        check_version(&transaction)?;
+        let present = match load_manifest(&transaction, capture_id) {
+            Ok((manifest, _)) => &manifest.source_id == source,
+            Err(CaptureError::Missing(_)) => false,
+            Err(error) => return Err(error),
+        };
+        transaction.commit()?;
+        Ok(present)
     }
 
     /// Locate a nonempty span of at most 8 KiB in a retained file of at most
@@ -293,7 +343,7 @@ impl CaptureStore {
             8 * 1024,
         )?;
         let transaction = self.connection.unchecked_transaction()?;
-        let bytes = read_bound_span_file(&transaction, reference, 8 * 1024)?;
+        let bytes = read_bound_span_file(&transaction, reference, 8 * 1024, None)?;
         let text = std::str::from_utf8(&bytes).map_err(|_| CaptureError::Encoding)?;
         if !text.is_char_boundary(reference.byte_start as usize)
             || !text.is_char_boundary(reference.byte_end as usize)
@@ -567,6 +617,7 @@ fn read_bound_span_file(
     connection: &Connection,
     reference: &CaptureSpanRef,
     span_limit: u64,
+    file_limit: Option<u64>,
 ) -> Result<Vec<u8>> {
     check_version(connection)?;
     let (manifest, max_span_bytes) = load_manifest(connection, &reference.file.capture_id)?;
@@ -591,8 +642,13 @@ fn read_bound_span_file(
         entry.byte_len,
         max_span_bytes.min(span_limit),
     )?;
-    let bytes =
-        read_object(connection, &entry.digest)?.ok_or(CaptureError::Missing("captured object"))?;
+    let bytes = match file_limit {
+        Some(limit) => {
+            read_object_admitted(connection, &entry.digest, Some(entry.byte_len), limit)?
+        }
+        None => read_object(connection, &entry.digest)?,
+    }
+    .ok_or(CaptureError::Missing("captured object"))?;
     if bytes.len() as u64 != entry.byte_len {
         return Err(CaptureError::Corrupt("manifest and object length disagree"));
     }
@@ -605,6 +661,15 @@ fn read_bound_span_file(
 }
 
 fn read_object(connection: &Connection, digest: &str) -> Result<Option<Vec<u8>>> {
+    read_object_admitted(connection, digest, None, MAX_FILE_BYTES)
+}
+
+fn read_object_admitted(
+    connection: &Connection,
+    digest: &str,
+    expected_len: Option<u64>,
+    max_file_bytes: u64,
+) -> Result<Option<Vec<u8>>> {
     let metadata: Option<(String, u64)> = connection
         .query_row(
             "SELECT typeof(bytes),length(bytes) FROM objects WHERE digest=?1",
@@ -619,6 +684,12 @@ fn read_object(connection: &Connection, digest: &str) -> Result<Option<Vec<u8>>>
         return Err(CaptureError::Corrupt(
             "invalid stored object type or length",
         ));
+    }
+    if expected_len.is_some_and(|expected| len != expected) {
+        return Err(CaptureError::Corrupt("manifest and object length disagree"));
+    }
+    if len > max_file_bytes {
+        return Err(CaptureError::Limit("selected file bytes"));
     }
     let bytes: Vec<u8> = connection.query_row(
         "SELECT bytes FROM objects WHERE digest=?1",
@@ -1842,3 +1913,7 @@ mod tests {
         assert_eq!(store.read_text_span(&span).unwrap(), "return x;");
     }
 }
+
+#[cfg(test)]
+#[path = "store/admitted_tests.rs"]
+mod admitted_tests;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::DiscoveryQuery;
 use core_graph::coverage::CoverageRecord;
 use core_graph::{Edge, Node};
 use serde_json::json;
@@ -51,6 +52,159 @@ fn snapshot() -> ContextSnapshot {
         })
         .collect();
     ContextSnapshot::new(nodes, Vec::<Edge>::new()).unwrap()
+}
+
+// #718 / AC-0288 foundation: qualified discovery shares production matching and
+// counts the entire outer envelope; this is not MCP/client acceptance evidence.
+#[test]
+fn qualified_discovery_shares_snapshot_and_enforces_exact_outer_byte_cap() {
+    let snapshot = Arc::new(snapshot());
+    let scope = [scoped("acme/api", Some("src:acme/api"), "config:v1")];
+    let recorded = [stored(
+        "acme/api",
+        "job-1",
+        inventory("acme/api", &["ran"], 0, false),
+    )];
+    let context = CoverageContext::from_shared_snapshot(
+        Arc::clone(&snapshot),
+        CoverageQualification::new(&scope, &recorded).unwrap(),
+    )
+    .unwrap();
+    let request = DiscoveryRequest {
+        query: DiscoveryQuery::Text { text: "mod".into() },
+        labels: vec![],
+        max_candidates: 1,
+        max_bytes: 4096,
+        cursor: None,
+    };
+    let first = context
+        .discover(QualifiedRequest {
+            request: request.clone(),
+            context_id: None,
+        })
+        .unwrap();
+    assert!(context.shares_snapshot(&snapshot));
+    assert_eq!(first.response, snapshot.discover(request.clone()).unwrap());
+    assert_eq!(first.context_id, context.context_id());
+    assert_eq!(&first.coverage, context.coverage());
+    assert!(!first.coverage.exhaustive);
+    let exact = serde_json::to_vec(&first).unwrap().len();
+    let mut bounded = request.clone();
+    bounded.max_bytes = exact;
+    assert_eq!(
+        context
+            .discover(QualifiedRequest {
+                request: bounded.clone(),
+                context_id: None
+            })
+            .unwrap(),
+        first
+    );
+    bounded.max_bytes -= 1;
+    assert!(matches!(
+        context.discover(QualifiedRequest {
+            request: bounded,
+            context_id: None
+        }),
+        Err(ContextError::ResponseBudgetExceeded { .. })
+    ));
+    for max_bytes in [0, super::super::MAX_RESPONSE_BYTES + 1] {
+        let mut invalid = request.clone();
+        invalid.max_bytes = max_bytes;
+        assert!(matches!(
+            context.discover(QualifiedRequest {
+                request: invalid,
+                context_id: None
+            }),
+            Err(ContextError::InvalidLimit {
+                name: "max_bytes",
+                ..
+            })
+        ));
+    }
+}
+
+// #718 / AC-0288: continuation binds both the graph/query cursor and the actual
+// producer-coverage context, even when an ingest changes no recovered facts.
+#[test]
+fn qualified_discovery_continues_only_in_same_coverage_context_and_query() {
+    let scope = [scoped("acme/api", Some("src:acme/api"), "config:v1")];
+    let context_for = |ingest| {
+        snapshot()
+            .with_coverage(
+                CoverageQualification::new(
+                    &scope,
+                    &[stored(
+                        "acme/api",
+                        ingest,
+                        inventory("acme/api", &["ran"], 0, false),
+                    )],
+                )
+                .unwrap(),
+            )
+            .unwrap()
+    };
+    let context = context_for("job-1");
+    let other = context_for("job-2");
+    assert_eq!(context.snapshot_id(), other.snapshot_id());
+    assert_ne!(context.context_id(), other.context_id());
+    let request = DiscoveryRequest {
+        query: DiscoveryQuery::Text { text: "mod".into() },
+        labels: vec![],
+        max_candidates: 1,
+        max_bytes: 4096,
+        cursor: None,
+    };
+    let first = context
+        .discover(QualifiedRequest {
+            request: request.clone(),
+            context_id: None,
+        })
+        .unwrap();
+    let mut continued = request;
+    continued.cursor = first.response.next_cursor.clone();
+    assert!(continued.cursor.is_some());
+    for (target, context_id) in [
+        (&context, None),
+        (&context, Some("wrong-context".into())),
+        (&other, Some(context.context_id().into())),
+    ] {
+        assert!(matches!(
+            target.discover(QualifiedRequest {
+                request: continued.clone(),
+                context_id
+            }),
+            Err(ContextError::CursorContextMismatch)
+        ));
+    }
+    let second = context
+        .discover(QualifiedRequest {
+            request: continued.clone(),
+            context_id: Some(context.context_id().into()),
+        })
+        .unwrap();
+    assert_ne!(second.response.candidates, first.response.candidates);
+    let exact = serde_json::to_vec(&second).unwrap().len();
+    continued.max_bytes = exact;
+    assert_eq!(
+        context
+            .discover(QualifiedRequest {
+                request: continued.clone(),
+                context_id: Some(context.context_id().into())
+            })
+            .unwrap(),
+        second
+    );
+    continued.query = DiscoveryQuery::Text {
+        text: "other".into(),
+    };
+    assert!(matches!(
+        context.discover(QualifiedRequest {
+            request: continued,
+            context_id: Some(context.context_id().into())
+        }),
+        Err(ContextError::CursorSelectionMismatch)
+    ));
 }
 
 // AC-0239: every scoped or recorded repo is qualified; only a current

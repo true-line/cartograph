@@ -1919,3 +1919,962 @@ fn primary_source_work_packet_is_refused_while_forget_holds_the_source() {
         1
     );
 }
+
+#[test]
+fn mcp_retained_span_uses_session_receipt_and_refuses_changed_or_over_budget_evidence() {
+    // AC-0288: actual capture/publication/receipt read; no checkout fallback.
+    use crate::mcp_reads::{ReadError, ReadSession, evidence::EvidenceLimits};
+    let temp = tempfile::tempdir().unwrap();
+    let app_data = directory(temp.path(), "private");
+    let root = directory(temp.path(), "project");
+    std::fs::write(root.join("source.ts"), ORIGINAL).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    let rule = rule_node(&parsed);
+    publish(&state, &source, &parsed);
+    let description = primary_source::describe(&state, &FactKey::from_node(&rule)).unwrap();
+    let fact = agents::TaskFactKey::Node {
+        id: rule.id.clone(),
+    };
+    let (target, guard) = crate::investigations::inspection::resolve(
+        &state,
+        &fact,
+        &description.graph_snapshot_id,
+        &description.receipt_id,
+        0,
+    )
+    .unwrap();
+    drop(guard);
+    let session = ReadSession::acquire(
+        &state.graph,
+        &state.decisions,
+        || {
+            Ok(vec![context_hub::coverage::ScopedRepo {
+                repo_key: source.repo_key.clone(),
+                registered_source_id: Some(source.source_id.clone()),
+                config_hash: "fixture".into(),
+                layer_hints: None,
+            }])
+        },
+        core_graph::SnapshotReadLimits::default(),
+        core_graph::coverage::CoverageReadLimits::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap();
+    let row_count = {
+        let (nodes, edges) = state.graph.lock().unwrap().read_snapshot().unwrap();
+        nodes.len() + edges.len()
+    };
+    let bounded_session = ReadSession::acquire(
+        &state.graph,
+        &state.decisions,
+        || Ok(vec![]),
+        core_graph::SnapshotReadLimits {
+            max_rows: row_count,
+            ..core_graph::SnapshotReadLimits::default()
+        },
+        core_graph::coverage::CoverageReadLimits::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap();
+    let original_bytes = {
+        let graph = state.graph.lock().unwrap().read_snapshot().unwrap();
+        serde_json::to_vec(&graph).unwrap().len()
+    };
+    let byte_bounded_session = ReadSession::acquire(
+        &state.graph,
+        &state.decisions,
+        || Ok(vec![]),
+        core_graph::SnapshotReadLimits {
+            max_bytes: original_bytes,
+            ..core_graph::SnapshotReadLimits::default()
+        },
+        core_graph::coverage::CoverageReadLimits::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap();
+    let byte_basis = byte_bounded_session.basis_id().unwrap();
+    let bounded_basis = bounded_session.basis_id().unwrap();
+    assert_eq!(
+        bounded_session
+            .describe_evidence(&state, &bounded_basis, &fact, 0, 65536)
+            .unwrap()
+            .target,
+        target
+    );
+    let basis = session.basis_id().unwrap();
+    let described = session
+        .describe_evidence(&state, &basis, &fact, 0, 65536)
+        .unwrap();
+    assert_eq!(described.target, target);
+    assert!(described.total_ranges > 0);
+    assert_eq!(
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 1)
+            .unwrap_err(),
+        ReadError::Limit
+    );
+    // AC-0288: invalid ordinal input must not trigger stale-basis reconnects.
+    // Cover the actual receipt boundary as well as the resolver's hard cap.
+    for ordinal in [described.total_ranges, 1024, usize::MAX] {
+        assert_eq!(
+            session
+                .describe_evidence(&state, &basis, &fact, ordinal, 65536)
+                .unwrap_err(),
+            ReadError::InvalidRequest
+        );
+    }
+    // Failed selection leaves the same immutable session usable.
+    assert_eq!(
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap()
+            .target,
+        target
+    );
+    let limits = || EvidenceLimits {
+        max_file_validation_bytes: ORIGINAL.len() as u64,
+        max_span_bytes: 8192,
+        max_response_bytes: 65536,
+    };
+    std::fs::write(root.join("source.ts"), "live-replacement-canary").unwrap();
+    let response = session
+        .read_evidence(&state, &basis, &target, limits())
+        .unwrap();
+    assert_eq!(
+        response.text,
+        ORIGINAL[target.captured.byte_start as usize..target.captured.byte_end as usize]
+    );
+    assert_eq!(response.scope, "primary_source_only");
+    assert_eq!(response.input_closure, "input_closure_not_established");
+    assert!(!response.text.contains("live-replacement-canary"));
+    assert_eq!(
+        session
+            .read_evidence(&state, "wrong-basis", &target, limits())
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+    let mut small = limits();
+    small.max_file_validation_bytes = 1;
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, small)
+            .unwrap_err(),
+        ReadError::Limit
+    );
+    let mut small = limits();
+    small.max_response_bytes = 1;
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, small)
+            .unwrap_err(),
+        ReadError::Limit
+    );
+    let mut forged = target.clone();
+    forged.captured.byte_end -= 1;
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &forged, limits())
+            .unwrap_err(),
+        ReadError::InvalidRequest
+    );
+    forged.source.byte_end = forged.captured.byte_end;
+    forged.target_id = forged.content_id().unwrap();
+    forged.validate().unwrap();
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &forged, limits())
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+    std::fs::remove_file(root.join("source.ts")).unwrap();
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, limits())
+            .unwrap()
+            .text,
+        response.text
+    );
+    // Exercise the real MCP route over the same capture after checkout deletion.
+    use crate::mcp_reads::dispatch::{
+        DispatchAction, DispatchLimits, Dispatcher, EvidenceWorkLimits,
+    };
+    use std::num::{NonZeroU64, NonZeroUsize};
+    let wire_session = ReadSession::acquire(
+        &state.graph,
+        &state.decisions,
+        || {
+            Ok(vec![context_hub::coverage::ScopedRepo {
+                repo_key: source.repo_key.clone(),
+                registered_source_id: Some(source.source_id.clone()),
+                config_hash: "fixture".into(),
+                layer_hints: None,
+            }])
+        },
+        core_graph::SnapshotReadLimits::default(),
+        core_graph::coverage::CoverageReadLimits::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap();
+    let mut wire = Dispatcher::with_evidence(
+        wire_session,
+        "fixture-session".into(),
+        DispatchLimits {
+            max_response_bytes: NonZeroUsize::new(65536).unwrap(),
+            max_request_ids: NonZeroUsize::new(16).unwrap(),
+            trace: flowtracer::TraceLimits {
+                max_flows: 16,
+                max_hops: 64,
+                max_output_bytes: 65536,
+            },
+            compile: spec::SelectedCompileLimits {
+                max_bytes: 65536,
+                adr: spec::AdrLimits {
+                    max_rows: 128,
+                    max_output_bytes: 65536,
+                },
+            },
+        },
+        &state,
+        EvidenceWorkLimits {
+            max_file_validation_bytes: NonZeroU64::new(ORIGINAL.len() as u64).unwrap(),
+            max_span_bytes: NonZeroU64::new(8192).unwrap(),
+        },
+    )
+    .unwrap();
+    let answer = |response| match response {
+        DispatchAction::Respond(value) => value,
+        other => panic!("unexpected {other:?}"),
+    };
+    answer(wire.receive(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}})));
+    assert_eq!(
+        wire.receive(json!({"jsonrpc":"2.0","method":"notifications/initialized"})),
+        DispatchAction::Ignore
+    );
+    let tools = answer(wire.receive(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})));
+    assert!(
+        tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "cartograph_evidence")
+    );
+    let described = answer(wire.receive(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"cartograph_evidence","arguments":{"session_id":"fixture-session","basis_id":basis,"kind":"retained_primary_source","mode":"describe","fact":fact,"ordinal":0,"max_bytes":65536}}})));
+    assert_eq!(described["result"]["isError"], false);
+    let wire_target = described["result"]["structuredContent"]["description"]["target"].clone();
+    assert_eq!(wire_target, serde_json::to_value(&target).unwrap());
+    let read_args = json!({"session_id":"fixture-session","basis_id":basis,"kind":"retained_primary_source","mode":"read","target":wire_target,"max_bytes":65536});
+    let read = answer(wire.receive(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"cartograph_evidence","arguments":read_args}})));
+    assert_eq!(read["result"]["isError"], false);
+    assert_eq!(
+        read["result"]["structuredContent"]["span"]["text"],
+        response.text
+    );
+    let mut unknown = read_args.clone();
+    unknown["target"]["source"]["injected"] = json!(true);
+    let rejected = answer(wire.receive(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"cartograph_evidence","arguments":unknown}})));
+    assert_eq!(rejected["error"]["code"], -32602);
+    // AC-0288: later graph growth must use the session's admitted limits in
+    // both describe and read, rather than the resolver's larger defaults.
+    let mut extra = rule.clone();
+    extra.id.push_str(":extra-row");
+    state.graph.lock().unwrap().put_node(&extra).unwrap();
+    assert_eq!(
+        bounded_session
+            .describe_evidence(&state, &bounded_basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::Limit
+    );
+    assert_eq!(
+        bounded_session
+            .read_evidence(&state, &bounded_basis, &target, limits())
+            .unwrap_err(),
+        ReadError::Limit
+    );
+    let mut changed = rule;
+    changed.props["mcp_changed"] = json!(true);
+    state.graph.lock().unwrap().put_node(&changed).unwrap();
+    let stale = answer(wire.receive(json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"cartograph_evidence","arguments":read_args}})));
+    assert_eq!(stale["result"]["isError"], true);
+
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, limits())
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+    // Changed selected fact properties must hit the session byte preflight
+    // before any preliminary unbounded digest lookup or receipt decode.
+    changed.props["mcp_oversized"] = json!("x".repeat(original_bytes));
+    state.graph.lock().unwrap().put_node(&changed).unwrap();
+    assert_eq!(
+        byte_bounded_session
+            .describe_evidence(&state, &byte_basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::Limit
+    );
+}
+
+#[test]
+fn mcp_evidence_preserves_typed_retention_failures_and_legacy_refresh_message() {
+    // AC-0288: production typed absence/corruption/operational evidence, never a
+    // guessed reason such as forgotten, omitted, or a working-checkout fallback.
+    use crate::investigations::inspection::{InspectionError, resolve, resolve_typed};
+    use crate::mcp_reads::{ReadError, ReadSession, evidence::EvidenceLimits};
+    let temp = tempfile::tempdir().unwrap();
+    let app_data = directory(temp.path(), "private");
+    let root = directory(temp.path(), "project");
+    std::fs::write(root.join("source.ts"), ORIGINAL).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    let rule = rule_node(&parsed);
+    publish(&state, &source, &parsed);
+    drop(parsed);
+    let fact = agents::TaskFactKey::Node { id: rule.id };
+    let session = ReadSession::acquire(
+        &state.graph,
+        &state.decisions,
+        || {
+            Ok(vec![context_hub::coverage::ScopedRepo {
+                repo_key: source.repo_key.clone(),
+                registered_source_id: Some(source.source_id.clone()),
+                config_hash: "fixture".into(),
+                layer_hints: None,
+            }])
+        },
+        core_graph::SnapshotReadLimits::default(),
+        core_graph::coverage::CoverageReadLimits::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap();
+    let basis = session.basis_id().unwrap();
+    let target = session
+        .describe_evidence(&state, &basis, &fact, 0, 65536)
+        .unwrap()
+        .target;
+    let limits = || EvidenceLimits {
+        max_file_validation_bytes: ORIGINAL.len() as u64,
+        max_span_bytes: 8192,
+        max_response_bytes: 65536,
+    };
+    let typed = || {
+        resolve_typed(
+            &state,
+            &fact,
+            &target.graph_snapshot_id,
+            &target.receipt_id,
+            0,
+        )
+    };
+    let legacy = || {
+        resolve(
+            &state,
+            &fact,
+            &target.graph_snapshot_id,
+            &target.receipt_id,
+            0,
+        )
+    };
+    let refresh = resolve(&state, &fact, "wrong-snapshot", &target.receipt_id, 0)
+        .err()
+        .unwrap();
+    assert_eq!(
+        refresh,
+        "Captured inspection target changed or is unavailable; refresh and select the source again."
+    );
+    assert_eq!(
+        resolve_typed(&state, &fact, "wrong-snapshot", &target.receipt_id, 0)
+            .err()
+            .unwrap(),
+        InspectionError::Stale
+    );
+    let receipts =
+        rusqlite::Connection::open(app_data.join("retained-source/receipts.sqlite")).unwrap();
+    let original: String = receipts
+        .query_row(
+            "SELECT payload FROM receipts WHERE id=?1",
+            [&target.receipt_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    receipts
+        .execute(
+            "UPDATE receipts SET payload=?1 WHERE id=?2",
+            rusqlite::params!["corrupt-receipt-canary", target.receipt_id],
+        )
+        .unwrap();
+    assert_eq!(typed().err().unwrap(), InspectionError::Invalid);
+    assert_eq!(legacy().err().unwrap(), refresh);
+    assert_eq!(
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::EvidenceInvalid
+    );
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, limits())
+            .unwrap_err(),
+        ReadError::EvidenceInvalid
+    );
+    assert_eq!(ReadError::EvidenceInvalid.to_string(), "evidence_invalid");
+    receipts
+        .execute(
+            "UPDATE receipts SET payload=?1 WHERE id=?2",
+            rusqlite::params![original, target.receipt_id],
+        )
+        .unwrap();
+    let preview = primary_source::preview(&state, &source.source_id).unwrap();
+    primary_source::forget(&state, &source.source_id, &preview.fingerprint).unwrap();
+    assert_eq!(typed().err().unwrap(), InspectionError::Unavailable);
+    assert_eq!(legacy().err().unwrap(), refresh);
+    assert_eq!(
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::EvidenceForgotten
+    );
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, limits())
+            .unwrap_err(),
+        ReadError::EvidenceForgotten
+    );
+    assert_eq!(
+        ReadError::EvidenceUnavailable.to_string(),
+        "evidence_unavailable"
+    );
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _graph = state.graph.lock().unwrap();
+            panic!("fixture poisons graph lock");
+        }))
+        .is_err()
+    );
+    assert_eq!(typed().err().unwrap(), InspectionError::Operational);
+    assert_eq!(legacy().err().unwrap(), refresh);
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, limits())
+            .unwrap_err(),
+        ReadError::Storage
+    );
+}
+
+fn mcp_forgotten_session(
+    state: &AppState,
+    source: &RegisteredSource,
+) -> crate::mcp_reads::ReadSession {
+    crate::mcp_reads::ReadSession::acquire(
+        &state.graph,
+        &state.decisions,
+        || {
+            Ok(vec![context_hub::coverage::ScopedRepo {
+                repo_key: source.repo_key.clone(),
+                registered_source_id: Some(source.source_id.clone()),
+                config_hash: "forgotten-fixture".into(),
+                layer_hints: None,
+            }])
+        },
+        core_graph::SnapshotReadLimits::default(),
+        core_graph::coverage::CoverageReadLimits::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap()
+}
+#[test]
+fn mcp_exact_pinned_and_reclaimed_forgotten_receipts_keep_v3_and_basis_boundaries() {
+    use crate::mcp_reads::{ReadError, evidence::EvidenceLimits};
+    for pinned in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let private = directory(temp.path(), "private");
+        let root = directory(temp.path(), "project");
+        std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+        let state = app_state(&private);
+        let source = register_local_source(&state, &root).unwrap();
+        let parsed = parse(&state, &source, || {});
+        let rule = rule_node(&parsed);
+        let bindings = publish(&state, &source, &parsed);
+        let binding = bindings
+            .into_iter()
+            .find(|b| b.fact == FactKey::from_node(&rule))
+            .unwrap();
+        assert!(binding.receipt_id.starts_with("ts-primary-v3:"));
+        drop(parsed);
+        if pinned {
+            retain_investigation_selection(&state, &source, &binding, "mcp-forgotten-pin");
+        }
+        let session = mcp_forgotten_session(&state, &source);
+        let basis = session.basis_id().unwrap();
+        let fact = agents::TaskFactKey::Node { id: rule.id };
+        let target = session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap()
+            .target;
+        let limits = || EvidenceLimits {
+            max_file_validation_bytes: 4096,
+            max_span_bytes: 1024,
+            max_response_bytes: 65536,
+        };
+        assert!(
+            !session
+                .read_evidence(&state, &basis, &target, limits())
+                .unwrap()
+                .text
+                .is_empty()
+        );
+        let preview = primary_source::preview(&state, &source.source_id).unwrap();
+        primary_source::forget(&state, &source.source_id, &preview.fingerprint).unwrap();
+        let status = state
+            .primary_sources
+            .receipts
+            .lock()
+            .unwrap()
+            .receipt_status(&binding.receipt_id)
+            .unwrap();
+        assert!(if pinned {
+            matches!(
+                status,
+                primary_source::ReceiptStatus::CaptureForgotten { .. }
+            )
+        } else {
+            matches!(status, primary_source::ReceiptStatus::Reclaimed { .. })
+        });
+        // The producer may truncate its capture-id list to [] under its
+        // store-wide byte pool. Exact receipt/tombstone identity still proves
+        // forgetting; this list is not an absence-completeness oracle.
+        let raw =
+            rusqlite::Connection::open(private.join("retained-source/receipts.sqlite")).unwrap();
+        raw.execute(
+            "UPDATE receipt_tombstones SET capture_ids='[]',capture_ids_truncated=1",
+            [],
+        )
+        .unwrap();
+        let wrong_guard = state
+            .primary_sources
+            .task_guard(&format!("src_{}", "f".repeat(32)))
+            .unwrap();
+        assert_eq!(
+            state
+                .primary_sources
+                .task_binding_forgotten(&wrong_guard, &binding, None)
+                .unwrap_err(),
+            primary_source::PinnedReadError::Invalid
+        );
+        drop(wrong_guard);
+        assert_eq!(
+            session
+                .describe_evidence(&state, &basis, &fact, 0, 65536)
+                .unwrap_err(),
+            ReadError::EvidenceForgotten
+        );
+        assert_eq!(
+            session
+                .read_evidence(&state, &basis, &target, limits())
+                .unwrap_err(),
+            ReadError::EvidenceForgotten
+        );
+        for field in ["receipt", "digest", "source"] {
+            let mut forged = target.clone();
+            match field {
+                "receipt" => forged.receipt_id = format!("ts-primary-v3:{}", "f".repeat(64)),
+                "digest" => forged.fact_digest = format!("node-v1:{}", "f".repeat(64)),
+                _ => forged.registered_source_id = format!("src_{}", "f".repeat(32)),
+            }
+            forged.target_id = forged.content_id().unwrap();
+            // Source substitution also has to preserve the target's internal
+            // file-source equality to reach association validation.
+            if field == "source" {
+                forged.captured.file.source_id = forged.registered_source_id.clone();
+                forged.target_id = forged.content_id().unwrap();
+            }
+            assert_eq!(
+                session
+                    .read_evidence(&state, &basis, &forged, limits())
+                    .unwrap_err(),
+                ReadError::StaleBasis,
+                "{field}"
+            );
+        }
+        assert_eq!(
+            session
+                .describe_evidence(&state, "wrong-basis", &fact, 0, 65536)
+                .unwrap_err(),
+            ReadError::StaleBasis
+        );
+        // Identical recapture positively clears the old forgotten mark; an
+        // absent capture alone never overrides a newly Present receipt.
+        let identical = parse(&state, &source, || {});
+        let identical_bindings = publish(&state, &source, &identical);
+        drop(identical);
+        assert!(
+            identical_bindings
+                .iter()
+                .any(|b| b.receipt_id == binding.receipt_id)
+        );
+        let fresh = mcp_forgotten_session(&state, &source);
+        let fresh_basis = fresh.basis_id().unwrap();
+        assert!(
+            fresh
+                .describe_evidence(&state, &fresh_basis, &fact, 0, 65536)
+                .is_ok()
+        );
+        // Changed reimport establishes a different basis and a new receipt.
+        std::fs::write(root.join("source.ts"), STABLE_B).unwrap();
+        let changed = parse(&state, &source, || {});
+        publish(&state, &source, &changed);
+        drop(changed);
+        assert_eq!(
+            session
+                .read_evidence(&state, &basis, &target, limits())
+                .unwrap_err(),
+            ReadError::StaleBasis
+        );
+        let new_session = mcp_forgotten_session(&state, &source);
+        let new_basis = new_session.basis_id().unwrap();
+        let new_target = new_session
+            .describe_evidence(&state, &new_basis, &fact, 0, 65536)
+            .unwrap()
+            .target;
+        assert_ne!(new_target.receipt_id, target.receipt_id);
+    }
+}
+#[test]
+fn mcp_unknown_missing_receipt_is_not_forgotten_and_status_errors_are_operational() {
+    use crate::mcp_reads::ReadError;
+    let temp = tempfile::tempdir().unwrap();
+    let private = directory(temp.path(), "private");
+    let root = directory(temp.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&private);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    let rule = rule_node(&parsed);
+    publish(&state, &source, &parsed);
+    drop(parsed);
+    let session = mcp_forgotten_session(&state, &source);
+    let basis = session.basis_id().unwrap();
+    let fact = agents::TaskFactKey::Node { id: rule.id };
+    let target = session
+        .describe_evidence(&state, &basis, &fact, 0, 65536)
+        .unwrap()
+        .target;
+    let raw = rusqlite::Connection::open(private.join("retained-source/receipts.sqlite")).unwrap();
+    raw.execute("DELETE FROM receipts WHERE id=?1", [&target.receipt_id])
+        .unwrap();
+    assert_eq!(
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::EvidenceUnavailable
+    );
+    assert!(matches!(
+        state
+            .primary_sources
+            .receipts
+            .lock()
+            .unwrap()
+            .receipt_status(&target.receipt_id)
+            .unwrap(),
+        primary_source::ReceiptStatus::Unknown
+    ));
+    raw.execute_batch("DROP TABLE receipt_reclaims").unwrap();
+    assert_eq!(
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::Storage
+    );
+}
+
+#[test]
+fn mcp_current_unbound_fact_is_unavailable_without_weakening_stale_or_invalid_checks() {
+    // AC-0288: current absence must not collapse into stale or infer omission.
+    use crate::mcp_reads::ReadError;
+    use core_graph::GraphStore;
+    let temp = tempfile::tempdir().unwrap();
+    let private = directory(temp.path(), "private");
+    let root = directory(temp.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&private);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    let rule = rule_node(&parsed);
+    publish(&state, &source, &parsed);
+    drop(parsed);
+    let raw = rusqlite::Connection::open(private.join("graph.db")).unwrap();
+    let fact = agents::TaskFactKey::Node {
+        id: rule.id.clone(),
+    };
+    let bound = mcp_forgotten_session(&state, &source);
+    let target = bound
+        .describe_evidence(&state, &bound.basis_id().unwrap(), &fact, 0, 65536)
+        .unwrap()
+        .target;
+    raw.execute(
+        "DELETE FROM source_node_bindings WHERE node_id=?1",
+        [&rule.id],
+    )
+    .unwrap();
+    let unbound = mcp_forgotten_session(&state, &source);
+    let basis = unbound.basis_id().unwrap();
+    assert_eq!(
+        unbound
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::EvidenceUnavailable
+    );
+    // A previously supplied receipt target still requires that exact binding.
+    assert_eq!(
+        bound
+            .read_evidence(
+                &state,
+                &bound.basis_id().unwrap(),
+                &target,
+                crate::mcp_reads::evidence::EvidenceLimits {
+                    max_file_validation_bytes: 4096,
+                    max_span_bytes: 1024,
+                    max_response_bytes: 65536
+                }
+            )
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+    assert!(matches!(
+        crate::investigations::inspection::resolve_typed(
+            &state,
+            &fact,
+            &unbound.basis().recovered_graph_id,
+            &target.receipt_id,
+            0
+        ),
+        Err(crate::investigations::inspection::InspectionError::Stale)
+    ));
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&Node {
+            id: "unrelated:changed".into(),
+            label: "Module".into(),
+            props: json!({}),
+        })
+        .unwrap();
+    assert_eq!(
+        unbound
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+    let fresh = mcp_forgotten_session(&state, &source);
+    assert_eq!(
+        fresh
+            .describe_evidence(&state, &fresh.basis_id().unwrap(), &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::EvidenceUnavailable
+    );
+    raw.execute("INSERT INTO source_node_bindings(node_id,repo_key,receipt_id,emitted_fact_digest) VALUES (?1,?2,?3,?4)", rusqlite::params![rule.id,source.repo_key,target.receipt_id,format!("node-v1:{}","0".repeat(64))]).unwrap();
+    assert_eq!(
+        fresh
+            .describe_evidence(&state, &fresh.basis_id().unwrap(), &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::EvidenceInvalid
+    );
+    raw.execute("DELETE FROM edges WHERE src=?1 OR dst=?1", [&rule.id])
+        .unwrap();
+    raw.execute("DELETE FROM nodes WHERE id=?1", [&rule.id])
+        .unwrap();
+    assert_eq!(
+        fresh
+            .describe_evidence(&state, &fresh.basis_id().unwrap(), &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+}
+
+// AC-0288 / T-0288: actual bounded producer omission, not missing-binding inference.
+#[test]
+fn mcp_real_store_capacity_omission_is_positive_guarded_and_stale_safe() {
+    use crate::mcp_reads::ReadError;
+    use core_graph::source::{OmissionLookup, ReceiptOmissionKind};
+    use tauri::Manager;
+    let temp = tempfile::tempdir().unwrap();
+    let private = directory(temp.path(), "private");
+    let root = directory(temp.path(), "project");
+    std::fs::write(root.join("rules.ts"), "export function alpha(ok: boolean) { if (!ok) return false; return true; }\nexport function beta() { return 2; }\n").unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&private));
+    app.manage(crate::PreflightRuns::default());
+    let state = app.state::<AppState>();
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 1;
+    let source = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(source.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &source.ingest_job_kind()).unwrap();
+    run_ingest(&source, &operation, &execution, app.handle(), &state).unwrap();
+    let graph = state.graph.lock().unwrap();
+    let (nodes, _) = graph.read_snapshot().unwrap();
+    let node = nodes
+        .into_iter()
+        .find(|node| {
+            let selected = graph
+                .read_source_selection_snapshot(&[FactKey::from_node(node)])
+                .unwrap();
+            matches!(
+                selected.selections[0].omission,
+                OmissionLookup::Omitted {
+                    kind: ReceiptOmissionKind::StoreCapacity,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    drop(graph);
+    let session = mcp_forgotten_session(&state, &source);
+    let basis = session.basis_id().unwrap();
+    let fact = agents::TaskFactKey::Node {
+        id: node.id.clone(),
+    };
+    let describe = || {
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err()
+    };
+    assert_eq!(
+        describe(),
+        ReadError::EvidenceOmitted(ReceiptOmissionKind::StoreCapacity)
+    );
+    assert!(matches!(
+        crate::investigations::inspection::resolve_typed(
+            &state,
+            &fact,
+            &session.basis().recovered_graph_id,
+            "unused",
+            0
+        ),
+        Err(crate::investigations::inspection::InspectionError::Stale)
+    ));
+    // An exclusive retention lock prevents positive classification without protection.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(
+            private
+                .join("retained-source/locks")
+                .join(format!("{}.lock", source.source_id)),
+        )
+        .unwrap();
+    lock.try_lock().unwrap();
+    assert_eq!(describe(), ReadError::Storage);
+    drop(lock);
+    let db_path = private.join("graph.db");
+    let changed_node = node.id.clone();
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .set_source_binding_after_lookup_hook(move || {
+            let writer = rusqlite::Connection::open(db_path).unwrap();
+            writer
+                .execute(
+                    "UPDATE source_node_omissions SET kind='rules' WHERE node_id=?1",
+                    [&changed_node],
+                )
+                .unwrap();
+            Ok(())
+        });
+    // Same graph hash, but omission changed between the two guarded observations.
+    assert_eq!(describe(), ReadError::StaleBasis);
+    assert_eq!(
+        describe(),
+        ReadError::EvidenceOmitted(ReceiptOmissionKind::Rules)
+    );
+    let db = rusqlite::Connection::open(private.join("graph.db")).unwrap();
+    let bound = state
+        .graph
+        .lock()
+        .unwrap()
+        .source_bindings_for_repo(&source.repo_key)
+        .unwrap()
+        .into_iter()
+        .find(|b| matches!(b.fact, FactKey::Node { .. }))
+        .unwrap();
+    let bound_id = match &bound.fact {
+        FactKey::Node { id } => id,
+        _ => unreachable!(),
+    };
+    // Contradictory test metadata cannot override a real current binding.
+    db.execute("INSERT INTO source_node_omissions(node_id,repo_key,kind,emitted_fact_digest) VALUES (?1,?2,'rules',?3)",rusqlite::params![bound_id,source.repo_key,bound.emitted_fact_digest]).unwrap();
+    let bound_fact = crate::task_evidence::task_fact(&bound.fact);
+    let bound_target = session
+        .describe_evidence(&state, &basis, &bound_fact, 0, 65536)
+        .unwrap()
+        .target;
+    // An unchanged raw graph does not authorize an invalid omission digest.
+    db.execute(
+        "UPDATE source_node_omissions SET emitted_fact_digest=?1 WHERE node_id=?2",
+        rusqlite::params![format!("node-v1:{}", "0".repeat(64)), node.id],
+    )
+    .unwrap();
+    assert_eq!(describe(), ReadError::EvidenceUnavailable);
+    assert_eq!(
+        state
+            .graph
+            .lock()
+            .unwrap()
+            .read_source_selection_snapshot(&[FactKey::from_node(&node)])
+            .unwrap()
+            .selections[0]
+            .omission,
+        OmissionLookup::Unrecorded
+    );
+    db.execute(
+        "DELETE FROM source_node_omissions WHERE node_id=?1",
+        [&node.id],
+    )
+    .unwrap();
+    assert_eq!(
+        state
+            .graph
+            .lock()
+            .unwrap()
+            .read_source_selection_snapshot(&[FactKey::from_node(&node)])
+            .unwrap()
+            .selections[0]
+            .omission,
+        OmissionLookup::NotOmitted
+    );
+    assert_eq!(describe(), ReadError::EvidenceUnavailable);
+    // A current binding still takes forgotten precedence over contradictory omission metadata.
+    let preview = primary_source::preview(&state, &source.source_id).unwrap();
+    primary_source::forget(&state, &source.source_id, &preview.fingerprint).unwrap();
+    assert_eq!(
+        session
+            .read_evidence(
+                &state,
+                &basis,
+                &bound_target,
+                crate::mcp_reads::evidence::EvidenceLimits {
+                    max_file_validation_bytes: 4096,
+                    max_span_bytes: 1024,
+                    max_response_bytes: 65536
+                }
+            )
+            .unwrap_err(),
+        ReadError::EvidenceForgotten
+    );
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&Node {
+            id: "changed-omission-basis".into(),
+            label: "Module".into(),
+            props: json!({}),
+        })
+        .unwrap();
+    assert_eq!(describe(), ReadError::StaleBasis);
+}

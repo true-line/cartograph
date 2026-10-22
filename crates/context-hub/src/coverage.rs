@@ -8,7 +8,10 @@
 //! read time; everything else describes the recorded ingest only. Existing
 //! [`ContextSnapshot`] reads and their identities are unchanged.
 
-use super::{ContextError, ContextSnapshot, QueryRequest, QueryResponse, content_identity};
+use super::{
+    ContextError, ContextSnapshot, DiscoveryRequest, DiscoveryResponse, QueryRequest,
+    QueryResponse, content_identity,
+};
 use core_graph::coverage::StoredCoverage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -432,6 +435,30 @@ impl CoverageContext {
         let mut inner = request.request;
         inner.max_bytes = self.inner_budget(inner.max_bytes, continued, &request.context_id)?;
         self.respond(self.snapshot.query(inner)?)
+    }
+
+    /// Discover candidates from the shared snapshot under its recorded coverage.
+    /// The byte cap includes the complete qualification envelope, and a cursor
+    /// continues only under the context that issued it. Discovery's own coverage
+    /// describes matching work; the outer coverage qualifies producer inputs.
+    pub fn discover(
+        &self,
+        request: QualifiedRequest<DiscoveryRequest>,
+    ) -> Result<QualifiedResponse<DiscoveryResponse>, ContextError> {
+        super::validate_limit(
+            "max_candidates",
+            request.request.max_candidates,
+            super::discovery::MAX_CANDIDATES,
+        )?;
+        super::validate_limit(
+            "max_bytes",
+            request.request.max_bytes,
+            super::MAX_RESPONSE_BYTES,
+        )?;
+        let continued = request.request.cursor.is_some();
+        let mut inner = request.request;
+        inner.max_bytes = self.inner_budget(inner.max_bytes, continued, &request.context_id)?;
+        self.respond(self.snapshot.discover(inner)?)
     }
 
     /// The inner page's share of `max_bytes`, after the qualification

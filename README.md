@@ -80,6 +80,10 @@ it covers.
   authoritative [adapter authoring guide](docs/adapters/AUTHORING_GUIDE.md)
   (ADR-0017).
 
+- [`read-cartograph-context`](.agents/skills/read-cartograph-context/SKILL.md) —
+  retrieve recovered context, official artifacts and retained evidence through
+  an existing read-only MCP connection, with progressive disclosure.
+
 ## License
 
 Cartograph is **source-available, not open source**. It is licensed under the

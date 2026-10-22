@@ -7,6 +7,22 @@ use std::{
     fmt,
 };
 
+struct Line<'a> {
+    src: &'a str,
+    arrow: &'a str,
+    label: &'a str,
+    dst: &'a str,
+}
+impl Line<'_> {
+    fn chars(&self) -> impl Iterator<Item = char> {
+        [
+            "    ", self.src, " ", self.arrow, "|", self.label, "| ", self.dst,
+        ]
+        .into_iter()
+        .flat_map(str::chars)
+    }
+}
+
 pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]) -> fmt::Result {
     let resources: BTreeMap<_, _> = nodes
         .iter()
@@ -63,21 +79,6 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
             aliases[id],
             id.strip_prefix("chan:").unwrap_or(id)
         )?;
-    }
-    struct Line<'a> {
-        src: &'a str,
-        arrow: &'a str,
-        label: &'a str,
-        dst: &'a str,
-    }
-    impl Line<'_> {
-        fn chars(&self) -> impl Iterator<Item = char> {
-            [
-                "    ", self.src, " ", self.arrow, "|", self.label, "| ", self.dst,
-            ]
-            .into_iter()
-            .flat_map(str::chars)
-        }
     }
     let mut lines = Vec::new();
     for edge in edges {
@@ -184,4 +185,20 @@ pub(crate) fn flows(out: &mut impl fmt::Write, flows: &[Flow]) -> fmt::Result {
         }
     }
     Ok(())
+}
+
+pub(super) fn logical_index_bytes(bytes: usize, rows: usize, hops: usize) -> Option<usize> {
+    use super::accounting::{map_slots, set_slots, slots, sum};
+    sum(&[
+        map_slots::<&str, &Node>(rows)?,
+        map_slots::<&str, &Node>(rows)?, // resources/channels
+        set_slots::<&str>(rows)?,
+        map_slots::<&str, String>(rows)?, // backed/aliases
+        bytes,
+        rows.checked_mul(crate::mermaid_id("").len())?, // alias payload + generated hash suffix
+        bytes, // one current sanitized source ID during format!
+        slots::<Line<'_>>(rows)?,
+        slots::<Line<'_>>(rows)?,                     // lines + stable sort
+        slots::<(&str, &str)>(hops.checked_mul(2)?)?, // two participants per hop
+    ])
 }

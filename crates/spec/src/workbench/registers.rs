@@ -941,6 +941,71 @@ pub(super) fn gap_selected(
 #[cfg(test)]
 thread_local! { static OWNED_OUTPUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
+pub(super) fn logical_workspace_bytes(
+    bytes: usize,
+    rows: usize,
+    values: usize,
+    flow_bytes: usize,
+    hops: usize,
+    flows: usize,
+) -> Option<usize> {
+    use super::accounting::{json_bytes, map_slots, set_slots, slots, sum};
+    use std::mem::size_of;
+    let candidates = rows.checked_add(hops)?;
+    let digits = usize::MAX.to_string().len();
+    let parts = 8usize.checked_add(5)?.checked_add(5)?; // hop id / subject / summary constructors
+    let row_headers = sum(&[
+        slots::<Candidate<'_>>(candidates)?,
+        slots::<Candidate<'_>>(candidates)?, // rows + stable-sort scratch
+        slots::<Cow<'_, str>>(candidates.checked_mul(parts)?)?,
+        slots::<Provenance>(rows)?,
+        slots::<core_prov::EvidenceRef>(values.checked_add(flow_bytes)?)?,
+        slots::<Omission>(candidates)?,
+        super::render::logical_origin_bytes(rows)?,
+    ])?;
+    let groups = sum(&[
+        set_slots::<Text<'_>>(rows)?,
+        slots::<Cow<'_, str>>(rows.checked_mul(5)?)?, // listed subjects
+        map_slots::<(Text<'_>, &str), CauseClass<'_>>(candidates)?,
+        slots::<CauseClass<'_>>(candidates)?,
+        slots::<CauseClass<'_>>(candidates)?, // classes + sorting
+        slots::<Cow<'_, str>>(candidates.checked_mul(5)?.checked_mul(2)?)?, // map key and class cause
+        slots::<usize>(candidates)?,
+        slots::<&Text<'_>>(candidates)?, // member/supporting
+        slots::<GapJsonClass<'_, '_>>(candidates)?,
+        slots::<&Text<'_>>(candidates)?,
+        slots::<OmissionRollup>(candidates)?,
+        map_slots::<(OmissionClass, FillSeam, bool), usize>(candidates)?,
+        map_slots::<(&str, &str), Vec<usize>>(rows)?,
+        slots::<((&str, &str), Vec<usize>)>(rows)?,
+        slots::<MatrixJsonClass<'_, '_>>(rows)?,
+        slots::<usize>(rows)?,
+        slots::<&Text<'_>>(rows)?,
+    ])?;
+    // supports_listed may split every source byte into a fragment and clone
+    // the current token once for lookup. Neither vector owns those substrings.
+    let token = sum(&[slots::<Cow<'_, str>>(bytes)?, slots::<Cow<'_, str>>(bytes)?])?;
+    sum(&[
+        row_headers,
+        groups,
+        token,
+        bytes,                     // graph candidate provenance payload
+        bytes,                     // cached original omissions
+        bytes,                     // direct node/edge omission details
+        flow_bytes,                // copied hop provenance
+        flow_bytes,                // uncached hop omission/fallback detail
+        hops.checked_mul(digits)?, // owned hop ordinal fragments
+        candidates.checked_mul(digits.checked_add("G-".len())?)?, // generated class IDs
+        rows.checked_mul(digits.checked_add("M-".len())?)?,
+        hops.checked_mul("unresolved  hop".len())?, // fallback fixed text; label payload is in flow_bytes
+        flows.checked_mul(size_of::<&str>())?,
+        json_bytes(bytes)?, // one current typed parse/format role
+        size_of::<GapJson<'_, '_>>(),
+        size_of::<MatrixJson<'_, '_>>(),
+        size_of::<Sink>(),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

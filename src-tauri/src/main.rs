@@ -21,6 +21,7 @@ mod job_execution;
 mod job_execution_host_tests;
 mod jobs;
 mod local_commit;
+mod mcp_reads;
 mod metrics;
 #[cfg(test)]
 mod name_unique_tests;
@@ -305,6 +306,13 @@ struct PluginCorpus {
 impl PluginCorpus {
     fn read(plugin: &adapters_plugin_host::discovery::DiscoveredPlugin) -> Self {
         let bytes = std::fs::read(plugin.path.with_extension("golden.json")).ok();
+        Self::from_bytes(plugin, bytes)
+    }
+
+    fn from_bytes(
+        plugin: &adapters_plugin_host::discovery::DiscoveredPlugin,
+        bytes: Option<Vec<u8>>,
+    ) -> Self {
         Self {
             gate_key: adapters_plugin_host::gate::gate_key(&plugin.content_hash, bytes.as_deref()),
             corpus: bytes.and_then(|bytes| serde_json::from_slice(&bytes).ok()),
@@ -573,22 +581,17 @@ fn active_plugins_in(
             continue;
         }
         let enabled = settings_store
-            .enabled_plugins(&settings_root)
-            .map_err(|e| e.to_string())?
-            .iter()
-            .any(|(id, hash)| *id == plugin.id && *hash == plugin.content_hash);
+            .plugin_enabled_exact(&settings_root, &plugin.id, &plugin.content_hash)
+            .map_err(|e| e.to_string())?;
         if !enabled {
             continue;
         }
         // The verdict covers these exact corpus bytes: an edited corpus
         // (new extension or coverage claims) is ungated, never trusted.
         let corpus = PluginCorpus::read(&plugin);
-        let gate_passed = matches!(
-            settings_store
-                .plugin_gate(&plugin.id, &corpus.gate_key)
-                .map_err(|e| e.to_string())?,
-            Some((true, _))
-        );
+        let gate_passed = settings_store
+            .plugin_gate_passed_exact(&plugin.id, &corpus.gate_key)
+            .map_err(|e| e.to_string())?;
         if !gate_passed {
             continue;
         }
@@ -5658,6 +5661,8 @@ fn main() {
             let staged_proposals = agents::ProposalStore::open(data_dir.join("proposals.sqlite"))?;
             let recovery_metrics = metrics::MetricsStore::open(&state_path)?;
             app.manage(PreflightRuns::default());
+            #[cfg(unix)]
+            app.manage(mcp_reads::service::Service::default());
             app.manage(AppState {
                 graph: Mutex::new(graph),
                 jobs,
@@ -5751,6 +5756,10 @@ fn main() {
             context::query_qualified_context,
             read_evidence,
             primary_source::describe_captured_source,
+            mcp_reads::commands::mcp_reads_status,
+            mcp_reads::commands::mcp_reads_enable,
+            mcp_reads::commands::mcp_reads_disable,
+            mcp_reads::commands::mcp_reads_client_configuration,
             primary_source::read_captured_source,
             primary_source::list_retained_sources,
             primary_source::preview_forget_source,
@@ -5767,8 +5776,19 @@ fn main() {
             add_repo,
             add_system
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Cartograph");
+        .build(tauri::generate_context!())
+        .expect("error while building Cartograph")
+        .run(|_app, _event| {
+            #[cfg(unix)]
+            if matches!(_event, tauri::RunEvent::Exit)
+                && let Some(service) = _app.try_state::<mcp_reads::service::Service>()
+                && tauri::async_runtime::block_on(service.shutdown()).is_err()
+            {
+                // Exit waits only for native transport cleanup, not synchronous
+                // graph workers. No paths, credentials or source enter this log.
+                eprintln!("Cartograph MCP endpoint cleanup failed");
+            }
+        });
 }
 
 #[cfg(test)]

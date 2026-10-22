@@ -44,6 +44,9 @@ llm = { workspace = true }
 semantic = { workspace = true }
 agents = { workspace = true }
 work-packets = { workspace = true }
+mcp-wire = { path = "../crates/mcp-wire" }
+mcp-local = { path = "../crates/mcp-local" }
+tokio = { version = "1.52.3", features = ["sync"] }
 
 [target.'cfg(windows)'.dependencies]
 # Handle-based filesystem capability checks for durable execution storage.

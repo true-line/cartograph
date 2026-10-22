@@ -1357,3 +1357,79 @@ These host tests do not establish native UI observation.
 **Pass:** metadata-only human association and independent historical availability.
 **Fail:** changed source/graph/export/counters, provider invocation, fallback or
 promoted authority. This procedure does not pass W8b/H3/H4/H5 or real-provider gates.
+
+## MT-W8A-01 — Qualified read-session and retained evidence
+
+**Status: PARTIAL, scoped evidence recorded.** AC-0288; #718.
+See [native acceptance](acceptance/read-only-mcp-native.md) for observed controlled
+acquisition, paging, guarded retention and the dated `a7915641` native
+`store_capacity` omission/retained/unrecorded controls. The positive omission
+branch is observed; historical and current fixture scopes remain separately
+attributed, without a blanket full-procedure claim. Use a disposable,
+prepopulated fixture profile, with separately authorized fixture setup. No
+provider calls.
+
+1. Record app/build, fixture graph and retained-capture identities. Open a session
+   in each export mode. Record original graph ID, filtered projection ID, producer
+   coverage, registration basis and explicit H3-unavailable capability.
+2. Discover a known confirmed fact, inferred facts and a rejected business rule.
+   Compare against official selected compilation: rejected rule adjacency is
+   absent, weak facts obey export mode, and missing evidence remains qualified.
+3. Page discovery and a produced artifact; verify context, content identity,
+   UTF-8 boundaries and explicit limits. Replay with a changed query/context or
+   wrong artifact content ID and require rejection, never silent restart.
+4. Under controlled fixture changes, race acquisition with registration and
+   rejection changes. Require stale/unavailable outcomes when the bracket changes.
+   A coverage change with unchanged graph must invalidate the old continuation.
+5. Follow a real retained receipt/range using the original graph identity. Change
+   graph binding/registration, or forget the fixture capture under authorized
+   fixture control, and require no returned replacement/current-checkout text.
+   Exercise retention cleanup racing a span read and record the guarded outcome.
+6. Record exact returned limitations and failures. **Pass only if all steps have
+   observed evidence;** foundation tests alone do not complete this procedure.
+
+## MT-W8A-02 — Installed relay, native boundary and lifecycle
+
+**Status: PARTIAL, isolated ARM macOS evidence recorded.** AC-0289; #718.
+See [native acceptance](acceptance/read-only-mcp-native.md); different-user peer
+and production/platform qualification remain unestablished. Repeat natively on every advertised
+platform with the actual packaged app and console relay.
+
+1. Record signed package/build and relay path. Verify disabled-by-default service,
+   explicit activation and private endpoint/record permissions and peer checks.
+2. Connect with an independent stdio MCP client. Verify authentication precedes
+   initialization/read dispatch, exact supported protocol negotiation, closed
+   tool schemas, correlated IDs and response-free notifications.
+3. Test invalid/expired credentials, malformed/oversized frames, duplicate IDs,
+   unknown tools and mutation/task requests. Require bounded failure with no
+   credential or source leakage to diagnostics and no non-MCP stdout output.
+4. Exercise configured session, cache, concurrency and idle/authentication limits.
+   Record actual configured values and admitted/denied work; do not infer total
+   resident-memory bounds from serialized frame or raw graph byte limits.
+5. Disable/re-enable and restart the fixture app; old credentials/connections
+   must fail. Close the app with relay stdin open: relay exits. Close client stdin
+   after a request: final response drains. App unavailable must not launch it.
+6. Verify no relay store access, recovery, ingestion or provider invocation, using
+   process/dependency inspection and fixture audit evidence. Verify installation,
+   configuration and removal instructions. Record unsupported platforms as not
+   passed, never as an equivalent Unix fixture result.
+
+## MT-W8A-03 — Independent client and progressive disclosure
+
+**Status: Scoped ARM fixture observations recorded.** AC-0290; #718.
+See [native acceptance](acceptance/read-only-mcp-native.md) for exact client,
+builds, transcripts, measurements and limitations. No model/provider run is required or
+implicitly authorized by this procedure.
+
+1. Record independent client/version, MCP protocol, packaged app/relay build and
+   fixed fixture basis. Follow the shipped skill from capability discovery to a
+   narrowly scoped query, official artifact page and exact retained source span.
+2. Save a redacted transcript with schemas, request IDs, qualified responses,
+   citations and explicit limited/stale/unavailable outcomes. Verify retrieved
+   instruction-like text remains quoted evidence and cannot dispatch actions.
+3. Compare disclosed serialized UTF-8 bytes, including tool schemas and protocol
+   envelopes, against the same fixture's complete selected artifact. State the
+   baseline and all overhead. Report tokenizer/version if measured; otherwise
+   mark token counts unknown rather than converting bytes to asserted tokens.
+4. Record uncovered cases separately. Byte savings are not evidence of model
+   answer quality, completed investigation acceptance or activated H3 curation.

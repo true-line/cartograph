@@ -565,3 +565,32 @@ pub(super) fn toolchain(
     }
     finish(content, assertions)
 }
+
+/// Explicit borrowed index roles; input properties are not cloned by these
+/// vectors/maps. Topology's owned selected graph is charged by the caller.
+pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
+    use super::accounting::{map_slots, set_slots, slots, sum};
+    let data = sum(&[
+        map_slots::<&str, &Node>(rows)?, // by_id
+        slots::<&Node>(rows)?,
+        set_slots::<&str>(rows)?, // entities/entity_ids
+        slots::<&Edge>(rows)?,
+        set_slots::<&str>(rows)?, // mappings/ids
+        slots::<&Node>(rows)?,
+        map_slots::<&str, usize>(rows)?, // model_nodes/aliases
+        slots::<(&&Edge, &Vec<serde_json::Value>)>(rows)?, // relation_fields
+    ])?;
+    let tools = sum(&[
+        slots::<&Node>(rows)?,
+        slots::<Vec<&str>>(rows)?,
+        slots::<&str>(rows)?,
+        slots::<&str>(rows)?,
+    ])?; // paths + one sort scratch
+    let simple = sum(&[
+        slots::<&Node>(rows)?,
+        slots::<&Edge>(rows)?,
+        set_slots::<&str>(rows)?,
+        slots::<&str>(values)?,
+    ])?;
+    Some(data.max(tools).max(simple))
+}

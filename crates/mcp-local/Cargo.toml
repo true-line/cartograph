@@ -1,0 +1,21 @@
+[package]
+name = "mcp-local"
+description = "Unix local transport foundation for app-owned context reads"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mcp-wire = { path = "../mcp-wire" }
+serde_json = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { version = "1.52.3", features = ["net", "io-util", "time", "rt", "sync"] }
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["process", "fs"] }
