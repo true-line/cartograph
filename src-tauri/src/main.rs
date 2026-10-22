@@ -70,6 +70,7 @@ struct AppState {
     settings: Mutex<settings::SettingsStore>,
     decisions: Mutex<agents::DecisionLog>,
     proposals: Mutex<agents::ProposalStore>,
+    work_packets: work_packets::PacketRuntime,
     extraction_caches: Mutex<ExtractionCaches>,
     embedding_cache: Option<Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>>,
     /// Durable, host-owned authority for operational source locations.
@@ -5466,7 +5467,7 @@ fn main() {
                 .map_err(|e| std::io::Error::other(e.to_string()))?
                 .bind_instance(&graph.instance_id()?)?;
             let state_path = data_dir.join("state.db");
-            app.manage(work_packets::PacketRuntime::open(&state_path)?);
+            let work_packets = work_packets::PacketRuntime::open(&state_path)?;
             let jobs = JobStore::open(&state_path)?;
             let job_execution_locks =
                 JobExecutionLocks::open(&data_dir, jobs.execution_namespace())?;
@@ -5496,6 +5497,7 @@ fn main() {
                 settings: Mutex::new(tier_settings),
                 decisions: Mutex::new(decisions),
                 proposals: Mutex::new(staged_proposals),
+                work_packets,
                 extraction_caches: Mutex::new(ExtractionCaches::default()),
                 embedding_cache: Some(embedding_cache),
                 sources: Arc::new(Mutex::new(sources)),
@@ -9361,6 +9363,7 @@ export function App() {
             proposals: std::sync::Mutex::new(
                 agents::ProposalStore::open(state_path.with_file_name("proposals.sqlite")).unwrap(),
             ),
+            work_packets: super::work_packets::PacketRuntime::open(&state_path).unwrap(),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
             primary_sources: super::primary_source::PrimarySourceStore::open(
@@ -10339,6 +10342,7 @@ export function App() {
             proposals: std::sync::Mutex::new(
                 agents::ProposalStore::open(state_path.with_file_name("proposals.sqlite")).unwrap(),
             ),
+            work_packets: super::work_packets::PacketRuntime::open(&state_path).unwrap(),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
             primary_sources: super::primary_source::PrimarySourceStore::open(dir).unwrap(),
@@ -10848,6 +10852,7 @@ export function App() {
             proposals: std::sync::Mutex::new(
                 agents::ProposalStore::open(state_path.with_file_name("proposals.sqlite")).unwrap(),
             ),
+            work_packets: super::work_packets::PacketRuntime::open(&state_path).unwrap(),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
             primary_sources: super::primary_source::PrimarySourceStore::open(
@@ -11105,6 +11110,7 @@ export function App() {
             proposals: std::sync::Mutex::new(
                 agents::ProposalStore::open(state_path.with_file_name("proposals.sqlite")).unwrap(),
             ),
+            work_packets: super::work_packets::PacketRuntime::open(&state_path).unwrap(),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
             primary_sources: super::primary_source::PrimarySourceStore::open(

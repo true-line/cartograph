@@ -777,3 +777,330 @@ fn ac0252_audit_events_reject_update_and_delete() {
         detail
     );
 }
+
+fn body_with_receipts(objective: &str, assoc_receipt: &str, excerpt_receipt: &str) -> PacketBody {
+    let mut packet = PacketBody::draft(format!("context-v1:{}", "a".repeat(64)));
+    packet.intent.objective = Known::requested(objective.into());
+    let mut assoc_fact = fact("assoc-symbol");
+    assoc_fact.source_association = Known::Supplied {
+        value: core_graph::source::SourceBinding {
+            fact: assoc_fact.reference.clone(),
+            repo_key: "local/src_fixture".into(),
+            receipt_id: assoc_receipt.into(),
+            emitted_fact_digest: assoc_fact.expected_digest.clone(),
+        },
+        origin: Origin::Evidence {
+            evidence_ids: vec![assoc_fact.id.clone()],
+        },
+    };
+    let mut excerpt_fact = fact("excerpt-symbol");
+    excerpt_fact.source_association = Known::Supplied {
+        value: core_graph::source::SourceBinding {
+            fact: excerpt_fact.reference.clone(),
+            repo_key: "local/src_fixture".into(),
+            receipt_id: excerpt_receipt.into(),
+            emitted_fact_digest: excerpt_fact.expected_digest.clone(),
+        },
+        origin: Origin::Evidence {
+            evidence_ids: vec![excerpt_fact.id.clone()],
+        },
+    };
+    let span = source_capture::CaptureSpanRef {
+        file: source_capture::CaptureFileRef {
+            source_id: source_capture::SourceId::new(format!("src_{}", "a".repeat(32))).unwrap(),
+            capture_id: format!("capture-v1:{}", "b".repeat(64)),
+            path: "src/rule.ts".into(),
+            digest: "c".repeat(64),
+            byte_len: 32,
+        },
+        byte_start: 0,
+        byte_end: 12,
+    };
+    let text = "return true;".to_string();
+    let excerpt_id = evidence_id(
+        "excerpt",
+        &(
+            &excerpt_fact.reference,
+            excerpt_receipt,
+            "condition",
+            0usize,
+            &span,
+            &text,
+        ),
+    )
+    .unwrap();
+    packet.evidence.facts.push(assoc_fact);
+    packet.evidence.facts.push(excerpt_fact.clone());
+    packet.evidence.source_excerpts.push(SourceExcerpt {
+        id: excerpt_id,
+        fact: excerpt_fact.reference,
+        receipt_id: excerpt_receipt.into(),
+        range_role: "condition".into(),
+        range_index: 0,
+        span,
+        text,
+    });
+    packet.normalize().unwrap();
+    packet
+}
+
+fn build_v1_store(path: &std::path::Path, packets: &[PacketBody]) {
+    let conn = Connection::open(path).unwrap();
+    for (_, _, sql) in SCHEMA_V1 {
+        conn.execute_batch(sql).unwrap();
+    }
+    conn.execute("INSERT INTO work_packet_meta VALUES(1,1)", [])
+        .unwrap();
+    for packet in packets {
+        let mut normalized = packet.clone();
+        normalized.normalize().unwrap();
+        let canonical = normalized.canonical_bytes().unwrap();
+        let id = packet_id(&canonical);
+        conn.execute(
+            "INSERT INTO work_packet_bodies(packet_id,body) VALUES(?1,?2)",
+            params![id, canonical],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO work_packet_reviews(packet_id,revision,status,note) VALUES(?1,0,'draft',NULL)",
+            [&id],
+        )
+        .unwrap();
+    }
+}
+
+fn owned_schema_snapshot(conn: &Connection) -> Vec<(String, String, String)> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, type, sql FROM sqlite_schema
+             WHERE name GLOB 'work_packet_*' OR (tbl_name GLOB 'work_packet_*' AND name NOT GLOB 'sqlite_*')
+             ORDER BY name",
+        )
+        .unwrap();
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+// AC-0301: fresh stores open at v2, index both fact associations and excerpts
+// without duplicates on body reuse, and filter candidate receipt sets.
+#[test]
+fn ac0301_fresh_store_is_v2_and_put_indexes_facts_and_excerpts_without_duplicates() {
+    let mut store = PacketStore::in_memory().unwrap();
+    let version: i64 = store
+        .connection
+        .query_row("SELECT version FROM work_packet_meta", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+
+    let packet = body_with_receipts("First packet", "receipt:assoc-1", "receipt:excerpt-1");
+    let first = store.put(packet.clone(), &[], "t1").unwrap();
+    let reused = store.put(packet, &[], "t2").unwrap();
+    assert_eq!(first.packet_id, reused.packet_id);
+
+    let rows: Vec<(String, String)> = store
+        .connection
+        .prepare("SELECT packet_id, receipt_id FROM work_packet_receipt_refs ORDER BY packet_id, receipt_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (first.packet_id.clone(), "receipt:assoc-1".to_string()),
+            (first.packet_id.clone(), "receipt:excerpt-1".to_string()),
+        ]
+    );
+
+    for mutation in [
+        "UPDATE work_packet_receipt_refs SET receipt_id='rewritten'",
+        "DELETE FROM work_packet_receipt_refs",
+    ] {
+        let error = store.connection.execute(mutation, []).unwrap_err();
+        assert!(
+            matches!(error, rusqlite::Error::SqliteFailure(_, Some(ref msg)) if msg == "immutable packet receipt ref")
+        );
+    }
+
+    assert!(store.referenced_receipts(&[]).unwrap().is_empty());
+    let candidates = vec![
+        "receipt:unreferenced".to_string(),
+        "receipt:assoc-1".to_string(),
+        "receipt:excerpt-1".to_string(),
+        "receipt:assoc-1".to_string(),
+    ];
+    assert_eq!(
+        store.referenced_receipts(&candidates).unwrap(),
+        BTreeSet::from([
+            "receipt:assoc-1".to_string(),
+            "receipt:excerpt-1".to_string(),
+        ])
+    );
+}
+
+// AC-0301: an exact v1 store containing two packets migrates atomically to v2
+// and backfills receipt references from both stored bodies.
+#[test]
+fn ac0301_v1_store_migrates_and_backfills_multiple_packets_in_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let v1_path = directory.path().join("migrated.sqlite");
+    let first_body = body_with_receipts("Packet one", "receipt:a-assoc", "receipt:shared");
+    let second_body = body_with_receipts("Packet two", "receipt:b-assoc", "receipt:shared");
+    build_v1_store(&v1_path, &[first_body.clone(), second_body.clone()]);
+
+    let migrated = PacketStore::open(&v1_path).unwrap();
+    let fresh = PacketStore::in_memory().unwrap();
+    assert_eq!(
+        owned_schema_snapshot(&migrated.connection),
+        owned_schema_snapshot(&fresh.connection)
+    );
+    let version: i64 = migrated
+        .connection
+        .query_row("SELECT version FROM work_packet_meta", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+    assert_eq!(
+        migrated
+            .get(&first_body.content_id().unwrap())
+            .unwrap()
+            .body,
+        first_body
+    );
+    assert_eq!(
+        migrated
+            .get(&second_body.content_id().unwrap())
+            .unwrap()
+            .body,
+        second_body
+    );
+    assert_eq!(
+        migrated
+            .referenced_receipts(&[
+                "receipt:a-assoc".into(),
+                "receipt:b-assoc".into(),
+                "receipt:shared".into(),
+                "receipt:absent".into(),
+            ])
+            .unwrap(),
+        BTreeSet::from([
+            "receipt:a-assoc".to_string(),
+            "receipt:b-assoc".to_string(),
+            "receipt:shared".to_string(),
+        ])
+    );
+    drop(migrated);
+
+    let reopened = PacketStore::open(&v1_path).unwrap();
+    assert_eq!(
+        reopened
+            .referenced_receipts(&["receipt:a-assoc".into(), "receipt:b-assoc".into()])
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+// AC-0301: v1 stores with corrupt or oversized bodies or an extra trigger fail
+// migration and leave the v1 store untouched.
+#[test]
+fn ac0301_v1_migration_rejects_corrupt_oversized_and_extra_trigger_stores_unchanged() {
+    let first_body = body_with_receipts("Valid first packet", "receipt:one", "receipt:two");
+    let second_body = body_with_receipts("Second packet", "receipt:three", "receipt:four");
+    let second_id = second_body.content_id().unwrap();
+
+    // 1. Corrupt body in v1 store rolls back completely.
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("corrupt.sqlite");
+        build_v1_store(&path, &[first_body.clone(), second_body.clone()]);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("DROP TRIGGER work_packet_body_immutable_update", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE work_packet_bodies SET body=X'7b6e6f742d6a736f6e' WHERE packet_id=?1",
+            [&second_id],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TRIGGER work_packet_body_immutable_update BEFORE UPDATE ON work_packet_bodies BEGIN SELECT RAISE(ABORT,'immutable packet body'); END",
+            [],
+        )
+        .unwrap();
+        let before_schema = owned_schema_snapshot(&conn);
+        drop(conn);
+
+        assert!(PacketStore::open(&path).is_err());
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(owned_schema_snapshot(&conn), before_schema);
+        let version: i64 = conn
+            .query_row("SELECT version FROM work_packet_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    // 2. Oversized body (> MAX_BODY_BYTES) in v1 store fails precheck and rolls back.
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oversized.sqlite");
+        build_v1_store(&path, &[first_body.clone(), second_body.clone()]);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("DROP TRIGGER work_packet_body_immutable_update", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE work_packet_bodies SET body=zeroblob(?1) WHERE packet_id=?2",
+            params![(MAX_BODY_BYTES + 1) as i64, &second_id],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TRIGGER work_packet_body_immutable_update BEFORE UPDATE ON work_packet_bodies BEGIN SELECT RAISE(ABORT,'immutable packet body'); END",
+            [],
+        )
+        .unwrap();
+        let before_schema = owned_schema_snapshot(&conn);
+        drop(conn);
+
+        assert!(matches!(
+            PacketStore::open(&path),
+            Err(PacketError::LimitExceeded("stored body"))
+        ));
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(owned_schema_snapshot(&conn), before_schema);
+        let version: i64 = conn
+            .query_row("SELECT version FROM work_packet_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    // 3. v1 store with one extra trigger is rejected without migrating.
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("extra-trigger.sqlite");
+        build_v1_store(&path, &[first_body, second_body]);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER extra_v1_trigger AFTER INSERT ON work_packet_events BEGIN SELECT 1; END",
+        )
+        .unwrap();
+        let before_schema = owned_schema_snapshot(&conn);
+        drop(conn);
+
+        assert!(matches!(
+            PacketStore::open(&path),
+            Err(PacketError::InvalidInput(
+                "incompatible packet store schema"
+            ))
+        ));
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(owned_schema_snapshot(&conn), before_schema);
+        let version: i64 = conn
+            .query_row("SELECT version FROM work_packet_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+}

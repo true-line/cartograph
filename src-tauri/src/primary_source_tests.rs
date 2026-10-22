@@ -1714,3 +1714,208 @@ fn primary_source_forget_then_reimport_same_directory_preserves_old_and_new_stat
         primary_source::ReceiptStatus::Unknown
     );
 }
+
+fn retain_work_packet(state: &AppState, fact: &FactKey) -> ::work_packets::PacketDetail {
+    let selection = crate::work_packets::prepare_selection(
+        &state.graph.lock().unwrap(),
+        &state.decisions.lock().unwrap(),
+        std::slice::from_ref(fact),
+        &[],
+    )
+    .unwrap();
+    let request = serde_json::json!({
+        "expected_snapshot_id": selection.snapshot_id,
+        "facts": selection.facts,
+    });
+    crate::work_packets::generate(state, &state.work_packets, &request.to_string()).unwrap()
+}
+
+// AC-0301: a receipt referenced only by a saved work packet survives forget as
+// capture-forgotten and the saved packet still resolves its excerpt receipt.
+#[test]
+fn primary_source_work_packet_pin_survives_forget_and_resolves_excerpt_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    assert!(parsed.receipts.len() >= 2);
+    let bindings = publish(&state, &source, &parsed);
+    let rule_fact = FactKey::from_node(&rule_node(&parsed));
+    let pinned_binding = bindings
+        .iter()
+        .find(|binding| binding.fact == rule_fact)
+        .unwrap()
+        .clone();
+    let unpinned_ids: Vec<String> = parsed
+        .receipts
+        .iter()
+        .map(|receipt| receipt.id().to_owned())
+        .filter(|id| id != &pinned_binding.receipt_id)
+        .collect();
+    assert!(!unpinned_ids.is_empty());
+    drop(parsed);
+
+    let packet = retain_work_packet(&state, &rule_fact);
+    assert!(!packet.body.evidence.source_excerpts.is_empty());
+    assert_eq!(
+        packet.body.evidence.source_excerpts[0].receipt_id,
+        pinned_binding.receipt_id
+    );
+
+    let preview = primary_source::preview(&state, &source.source_id).unwrap();
+    assert_eq!(preview.investigation_references, 0);
+    assert_eq!(preview.staged_references, 0);
+    assert_eq!(preview.packet_references, 1);
+
+    assert_eq!(
+        primary_source::forget(&state, &source.source_id, &preview.fingerprint).unwrap(),
+        preview.captures as u64
+    );
+
+    let (count_after, _) = receipt_store_accounting(&app_data);
+    assert_eq!(count_after, 1);
+
+    {
+        let receipts_guard = state.primary_sources.receipts.lock().unwrap();
+        let tombstone = match receipts_guard
+            .receipt_status(&pinned_binding.receipt_id)
+            .unwrap()
+        {
+            primary_source::ReceiptStatus::CaptureForgotten { tombstone } => tombstone,
+            other => panic!("expected CaptureForgotten, got {other:?}"),
+        };
+        assert_eq!(tombstone.receipts_retained_pinned, 1);
+        assert_eq!(tombstone.receipts_reclaimed, unpinned_ids.len() as u64);
+        for unpinned in &unpinned_ids {
+            assert_eq!(
+                receipts_guard.receipt_status(unpinned).unwrap(),
+                primary_source::ReceiptStatus::Reclaimed {
+                    tombstone: tombstone.clone()
+                }
+            );
+        }
+    }
+
+    let saved = state
+        .work_packets
+        .store
+        .lock()
+        .unwrap()
+        .get(&packet.packet_id)
+        .unwrap();
+    let excerpt = &saved.body.evidence.source_excerpts[0];
+    let fact = &saved.body.evidence.facts[0];
+    let guard = state.primary_sources.task_guard(&source.source_id).unwrap();
+    let resolved = state
+        .primary_sources
+        .task_receipt(
+            &guard,
+            &fact.reference,
+            &fact.expected_digest,
+            &pinned_binding.repo_key,
+            &excerpt.receipt_id,
+        )
+        .unwrap();
+    assert_eq!(resolved.id(), excerpt.receipt_id);
+    assert_eq!(
+        state.primary_sources.task_text(&guard, &resolved, 0),
+        Err(primary_source::PinnedReadError::Unavailable)
+    );
+}
+
+// AC-0301: saving a work packet after preview changes the fingerprint so a
+// stale confirmation is refused.
+#[test]
+fn primary_source_work_packet_saved_after_preview_invalidates_forget_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    let total_receipts = parsed.receipts.len() as u64;
+    publish(&state, &source, &parsed);
+    let rule_fact = FactKey::from_node(&rule_node(&parsed));
+    drop(parsed);
+
+    let before = primary_source::preview(&state, &source.source_id).unwrap();
+    assert_eq!(before.packet_references, 0);
+
+    let _packet = retain_work_packet(&state, &rule_fact);
+
+    let after = primary_source::preview(&state, &source.source_id).unwrap();
+    assert_eq!(after.packet_references, 1);
+    assert_ne!(after.fingerprint, before.fingerprint);
+
+    let err = primary_source::forget(&state, &source.source_id, &before.fingerprint)
+        .expect_err("stale preview fingerprint must be refused");
+    assert_eq!(
+        err,
+        "Retained source changed; refresh the preview before forgetting."
+    );
+    assert_eq!(receipt_store_accounting(&app_data).0, total_receipts);
+
+    assert_eq!(
+        primary_source::forget(&state, &source.source_id, &after.fingerprint).unwrap(),
+        after.captures as u64
+    );
+    assert_eq!(receipt_store_accounting(&app_data).0, 1);
+}
+
+// AC-0301: while a forget holds the source's exclusive guard, a work packet
+// citing that source is refused rather than saved without a pin, so the
+// forget can never reclaim a receipt the packet was just written to cite.
+#[test]
+fn primary_source_work_packet_is_refused_while_forget_holds_the_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    publish(&state, &source, &parsed);
+    let rule_fact = FactKey::from_node(&rule_node(&parsed));
+    drop(parsed);
+    let selection = crate::work_packets::prepare_selection(
+        &state.graph.lock().unwrap(),
+        &state.decisions.lock().unwrap(),
+        std::slice::from_ref(&rule_fact),
+        &[],
+    )
+    .unwrap();
+    let request = serde_json::json!({
+        "expected_snapshot_id": selection.snapshot_id,
+        "facts": selection.facts,
+    });
+
+    let forgetting = state
+        .primary_sources
+        .exclusive_guard_for_test(&source.source_id);
+    let refused = crate::work_packets::generate(&state, &state.work_packets, &request.to_string())
+        .unwrap_err();
+    assert_eq!(refused.code, "selection_conflict");
+    assert!(
+        state
+            .work_packets
+            .store
+            .lock()
+            .unwrap()
+            .list(10)
+            .unwrap()
+            .is_empty()
+    );
+    drop(forgetting);
+
+    crate::work_packets::generate(&state, &state.work_packets, &request.to_string()).unwrap();
+    assert_eq!(
+        primary_source::preview(&state, &source.source_id)
+            .unwrap()
+            .packet_references,
+        1
+    );
+}
