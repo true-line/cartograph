@@ -557,53 +557,76 @@ fn path_binder(cx: &FileCx, at: TsNode, name: &str) -> bool {
     let Some(body) = function.child_by_field_name("body") else {
         return false;
     };
+    if !only_substitutes(cx, body, param) {
+        return false;
+    }
     let mut returns = 0;
     for node in scope_nodes(body) {
-        match node.kind() {
-            "return_statement" => {
-                let returned = node.named_child(0);
-                if !returned.is_some_and(|r| r.kind() == "identifier" && cx.text(&r) == param) {
-                    return false;
-                }
-                returns += 1;
-            }
-            "augmented_assignment_expression" | "update_expression"
-                if node
-                    .named_child(0)
-                    .is_some_and(|target| cx.text(&target) == param) =>
-            {
+        if node.kind() == "return_statement" {
+            let returned = node.named_child(0);
+            if !returned.is_some_and(|r| r.kind() == "identifier" && cx.text(&r) == param) {
                 return false;
             }
-            "assignment_expression"
-                if node
-                    .child_by_field_name("left")
-                    .is_some_and(|left| cx.text(&left) == param) =>
-            {
-                let call = node
-                    .child_by_field_name("right")
-                    .filter(|right| right.kind() == "call_expression");
-                let substitutes = call
-                    .and_then(|call| call.child_by_field_name("function"))
-                    .filter(|callee| callee.kind() == "member_expression")
-                    .is_some_and(|callee| {
-                        callee
-                            .child_by_field_name("object")
-                            .is_some_and(|object| cx.text(&object) == param)
-                            && callee
-                                .child_by_field_name("property")
-                                .is_some_and(|p| matches!(cx.text(&p), "replace" | "replaceAll"))
-                    })
-                    && call
-                        .and_then(|call| call_args(call).first().copied())
-                        .is_some_and(|pattern| placeholder(cx, pattern));
-                if !substitutes {
-                    return false;
-                }
-            }
-            _ => {}
+            returns += 1;
         }
     }
     returns > 0
+}
+
+/// True when every write to `param` anywhere in `body`, nested functions
+/// included, is `param = param.replace(<placeholder>, …)` (#757 review).
+/// Any other write (destructuring, compound, update, a `for…of` head), a
+/// redeclaration, or a use of `arguments` or `eval` (either can rebind the
+/// parameter) disproves the binder. This is a closed grammar: a write in
+/// any other form fails rather than passes.
+fn only_substitutes(cx: &FileCx, body: TsNode, param: &str) -> bool {
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+        let writes = |field: &str| {
+            node.child_by_field_name(field)
+                .is_some_and(|target| binds(cx, target, param))
+        };
+        let disproves = match node.kind() {
+            "identifier" => matches!(cx.text(&node), "arguments" | "eval"),
+            "assignment_expression" if writes("left") => {
+                node.child_by_field_name("left")
+                    .is_none_or(|left| left.kind() != "identifier")
+                    || !substitutes(cx, node, param)
+            }
+            "augmented_assignment_expression" => writes("left"),
+            "update_expression" => writes("argument"),
+            "variable_declarator" | "function_declaration" | "class_declaration" => writes("name"),
+            "for_in_statement" => writes("left"),
+            _ => false,
+        };
+        if disproves {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when `assignment` is `param = param.replace(<placeholder>, …)` or
+/// `replaceAll`.
+fn substitutes(cx: &FileCx, assignment: TsNode, param: &str) -> bool {
+    let call = assignment
+        .child_by_field_name("right")
+        .filter(|right| right.kind() == "call_expression");
+    call.and_then(|call| call.child_by_field_name("function"))
+        .filter(|callee| callee.kind() == "member_expression")
+        .is_some_and(|callee| {
+            callee
+                .child_by_field_name("object")
+                .is_some_and(|object| object.kind() == "identifier" && cx.text(&object) == param)
+                && callee
+                    .child_by_field_name("property")
+                    .is_some_and(|p| matches!(cx.text(&p), "replace" | "replaceAll"))
+        })
+        && call
+            .and_then(|call| call_args(call).first().copied())
+            .is_some_and(|pattern| placeholder(cx, pattern))
 }
 
 /// True when `pattern` can only match a route placeholder: `` `:${key}` ``,
