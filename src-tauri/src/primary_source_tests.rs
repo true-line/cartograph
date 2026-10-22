@@ -1919,3 +1919,219 @@ fn primary_source_work_packet_is_refused_while_forget_holds_the_source() {
         1
     );
 }
+
+#[test]
+fn mcp_retained_span_uses_session_receipt_and_refuses_changed_or_over_budget_evidence() {
+    // AC-0288: actual capture/publication/receipt read; no checkout fallback.
+    use crate::mcp_reads::{ReadError, ReadSession, evidence::EvidenceLimits};
+    let temp = tempfile::tempdir().unwrap();
+    let app_data = directory(temp.path(), "private");
+    let root = directory(temp.path(), "project");
+    std::fs::write(root.join("source.ts"), ORIGINAL).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    let rule = rule_node(&parsed);
+    publish(&state, &source, &parsed);
+    let description = primary_source::describe(&state, &FactKey::from_node(&rule)).unwrap();
+    let fact = agents::TaskFactKey::Node {
+        id: rule.id.clone(),
+    };
+    let (target, guard) = crate::investigations::inspection::resolve(
+        &state,
+        &fact,
+        &description.graph_snapshot_id,
+        &description.receipt_id,
+        0,
+    )
+    .unwrap();
+    drop(guard);
+    let session = ReadSession::acquire(
+        &state.graph,
+        &state.decisions,
+        || {
+            Ok(vec![context_hub::coverage::ScopedRepo {
+                repo_key: source.repo_key.clone(),
+                registered_source_id: Some(source.source_id.clone()),
+                config_hash: "fixture".into(),
+                layer_hints: None,
+            }])
+        },
+        core_graph::SnapshotReadLimits::default(),
+        core_graph::coverage::CoverageReadLimits::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap();
+    let basis = session.basis_id().unwrap();
+    let described = session
+        .describe_evidence(&state, &basis, &fact, 0, 65536)
+        .unwrap();
+    assert_eq!(described.target, target);
+    assert!(described.total_ranges > 0);
+    assert_eq!(
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 1)
+            .unwrap_err(),
+        ReadError::Limit
+    );
+    assert_eq!(
+        session
+            .describe_evidence(&state, &basis, &fact, usize::MAX, 65536)
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+    let limits = || EvidenceLimits {
+        max_file_validation_bytes: ORIGINAL.len() as u64,
+        max_span_bytes: 8192,
+        max_response_bytes: 65536,
+    };
+    std::fs::write(root.join("source.ts"), "live-replacement-canary").unwrap();
+    let response = session
+        .read_evidence(&state, &basis, &target, limits())
+        .unwrap();
+    assert_eq!(
+        response.text,
+        ORIGINAL[target.captured.byte_start as usize..target.captured.byte_end as usize]
+    );
+    assert_eq!(response.scope, "primary_source_only");
+    assert_eq!(response.input_closure, "input_closure_not_established");
+    assert!(!response.text.contains("live-replacement-canary"));
+    assert_eq!(
+        session
+            .read_evidence(&state, "wrong-basis", &target, limits())
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+    let mut small = limits();
+    small.max_file_validation_bytes = 1;
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, small)
+            .unwrap_err(),
+        ReadError::Limit
+    );
+    let mut small = limits();
+    small.max_response_bytes = 1;
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, small)
+            .unwrap_err(),
+        ReadError::Limit
+    );
+    let mut forged = target.clone();
+    forged.captured.byte_end -= 1;
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &forged, limits())
+            .unwrap_err(),
+        ReadError::InvalidRequest
+    );
+    forged.source.byte_end = forged.captured.byte_end;
+    forged.target_id = forged.content_id().unwrap();
+    forged.validate().unwrap();
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &forged, limits())
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+    std::fs::remove_file(root.join("source.ts")).unwrap();
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, limits())
+            .unwrap()
+            .text,
+        response.text
+    );
+    // Exercise the real MCP route over the same capture after checkout deletion.
+    use crate::mcp_reads::dispatch::{
+        DispatchAction, DispatchLimits, Dispatcher, EvidenceWorkLimits,
+    };
+    use std::num::{NonZeroU64, NonZeroUsize};
+    let wire_session = ReadSession::acquire(
+        &state.graph,
+        &state.decisions,
+        || {
+            Ok(vec![context_hub::coverage::ScopedRepo {
+                repo_key: source.repo_key.clone(),
+                registered_source_id: Some(source.source_id.clone()),
+                config_hash: "fixture".into(),
+                layer_hints: None,
+            }])
+        },
+        core_graph::SnapshotReadLimits::default(),
+        core_graph::coverage::CoverageReadLimits::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap();
+    let mut wire = Dispatcher::with_evidence(
+        wire_session,
+        "fixture-session".into(),
+        DispatchLimits {
+            max_response_bytes: NonZeroUsize::new(65536).unwrap(),
+            max_request_ids: NonZeroUsize::new(16).unwrap(),
+            trace: flowtracer::TraceLimits {
+                max_flows: 16,
+                max_hops: 64,
+                max_output_bytes: 65536,
+            },
+            compile: spec::SelectedCompileLimits {
+                max_bytes: 65536,
+                adr: spec::AdrLimits {
+                    max_rows: 128,
+                    max_output_bytes: 65536,
+                },
+            },
+        },
+        &state,
+        EvidenceWorkLimits {
+            max_file_validation_bytes: NonZeroU64::new(ORIGINAL.len() as u64).unwrap(),
+            max_span_bytes: NonZeroU64::new(8192).unwrap(),
+        },
+    )
+    .unwrap();
+    let answer = |response| match response {
+        DispatchAction::Respond(value) => value,
+        other => panic!("unexpected {other:?}"),
+    };
+    answer(wire.receive(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}})));
+    assert_eq!(
+        wire.receive(json!({"jsonrpc":"2.0","method":"notifications/initialized"})),
+        DispatchAction::Ignore
+    );
+    let tools = answer(wire.receive(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})));
+    assert!(
+        tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "cartograph_evidence")
+    );
+    let described = answer(wire.receive(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"cartograph_evidence","arguments":{"session_id":"fixture-session","basis_id":basis,"kind":"retained_primary_source","mode":"describe","fact":fact,"ordinal":0,"max_bytes":65536}}})));
+    assert_eq!(described["result"]["isError"], false);
+    let wire_target = described["result"]["structuredContent"]["description"]["target"].clone();
+    assert_eq!(wire_target, serde_json::to_value(&target).unwrap());
+    let read_args = json!({"session_id":"fixture-session","basis_id":basis,"kind":"retained_primary_source","mode":"read","target":wire_target,"max_bytes":65536});
+    let read = answer(wire.receive(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"cartograph_evidence","arguments":read_args}})));
+    assert_eq!(read["result"]["isError"], false);
+    assert_eq!(
+        read["result"]["structuredContent"]["span"]["text"],
+        response.text
+    );
+    let mut unknown = read_args.clone();
+    unknown["target"]["source"]["injected"] = json!(true);
+    let rejected = answer(wire.receive(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"cartograph_evidence","arguments":unknown}})));
+    assert_eq!(rejected["error"]["code"], -32602);
+    let mut changed = rule;
+    changed.props["mcp_changed"] = json!(true);
+    state.graph.lock().unwrap().put_node(&changed).unwrap();
+    let stale = answer(wire.receive(json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"cartograph_evidence","arguments":read_args}})));
+    assert_eq!(stale["result"]["isError"], true);
+
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, limits())
+            .unwrap_err(),
+        ReadError::StaleBasis
+    );
+}

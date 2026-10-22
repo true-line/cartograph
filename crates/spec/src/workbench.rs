@@ -11,8 +11,8 @@ use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance, Tier};
 use flowtracer::{Flow, FlowStatus, Hop};
 pub use selected::{
-    ArtifactSelectionError, SelectedArtifactLimit, SelectedArtifactOutcome, SelectedCompileLimits,
-    compile_spec_selected,
+    ArtifactDescriptor, ArtifactSelectionError, SelectedArtifactLimit, SelectedArtifactOutcome,
+    SelectedCompileLimits, artifact_catalog, compile_spec_selected, project_recovered_facts,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

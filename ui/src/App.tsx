@@ -18,6 +18,7 @@ import { ConnectSurface } from './components/ConnectSurface';
 import { PreflightSurface } from './components/PreflightSurface';
 import { RecoverSurface } from './components/RecoverSurface';
 import { SettingsSurface } from './components/SettingsSurface';
+import { McpSettings } from './components/McpSettings';
 import { WorkspaceSurface } from './components/WorkspaceSurface';
 import { GapsDriftSurface } from './components/GapsDriftSurface';
 import { ProvenanceSurface } from './components/ProvenanceSurface';
@@ -757,6 +758,7 @@ export default function App() {
             parallelism={ingestParallelism}
             onParallelismChange={(setting) => void setIngestParallelism(setting)}
           />
+          <McpSettings available={backend === 'up'} />
           <SourceRetention sources={primarySource.sources} preview={primarySource.preview}
             busy={primarySource.retentionBusy} error={primarySource.retentionError}
             message={primarySource.retentionMessage}

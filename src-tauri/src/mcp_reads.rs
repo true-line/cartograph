@@ -1,0 +1,258 @@
+//! App-private immutable recovered-context reads. No transport, app startup,
+//! provider calls or accepted-proposal/H3 projection lives here.
+//!
+//! Store admission bounds raw/canonical graph and coverage bytes. It does not
+//! bound exact RSS: retained raw facts, projection indexes, temporary identity
+//! construction and future artifact caches need separate service admission.
+
+use agents::{DecisionLog, DecisionSelectionError};
+use context_hub::coverage::{
+    CoverageContext, CoverageQualification, MAX_COVERAGE_IDENTITY_BYTES, MAX_COVERAGE_REPOS,
+    QualifiedRequest, QualifiedResponse, ScopedRepo,
+};
+use context_hub::{ContextError, ContextSnapshot, DiscoveryRequest, DiscoveryResponse};
+#[cfg(test)]
+use context_hub::{QueryRequest, QueryResponse};
+use core_graph::coverage::CoverageReadLimits;
+use core_graph::{
+    Edge, GraphError, Node, SnapshotBoundsError, SnapshotReadLimits, SqliteGraphStore,
+};
+use serde::Serialize;
+use spec::ExportMode;
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex},
+};
+
+pub(crate) mod artifacts;
+pub(crate) mod commands;
+pub(crate) mod dispatch;
+#[cfg(unix)]
+pub(crate) mod service;
+pub(crate) mod worker;
+
+/// Closed source-free failures; never expose storage diagnostics or input text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ReadError {
+    #[error("stale_basis")]
+    StaleBasis,
+    #[error("response_limit")]
+    Limit,
+    #[error("storage_unavailable")]
+    Storage,
+    #[error("invalid_request")]
+    InvalidRequest,
+}
+
+/// Consistency identities, never authentication credentials or H3 revisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ReadBasis {
+    pub recovered_graph_id: String,
+    pub projection_snapshot_id: String,
+    pub coverage_id: String,
+    /// Projected snapshot plus coverage only. The service must separately bind
+    /// cursors to an opaque session and this complete basis (raw ID/mode/policy).
+    pub context_id: String,
+    pub rejection_decision_digest: String,
+    pub registration_basis_digest: String,
+    pub export_mode: ExportMode,
+    pub h3_curated_available: bool,
+}
+
+/// One immutable production-policy projection. Raw facts and effective rejected
+/// hashes remain private for later selected compilation from exactly this basis.
+pub(crate) struct ReadSession {
+    basis: ReadBasis,
+    raw_nodes: Vec<Node>,
+    raw_edges: Vec<Edge>,
+    rejected_hashes: BTreeSet<String>,
+    #[cfg(test)]
+    snapshot: Arc<ContextSnapshot>,
+    qualified: CoverageContext,
+}
+
+impl ReadSession {
+    /// Observe policy and registration basis before/after one coherent bounded
+    /// graph+coverage read. Observed drift fails rather than mixing revisions.
+    /// Brackets cannot exclude ABA changes or create a cross-database transaction.
+    /// Scope is trusted app metadata, not deserialized external filesystem input.
+    pub(crate) fn acquire(
+        graph: &Mutex<SqliteGraphStore>,
+        decisions: &Mutex<DecisionLog>,
+        mut scope: impl FnMut() -> Result<Vec<ScopedRepo>, ReadError>,
+        graph_limits: SnapshotReadLimits,
+        coverage_limits: CoverageReadLimits,
+        mode: ExportMode,
+    ) -> Result<Self, ReadError> {
+        let rejected_hashes = rejected(decisions)?;
+        let before_scope = normalized_scope(scope()?)?;
+        let ((raw_nodes, raw_edges), recorded) = graph
+            .lock()
+            .map_err(|_| ReadError::Storage)?
+            .read_snapshot_with_coverage_bounded(graph_limits, coverage_limits)
+            .map_err(graph_error)?;
+        let after_scope = normalized_scope(scope()?)?;
+        let after_rejected = rejected(decisions)?;
+        if before_scope != after_scope || rejected_hashes != after_rejected {
+            return Err(ReadError::StaleBasis);
+        }
+        // Drop the temporary raw index before constructing the filtered index.
+        // Raw identity must never be replaced by the filtered projection's ID.
+        let recovered_graph_id = ContextSnapshot::new(raw_nodes.clone(), raw_edges.clone())
+            .map_err(context_error)?
+            .id()
+            .to_owned();
+        let (nodes, edges) =
+            spec::project_recovered_facts(&raw_nodes, &raw_edges, mode, &rejected_hashes);
+        let snapshot = Arc::new(
+            ContextSnapshot::new(
+                nodes.into_iter().cloned().collect(),
+                edges.into_iter().cloned().collect(),
+            )
+            .map_err(context_error)?,
+        );
+        let coverage =
+            CoverageQualification::new(&before_scope, &recorded).map_err(context_error)?;
+        let qualified = CoverageContext::from_shared_snapshot(Arc::clone(&snapshot), coverage)
+            .map_err(context_error)?;
+        let basis = ReadBasis {
+            recovered_graph_id,
+            projection_snapshot_id: snapshot.id().into(),
+            coverage_id: qualified.coverage_id().into(),
+            context_id: qualified.context_id().into(),
+            rejection_decision_digest: digest("compiler-rejections-v1", &rejected_hashes)?,
+            registration_basis_digest: digest("source-registration-basis-v1", &before_scope)?,
+            export_mode: mode,
+            h3_curated_available: false,
+        };
+        Ok(Self {
+            basis,
+            raw_nodes,
+            raw_edges,
+            rejected_hashes,
+            #[cfg(test)]
+            snapshot,
+            qualified,
+        })
+    }
+
+    pub(crate) fn basis_id(&self) -> Result<String, ReadError> {
+        digest("mcp-read-basis-v1", &self.basis)
+    }
+
+    pub(crate) fn basis(&self) -> &ReadBasis {
+        &self.basis
+    }
+
+    #[cfg(test)]
+    pub(crate) fn query(
+        &self,
+        request: QualifiedRequest<QueryRequest>,
+    ) -> Result<QualifiedResponse<QueryResponse>, ReadError> {
+        self.qualified.query(request).map_err(context_error)
+    }
+
+    pub(crate) fn discover(
+        &self,
+        request: QualifiedRequest<DiscoveryRequest>,
+    ) -> Result<QualifiedResponse<DiscoveryResponse>, ReadError> {
+        self.qualified.discover(request).map_err(context_error)
+    }
+}
+
+fn rejected(decisions: &Mutex<DecisionLog>) -> Result<BTreeSet<String>, ReadError> {
+    decisions
+        .lock()
+        .map_err(|_| ReadError::Storage)?
+        .read_curation_observation(&[])
+        .map(|observation| observation.rejected_hashes)
+        .map_err(|error| match error {
+            DecisionSelectionError::LimitExceeded => ReadError::Limit,
+            _ => ReadError::Storage,
+        })
+}
+
+fn normalized_scope(mut scope: Vec<ScopedRepo>) -> Result<Vec<ScopedRepo>, ReadError> {
+    if scope.len() > MAX_COVERAGE_REPOS {
+        return Err(ReadError::Limit);
+    }
+    for repo in &mut scope {
+        for identity in [
+            Some(repo.repo_key.as_str()),
+            repo.registered_source_id.as_deref(),
+            Some(repo.config_hash.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if identity.len() > MAX_COVERAGE_IDENTITY_BYTES {
+                return Err(ReadError::Limit);
+            }
+            if identity.is_empty() || identity.contains('\0') {
+                return Err(ReadError::InvalidRequest);
+            }
+        }
+        if let Some(hints) = &mut repo.layer_hints {
+            if hints
+                .iter()
+                .any(|hint| hint.len() > MAX_COVERAGE_IDENTITY_BYTES)
+            {
+                return Err(ReadError::Limit);
+            }
+            hints.sort();
+            hints.dedup();
+        }
+    }
+    scope.sort_by(|left, right| left.repo_key.cmp(&right.repo_key));
+    if scope
+        .windows(2)
+        .any(|pair| pair[0].repo_key == pair[1].repo_key)
+    {
+        return Err(ReadError::InvalidRequest);
+    }
+    Ok(scope)
+}
+
+fn digest(prefix: &str, value: &impl Serialize) -> Result<String, ReadError> {
+    let bytes = serde_json::to_vec(&(prefix, value)).map_err(|_| ReadError::Storage)?;
+    Ok(format!("{prefix}:{}", core_prov::content_hash(&bytes)))
+}
+
+fn graph_error(error: GraphError) -> ReadError {
+    match error {
+        GraphError::SnapshotBounds(SnapshotBoundsError::InvalidLimits) => ReadError::InvalidRequest,
+        GraphError::SnapshotBounds(
+            SnapshotBoundsError::RowLimit
+            | SnapshotBoundsError::RawByteLimit
+            | SnapshotBoundsError::CanonicalByteLimit
+            | SnapshotBoundsError::JsonDepthLimit
+            | SnapshotBoundsError::JsonValueLimit
+            | SnapshotBoundsError::CoverageRecordLimit
+            | SnapshotBoundsError::CoverageByteLimit,
+        ) => ReadError::Limit,
+        _ => ReadError::Storage,
+    }
+}
+
+fn context_error(error: ContextError) -> ReadError {
+    match error {
+        ContextError::CursorContextMismatch
+        | ContextError::CursorSnapshotMismatch
+        | ContextError::CursorSelectionMismatch
+        | ContextError::CursorPolicyMismatch => ReadError::StaleBasis,
+        ContextError::ResponseBudgetExceeded { .. } => ReadError::Limit,
+        ContextError::Serialization(_)
+        | ContextError::DuplicateNode(_)
+        | ContextError::DuplicateEdge(_)
+        | ContextError::InvalidCoverage(_) => ReadError::Storage,
+        _ => ReadError::InvalidRequest,
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
+pub(crate) mod evidence;
+
+#[cfg(all(test, unix))]
+mod client_smoke_tests;

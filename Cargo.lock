@@ -222,6 +222,8 @@ dependencies = [
  "iac",
  "ingest",
  "llm",
+ "mcp-local",
+ "mcp-wire",
  "rfd",
  "rusqlite",
  "semantic",
@@ -235,6 +237,7 @@ dependencies = [
  "tauri-build",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "windows-sys 0.61.2",
  "work-packets",
 ]
@@ -2893,6 +2896,40 @@ name = "maybe-owned"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
+
+[[package]]
+name = "mcp-local"
+version = "0.20.0"
+dependencies = [
+ "mcp-wire",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "mcp-relay"
+version = "0.20.0"
+dependencies = [
+ "mcp-local",
+ "mcp-wire",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "mcp-wire"
+version = "0.20.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "serde_json",
+ "subtle",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "memchr"

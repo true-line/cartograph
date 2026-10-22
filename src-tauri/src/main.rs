@@ -21,6 +21,7 @@ mod job_execution;
 mod job_execution_host_tests;
 mod jobs;
 mod local_commit;
+mod mcp_reads;
 mod metrics;
 #[cfg(test)]
 mod name_unique_tests;
@@ -5658,6 +5659,8 @@ fn main() {
             let staged_proposals = agents::ProposalStore::open(data_dir.join("proposals.sqlite"))?;
             let recovery_metrics = metrics::MetricsStore::open(&state_path)?;
             app.manage(PreflightRuns::default());
+            #[cfg(unix)]
+            app.manage(mcp_reads::service::Service::default());
             app.manage(AppState {
                 graph: Mutex::new(graph),
                 jobs,
@@ -5751,6 +5754,10 @@ fn main() {
             context::query_qualified_context,
             read_evidence,
             primary_source::describe_captured_source,
+            mcp_reads::commands::mcp_reads_status,
+            mcp_reads::commands::mcp_reads_enable,
+            mcp_reads::commands::mcp_reads_disable,
+            mcp_reads::commands::mcp_reads_client_configuration,
             primary_source::read_captured_source,
             primary_source::list_retained_sources,
             primary_source::preview_forget_source,
@@ -5767,8 +5774,19 @@ fn main() {
             add_repo,
             add_system
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Cartograph");
+        .build(tauri::generate_context!())
+        .expect("error while building Cartograph")
+        .run(|_app, _event| {
+            #[cfg(unix)]
+            if matches!(_event, tauri::RunEvent::Exit)
+                && let Some(service) = _app.try_state::<mcp_reads::service::Service>()
+                && tauri::async_runtime::block_on(service.shutdown()).is_err()
+            {
+                // Exit waits only for native transport cleanup, not synchronous
+                // graph workers. No paths, credentials or source enter this log.
+                eprintln!("Cartograph MCP endpoint cleanup failed");
+            }
+        });
 }
 
 #[cfg(test)]

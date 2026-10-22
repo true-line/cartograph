@@ -149,6 +149,67 @@ const ARTIFACTS: &[Artifact] = &[
     },
 ];
 
+/// Metadata for a supported official producer, not a claim that its output
+/// exists in a read session. Content identity is available only after successful
+/// selected compilation; limited outcomes never acquire a fabricated identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArtifactDescriptor {
+    /// Official selection key accepted by the compiler.
+    pub id: &'static str,
+    /// Portable output file name.
+    pub file_name: &'static str,
+    /// Human-readable producer title.
+    pub title: &'static str,
+    /// Output format, such as markdown or json.
+    pub format: &'static str,
+    /// Versioned schema expected for this producer's completed output.
+    pub schema: String,
+}
+
+/// The authoritative finite producer catalog in official compilation order.
+/// This performs no graph reads, derivation or artifact construction.
+pub fn artifact_catalog() -> Vec<ArtifactDescriptor> {
+    ARTIFACTS
+        .iter()
+        .map(|artifact| ArtifactDescriptor {
+            id: artifact.id,
+            file_name: artifact.file,
+            title: artifact.title,
+            format: artifact.format,
+            schema: SpecArtifact::expected_schema(artifact.id),
+        })
+        .collect()
+}
+
+/// The recovered facts underlying official artifact compilation, in stable order.
+/// Reuses export mode and rejection policy, including suppression of relations
+/// touching hidden BusinessRule nodes. No accepted-proposal projection or derived
+/// ADR/security facts are added. References preserve the original stored bytes;
+/// callers must separately identify raw and filtered snapshots and admit inputs
+/// under their graph limits before calling this allocation-bounded-by-input helper.
+pub fn project_recovered_facts<'a>(
+    nodes: &'a [Node],
+    edges: &'a [Edge],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+) -> (Vec<&'a Node>, Vec<&'a Edge>) {
+    let selected_nodes = filter_nodes(nodes, mode, rejected);
+    let all_rules: BTreeSet<_> = nodes
+        .iter()
+        .filter(|n| n.label == "BusinessRule")
+        .map(|n| n.id.as_str())
+        .collect();
+    let visible: BTreeSet<_> = selected_nodes.iter().map(|n| n.id.as_str()).collect();
+    let selected_edges = filter_edges(edges, mode, rejected)
+        .into_iter()
+        .filter(|e| {
+            let touches = all_rules.contains(e.src.as_str()) || all_rules.contains(e.dst.as_str());
+            !touches || (visible.contains(e.src.as_str()) && visible.contains(e.dst.as_str()))
+        })
+        .collect();
+    (selected_nodes, selected_edges)
+}
+
 pub(crate) struct Projection {
     pub(crate) nodes: Vec<Node>,
     pub(crate) edges: Vec<Edge>,
@@ -162,24 +223,9 @@ pub(crate) fn project(
     rejected: &BTreeSet<String>,
     adr: Option<crate::AdrLimits>,
 ) -> Result<Projection, crate::AdrLimitExceeded> {
-    let base_nodes = filter_nodes(nodes, mode, rejected)
-        .into_iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    let all_rules: BTreeSet<_> = nodes
-        .iter()
-        .filter(|n| n.label == "BusinessRule")
-        .map(|n| n.id.as_str())
-        .collect();
-    let visible: BTreeSet<_> = base_nodes.iter().map(|n| n.id.as_str()).collect();
-    let base_edges = filter_edges(edges, mode, rejected)
-        .into_iter()
-        .filter(|e| {
-            let touches = all_rules.contains(e.src.as_str()) || all_rules.contains(e.dst.as_str());
-            !touches || (visible.contains(e.src.as_str()) && visible.contains(e.dst.as_str()))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let (selected_nodes, selected_edges) = project_recovered_facts(nodes, edges, mode, rejected);
+    let base_nodes: Vec<_> = selected_nodes.into_iter().cloned().collect();
+    let base_edges: Vec<_> = selected_edges.into_iter().cloned().collect();
     let flows = project_flows(flows, mode, rejected);
     let derived = if let Some(limits) = adr {
         crate::derive_adr_facts_bounded(&base_nodes, &base_edges, &flows, limits)?

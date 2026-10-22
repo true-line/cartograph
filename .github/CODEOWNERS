@@ -86,3 +86,12 @@ package-lock.json @qwts
 /about.toml                               @qwts
 /THIRD-PARTY-NOTICES.md                   @qwts
 /ui/src/generated/thirdPartyNotices.ts    @qwts
+
+# Read-only MCP protocol boundary and future relay entrypoint (#718).
+/crates/mcp-wire/ @qwts
+/crates/mcp-local/ @qwts
+/crates/mcp-relay/ @qwts
+
+# Package-only MCP sidecar compilation and bundle configuration.
+/scripts/build-mcp-relay.mjs @qwts
+/src-tauri/tauri.mcp-bundle.conf.json @qwts
