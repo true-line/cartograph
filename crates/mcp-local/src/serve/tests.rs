@@ -177,7 +177,7 @@ fn revocation_racing_valid_preamble_cannot_acquire_application_session() {
         let (activation, revoked) = watch::channel(false);
         let constructed = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&constructed);
-        let task = tokio::spawn(async move {
+        let task = async move {
             serve_connection(
                 server,
                 &capability,
@@ -193,13 +193,27 @@ fn revocation_racing_valid_preamble_cannot_acquire_application_session() {
                 },
             )
             .await
-        });
-        tokio::task::yield_now().await;
+        };
+        let mut task = std::pin::pin!(task);
+        // Poll authentication into its pending read, then make both the valid
+        // preamble and revocation ready before polling the server again. This
+        // tests precedence without relying on executor/socket scheduling.
+        std::future::poll_fn(|cx| {
+            assert!(task.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
         client.write(&auth).await.unwrap();
         activation.send(true).unwrap();
-        assert_eq!(task.await.unwrap(), Err(ServeError::Revoked));
+        assert_eq!(task.await, Err(ServeError::Revoked));
         assert_eq!(constructed.load(Ordering::SeqCst), 0);
-        assert_eq!(client.read().await.unwrap(), None);
+        // Dropping a socket with unread preamble bytes may reset its peer on
+        // Unix. Both EOF and that I/O closure are legitimate; no ACK or other
+        // response, deadline, or malformed frame is accepted here.
+        assert!(matches!(
+            client.read().await,
+            Ok(None) | Err(crate::connection::ConnectionError::Io)
+        ));
     });
 }
 
