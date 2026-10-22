@@ -43,6 +43,11 @@ impl ConstIndex {
         self.imports.insert(file.to_string(), bindings);
     }
 
+    /// The `(specifier, original name)` that `file` imports as `name`.
+    pub(crate) fn import_binding(&self, file: &str, name: &str) -> Option<&(String, String)> {
+        self.imports.get(file)?.get(name)
+    }
+
     /// Resolve `Obj.Prop` as seen from `file`: same-file definition, or an
     /// import-proven definition in the exact target module. `None` when the
     /// binding cannot be proven.

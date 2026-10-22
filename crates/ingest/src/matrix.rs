@@ -150,6 +150,8 @@ use Capability::*;
 use Support::*;
 
 const NO_CLIENT: &str = "outbound HTTP client calls are recognized only in TypeScript/JavaScript";
+const NO_JVM_CLIENT: &str =
+    "outbound HTTP client calls are recognized only through Retrofit interfaces";
 const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript";
 const TSX_ONLY: &str = "recorded in .tsx/.js/.jsx files; plain .ts modules are not scanned";
 
@@ -192,6 +194,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("JavaScript", "next", ClientRoutes, Supported, ""),
     cell("JavaScript", "react-router", ClientRoutes, Supported, ""),
     cell("JavaScript", "fetch", HttpClientCalls, Supported, ""),
+    cell("JavaScript", "route-table", HttpClientCalls, Supported, ""),
     cell("JavaScript", "chrome-messaging", EventSites, Supported, ""),
     cell("JavaScript", "indexeddb", DataModel, Supported, ""),
     cell("Vue", CORE, Imports, Supported, ""),
@@ -235,12 +238,14 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
         "fields inherited from @MappedSuperclass and @Embeddable types are not merged, \
          and repository methods outside the Spring Data naming vocabulary assert no access",
     ),
-    cell("Java", CORE, HttpClientCalls, Unsupported, NO_CLIENT),
+    cell("Java", "retrofit", HttpClientCalls, Supported, ""),
+    cell("Java", CORE, HttpClientCalls, Unsupported, NO_JVM_CLIENT),
     cell("Java", CORE, EventSites, Unsupported, NO_EVENTS),
     cell("Kotlin", CORE, Types, Supported, ""),
     cell("Kotlin", CORE, Calls, Supported, ""),
     cell("Kotlin", "spring-web", HttpEndpoints, Supported, ""),
-    cell("Kotlin", CORE, HttpClientCalls, Unsupported, NO_CLIENT),
+    cell("Kotlin", "retrofit", HttpClientCalls, Supported, ""),
+    cell("Kotlin", CORE, HttpClientCalls, Unsupported, NO_JVM_CLIENT),
     cell("Kotlin", CORE, EventSites, Unsupported, NO_EVENTS),
     cell(
         "WebExtension",

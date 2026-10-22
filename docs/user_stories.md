@@ -560,9 +560,10 @@
 - **Priority:** Must · **Status:** Draft
 - **AC-0240** Given a client call in one repo and an endpoint or channel in another, when stitching runs after every repo is ingested, then they are joined only with binding evidence such as a declared service in the system manifest, base-URL configuration or a gateway route, and the edge cites that evidence.
 - **AC-0241** Given a cross-repo call without binding evidence, or with several equally supported targets, when stitching completes, then the call remains a Gap or labeled candidate with its reason and no new confidence tier is introduced.
+- **AC-0315** Given a client that declares its API as data rather than as a literal URL at the call site, when the repository is recovered, then each declared call becomes a client call fact with its HTTP method, literal path template, the client entry it comes from and evidence spans for both the call and the base URL it joins. The two declaration styles are Retrofit `@GET`/`@POST`/`@PUT`/`@PATCH`/`@DELETE`/`@HEAD`/`@OPTIONS`/`@HTTP` annotations on an import-proven Kotlin or Java interface, joined to the repository's one `Retrofit.Builder().baseUrl(...)` by RFC 3986 resolution; and a literal `{ method, path }` entry of a const route table, joined by string concatenation to a base URL at a binding-proven call site: a wrapper whose first parameter is the route, or a direct `fetch(base + Table.ENTRY.path)`. A base read from runtime state resolves only through a system-manifest `env` declaration of its source text, never an env file. A non-literal path, an unresolved or ambiguous base, or an undeclared runtime base stays a Gap whose reason names the entry; a joined absolute URL binds across repos only on AC-0240 evidence (#737).
 - **Security:** Uses only recovered facts and declared configuration; no live network probing.
 - **Performance:** Stitching runs once per system after ingest and scales with the number of call sites, not repos squared.
-- **Trace:** P1 (ROADMAP W2) · `events`, `ingest`, `app` · — · T-0240..0241
+- **Trace:** P1 (ROADMAP W2) · `events`, `ingest`, `app`, `adapters-lang-ts`, `adapters-lang-kotlin`, `adapters-lang-java` · — · T-0240..0241, T-0315
 
 ### US-0035 — Read lifecycle artifacts as projections with content acceptance
 - **Actor:** Engineer or reviewer

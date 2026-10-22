@@ -33,27 +33,36 @@ fn showcase_app(profile: &Path) -> tauri::App<tauri::test::MockRuntime> {
 #[test]
 #[ignore = "manual showcase run over local checkouts; no provider calls"]
 fn showcase_recover_and_export() {
-    let sources: Vec<PathBuf> = required("CARTOGRAPH_SHOWCASE_SOURCES")
-        .split(':')
-        .map(PathBuf::from)
-        .collect();
     let output = PathBuf::from(required("CARTOGRAPH_SHOWCASE_OUTPUT"));
     assert!(output.is_absolute(), "output must be absolute");
     std::fs::create_dir(&output).expect("output directory must be new");
     let app = showcase_app(&output.join("profile"));
     let state = app.state::<AppState>();
 
-    let mut summaries = Vec::new();
-    for source in &sources {
-        let registered = register_local_source(&state, source).unwrap();
-        let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
-        let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
-        let summary = run_ingest(&registered, &operation, &execution, app.handle(), &state)
-            .unwrap_or_else(|error| panic!("ingest {} failed: {error}", source.display()));
-        summaries.push(serde_json::json!({
-            "source": source, "repo": registered.repo_key, "summary": summary,
-        }));
-    }
+    // A system manifest ingests every repo it declares through the
+    // production `add_system` path, so cross-repo binding runs (#737).
+    let summaries = if let Ok(manifest) = std::env::var("CARTOGRAPH_SHOWCASE_MANIFEST") {
+        let summary = add_system_blocking(manifest.clone(), app.handle().clone())
+            .unwrap_or_else(|error| panic!("system {manifest} failed: {error}"));
+        vec![serde_json::json!({ "manifest": manifest, "summary": summary })]
+    } else {
+        let sources: Vec<PathBuf> = required("CARTOGRAPH_SHOWCASE_SOURCES")
+            .split(':')
+            .map(PathBuf::from)
+            .collect();
+        let mut summaries = Vec::new();
+        for source in &sources {
+            let registered = register_local_source(&state, source).unwrap();
+            let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+            let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+            let summary = run_ingest(&registered, &operation, &execution, app.handle(), &state)
+                .unwrap_or_else(|error| panic!("ingest {} failed: {error}", source.display()));
+            summaries.push(serde_json::json!({
+                "source": source, "repo": registered.repo_key, "summary": summary,
+            }));
+        }
+        summaries
+    };
     std::fs::write(
         output.join("ingest.json"),
         serde_json::to_vec_pretty(&summaries).unwrap(),
@@ -79,7 +88,32 @@ fn showcase_recover_and_export() {
         .unwrap();
     }
 
-    let (nodes, _) = graph.read_snapshot().unwrap();
+    let (nodes, edges) = graph.read_snapshot().unwrap();
+    // Client calls and where they landed: an endpoint, or a Gap with its reason.
+    let reasons: std::collections::BTreeMap<&str, &serde_json::Value> = nodes
+        .iter()
+        .filter(|node| node.label == "Gap")
+        .map(|node| (node.id.as_str(), &node.props["reason"]))
+        .collect();
+    let fetches: Vec<_> = edges
+        .iter()
+        .filter(|edge| edge.label == "FETCHES")
+        .map(|edge| {
+            serde_json::json!({
+                "src": edge.src,
+                "dst": edge.dst,
+                "method": edge.props["method"],
+                "entry": edge.props["join"]["entry"],
+                "binding": edge.props["binding"],
+                "reason": reasons.get(edge.dst.as_str()),
+            })
+        })
+        .collect();
+    std::fs::write(
+        output.join("fetches.json"),
+        serde_json::to_vec_pretty(&fetches).unwrap(),
+    )
+    .unwrap();
     let endpoints: Vec<_> = nodes
         .iter()
         .filter(|node| node.label == "Endpoint")

@@ -1,4 +1,5 @@
 use super::*;
+use adapters_fw::events::IdentityExpr;
 use core_graph::{Edge, Node};
 
 fn write(dir: &Path, rel: &str, content: &str) {
@@ -751,5 +752,171 @@ fn import_targets_carry_provenance_and_only_proven_externals_confirm() {
         ConfidenceTier::Gap,
         "unresolved",
         "import com.demo.legacy.JavaThing",
+    );
+}
+
+// --- Retrofit client calls (#737) ------------------------------------------
+
+const RETROFIT_API: &str = r#"package io.demo.network
+
+import retrofit2.http.GET
+import retrofit2.http.HTTP
+import retrofit2.http.POST
+import retrofit2.http.Path
+import com.other.GET as OtherGet
+
+interface ApiService {
+    @GET("api/stats")
+    suspend fun stats(): Response<Stats>
+
+    @POST(value = "api/auth/login")
+    suspend fun login(@Body body: Login): Response<Token>
+
+    @HTTP(method = "DELETE", path = "api/mailboxes/{id}", hasBody = true)
+    suspend fun deleteMailbox(@Path("id") id: Int): Response<Ok>
+
+    @GET(PREFIX + "aliases")
+    suspend fun aliases(): Response<Aliases>
+
+    @retrofit2.http.PUT("api/setting")
+    suspend fun setting(): Response<Ok>
+}
+
+class NotAnInterface {
+    @GET("api/never")
+    fun never() {}
+}
+"#;
+
+fn retrofit_sites(files: &[(&str, &str)]) -> Vec<adapters_fw::client::FetchSite> {
+    let dir = tempfile::tempdir().unwrap();
+    for (rel, content) in files {
+        write(dir.path(), rel, content);
+    }
+    extract_dir(dir.path(), &id()).unwrap().fetch_sites
+}
+
+// AC-0315: import-proven Retrofit annotations on interface methods become
+// client calls with a literal path, a dynamic path as Computed, the entry
+// name and the repo's one literal builder base joined by resolution. A
+// class method, an unproven annotation and an `@HTTP` verb all follow the
+// same proof. (T-0315)
+#[test]
+fn retrofit_interface_methods_become_joined_client_calls() {
+    let module = r#"package io.demo.network
+
+import retrofit2.Retrofit
+
+fun provide() = Retrofit.Builder()
+    .baseUrl("https://app.example.io")
+    .build()
+"#;
+    let other = r#"package io.demo.other
+
+import com.other.GET
+
+interface Unrelated {
+    @GET("api/unrelated")
+    fun unrelated()
+}
+"#;
+    let sites = retrofit_sites(&[
+        ("net/ApiService.kt", RETROFIT_API),
+        ("net/Module.kt", module),
+        ("other/Unrelated.kt", other),
+    ]);
+    let summary: Vec<_> = sites
+        .iter()
+        .map(|s| {
+            (
+                s.method.as_str(),
+                s.url.clone(),
+                s.entry.as_deref().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (
+                "GET",
+                IdentityExpr::Literal("api/stats".into()),
+                "ApiService.stats"
+            ),
+            (
+                "POST",
+                IdentityExpr::Literal("api/auth/login".into()),
+                "ApiService.login"
+            ),
+            (
+                "DELETE",
+                IdentityExpr::Literal("api/mailboxes/{id}".into()),
+                "ApiService.deleteMailbox"
+            ),
+            (
+                "GET",
+                IdentityExpr::Computed("@GET(PREFIX + \"aliases\")".into()),
+                "ApiService.aliases"
+            ),
+            (
+                "PUT",
+                IdentityExpr::Literal("api/setting".into()),
+                "ApiService.setting"
+            ),
+        ]
+    );
+    for site in &sites {
+        let base = site.base.as_ref().unwrap();
+        assert_eq!(
+            base.url,
+            IdentityExpr::Literal("https://app.example.io".into())
+        );
+        assert_eq!(base.join, adapters_fw::client::BaseJoin::Resolve);
+        assert_eq!(base.path, "net/Module.kt");
+        assert_eq!(site.path, "net/ApiService.kt");
+    }
+    assert_eq!(
+        sites[0].symbol.as_deref(),
+        Some("sym:local/demo@net/ApiService.kt#ApiService.stats")
+    );
+}
+
+// AC-0315: a non-literal builder base stays Computed with its text, and two
+// distinct bases cannot be chosen between. (T-0315)
+#[test]
+fn retrofit_bases_must_be_unique_and_keep_their_text() {
+    let builder = |url: &str| {
+        format!(
+            "package io.demo\n\nimport retrofit2.Retrofit\n\nval r = Retrofit.Builder().baseUrl({url}).build()\n"
+        )
+    };
+    let computed = retrofit_sites(&[
+        ("ApiService.kt", RETROFIT_API),
+        ("Module.kt", &builder("Constants.BASE_URL")),
+    ]);
+    assert_eq!(
+        computed[0].base.as_ref().unwrap().url,
+        IdentityExpr::Computed("Constants.BASE_URL".into())
+    );
+    let two = retrofit_sites(&[
+        ("ApiService.kt", RETROFIT_API),
+        ("A.kt", &builder("\"https://a.io\"")),
+        ("B.kt", &builder("\"https://b.io\"")),
+    ]);
+    assert_eq!(
+        two[0].base.as_ref().unwrap().url,
+        IdentityExpr::Computed("2 distinct Retrofit base URL candidates".into())
+    );
+    // An unimported `Retrofit` builder proves nothing.
+    let unproven = retrofit_sites(&[
+        ("ApiService.kt", RETROFIT_API),
+        (
+            "Module.kt",
+            "package io.demo\n\nval r = Retrofit.Builder().baseUrl(\"https://a.io\").build()\n",
+        ),
+    ]);
+    assert_eq!(
+        unproven[0].base.as_ref().unwrap().url,
+        IdentityExpr::Computed("no Retrofit base URL in repo".into())
     );
 }

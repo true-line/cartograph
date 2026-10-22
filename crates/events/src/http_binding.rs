@@ -295,19 +295,24 @@ pub fn stitch_cross_repo(
             ) else {
                 continue;
             };
+            let mut props = serde_json::json!({
+                "method": method,
+                "resolver": url_source,
+                "url": url,
+                "binding": citations,
+                "prov": provenance,
+            });
+            // A joined client call (#737) keeps its entry and join citation.
+            if let Some(join) = gap.props.get("join") {
+                props["join"] = join.clone();
+            }
             out.joined.push(JoinedFetch {
                 gap_id: gap.id.clone(),
                 edge: Edge {
                     src: gap_edge.src.clone(),
                     dst: (*endpoint).to_string(),
                     label: "FETCHES".into(),
-                    props: serde_json::json!({
-                        "method": method,
-                        "resolver": url_source,
-                        "url": url,
-                        "binding": citations,
-                        "prov": provenance,
-                    }),
+                    props,
                 },
             });
             continue;

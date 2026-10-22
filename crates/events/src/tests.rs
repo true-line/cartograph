@@ -274,7 +274,7 @@ export async function listen() {
 
 // --- FETCHES resolution (US-0005, AC-0014) ---------------------------------
 
-use adapters_fw::client::FetchSite;
+use adapters_fw::client::{BaseJoin, FetchBase, FetchSite};
 
 fn fetch_site(method: &str, url: IdentityExpr) -> FetchSite {
     FetchSite {
@@ -284,6 +284,8 @@ fn fetch_site(method: &str, url: IdentityExpr) -> FetchSite {
         path: "app.tsx".into(),
         byte_start: 10,
         byte_end: 40,
+        base: None,
+        entry: None,
     }
 }
 
@@ -1406,4 +1408,176 @@ export function lost(url: string) { return new SendMessageCommand({ QueueUrl: ur
         names(&gap.props),
         ["builtin:event-sdks.json", "extension:region.json"]
     );
+}
+
+// --- Joined client calls (#737) --------------------------------------------
+
+fn joined_site(
+    method: &str,
+    path: &str,
+    base: IdentityExpr,
+    join: BaseJoin,
+    entry: &str,
+) -> FetchSite {
+    FetchSite {
+        base: Some(FetchBase {
+            url: base,
+            join,
+            path: "api.js".into(),
+            byte_start: 7,
+        }),
+        entry: Some(entry.into()),
+        ..fetch_site(method, IdentityExpr::Literal(path.into()))
+    }
+}
+
+// AC-0315: a Retrofit path resolves against its literal base URL and binds
+// cross-repo on the declared service, citing the client entry and join.
+// (T-0315)
+#[test]
+fn retrofit_path_joins_its_base_url_and_binds_cross_repo() {
+    let site = joined_site(
+        "GET",
+        "api/stats",
+        IdentityExpr::Literal("https://app.example.io".into()),
+        BaseJoin::Resolve,
+        "ApiService.stats",
+    );
+    let (gaps, edges) = web_gaps(&[site], &ConfigIndex::default());
+    assert_eq!(
+        gaps[0].props["request"]["url"],
+        "https://app.example.io/api/stats"
+    );
+    assert_eq!(gaps[0].props["request"]["url_source"], "base:literal");
+    let out = stitch_cross_repo(
+        &gaps,
+        &edges,
+        &eps(&["ep:api@GET:/api/stats", "ep:api@POST:/api/stats"]),
+        &[service("app", "api", "https://app.example.io")],
+    );
+    let [joined] = out.joined.as_slice() else {
+        panic!("one join: {:?}", out.joined)
+    };
+    assert_eq!(joined.edge.dst, "ep:api@GET:/api/stats");
+    assert_eq!(joined.edge.props["resolver"], "base:literal");
+    assert_eq!(
+        joined.edge.props["join"],
+        serde_json::json!({"entry": "ApiService.stats", "path": "api.js", "byte_start": 7})
+    );
+}
+
+// AC-0315: a runtime base URL resolves only through a system-manifest
+// declaration of its source text; an env file defining the same text does
+// not count, and the Gap names the table entry. (T-0315)
+#[test]
+fn runtime_table_base_resolves_only_from_the_manifest() {
+    let site = || {
+        joined_site(
+            "POST",
+            "/api/auth/login",
+            IdentityExpr::Computed("SETTINGS.apiUrl".into()),
+            BaseJoin::Concat,
+            "API_ROUTE.LOGIN",
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env"),
+        "SETTINGS.apiUrl=https://env.example.io\n",
+    )
+    .unwrap();
+    let mut cfg = ConfigIndex::from_dir(dir.path()).unwrap();
+    let (gaps, _) = web_gaps(&[site()], &cfg);
+    assert_eq!(
+        gaps[0].props["reason"],
+        "runtime base URL `SETTINGS.apiUrl` of API_ROUTE.LOGIN is not declared in the system manifest"
+    );
+    assert!(gaps[0].props["request"].is_null());
+    assert_eq!(gaps[0].props["join"]["entry"], "API_ROUTE.LOGIN");
+
+    let declared = BTreeMap::from([(
+        "SETTINGS.apiUrl".to_string(),
+        "https://app.example.io".to_string(),
+    )]);
+    cfg.apply_manifest(&declared, "cartograph.system.toml");
+    let (gaps, edges) = web_gaps(&[site()], &cfg);
+    assert_eq!(
+        gaps[0].props["request"]["url"],
+        "https://app.example.io/api/auth/login"
+    );
+    assert_eq!(
+        gaps[0].props["request"]["url_source"],
+        "base:config:cartograph.system.toml"
+    );
+    let out = stitch_cross_repo(
+        &gaps,
+        &edges,
+        &eps(&["ep:api@POST:/api/auth/login"]),
+        &[service("app", "api", "https://app.example.io")],
+    );
+    assert_eq!(out.joined.len(), 1);
+    assert_eq!(out.joined[0].edge.props["join"]["entry"], "API_ROUTE.LOGIN");
+}
+
+// AC-0315: a joined call whose path is not literal stays a Gap naming the
+// entry, and a base env key that no file defines names it too. (T-0315)
+#[test]
+fn joined_calls_with_unresolved_halves_stay_named_gaps() {
+    let computed_path = FetchSite {
+        url: IdentityExpr::Computed("route()".into()),
+        ..joined_site(
+            "GET",
+            "",
+            IdentityExpr::Literal("https://app.example.io".into()),
+            BaseJoin::Resolve,
+            "ApiService.dynamic",
+        )
+    };
+    let env_base = FetchSite {
+        byte_start: 90,
+        ..joined_site(
+            "GET",
+            "/api/x",
+            IdentityExpr::EnvRef("API_URL".into()),
+            BaseJoin::Concat,
+            "API_ROUTE.X",
+        )
+    };
+    let (gaps, _) = web_gaps(&[computed_path, env_base], &ConfigIndex::default());
+    let reasons: Vec<_> = gaps
+        .iter()
+        .map(|g| g.props["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "runtime-computed path of ApiService.dynamic",
+            "env key API_URL (base URL of API_ROUTE.X) not found in any env file in the repo",
+        ]
+    );
+}
+
+// AC-0315: Flask `<int:id>` and FastAPI/Spring `{id}` route parameters match
+// one concrete segment like Express `:id`; literal segments still must agree
+// and an empty segment never fills a parameter. (T-0315)
+#[test]
+fn route_parameters_match_in_every_framework_spelling() {
+    for pattern in [
+        "/api/aliases/:id/toggle",
+        "/api/aliases/<int:id>/toggle",
+        "/api/aliases/<id>/toggle",
+        "/api/aliases/{id}/toggle",
+    ] {
+        assert!(
+            route_matches(pattern, "/api/aliases/:alias_id/toggle"),
+            "{pattern}"
+        );
+        assert!(route_matches(pattern, "/api/aliases/7/toggle"), "{pattern}");
+        assert!(!route_matches(pattern, "/api/aliases//toggle"), "{pattern}");
+        assert!(
+            !route_matches(pattern, "/api/aliases/7/contacts"),
+            "{pattern}"
+        );
+    }
+    assert!(!route_matches("/api/<>/x", "/api/a/x"));
 }

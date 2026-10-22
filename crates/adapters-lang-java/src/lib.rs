@@ -55,6 +55,10 @@ pub struct Extraction {
     pub nodes: Vec<Node>,
     /// Recovered edges.
     pub edges: Vec<Edge>,
+    /// Retrofit client calls (#737), stitched by the `events` crate.
+    pub fetch_sites: Vec<adapters_fw::client::FetchSite>,
+    /// Retrofit builder base URLs, joined to `fetch_sites` repo-wide.
+    retrofit_bases: Vec<adapters_fw::client::FetchBase>,
     pending_calls: Vec<PendingCall>,
     declared_types: Vec<DeclaredType>,
     /// Package declarations, one per file that has one.
@@ -800,6 +804,13 @@ pub fn extract_source(
         methods.push((method, symbol, chain, name));
     }
 
+    // Retrofit client calls (#737): interface methods now, base URL at the
+    // directory join.
+    out.fetch_sites
+        .extend(retrofit::sites(&cx, &methods, &imports));
+    out.retrofit_bases
+        .extend(retrofit::bases(&cx, root, &imports));
+
     // Spring Web endpoints: annotation-proven controllers, class-level
     // @RequestMapping base path, method-level @{Get,Post,...}Mapping.
     for (method, handler, chain, _) in &methods {
@@ -1261,6 +1272,8 @@ pub fn extract_dir_incremental_with_progress(
             out.pending_calls.extend(extraction.pending_calls);
             out.declared_types.extend(extraction.declared_types);
             out.packages.extend(extraction.packages);
+            out.fetch_sites.extend(extraction.fetch_sites);
+            out.retrofit_bases.extend(extraction.retrofit_bases);
             out.method_index.extend(extraction.method_index);
             out.entity_index.extend(extraction.entity_index);
             out.repository_index.extend(extraction.repository_index);
@@ -1270,6 +1283,11 @@ pub fn extract_dir_incremental_with_progress(
         },
     );
     merged?;
+    adapters_fw::client::join_repo_base(
+        &mut out.fetch_sites,
+        &out.retrofit_bases,
+        retrofit::LIBRARY,
+    );
 
     // Directory join: an imported FQN resolves only to a type this repo
     // declares exactly once — a duplicate FQN (the same class in two source
@@ -1385,6 +1403,8 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
     extract_dir_incremental(root, id, &mut IncrementalCache::default())
         .map(|(extraction, _)| extraction)
 }
+
+mod retrofit;
 
 #[cfg(test)]
 mod tests;

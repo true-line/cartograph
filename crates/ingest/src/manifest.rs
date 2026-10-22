@@ -132,7 +132,9 @@ pub struct SystemManifest {
     pub repos: Vec<ManifestRepo>,
     /// Known identities: key → value, applied to the config resolver ahead
     /// of `.env` files (author-declared, e.g. a queue URL the code reads
-    /// from an env var no checked-in file defines).
+    /// from an env var no checked-in file defines). A key may also be the
+    /// source text of a runtime base URL a client joins its paths to
+    /// (`SETTINGS.apiUrl`, #737): only this declaration resolves it.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// Declared HTTP services (#589).
