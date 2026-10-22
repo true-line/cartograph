@@ -2901,7 +2901,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mcp-local"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "mcp-wire",
  "rustix",
@@ -2914,7 +2914,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-relay"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "mcp-local",
  "mcp-wire",
@@ -2925,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-wire"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "getrandom 0.3.4",
  "serde_json",
