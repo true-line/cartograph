@@ -29,8 +29,14 @@ function baseLayers(node: GraphNode): GraphLayer[] {
       return ['infra', 'cloud'];
     case 'Channel':
       return ['events', 'cloud'];
+    case 'Gateway':
+      return ['cloud'];
     case 'Screen':
     case 'Component':
+    case 'Extension':
+    case 'ExtensionContext':
+    case 'Command':
+    case 'Permission':
       return ['client'];
     case 'Module':
     case 'File':
@@ -73,14 +79,21 @@ function edgeLayers(edge: GraphEdge): GraphLayer[] {
   }
 }
 
-/** Pure O(N+E) layer projection used before handing facts to Cytoscape. */
+/** Pure O(N+E) layer projection used before handing facts to Cytoscape.
+ *  A layer edge brings in its other endpoint only when one endpoint natively
+ *  belongs to the layer, so generic relations between unclassified facts
+ *  (rule exits, rule gaps joined by DEPENDS_ON) never surface under a layer
+ *  they are not part of (#723). */
 export function filterAtlasGraph(snapshot: AtlasSnapshot, layer: AtlasLayer): AtlasSnapshot {
   if (layer === 'all') return snapshot;
 
-  const edges = snapshot.edges.filter((edge) => edgeLayers(edge).includes(layer));
-  const visibleIds = new Set(
+  const native = new Set(
     snapshot.nodes.filter((node) => baseLayers(node).includes(layer)).map((node) => node.id),
   );
+  const edges = snapshot.edges.filter(
+    (edge) => edgeLayers(edge).includes(layer) && (native.has(edge.src) || native.has(edge.dst)),
+  );
+  const visibleIds = new Set(native);
   for (const edge of edges) {
     visibleIds.add(edge.src);
     visibleIds.add(edge.dst);
@@ -588,7 +601,11 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
 
       <div className="atlas-surface">
         {visible.nodes.length === 0 ? (
-          <p className="muted atlas-empty">No graph facts in this layer.</p>
+          <p className="muted atlas-empty">
+            {layer === 'infra'
+              ? 'No infrastructure recovered. Add infrastructure-as-code (Terraform, Pulumi), deployment config or a plugin for this stack to show what the code runs on and talks to.'
+              : 'No graph facts in this layer.'}
+          </p>
         ) : (
           <div
             ref={containerRef}
