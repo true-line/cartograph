@@ -45,7 +45,8 @@ else if(name==='cartograph_read_artifact'){
  if(fault==='artifact')data.artifact.content='x'.repeat(257);
 }
 else if(name==='cartograph_evidence'){
- if(['missing-capture','rejected-fact'].includes(fault))return error();
+ if(fault==='missing-capture')return process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result:{isError:true,structuredContent:{error:'evidence_unavailable'}}})+'\\n');
+ if(fault==='rejected-fact'||fault==='missing-capture-untyped')return error();
  if(a.basis_id!=='basis'||(a.target&&a.target.receipt_id!=='receipt')||a.max_bytes<1024)return error();
  const common={basis_id:'basis',scope:'primary_source_only',input_closure:'input_closure_not_established',target};
  data=a.mode==='describe'?{description:{...common,total_ranges:1,next_ordinal:null}}:{span:{...common,text:evidenceText}};
@@ -94,4 +95,8 @@ test('oversized stdout, stderr, invalid UTF8, unsolicited responses, EOF and tim
     const options = fixture(t, body); options['timeout-ms'] = 200;
     await assert.rejects(smoke(options));
   }
+});
+
+test('missing capture must report typed absence rather than an unrelated refusal', async (t) => {
+  await assert.rejects(smoke({ ...fixture(t, protocolRelay('missing-capture-untyped')), scenario: 'missing-capture' }));
 });

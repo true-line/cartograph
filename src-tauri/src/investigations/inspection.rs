@@ -13,21 +13,46 @@ use tauri::Manager;
 
 const REFRESH: &str =
     "Captured inspection target changed or is unavailable; refresh and select the source again.";
+/// Source-free evidence failures; absence does not establish why content is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InspectionError {
+    Stale,
+    Unavailable,
+    Invalid,
+    Operational,
+}
+impl From<crate::primary_source::PinnedReadError> for InspectionError {
+    fn from(error: crate::primary_source::PinnedReadError) -> Self {
+        use crate::primary_source::PinnedReadError;
+        match error {
+            PinnedReadError::Unavailable => Self::Unavailable,
+            PinnedReadError::Invalid => Self::Invalid,
+            PinnedReadError::Operational => Self::Operational,
+        }
+    }
+}
 fn snapshot(state: &AppState, fact: &TaskFactKey) -> Result<(String, SourceBinding), String> {
+    snapshot_typed(state, fact).map_err(|_| REFRESH.into())
+}
+fn snapshot_typed(
+    state: &AppState,
+    fact: &TaskFactKey,
+) -> Result<(String, SourceBinding), InspectionError> {
     let snapshot = state
         .graph
         .lock()
-        .map_err(|_| REFRESH)?
+        .map_err(|_| InspectionError::Operational)?
         .read_source_selection_snapshot_bounded(
             &[crate::task_evidence::graph_fact(fact)],
             SnapshotReadLimits::default(),
         )
-        .map_err(|_| REFRESH)?;
+        .map_err(|_| InspectionError::Operational)?;
     let binding = match snapshot.selections.into_iter().next().map(|s| s.state) {
         Some(FactSourceState::Present { binding, .. }) => binding,
-        _ => return Err(REFRESH.into()),
+        _ => return Err(InspectionError::Stale),
     };
-    let context = ContextSnapshot::new(snapshot.graph.0, snapshot.graph.1).map_err(|_| REFRESH)?;
+    let context = ContextSnapshot::new(snapshot.graph.0, snapshot.graph.1)
+        .map_err(|_| InspectionError::Operational)?;
     Ok((context.id().into(), binding))
 }
 pub(crate) fn graph_snapshot_for_receipt(
@@ -85,40 +110,50 @@ pub(crate) fn resolve(
     expected_receipt: &str,
     ordinal: usize,
 ) -> Result<(InvestigationInspectionTarget, RetentionGuard), String> {
+    resolve_typed(state, fact, expected_snapshot, expected_receipt, ordinal)
+        .map_err(|_| REFRESH.into())
+}
+pub(crate) fn resolve_typed(
+    state: &AppState,
+    fact: &TaskFactKey,
+    expected_snapshot: &str,
+    expected_receipt: &str,
+    ordinal: usize,
+) -> Result<(InvestigationInspectionTarget, RetentionGuard), InspectionError> {
     if ordinal >= 1024 {
-        return Err(REFRESH.into());
+        return Err(InspectionError::Stale);
     }
-    let (snapshot_id, preliminary) = snapshot(state, fact)?;
+    let (snapshot_id, preliminary) = snapshot_typed(state, fact)?;
     if snapshot_id != expected_snapshot || preliminary.receipt_id != expected_receipt {
-        return Err(REFRESH.into());
+        return Err(InspectionError::Stale);
     }
     let source = state
         .sources
         .lock()
-        .map_err(|_| REFRESH)?
+        .map_err(|_| InspectionError::Operational)?
         .get_by_repo(&preliminary.repo_key)
-        .map_err(|_| REFRESH)?
-        .ok_or(REFRESH)?;
+        .map_err(|_| InspectionError::Operational)?
+        .ok_or(InspectionError::Stale)?;
     let guard = state
         .primary_sources
         .task_guard(&source.source_id)
-        .map_err(|_| REFRESH)?;
-    let (checked_id, binding) = snapshot(state, fact)?;
+        .map_err(InspectionError::from)?;
+    let (checked_id, binding) = snapshot_typed(state, fact)?;
     if checked_id != snapshot_id || binding != preliminary {
-        return Err(REFRESH.into());
+        return Err(InspectionError::Stale);
     }
     let checked_source = state
         .sources
         .lock()
-        .map_err(|_| REFRESH)?
+        .map_err(|_| InspectionError::Operational)?
         .get_by_repo(&binding.repo_key)
-        .map_err(|_| REFRESH)?
-        .ok_or(REFRESH)?;
+        .map_err(|_| InspectionError::Operational)?
+        .ok_or(InspectionError::Stale)?;
     if checked_source.source_id != source.source_id
         || checked_source.repo_key != source.repo_key
         || checked_source.root() != source.root()
     {
-        return Err(REFRESH.into());
+        return Err(InspectionError::Stale);
     }
     let receipt = state
         .primary_sources
@@ -129,12 +164,12 @@ pub(crate) fn resolve(
             &binding.repo_key,
             &binding.receipt_id,
         )
-        .map_err(|_| REFRESH)?;
-    let target = descriptor(&receipt, &snapshot_id, ordinal)?;
+        .map_err(InspectionError::from)?;
+    let target = descriptor(&receipt, &snapshot_id, ordinal).map_err(|_| InspectionError::Stale)?;
     state
         .primary_sources
         .task_capture_present(&guard, &target.captured)
-        .map_err(|_| REFRESH)?;
+        .map_err(InspectionError::from)?;
     Ok((target, guard))
 }
 pub(crate) fn validate_targets(

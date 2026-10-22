@@ -148,6 +148,7 @@ fn real_capabilities_discovery_catalog_and_identity_bound_artifact_pages() {
     assert_eq!(data["session_id"], dispatch.session_id);
     assert_eq!(data["h3_curated_available"], false);
     assert_eq!(data["evidence_available"], false);
+    assert_eq!(data["evidence_absence_reason_available"], false);
     assert_eq!(data["structured_content_required"], true);
     assert_eq!(data["context_fact_kinds"], json!(["node", "edge"]));
     assert_eq!(data["discovery_fact_kinds"], json!(["node"]));

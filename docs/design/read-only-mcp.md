@@ -23,6 +23,21 @@ omission evidence; those counts may qualify the inventory but cannot classify
 an individual missing binding. A receipt omission is neither a
 forgotten capture nor an ordinary failed read.
 
+The current resolver preserves typed failures as `evidence_unavailable`
+(receipt/capture absent), `evidence_invalid` (retained evidence cannot be
+validated), `stale_basis` (selection/identity changed), and `storage_unavailable`
+(operational failure). Invalid does not identify the underlying cause: the
+retention layer also uses that category for its own read bounds. Explicit MCP
+admission limits still return `response_limit`. These fixed codes contain no
+source text or filesystem diagnostics; existing desktop inspection callers keep
+their original refresh message.
+
+`evidence_absence_reason_available: false` advertises a remaining acceptance gap:
+the store has no durable forget tombstone, so a missing capture cannot establish
+that a human forgot it. Distinguishing positively forgotten evidence remains
+required by AC-0288; the generic unavailable response does not satisfy it. Neither
+clients nor the skill may infer forgotten or receipt-omitted from absence.
+
 Delivery is macOS/Unix first. Acceptance must name the actual tested platform;
 a Unix result does not claim Windows support. Windows remains a separate pending
 deliverable with native security, lifecycle and packaging verification.
@@ -283,14 +298,14 @@ fact has real synthetic citation evidence and a DecisionLog rejection; identifie
 discovery returns no candidate and its evidence request fails closed.
 
 The three-scenario release-relay run passed on 2026-10-22 UTC. Retained evidence
-returned a 99-byte exact span. Measured stdout bytes were 69,020 (retained), 65,655
-(missing capture) and 10,738 (rejected fact), respectively. No stderr was emitted.
+returned a 99-byte exact span. Measured stdout bytes were 69,062 (retained), 65,715
+(missing capture) and 10,780 (rejected fact), respectively. No stderr was emitted.
 The same-fixture artifact comparison reconstructs all 10,457 content bytes in
 41 pages of at most 256 bytes and checks the identical content identity and hash
 against a full-content response. Including actual request/response LF framing and
 shared initialization, tool schemas, capabilities and catalog overhead, the
-full-content strategy used 23,884 wire bytes; complete pagination used 69,449,
-which is **45,565 bytes more**. Shared overhead was 12,000 bytes, including 5,837
+full-content strategy used 23,926 wire bytes; complete pagination used 69,491,
+which is **45,565 bytes more**. Shared overhead was 12,042 bytes, including 5,837
 bytes of tool-input schemas. This is not a savings result. A comparison for a task that needs only selected
 pages requires its own measurement. Tokens and tokenizer identity remain
 explicitly unknown.

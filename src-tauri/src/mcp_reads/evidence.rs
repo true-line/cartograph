@@ -3,6 +3,19 @@ use super::{ReadError, ReadSession};
 use agents::{TaskFactKey, investigation::InvestigationInspectionTarget};
 use serde::Serialize;
 
+fn inspection_error(error: crate::investigations::inspection::InspectionError) -> ReadError {
+    use crate::investigations::inspection::InspectionError;
+    match error {
+        InspectionError::Stale => ReadError::StaleBasis,
+        InspectionError::Unavailable => ReadError::EvidenceUnavailable,
+        InspectionError::Invalid => ReadError::EvidenceInvalid,
+        InspectionError::Operational => ReadError::Storage,
+    }
+}
+fn retained_error(error: crate::primary_source::PinnedReadError) -> ReadError {
+    inspection_error(error.into())
+}
+
 /// Per-read work admission supplied by the service, independently of framing.
 pub(crate) struct EvidenceLimits {
     pub max_file_validation_bytes: u64,
@@ -58,14 +71,14 @@ impl ReadSession {
             .current_source_binding(&crate::task_evidence::graph_fact(fact))
             .map_err(|_| ReadError::Storage)?
             .ok_or(ReadError::StaleBasis)?;
-        let (target, guard) = crate::investigations::inspection::resolve(
+        let (target, guard) = crate::investigations::inspection::resolve_typed(
             state,
             fact,
             &self.basis.recovered_graph_id,
             &binding.receipt_id,
             ordinal,
         )
-        .map_err(|_| ReadError::StaleBasis)?;
+        .map_err(inspection_error)?;
         let receipt = state
             .primary_sources
             .task_receipt(
@@ -75,7 +88,7 @@ impl ReadSession {
                 &target.source.repo,
                 &target.receipt_id,
             )
-            .map_err(|_| ReadError::Storage)?;
+            .map_err(retained_error)?;
         let total_ranges = receipt.ranges().len();
         let response = EvidenceDescription {
             basis_id,
@@ -165,14 +178,14 @@ impl ReadSession {
         {
             return Err(ReadError::Limit);
         }
-        let (actual, guard) = crate::investigations::inspection::resolve(
+        let (actual, guard) = crate::investigations::inspection::resolve_typed(
             state,
             &target.fact,
             &self.basis.recovered_graph_id,
             &target.receipt_id,
             target.receipt_inventory_index as usize,
         )
-        .map_err(|_| ReadError::StaleBasis)?;
+        .map_err(inspection_error)?;
         if actual != *target {
             return Err(ReadError::StaleBasis);
         }
@@ -185,11 +198,11 @@ impl ReadSession {
                 &target.source.repo,
                 &target.receipt_id,
             )
-            .map_err(|_| ReadError::Storage)?;
+            .map_err(retained_error)?;
         response.text = state
             .primary_sources
             .task_text(&guard, &receipt, target.receipt_inventory_index as usize)
-            .map_err(|_| ReadError::Storage)?;
+            .map_err(retained_error)?;
         // Guard remains alive through the real read. No lease or provider budget
         // is implied; the service must separately charge cumulative read work.
         if serde_json::to_vec(&response)

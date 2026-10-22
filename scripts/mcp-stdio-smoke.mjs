@@ -150,8 +150,10 @@ export async function smoke(options) {
       const evidenceArgs = { ...identity, kind: 'retained_primary_source', max_bytes: options['max-frame-bytes'] };
       if (scenarioName === 'missing-capture') {
         stage = 'missing-capture';
-        refused(await call('cartograph_evidence', { ...evidenceArgs, mode: 'describe', fact: candidate.reference, ordinal: 0 }));
-        scenario = { name: scenarioName, candidate, evidence_refused: true, comparison };
+        const unavailable = await call('cartograph_evidence', { ...evidenceArgs, mode: 'describe', fact: candidate.reference, ordinal: 0 });
+        refused(unavailable);
+        if (unavailable.result?.structuredContent?.error !== 'evidence_unavailable') throw new Error('missing capture lost its typed failure');
+        scenario = { name: scenarioName, candidate, evidence_refused: true, evidence_error: 'evidence_unavailable', comparison };
       } else {
       stage = 'evidence-description';
       const description = structured(await call('cartograph_evidence', { ...evidenceArgs, mode: 'describe', fact: candidate.reference, ordinal: 0 })).description;

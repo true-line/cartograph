@@ -2135,3 +2135,150 @@ fn mcp_retained_span_uses_session_receipt_and_refuses_changed_or_over_budget_evi
         ReadError::StaleBasis
     );
 }
+
+#[test]
+fn mcp_evidence_preserves_typed_retention_failures_and_legacy_refresh_message() {
+    // AC-0288: production typed absence/corruption/operational evidence, never a
+    // guessed reason such as forgotten, omitted, or a working-checkout fallback.
+    use crate::investigations::inspection::{InspectionError, resolve, resolve_typed};
+    use crate::mcp_reads::{ReadError, ReadSession, evidence::EvidenceLimits};
+    let temp = tempfile::tempdir().unwrap();
+    let app_data = directory(temp.path(), "private");
+    let root = directory(temp.path(), "project");
+    std::fs::write(root.join("source.ts"), ORIGINAL).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    let rule = rule_node(&parsed);
+    publish(&state, &source, &parsed);
+    drop(parsed);
+    let fact = agents::TaskFactKey::Node { id: rule.id };
+    let session = ReadSession::acquire(
+        &state.graph,
+        &state.decisions,
+        || {
+            Ok(vec![context_hub::coverage::ScopedRepo {
+                repo_key: source.repo_key.clone(),
+                registered_source_id: Some(source.source_id.clone()),
+                config_hash: "fixture".into(),
+                layer_hints: None,
+            }])
+        },
+        core_graph::SnapshotReadLimits::default(),
+        core_graph::coverage::CoverageReadLimits::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap();
+    let basis = session.basis_id().unwrap();
+    let target = session
+        .describe_evidence(&state, &basis, &fact, 0, 65536)
+        .unwrap()
+        .target;
+    let limits = || EvidenceLimits {
+        max_file_validation_bytes: ORIGINAL.len() as u64,
+        max_span_bytes: 8192,
+        max_response_bytes: 65536,
+    };
+    let typed = || {
+        resolve_typed(
+            &state,
+            &fact,
+            &target.graph_snapshot_id,
+            &target.receipt_id,
+            0,
+        )
+    };
+    let legacy = || {
+        resolve(
+            &state,
+            &fact,
+            &target.graph_snapshot_id,
+            &target.receipt_id,
+            0,
+        )
+    };
+    let refresh = resolve(&state, &fact, "wrong-snapshot", &target.receipt_id, 0)
+        .err()
+        .unwrap();
+    assert_eq!(
+        refresh,
+        "Captured inspection target changed or is unavailable; refresh and select the source again."
+    );
+    assert_eq!(
+        resolve_typed(&state, &fact, "wrong-snapshot", &target.receipt_id, 0)
+            .err()
+            .unwrap(),
+        InspectionError::Stale
+    );
+    let receipts =
+        rusqlite::Connection::open(app_data.join("retained-source/receipts.sqlite")).unwrap();
+    let original: String = receipts
+        .query_row(
+            "SELECT payload FROM receipts WHERE id=?1",
+            [&target.receipt_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    receipts
+        .execute(
+            "UPDATE receipts SET payload=?1 WHERE id=?2",
+            rusqlite::params!["corrupt-receipt-canary", target.receipt_id],
+        )
+        .unwrap();
+    assert_eq!(typed().err().unwrap(), InspectionError::Invalid);
+    assert_eq!(legacy().err().unwrap(), refresh);
+    assert_eq!(
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::EvidenceInvalid
+    );
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, limits())
+            .unwrap_err(),
+        ReadError::EvidenceInvalid
+    );
+    assert_eq!(ReadError::EvidenceInvalid.to_string(), "evidence_invalid");
+    receipts
+        .execute(
+            "UPDATE receipts SET payload=?1 WHERE id=?2",
+            rusqlite::params![original, target.receipt_id],
+        )
+        .unwrap();
+    let preview = primary_source::preview(&state, &source.source_id).unwrap();
+    primary_source::forget(&state, &source.source_id, &preview.fingerprint).unwrap();
+    assert_eq!(typed().err().unwrap(), InspectionError::Unavailable);
+    assert_eq!(legacy().err().unwrap(), refresh);
+    assert_eq!(
+        session
+            .describe_evidence(&state, &basis, &fact, 0, 65536)
+            .unwrap_err(),
+        ReadError::EvidenceUnavailable
+    );
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, limits())
+            .unwrap_err(),
+        ReadError::EvidenceUnavailable
+    );
+    assert_eq!(
+        ReadError::EvidenceUnavailable.to_string(),
+        "evidence_unavailable"
+    );
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _graph = state.graph.lock().unwrap();
+            panic!("fixture poisons graph lock");
+        }))
+        .is_err()
+    );
+    assert_eq!(typed().err().unwrap(), InspectionError::Operational);
+    assert_eq!(legacy().err().unwrap(), refresh);
+    assert_eq!(
+        session
+            .read_evidence(&state, &basis, &target, limits())
+            .unwrap_err(),
+        ReadError::Storage
+    );
+}
