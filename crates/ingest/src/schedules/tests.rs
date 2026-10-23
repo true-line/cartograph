@@ -681,7 +681,8 @@ spec:
 // `__main__` block. When the option, the parsed-args binding and a unique
 // literal comparison prove the branch, and its body makes one bare call to
 // a module-level function the adapter emitted, ENTRY enters that function
-// and cites the branch; anything less keeps the file. (AC-0334, T-0334)
+// (InferredStrong, a static reading) and cites the branch; anything less
+// keeps the file and names why. (AC-0334, T-0334)
 #[test]
 fn argument_dispatch_enters_the_selected_function() {
     let cron = r#"import argparse
@@ -752,6 +753,8 @@ if __name__ == "__main__":
     let out = extract_with(&[("cron.py", cron), ("cron.yaml", &yacron)], &symbols);
     let stats = entry(&out, 0, "cron.yaml");
     assert_eq!(stats.dst, format!("sym:{REPO}@cron.py#stats"));
+    assert_eq!(confidence(stats), "InferredStrong");
+    assert_eq!(stats.props["entry_argument_dispatch"], true);
     assert_eq!(
         stats.props["dispatch"],
         serde_json::json!({"option": "-j", "value": "stats", "function": "stats", "file": "cron.py"})
@@ -772,22 +775,49 @@ if __name__ == "__main__":
         let edge = entry(&out, index, "cron.yaml");
         assert_eq!(edge.dst, format!("file:{REPO}@cron.py"), "{job}");
         assert!(edge.props.get("dispatch").is_none(), "{job}");
+        let reason = if job.contains("--job notify") {
+            dispatch::AMBIGUOUS
+        } else {
+            dispatch::UNPROVEN
+        };
+        assert_eq!(edge.props["dispatch_unresolved"], reason, "{job}");
     }
 
-    // A function the adapter did not emit keeps the file; so does a script
-    // without the `__main__` guard.
+    // A function the adapter did not emit keeps the file, and so does a
+    // script without the `__main__` guard; each names why.
     let out = extract_with(
         &[("cron.py", cron), ("cron.yaml", &yacron)],
         &BTreeSet::new(),
     );
+    let unemitted = entry(&out, 0, "cron.yaml");
+    assert_eq!(unemitted.dst, format!("file:{REPO}@cron.py"));
     assert_eq!(
-        entry(&out, 0, "cron.yaml").dst,
-        format!("file:{REPO}@cron.py")
+        unemitted.props["dispatch_unresolved"],
+        "dispatched function not emitted by the Python adapter"
     );
     let unguarded = cron.replace("if __name__ == \"__main__\":", "if True:");
     let out = extract_with(&[("cron.py", &unguarded), ("cron.yaml", &yacron)], &symbols);
-    assert_eq!(
-        entry(&out, 0, "cron.yaml").dst,
-        format!("file:{REPO}@cron.py")
+    let unguarded = entry(&out, 0, "cron.yaml");
+    assert_eq!(unguarded.dst, format!("file:{REPO}@cron.py"));
+    assert_eq!(unguarded.props["dispatch_unresolved"], dispatch::UNPROVEN);
+    // Behind a Dockerfile the file entry is Confirmed; the dispatch onto a
+    // function stays a static reading.
+    let docked = "jobs:\n  - name: D\n    command: python /code/cron.py -j stats\n    schedule: \"0 0 * * *\"\n  - name: F\n    command: python /code/cron.py\n    schedule: \"0 0 * * *\"\n";
+    let out = extract_with(
+        &[
+            ("Dockerfile", DOCKERFILE),
+            ("cron.py", cron),
+            ("cron.yaml", docked),
+        ],
+        &symbols,
     );
+    assert_eq!(confidence(entry(&out, 0, "cron.yaml")), "InferredStrong");
+    assert_eq!(confidence(entry(&out, 1, "cron.yaml")), "Confirmed");
+    // A command passing no option makes no dispatch claim at all.
+    let plain = "jobs:\n  - name: P\n    command: python cron.py\n    schedule: \"0 0 * * *\"\n";
+    let out = extract_with(&[("cron.py", cron), ("cron.yaml", plain)], &symbols);
+    let plain = entry(&out, 0, "cron.yaml");
+    assert_eq!(plain.dst, format!("file:{REPO}@cron.py"));
+    assert!(plain.props.get("dispatch_unresolved").is_none());
+    assert!(plain.props.get("entry_argument_dispatch").is_none());
 }

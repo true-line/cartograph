@@ -12,7 +12,8 @@
 //! - that branch's body makes exactly one bare call to a function the file
 //!   defines at module level.
 //!
-//! Anything else proves no dispatch, and the entry stays the file.
+//! Anything else proves no dispatch: the entry stays the file, and the
+//! `ENTRY` names why (`dispatch_unresolved`).
 
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -29,10 +30,23 @@ pub(super) struct Dispatch {
     pub span: (u64, u64),
 }
 
-/// The dispatch the arguments after the script select in `source`, if
-/// proven.
-pub(super) fn dispatch(source: &str, args: &[&str]) -> Option<Dispatch> {
-    let (option, value) = selected(args)?;
+/// Why a command's options select no proven function.
+pub(super) const UNPROVEN: &str = "argument dispatch not proven in __main__";
+/// Several options, or one without a value, select no single branch.
+pub(super) const AMBIGUOUS: &str = "schedule command passes several options or a valueless one";
+
+/// The dispatch the arguments after the script select in `source`: `None`
+/// when they pass no option, otherwise the dispatch or why it is unproven.
+pub(super) fn dispatch(source: &str, args: &[&str]) -> Option<Result<Dispatch, &'static str>> {
+    let (option, value) = match selected(args) {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return None,
+        Err(reason) => return Some(Err(reason)),
+    };
+    Some(proven(source, option, value).ok_or(UNPROVEN))
+}
+
+fn proven(source: &str, option: String, value: String) -> Option<Dispatch> {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_python::LANGUAGE.into())
@@ -150,8 +164,9 @@ pub(super) fn dispatch(source: &str, args: &[&str]) -> Option<Dispatch> {
 }
 
 /// The option and value the command passes: `-j v`, `--job v` or
-/// `--job=v`. Several options are ambiguous.
-fn selected(args: &[&str]) -> Option<(String, String)> {
+/// `--job=v`; `None` when it passes no option. Several options, or one
+/// without a value, are ambiguous.
+fn selected(args: &[&str]) -> Result<Option<(String, String)>, &'static str> {
     let mut found = None;
     let mut words = args.iter();
     while let Some(word) = words.next() {
@@ -162,13 +177,13 @@ fn selected(args: &[&str]) -> Option<(String, String)> {
             Some((option, value)) if word.starts_with("--") => {
                 (option.to_string(), value.to_string())
             }
-            _ => (word.to_string(), words.next()?.to_string()),
+            _ => (word.to_string(), words.next().ok_or(AMBIGUOUS)?.to_string()),
         };
         if pair.1.is_empty() || pair.1.starts_with('-') || found.replace(pair).is_some() {
-            return None;
+            return Err(AMBIGUOUS);
         }
     }
-    found
+    Ok(found)
 }
 
 /// A node's named children.

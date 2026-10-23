@@ -83,6 +83,10 @@ struct Job {
     format: &'static str,
 }
 
+/// A scheduled entry's argument dispatch: the selected function, or why
+/// its options select none.
+type Dispatched = Result<dispatch::Dispatch, &'static str>;
+
 /// How a job's entry resolved.
 #[derive(Debug, Clone, PartialEq)]
 enum Entry {
@@ -118,18 +122,27 @@ pub fn extract_dir(
     let mut out = ScheduleExtraction::default();
     let mut emitted_files = BTreeSet::new();
     let mut sources: BTreeMap<String, Option<String>> = BTreeMap::new();
-    let mut dispatch_of = |rel: &str, command: &str| -> Option<dispatch::Dispatch> {
+    let mut dispatch_of = |rel: &str, command: &str| -> Option<Dispatched> {
         if !rel.ends_with(".py") {
             return None;
         }
+        let args = script_args(command)?;
         let source = sources
             .entry(rel.to_string())
             .or_insert_with(|| std::fs::read_to_string(root.join(rel)).ok())
-            .as_deref()?;
-        let found = dispatch::dispatch(source, &script_args(command)?)?;
-        symbols
-            .contains(&format!("sym:{}@{rel}#{}", id.repo, found.function))
-            .then_some(found)
+            .as_deref();
+        let Some(source) = source else {
+            return args
+                .iter()
+                .any(|arg| arg.starts_with('-'))
+                .then_some(Err(dispatch::UNPROVEN));
+        };
+        Some(dispatch::dispatch(source, &args)?.and_then(|found| {
+            symbols
+                .contains(&format!("sym:{}@{rel}#{}", id.repo, found.function))
+                .then_some(found)
+                .ok_or("dispatched function not emitted by the Python adapter")
+        }))
     };
     for file in &walked {
         let jobs = if file.name.ends_with(".yml") || file.name.ends_with(".yaml") {
@@ -179,7 +192,7 @@ fn emit(
     job: &Job,
     files: &BTreeSet<String>,
     container: Option<&ContainerRoot>,
-    dispatch_of: &mut dyn FnMut(&str, &str) -> Option<dispatch::Dispatch>,
+    dispatch_of: &mut dyn FnMut(&str, &str) -> Option<Dispatched>,
     emitted_files: &mut BTreeSet<String>,
     out: &mut ScheduleExtraction,
 ) {
@@ -259,28 +272,39 @@ fn emit(
                     ),
                 });
             }
-            // A proven argument dispatch enters the selected function.
+            // A proven argument dispatch enters the selected function, as a
+            // static reading of the branch (InferredStrong); an unproven one
+            // keeps the file and names why.
             let dispatched = job
                 .command
                 .as_deref()
                 .and_then(|command| dispatch_of(&entry_rel, command));
             let dst = match &dispatched {
-                Some(found) => {
+                Some(Ok(found)) => {
                     spans.push(evidence(&entry_rel, found.span));
                     format!("sym:{}@{entry_rel}#{}", id.repo, found.function)
                 }
-                None => file_id,
+                _ => file_id,
             };
             let identity = format!("{schedule_id} ENTRY {dst}");
             let mut props = serde_json::json!({ "command": job.command });
-            if let Some(found) = dispatched {
-                props["dispatch"] = serde_json::json!({
-                    "option": found.option,
-                    "value": found.value,
-                    "function": found.function,
-                    "file": entry_rel,
-                });
-            }
+            let confidence = match dispatched {
+                Some(Ok(found)) => {
+                    props["dispatch"] = serde_json::json!({
+                        "option": found.option,
+                        "value": found.value,
+                        "function": found.function,
+                        "file": entry_rel,
+                    });
+                    props["entry_argument_dispatch"] = true.into();
+                    ConfidenceTier::InferredStrong
+                }
+                Some(Err(reason)) => {
+                    props["dispatch_unresolved"] = reason.into();
+                    confidence
+                }
+                None => confidence,
+            };
             if let Some(marker) = marker {
                 props[marker] = true.into();
             }
