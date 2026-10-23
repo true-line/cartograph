@@ -5863,6 +5863,8 @@ fn main() {
             read_evidence,
             primary_source::describe_captured_source,
             mcp_reads::commands::mcp_reads_status,
+            mcp_reads::commands::mcp_task_client_create,
+            mcp_reads::commands::mcp_task_clients,
             mcp_reads::commands::mcp_reads_enable,
             mcp_reads::commands::mcp_reads_disable,
             mcp_reads::commands::mcp_reads_client_configuration,

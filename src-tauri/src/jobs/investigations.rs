@@ -30,6 +30,8 @@ mod coverage;
 #[cfg(test)]
 #[path = "investigations/coverage_tests.rs"]
 mod coverage_tests;
+#[path = "investigations/mcp_clients.rs"]
+mod mcp_clients;
 #[cfg(test)]
 #[path = "investigations/metadata_host_fixture.rs"]
 pub(crate) mod metadata_host_fixture;
