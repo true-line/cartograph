@@ -77,12 +77,21 @@ ec2 = boto3.client("ec2")
 "#,
         ),
         (
+            "app/sibling.py",
+            "import redis\nredis.Redis.timeout = 3\nredis.Redis.from_url(\"redis://cache.internal\")\n",
+        ),
+        (
             "app/order.py",
-            "def early():\n    import smtplib\n\nimport smtplib\nsmtplib.SMTP(\"mail.internal\")\n",
+            "def early():\n    import smtplib\n\nimport smtplib\nsmtplib.SMTP_PORT = 25\nsmtplib.SMTP(\"mail.internal\")\n",
         ),
     ]);
-    // A local import of the same module, before or after, keeps the proof.
+    // A local import of the same module, before or after, keeps the proof;
+    // so does a write to a sibling member.
     assert_eq!(uses(&edges, "order.py"), vec![res("smtp:mail.internal")]);
+    assert_eq!(
+        uses(&edges, "sibling.py"),
+        vec![res("redis:redis://cache.internal")]
+    );
     assert_eq!(
         uses(&edges, "infra.py"),
         vec![
@@ -176,6 +185,26 @@ fn rebound_or_local_imports_prove_nothing() {
         (
             "p_dotted.py",
             "import redis\nredis.Redis = object\nredis.Redis.from_url(\"redis://h\")\n",
+        ),
+        (
+            "q_nested.py",
+            "import redis\nredis.Redis.from_url = object\nredis.Redis.from_url(\"redis://h\")\n",
+        ),
+        (
+            "r_setattr_nested.py",
+            "import redis\nsetattr(redis.Redis, \"from_url\", object)\nredis.Redis.from_url(\"redis://h\")\n",
+        ),
+        (
+            "s_del.py",
+            "import boto3\ndel boto3.client\nboto3.client(\"s3\")\n",
+        ),
+        (
+            "t_tuple.py",
+            "import smtplib\nsmtplib.SMTP, x = object, 1\nsmtplib.SMTP(\"m\")\n",
+        ),
+        (
+            "u_beneath.py",
+            "import redis\nredis.Redis.from_url.cache = {}\nredis.Redis.from_url(\"redis://h\")\n",
         ),
         (
             "l_global.py",

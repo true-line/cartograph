@@ -39,6 +39,8 @@ enum Bound {
     Symbol(String, String),
 }
 
+type MemberPath = Vec<Option<String>>;
+
 /// Names a file binds: what each import binds a name to, and how often
 /// anything else writes it.
 struct Scope {
@@ -50,9 +52,10 @@ struct Scope {
     /// Module-level `name = <expr>` assignments (the value's span),
     /// followed one step.
     assigned: HashMap<String, (usize, usize)>,
-    /// Members written on a name (`boto3.client = …`, `ns["k"] = …`);
-    /// `None` = any member (`setattr(ns, …)`, a computed key).
-    members: HashMap<String, HashSet<Option<String>>>,
+    /// Member paths written under a name (`boto3.client = …`,
+    /// `redis.Redis.from_url = …`, `ns["k"] = …`); a `None` segment is
+    /// any member (`setattr(ns, …)`, a computed key).
+    members: HashMap<String, HashSet<MemberPath>>,
 }
 
 impl Scope {
@@ -68,44 +71,58 @@ impl Scope {
         }
     }
 
-    /// Whether the file writes `member` (or any member) of `name`.
-    fn overwritten(&self, name: &str, member: &str) -> bool {
+    /// Whether the file writes the member path a call reads under `name`,
+    /// an ancestor of it, or anything beneath it.
+    fn overwritten(&self, name: &str, read: &[String]) -> bool {
         self.members.get(name).is_some_and(|written| {
-            written.contains(&None) || written.contains(&Some(member.into()))
+            written.iter().any(|path| {
+                path.iter()
+                    .zip(read)
+                    .all(|(segment, read)| segment.as_ref().is_none_or(|s| s == read))
+            })
         })
     }
 }
 
-/// Record every `N.m` or `N[k]` a write target reaches. Deeper members
-/// (`boto3.session.x`) write something else and are not recorded.
-fn member_writes(cx: &FileCx, target: TsNode, out: &mut HashMap<String, HashSet<Option<String>>>) {
-    match target.kind() {
-        "attribute" => {
-            if let (Some(object), Some(attribute)) = (
-                target.child_by_field_name("object"),
-                target.child_by_field_name("attribute"),
-            ) && object.kind() == "identifier"
-            {
-                out.entry(cx.text(&object).to_string())
-                    .or_default()
-                    .insert(Some(cx.text(&attribute).to_string()));
+/// The root name and member path of `N.a["k"].b`; `None` when the chain
+/// does not start at a name.
+fn member_path(cx: &FileCx, mut node: TsNode) -> Option<(String, MemberPath)> {
+    let mut path = Vec::new();
+    loop {
+        match node.kind() {
+            "identifier" => {
+                path.reverse();
+                return Some((cx.text(&node).to_string(), path));
             }
-        }
-        "subscript" => {
-            if let Some(value) = target.child_by_field_name("value")
-                && value.kind() == "identifier"
-            {
-                let mut walk = target.walk();
-                let keys: Vec<_> = target
+            "attribute" => {
+                path.push(Some(
+                    cx.text(&node.child_by_field_name("attribute")?).to_string(),
+                ));
+                node = node.child_by_field_name("object")?;
+            }
+            "subscript" => {
+                let mut walk = node.walk();
+                let keys: Vec<_> = node
                     .children_by_field_name("subscript", &mut walk)
                     .collect();
-                let key = match keys.as_slice() {
+                path.push(match keys.as_slice() {
                     [key] => literal_string(cx, *key),
                     _ => None,
-                };
-                out.entry(cx.text(&value).to_string())
-                    .or_default()
-                    .insert(key);
+                });
+                node = node.child_by_field_name("value")?;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Record every member path a write target (or each target of a tuple,
+/// list or `del`) reaches.
+fn member_writes(cx: &FileCx, target: TsNode, out: &mut HashMap<String, HashSet<MemberPath>>) {
+    match target.kind() {
+        "attribute" | "subscript" => {
+            if let Some((name, path)) = member_path(cx, target) {
+                out.entry(name).or_default().insert(path);
             }
         }
         _ => {
@@ -277,20 +294,17 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
                 node.child_by_field_name("left")
             }
             "delete_statement" => Some(node),
-            // `setattr(ns, …)` / `delattr(ns, …)` may write any member.
+            // `setattr(x, …)` / `delattr(x, …)` may write any member of `x`:
+            // a write at `x` overlaps every path beneath it.
             "call" => {
                 if let Some(callee) = node.child_by_field_name("function")
                     && matches!(cx.text(&callee), "setattr" | "delattr")
                     && let Some(object) = node
                         .child_by_field_name("arguments")
                         .and_then(|args| positional(args).first().copied())
-                    && object.kind() == "identifier"
+                    && let Some((name, path)) = member_path(cx, object)
                 {
-                    scope
-                        .members
-                        .entry(cx.text(&object).to_string())
-                        .or_default()
-                        .insert(None);
+                    scope.members.entry(name).or_default().insert(path);
                 }
                 None
             }
@@ -348,9 +362,10 @@ fn callee_export(cx: &FileCx, callee: TsNode, scope: &Scope) -> Option<(String, 
                 );
                 object = object.child_by_field_name("object")?;
             }
-            // A write of the member this call reads voids it.
-            let first = path.last().unwrap_or(&attribute);
-            if object.kind() != "identifier" || scope.overwritten(cx.text(&object), first) {
+            // A write of the member path this call reads, an ancestor of
+            // it or anything beneath it voids it.
+            let read: Vec<String> = path.iter().rev().chain([&attribute]).cloned().collect();
+            if object.kind() != "identifier" || scope.overwritten(cx.text(&object), &read) {
                 return None;
             }
             let mut module = match scope.proven(cx.text(&object))? {
