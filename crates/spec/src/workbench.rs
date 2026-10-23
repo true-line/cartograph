@@ -23,6 +23,7 @@ pub use selected::{
     compile_spec_selected_with_security, project_recovered_facts,
 };
 use serde::{Deserialize, Serialize};
+use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// R-INT-5 projection used by every official artifact.
@@ -258,26 +259,28 @@ pub(crate) fn identified_artifact(
     artifact
 }
 
-pub(crate) fn filter_nodes<'a>(
-    nodes: &'a [Node],
+pub(crate) fn filter_nodes<'a, T: Borrow<Node>>(
+    nodes: &'a [T],
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
 ) -> Vec<&'a Node> {
     let mut selected: Vec<&Node> = nodes
         .iter()
+        .map(Borrow::borrow)
         .filter(|node| included(&provenance(&node.props, &node.id), mode, rejected_hashes))
         .collect();
     selected.sort_by(|left, right| left.id.cmp(&right.id));
     selected
 }
 
-pub(crate) fn filter_edges<'a>(
-    edges: &'a [Edge],
+pub(crate) fn filter_edges<'a, T: Borrow<Edge>>(
+    edges: &'a [T],
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
 ) -> Vec<&'a Edge> {
     let mut selected: Vec<&Edge> = edges
         .iter()
+        .map(Borrow::borrow)
         .filter(|edge| {
             included(
                 &provenance(&edge.props, &edge_identity(edge)),
@@ -610,6 +613,48 @@ mod tests {
             gap_reason: (confidence == ConfidenceTier::Gap).then(|| "computed identity".into()),
             attempted_tiers: vec![],
         }
+    }
+
+    // AC-0258 (T-0258): a projection borrows every selected graph fact and
+    // owns only what it derives, so an export never clones the graph (#725).
+    #[test]
+    fn projection_borrows_graph_facts_and_owns_only_derived_ones() {
+        let (mut nodes, edges, flows) = fixture();
+        // An explicitly public endpoint derives an owned security finding.
+        let mut public = node(
+            "ep:public",
+            "Endpoint",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        public.props["authenticated"] = false.into();
+        nodes.push(public);
+        let projection = selected::project(
+            &nodes,
+            &edges,
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+            None,
+        )
+        .unwrap();
+        let input: BTreeSet<_> = nodes.iter().map(|node| node.id.as_str()).collect();
+        assert!(projection.nodes.iter().any(|n| matches!(n, Cow::Owned(_))));
+        for node in &projection.nodes {
+            assert_eq!(
+                matches!(node, Cow::Borrowed(_)),
+                input.contains(node.id.as_str()),
+                "{}",
+                node.id
+            );
+        }
+        assert!(
+            projection
+                .edges
+                .iter()
+                .filter(|edge| edges.contains(edge))
+                .all(|edge| matches!(edge, Cow::Borrowed(_)))
+        );
     }
 
     // AC-0258 (T-0258): selected construction and ordinary compatibility.

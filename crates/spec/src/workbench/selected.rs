@@ -212,19 +212,21 @@ pub fn project_recovered_facts<'a>(
     (selected_nodes, selected_edges)
 }
 
-pub(crate) struct Projection {
-    pub(crate) nodes: Vec<Node>,
-    pub(crate) edges: Vec<Edge>,
+/// Selected graph facts stay borrowed; only derived ADR, drift and security
+/// facts are owned, so a projection never clones the graph (#725).
+pub(crate) struct Projection<'a> {
+    pub(crate) nodes: Vec<Cow<'a, Node>>,
+    pub(crate) edges: Vec<Cow<'a, Edge>>,
     pub(crate) flows: Vec<Flow>,
 }
-pub(crate) fn project(
-    nodes: &[Node],
-    edges: &[Edge],
+pub(crate) fn project<'a>(
+    nodes: &'a [Node],
+    edges: &'a [Edge],
     flows: &[Flow],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
     adr: Option<crate::AdrLimits>,
-) -> Result<Projection, crate::AdrLimitExceeded> {
+) -> Result<Projection<'a>, crate::AdrLimitExceeded> {
     project_with_security(nodes, edges, flows, mode, rejected, adr, None).map_err(|limit| {
         match limit {
             SelectedArtifactLimit::AdrDerivation(limit) => limit,
@@ -232,35 +234,28 @@ pub(crate) fn project(
         }
     })
 }
-fn project_with_security(
-    nodes: &[Node],
-    edges: &[Edge],
+fn project_with_security<'a>(
+    nodes: &'a [Node],
+    edges: &'a [Edge],
     flows: &[Flow],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
     adr: Option<crate::AdrLimits>,
     security: Option<crate::SecurityLimits>,
-) -> Result<Projection, SelectedArtifactLimit> {
-    let (selected_nodes, selected_edges) = project_recovered_facts(nodes, edges, mode, rejected);
-    let base_nodes: Vec<_> = selected_nodes.into_iter().cloned().collect();
-    let base_edges: Vec<_> = selected_edges.into_iter().cloned().collect();
+) -> Result<Projection<'a>, SelectedArtifactLimit> {
+    let (base_nodes, base_edges) = project_recovered_facts(nodes, edges, mode, rejected);
     let flows = project_flows(flows, mode, rejected);
-    let derived = if let Some(limits) = adr {
-        crate::derive_adr_facts_bounded(&base_nodes, &base_edges, &flows, limits)
-            .map_err(SelectedArtifactLimit::AdrDerivation)?
-    } else {
-        crate::derive_adr_facts(&base_nodes, &base_edges, &flows)
-    };
+    let derived = crate::adr::derive_inner(&base_nodes, &base_edges, &flows, adr)
+        .map_err(SelectedArtifactLimit::AdrDerivation)?;
     let security = match security {
-        Some(limits) => crate::derive_security_findings_bounded(&base_nodes, &base_edges, limits)
+        Some(limits) => crate::security::derive_bounded(&base_nodes, &base_edges, limits)
             .map_err(SelectedArtifactLimit::SecurityDerivation)?,
         None => crate::security::derive_security_findings(&base_nodes, &base_edges),
     };
-    let mut nodes = base_nodes;
-    nodes.extend(derived.nodes);
-    nodes.extend(security);
-    let mut edges = base_edges;
-    edges.extend(derived.edges);
+    let mut nodes: Vec<_> = base_nodes.into_iter().map(Cow::Borrowed).collect();
+    nodes.extend(derived.nodes.into_iter().chain(security).map(Cow::Owned));
+    let mut edges: Vec<_> = base_edges.into_iter().map(Cow::Borrowed).collect();
+    edges.extend(derived.edges.into_iter().map(Cow::Owned));
     Ok(Projection {
         nodes,
         edges,

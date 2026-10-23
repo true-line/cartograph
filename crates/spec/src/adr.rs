@@ -287,8 +287,8 @@ fn combined_evidence<'a>(
 }
 
 fn recovered_adrs(
-    nodes: &[Node],
-    edges: &[Edge],
+    nodes: &[&Node],
+    edges: &[&Edge],
     budget: &mut Budget,
 ) -> Result<AdrFacts, AdrLimitExceeded> {
     let governed: BTreeSet<&str> = edges
@@ -303,27 +303,21 @@ fn recovered_adrs(
         })
         .map(|edge| edge.dst.as_str())
         .collect();
-    // Typed source provenance is copied once, linearly in the separately admitted
-    // graph; it is never repeatedly cloned for channel or ADR crossproducts.
-    let edge_provenances: Vec<_> = edges
-        .iter()
-        .map(|edge| typed_provenance(&edge.props))
-        .collect();
     let mut facts = AdrFacts::default();
     for channel in nodes.iter().filter(|node| node.label == "Channel") {
         if governed.contains(channel.id.as_str()) {
             continue;
         }
+        // Typed provenance is parsed only for edges into this channel; an
+        // edge has one target, so each is parsed at most once (#725).
         let related: Vec<_> = edges
             .iter()
-            .zip(&edge_provenances)
-            .filter(|(edge, _)| {
+            .filter(|edge| {
                 edge.dst == channel.id
                     && matches!(edge.label.as_str(), "PUBLISHES" | "SUBSCRIBES" | "BACKS")
             })
-            .filter_map(|(edge, provenance)| {
-                provenance
-                    .as_ref()
+            .filter_map(|edge| {
+                typed_provenance(&edge.props)
                     .filter(|p| p.confidence_tier != ConfidenceTier::Gap)
                     .map(|p| (edge, p))
             })
@@ -351,7 +345,7 @@ fn recovered_adrs(
         let cited = combined_evidence(
             related
                 .iter()
-                .map(|(_, p)| *p)
+                .map(|(_, p)| p)
                 .chain(channel_provenance.iter()),
             budget,
         )?;
@@ -413,25 +407,18 @@ fn recovered_adrs(
 }
 
 fn drift_facts(
-    nodes: &[Node],
-    edges: &[Edge],
+    nodes: &[&Node],
+    edges: &[&Edge],
     flows: &[Flow],
     budget: &mut Budget,
 ) -> Result<AdrFacts, AdrLimitExceeded> {
-    let by_id: BTreeMap<&str, &Node> = nodes.iter().map(|node| (node.id.as_str(), node)).collect();
-    let node_provenances: Vec<_> = nodes
-        .iter()
-        .map(|node| typed_provenance(&node.props))
-        .collect();
-    let edge_provenances: Vec<_> = edges
-        .iter()
-        .map(|edge| typed_provenance(&edge.props))
-        .collect();
+    let by_id: BTreeMap<&str, &Node> = nodes.iter().map(|node| (node.id.as_str(), *node)).collect();
     let mut facts = AdrFacts::default();
-    for (adr, adr_provenance) in nodes
+    // Typed provenance is parsed only for found ADRs and the edges they
+    // forbid, not for the whole graph (#725).
+    for adr in nodes
         .iter()
-        .zip(&node_provenances)
-        .filter(|(node, _)| node.label == "ADR" && node.props["origin"].as_str() == Some("found"))
+        .filter(|node| node.label == "ADR" && node.props["origin"].as_str() == Some("found"))
     {
         let forbidden: BTreeSet<_> = adr.props["forbids"]
             .as_array()
@@ -442,15 +429,17 @@ fn drift_facts(
         if forbidden.is_empty() {
             continue;
         }
+        let adr_provenance = typed_provenance(&adr.props);
         let governed: BTreeSet<_> = edges
             .iter()
             .filter(|edge| edge.label == "DECIDES" && edge.src == adr.id)
             .map(|edge| edge.dst.as_str())
             .collect();
-        for (edge, edge_provenance) in edges.iter().zip(&edge_provenances).filter(|(edge, _)| {
+        for edge in edges.iter().filter(|edge| {
             forbidden.contains(edge.label.as_str())
                 && (governed.contains(edge.src.as_str()) || governed.contains(edge.dst.as_str()))
         }) {
+            let edge_provenance = typed_provenance(&edge.props);
             let Some(edge_provenance) = edge_provenance
                 .as_ref()
                 .filter(|p| p.confidence_tier != ConfidenceTier::Gap)
@@ -546,19 +535,21 @@ fn drift_facts(
     Ok(facts)
 }
 
-fn derive_inner(
-    nodes: &[Node],
-    edges: &[Edge],
+/// ADR facts over borrowed graph facts, so a caller holding a projection of
+/// references never clones the graph to derive them (#725).
+pub(crate) fn derive_inner(
+    nodes: &[&Node],
+    edges: &[&Edge],
     flows: &[Flow],
     limits: Option<AdrLimits>,
 ) -> Result<AdrFacts, AdrLimitExceeded> {
     let mut budget = Budget::new(limits)?;
     let mut recovered = recovered_adrs(nodes, edges, &mut budget)?;
-    let mut projected_nodes = nodes.to_vec();
-    projected_nodes.extend(recovered.nodes.clone());
-    let mut projected_edges = edges.to_vec();
-    projected_edges.extend(recovered.edges.clone());
-    let drift = drift_facts(&projected_nodes, &projected_edges, flows, &mut budget)?;
+    let drift = {
+        let projected_nodes: Vec<&Node> = nodes.iter().copied().chain(&recovered.nodes).collect();
+        let projected_edges: Vec<&Edge> = edges.iter().copied().chain(&recovered.edges).collect();
+        drift_facts(&projected_nodes, &projected_edges, flows, &mut budget)?
+    };
     recovered.nodes.extend(drift.nodes);
     recovered.edges.extend(drift.edges);
     recovered
@@ -573,7 +564,7 @@ fn derive_inner(
 /// Add evidence-backed recovered ADR drafts and explicit ADR/code drift to a
 /// disposable compilation projection. Confirmed graph input is never mutated.
 pub fn derive_adr_facts(nodes: &[Node], edges: &[Edge], flows: &[Flow]) -> AdrFacts {
-    derive_inner(nodes, edges, flows, None)
+    derive_inner(&refs(nodes), &refs(edges), flows, None)
         .expect("unbounded ADR derivation has no admission limit")
 }
 
@@ -587,7 +578,11 @@ pub fn derive_adr_facts_bounded(
     flows: &[Flow],
     limits: AdrLimits,
 ) -> Result<AdrFacts, AdrLimitExceeded> {
-    derive_inner(nodes, edges, flows, Some(limits))
+    derive_inner(&refs(nodes), &refs(edges), flows, Some(limits))
+}
+
+fn refs<T>(facts: &[T]) -> Vec<&T> {
+    facts.iter().collect()
 }
 
 pub(crate) fn logical_workspace_bytes(
@@ -602,7 +597,8 @@ pub(crate) fn logical_workspace_bytes(
     let projected_rows = rows.checked_add(limits.max_rows)?;
     let projected_values = values.checked_add(limits.max_output_bytes)?;
     sum(&[
-        // derive_inner clones the base graph and recovered rows before drift.
+        // An upper bound: derive_inner now borrows the base graph and
+        // recovered rows for drift (#725) rather than cloning them.
         json(projected_bytes, projected_values)?,
         slots::<Node>(projected_rows)?,
         slots::<Edge>(projected_rows)?,
