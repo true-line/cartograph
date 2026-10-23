@@ -782,6 +782,9 @@ if __name__ == "__main__":
         assert!(edge.props.get("dispatch").is_none(), "{job}");
         let reason = if job.contains("--job notify") {
             dispatch::AMBIGUOUS
+        } else if job.ends_with("imported") {
+            // `app.jobs` is no file in this fixture (AC-0336).
+            "imported module is not one repository file"
         } else {
             dispatch::UNPROVEN
         };
@@ -969,4 +972,183 @@ if __name__ == "__main__":
     assert_eq!(plain.dst, format!("file:{REPO}@cron.py"));
     assert!(plain.props.get("dispatch_unresolved").is_none());
     assert!(plain.props.get("entry_argument_dispatch").is_none());
+}
+
+// AC-0336: a dispatched branch may call a function imported from one
+// repository module, or run a local coroutine through `asyncio.run`; the
+// `ENTRY` then enters the function where it is defined. (T-0336)
+#[test]
+fn imported_and_async_dispatch_enters_the_defining_function() {
+    let cron = r#"import argparse
+import asyncio
+from tasks.domains import check_domains
+from app.mail import resend
+from app.alias import aliased as renamed
+from .rel import relative_job
+from lib.missing import gone
+from lib.twice import twice_defined
+from shadow.pkg import shadowed
+from lib.cond import conditional
+
+
+async def check_hibp():
+    pass
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-j", "--job")
+    args = parser.parse_args()
+    if args.job == "domains":
+        check_domains()
+    elif args.job == "resend":
+        resend()
+    elif args.job == "hibp":
+        asyncio.run(check_hibp())
+    elif args.job == "renamed":
+        renamed()
+    elif args.job == "relative":
+        relative_job()
+    elif args.job == "missing":
+        gone()
+    elif args.job == "twice":
+        twice_defined()
+    elif args.job == "shadowed":
+        shadowed()
+    elif args.job == "both":
+        asyncio.run(check_hibp())
+        check_domains()
+    elif args.job == "debug":
+        asyncio.run(check_hibp(), debug=True)
+    elif args.job == "conditional":
+        conditional()
+"#;
+    let jobs = [
+        "domains",
+        "resend",
+        "hibp",
+        "renamed",
+        "relative",
+        "missing",
+        "twice",
+        "shadowed",
+        "both",
+        "debug",
+        "conditional",
+    ];
+    let yacron: String = std::iter::once("jobs:\n".to_string())
+        .chain(jobs.iter().map(|job| {
+            format!("  - name: {job}\n    command: python cron.py -j {job}\n    schedule: \"0 0 * * *\"\n")
+        }))
+        .collect();
+    let modules = [
+        ("tasks/domains.py", "def check_domains():\n    pass\n"),
+        ("app/__init__.py", ""),
+        ("app/mail.py", "def resend():\n    pass\n"),
+        ("app/alias.py", "def aliased():\n    pass\n"),
+        (
+            "lib/twice.py",
+            "def twice_defined():\n    pass\n\n\ndef twice_defined():\n    pass\n",
+        ),
+        ("shadow.py", ""),
+        ("shadow/pkg.py", "def shadowed():\n    pass\n"),
+        (
+            "lib/cond.py",
+            "if FLAG:\n    def conditional():\n        pass\n",
+        ),
+    ];
+    let symbols: BTreeSet<String> = [
+        "tasks/domains.py#check_domains",
+        "app/mail.py#resend",
+        "app/alias.py#aliased",
+        "lib/twice.py#twice_defined",
+        "shadow/pkg.py#shadowed",
+        "lib/cond.py#conditional",
+        "cron.py#check_hibp",
+    ]
+    .iter()
+    .map(|id| format!("sym:{REPO}@{id}"))
+    .collect();
+    let run = |cron: &str| {
+        let mut files = vec![("cron.py", cron), ("cron.yaml", yacron.as_str())];
+        files.extend(modules);
+        extract_with(&files, &symbols)
+    };
+    let out = run(cron);
+
+    let domains = entry(&out, 0, "cron.yaml");
+    assert_eq!(
+        domains.dst,
+        format!("sym:{REPO}@tasks/domains.py#check_domains")
+    );
+    assert_eq!(confidence(domains), "InferredStrong");
+    assert_eq!(
+        domains.props["dispatch"],
+        serde_json::json!({
+            "option": "-j", "value": "domains", "function": "check_domains",
+            "file": "tasks/domains.py", "module": "tasks.domains",
+        })
+    );
+    let import = &domains.props["prov"]["evidence"][2];
+    let start = import["byte_start"].as_u64().unwrap() as usize;
+    assert_eq!(import["path"], "cron.py");
+    assert!(cron[start..].starts_with("from tasks.domains import check_domains"));
+    assert_eq!(
+        entry(&out, 1, "cron.yaml").dst,
+        format!("sym:{REPO}@app/mail.py#resend")
+    );
+    let hibp = entry(&out, 2, "cron.yaml");
+    assert_eq!(hibp.dst, format!("sym:{REPO}@cron.py#check_hibp"));
+    assert!(hibp.props["dispatch"].get("module").is_none());
+
+    // An aliased, relative, unresolvable, shadowed, or doubly or conditionally
+    // defined import,
+    // or a branch that makes another call or passes `asyncio.run` more,
+    // keeps the file and names why.
+    for (index, reason) in [
+        (3, dispatch::UNPROVEN),
+        (4, dispatch::UNPROVEN),
+        (5, "imported module is not one repository file"),
+        (
+            6,
+            "imported function is not one top-level def in its module",
+        ),
+        (7, "imported module is not one repository file"),
+        (8, dispatch::UNPROVEN),
+        (9, dispatch::UNPROVEN),
+        (
+            10,
+            "imported function is not one top-level def in its module",
+        ),
+    ] {
+        let edge = entry(&out, index, "cron.yaml");
+        assert_eq!(edge.dst, format!("file:{REPO}@cron.py"), "{}", jobs[index]);
+        assert_eq!(edge.props["dispatch_unresolved"], reason, "{}", jobs[index]);
+    }
+
+    // `asyncio` must be the real module, imported before the guard.
+    let fake = cron.replacen("import asyncio\n", "from helpers import asyncio\n", 1);
+    assert_eq!(
+        entry(&run(&fake), 2, "cron.yaml").dst,
+        format!("file:{REPO}@cron.py")
+    );
+
+    // A module resolves from the script's own directory.
+    let files: BTreeSet<String> = ["jobs/run.py", "jobs/helpers/x.py", "helpers/x.py"]
+        .iter()
+        .map(|path| path.to_string())
+        .collect();
+    assert_eq!(
+        module_file("jobs/run.py", "helpers.x", &files).as_deref(),
+        Some("jobs/helpers/x.py")
+    );
+    assert_eq!(
+        module_file("run.py", "helpers.x", &files).as_deref(),
+        Some("helpers/x.py")
+    );
+    let both: BTreeSet<String> = ["m.py", "m/__init__.py"]
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+    assert_eq!(module_file("run.py", "m", &both), None);
 }

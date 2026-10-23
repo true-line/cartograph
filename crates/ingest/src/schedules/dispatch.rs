@@ -15,8 +15,12 @@
 //!   before the selected one comparing it with another literal; all three
 //!   run in order on the block's straight-line path (entering `with`
 //!   bodies only); and
-//! - the selected branch makes exactly one bare call to a name bound once
-//!   in module scope, by an undecorated top-level `def` before the guard.
+//! - the selected branch makes exactly one bare call, or one
+//!   `asyncio.run(<bare call>)` with `import asyncio` proven like
+//!   `argparse`, to a name bound once in module scope before the guard:
+//!   by an undecorated top-level `def`, or by a top-level absolute
+//!   `from <module> import <name>` that the caller resolves to one
+//!   repository file defining it the same way.
 //!
 //! Anything else proves no dispatch: the entry stays the file, and the
 //! `ENTRY` names why (`dispatch_unresolved`).
@@ -34,6 +38,9 @@ pub(super) struct Dispatch {
     pub function: String,
     /// Byte span of the selected branch.
     pub span: (u64, u64),
+    /// The module the function is imported from (`from <module> import
+    /// <function>`) and that import's span; `None` for a `def` in the entry.
+    pub import: Option<(String, (u64, u64))>,
 }
 
 /// Why a command's options select no proven function.
@@ -187,6 +194,18 @@ fn proven(source: &str, option: String, value: String) -> Option<Dispatch> {
         .into_iter()
         .filter_map(expression)
         .filter_map(|call| {
+            // `asyncio.run(f())` runs `f` when `asyncio` is the real module.
+            let call = match method_call(source, call) {
+                Some(("asyncio", "run", arguments))
+                    if imported_module(source, root, main, "asyncio") =>
+                {
+                    match children(arguments)[..] {
+                        [inner] => inner,
+                        _ => return None,
+                    }
+                }
+                _ => call,
+            };
             let function = call.child_by_field_name("function")?;
             (call.kind() == "call" && function.kind() == "identifier").then(|| text(function))
         })
@@ -194,21 +213,62 @@ fn proven(source: &str, option: String, value: String) -> Option<Dispatch> {
     let [function] = calls.as_slice() else {
         return None;
     };
-    // The function is bound once, by an undecorated top-level `def` that
-    // has run before the guard: a conditional or later `def` may not exist
-    // when the branch calls it (#796 review).
-    let [def] = binders(source, root, function)?[..] else {
+    // The function is bound once, by an undecorated top-level `def` or an
+    // absolute `from` import that has run before the guard: a conditional
+    // or later binding may not exist when the branch calls it (#796 review).
+    let [binder] = binders(source, root, function)?[..] else {
         return None;
     };
-    (def.kind() == "function_definition"
-        && def.parent() == Some(root)
-        && def.end_byte() <= main.start_byte())
-    .then(|| Dispatch {
+    if binder.parent() != Some(root) || binder.end_byte() > main.start_byte() {
+        return None;
+    }
+    let import = match binder.kind() {
+        "function_definition" => None,
+        "import_from_statement" => Some((
+            imported_from(source, binder, function)?,
+            (binder.start_byte() as u64, binder.end_byte() as u64),
+        )),
+        _ => return None,
+    };
+    Some(Dispatch {
         option,
         value,
         function: function.to_string(),
         span: (branch.start_byte() as u64, branch.end_byte() as u64),
+        import,
     })
+}
+
+/// The absolute module a `from <module> import ... <name> ...` takes `name`
+/// from under its own name; `None` for a relative or aliased import.
+fn imported_from(source: &str, import: TsNode, name: &str) -> Option<String> {
+    let module = import.child_by_field_name("module_name")?;
+    let mut walk = import.walk();
+    let plain = import
+        .children_by_field_name("name", &mut walk)
+        .any(|imported| imported.kind() == "dotted_name" && &source[imported.byte_range()] == name);
+    (module.kind() == "dotted_name" && plain).then(|| source[module.byte_range()].to_string())
+}
+
+/// Whether `source` binds `name` once in module scope, by an undecorated
+/// top-level `def`: what `from <module> import <name>` then imports.
+pub(super) fn defines(source: &str, name: &str) -> bool {
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .is_err()
+    {
+        return false;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return false;
+    };
+    let root = tree.root_node();
+    !root.has_error()
+        && binders(source, root, name).is_some_and(|binders| {
+            matches!(binders[..], [def]
+                if def.kind() == "function_definition" && def.parent() == Some(root))
+        })
 }
 
 /// The attribute an `add_argument` call stores, when its keywords keep the
