@@ -682,7 +682,7 @@
 - **Actor:** Authorized external agent
 - **As an** authorized external agent **I want** to request and follow a durable specialist investigation through MCP **so that** reconnects and retries preserve the same host-owned work and cited outcome.
 - **Priority:** Should · **Status:** Planned
-- **AC-0320** Read-only credentials reject start, status, events, result and cancel. Only an owner app action grants task access; client JSON cannot choose principal or grant.
+- **AC-0320** Read-only credentials reject start, status, events, result and cancel. Only an owner app action grants task access; client JSON cannot choose principal or grant. The runtime grant primitive defaults read-only and revokes all shared sessions on revoke/drop; host authentication and owner-command integration remain required.
 - **AC-0321** The same host-assigned principal survives reconnect/rotation; old credentials fail, rotated credentials lack a task grant until reconfirmed. Restart restores identity without execution authority. Persisted client IDs contain no credentials or grants; bounded owner creation/listing preserves existing identities when creation capacity is full.
 - **AC-0322** Same principal/nonce/normalized intent returns one task under concurrent requests and after graph/provider/capacity changes. Different intent refuses; another principal cannot collide with that namespace. Durable readers reject origin/intent/namespace disagreement before exposing task data, and namespace bytes count toward stored capacity.
 - **AC-0323** Migration preserves every old App task, body hash and nonce interpretation. Invalid layout or interrupted migration leaves the old store intact; textual app/MCP nonce collisions cannot alias tasks.

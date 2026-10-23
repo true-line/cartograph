@@ -13,6 +13,7 @@ mod finding_review;
 mod input;
 mod inspection;
 mod mcp_client_id;
+mod mcp_grant;
 // Separate completion families preserve every legacy generation and identity.
 #[doc(hidden)]
 pub mod obligations;
@@ -40,6 +41,7 @@ pub use finding_review::*;
 pub use input::*;
 pub use inspection::*;
 pub use mcp_client_id::McpClientId;
+pub use mcp_grant::{McpGrantSnapshot, McpGrantUnavailable, McpTaskActivation, McpTaskSession};
 pub use obligations::*;
 pub use policy::{
     INVESTIGATION_V1_POLICY, INVESTIGATION_V2_POLICY, InvestigationPolicy,
