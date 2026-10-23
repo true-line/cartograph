@@ -54,7 +54,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 
 | US-0042 | AC-0293..0296 | agents, app, ui | W8b / H4 dependency (#730) | — | — | T-0293..0296 |
 
-| US-0043 | AC-0320..0329 | agents (durable client identity, task attribution and runtime grant primitive), app (host activation lifecycle; task dispatch remains planned), mcp-wire (closed task argument envelopes), mcp-local, mcp-relay, ui | H4 | — | ADR-0028, ADR-0044, ADR-0048 | T-0320..0329 |
+| US-0043 | AC-0320..0329 | agents (durable client identity, task attribution and runtime grant primitive), app (host activation lifecycle; task dispatch remains planned), ui (owner credential rotation), mcp-wire (closed task argument envelopes), mcp-local, mcp-relay | H4 | — | ADR-0028, ADR-0044, ADR-0048 | T-0320..0329 |
 
 ## Coverage assertions
 - Every Must-priority US is anchored to an original milestone, post-M10 work, or a SPEC-01 delivery gate; a milestone label alone does not establish completion.

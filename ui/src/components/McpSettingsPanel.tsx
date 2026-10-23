@@ -16,6 +16,7 @@ export interface McpSettingsPanelProps {
   onSkill: () => void;
   onEnable: (policy: Record<string, unknown>) => void;
   onDisable: () => void;
+  onRotate: () => void;
   onRefresh: () => void;
   onConfiguration: () => void;
 }
@@ -78,6 +79,8 @@ export function McpSettingsPanel(props: McpSettingsPanelProps) {
         onClick={() => { if (policy) props.onEnable(policy); }}>Enable read access</button>
       <button disabled={disabled || !['running', 'stopped'].includes(props.status)}
         onClick={props.onDisable}>Disable read access</button>
+      <button disabled={disabled || props.status !== 'running'}
+        onClick={props.onRotate}>Rotate client credentials</button>
       <button disabled={disabled} onClick={props.onRefresh}>Refresh read service</button>
       <button disabled={disabled || props.status !== 'running'}
         onClick={props.onConfiguration}>Show client configuration</button>
@@ -96,6 +99,8 @@ export function McpSettingsPanel(props: McpSettingsPanelProps) {
         ? <pre key={file.path} aria-label="Packaged SKILL.md">{file.content}</pre>
         : <details key={file.path}><summary>{file.path}</summary><pre>{file.content}</pre></details>)}
     </section>}
+    <p>Rotating credentials disconnects existing clients. Old credentials stop working; request a new
+      client configuration after rotation. Rotation does not restore investigation access.</p>
     {props.status === 'draining' && <p>Previous reads are finishing. Refresh before enabling a new session.</p>}
     {props.status === 'cleanup_failed' && <p role="alert">Read access was revoked, but endpoint cleanup could not be verified. New access is blocked.</p>}
     {props.error && <p role="alert">{props.error}</p>}
