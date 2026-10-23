@@ -29,7 +29,7 @@ use std::path::Path;
 use tree_sitter::{Node as TsNode, Parser};
 
 use adapters_fw::events::{
-    ClientForm, IdentityArg, IdentityExpr, ObservedClient, ObservedFamily, Registries,
+    ClientForm, Ecosystem, IdentityArg, IdentityExpr, ObservedClient, ObservedFamily, Registries,
     RegistryIdentity,
 };
 
@@ -977,7 +977,11 @@ fn extract_file(
                 let args = node.child_by_field_name("arguments");
                 if let Some((module, export)) = callee_export(&cx, callee, &scopes)
                     && let Some(client) = registries.clients.iter().find(|c: &&ObservedClient| {
-                        c.module == module && c.export == export && c.form == form
+                        c.ecosystem == Ecosystem::Npm
+                            && c.select.is_none()
+                            && c.module == module
+                            && c.export == export
+                            && c.form == form
                     })
                 {
                     let identity = match (&client.identity, args) {

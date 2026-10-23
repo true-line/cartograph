@@ -1,0 +1,20 @@
+{
+  "nodes": [
+    {
+      "label": "Resource",
+      "id": "res:local/p@observed:aws-s3",
+      "props": {
+        "kind": "sdk-client",
+        "observed": true
+      }
+    },
+    {
+      "label": "Resource",
+      "id": "res:local/p@observed:redis:env:REDIS_HOST",
+      "props": {
+        "env_key": "REDIS_HOST",
+        "observed": true
+      }
+    }
+  ]
+}

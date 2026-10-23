@@ -231,6 +231,26 @@ pub enum ClientForm {
     Call,
 }
 
+/// The package ecosystem an observed client's module belongs to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ecosystem {
+    /// An npm module, matched by the TypeScript adapter.
+    #[default]
+    Npm,
+    /// A Python module, matched by the Python adapter.
+    Pypi,
+}
+
+/// A literal first argument a client call must carry to match, for a
+/// factory that names its service (`boto3.client("s3")`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientSelect {
+    /// The exact string literal the call's first argument must be.
+    pub first: String,
+}
+
 /// A client constructor or factory whose call site is observed
 /// infrastructure when the code has no IaC for it (#734): the call proves
 /// the code talks to `provider`, and `identity`, when declared, names
@@ -241,7 +261,10 @@ pub struct ObservedClient {
     pub family: ObservedFamily,
     /// Provider recorded as the resource type (`aws-s3`, `stripe`).
     pub provider: String,
-    /// npm module the binding must be imported (or required) from.
+    /// Ecosystem the module belongs to (npm unless declared).
+    pub ecosystem: Ecosystem,
+    /// Module the binding must be imported (or required) from: an npm
+    /// module, or a dotted Python module for `pypi`.
     pub module: String,
     /// Exported name, or `default` for the module's default export.
     pub export: String,
@@ -249,6 +272,8 @@ pub struct ObservedClient {
     pub form: ClientForm,
     /// Where the instance identity lives, if the client declares one.
     pub identity: Option<IdentityArg>,
+    /// The literal first argument the call must carry, if any.
+    pub select: Option<ClientSelect>,
     /// The file that declared this entry.
     pub registry: RegistryIdentity,
 }
@@ -258,11 +283,15 @@ pub struct ObservedClient {
 struct ClientEntry {
     family: ObservedFamily,
     provider: String,
+    #[serde(default)]
+    ecosystem: Ecosystem,
     module: String,
     export: String,
     form: ClientForm,
     #[serde(default)]
     identity: Option<IdentityArg>,
+    #[serde(default)]
+    select: Option<ClientSelect>,
 }
 
 /// A registry data file that was rejected whole.
@@ -520,15 +549,24 @@ impl Registries {
                 Some(IdentityArg::Key(key)) => valid_name(key),
                 Some(IdentityArg::First) | None => true,
             };
+            let select_valid = client
+                .select
+                .as_ref()
+                .is_none_or(|select| valid_name(&select.first));
             if !valid_kind(&client.provider)
                 || !valid_name(&client.module)
                 || !valid_name(&client.export)
                 || !identity_valid
+                || !select_valid
             {
                 return Err(format!("invalid client entry for {:?}", client.provider));
             }
             if clients.iter().any(|c: &ObservedClient| {
-                c.module == client.module && c.export == client.export && c.form == client.form
+                c.ecosystem == client.ecosystem
+                    && c.module == client.module
+                    && c.export == client.export
+                    && c.form == client.form
+                    && c.select == client.select
             }) {
                 return Err(format!(
                     "client {:?} of {:?} is already registered",
@@ -538,10 +576,12 @@ impl Registries {
             clients.push(ObservedClient {
                 family: client.family,
                 provider: client.provider,
+                ecosystem: client.ecosystem,
                 module: client.module,
                 export: client.export,
                 form: client.form,
                 identity: client.identity,
+                select: client.select,
                 registry: registry.clone(),
             });
         }
@@ -718,6 +758,52 @@ mod tests {
             ),
         ];
         for (name, json) in cases {
+            let layered = Registries::layered(&[file(name, &json)]);
+            assert_eq!(layered.rejected.len(), 1, "{name} was accepted");
+            assert_eq!(layered.clients, builtin.clients, "{name}");
+        }
+    }
+
+    // AC-0318: a Python client is registry data too: `pypi` entries name a
+    // dotted module, and a factory that names its service (`boto3.client`)
+    // is told apart by a literal first argument, so one export may carry
+    // one entry per service but never two for the same one. (T-0318)
+    #[test]
+    fn python_clients_carry_their_ecosystem_and_service_selector() {
+        let builtin = Registries::builtin();
+        let npm = builtin
+            .clients
+            .iter()
+            .find(|c| c.module == "stripe")
+            .unwrap();
+        assert_eq!(npm.ecosystem, Ecosystem::Npm);
+        let s3 = builtin
+            .clients
+            .iter()
+            .find(|c| {
+                c.ecosystem == Ecosystem::Pypi
+                    && c.module == "boto3"
+                    && c.export == "client"
+                    && c.select.as_ref().is_some_and(|s| s.first == "s3")
+            })
+            .unwrap();
+        assert_eq!(s3.provider, "aws-s3");
+        let entry = |select: &str| {
+            format!(
+                r#"{{"schema":"cartograph-observed-client-registry@1","version":"x",
+                "clients":[{{"family":"sdk-client","provider":"aws-ec2","ecosystem":"pypi",
+                  "module":"boto3","export":"client","form":"call"{select}}}]}}"#
+            )
+        };
+        let ec2 = Registries::layered(&[file("ec2.json", &entry(r#","select":{"first":"ec2"}"#))]);
+        assert!(ec2.rejected.is_empty(), "{:?}", ec2.rejected);
+        assert_eq!(ec2.clients.len(), builtin.clients.len() + 1);
+        for (name, json) in [
+            ("same-service.json", entry(r#","select":{"first":"s3"}"#)),
+            ("bad-select.json", entry(r#","select":{"first":""}"#)),
+            ("select-key.json", entry(r#","select":{"second":"ec2"}"#)),
+            ("bad-ecosystem.json", entry("").replace("pypi", "cargo")),
+        ] {
             let layered = Registries::layered(&[file(name, &json)]);
             assert_eq!(layered.rejected.len(), 1, "{name} was accepted");
             assert_eq!(layered.clients, builtin.clients, "{name}");

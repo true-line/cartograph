@@ -234,6 +234,13 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("Python", CORE, Calls, Supported, ""),
     cell("Python", "fastapi", HttpEndpoints, Supported, ""),
     cell("Python", "flask", HttpEndpoints, Supported, ""),
+    cell(
+        "Python",
+        "sdk-client",
+        InfraResources,
+        Partial,
+        "module-level imports only; an identity imported from another module is a Gap",
+    ),
     cell("Python", CORE, HttpClientCalls, Unsupported, NO_CLIENT),
     cell("Python", CORE, EventSites, Unsupported, NO_EVENTS),
     cell("Go", CORE, Imports, Supported, ""),
