@@ -69,6 +69,9 @@ impl Worker {
         {
             return Err(ReadError::InvalidRequest);
         }
+        if limits.acquisition_mode == AcquisitionMode::Scoped {
+            super::scoped_session::ScopedReadSession::validate_graph_limits(limits.graph)?;
+        }
         #[cfg(unix)]
         validate_reservation(limits)?;
         let permit = budget

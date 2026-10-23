@@ -85,3 +85,42 @@ fn mcp_worker_protocol_survives_failed_acquisition_and_keeps_one_id_ledger() {
         });
     }
 }
+
+// AC-0289: host policy must be valid before lifecycle can advertise its caps.
+#[test]
+fn scoped_worker_refuses_invalid_graph_limits_before_reserving_or_advertising() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(crate::registered_source_tests::app_state(dir.path()));
+    let base = tests::limits();
+    let budget = WorkBudget::new(WorkLimits {
+        max_workers: NonZeroUsize::new(1).unwrap(),
+        max_reserved_bytes: base.reserved_bytes,
+        max_cumulative_read_bytes: 100_000,
+    });
+    let maximum = core_graph::SnapshotReadLimits::default();
+    for field in 0..4 {
+        for above in [false, true] {
+            let mut limits = base;
+            limits.acquisition_mode = AcquisitionMode::Scoped;
+            let (value, max) = match field {
+                0 => (&mut limits.graph.max_rows, maximum.max_rows),
+                1 => (&mut limits.graph.max_bytes, maximum.max_bytes),
+                2 => (&mut limits.graph.max_depth, maximum.max_depth),
+                _ => (&mut limits.graph.max_values, maximum.max_values),
+            };
+            *value = if above { max + 1 } else { 0 };
+            let result = tauri::async_runtime::block_on(Worker::start(
+                app.handle().clone(),
+                "invalid-scope".into(),
+                spec::ExportMode::VerifiedOnly,
+                limits,
+                budget.clone(),
+            ));
+            assert!(matches!(result, Err(ReadError::InvalidRequest)));
+            assert!(budget.is_idle().unwrap());
+        }
+    }
+}
