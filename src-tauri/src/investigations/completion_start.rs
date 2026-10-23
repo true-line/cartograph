@@ -1,4 +1,5 @@
 //! Generation-four entrypoint: source validation precedes durable intent admission.
+use super::super::completion_choices::SelectionError;
 use super::*;
 use crate::primary_source::RetentionGuard;
 
@@ -7,7 +8,7 @@ fn validate_targets<R: tauri::Runtime>(
     state: &AppState,
     request: &StagedObligationRequest,
     scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
-) -> Result<Vec<RetentionGuard>, String> {
+) -> Result<Vec<RetentionGuard>, SelectionError> {
     // Refuse an impossible obligation before any durable start/provider lookup.
     match scope_limits {
         Some(limits) => super::super::completion_choices::validate_request_with_scope(
@@ -16,7 +17,8 @@ fn validate_targets<R: tauri::Runtime>(
             request,
             Some(limits),
         ),
-        None => super::super::completion_choices::validate_request(app, state, request),
+        None => super::super::completion_choices::validate_request(app, state, request)
+            .map_err(SelectionError::from),
     }?;
     let policy = InvestigationPolicy::for_profile(&request.limit_profile)
         .ok_or_else(|| "Unknown investigation policy.".to_owned())?;
@@ -34,7 +36,9 @@ fn validate_targets<R: tauri::Runtime>(
             target.receipt_inventory_index as usize,
         )?;
         if actual != target {
-            return Err("Completion source changed; refresh the selection.".into());
+            return Err("Completion source changed; refresh the selection."
+                .to_owned()
+                .into());
         }
         guards.push(guard);
     }
@@ -100,7 +104,7 @@ pub(super) fn start_access<R: tauri::Runtime>(
             if let Some(prior) = existing()? {
                 return Ok(prior.summary);
             }
-            return Err(rejected("refresh_required", error));
+            return Err(rejected(error.code(), error));
         }
     };
     // This resolves app-lifetime configuration only, without network activity.
