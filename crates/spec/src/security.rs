@@ -5,6 +5,7 @@ mod maxima;
 mod support;
 #[cfg(test)]
 pub(crate) use bounded::MATERIALIZED as SECURITY_OUTPUT_MATERIALIZATIONS;
+pub(crate) use bounded::derive_bounded;
 pub use bounded::{
     SecurityLimit, SecurityLimitExceeded, SecurityLimits, SecurityProjectionSize,
     derive_security_findings_bounded, security_projection_size,
@@ -13,6 +14,7 @@ pub use maxima::security_projection_bound;
 
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance, Tier};
+use std::borrow::Borrow;
 
 const SECURITY_EXTRACTOR_T0: &str = "t0.security-projection";
 const SECURITY_EXTRACTOR_T1: &str = "t1.security-projection";
@@ -116,11 +118,15 @@ fn finding_node(
 
 /// Derive security findings without mutating graph input. Endpoint findings
 /// require an explicit negative auth fact; absence alone is not evidence.
-pub(crate) fn derive_security_findings(nodes: &[Node], edges: &[Edge]) -> Vec<Node> {
+pub(crate) fn derive_security_findings<N: Borrow<Node>, E: Borrow<Edge>>(
+    nodes: &[N],
+    edges: &[E],
+) -> Vec<Node> {
     let mut findings = Vec::new();
 
     for endpoint in nodes
         .iter()
+        .map(Borrow::borrow)
         .filter(|node| node.label == "Endpoint" && explicit_auth_state(node) == Some(false))
     {
         let Some(support) = typed_provenance(&endpoint.props) else {
@@ -143,7 +149,11 @@ pub(crate) fn derive_security_findings(nodes: &[Node], edges: &[Edge]) -> Vec<No
         ));
     }
 
-    for grant in edges.iter().filter(|edge| edge.label == "GRANTS") {
+    for grant in edges
+        .iter()
+        .map(Borrow::borrow)
+        .filter(|edge| edge.label == "GRANTS")
+    {
         let actions = strings(&grant.props["actions"]);
         let mut scopes = strings(&grant.props["resource_scopes"]);
         if scopes.is_empty() {

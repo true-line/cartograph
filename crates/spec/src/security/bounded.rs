@@ -6,6 +6,7 @@ use super::{
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Tier};
 use serde::{Serialize, Serializer};
+use std::borrow::Borrow;
 use std::{fmt, io};
 
 /// Explicit admission for a complete security projection, never a partial result.
@@ -220,10 +221,14 @@ fn hash(value: &impl Serialize) -> String {
     serde_json::to_writer(&mut output, value).expect("security identity serializes");
     output.0.finalize().to_hex().to_string()
 }
-fn findings<'a>(nodes: &'a [Node], edges: &'a [Edge]) -> Vec<Finding<'a>> {
+fn findings<'a, N: Borrow<Node>, E: Borrow<Edge>>(
+    nodes: &'a [N],
+    edges: &'a [E],
+) -> Vec<Finding<'a>> {
     let mut result = Vec::new();
     for node in nodes
         .iter()
+        .map(Borrow::borrow)
         .filter(|node| node.label == "Endpoint" && explicit_auth_state(node) == Some(false))
     {
         let Some(support) = Support::from_props(&node.props) else {
@@ -240,7 +245,11 @@ fn findings<'a>(nodes: &'a [Node], edges: &'a [Edge]) -> Vec<Finding<'a>> {
             content_hash,
         ));
     }
-    for edge in edges.iter().filter(|edge| edge.label == "GRANTS") {
+    for edge in edges
+        .iter()
+        .map(Borrow::borrow)
+        .filter(|edge| edge.label == "GRANTS")
+    {
         let actions = strings(&edge.props["actions"]);
         let mut scopes = strings(&edge.props["resource_scopes"]);
         if scopes.is_empty() {
@@ -332,6 +341,15 @@ pub fn security_projection_size(nodes: &[Node], edges: &[Edge]) -> Option<Securi
 pub fn derive_security_findings_bounded(
     nodes: &[Node],
     edges: &[Edge],
+    limits: SecurityLimits,
+) -> Result<Vec<Node>, SecurityLimitExceeded> {
+    derive_bounded(nodes, edges, limits)
+}
+
+/// [`derive_security_findings_bounded`] over borrowed facts (#725).
+pub(crate) fn derive_bounded<N: Borrow<Node>, E: Borrow<Edge>>(
+    nodes: &[N],
+    edges: &[E],
     limits: SecurityLimits,
 ) -> Result<Vec<Node>, SecurityLimitExceeded> {
     let findings = findings(nodes, edges);
