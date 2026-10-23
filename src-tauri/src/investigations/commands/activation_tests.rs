@@ -18,6 +18,8 @@ struct PublicProvider {
     available: AtomicBool,
     profiles: AtomicUsize,
     calls: AtomicUsize,
+    pause: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    entered: AtomicBool,
 }
 impl PublicProvider {
     fn new(cloud: bool) -> Self {
@@ -26,6 +28,8 @@ impl PublicProvider {
             available: AtomicBool::new(true),
             profiles: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
+            pause: std::sync::Mutex::new(None),
+            entered: AtomicBool::new(false),
         }
     }
 }
@@ -68,6 +72,10 @@ impl LlmProvider for PublicProvider {
         request: &AuthorizedBoundedCompletion,
         control: &CompletionControl<'_>,
     ) -> Result<BoundedCompletion, BoundedCallError> {
+        if let Some(wait) = self.pause.lock().unwrap().take() {
+            self.entered.store(true, Ordering::SeqCst);
+            wait.recv_timeout(Duration::from_secs(30)).unwrap();
+        }
         assert_eq!((control.check)(), CallDirective::Continue);
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
@@ -172,6 +180,7 @@ fn completion_replay(mcp: bool) {
                 Instant::now(),
                 session.as_ref(),
                 mcp.then(|| crate::mcp_reads::worker::tests::limits().scope),
+                None,
             )
         };
         let mut refused_limits = crate::mcp_reads::worker::tests::limits().scope;
@@ -185,6 +194,7 @@ fn completion_replay(mcp: bool) {
                 Instant::now(),
                 session.as_ref(),
                 Some(refused_limits),
+                None,
             )
             .unwrap_err();
             assert!(
@@ -255,6 +265,7 @@ fn completion_replay(mcp: bool) {
                 Instant::now(),
                 session.as_ref(),
                 Some(refused_limits),
+                None,
             )
             .unwrap()
         } else {
@@ -504,4 +515,101 @@ fn mcp_coordinator_legacy_retry_precedes_provider_and_checks_grant() {
     assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     assert_eq!(detail(app.handle(), &saved.summary.investigation_id), saved);
+}
+
+// AC-0325/0327: connection revocation cannot refund a still-running provider call.
+#[test]
+fn mcp_completion_retains_reservation_until_detached_worker_exits() {
+    use mcp_local::work_budget::{WorkBudget, WorkLimits};
+    let provider = Arc::new(PublicProvider::new(false));
+    worker::with_public_start_fixture(provider.clone(), false, |app, request, _| {
+        let state = app.state::<AppState>();
+        state
+            .investigations
+            .set_test_provider(request.provider_mode, provider.clone());
+        let one = std::num::NonZeroUsize::new(1).unwrap();
+        let client = state.jobs.lock().unwrap().create_mcp_client(one).unwrap();
+        let grant = McpTaskActivation::granted(client, one);
+        let session = grant.session();
+        // Unit reservation proves lifetime only, not the final byte composition.
+        let new_budget = || {
+            WorkBudget::new(WorkLimits {
+                max_workers: one,
+                max_reserved_bytes: one,
+                max_cumulative_read_bytes: 0,
+            })
+        };
+        let rejected_budget = new_budget();
+        let rejected_permit = Arc::new(rejected_budget.try_acquire(one, 0).unwrap());
+        rejected_budget.revoke();
+        let profiles = provider.profiles.load(Ordering::SeqCst);
+        let limits = crate::mcp_reads::worker::tests::limits().scope;
+        let denied = completion_start::start_access(
+            request.clone(),
+            app.clone(),
+            Instant::now(),
+            Some(&session),
+            Some(limits),
+            Some(rejected_permit.clone()),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            denied,
+            InvestigationStartError::Rejected {
+                code: "limit_exceeded",
+                ..
+            }
+        ));
+        assert!(
+            state
+                .jobs
+                .lock()
+                .unwrap()
+                .existing_investigation_completion_access(&request, Some(&session))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        let budget = new_budget();
+        let permit = Arc::new(budget.try_acquire(one, 0).unwrap());
+        let (release, gate) = std::sync::mpsc::channel();
+        *provider.pause.lock().unwrap() = Some(gate);
+        let started = completion_start::start_access(
+            request.clone(),
+            app.clone(),
+            Instant::now(),
+            Some(&session),
+            Some(limits),
+            Some(permit.clone()),
+        )
+        .unwrap();
+        wait(|| provider.entered.load(Ordering::SeqCst).then_some(()));
+        budget.revoke();
+        drop(permit); // connection no longer owns the reservation
+        assert!(!budget.is_idle().unwrap());
+        assert!(budget.try_acquire(one, 0).is_err());
+        // A committed retry requires no new work, even with a revoked permit.
+        let replay = completion_start::start_access(
+            request,
+            app.clone(),
+            Instant::now(),
+            Some(&session),
+            Some(limits),
+            Some(rejected_permit),
+        )
+        .unwrap();
+        assert_eq!(replay.investigation_id, started.investigation_id);
+        grant.revoke(); // no implicit cancellation of admitted durable work
+        release.send(()).unwrap();
+        let saved = finished(app, &started.investigation_id);
+        assert_eq!(
+            saved.summary.status,
+            InvestigationStatus::Completed,
+            "{:?}",
+            saved.error
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+        wait(|| budget.is_idle().unwrap().then_some(()));
+    });
 }

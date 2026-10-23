@@ -46,7 +46,7 @@ pub(super) fn start<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     started: Instant,
 ) -> Result<InvestigationSummary, InvestigationStartError> {
-    start_access(request, app, started, None, None)
+    start_access(request, app, started, None, None, None)
 }
 
 pub(super) fn start_access<R: tauri::Runtime>(
@@ -55,6 +55,7 @@ pub(super) fn start_access<R: tauri::Runtime>(
     started: Instant,
     session: Option<&McpTaskSession>,
     scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
+    reservation: Option<std::sync::Arc<mcp_local::work_budget::WorkPermit>>,
 ) -> Result<InvestigationSummary, InvestigationStartError> {
     let policy = InvestigationPolicy::for_profile(&request.limit_profile)
         .ok_or_else(|| rejected("invalid_input", "Unknown investigation policy."))?;
@@ -76,6 +77,13 @@ pub(super) fn start_access<R: tauri::Runtime>(
     // Recover a committed nonce before consulting mutable source/provider state.
     if let Some(prior) = existing()? {
         return Ok(prior.summary);
+    }
+    // A retry above needs no new execution reservation. New work must retain
+    // the host's already-admitted permit through preparation and worker exit.
+    if let Some(permit) = reservation.as_ref() {
+        permit
+            .check_active()
+            .map_err(|error| rejected("limit_exceeded", error))?;
     }
     let specialist: SpecialistId =
         serde_json::from_value(serde_json::Value::String(request.specialist_id.clone()))
@@ -150,20 +158,23 @@ pub(super) fn start_access<R: tauri::Runtime>(
     // async waiter goes away. Persisted history is the response authority.
     let worker_app = app.clone();
     let worker_id = id.clone();
-    tauri::async_runtime::spawn_blocking(move || match scope_limits {
-        Some(limits) => worker::run_completion_with_scope(
-            worker_app,
-            worker_id,
-            request,
-            execution,
-            provider,
-            live,
-            started,
-            Some(limits),
-        ),
-        None => worker::run_completion(
-            worker_app, worker_id, request, execution, provider, live, started,
-        ),
+    tauri::async_runtime::spawn_blocking(move || {
+        let _reservation = reservation;
+        match scope_limits {
+            Some(limits) => worker::run_completion_with_scope(
+                worker_app,
+                worker_id,
+                request,
+                execution,
+                provider,
+                live,
+                started,
+                Some(limits),
+            ),
+            None => worker::run_completion(
+                worker_app, worker_id, request, execution, provider, live, started,
+            ),
+        }
     });
     let detail = state
         .jobs
