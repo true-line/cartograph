@@ -79,7 +79,8 @@ struct Job {
     span: (u64, u64),
     /// Why the job's fields cannot be trusted as written.
     unreadable: Option<&'static str>,
-    /// The schedule file format (`yacron`, `crontab`).
+    /// The schedule file format (`yacron`, `crontab`, `kubernetes`,
+    /// `github-actions`).
     format: &'static str,
 }
 
@@ -176,11 +177,15 @@ pub fn extract_dir(
             let Ok(text) = std::fs::read_to_string(&file.path) else {
                 continue;
             };
-            let jobs = yacron_jobs(&text);
-            if jobs.is_empty() {
-                cronjob_jobs(&text)
+            if workflow_file(&file.rel) {
+                actions_jobs(&text)
             } else {
-                jobs
+                let jobs = yacron_jobs(&text);
+                if jobs.is_empty() {
+                    cronjob_jobs(&text)
+                } else {
+                    jobs
+                }
             }
         } else if let Some(system) = crontab_kind(&file.rel) {
             let Ok(text) = std::fs::read_to_string(&file.path) else {
@@ -272,6 +277,15 @@ fn emit(
     });
     let entry = match (job.unreadable, job.command.as_deref()) {
         (Some(reason), _) => Entry::Gap(reason),
+        // A scheduled workflow runs the workflow itself; its steps are not
+        // traced through here.
+        (None, _) if job.format == "github-actions" => Entry::File {
+            rel: rel.to_string(),
+            confidence: ConfidenceTier::Confirmed,
+            marker: None,
+            dockerfile: Vec::new(),
+            container_dir: None,
+        },
         (None, None) => Entry::Gap("schedule job without a literal command"),
         (None, Some(command)) => resolve_entry(command, files, container),
     };
@@ -865,9 +879,10 @@ const WEEKDAYS: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
 /// Crontab field `position` (minute, hour, day of month, month, day of
 /// week): `*` or values and ranges within that field's bounds, `,` lists,
-/// and a `/` step of at least 1 after `*` or a range. Names are accepted
-/// only in the month and weekday fields.
-fn cron_field(field: &str, position: usize) -> bool {
+/// and a `/` step of at least 1 after `*` or a range, or with `start_step`
+/// after a single value. Names are accepted only in the month and weekday
+/// fields.
+fn cron_field(field: &str, position: usize, start_step: bool) -> bool {
     let (low, high, names): (u32, u32, &[&str]) = match position {
         0 => (0, 59, &[]),
         1 => (0, 23, &[]),
@@ -901,7 +916,9 @@ fn cron_field(field: &str, position: usize) -> bool {
         let ranged = match base.split_once('-') {
             _ if base == "*" => true,
             Some((from, to)) => matches!((value(from), value(to)), (Some(a), Some(b)) if a <= b),
-            None => step.is_none() && value(base).is_some(),
+            // `20/15`: from a start to the field's end. GitHub documents it;
+            // crontab(5) does not (#799 review).
+            None => (step.is_none() || start_step) && value(base).is_some(),
         };
         stepped && ranged
     })
@@ -967,7 +984,7 @@ fn crontab_jobs(text: &str, system: bool) -> Vec<Job> {
         let word = |index: usize| &trimmed[words[index].0..words[index].1];
         let fields = if CRON_MACROS.contains(&word(0)) {
             1
-        } else if words.len() > 5 && (0..5).all(|index| cron_field(word(index), index)) {
+        } else if words.len() > 5 && (0..5).all(|index| cron_field(word(index), index, false)) {
             5
         } else {
             jobs.push(job);
@@ -1211,6 +1228,105 @@ fn value_of<'t>(text: &str, mapping: TsNode<'t>, name: &str) -> Option<TsNode<'t
         .into_iter()
         .find(|(key, _)| scalar(text, *key).as_deref() == Some(name))
         .map(|(_, value)| value)
+}
+
+/// A GitHub Actions workflow: a YAML file directly in `.github/workflows`.
+fn workflow_file(rel: &str) -> bool {
+    rel.strip_prefix(".github/workflows/")
+        .is_some_and(|name| !name.contains('/'))
+}
+
+/// The `on.schedule` entries of a GitHub Actions workflow: one job per
+/// `cron`, its five fields kept verbatim and checked like crontab(5).
+fn actions_jobs(text: &str) -> Vec<Job> {
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_yaml::LANGUAGE.into())
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(text, None) else {
+        return Vec::new();
+    };
+    let root = tree.root_node();
+    if root.has_error() {
+        return Vec::new();
+    }
+    let Some(top) = first_mapping(root) else {
+        return Vec::new();
+    };
+    let name = value_of(text, top, "name").and_then(|value| scalar(text, value));
+    let Some(on) = value_of(text, top, "on") else {
+        return Vec::new();
+    };
+    let Some(schedule) = descend(on, "block_mapping").and_then(|on| value_of(text, on, "schedule"))
+    else {
+        return Vec::new();
+    };
+    // An anchor or tag on a container the crons sit in (#799 review).
+    let decorated = [on, schedule].into_iter().any(|node| {
+        let mut walk = node.walk();
+        let wrappers: Vec<TsNode> = node.named_children(&mut walk).collect();
+        node.kind() == "alias"
+            || wrappers
+                .iter()
+                .any(|child| matches!(child.kind(), "alias" | "anchor" | "tag"))
+    });
+    let job = |span: (u64, u64), cron: Option<String>, unreadable| Job {
+        name: name.clone(),
+        schedule: cron,
+        command: None,
+        span,
+        unreadable,
+        format: "github-actions",
+    };
+    let Some(sequence) = descend(schedule, "block_sequence") else {
+        let span = (schedule.start_byte() as u64, schedule.end_byte() as u64);
+        return vec![job(
+            span,
+            None,
+            Some("workflow schedule is not a block sequence"),
+        )];
+    };
+    let mut walk = sequence.walk();
+    let items: Vec<TsNode> = sequence
+        .named_children(&mut walk)
+        .filter(|item| item.kind() == "block_sequence_item")
+        .collect();
+    items
+        .into_iter()
+        .map(|item| {
+            let span = (item.start_byte() as u64, item.end_byte() as u64);
+            let value =
+                descend(item, "block_mapping").and_then(|entry| value_of(text, entry, "cron"));
+            if decorated || contains_kind(item, &["alias", "anchor", "tag"]) {
+                return job(
+                    span,
+                    None,
+                    Some("workflow cron uses a YAML alias, anchor or tag"),
+                );
+            }
+            match value.and_then(|value| scalar(text, value)) {
+                Some(cron) => {
+                    let fields: Vec<&str> = cron.split_whitespace().collect();
+                    let valid = fields.len() == 5
+                        && fields
+                            .iter()
+                            .enumerate()
+                            .all(|(index, field)| cron_field(field, index, true));
+                    let unreadable =
+                        (!valid).then_some("workflow cron is not five schedule fields");
+                    job(span, Some(cron), unreadable)
+                }
+                None => job(
+                    span,
+                    None,
+                    Some("workflow schedule entry without a literal cron"),
+                ),
+            }
+        })
+        .collect()
 }
 
 /// A YAML sequence of literal scalars, block or flow; `None` otherwise.
