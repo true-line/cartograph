@@ -109,58 +109,60 @@ impl JobStore {
         &self,
         id: &str,
         after_sequence: u64,
-        client: Option<&McpClientId>,
+        session: Option<&McpTaskSession>,
     ) -> Result<InvestigationEventPage, InvestigationStoreError> {
-        let tx = self.conn.unchecked_transaction()?;
-        validate(&tx, &self.namespace)?;
-        require_request_owner(&tx, id, client)?;
-        let task = load_execution_task(&tx, id)?;
-        if after_sequence > journal_event_limit(&task)? {
-            return Err(InvestigationStoreError::Invalid);
-        }
-        let sequences=tx.prepare("SELECT sequence FROM investigation_events WHERE task_id=?1 AND sequence>?2 ORDER BY sequence LIMIT 51")?
-            .query_map(params![id,signed(after_sequence)?],|r|r.get::<_,i64>(0))?.collect::<Result<Vec<_>,_>>()?;
-        let mut items = Vec::new();
-        let mut remaining = 256 * 1024 - 4096;
-        let mut next_sequence = after_sequence;
-        let mut has_more = false;
-        for sequence in sequences {
-            let event: InvestigationEvent =
-                read_body(&tx, "investigation_events", "sequence", id, &sequence)?
-                    .ok_or(InvestigationStoreError::Invalid)?;
-            if event.investigation_id != id
-                || signed(event.sequence)? != sequence
-                || event.sequence != next_sequence + 1
-                || event.sequence > task.detail.summary.last_event_sequence
-                || event.revision > task.detail.summary.revision
-                || event.summary.len() > 1024
-                || redacted_history_text(&event.summary, 1024)? != event.summary
-                || event.step_id.as_ref().is_some_and(|v| !id_valid(v))
-                || event.created_at.len() > 32
-            {
+        with_task_access(session, |client| {
+            let tx = self.conn.unchecked_transaction()?;
+            validate(&tx, &self.namespace)?;
+            require_request_owner(&tx, id, client)?;
+            let task = load_execution_task(&tx, id)?;
+            if after_sequence > journal_event_limit(&task)? {
                 return Err(InvestigationStoreError::Invalid);
             }
-            let size = encode(&event, 16 * 1024)?.len() + 1;
-            if items.len() == 50 || size > remaining {
-                has_more = true;
-                break;
+            let sequences=tx.prepare("SELECT sequence FROM investigation_events WHERE task_id=?1 AND sequence>?2 ORDER BY sequence LIMIT 51")?
+            .query_map(params![id,signed(after_sequence)?],|r|r.get::<_,i64>(0))?.collect::<Result<Vec<_>,_>>()?;
+            let mut items = Vec::new();
+            let mut remaining = 256 * 1024 - 4096;
+            let mut next_sequence = after_sequence;
+            let mut has_more = false;
+            for sequence in sequences {
+                let event: InvestigationEvent =
+                    read_body(&tx, "investigation_events", "sequence", id, &sequence)?
+                        .ok_or(InvestigationStoreError::Invalid)?;
+                if event.investigation_id != id
+                    || signed(event.sequence)? != sequence
+                    || event.sequence != next_sequence + 1
+                    || event.sequence > task.detail.summary.last_event_sequence
+                    || event.revision > task.detail.summary.revision
+                    || event.summary.len() > 1024
+                    || redacted_history_text(&event.summary, 1024)? != event.summary
+                    || event.step_id.as_ref().is_some_and(|v| !id_valid(v))
+                    || event.created_at.len() > 32
+                {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+                let size = encode(&event, 16 * 1024)?.len() + 1;
+                if items.len() == 50 || size > remaining {
+                    has_more = true;
+                    break;
+                }
+                remaining -= size;
+                next_sequence = event.sequence;
+                items.push(event);
             }
-            remaining -= size;
-            next_sequence = event.sequence;
-            items.push(event);
-        }
-        if !has_more && next_sequence < task.detail.summary.last_event_sequence {
-            return Err(InvestigationStoreError::Invalid);
-        }
-        let page = InvestigationEventPage {
-            investigation_id: id.into(),
-            items,
-            next_sequence,
-            has_more,
-        };
-        encode(&page, 256 * 1024)?;
-        tx.commit()?;
-        Ok(page)
+            if !has_more && next_sequence < task.detail.summary.last_event_sequence {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            let page = InvestigationEventPage {
+                investigation_id: id.into(),
+                items,
+                next_sequence,
+                has_more,
+            };
+            encode(&page, 256 * 1024)?;
+            tx.commit()?;
+            Ok(page)
+        })
     }
 
     pub(crate) fn investigation_receipt_references(

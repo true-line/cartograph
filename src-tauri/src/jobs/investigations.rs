@@ -72,6 +72,21 @@ use storage::*;
 
 pub(super) use transitions::{attach_execution, cancel_for_job};
 
+// None is the existing trusted owner-App path, never a transport argument.
+// MCP callers supply a host-created session, including read-only sessions.
+// Keep the grant guard alive through the entire synchronous store operation.
+fn with_task_access<T>(
+    session: Option<&McpTaskSession>,
+    operation: impl FnOnce(Option<&McpClientId>) -> Result<T, InvestigationStoreError>,
+) -> Result<T, InvestigationStoreError> {
+    match session {
+        None => operation(None),
+        Some(session) => session
+            .with_grant(|client, _| operation(Some(client)))
+            .map_err(|_| InvestigationStoreError::Missing)?,
+    }
+}
+
 pub(crate) const KIND_PREFIX: &str = "investigation-v1:";
 const MAX_TASKS: usize = 128;
 const MAX_LIVE_TASKS: usize = 2;
@@ -635,14 +650,16 @@ impl JobStore {
     fn investigation_access(
         &self,
         id: &str,
-        client: Option<&McpClientId>,
+        session: Option<&McpTaskSession>,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
-        let tx = self.conn.unchecked_transaction()?;
-        validate(&tx, &self.namespace)?;
-        require_request_owner(&tx, id, client)?;
-        let task = load_execution_task(&tx, id)?;
-        tx.commit()?;
-        Ok(task.detail)
+        with_task_access(session, |client| {
+            let tx = self.conn.unchecked_transaction()?;
+            validate(&tx, &self.namespace)?;
+            require_request_owner(&tx, id, client)?;
+            let task = load_execution_task(&tx, id)?;
+            tx.commit()?;
+            Ok(task.detail)
+        })
     }
 
     /// Worker counterpart of the family-aware public read, requiring a live owner.
@@ -685,15 +702,17 @@ impl JobStore {
     fn investigation_result_access(
         &self,
         id: &str,
-        client: Option<&McpClientId>,
+        session: Option<&McpTaskSession>,
     ) -> Result<Option<InvestigationResult>, InvestigationStoreError> {
-        let tx = self.conn.unchecked_transaction()?;
-        validate(&tx, &self.namespace)?;
-        require_request_owner(&tx, id, client)?;
-        let task = load_execution_task(&tx, id)?;
-        let result = load_result(&tx, &task)?;
-        tx.commit()?;
-        Ok(result)
+        with_task_access(session, |client| {
+            let tx = self.conn.unchecked_transaction()?;
+            validate(&tx, &self.namespace)?;
+            require_request_owner(&tx, id, client)?;
+            let task = load_execution_task(&tx, id)?;
+            let result = load_result(&tx, &task)?;
+            tx.commit()?;
+            Ok(result)
+        })
     }
 
     /// Owned counterpart for the worker, including next-family consent.

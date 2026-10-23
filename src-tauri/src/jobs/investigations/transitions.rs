@@ -420,29 +420,38 @@ impl JobStore {
         &mut self,
         id: &str,
         next_prompt: bool,
-        client: Option<&McpClientId>,
+        session: Option<&McpTaskSession>,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate(&tx, &self.namespace)?;
-        require_request_owner(&tx, id, client)?;
-        let mut task = if next_prompt {
-            load_next_prompt_task_base(&tx, id)?
-        } else {
-            load_task(&tx, id)?
-        };
-        if task.phase != Phase::Terminal && !task.detail.summary.cancel_requested {
-            let expected = task.detail.summary.revision;
-            request_cancel(&tx, &mut task)?;
-            if next_prompt {
-                save_next_prompt_task(&tx, &task, expected, true)?;
+        with_task_access(session, |client| {
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            validate(&tx, &self.namespace)?;
+            require_request_owner(&tx, id, client)?;
+            let mut task = if client.is_some() {
+                load_execution_task(&tx, id)?
+            } else if next_prompt {
+                load_next_prompt_task_base(&tx, id)?
             } else {
-                save_task(&tx, &task, expected, true)?;
+                load_task(&tx, id)?
+            };
+            let next_prompt = task
+                .detail
+                .summary
+                .specialist_id
+                .uses_next_prompt_admission();
+            if task.phase != Phase::Terminal && !task.detail.summary.cancel_requested {
+                let expected = task.detail.summary.revision;
+                request_cancel(&tx, &mut task)?;
+                if next_prompt {
+                    save_next_prompt_task(&tx, &task, expected, true)?;
+                } else {
+                    save_task(&tx, &task, expected, true)?;
+                }
             }
-        }
-        tx.commit()?;
-        Ok(task.detail)
+            tx.commit()?;
+            Ok(task.detail)
+        })
     }
 
     /// Internal terminal path for failures outside a pending source read.

@@ -549,14 +549,17 @@ fn principal_task_access_next_family_cancellation_preserves_owner_parity() {
         "UPDATE investigation_tasks SET record=?2,record_hash=?3,request_namespace=?4 WHERE id=?1",
         params![id, bytes, core_prov::content_hash(&bytes), f.task.detail.origin.request_namespace()],
     ).unwrap();
+    let activation =
+        McpTaskActivation::granted(client.clone(), std::num::NonZeroUsize::new(4).unwrap());
+    let session = activation.session();
     let before = f.store.investigation(&id).unwrap();
     assert_eq!(
-        f.store.investigation_access(&id, Some(&client)).unwrap(),
+        f.store.investigation_access(&id, Some(&session)).unwrap(),
         before
     );
     let cancelled = f
         .store
-        .cancel_investigation_access(&id, true, Some(&client))
+        .cancel_investigation_access(&id, false, Some(&session))
         .unwrap();
     assert!(cancelled.summary.cancel_requested);
     // The execution owner still holds the claim; cancellation is requested,
