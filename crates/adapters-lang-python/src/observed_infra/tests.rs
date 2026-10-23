@@ -303,6 +303,12 @@ fn module_constants_are_followed_into_their_module() {
     assert!(nodes.iter().all(|node| node.label != "Gap"));
     let edge = edges.iter().find(|e| e.src.contains("db.py")).unwrap();
     assert_eq!(edge.props["identity_from"], "app/config.py");
+    assert_eq!(edge.props["prov"]["confidence_tier"], "Confirmed");
+    assert!(
+        edge.props
+            .get("identity_assumes_method_receivers")
+            .is_none()
+    );
     let resource = nodes
         .iter()
         .find(|n| n.id == res("sql-database:env:DB_URI"))
@@ -327,7 +333,56 @@ fn module_constants_are_followed_into_their_module() {
 // through a proven binding. An unrelated member write does not. (T-0331)
 #[test]
 fn module_constants_fail_closed() {
-    let cases: [(&str, &[(&str, &str)]); 29] = [
+    let cases: [(&str, &[(&str, &str)]); 36] = [
+        (
+            "computed setattr beneath an import",
+            &[(
+                "tools/patch.py",
+                "from app import holder\nsetattr(holder.target, key, None)\n",
+            )],
+        ),
+        (
+            "static method called with the module",
+            &[(
+                "tools/patch.py",
+                "from app import config\nclass Patcher:\n    @staticmethod\n    def apply(module, key):\n        setattr(module, key, \"sqlite://\")\nPatcher.apply(config, \"DB_URI\")\n",
+            )],
+        ),
+        (
+            "unknown decorator",
+            &[(
+                "tools/patch.py",
+                "class Patcher:\n    @register\n    def apply(module, key):\n        setattr(module, key, None)\n",
+            )],
+        ),
+        (
+            "chained alias",
+            &[(
+                "tools/patch.py",
+                "from types import SimpleNamespace\nfrom app import config\nholder = SimpleNamespace(target=config)\nsetattr(holder.target, key, \"sqlite://\")\n",
+            )],
+        ),
+        (
+            "chained parameter",
+            &[(
+                "tools/patch.py",
+                "def patch(holder, key):\n    setattr(holder.target, key, None)\n",
+            )],
+        ),
+        (
+            "chained literal write",
+            &[(
+                "tools/patch.py",
+                "def patch(holder):\n    holder.target.DB_URI = None\n",
+            )],
+        ),
+        (
+            "literal write beneath an imported module",
+            &[(
+                "tools/patch.py",
+                "import app.holder\napp.holder.cfg.DB_URI = None\n",
+            )],
+        ),
         (
             "computed setattr on a name also bound otherwise",
             &[(
@@ -560,4 +615,9 @@ fn module_constants_fail_closed() {
         uses(&edges, "app/db.py"),
         vec![res("sql-database:env:DB_URI")]
     );
+    // The receiver writes (`setattr(self, …)`, `setattr(cls, …)`) are only
+    // conventionally harmless: the follow is inferred and says so.
+    let edge = edges.iter().find(|e| e.src.contains("app/db.py")).unwrap();
+    assert_eq!(edge.props["prov"]["confidence_tier"], "InferredStrong");
+    assert_eq!(edge.props["identity_assumes_method_receivers"], true);
 }

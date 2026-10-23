@@ -63,8 +63,12 @@ struct Scope {
     /// `patch("a.b.X")`).
     patches: Vec<MemberPath>,
     /// Roots whose members `setattr`/`delattr`/`patch.object` write by a
-    /// computed name, other than a method's own receiver.
-    computed_setattr: Vec<String>,
+    /// computed name, other than a method's own receiver, and whether the
+    /// write is at the root itself (not beneath a member chain).
+    computed_setattr: Vec<(String, bool)>,
+    /// A computed-name write on a method's receiver: harmless only if the
+    /// method is never called unbound with a module.
+    receiver_setattr: bool,
     /// Namespaces written by computed key (`globals()[k] = …`,
     /// `vars(x)[k] = …`, `x.__dict__[k] = …`).
     namespaces: Vec<Namespace>,
@@ -135,7 +139,8 @@ fn namespace_write(cx: &FileCx, target: TsNode, out: &mut Vec<Namespace>) {
 }
 
 /// Whether `object` is the first parameter of a method defined directly
-/// in a class body (`self`, `cls`): an instance, not a module.
+/// in a class body, undecorated or `@classmethod` (`self`, `cls`). By
+/// convention a receiver, not proof: an unbound call may pass anything.
 fn is_receiver(cx: &FileCx, object: TsNode) -> bool {
     if object.kind() != "identifier" {
         return false;
@@ -149,8 +154,17 @@ fn is_receiver(cx: &FileCx, object: TsNode) -> bool {
         }
     };
     let mut owner = function.parent();
-    if owner.is_some_and(|o| o.kind() == "decorated_definition") {
-        owner = owner.and_then(|o| o.parent());
+    if let Some(decorated) = owner.filter(|o| o.kind() == "decorated_definition") {
+        // `@staticmethod` or an unknown decorator: any first argument.
+        let mut walk = decorated.walk();
+        let only_classmethod = decorated
+            .named_children(&mut walk)
+            .filter(|child| child.kind() == "decorator")
+            .all(|decorator| cx.text(&decorator).trim() == "@classmethod");
+        if !only_classmethod {
+            return false;
+        }
+        owner = decorated.parent();
     }
     let in_class = owner
         .filter(|block| block.kind() == "block")
@@ -394,6 +408,7 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
         wildcard: false,
         patches: Vec::new(),
         computed_setattr: Vec::new(),
+        receiver_setattr: false,
         namespaces: Vec::new(),
     };
     let mut stack = vec![root];
@@ -448,11 +463,14 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
                                 first.and_then(|object| member_path(cx, object))
                             {
                                 let attr = args.get(1).and_then(|attr| literal_string(cx, *attr));
-                                if attr.is_none()
-                                    && path.is_empty()
-                                    && !first.is_some_and(|object| is_receiver(cx, object))
-                                {
-                                    scope.computed_setattr.push(name.clone());
+                                if attr.is_none() {
+                                    if first.is_some_and(|object| is_receiver(cx, object)) {
+                                        scope.receiver_setattr = true;
+                                    } else {
+                                        scope
+                                            .computed_setattr
+                                            .push((name.clone(), path.is_empty()));
+                                    }
                                 }
                                 path.push(attr);
                                 scope.members.entry(name).or_default().insert(path);
@@ -538,6 +556,9 @@ struct Follows {
     /// A computed-name member write through a root that may be any module
     /// (an alias, a parameter): no follow is proven.
     any_member: bool,
+    /// A computed-name write on a method receiver somewhere: follows rest
+    /// on the receiver convention.
+    receiver_assumed: bool,
 }
 
 /// The dotted module a repository-relative Python file is.
@@ -691,31 +712,34 @@ fn extract_file(
     let root = tree.root_node();
     let cx = FileCx { source, path, id };
     let scope = collect_scope(&cx, root);
-    // Member writes through a proven module binding (`config.X = …`) may
+    // Member writes through an import-bound name (`config.X = …`) may
     // replace another module's constant: no follow may read past them.
     for (name, paths) in &scope.members {
-        match scope.imported_only(name) {
-            Some(bound) => {
-                let base = bound_segments(bound);
-                follows.module_writes.extend(
-                    paths
-                        .iter()
-                        .map(|path| [base.clone(), path.clone()].concat()),
-                );
-            }
-            None => follows.rebound.extend(
+        if let Some(bound) = scope.imported_only(name) {
+            let base = bound_segments(bound);
+            follows.module_writes.extend(
                 paths
                     .iter()
-                    .filter_map(|path| path.last().cloned().flatten()),
-            ),
+                    .map(|path| [base.clone(), path.clone()].concat()),
+            );
         }
+        // Through any root, a named member write may rebind a constant of
+        // whatever module the chain reaches (`holder.cfg.DB_URI = …`).
+        follows.rebound.extend(
+            paths
+                .iter()
+                .filter_map(|path| path.last().cloned().flatten()),
+        );
     }
     follows.module_writes.extend(scope.patches.iter().cloned());
-    for root in &scope.computed_setattr {
-        if scope.imported_only(root).is_none() {
+    // A computed-name write is attributable only at an import-bound root
+    // itself; beneath a member chain (`holder.target`) it may be anything.
+    for (root, at_root) in &scope.computed_setattr {
+        if !at_root || scope.imported_only(root).is_none() {
             follows.any_member = true;
         }
     }
+    follows.receiver_assumed |= scope.receiver_setattr;
     for namespace in &scope.namespaces {
         match namespace {
             Namespace::Own => follows
@@ -791,6 +815,7 @@ fn extract_file(
             module: Some(client.module.clone()),
             identity,
             identity_source: None,
+            identity_assumption: None,
             registry: Some(client.registry.clone()),
             symbol,
             path: path.to_string(),
@@ -959,6 +984,9 @@ pub fn extract_dir(
         {
             sites[pending.site].identity = Some(identity);
             sites[pending.site].identity_source = Some(source);
+            sites[pending.site].identity_assumption = follows
+                .receiver_assumed
+                .then_some("identity_assumes_method_receivers");
         }
     }
     Ok(assemble(
