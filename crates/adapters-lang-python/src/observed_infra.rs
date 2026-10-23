@@ -345,6 +345,8 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
 /// `X` → its binding; `n.a.X` → (`<n's module>.a`, `X`).
 fn callee_export(cx: &FileCx, callee: TsNode, scope: &Scope) -> Option<(String, String)> {
     match callee.kind() {
+        // Any member write under a called name (`R.__new__ = …`) voids it.
+        "identifier" if scope.overwritten(cx.text(&callee), &[]) => None,
         "identifier" => match scope.proven(cx.text(&callee))? {
             Bound::Symbol(module, name) => Some((module.clone(), name.clone())),
             Bound::Module(_) => None,

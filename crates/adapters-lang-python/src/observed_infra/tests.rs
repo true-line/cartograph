@@ -215,6 +215,14 @@ fn rebound_or_local_imports_prove_nothing() {
             "import redis\nredis.Redis.from_url.cache = {}\nredis.Redis.from_url(\"redis://h\")\n",
         ),
         (
+            "v_symbol_member.py",
+            "from redis import Redis as R\nR.__new__ = lambda *a, **k: object()\nR(host=\"cache.internal\")\n",
+        ),
+        (
+            "w_symbol_setattr.py",
+            "from smtplib import SMTP\nsetattr(SMTP, \"__init__\", None)\nSMTP(\"m\")\n",
+        ),
+        (
             "l_global.py",
             "import boto3\ndef swap():\n    global boto3\n    boto3 = None\nboto3.client(\"s3\")\n",
         ),
