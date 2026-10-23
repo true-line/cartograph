@@ -32,6 +32,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use tree_sitter::{Node as TsNode, Parser};
 
+mod dispatch;
+
 /// Extractor id recorded on every schedule fact.
 pub const SCHEDULE_EXTRACTOR_ID: &str = "t0.schedule";
 
@@ -96,8 +98,14 @@ enum Entry {
 }
 
 /// Walk `root` and turn every schedule file (yacron, crontab, `CronJob`)
-/// into facts.
-pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<ScheduleExtraction> {
+/// into facts. `symbols` holds the `Symbol` ids the language adapters
+/// emitted: a Python entry whose argument dispatch is proven enters the
+/// selected function when it is among them, and the file otherwise.
+pub fn extract_dir(
+    root: &Path,
+    id: &SourceId,
+    symbols: &BTreeSet<String>,
+) -> std::io::Result<ScheduleExtraction> {
     let walked = source_walk::files(
         root,
         &crate::preflight::skip_dir,
@@ -109,6 +117,20 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<ScheduleExtrac
         .and_then(|text| container_root(&text));
     let mut out = ScheduleExtraction::default();
     let mut emitted_files = BTreeSet::new();
+    let mut sources: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut dispatch_of = |rel: &str, command: &str| -> Option<dispatch::Dispatch> {
+        if !rel.ends_with(".py") {
+            return None;
+        }
+        let source = sources
+            .entry(rel.to_string())
+            .or_insert_with(|| std::fs::read_to_string(root.join(rel)).ok())
+            .as_deref()?;
+        let found = dispatch::dispatch(source, &script_args(command)?)?;
+        symbols
+            .contains(&format!("sym:{}@{rel}#{}", id.repo, found.function))
+            .then_some(found)
+    };
     for file in &walked {
         let jobs = if file.name.ends_with(".yml") || file.name.ends_with(".yaml") {
             let Ok(text) = std::fs::read_to_string(&file.path) else {
@@ -140,6 +162,7 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<ScheduleExtrac
                 job,
                 &files,
                 container.as_ref(),
+                &mut dispatch_of,
                 &mut emitted_files,
                 &mut out,
             );
@@ -156,6 +179,7 @@ fn emit(
     job: &Job,
     files: &BTreeSet<String>,
     container: Option<&ContainerRoot>,
+    dispatch_of: &mut dyn FnMut(&str, &str) -> Option<dispatch::Dispatch>,
     emitted_files: &mut BTreeSet<String>,
     out: &mut ScheduleExtraction,
 ) {
@@ -235,8 +259,28 @@ fn emit(
                     ),
                 });
             }
-            let identity = format!("{schedule_id} ENTRY {file_id}");
+            // A proven argument dispatch enters the selected function.
+            let dispatched = job
+                .command
+                .as_deref()
+                .and_then(|command| dispatch_of(&entry_rel, command));
+            let dst = match &dispatched {
+                Some(found) => {
+                    spans.push(evidence(&entry_rel, found.span));
+                    format!("sym:{}@{entry_rel}#{}", id.repo, found.function)
+                }
+                None => file_id,
+            };
+            let identity = format!("{schedule_id} ENTRY {dst}");
             let mut props = serde_json::json!({ "command": job.command });
+            if let Some(found) = dispatched {
+                props["dispatch"] = serde_json::json!({
+                    "option": found.option,
+                    "value": found.value,
+                    "function": found.function,
+                    "file": entry_rel,
+                });
+            }
             if let Some(marker) = marker {
                 props[marker] = true.into();
             }
@@ -253,7 +297,7 @@ fn emit(
             }
             out.edges.push(Edge {
                 src: schedule_id,
-                dst: file_id,
+                dst,
                 label: "ENTRY".into(),
                 props: seal(props, confidence, spans, &identity),
             });
@@ -402,6 +446,18 @@ fn resolve_entry(
         };
     }
     Entry::Gap("schedule entry not found in source tree")
+}
+
+/// The command's words after the script it runs.
+fn script_args(command: &str) -> Option<Vec<&str>> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let script = match script_of(&words).ok()? {
+        Script::Path(word) | Script::Module(word) => word,
+    };
+    let at = words
+        .iter()
+        .position(|word| word.as_ptr() == script.as_ptr())?;
+    Some(words[at + 1..].to_vec())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

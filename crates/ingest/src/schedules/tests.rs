@@ -3,6 +3,10 @@ use super::*;
 const REPO: &str = "local/app";
 
 fn extract(files: &[(&str, &str)]) -> ScheduleExtraction {
+    extract_with(files, &BTreeSet::new())
+}
+
+fn extract_with(files: &[(&str, &str)], symbols: &BTreeSet<String>) -> ScheduleExtraction {
     let dir = tempfile::tempdir().unwrap();
     for (path, body) in files {
         let path = dir.path().join(path);
@@ -15,6 +19,7 @@ fn extract(files: &[(&str, &str)]) -> ScheduleExtraction {
             repo: REPO,
             commit: "abc",
         },
+        symbols,
     )
     .unwrap()
 }
@@ -669,5 +674,120 @@ spec:
     assert_eq!(
         entry(&bare, 1, file).props["entry_relative_to_repo_root"],
         true
+    );
+}
+
+// #779: `python cron.py -j stats` runs one branch of the script's
+// `__main__` block. When the option, the parsed-args binding and a unique
+// literal comparison prove the branch, and its body makes one bare call to
+// a module-level function the adapter emitted, ENTRY enters that function
+// and cites the branch; anything less keeps the file. (AC-0334, T-0334)
+#[test]
+fn argument_dispatch_enters_the_selected_function() {
+    let cron = r#"import argparse
+from app.jobs import imported_job
+
+
+def stats():
+    pass
+
+
+def notify():
+    pass
+
+
+def twice():
+    pass
+
+
+def twice():
+    pass
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-j", "--job", help="job", type=str)
+    parser.add_argument("--mode", dest="chosen")
+    args = parser.parse_args()
+    with open("x"):
+        if args.job == "stats":
+            LOG.d("Compute stats")
+            stats()
+        elif "notify" == args.job:
+            notify()
+        elif args.job == "both":
+            stats()
+            notify()
+        elif args.job == "imported":
+            imported_job()
+        elif args.job == "twice":
+            twice()
+        elif args.job == "dup":
+            stats()
+        elif args.job == "dup":
+            notify()
+    if args.chosen == "fast":
+        notify()
+"#;
+    let jobs = [
+        "python cron.py -j stats",
+        "python cron.py --job=notify",
+        "python cron.py --mode fast",
+        "python cron.py -j both",
+        "python cron.py -j imported",
+        "python cron.py -j twice",
+        "python cron.py -j dup",
+        "python cron.py -j missing",
+        "python cron.py -j stats --job notify",
+    ];
+    let yacron: String = std::iter::once("jobs:\n".to_string())
+        .chain(jobs.iter().map(|command| {
+            format!("  - name: {command}\n    command: {command}\n    schedule: \"0 0 * * *\"\n")
+        }))
+        .collect();
+    let symbols: BTreeSet<String> = ["stats", "notify", "twice", "imported_job"]
+        .iter()
+        .map(|name| format!("sym:{REPO}@cron.py#{name}"))
+        .collect();
+    let out = extract_with(&[("cron.py", cron), ("cron.yaml", &yacron)], &symbols);
+    let stats = entry(&out, 0, "cron.yaml");
+    assert_eq!(stats.dst, format!("sym:{REPO}@cron.py#stats"));
+    assert_eq!(
+        stats.props["dispatch"],
+        serde_json::json!({"option": "-j", "value": "stats", "function": "stats", "file": "cron.py"})
+    );
+    let branch = &stats.props["prov"]["evidence"][1];
+    assert_eq!(branch["path"], "cron.py");
+    let start = branch["byte_start"].as_u64().unwrap() as usize;
+    assert!(cron[start..].starts_with("if args.job == \"stats\":"));
+    assert_eq!(
+        entry(&out, 1, "cron.yaml").dst,
+        format!("sym:{REPO}@cron.py#notify")
+    );
+    assert_eq!(
+        entry(&out, 2, "cron.yaml").dst,
+        format!("sym:{REPO}@cron.py#notify")
+    );
+    for (index, job) in jobs.iter().enumerate().skip(3) {
+        let edge = entry(&out, index, "cron.yaml");
+        assert_eq!(edge.dst, format!("file:{REPO}@cron.py"), "{job}");
+        assert!(edge.props.get("dispatch").is_none(), "{job}");
+    }
+
+    // A function the adapter did not emit keeps the file; so does a script
+    // without the `__main__` guard.
+    let out = extract_with(
+        &[("cron.py", cron), ("cron.yaml", &yacron)],
+        &BTreeSet::new(),
+    );
+    assert_eq!(
+        entry(&out, 0, "cron.yaml").dst,
+        format!("file:{REPO}@cron.py")
+    );
+    let unguarded = cron.replace("if __name__ == \"__main__\":", "if True:");
+    let out = extract_with(&[("cron.py", &unguarded), ("cron.yaml", &yacron)], &symbols);
+    assert_eq!(
+        entry(&out, 0, "cron.yaml").dst,
+        format!("file:{REPO}@cron.py")
     );
 }
