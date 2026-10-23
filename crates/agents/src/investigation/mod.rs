@@ -108,9 +108,14 @@ pub fn decode_record<T: serde::de::DeserializeOwned + serde::Serialize>(
     let value: T = serde_json::from_str(body).map_err(|_| InvestigationError::InvalidInput)?;
     // New investigation contracts have no legacy permissive fields. Typed
     // round-trip equality also closes nested DTOs reused from older contracts.
+    // Typed serialization can expand a small input. Enforce the existing byte
+    // ceiling before constructing either comparison Value.
+    let canonical = bounded_bytes(&value, MAX_RECORD_BYTES)?;
     let original: serde_json::Value =
         serde_json::from_str(body).map_err(|_| InvestigationError::InvalidInput)?;
-    if serde_json::to_value(&value).map_err(|_| InvestigationError::InvalidInput)? != original {
+    let round_trip: serde_json::Value =
+        serde_json::from_slice(&canonical).map_err(|_| InvestigationError::InvalidInput)?;
+    if round_trip != original {
         return Err(InvestigationError::InvalidInput);
     }
     Ok(value)

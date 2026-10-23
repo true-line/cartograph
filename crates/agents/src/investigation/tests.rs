@@ -586,3 +586,38 @@ pub(super) mod inspection_tests;
 
 #[path = "staged_finish_tests.rs"]
 mod staged_finish_tests;
+
+#[test]
+fn durable_record_round_trip_bounds_expansion_before_comparison_values() {
+    // AC-0188: bound typed expansion before allocating comparison Values.
+    use serde::ser::SerializeSeq;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static EMITTED: AtomicUsize = AtomicUsize::new(0);
+    #[derive(Debug, serde::Deserialize)]
+    struct Expanding {}
+    impl serde::Serialize for Expanding {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut sequence = serializer.serialize_seq(Some(MAX_RECORD_BYTES))?;
+            for _ in 0..MAX_RECORD_BYTES {
+                EMITTED.fetch_add(1, Ordering::Relaxed);
+                sequence.serialize_element("expanded")?;
+            }
+            sequence.end()
+        }
+    }
+    EMITTED.store(0, Ordering::Relaxed);
+    assert_eq!(
+        decode_record::<Expanding>("{}").unwrap_err(),
+        InvestigationError::LimitExceeded
+    );
+    assert!(EMITTED.load(Ordering::Relaxed) < MAX_RECORD_BYTES);
+
+    // Preserve semantic round-trip comparison for whitespace, escapes, signed
+    // numbers and nested objects; canonical byte equality remains a store rule.
+    let raw = r#" { "label": "\u00e9", "values": [1, -2, 0.5, null], "nested": {"ok": true} } "#;
+    let decoded = decode_record::<serde_json::Value>(raw).unwrap();
+    assert_eq!(
+        decoded,
+        serde_json::from_str::<serde_json::Value>(raw).unwrap()
+    );
+}
