@@ -722,8 +722,9 @@ fn collect_calls<'t>(node: TsNode<'t>, out: &mut Vec<TsNode<'t>>) {
 }
 
 /// Where the file may make `op` other than Alembic's: any `op` that is not a
-/// member read through it (a bare read, a binding, a member write or
-/// deletion), or a wildcard import that may rebind it.
+/// call through one of its members (a bare read, a binding, a member read
+/// into a value, a member write or deletion), or a wildcard import that may
+/// rebind it.
 fn op_replaced<'t>(cx: &FileCx<'_>, root: TsNode<'t>) -> Option<TsNode<'t>> {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
@@ -762,7 +763,7 @@ fn op_replaced<'t>(cx: &FileCx<'_>, root: TsNode<'t>) -> Option<TsNode<'t>> {
         if parent.kind() != "attribute" || !is_field(parent, "object") {
             return Some(node);
         }
-        // The member chain from `op` must not be written or deleted.
+        // The member chain from `op`.
         let mut top = parent;
         while let Some(up) = top.parent() {
             let holds = |field: &str| {
@@ -777,20 +778,15 @@ fn op_replaced<'t>(cx: &FileCx<'_>, root: TsNode<'t>) -> Option<TsNode<'t>> {
                 break;
             }
         }
-        let written = top.parent().is_some_and(|up| {
-            let left = up
-                .child_by_field_name("left")
-                .is_some_and(|child| child.id() == top.id());
-            (matches!(
-                up.kind(),
-                "assignment" | "augmented_assignment" | "for_statement"
-            ) && left)
-                || matches!(
-                    up.kind(),
-                    "delete_statement" | "pattern_list" | "tuple_pattern" | "list_pattern"
-                )
+        // Only a call through it (`op.add_column(...)`); a member read
+        // into a value, a write or a deletion may hide or replace an op.
+        let called = top.parent().is_some_and(|up| {
+            up.kind() == "call"
+                && up
+                    .child_by_field_name("function")
+                    .is_some_and(|function| function.id() == top.id())
         });
-        if written {
+        if !called {
             return Some(node);
         }
     }

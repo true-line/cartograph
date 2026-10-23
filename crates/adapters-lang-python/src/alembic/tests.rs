@@ -392,6 +392,10 @@ fn alembic_replay_fails_closed() {
         ("    op.impl.dialect = None", ""),
         ("    op.impl['dialect'] = None", ""),
         ("    del op.impl", ""),
+        (
+            "    add = op.add_column\n    add('users', sa.Column('phantom', sa.String()))",
+            "",
+        ),
         ("    register(op)", ""),
         (
             "    op.add_column('users', sa.Column('phantom', sa.String()))",
