@@ -448,8 +448,20 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
                             .map(|attribute| cx.text(&attribute)),
                         _ => None,
                     };
-                    let args = positional(args);
-                    let first = args.first().copied();
+                    // Keyword forms (`patch.object(target=x, attribute="a")`,
+                    // `monkeypatch.setattr(target=…, name=…)`) name the same
+                    // operands; a splat may name any of them.
+                    let listed = positional(args);
+                    let splat = listed
+                        .iter()
+                        .any(|arg| matches!(arg.kind(), "list_splat" | "dictionary_splat"));
+                    if splat && matches!(verb, Some("setattr" | "delattr" | "patch" | "object")) {
+                        scope.namespaces.push(Namespace::Unknown);
+                    }
+                    let first = keyword(cx, args, "target").or(listed.first().copied());
+                    let attr_arg = keyword(cx, args, "attribute")
+                        .or(keyword(cx, args, "name"))
+                        .or(listed.get(1).copied());
                     match (verb, first.and_then(|first| literal_string(cx, first))) {
                         // `monkeypatch.setattr("a.b.X", v)`, `patch("a.b.X")`.
                         (Some("setattr" | "delattr" | "patch"), Some(target)) => scope
@@ -462,7 +474,7 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
                             if let Some((name, mut path)) =
                                 first.and_then(|object| member_path(cx, object))
                             {
-                                let attr = args.get(1).and_then(|attr| literal_string(cx, *attr));
+                                let attr = attr_arg.and_then(|attr| literal_string(cx, attr));
                                 if attr.is_none() {
                                     if first.is_some_and(|object| is_receiver(cx, object)) {
                                         scope.receiver_setattr = true;

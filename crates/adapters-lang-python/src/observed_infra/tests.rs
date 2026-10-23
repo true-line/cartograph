@@ -333,7 +333,35 @@ fn module_constants_are_followed_into_their_module() {
 // through a proven binding. An unrelated member write does not. (T-0331)
 #[test]
 fn module_constants_fail_closed() {
-    let cases: [(&str, &[(&str, &str)]); 36] = [
+    let cases: [(&str, &[(&str, &str)]); 40] = [
+        (
+            "patch.object by keyword",
+            &[(
+                "tests/test_db.py",
+                "from unittest import mock\nfrom app import config\nmock.patch.object(target=config, attribute=\"DB_URI\", new=\"sqlite://\")\n",
+            )],
+        ),
+        (
+            "patch target by keyword",
+            &[(
+                "tests/test_db.py",
+                "from unittest.mock import patch\npatch(target=\"app.config.DB_URI\", new=\"sqlite://\")\n",
+            )],
+        ),
+        (
+            "monkeypatch name by keyword",
+            &[(
+                "tests/test_db.py",
+                "from app import config\ndef test(monkeypatch):\n    monkeypatch.setattr(config, name=\"DB_URI\", value=\"sqlite://\")\n",
+            )],
+        ),
+        (
+            "splatted patch operands",
+            &[(
+                "tests/test_db.py",
+                "from unittest import mock\nmock.patch.object(**operands)\n",
+            )],
+        ),
         (
             "computed setattr beneath an import",
             &[(
