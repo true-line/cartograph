@@ -147,6 +147,14 @@ fn rebound_or_local_imports_prove_nothing() {
             "import boto3\ntry:\n    pass\nexcept Exception as boto3:\n    pass\nboto3.client(\"s3\")\n",
         ),
         (
+            "e_except_tuple.py",
+            "import boto3\ntry:\n    pass\nexcept (ValueError, KeyError) as boto3:\n    pass\nboto3.client(\"s3\")\n",
+        ),
+        (
+            "e_except_group.py",
+            "import boto3\ntry:\n    pass\nexcept* ValueError as boto3:\n    pass\nboto3.client(\"s3\")\n",
+        ),
+        (
             "f_loop.py",
             "from redis import from_url\nfor from_url in []:\n    pass\nfrom_url(\"redis://h\")\n",
         ),
