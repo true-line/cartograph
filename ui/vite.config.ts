@@ -41,6 +41,9 @@ export default defineConfig(({ mode }) => ({
       },
     }, {
       extends: true,
+      // Browser tests discover their server URL and can use a free port.
+      // Do not inherit the fixed Tauri dev URL's strict-port requirement.
+      server: { strictPort: false },
       plugins: [
       // The plugin will run tests for the stories defined in your Storybook config
       // See options at: https://storybook.js.org/docs/next/writing-tests/integrations/vitest-addon#storybooktest
