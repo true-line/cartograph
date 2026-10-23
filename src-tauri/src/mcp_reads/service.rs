@@ -96,7 +96,11 @@ impl Policy {
         Ok(())
     }
 }
+mod lifecycle;
+
 struct Active {
+    tasks: agents::investigation::McpTaskActivation,
+    policy: Policy,
     activation: Activation,
     budget: WorkBudget,
     transport: ActivationLimits,
@@ -110,6 +114,7 @@ struct State {
     shutdown: bool,
     cleanup_failed: bool,
     cleanup: Option<CleanupCompletion>,
+    rotation: Option<Arc<()>>,
 }
 #[derive(Default)]
 pub(crate) struct Service(Arc<Mutex<State>>);
@@ -117,6 +122,7 @@ impl Drop for Service {
     fn drop(&mut self) {
         if let Ok(mut state) = self.0.lock() {
             if let Some(active) = state.active.take() {
+                active.tasks.revoke();
                 active.budget.revoke();
             }
             if let Some(budget) = &state.draining {
@@ -136,9 +142,9 @@ pub(crate) enum Status {
     CleanupFailed,
 }
 
-impl Service {
-    pub(crate) fn status(&self) -> Result<Status, ReadError> {
-        let state = self.0.lock().map_err(|_| ReadError::Storage)?;
+impl State {
+    fn status(&self) -> Result<Status, ReadError> {
+        let state = self;
         if state.cleanup_failed {
             return Ok(Status::CleanupFailed);
         }
@@ -161,6 +167,12 @@ impl Service {
         } else {
             Ok(Status::Disabled)
         }
+    }
+}
+
+impl Service {
+    pub(crate) fn status(&self) -> Result<Status, ReadError> {
+        self.0.lock().map_err(|_| ReadError::Storage)?.status()
     }
 
     /// Generate a JSON client entry for an existing host-selected executable.
@@ -213,8 +225,51 @@ impl Service {
         parent: &Path,
         policy: Policy,
     ) -> Result<PathBuf, ReadError> {
+        self.enable_selected(app, parent, policy, None)
+    }
+
+    // Host-only boundary. No transport argument selects a principal or grant.
+    fn enable_selected<R: tauri::Runtime>(
+        &self,
+        app: tauri::AppHandle<R>,
+        parent: &Path,
+        policy: Policy,
+        selection: Option<(
+            &crate::jobs::JobStore,
+            agents::investigation::McpClientId,
+            std::num::NonZeroUsize,
+        )>,
+    ) -> Result<PathBuf, ReadError> {
+        let tasks = match selection {
+            None => Default::default(),
+            Some((store, client, capacity)) => {
+                if !store
+                    .mcp_client_exists(&client)
+                    .map_err(|_| ReadError::Storage)?
+                {
+                    return Err(ReadError::InvalidRequest);
+                }
+                agents::investigation::McpTaskActivation::granted(client, capacity)
+            }
+        };
+        Self::enable_transition(&self.0, app, parent, policy, tasks, None)
+    }
+
+    fn enable_transition<R: tauri::Runtime>(
+        shared: &Mutex<State>,
+        app: tauri::AppHandle<R>,
+        parent: &Path,
+        policy: Policy,
+        tasks: agents::investigation::McpTaskActivation,
+        rotation: Option<&Arc<()>>,
+    ) -> Result<PathBuf, ReadError> {
         policy.validate()?;
-        let mut state = self.0.lock().map_err(|_| ReadError::Storage)?;
+        let mut state = shared.lock().map_err(|_| ReadError::Storage)?;
+        match (&state.rotation, rotation) {
+            (None, None) => {}
+            (Some(current), Some(expected)) if Arc::ptr_eq(current, expected) => {}
+            _ => return Err(ReadError::InvalidRequest),
+        }
         if state.active.is_some() || state.stopping || state.shutdown || state.cleanup_failed {
             return Err(ReadError::InvalidRequest);
         }
@@ -254,10 +309,13 @@ impl Service {
         .map_err(|_| ReadError::Storage)?;
         let record = activation.record_path().to_path_buf();
         state.active = Some(Active {
+            tasks,
+            policy,
             activation,
             budget,
             transport: policy.transport,
         });
+        state.rotation = None;
         Ok(record)
     }
 
@@ -274,7 +332,11 @@ impl Service {
     }
 
     async fn stop(&self, shutdown: bool) -> Result<(), ReadError> {
-        let Some(mut completion) = self.begin_stop(shutdown)? else {
+        Self::await_cleanup(self.begin_stop(shutdown)?).await
+    }
+
+    async fn await_cleanup(completion: Option<CleanupCompletion>) -> Result<(), ReadError> {
+        let Some(mut completion) = completion else {
             return Ok(());
         };
         loop {
@@ -288,12 +350,18 @@ impl Service {
     fn begin_stop(&self, shutdown: bool) -> Result<Option<CleanupCompletion>, ReadError> {
         let mut state = self.0.lock().map_err(|_| ReadError::Storage)?;
         state.shutdown |= shutdown;
+        state.rotation = None;
+        self.begin_stop_locked(&mut state)
+    }
+
+    fn begin_stop_locked(&self, state: &mut State) -> Result<Option<CleanupCompletion>, ReadError> {
         if let Some(completion) = &state.cleanup {
             return Ok(Some(completion.clone()));
         }
         let Some(active) = state.active.take() else {
             return Ok(None);
         };
+        active.tasks.revoke();
         active.budget.revoke();
         state.draining = Some(active.budget.clone());
         state.stopping = true;
