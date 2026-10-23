@@ -74,7 +74,7 @@ fn mcp_grant_poison_is_unavailable() {
     let owner = activation();
     let session = owner.session();
     let _ = std::panic::catch_unwind(|| {
-        let _guard = owner.0.write().unwrap();
+        let _guard = owner.0.identity.write().unwrap();
         panic!("synthetic poison");
     });
     assert_eq!(owner.owner_snapshot(), Err(McpGrantUnavailable));
@@ -101,13 +101,21 @@ fn mcp_grant_revocation_orders_after_admitted_operation() {
         entry.recv().unwrap();
         // The actual lock is held throughout admission, independent of scheduling.
         assert!(matches!(
-            owner.0.try_write(),
+            owner.0.identity.try_write(),
             Err(std::sync::TryLockError::WouldBlock)
         ));
         let revocation = scope.spawn(|| owner.revoke());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !owner.0.revoked.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let revoking = owner.0.revoked.load(Ordering::SeqCst);
+        // New admissions refuse while the original reader still holds the lock.
+        let denied = revoking.then(|| session.with_grant(|_, _| ()));
         release.send(()).unwrap();
         assert_eq!(operation.join().unwrap(), Ok(42));
         revocation.join().unwrap();
+        assert_eq!(denied, Some(Err(McpGrantUnavailable)));
     });
     assert_eq!(session.with_grant(|_, _| ()), Err(McpGrantUnavailable));
 }
