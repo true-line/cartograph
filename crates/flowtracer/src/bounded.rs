@@ -218,6 +218,11 @@ impl fmt::Display for Name<'_> {
                 Some(name) => write!(f, "Command {name}"),
                 None => f.write_str(&node.id),
             },
+            "Schedule" => match (p["name"].as_str(), p["schedule"].as_str()) {
+                (Some(name), Some(schedule)) => write!(f, "Schedule {name} ({schedule})"),
+                (Some(name), None) => write!(f, "Schedule {name}"),
+                _ => f.write_str(&node.id),
+            },
             "Gap" => write!(f, "GAP: {}", p["reason"].as_str().unwrap_or("unresolved")),
             "File" => f.write_str(p["path"].as_str().unwrap_or(&node.id)),
             _ => f.write_str(&node.id),

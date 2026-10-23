@@ -711,6 +711,90 @@ fn command_flow_reaches_the_background_handler_chain() {
     assert!(flows.iter().any(|f| f.trigger_kind == "ExtensionContext"));
 }
 
+// AC-0330: a declared scheduled job anchors its own flow: ENTRY into the
+// file it runs, then the symbols that file defines and their calls; an
+// unprovable entry ends the flow at its Gap. (T-0330)
+#[test]
+fn schedule_flow_enters_the_file_its_job_runs() {
+    let nodes = vec![
+        node(
+            "sched:app@crontab.yml#0",
+            "Schedule",
+            serde_json::json!({"name": "stats", "schedule": "0 0 * * *"}),
+        ),
+        node(
+            "sched:app@crontab.yml#1",
+            "Schedule",
+            serde_json::json!({"name": "broken"}),
+        ),
+        node(
+            "file:app@cron.py",
+            "File",
+            serde_json::json!({"path": "cron.py"}),
+        ),
+        node(
+            "sym:app@cron.py#main",
+            "Symbol",
+            serde_json::json!({"name": "main"}),
+        ),
+        node(
+            "sym:app@stats.py#compute",
+            "Symbol",
+            serde_json::json!({"name": "compute"}),
+        ),
+        node(
+            "gap:schedule:app@crontab.yml#1",
+            "Gap",
+            serde_json::json!({"reason": "shell-composed schedule command"}),
+        ),
+    ];
+    let edges = vec![
+        edge(
+            "sched:app@crontab.yml#0",
+            "file:app@cron.py",
+            "ENTRY",
+            "Confirmed",
+        ),
+        edge(
+            "sym:app@cron.py#main",
+            "file:app@cron.py",
+            "DEFINED_IN",
+            "Confirmed",
+        ),
+        edge(
+            "sym:app@cron.py#main",
+            "sym:app@stats.py#compute",
+            "CALLS",
+            "Confirmed",
+        ),
+        edge(
+            "sched:app@crontab.yml#1",
+            "gap:schedule:app@crontab.yml#1",
+            "ENTRY",
+            "Gap",
+        ),
+    ];
+    let flows = trace(&nodes, &edges);
+    assert_eq!(flows.len(), 2);
+    let stats = &flows[0];
+    assert_eq!(stats.trigger_kind, "Schedule");
+    assert_eq!(stats.trigger_name, "Schedule stats (0 0 * * *)");
+    let labels: Vec<&str> = stats.hops.iter().map(|h| h.label.as_str()).collect();
+    assert_eq!(labels, ["ENTRY", "DEFINED_IN", "CALLS"]);
+    assert_eq!(stats.status, FlowStatus::Verified);
+    let broken = &flows[1];
+    assert_eq!(broken.trigger_name, "Schedule broken");
+    assert_eq!(broken.status, FlowStatus::Partial);
+    assert_eq!(
+        anchor_probes(&nodes, &edges)
+            .iter()
+            .find(|p| p.kind == "scheduled jobs")
+            .unwrap()
+            .found,
+        2
+    );
+}
+
 // AC-0084: the anchor probes name every kind sought with the count found —
 // the zero-flow surface reports what recovery looked for, deterministically.
 // (T-0084)
@@ -725,6 +809,7 @@ fn anchor_probes_count_every_kind_sought() {
             ("screens (routes/pages)", 0),
             ("extension contexts (popup, background, content scripts)", 1),
             ("extension commands (keyboard shortcuts)", 0),
+            ("scheduled jobs", 0),
             ("HTTP endpoints", 0),
             // SAVE_SNAPSHOT is published locally — not an external channel.
             ("externally published event channels", 0),
@@ -733,7 +818,7 @@ fn anchor_probes_count_every_kind_sought() {
 
     // An empty slice still names every kind, all zero.
     let none = anchor_probes(&[], &[]);
-    assert_eq!(none.len(), 5);
+    assert_eq!(none.len(), 6);
     assert!(none.iter().all(|p| p.found == 0));
 
     // A consumed-but-never-published channel counts as external.

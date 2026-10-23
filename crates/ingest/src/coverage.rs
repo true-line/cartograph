@@ -267,6 +267,11 @@ const DETERMINISTIC: &[(&str, &str, Option<&[&str]>)] = &[
         "toolchain configuration",
         None,
     ),
+    (
+        crate::schedules::SCHEDULE_EXTRACTOR_ID,
+        "scheduled jobs",
+        None,
+    ),
 ];
 
 fn selected(hints: &[String], id: &str, layers: Option<&[&str]>) -> bool {

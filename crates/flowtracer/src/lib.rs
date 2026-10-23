@@ -3,7 +3,8 @@
 //!
 //! A flow starts at a trigger — a `Screen` (M4, the user-action anchor),
 //! an extension user-action anchor (`ExtensionContext` or manifest
-//! `Command`, #165), an `Endpoint` nothing local fetches, or a `Channel`
+//! `Command`, #165), a declared scheduled job (`Schedule`, #770), an
+//! `Endpoint` nothing local fetches, or a `Channel`
 //! no local producer publishes to — and walks the graph hop by hop:
 //! `RENDERS` into components, `FETCHES` into endpoints, `HANDLES` into
 //! the handler symbol or context, `ENTRY` into a context's entry file,
@@ -60,6 +61,7 @@ pub const FLOW_NODE_LABELS: &[&str] = &[
     "Channel",
     "ExtensionContext",
     "Command",
+    "Schedule",
     "Gap",
     "File",
 ];
@@ -260,7 +262,12 @@ fn trace_impl(
     // entering the slice.
     let mut anchors: Vec<&Node> = nodes
         .iter()
-        .filter(|n| matches!(n.label.as_str(), "Screen" | "ExtensionContext" | "Command"))
+        .filter(|n| {
+            matches!(
+                n.label.as_str(),
+                "Screen" | "ExtensionContext" | "Command" | "Schedule"
+            )
+        })
         .collect();
     anchors.sort_by(|a, b| a.id.cmp(&b.id));
     let mut flows = Vec::new();
@@ -353,6 +360,10 @@ pub fn anchor_probes(nodes: &[Node], edges: &[Edge]) -> Vec<AnchorProbe> {
         AnchorProbe {
             kind: "extension commands (keyboard shortcuts)".into(),
             found: count("Command"),
+        },
+        AnchorProbe {
+            kind: "scheduled jobs".into(),
+            found: count("Schedule"),
         },
         AnchorProbe {
             kind: "HTTP endpoints".into(),
