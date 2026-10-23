@@ -35,7 +35,7 @@ The harness is in `src-tauri/src/showcase_tests.rs`. It uses the production path
 
 The scorer, `scripts/score-api-contract.mjs`, reduces `:x`, `<x>` and `{x}` to one parameter shape, then compares each `METHOD /path` pair.
 
-On an M4 laptop, ingesting all three repos took 17.3 s, measured with an already built release test binary. The first build takes about 20 minutes. Peak memory was not measured on this run.
+On an M4 laptop, ingesting and exporting all three repos through the system manifest (gap 1) took 27.1 s wall time, with an already built release test binary. The first build takes about 20 minutes. Peak resident memory was 1.09 GiB (`/usr/bin/time -l`), down from 1.39 GiB before the publish snapshot check stopped re-reading the whole graph (#768). Measured at Cartograph `d326a47e`.
 
 ## Score
 
@@ -70,13 +70,13 @@ No route was promoted to `Confirmed` from a receiver it couldn't prove.
 
 | Source | Producers that ran | Nodes | Edges | Coverage |
 |---|---|---|---|---|
-| app | TypeScript/JS (49 files), Python (717 files), toolchain | 24,818 | 34,240 | limited: no `otel_jsonl` declared, so 250 endpoint and channel facts stay T0 |
-| browser-extension | TypeScript/JS (28 files), WebExtension manifest, toolchain | 593 | 679 | limited |
-| Simple-Login-Android | Kotlin (195 files), toolchain | 1,357 | 3,262 | complete for the producers that ran |
+| app | TypeScript/JS (49 files), Python (717 files), toolchain, schedules (2 files) | 24,892 | 34,317 | limited: no `otel_jsonl` declared, so 250 endpoint and channel facts stay T0 |
+| browser-extension | TypeScript/JS (28 files), WebExtension manifest, toolchain | 608 | 694 | limited |
+| Simple-Login-Android | Kotlin (195 files), toolchain | 1,398 | 3,303 | complete for the producers that ran |
 
-Source: `ingest.json`, coverage producers.
+Source: `ingest.json`, coverage producers, from the manifest run. Every coverage record cites its repository's commit (gap 6).
 
-The bundle has 26,910 assertions, 7,512 open gap findings in 25 cause classes and 3 security findings (`bundle.json`, `gap_register.md`, `security.md`). The security findings are three over-broad host permissions in the extension manifest: `http://*/*`, `https://*/*` and `https://*.simplelogin.io/*`.
+The bundle has 29,256 assertions, 7,495 open gap findings in 27 cause classes and 3 security findings (`bundle.json`, `gap_register.md`, `security.md`). The security findings are three over-broad host permissions in the extension manifest: `http://*/*`, `https://*/*` and `https://*.simplelogin.io/*`.
 
 ## Gaps, ranked by impact
 
@@ -106,13 +106,19 @@ The bundle has 26,910 assertions, 7,512 open gap findings in 25 cause classes an
    ```
 
    Save it as `$SRC/cartograph.system.toml` and run the showcase with `CARTOGRAPH_SHOWCASE_MANIFEST=$SRC/cartograph.system.toml` in place of `CARTOGRAPH_SHOWCASE_SOURCES`. The run also writes `fetches.json`, listing every client call with its target endpoint or Gap reason.
-2. **Data model: resolved by #738.** `app/models.py` declares 80 SQLAlchemy models. Before #738, `data_model.md` reported *No DataEntity facts have been recovered yet*. With the SQLAlchemy producer, all 80 become Confirmed `DataEntity` facts with cited columns, linked by 82 `REFERENCES` edges, one per entity pair. Five `ForeignKey` targets that are not string literals stay `Gap`s. The 275 Alembic revisions in `migrations/versions/` are not read yet. Migration history is a separate producer. (The node and edge totals in the table above were measured before #738.)
-3. **Infrastructure: started by #734, mostly still open.** The observed-infrastructure producer reads TypeScript and JavaScript. Through the manifest above, it recovers one Confirmed `Resource`: `localStorage`, used by the server's `static/local-storage-polyfill.js`. So `topology.md` is no longer empty, but the Python server's real infrastructure still is not recovered: S3 through boto3 (`app/s3.py`), Redis, SMTP (four modules) and the SQLAlchemy engine. The extension's WebExtension storage (`browser.storage.sync` in `src/popup/SLStorage.js`) is not a registry client either. The `Dockerfile`, `crontab.yml`, `example.env` and `alembic.ini` are still unread. *Fill:* an observed-infrastructure producer for Python, a WebExtension storage registry entry, and container and cron config readers.
-4. **Documentation drift is not reported.** The notification mismatch above, and the 12 undocumented routes, were found by the external scorer. Cartograph's own `drift_register.md` reports 0, because it doesn't take documentation in as a contract. *Fill:* a documented-contract input (Markdown API reference or OpenAPI) compared against recovered routes, with drift cited on both sides (#739). For enterprises with outdated docs, this is the direct value.
+2. **Data model: resolved by #738.** `app/models.py` declares 80 SQLAlchemy models. Before #738, `data_model.md` reported *No DataEntity facts have been recovered yet*. With the SQLAlchemy producer, all 80 become Confirmed `DataEntity` facts with cited columns, linked by 82 `REFERENCES` edges, one per entity pair. The 64 `ForeignKey` targets written as expressions rather than strings (`sa.ForeignKey(User.id, …)`) stay `Gap`s (class C-13). The 275 Alembic revisions in `migrations/versions/` are not read yet. Migration history is a separate producer.
+3. **Infrastructure and scheduled work: largely resolved by #734 and #770.** `topology.md` now lists four observed `Resource`s, each citing the code that proves it:
+   - S3 through boto3 ([`app/s3.py`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/app/s3.py)), Confirmed;
+   - SMTP ([`app/mail_sender.py`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/app/mail_sender.py)), Confirmed. Two other SMTP sites whose host is computed at runtime stay Gaps (class C-25);
+   - the SQLAlchemy engine, `sql-database:env:DB_URI`. `app/db.py` builds it from `config.DB_URI`, and Cartograph follows that constant into `app/config.py`, where it is read from the environment. It is InferredStrong and marked `identity_assumes_method_receivers`, not Confirmed, because the repository also writes computed attributes through a method's `self` (`setattr(self, k, v)` in `app/dashboard/views/alias_log.py`), and the follow rests on that receiver not being the config module;
+   - `localStorage`, used by the server's `static/local-storage-polyfill.js`.
+
+   The 18 yacron jobs in `crontab.yml` and `crontab-all-hosts.yml` are now `Schedule` triggers carrying their cron expressions, and each appears in `flow_dossiers.md` as a flow from the schedule into `cron.py` and its call graph. Every entry is InferredStrong and marked `entry_may_be_replaced_in_image`, not Confirmed. The final Dockerfile stage proves `/code` is the repository, but a later `COPY --from=npm /code /code` may overwrite the script, and the ENTRY cites that instruction. Still open: Redis, which the server reaches only through the `limits` library's `RedisStorage` (`app/redis_services.py`), not a registry client; the extension's WebExtension storage (`browser.storage.sync` in `src/popup/SLStorage.js`), which is not a registry client; `example.env` and `alembic.ini`; and dispatch from `cron.py -j <job>` to the handler it selects (#779).
+4. **Documentation drift: resolved by #739.** Cartograph now takes a declared API reference in as a contract and reports drift in its own `drift_register.md`, cited on both sides. Declared as below, it reports the notification mismatch and the 12 undocumented routes that the external scorer found, with no scorer involved. The declaration is opt-in, so the default run above reports 0 drift. For enterprises with outdated docs, this is the direct value.
 5. **No user stories.** `user_stories.md` reports *No Capability facts have been recovered yet*. Capabilities need the interpretation tier, which this deterministic run excludes by design.
-6. **Sources are recorded as `workdir`, not by commit.** All three are git checkouts at the commits above, but each coverage record shows `commit: "workdir"` (`ingest.json`). Citations therefore can't pin the commit they came from. Stamping HEAD on a clean checkout would overclaim: working-tree capture is not a commit snapshot (SPEC-04). *Fill:* recover a Git source at a commit through the existing Git-object capture, so producers read that commit's blobs (#740).
-7. **TypeScript rule gaps dominate the count but not the impact.** Classes C-01 to C-09 account for 6,910 of the 7,512 gap findings. They are unresolved interpretation (return/throw consumers, predicates, mutation, loops), routed to T1, and they don't affect the HTTP contract.
-8. **Unresolved module edges.** There are 177 in Python (C-10) and 69 in Kotlin (C-12), plus 38 unresolved Kotlin imports (C-15). These are mostly third-party packages that aren't vendored in the checkout.
+6. **Commit pinning: resolved by #740.** A clean Git checkout is now recovered at its commit through the Git-object capture, so each coverage record in `ingest.json` and every citation names the full commit above. A dirty checkout still records `workdir`, because a working tree is not a commit snapshot (SPEC-04). Declaring the API reference below dirties `app`, so that run records `workdir` for `app` only.
+7. **TypeScript rule gaps dominate the count but not the impact.** Classes C-01 to C-09 account for 6,835 of the 7,495 gap findings. They are unresolved interpretation (return/throw consumers, predicates, mutation, loops), routed to T1, and they don't affect the HTTP contract.
+8. **Unresolved module edges.** There are 177 in Python (C-10) and 69 in Kotlin (C-12), plus 38 unresolved Kotlin imports (C-16). These are mostly third-party packages that aren't vendored in the checkout.
 
 ## Measuring contract drift (#739)
 
@@ -132,10 +138,10 @@ CARTOGRAPH_SHOWCASE_OUTPUT=$OUT \
   cargo test --release showcase_recover_and_export -- --ignored --nocapture
 ```
 
-Expected result to verify in `$OUT/verified-only/drift_register.md` under `## API contract drift`: **1 `documented-not-served`** (`POST /api/notifications/{}`) and **12 `served-undocumented`** routes under `/api`, each citing the documented route or recovered endpoint.
+Verified at Cartograph `d326a47e`, in `$OUT/verified-only/drift_register.md` under `## API contract drift`: **1 `documented-not-served`** (`POST /api/notifications/{}`) and **12 `served-undocumented`** routes under `/api`, each citing the documented route or the recovered endpoint, its mount chain and `docs/api.md`. Every entry is InferredStrong. Remove `.cartograph/` afterwards to restore the clean checkout and commit pinning.
 
 ## Known limits
 
 - Swift is unsupported; no iOS client was ingested.
-- There is no Terraform or other IaC in these repos. The topology shows only what the source proves, currently one `localStorage` resource; the rest of the infrastructure is still unrecovered (gap 3).
+- There is no Terraform or other IaC in these repos. The topology shows only what the source proves: four observed resources (gap 3).
 - Request parameters and response shapes were not scored. The scorer compares methods and paths only.
