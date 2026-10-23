@@ -147,19 +147,25 @@ fn emit(
         byte_end: end,
         commit_sha: id.commit.to_string(),
     };
-    let prov = |confidence, spans: Vec<EvidenceRef>, identity: &str| {
-        serde_json::to_value(
-            Provenance::new(
-                Tier::Deterministic,
-                confidence,
-                spans,
-                SCHEDULE_EXTRACTOR_ID,
-                identity.as_bytes(),
+    // The content hash covers the fact's properties as well as its identity,
+    // so an edited cron, command or entry changes the graph fingerprint.
+    let seal =
+        |mut props: serde_json::Value, confidence, spans: Vec<EvidenceRef>, identity: &str| {
+            let input =
+                serde_json::to_vec(&serde_json::json!([identity, &props])).expect("serializes");
+            props["prov"] = serde_json::to_value(
+                Provenance::new(
+                    Tier::Deterministic,
+                    confidence,
+                    spans,
+                    SCHEDULE_EXTRACTOR_ID,
+                    &input,
+                )
+                .expect("within ceiling"),
             )
-            .expect("within ceiling"),
-        )
-        .expect("serializes")
-    };
+            .expect("serializes");
+            props
+        };
     let schedule_id = format!("sched:{}@{rel}#{index}", id.repo);
     let display = job
         .name
@@ -168,14 +174,18 @@ fn emit(
     out.nodes.push(Node {
         id: schedule_id.clone(),
         label: "Schedule".into(),
-        props: serde_json::json!({
-            "name": display,
-            "schedule": job.schedule,
-            "command": job.command,
-            "file": rel,
-            "format": "yacron",
-            "prov": prov(ConfidenceTier::Confirmed, vec![evidence(rel, job.span)], &schedule_id),
-        }),
+        props: seal(
+            serde_json::json!({
+                "name": display,
+                "schedule": job.schedule,
+                "command": job.command,
+                "file": rel,
+                "format": "yacron",
+            }),
+            ConfidenceTier::Confirmed,
+            vec![evidence(rel, job.span)],
+            &schedule_id,
+        ),
     });
     let entry = match (job.unreadable, job.command.as_deref()) {
         (Some(reason), _) => Entry::Gap(reason),
@@ -198,17 +208,16 @@ fn emit(
                 out.nodes.push(Node {
                     id: file_id.clone(),
                     label: "File".into(),
-                    props: serde_json::json!({
-                        "path": entry_rel,
-                        "prov": prov(ConfidenceTier::Confirmed, spans.clone(), &file_id),
-                    }),
+                    props: seal(
+                        serde_json::json!({ "path": entry_rel }),
+                        ConfidenceTier::Confirmed,
+                        spans.clone(),
+                        &file_id,
+                    ),
                 });
             }
             let identity = format!("{schedule_id} ENTRY {file_id}");
-            let mut props = serde_json::json!({
-                "command": job.command,
-                "prov": prov(confidence, spans, &identity),
-            });
+            let mut props = serde_json::json!({ "command": job.command });
             if let Some(marker) = marker {
                 props[marker] = true.into();
             }
@@ -219,7 +228,7 @@ fn emit(
                 src: schedule_id,
                 dst: file_id,
                 label: "ENTRY".into(),
-                props,
+                props: seal(props, confidence, spans, &identity),
             });
         }
         Entry::Gap(reason) => {
@@ -228,22 +237,28 @@ fn emit(
             out.nodes.push(Node {
                 id: gap_id.clone(),
                 label: "Gap".into(),
-                props: serde_json::json!({
-                    "reason": reason,
-                    "command": job.command,
-                    "attempted_tiers": ["T0"],
-                    "prov": prov(ConfidenceTier::Gap, spans.clone(), &gap_id),
-                }),
+                props: seal(
+                    serde_json::json!({
+                        "reason": reason,
+                        "command": job.command,
+                        "attempted_tiers": ["T0"],
+                    }),
+                    ConfidenceTier::Gap,
+                    spans.clone(),
+                    &gap_id,
+                ),
             });
             let identity = format!("{schedule_id} ENTRY {gap_id}");
             out.edges.push(Edge {
                 src: schedule_id,
                 dst: gap_id,
                 label: "ENTRY".into(),
-                props: serde_json::json!({
-                    "reason": reason,
-                    "prov": prov(ConfidenceTier::Gap, spans, &identity),
-                }),
+                props: seal(
+                    serde_json::json!({ "reason": reason }),
+                    ConfidenceTier::Gap,
+                    spans,
+                    &identity,
+                ),
             });
         }
     }
@@ -278,33 +293,28 @@ fn resolve_entry(
     let exists = |rel: &str| files.contains(rel).then(|| rel.to_string());
     // A relative path runs from the final working directory, when proven.
     let cwd = container.and_then(|container| container.cwd.as_ref());
-    for candidate in &candidates {
+    let resolve = |candidate: &String| -> Option<Entry> {
         let relative = candidate.trim_start_matches("./");
         let (absolute, cwd_span) = match (candidate.starts_with('/'), cwd) {
             (true, _) => (normalize(candidate), None),
             (false, Some((dir, span))) => (normalize(&format!("{dir}/{relative}")), Some(*span)),
             (false, None) => match exists(relative) {
                 Some(rel) => {
-                    return Entry::File {
+                    return Some(Entry::File {
                         rel,
                         confidence: ConfidenceTier::InferredStrong,
                         marker: Some("entry_relative_to_repo_root"),
                         dockerfile: Vec::new(),
                         container_dir: None,
-                    };
+                    });
                 }
-                None => continue,
+                None => return None,
             },
         };
-        let Some(container) = container else {
-            continue;
-        };
-        let Some(rel) = absolute
+        let container = container?;
+        let rel = absolute
             .strip_prefix(&format!("{}/", container.dir))
-            .and_then(exists)
-        else {
-            continue;
-        };
+            .and_then(exists)?;
         let mut dockerfile = container.spans.clone();
         dockerfile.extend(cwd_span.filter(|span| !container.spans.contains(span)));
         let replaced: Vec<(u64, u64)> = container
@@ -326,13 +336,20 @@ fn resolve_entry(
                 Some("entry_may_be_replaced_in_image"),
             )
         };
-        return Entry::File {
+        Some(Entry::File {
             rel,
             confidence,
             marker,
             dockerfile,
             container_dir: Some(container.dir.clone()),
-        };
+        })
+    };
+    // `python -m a.b` may name `a/b.py` or `a/b/__main__.py`: both is ambiguous.
+    let mut found = candidates.iter().filter_map(resolve);
+    match (found.next(), found.next()) {
+        (Some(entry), None) => return entry,
+        (Some(_), Some(_)) => return Entry::Gap("schedule module matches several files"),
+        (None, _) => {}
     }
     // A path no container mapping proves: a unique suffix only.
     let unmapped = match script {
@@ -671,8 +688,12 @@ fn yacron_jobs(text: &str) -> Vec<Job> {
         .into_iter()
         .filter_map(|item| job(text, item))
         .collect();
+    // A mapping without `schedule` is no job, unless a merge key or computed
+    // key could be hiding one: that stays a Gap rather than vanishing.
     if jobs.iter().any(|job| job.schedule.is_some()) {
-        jobs
+        jobs.into_iter()
+            .filter(|job| job.schedule.is_some() || job.unreadable.is_some())
+            .collect()
     } else {
         Vec::new()
     }

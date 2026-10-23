@@ -342,3 +342,54 @@ fn interpreter_options_outside_the_grammar_are_not_file_execution() {
         assert_eq!(script(command), expected.map(str::to_string), "{command}");
     }
 }
+
+// AC-0330 review: a module that names both `a/b.py` and `a/b/__main__.py`
+// is ambiguous; a mapping without `schedule` is no job; the content hash
+// changes with the job's cron and command. (T-0330)
+#[test]
+fn ambiguous_modules_unscheduled_mappings_and_edited_jobs() {
+    let crontab = "jobs:\n  - name: Module job\n    command: python -m app.tasks\n    schedule: \"*/5 * * * *\"\n  - name: Not a job\n    command: python cron.py\n";
+    let out = extract(&[
+        ("Dockerfile", DOCKERFILE),
+        ("crontab.yml", crontab),
+        ("cron.py", ""),
+        ("app/tasks.py", ""),
+        ("app/tasks/__main__.py", ""),
+    ]);
+    let schedules = out.nodes.iter().filter(|n| n.label == "Schedule").count();
+    assert_eq!(schedules, 1);
+    assert_eq!(
+        entry(&out, 0, "crontab.yml").props["reason"],
+        "schedule module matches several files"
+    );
+    let single = extract(&[
+        ("Dockerfile", DOCKERFILE),
+        ("crontab.yml", crontab),
+        ("app/tasks.py", ""),
+    ]);
+    assert_eq!(confidence(entry(&single, 0, "crontab.yml")), "Confirmed");
+
+    let hashes = |crontab: &str| {
+        let out = extract(&[
+            ("Dockerfile", DOCKERFILE),
+            ("crontab.yml", crontab),
+            ("cron.py", ""),
+            ("jobs/cron.py", ""),
+        ]);
+        let node = out.nodes.iter().find(|n| n.label == "Schedule").unwrap();
+        let edge = entry(&out, 0, "crontab.yml");
+        (
+            node.props["prov"]["content_hash"].clone(),
+            edge.props["prov"]["content_hash"].clone(),
+        )
+    };
+    let job = |command: &str, cron: &str| {
+        format!("jobs:\n  - name: J\n    command: {command}\n    schedule: \"{cron}\"\n")
+    };
+    let base = hashes(&job("python cron.py", "0 0 * * *"));
+    assert_eq!(base, hashes(&job("python cron.py", "0 0 * * *")));
+    assert_ne!(base.0, hashes(&job("python cron.py", "0 1 * * *")).0);
+    let moved = hashes(&job("python jobs/cron.py", "0 0 * * *"));
+    assert_ne!(base.0, moved.0);
+    assert_ne!(base.1, moved.1);
+}
