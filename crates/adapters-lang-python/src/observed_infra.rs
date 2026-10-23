@@ -805,13 +805,18 @@ fn param_of(cx: &FileCx, root: TsNode, call: TsNode, value: TsNode) -> Option<(S
     }
     let index = index?;
     let mut written = Vec::new();
+    let mut imported = false;
     let mut stack = vec![function.child_by_field_name("body")?];
     while let Some(node) = stack.pop() {
         written_names(node, &mut written);
+        // A local import may rebind the parameter, a wildcard any name.
+        imported |= import_names(cx, node)
+            .iter()
+            .any(|(bound, _)| bound == name || bound == "*");
         let mut walk = node.walk();
         stack.extend(node.named_children(&mut walk));
     }
-    if written.iter().any(|node| cx.text(node) == name) {
+    if imported || written.iter().any(|node| cx.text(node) == name) {
         return None;
     }
     let function_name = cx.text(&function.child_by_field_name("name")?);
@@ -864,6 +869,14 @@ fn collect_references(cx: &FileCx, root: TsNode, scope: &Scope, follows: &mut Fo
                 }
                 match scope.proven(cx.text(&node)) {
                     Some(Bound::Symbol(module, export)) => Some((module.clone(), export.clone())),
+                    // A module read other than for a member (`alias = svc`)
+                    // may reach any of its exports unseen.
+                    Some(Bound::Module(module))
+                        if !(kind == Some("attribute") && field_of("object")) =>
+                    {
+                        follows.unseen_modules.insert(module.clone());
+                        None
+                    }
                     _ => None,
                 }
             }

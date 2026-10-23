@@ -816,6 +816,10 @@ fn parameters_are_followed_to_their_one_caller() {
         .find(|e| e.dst == res("smtp:mail.internal"))
         .unwrap();
     assert_eq!(smtp.props["identity_from"], "server.py");
+    // A call through an imported module's member is the one caller too.
+    let module_call = "from app import config\nimport app.services as svc\n\ndef create_app(app):\n    svc.initialize_redis_services(app, config.MEM_STORE_URI)\n";
+    let (_, edges) = with_services(&[("server.py", module_call)]);
+    assert!(uses(&edges, "services.py").contains(&res("redis:env:MEM_STORE_URI").as_str()));
 
     // Each way another caller may hide, or the parameter may not be what
     // the caller passed, leaves the Redis site a Gap.
@@ -829,6 +833,8 @@ fn parameters_are_followed_to_their_one_caller() {
     let services = |from: &str, to: &str| SERVICES.replacen(from, to, 1);
     for (case, overrides) in [
         ("second caller", vec![("server.py", server("\ninitialize_redis_services(None, \"redis://x\")\n"))]),
+        ("module read as a value", vec![("app/other.py", "import app.services as svc\nalias = svc\nalias.initialize_redis_services(None, \"redis://other\")\n".to_string())]),
+        ("parameter rebound by a local import", vec![("app/services.py", services("    if redis_url", "    from other_config import REDIS_URI as redis_url\n    if redis_url"))]),
         ("read as a value", vec![("server.py", server("\nhooks = [initialize_redis_services]\n"))]),
         ("attribute of it", vec![("server.py", server("\nname = initialize_redis_services.__name__\n"))]),
         ("re-exported", vec![("app/__init__.py", "from app.services import initialize_redis_services\n".to_string())]),
