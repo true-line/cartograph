@@ -303,8 +303,40 @@ fn mcp_granted_start_derives_identity_and_refuses_revoked_replay() {
         .unwrap();
     assert!(!replay.created);
     assert_eq!(replay.detail, first.detail);
+    // AC-0322/0324: read-only recovery is namespace scoped and survives reopen.
+    let reopened = JobStore::open(f.directory.path().join("state.db")).unwrap();
+    assert_eq!(
+        reopened
+            .existing_investigation_access(&request, Some(&session))
+            .unwrap(),
+        Some(first.detail.clone())
+    );
+    assert!(reopened.existing_investigation(&request).unwrap().is_none());
+    let foreign = f
+        .store
+        .create_mcp_client(std::num::NonZeroUsize::new(2).unwrap())
+        .unwrap();
+    let foreign_grant = McpTaskActivation::granted(foreign, one);
+    assert!(
+        reopened
+            .existing_investigation_access(&request, Some(&foreign_grant.session()))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        reopened
+            .existing_investigation_access(&request, Some(&readonly.session()))
+            .unwrap_err(),
+        InvestigationStoreError::Missing
+    );
     let mut changed = request.clone();
     changed.question.push('?');
+    assert_eq!(
+        reopened
+            .existing_investigation_access(&changed, Some(&session))
+            .unwrap_err(),
+        InvestigationStoreError::Conflict
+    );
     assert_eq!(
         f.store
             .start_investigation_access(&changed, None, Some(&session))
@@ -323,6 +355,12 @@ fn mcp_granted_start_derives_identity_and_refuses_revoked_replay() {
     let before = f.store.conn.total_changes();
     for denied in [session, successor.session()] {
         assert_eq!(
+            reopened
+                .existing_investigation_access(&request, Some(&denied))
+                .unwrap_err(),
+            InvestigationStoreError::Missing
+        );
+        assert_eq!(
             f.store
                 .start_investigation_access(&request, None, Some(&denied))
                 .unwrap_err(),
@@ -335,6 +373,16 @@ fn mcp_granted_start_derives_identity_and_refuses_revoked_replay() {
         .start_investigation(&request, Some(&provider))
         .unwrap();
     assert_eq!(app.detail.origin, InvestigationOrigin::App);
+    assert_eq!(
+        reopened.existing_investigation(&request).unwrap(),
+        Some(app.detail.clone())
+    );
+    assert!(
+        reopened
+            .existing_investigation_access(&request, Some(&foreign_grant.session()))
+            .unwrap()
+            .is_none()
+    );
     assert_ne!(
         app.detail.summary.investigation_id,
         first.detail.summary.investigation_id

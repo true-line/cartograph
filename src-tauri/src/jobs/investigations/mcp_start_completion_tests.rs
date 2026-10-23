@@ -55,8 +55,44 @@ fn mcp_granted_completion_start_preserves_families_and_refuses_revocation() {
             .unwrap();
         assert!(!replay.created);
         assert_eq!(replay.detail, first.detail);
+        // AC-0322/0324: both families use the same saved-state retry boundary.
+        let reopened = JobStore::open(dir.path().join("state.db")).unwrap();
+        assert_eq!(
+            reopened
+                .existing_investigation_completion_access(&request, Some(&session))
+                .unwrap(),
+            Some(first.detail.clone())
+        );
+        assert!(
+            reopened
+                .existing_investigation_completion(&request)
+                .unwrap()
+                .is_none()
+        );
+        let foreign = store
+            .create_mcp_client(std::num::NonZeroUsize::new(2).unwrap())
+            .unwrap();
+        let foreign_grant = McpTaskActivation::granted(foreign, one);
+        assert!(
+            reopened
+                .existing_investigation_completion_access(&request, Some(&foreign_grant.session()))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            reopened
+                .existing_investigation_completion_access(&request, Some(&readonly.session()))
+                .unwrap_err(),
+            InvestigationStoreError::Missing
+        );
         let mut changed = request.clone();
         changed.question.push('?');
+        assert_eq!(
+            reopened
+                .existing_investigation_completion_access(&changed, Some(&session))
+                .unwrap_err(),
+            InvestigationStoreError::Conflict
+        );
         assert_eq!(
             store
                 .start_completion_access(&changed, None, next, Some(&session))
@@ -64,6 +100,12 @@ fn mcp_granted_completion_start_preserves_families_and_refuses_revocation() {
             InvestigationStoreError::Conflict
         );
         grant.revoke();
+        assert_eq!(
+            reopened
+                .existing_investigation_completion_access(&request, Some(&session))
+                .unwrap_err(),
+            InvestigationStoreError::Missing
+        );
         let before = store.conn.total_changes();
         assert_eq!(
             store
