@@ -190,7 +190,7 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                     None => format!("observed:{}", site.provider),
                 };
                 let resource_id = format!("res:{repo}@{logical_id}");
-                resources.entry(resource_id.clone()).or_insert_with(|| {
+                let resource = || {
                     let mut props = serde_json::json!({
                         "type": site.provider,
                         "provider": site.provider,
@@ -202,6 +202,9 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                             confidence, &format!("Resource {resource_id}"),
                         ),
                     });
+                    if let Some(marker) = site.identity_assumption {
+                        props[marker] = serde_json::json!(true);
+                    }
                     if let Some(module) = &site.module {
                         props["module"] = serde_json::json!(module);
                     }
@@ -216,7 +219,21 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                         label: "Resource".into(),
                         props,
                     }
-                });
+                };
+                // A site that proves the resource without an assumption
+                // replaces one that rested on it.
+                match resources.entry(resource_id.clone()) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(resource());
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut slot) => {
+                        if confidence == ConfidenceTier::Confirmed
+                            && slot.get().props["prov"]["confidence_tier"] != "Confirmed"
+                        {
+                            slot.insert(resource());
+                        }
+                    }
+                }
                 if let Some((path, _, _)) = &site.identity_source {
                     edge_props.insert("identity_from".into(), serde_json::json!(path));
                 }

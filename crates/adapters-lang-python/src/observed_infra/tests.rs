@@ -594,7 +594,7 @@ fn module_constants_fail_closed() {
     }
     // Writes of other members, of another module's `config` binding, or of
     // a computed member of an unproven root leave the follow standing.
-    let (_, edges) = extract(&[
+    let (nodes, edges) = extract(&[
         ("app/__init__.py", ""),
         ("app/config.py", CONFIG),
         ("app/db.py", DB),
@@ -620,4 +620,45 @@ fn module_constants_fail_closed() {
     let edge = edges.iter().find(|e| e.src.contains("app/db.py")).unwrap();
     assert_eq!(edge.props["prov"]["confidence_tier"], "InferredStrong");
     assert_eq!(edge.props["identity_assumes_method_receivers"], true);
+    let resource = nodes
+        .iter()
+        .find(|n| n.id == res("sql-database:env:DB_URI"))
+        .unwrap();
+    assert_eq!(resource.props["prov"]["confidence_tier"], "InferredStrong");
+    assert_eq!(resource.props["identity_assumes_method_receivers"], true);
+
+    // A later site that proves the same resource without the assumption
+    // makes it Confirmed and unmarked.
+    let (nodes, _) = extract(&[
+        ("app/__init__.py", ""),
+        ("app/config.py", CONFIG),
+        ("app/db.py", DB),
+        (
+            "tests/conftest.py",
+            "from app import config\nconfig.OTHER = 1\ndef test(monkeypatch):\n    monkeypatch.setattr(config, \"SESSION\", True)\n    monkeypatch.setattr(\"app.abuser.config\", object())\n",
+        ),
+        (
+            "app/model.py",
+            "class M:\n    def __init__(self, **kw):\n        for k, v in kw.items():\n            setattr(self, k, v)\n    @classmethod\n    def make(cls, k):\n        setattr(cls, k, None)\n\nglobals()[NAME] = 1\nresult = {}\nresult[key] = 1\n",
+        ),
+        (
+            "tests/utils.py",
+            "def reset():\n    from flask import g\n    setattr(g, \"%s_done\" % prefix, False)\n",
+        ),
+        (
+            "app/db2.py",
+            "import os\nfrom sqlalchemy import create_engine\nengine = create_engine(os.environ[\"DB_URI\"])\n",
+        ),
+    ]);
+    let resource = nodes
+        .iter()
+        .find(|n| n.id == res("sql-database:env:DB_URI"))
+        .unwrap();
+    assert_eq!(resource.props["prov"]["confidence_tier"], "Confirmed");
+    assert!(
+        resource
+            .props
+            .get("identity_assumes_method_receivers")
+            .is_none()
+    );
 }
