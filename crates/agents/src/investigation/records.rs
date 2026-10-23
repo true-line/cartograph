@@ -346,10 +346,21 @@ pub struct InvestigationCoverageContext {
     pub coverage: context_hub::coverage::CoverageQualification,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Durable attribution only; an origin is never an execution grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvestigationOrigin {
     App,
+    Mcp { client_id: super::McpClientId },
+}
+
+impl InvestigationOrigin {
+    pub fn request_namespace(&self) -> String {
+        match self {
+            Self::App => "app".into(),
+            Self::Mcp { client_id } => format!("mcp:{}", client_id.as_str()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

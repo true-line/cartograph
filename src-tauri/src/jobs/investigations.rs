@@ -305,6 +305,8 @@ struct StoredTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completion_intent: Option<completion::CompletionIntent>,
     nonce: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mcp_intent_hash: Option<String>,
     intent_hash: String,
     expected_graph_revision: Option<String>,
     detail: InvestigationDetail,
@@ -452,6 +454,7 @@ impl JobStore {
             }),
             completion_intent: completion_intent.clone(),
             nonce: request.request_nonce.clone(),
+            mcp_intent_hash: None,
             intent_hash,
             expected_graph_revision: request.expected_graph_revision.clone(),
             detail: InvestigationDetail {
