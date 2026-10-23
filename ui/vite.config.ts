@@ -12,9 +12,12 @@ import { playwright } from '@vitest/browser-playwright';
 export default defineConfig(({ mode }) => ({
   plugins: [react()],
   clearScreen: false,
+  // Vitest builds its browser test server (port 63315) from this config, so a
+  // strict port there fails a run whenever another job on the same runner holds
+  // it. Only the Tauri dev server needs the fixed port.
   server: {
     port: 1420,
-    strictPort: true
+    strictPort: mode !== 'test'
   },
   // Production hardening (#221): no source maps in shipped assets, and strip
   // `console.*` + `debugger` from the bundle. Vite 8 minifies with oxc (the
