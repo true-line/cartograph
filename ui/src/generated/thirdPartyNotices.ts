@@ -7572,7 +7572,7 @@ export const THIRD_PARTY_NOTICES = [
   "## MIT License",
   "",
   "Used by:",
-  "- tokio 1.52.3 — https://github.com/tokio-rs/tokio",
+  "- tokio 1.54.1 — https://github.com/tokio-rs/tokio",
   "",
   "```",
   "MIT License",

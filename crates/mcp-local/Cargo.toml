@@ -14,7 +14,7 @@ mcp-wire = { path = "../mcp-wire" }
 serde_json = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-tokio = { version = "1.52.3", features = ["net", "io-util", "time", "rt", "sync"] }
+tokio = { version = "1.53.3", features = ["net", "io-util", "time", "rt", "sync"] }
 tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
