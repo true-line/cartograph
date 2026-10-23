@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [target.'cfg(unix)'.dependencies]
 mcp-local = { path = "../mcp-local" }
-tokio = { version = "1.52.3", features = ["io-std", "io-util", "net", "time", "rt"] }
+tokio = { version = "1.53.3", features = ["io-std", "io-util", "net", "time", "rt"] }
 
 [dev-dependencies]
 mcp-wire = { path = "../mcp-wire" }
