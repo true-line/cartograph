@@ -467,3 +467,74 @@ fn prepared_task_pins_its_receipts_against_a_supersession_reclaim() {
             .all(|item| item.status == Availability::Available)
     );
 }
+
+#[test]
+fn a_task_staged_between_reclaim_snapshots_keeps_its_receipts() {
+    // #762 review: a task may stage and drop its in-flight pin while a
+    // supersession reclaim is between its keep-set snapshots; one of the
+    // two snapshots must still hold the receipts.
+    let dir = tempfile::tempdir().unwrap();
+    let private = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let path = root.join("source.ts");
+    std::fs::write(&path, ORIGINAL).unwrap();
+    let state = app_state(&private);
+    let source = crate::register_local_source(&state, &root).unwrap();
+    let captured = capture(&state, &source, true);
+    let (owner, target) = rule_pair(&captured);
+    install_task(&state, &owner, &[target]);
+    let task = prepare(&state, GAP, "escalate:handoff").unwrap();
+    let cited: Vec<String> = task
+        .source_basis()
+        .evidence
+        .iter()
+        .filter_map(|item| match &item.origin {
+            TaskEvidenceKind::CapturedPrimarySource { receipt_id, .. } => Some(receipt_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!cited.is_empty());
+    let (_, execution) = crate::start_job(&state, "escalate:handoff:local").unwrap();
+    let provider = DuringCall {
+        task: task.task().clone(),
+        expect_prepared: true,
+        change: Mutex::new(Some(|| {
+            std::fs::write(&path, ORIGINAL.replace("trailing-A", "trailing-B")).unwrap();
+            let next = capture(&state, &source, false);
+            replace_current_receipts(&state, &source, &next);
+        })),
+    };
+    let proposal = agents::AgentBroker::bounded_default()
+        .propose_prepared(
+            &provider,
+            &EgressFirewall::new(EgressPolicy::local_only()),
+            &task,
+            None,
+        )
+        .unwrap();
+    let mut staged = None;
+    let reclaimed = crate::primary_source::reclaim_superseded_with(&state, &source, "next", || {
+        staged = Some(
+            crate::stage_completed_prepared_job_proposal(&state, &execution, &task, &proposal)
+                .unwrap(),
+        );
+        drop(task);
+    })
+    .unwrap();
+    assert!(reclaimed > 0);
+    let receipts = state.primary_sources.receipts.lock().unwrap();
+    for id in &cited {
+        assert_eq!(
+            receipts.receipt_status(id).unwrap(),
+            crate::primary_source::ReceiptStatus::Present
+        );
+    }
+    drop(receipts);
+    let available = assess(&state, &staged.unwrap().proposal_id).unwrap();
+    assert!(
+        available
+            .evidence
+            .iter()
+            .all(|item| item.status == Availability::Available)
+    );
+}

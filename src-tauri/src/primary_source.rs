@@ -1718,10 +1718,25 @@ pub(crate) fn reclaim_superseded(
     source: &RegisteredSource,
     capture_id: &str,
 ) -> Result<u64, String> {
+    reclaim_superseded_with(state, source, capture_id, || {})
+}
+
+/// [`reclaim_superseded`], pausing between its two keep-set snapshots so
+/// tests can stage a task in the handoff.
+pub(crate) fn reclaim_superseded_with(
+    state: &AppState,
+    source: &RegisteredSource,
+    capture_id: &str,
+    between_snapshots: impl FnOnce(),
+) -> Result<u64, String> {
     let Ok(_guard) = state.primary_sources.guard(&source.source_id, true) else {
         return Ok(0);
     };
-    let locked = preview_locked(state, source)?;
+    // In-flight pins first, durable pins second (#762 review). The
+    // exclusive guard admits no new preparation, so a pin missing here was
+    // dropped already, after its task staged: the durable snapshot below
+    // then holds that staged pin. Reading them the other way round lets a
+    // task stage after the durable read and drop before the in-flight one.
     let in_flight = state
         .primary_sources
         .in_flight
@@ -1730,6 +1745,8 @@ pub(crate) fn reclaim_superseded(
         .keys()
         .cloned()
         .collect::<Vec<_>>();
+    between_snapshots();
+    let locked = preview_locked(state, source)?;
     let keep = locked
         .pins
         .union(&locked.bound)
