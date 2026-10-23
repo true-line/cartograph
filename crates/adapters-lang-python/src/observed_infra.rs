@@ -895,6 +895,13 @@ fn collect_references(cx: &FileCx, root: TsNode, scope: &Scope, follows: &mut Fo
                 call.end_byte(),
             ));
         } else {
+            // A dotted module escaping its member access (`alias =
+            // app.services`) may reach any of its exports unseen.
+            if !(parent.is_some_and(|parent| parent.kind() == "attribute") && field_of("object")) {
+                follows
+                    .unseen_modules
+                    .insert(format!("{}.{}", target.0, target.1));
+            }
             follows.escaped.insert(target);
         }
     }

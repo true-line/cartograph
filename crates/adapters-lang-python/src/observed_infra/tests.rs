@@ -818,6 +818,9 @@ fn parameters_are_followed_to_their_one_caller() {
     assert_eq!(smtp.props["identity_from"], "server.py");
     // A call through an imported module's member is the one caller too.
     let module_call = "from app import config\nimport app.services as svc\n\ndef create_app(app):\n    svc.initialize_redis_services(app, config.MEM_STORE_URI)\n";
+    let dotted_call = "from app import config\nimport app.services\n\ndef create_app(server):\n    app.services.initialize_redis_services(server, config.MEM_STORE_URI)\n";
+    let (_, edges) = with_services(&[("server.py", dotted_call)]);
+    assert!(uses(&edges, "services.py").contains(&res("redis:env:MEM_STORE_URI").as_str()));
     let (_, edges) = with_services(&[("server.py", module_call)]);
     assert!(uses(&edges, "services.py").contains(&res("redis:env:MEM_STORE_URI").as_str()));
 
@@ -833,6 +836,7 @@ fn parameters_are_followed_to_their_one_caller() {
     let services = |from: &str, to: &str| SERVICES.replacen(from, to, 1);
     for (case, overrides) in [
         ("second caller", vec![("server.py", server("\ninitialize_redis_services(None, \"redis://x\")\n"))]),
+        ("dotted module read as a value", vec![("app/other.py", "import app.services\nalias = app.services\nalias.initialize_redis_services(None, \"redis://other\")\n".to_string())]),
         ("module read as a value", vec![("app/other.py", "import app.services as svc\nalias = svc\nalias.initialize_redis_services(None, \"redis://other\")\n".to_string())]),
         ("parameter rebound by a local import", vec![("app/services.py", services("    if redis_url", "    from other_config import REDIS_URI as redis_url\n    if redis_url"))]),
         ("read as a value", vec![("server.py", server("\nhooks = [initialize_redis_services]\n"))]),
