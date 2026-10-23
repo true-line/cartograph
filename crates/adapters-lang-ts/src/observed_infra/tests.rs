@@ -353,6 +353,27 @@ export const search = algoliasearch("APP123", "key");
     assert!(builtin.nodes.is_empty());
 }
 
+// #786 review: only the platform `fetch` drops a computed URL (the client-call
+// pass records it). A registry client that happens to be named `fetch`, in
+// any family, keeps its runtime-computed identity Gap. (T-0316)
+#[test]
+fn a_registry_client_named_fetch_keeps_its_computed_identity_gap() {
+    let extension = br#"{"schema":"cartograph-observed-client-registry@1","version":"x-1",
+        "clients":[{"family":"sdk-client","provider":"fetch","module":"fetch-sdk",
+          "export":"default","form":"call","identity":"first"}]}"#;
+    let registries = Registries::layered(&[("fetch.json".into(), extension.to_vec())]);
+    let src = r#"
+import connect from "fetch-sdk";
+export const a = connect(region + ".example.com");
+export const b = fetch(base + "/items");
+"#;
+    let ex = extract_with(&[("src/client.ts", src)], &registries);
+    let gaps: Vec<_> = ex.nodes.iter().filter(|n| n.label == "Gap").collect();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(gaps[0].props["reason"], "runtime-computed fetch identity");
+    assert_eq!(gaps[0].props["kind"], "sdk-client");
+}
+
 // AC-0316 (#758 review): an identity that cannot be recorded safely is
 // withheld whole, never kept as Gap raw text: a credential URL whose origin
 // exceeds the bound, a URL with no host, a token-shaped literal. A computed

@@ -1092,13 +1092,17 @@ pub fn extract_captured(
 }
 
 /// Resources, `USES` edges and Gaps for the collected sites, assembled by
-/// the language-neutral [`adapters_fw::observed::assemble`]. A computed
-/// `fetch` URL is already the client-call pass's Gap, so it is not repeated.
+/// the language-neutral [`adapters_fw::observed::assemble`]. A computed URL
+/// of the platform `fetch` (an HTTP site with no registry entry) is already
+/// the client-call pass's Gap, so it is not repeated.
 fn assemble(id: &SourceId, sites: &[ObservedSite]) -> Extraction {
     let sites: Vec<ObservedSite> = sites
         .iter()
         .filter(|site| {
-            !(site.provider == "fetch" && matches!(site.identity, Some(IdentityExpr::Computed(_))))
+            !(site.family == ObservedFamily::HttpApi
+                && site.registry.is_none()
+                && site.provider == "fetch"
+                && matches!(site.identity, Some(IdentityExpr::Computed(_))))
         })
         .cloned()
         .collect();
