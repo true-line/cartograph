@@ -1162,3 +1162,55 @@ fn transport_workspace_covers_rejected_response_owners() {
                 .response_peak_bytes
     );
 }
+
+#[test]
+fn firewall_workspace_covers_redacted_preparation_and_authorized_copy() {
+    // AC-0327: firewall component only, not full task admission or RSS.
+    // Constructing a provider never invokes it or opens a socket.
+    let provider = OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test-model",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let limits = CompletionLimits::default();
+    let mut original = action();
+    original.payload.spans[0].text = "password=supersecret123".into();
+    let prepared = firewall
+        .prepare_bounded(&provider, &original, &limits)
+        .unwrap();
+    let authorized = firewall
+        .authorize_bounded(&provider, &prepared, None)
+        .unwrap();
+    assert_ne!(
+        original.payload.spans[0].text,
+        authorized.payload().spans[0].text
+    );
+    let mut tiny = limits.values();
+    tiny.input_bytes = 1;
+    assert_eq!(
+        firewall
+            .prepare_bounded(&provider, &original, &CompletionLimits::new(tiny).unwrap())
+            .unwrap_err()
+            .code,
+        FailureCode::InputTooLarge
+    );
+    let model = limits.firewall_workspace_bytes().unwrap();
+    let actual = serde_json::to_vec(prepared.preview()).unwrap().len();
+    assert!(model.prepared_bytes >= actual);
+    assert!(model.authorized_bytes >= serde_json::to_vec(authorized.payload()).unwrap().len());
+    assert!(model.prepare_peak_bytes >= model.prepared_bytes + 512 * 1024);
+    assert!(model.authorize_peak_bytes > model.authorized_bytes);
+    let mut values = limits.values();
+    values.input_bytes /= 2;
+    values.max_spans = 1;
+    let smaller = CompletionLimits::new(values)
+        .unwrap()
+        .firewall_workspace_bytes()
+        .unwrap();
+    assert!(smaller.prepared_bytes < model.prepared_bytes);
+    assert!(smaller.prepare_peak_bytes < model.prepare_peak_bytes);
+    values.input_bytes = u64::MAX;
+    assert!(CompletionLimits::new(values).is_err());
+}
