@@ -1,5 +1,47 @@
 # cartograph
 
+## 0.23.0
+
+### Minor Changes
+
+- 265eb45: GitHub Actions workflows with `on.schedule` now contribute one `Schedule` flow trigger per cron, entering the workflow file itself (#779).
+- 5cfe827: Python repositories with an `alembic.ini` now replay their Alembic migration history and report schema drift against the SQLAlchemy models, both ways, in the drift register's new Schema drift section; anything the replay cannot follow is a Gap (#833).
+- cfbafda: SQLAlchemy `ForeignKey(Model.column)` targets now resolve to the recovered model when the declaring file names it and the column is declared, instead of always becoming a Gap.
+- 855e4d1: Prepare investigation storage for separate client request namespaces while preserving existing App task history.
+- 498b6f9: Bind durable investigation origin and intent metadata to its bounded indexed request namespace, preserving historical App records.
+- 0d4792a: Scheduled jobs declared in crontab(5) files (`crontab`, `*.cron`, `cron.d/*`) now become `Schedule` flow triggers, entering the script each line runs like yacron jobs do (#779).
+- 7da4f61: Recover client HTTP calls declared as data: Retrofit interface annotations in Kotlin and Java, joined to the repository's `Retrofit.Builder().baseUrl(...)`, and `{ method, path }` route tables in JavaScript and Vue, joined to their base URL by a wrapper or a direct `fetch`. A base read from runtime state resolves only when `cartograph.system.toml` declares it under `env`, so joined calls can bind to another repo's endpoints; anything unresolved stays a Gap naming the entry. Flask `<id>` and FastAPI `{id}` route parameters now match client paths like Express `:id` (#737).
+- 6bc97eb: Add durable MCP client registration and bounded owner-side listing without enabling investigation access.
+- efcb1be: A scheduled job's dispatched branch can now call a function imported from another module in the repository, or run a coroutine through `asyncio.run`, and its flow still starts at that function (#779).
+- 8c84c15: Kubernetes `CronJob` manifests now become `Schedule` flow triggers, one per container, entering the script its command runs; entries mapped through the root `Dockerfile` are marked as an image assumption (#779).
+- 85a954a: Python code that reaches Redis through the `limits` rate-limit storages (`RedisStorage`, `RedisSentinelStorage`, `RedisClusterStorage`) now shows an observed `redis` resource, or a Gap naming the call when the URL is computed at run time (#734).
+- 737e088: Add owner-controlled local MCP credential rotation with revocation and shutdown fencing.
+- 5bfc0c8: Add credential rotation to MCP Settings, clearing old client configuration while credentials are replaced.
+- afb2024: Observed infrastructure now includes HTTP APIs: calls through the platform `fetch`, axios or ky whose URL starts with a proven absolute origin use one `http-api` resource per origin, whichever client made them. Relative URLs name no resource, a host the code leaves open is never truncated to a guessed origin, an env-led base records its variable name, and a computed axios or ky URL is a Gap.
+- 961de17: Recover infrastructure from code that has no IaC. Proven browser storage (IndexedDB, Cache Storage, Web Storage), SDK clients (AWS SDK v3, Firebase, Supabase, Stripe, MongoDB, Postgres, Redis, Prisma) and auth clients (Auth0, Clerk, NextAuth, Cognito) become observed `Resource` nodes under Atlas → Infrastructure, each linked to the code that uses it. The client table is registry data that extension files can add to.
+- 46b3843: Observed infrastructure from Python: import-proven boto3, redis, smtplib and SQLAlchemy clients become observed resources (#734).
+- be17b60: A Python client whose identity is a function parameter is now followed to the function's one static caller (and on through `config.X`), so SimpleLogin's Redis rate-limit storage resolves to `MEM_STORE_URI` instead of a Gap. The result is InferredStrong and marked `identity_assumes_static_callers`.
+- d326a47: Observed infrastructure from Python now follows a client identity into another repository module's constant (`create_engine(config.DB_URI)` becomes the `DB_URI` env variable), citing the assignment it rests on and failing closed on anything that may rebind it (#734).
+- b40b0a0: A scheduled Python job such as `python cron.py -j stats` now enters the function its argument selects when the script's `__main__` argparse dispatch proves it, so each job's flow starts at its own code instead of the whole file (#779).
+- 3627635: Scheduled jobs are now flow triggers. A yacron-format schedule file (`jobs:` with `schedule` and `command`) makes each job a `Schedule` trigger, which traces into the file the job runs and from there into its symbols and calls. The entry is Confirmed when the root `Dockerfile` proves where the repository sits in the container and nothing later in the image may replace it; otherwise it is marked as inferred, or kept as a Gap naming the job (#770).
+- 3fee806: Add explicit scoped MCP sessions for bounded discovery, selected fact details, and retained evidence on graphs that exceed complete-snapshot admission. Scoped reads expose partial coverage and revision-bound continuation, preserve existing complete sessions, and compile bounded stored-fact data-model and rule-evidence partitions with distinct identities. Complete flow artifacts remain unavailable in scoped mode.
+- 5a9804d: Recovering a source again now reclaims the receipts its previous recovery left behind. After a recovery publishes its graph, every receipt of that source that nothing pins and the current graph no longer binds is reclaimed under a `superseded` tombstone, so the receipt store stops growing with each re-import. Pinned and capture-forgotten receipts, capture bytes, and the receipts of a task prepared during the reclaim are kept (#725, ADR-0046 decision 5).
+- 3baac0d: Observed infrastructure from TypeScript and JavaScript now recovers WebExtension storage: `chrome.storage.sync`, `browser.storage.local` and the other areas each become an observed resource, including through `webextension-polyfill` (#734).
+
+### Patch Changes
+
+- 93f221c: Keep App investigation retries in their own nonce namespace so a stored MCP task cannot be returned for an App request with the same nonce.
+- 05d6bbd: Enforce the existing coverage archive byte limit before allocating canonical comparison JSON during saved archive validation.
+- 52c710d: Keep the MCP protocol available when graph acquisition fails; acquire read context on the first read and retain one request-ID ledger across retries.
+- afb2024: Observed infrastructure: a write through a cast, `!` or parentheses (`Object.assign(A as any, …)`, `(A!).X = …`) now voids the namespace it overwrites.
+- 5e43471: The TypeScript and Python observed-infrastructure producers now assemble resources, `USES` edges and Gaps through one shared implementation, so both languages keep one output shape (#734).
+- f1f9231: Publishing an extraction into the graph no longer holds a second whole-graph copy: the snapshot check streams the stored graph and compares it row by row, and the patch is built from borrowed snapshot facts with incident edges indexed once. On the SimpleLogin showcase, the publish heap peak drops from 735 / 509 / 576 MB to 535 / 303 / 357 MB per repo, and process RSS from about 1.9 GB to 1.41 GB (#725).
+- ffd0227: FastAPI and Flask mounts on a function-local app now confirm a route only when the app's sole binding in its scope is the framework constructor, ahead of the call. A rebound, late-constructed, branch- or loop-assigned, `nonlocal`- or `global`-rebound receiver leaves the route unproven instead of fabricating a Confirmed path.
+- ae0c9db: Bound durable investigation record serialization before allocating round-trip comparison values.
+- bcf015e: Registering sources concurrently no longer fails as "storage unavailable" when another registration's commit is slow; the registry now waits up to 5 s for it (#839).
+- a9a495e: Spec export no longer copies the graph to compile it: the projection borrows every selected fact and owns only the ADR, drift and security facts it derives, and typed provenance is parsed only for the facts ADR recovery and drift actually inspect. On the SimpleLogin showcase the export heap peak drops from 749 MB to 358 MB with the same artifacts (#725).
+- 7d0bdf5: Bump tokio to 1.54.1 for RUSTSEC-2026-0386 (unsound `AsyncFd` constructors; Cartograph never calls them).
+
 ## 0.22.0
 
 ### Minor Changes
