@@ -388,3 +388,82 @@ fn selected_basis_assessment_distinguishes_storage_failure_and_legacy_unverified
         legacy
     );
 }
+
+#[test]
+fn prepared_task_pins_its_receipts_against_a_supersession_reclaim() {
+    // #762 review: a newer publish may reclaim superseded receipts between
+    // preparation and staging; the receipts the task cites must survive.
+    let dir = tempfile::tempdir().unwrap();
+    let private = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let path = root.join("source.ts");
+    std::fs::write(&path, ORIGINAL).unwrap();
+    let state = app_state(&private);
+    let source = crate::register_local_source(&state, &root).unwrap();
+    let captured = capture(&state, &source, true);
+    let (owner, target) = rule_pair(&captured);
+    install_task(&state, &owner, &[target]);
+    let task = prepare(&state, GAP, "escalate:superseded").unwrap();
+    let cited: Vec<String> = task
+        .source_basis()
+        .evidence
+        .iter()
+        .filter_map(|item| match &item.origin {
+            TaskEvidenceKind::CapturedPrimarySource { receipt_id, .. } => Some(receipt_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!cited.is_empty());
+    let status = |id: &str| {
+        state
+            .primary_sources
+            .receipts
+            .lock()
+            .unwrap()
+            .receipt_status(id)
+            .unwrap()
+    };
+    let (_, execution) = crate::start_job(&state, "escalate:superseded:local").unwrap();
+    let provider = DuringCall {
+        task: task.task().clone(),
+        expect_prepared: true,
+        change: Mutex::new(Some(|| {
+            std::fs::write(&path, ORIGINAL.replace("trailing-A", "trailing-B")).unwrap();
+            let next = capture(&state, &source, false);
+            replace_current_receipts(&state, &source, &next);
+            // Every superseded receipt but the cited ones is reclaimed.
+            assert!(
+                crate::primary_source::reclaim_superseded(&state, &source, "next").unwrap() > 0
+            );
+            for id in &cited {
+                assert_eq!(status(id), crate::primary_source::ReceiptStatus::Present);
+            }
+        })),
+    };
+    let proposal = agents::AgentBroker::bounded_default()
+        .propose_prepared(
+            &provider,
+            &EgressFirewall::new(EgressPolicy::local_only()),
+            &task,
+            None,
+        )
+        .unwrap();
+    let staged =
+        crate::stage_completed_prepared_job_proposal(&state, &execution, &task, &proposal).unwrap();
+    drop(task);
+    // Once staged, the proposal's own pin keeps the receipts.
+    assert_eq!(
+        crate::primary_source::reclaim_superseded(&state, &source, "next").unwrap(),
+        0
+    );
+    for id in &cited {
+        assert_eq!(status(id), crate::primary_source::ReceiptStatus::Present);
+    }
+    let available = assess(&state, &staged.proposal_id).unwrap();
+    assert!(
+        available
+            .evidence
+            .iter()
+            .all(|item| item.status == Availability::Available)
+    );
+}

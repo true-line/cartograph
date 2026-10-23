@@ -1120,9 +1120,39 @@ impl ReceiptStore {
 }
 
 /// Private stores are locked only for short operations, never while parsing.
+/// Receipts that prepared tasks cite, counted per receipt.
+type InFlight = std::sync::Arc<Mutex<std::collections::BTreeMap<String, usize>>>;
+
+/// A prepared task's pin on the receipts it cites (#762 review). Taken while
+/// the task still holds its shared retention guards and released when the
+/// task is dropped after staging, so a supersession reclaim never deletes
+/// evidence a proposal is about to cite. Forget does not consult it: a
+/// forgotten source's tasks still stage their copied content (AC-0177/0178).
+pub(crate) struct InFlightPin {
+    ids: Vec<String>,
+    pins: InFlight,
+}
+
+impl Drop for InFlightPin {
+    fn drop(&mut self) {
+        // A poisoned set keeps every pin, which only ever keeps receipts.
+        if let Ok(mut pins) = self.pins.lock() {
+            for id in &self.ids {
+                if let Some(count) = pins.get_mut(id) {
+                    *count -= 1;
+                    if *count == 0 {
+                        pins.remove(id);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) struct PrimarySourceStore {
     captures: Mutex<CaptureStore>,
     pub(crate) receipts: Mutex<ReceiptStore>,
+    in_flight: InFlight,
     storage: PrivateStorage,
     #[cfg(test)]
     evidence_accesses: std::sync::atomic::AtomicUsize,
@@ -1138,6 +1168,7 @@ impl PrimarySourceStore {
         Ok(Self {
             captures: Mutex::new(captures),
             receipts: Mutex::new(receipts),
+            in_flight: InFlight::default(),
             storage,
             #[cfg(test)]
             evidence_accesses: std::sync::atomic::AtomicUsize::new(0),
@@ -1150,6 +1181,18 @@ impl PrimarySourceStore {
     pub(crate) fn evidence_access_attempts(&self) -> usize {
         self.evidence_accesses
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Pin `ids` for a prepared task until the returned pin is dropped.
+    pub(crate) fn pin_in_flight(&self, ids: Vec<String>) -> Result<InFlightPin, String> {
+        let mut pins = self.in_flight.lock().map_err(storage_error)?;
+        for id in &ids {
+            *pins.entry(id.clone()).or_default() += 1;
+        }
+        Ok(InFlightPin {
+            ids,
+            pins: self.in_flight.clone(),
+        })
     }
 
     /// Hold the exclusive guard a forget takes, so tests can race against it.
@@ -1667,7 +1710,9 @@ pub(crate) fn forget(state: &AppState, id: &str, fingerprint: &str) -> Result<u6
 /// and nothing pins (ADR-0046 decision 5). The caller must have released its
 /// prepared input first. The reclaim needs the exclusive retention guard, so
 /// no other recovery of this source can be holding fresh, not yet published
-/// receipts; a busy source is skipped and settles on its next publish.
+/// receipts, and no task can prepare against it; a busy source is skipped
+/// and settles on its next publish. Receipts a prepared task cites stay
+/// pinned until it has staged ([`InFlightPin`]).
 pub(crate) fn reclaim_superseded(
     state: &AppState,
     source: &RegisteredSource,
@@ -1677,7 +1722,20 @@ pub(crate) fn reclaim_superseded(
         return Ok(0);
     };
     let locked = preview_locked(state, source)?;
-    let keep = locked.pins.union(&locked.bound).cloned().collect();
+    let in_flight = state
+        .primary_sources
+        .in_flight
+        .lock()
+        .map_err(storage_error)?
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let keep = locked
+        .pins
+        .union(&locked.bound)
+        .cloned()
+        .chain(in_flight)
+        .collect();
     state
         .primary_sources
         .receipts

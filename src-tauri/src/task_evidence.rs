@@ -288,12 +288,40 @@ fn failure(report: &SelectionReport, reason: &str) -> TaskPreparationError {
     }
 }
 
+/// A prepared task with the in-flight pin on the receipts it cites, held
+/// until the task is dropped after staging.
+pub(crate) struct PreparedTask {
+    task: PreparedAgentTask,
+    _pin: crate::primary_source::InFlightPin,
+}
+
+// A task's identity is its prepared content; the pin is bookkeeping.
+impl PartialEq for PreparedTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.task == other.task
+    }
+}
+
+impl std::fmt::Debug for PreparedTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.task.fmt(f)
+    }
+}
+
+impl std::ops::Deref for PreparedTask {
+    type Target = PreparedAgentTask;
+
+    fn deref(&self) -> &PreparedAgentTask {
+        &self.task
+    }
+}
+
 /// Own one coherent graph observation, then prepare its bounded evidence task.
 pub(crate) fn prepare(
     state: &AppState,
     gap_id: &str,
     action_id: &str,
-) -> Result<PreparedAgentTask, String> {
+) -> Result<PreparedTask, String> {
     let graph = state
         .graph
         .lock()
@@ -309,7 +337,7 @@ fn prepare_from_snapshot(
     gap_id: &str,
     action_id: &str,
     after_guards: impl FnOnce(),
-) -> Result<PreparedAgentTask, TaskPreparationError> {
+) -> Result<PreparedTask, TaskPreparationError> {
     let plan = planning::plan(&graph.0, &graph.1, gap_id, action_id)?;
     let mut selection_report = report(&plan);
     let mut keys: Vec<_> = plan
@@ -529,16 +557,32 @@ fn prepare_from_snapshot(
         evidence: origins,
         selection: selection_report,
     };
+    // Pin the cited receipts while the guards still hold them, so no
+    // supersession reclaim can fall between this and staging (#762 review).
+    let cited = basis
+        .evidence
+        .iter()
+        .filter_map(|item| match &item.origin {
+            TaskEvidenceKind::CapturedPrimarySource { receipt_id, .. } => Some(receipt_id.clone()),
+            _ => None,
+        })
+        .collect();
+    let pin = state
+        .primary_sources
+        .pin_in_flight(cited)
+        .map_err(|_| failure(&validation_report, INVALID))?;
     // Leases are explicitly out of scope before a caller can invoke a provider.
     drop(guards);
-    PreparedAgentTask::new(task, basis).map_err(|_| {
-        let mut report = validation_report;
-        report.stop_reason = SelectionStopReason::InvalidSelection;
-        failure(
-            &report,
-            "Prepared task exceeds its bounded evidence or metadata contract.",
-        )
-    })
+    PreparedAgentTask::new(task, basis)
+        .map(|task| PreparedTask { task, _pin: pin })
+        .map_err(|_| {
+            let mut report = validation_report;
+            report.stop_reason = SelectionStopReason::InvalidSelection;
+            failure(
+                &report,
+                "Prepared task exceeds its bounded evidence or metadata contract.",
+            )
+        })
 }
 
 #[cfg(test)]
