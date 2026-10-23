@@ -480,6 +480,12 @@ fn replay(revision: &Revision, id: &SourceId<'_>, schema: &mut Schema) -> Replay
             "`op` is not bound by `from alembic import op`",
         ));
     }
+    if let Some(node) = op_replaced(&cx, root) {
+        return Err(inconclusive(
+            node,
+            "`op` is rebound or its members replaced",
+        ));
+    }
     let mut calls = Vec::new();
     collect_calls(body, &mut calls);
     for call in calls {
@@ -524,6 +530,20 @@ fn replay(revision: &Revision, id: &SourceId<'_>, schema: &mut Schema) -> Replay
             let changes = sql_effect(&sql)
                 .ok_or_else(|| inconclusive(call, "raw SQL may change any table"))?;
             let evidence = cx.evidence(&call);
+            // SQL run on some paths only leaves its tables unknown.
+            if conditional(&cx, call, body) {
+                for change in changes {
+                    let (SqlChange::AddColumn(table, _)
+                    | SqlChange::DropColumn(table, _)
+                    | SqlChange::Reshape(table)) = change;
+                    schema.forget(
+                        &table,
+                        "a migration op on it runs conditionally or in batch mode",
+                        &evidence,
+                    );
+                }
+                continue;
+            }
             for change in changes {
                 match change {
                     SqlChange::AddColumn(table, column) => match schema.tables.get_mut(&table) {
@@ -701,6 +721,82 @@ fn collect_calls<'t>(node: TsNode<'t>, out: &mut Vec<TsNode<'t>>) {
     }
 }
 
+/// Where the file may make `op` other than Alembic's: any `op` that is not a
+/// member read through it (a bare read, a binding, a member write or
+/// deletion), or a wildcard import that may rebind it.
+fn op_replaced<'t>(cx: &FileCx<'_>, root: TsNode<'t>) -> Option<TsNode<'t>> {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+        if node.kind() == "wildcard_import" {
+            return Some(node);
+        }
+        if node.kind() != "identifier" || cx.text(&node) != "op" {
+            continue;
+        }
+        let Some(parent) = node.parent() else {
+            continue;
+        };
+        let is_field = |parent: TsNode<'_>, field: &str| {
+            parent
+                .child_by_field_name(field)
+                .is_some_and(|child| child.id() == node.id())
+        };
+        // Another object's member (`column.op(...)`), a keyword's name, or
+        // `from alembic import op` itself.
+        if (parent.kind() == "attribute" && is_field(parent, "attribute"))
+            || (parent.kind() == "keyword_argument" && is_field(parent, "name"))
+        {
+            continue;
+        }
+        if parent.kind() == "dotted_name"
+            && parent.parent().is_some_and(|import| {
+                import.kind() == "import_from_statement"
+                    && cx.text(&import).split_whitespace().collect::<Vec<_>>()
+                        == ["from", "alembic", "import", "op"]
+            })
+        {
+            continue;
+        }
+        if parent.kind() != "attribute" || !is_field(parent, "object") {
+            return Some(node);
+        }
+        // The member chain from `op` must not be written or deleted.
+        let mut top = parent;
+        while let Some(up) = top.parent() {
+            let holds = |field: &str| {
+                up.child_by_field_name(field)
+                    .is_some_and(|child| child.id() == top.id())
+            };
+            if (up.kind() == "attribute" && holds("object"))
+                || (up.kind() == "subscript" && holds("value"))
+            {
+                top = up;
+            } else {
+                break;
+            }
+        }
+        let written = top.parent().is_some_and(|up| {
+            let left = up
+                .child_by_field_name("left")
+                .is_some_and(|child| child.id() == top.id());
+            (matches!(
+                up.kind(),
+                "assignment" | "augmented_assignment" | "for_statement"
+            ) && left)
+                || matches!(
+                    up.kind(),
+                    "delete_statement" | "pattern_list" | "tuple_pattern" | "list_pattern"
+                )
+        });
+        if written {
+            return Some(node);
+        }
+    }
+    None
+}
+
 fn mentions_op(cx: &FileCx<'_>, node: TsNode<'_>) -> bool {
     let mut stack = vec![node];
     while let Some(node) = stack.pop() {
@@ -737,6 +833,8 @@ fn conditional(cx: &FileCx<'_>, call: TsNode<'_>, body: TsNode<'_>) -> bool {
                 | "lambda"
                 | "function_definition"
                 | "list_comprehension"
+                | "set_comprehension"
+                | "dictionary_comprehension"
                 | "generator_expression"
         ) {
             return true;

@@ -223,6 +223,14 @@ fn alembic_replay_fails_closed() {
             .ends_with("runs conditionally or in batch mode")
     );
     assert!(
+        unchecked("    if True:\n        op.execute('ALTER TABLE users ADD COLUMN phantom int')")
+            .ends_with("runs conditionally or in batch mode")
+    );
+    assert!(
+        unchecked("    for _ in []:\n        op.execute('ALTER TABLE users DROP COLUMN note')")
+            .ends_with("runs conditionally or in batch mode")
+    );
+    assert!(
         unchecked(
             "    with op.batch_alter_table('users') as batch:\n        batch.drop_column('note')"
         )
@@ -354,6 +362,48 @@ fn alembic_replay_fails_closed() {
         refused(unbound, &[]),
         "`op` is not bound by `from alembic import op`"
     );
+    // `op` must stay Alembic's: no rebinding, member replacement or
+    // wildcard import anywhere in the revision.
+    let replaced = |upgrade: &str, tail: &str| {
+        with(
+            &history(),
+            "e6_x.py",
+            format!("{}{tail}", revision("e6", "'d5'", upgrade)),
+        )
+    };
+    let rebound = "`op` is rebound or its members replaced";
+    for (upgrade, tail) in [
+        (
+            "    op.add_column('users', sa.Column('phantom', sa.String()))",
+            "\nop = FakeOps()\n",
+        ),
+        (
+            "    op = FakeOps()\n    op.add_column('users', sa.Column('phantom', sa.String()))",
+            "",
+        ),
+        (
+            "    from fake import op\n    op.add_column('users', sa.Column('phantom', sa.String()))",
+            "",
+        ),
+        (
+            "    op.add_column('users', sa.Column('phantom', sa.String()))",
+            "\nop.add_column = print\n",
+        ),
+        ("    op.impl.dialect = None", ""),
+        ("    op.impl['dialect'] = None", ""),
+        ("    del op.impl", ""),
+        ("    register(op)", ""),
+        (
+            "    op.add_column('users', sa.Column('phantom', sa.String()))",
+            "\nfrom fake import *\n",
+        ),
+    ] {
+        assert_eq!(
+            refused(replaced(upgrade, tail), &[]),
+            rebound,
+            "{upgrade}{tail}"
+        );
+    }
     let unnamed = with(
         &history(),
         "e6_x.py",
