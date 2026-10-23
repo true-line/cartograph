@@ -1,6 +1,6 @@
 {
   "schema": "cartograph-observed-client-registry@1",
-  "version": "2026.10-py",
+  "version": "2026.10-py-limits",
   "clients": [
     {
       "family": "sdk-client",
@@ -488,6 +488,33 @@
       "ecosystem": "pypi",
       "module": "redis.Redis",
       "export": "from_url",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "redis",
+      "ecosystem": "pypi",
+      "module": "limits.storage",
+      "export": "RedisStorage",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "redis",
+      "ecosystem": "pypi",
+      "module": "limits.storage",
+      "export": "RedisSentinelStorage",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "redis",
+      "ecosystem": "pypi",
+      "module": "limits.storage",
+      "export": "RedisClusterStorage",
       "form": "call",
       "identity": "first"
     },

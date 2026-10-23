@@ -269,6 +269,43 @@ shadowed = create_engine(DB)
     assert_eq!(edges.len(), 4);
 }
 
+// AC-0318: Redis reached through the `limits` rate-limit storage is the same
+// `redis` resource, under either import form; a URL passed in is a Gap
+// naming the site. (T-0318)
+#[test]
+fn limits_redis_storage_is_observed_redis() {
+    let (nodes, edges) = extract(&[(
+        "app/redis_services.py",
+        r#"
+import limits.storage
+from limits.storage import RedisSentinelStorage, RedisClusterStorage
+
+def initialize(redis_url):
+    return limits.storage.RedisStorage(redis_url)
+
+def sentinel():
+    return RedisSentinelStorage("redis+sentinel://sentinel.internal:26379/main")
+
+def cluster():
+    return RedisClusterStorage("redis+cluster://user:pw@cluster.internal:7000")
+
+memory = limits.storage.MemoryStorage()
+"#,
+    )]);
+    assert_eq!(
+        uses(&edges, "redis_services.py"),
+        vec![
+            format!("gap:observed:{REPO}@app/redis_services.py@131"),
+            res("redis:redis+cluster://cluster.internal:7000"),
+            res("redis:redis+sentinel://sentinel.internal:26379"),
+        ]
+    );
+    let gaps: Vec<&Node> = nodes.iter().filter(|n| n.label == "Gap").collect();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(gaps[0].props["reason"], "runtime-computed redis identity");
+    assert!(!serde_json::to_string(&nodes).unwrap().contains("pw@"));
+}
+
 const CONFIG: &str = "import os\nDB_URI = os.environ[\"DB_URI\"]\n";
 const DB: &str = "from sqlalchemy import create_engine\nfrom app import config\nengine = create_engine(config.DB_URI)\n";
 
