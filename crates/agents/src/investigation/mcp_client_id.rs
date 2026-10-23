@@ -71,3 +71,29 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    use crate::investigation::InvestigationOrigin;
+
+    // AC-0323: retain historical App JSON while adding explicit MCP attribution.
+    #[test]
+    fn task_origin_preserves_app_wire_and_binds_client_namespace() {
+        let app: InvestigationOrigin = serde_json::from_str("\"app\"").unwrap();
+        assert_eq!(serde_json::to_string(&app).unwrap(), "\"app\"");
+        assert_eq!(app.request_namespace(), "app");
+        let origin = InvestigationOrigin::Mcp {
+            client_id: McpClientId::from_host_bytes([0xab; 16]),
+        };
+        assert_eq!(
+            origin.request_namespace(),
+            format!("mcp:{}", "ab".repeat(16))
+        );
+        let json = serde_json::to_string(&origin).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InvestigationOrigin>(&json).unwrap(),
+            origin
+        );
+    }
+}

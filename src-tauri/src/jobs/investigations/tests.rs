@@ -1575,3 +1575,6 @@ mod finding_review_tests;
 
 #[path = "namespace_migration_tests.rs"]
 mod namespace_migration_tests;
+
+#[path = "origin_namespace_tests.rs"]
+mod origin_namespace_tests;

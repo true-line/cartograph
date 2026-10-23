@@ -403,6 +403,11 @@ fn validate_task_contract(
         return Err(InvestigationStoreError::Invalid);
     }
     let detail = &task.detail;
+    match (&detail.origin, &task.mcp_intent_hash) {
+        (InvestigationOrigin::App, None) => {}
+        (InvestigationOrigin::Mcp { .. }, Some(hash)) if hash_valid(hash) => {}
+        _ => return Err(InvestigationStoreError::Invalid),
+    }
     let policy =
         InvestigationPolicy::for_limits(&detail.limits).ok_or(InvestigationStoreError::Invalid)?;
     let summary = &detail.summary;
@@ -878,10 +883,19 @@ fn load_task_base_contract(
         return Err(InvestigationStoreError::Invalid);
     }
     let row = connection.query_row(
-        "SELECT CASE WHEN typeof(record)='blob' AND length(record)<=262144 THEN record END, CASE WHEN typeof(record_hash)='text' AND length(CAST(record_hash AS BLOB))=64 THEN record_hash END, revision, live, job_id, CASE WHEN typeof(nonce)='text' AND length(CAST(nonce AS BLOB))<=128 THEN nonce END, CASE WHEN typeof(conversation_id)='text' AND length(CAST(conversation_id AS BLOB))<=128 THEN conversation_id END FROM investigation_tasks WHERE id=?1",
-        [id], |r| Ok((r.get::<_,Option<Vec<u8>>>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<String>>(6)?)),
+        "SELECT CASE WHEN typeof(record)='blob' AND length(record)<=262144 THEN record END, CASE WHEN typeof(record_hash)='text' AND length(CAST(record_hash AS BLOB))=64 THEN record_hash END, revision, live, job_id, CASE WHEN typeof(nonce)='text' AND length(CAST(nonce AS BLOB))<=128 THEN nonce END, CASE WHEN typeof(conversation_id)='text' AND length(CAST(conversation_id AS BLOB))<=128 THEN conversation_id END, CASE WHEN typeof(request_namespace)='text' AND length(CAST(request_namespace AS BLOB))<=36 THEN request_namespace END FROM investigation_tasks WHERE id=?1",
+        [id], |r| Ok((r.get::<_,Option<Vec<u8>>>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,Option<String>>(7)?)),
     ).optional()?.ok_or(InvestigationStoreError::Missing)?;
-    let (Some(bytes), Some(hash), revision, live, job_id, Some(nonce), Some(conversation)) = row
+    let (
+        Some(bytes),
+        Some(hash),
+        revision,
+        live,
+        job_id,
+        Some(nonce),
+        Some(conversation),
+        Some(request_namespace),
+    ) = row
     else {
         return Err(InvestigationStoreError::Invalid);
     };
@@ -896,7 +910,8 @@ fn load_task_base_contract(
         [],
         |r| r.get(0),
     )?;
-    if task.detail.summary.investigation_id != id
+    if task.detail.origin.request_namespace() != request_namespace
+        || task.detail.summary.investigation_id != id
         || signed(task.detail.summary.revision)? != revision
         || live != i64::from(task.phase != Phase::Terminal)
         || task.detail.summary.job_id != job_id
@@ -976,7 +991,7 @@ fn insert_validated_task(
     task: &StoredTask,
 ) -> Result<(), InvestigationStoreError> {
     let bytes = encode(task, MAX_RECORD_BYTES)?;
-    one(connection.execute("INSERT INTO investigation_tasks(id,nonce,conversation_id,job_id,revision,live,record,record_hash) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![task.detail.summary.investigation_id,task.nonce,task.detail.summary.conversation_id,task.detail.summary.job_id,signed(task.detail.summary.revision)?,i64::from(task.phase!=Phase::Terminal),bytes,core_prov::content_hash(&bytes)])?)
+    one(connection.execute("INSERT INTO investigation_tasks(id,nonce,conversation_id,job_id,revision,live,record,record_hash,request_namespace) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![task.detail.summary.investigation_id,task.nonce,task.detail.summary.conversation_id,task.detail.summary.job_id,signed(task.detail.summary.revision)?,i64::from(task.phase!=Phase::Terminal),bytes,core_prov::content_hash(&bytes),task.detail.origin.request_namespace()])?)
 }
 
 pub(super) fn save_task(
@@ -1011,7 +1026,7 @@ fn save_validated_task(
     terminal: bool,
 ) -> Result<(), InvestigationStoreError> {
     let bytes = encode(task, MAX_RECORD_BYTES)?;
-    one(connection.execute("UPDATE investigation_tasks SET revision=?2,live=?3,record=?4,record_hash=?5 WHERE id=?1 AND revision=?6", params![task.detail.summary.investigation_id,signed(task.detail.summary.revision)?,i64::from(task.phase!=Phase::Terminal),bytes,core_prov::content_hash(&bytes),signed(expected_revision)?])?)?;
+    one(connection.execute("UPDATE investigation_tasks SET revision=?2,live=?3,record=?4,record_hash=?5 WHERE id=?1 AND revision=?6 AND request_namespace=?7", params![task.detail.summary.investigation_id,signed(task.detail.summary.revision)?,i64::from(task.phase!=Phase::Terminal),bytes,core_prov::content_hash(&bytes),signed(expected_revision)?,task.detail.origin.request_namespace()])?)?;
     check_task_capacity(connection, &task.detail.summary.investigation_id, terminal)
 }
 
@@ -1124,7 +1139,7 @@ pub(super) fn stored_bytes_with_reads(
     // existing TERMINAL_RESERVE; do not add that reserve here a second time.
     // BLOB casts charge UTF-8 bytes even if a malformed row has SQL TEXT type.
     let (tasks, records): (i64, i64) = connection.query_row(
-        "SELECT count(*), coalesce(sum(length(CAST(record AS BLOB))+length(CAST(record_hash AS BLOB))+length(CAST(id AS BLOB))+length(CAST(nonce AS BLOB))+length(CAST(conversation_id AS BLOB))),0) FROM investigation_tasks WHERE (?1 IS NULL OR id=?1)",
+        "SELECT count(*), coalesce(sum(length(CAST(record AS BLOB))+length(CAST(record_hash AS BLOB))+length(CAST(id AS BLOB))+length(CAST(nonce AS BLOB))+length(CAST(conversation_id AS BLOB))+length(CAST(request_namespace AS BLOB))),0) FROM investigation_tasks WHERE (?1 IS NULL OR id=?1)",
         [id], |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let mut bytes = usize::try_from(tasks)
