@@ -54,6 +54,12 @@ pub fn string_wire(bytes: usize) -> Option<usize> {
 }
 /// Count compact serialization without constructing a full output buffer.
 pub fn count(value: &impl Serialize) -> Option<usize> {
+    encoded_size(value).ok()
+}
+
+/// Exact compact JSON length with serialization errors preserved, without an
+/// output byte buffer. Query diagnostics need the full rejected length too.
+pub(crate) fn encoded_size(value: &impl Serialize) -> Result<usize, serde_json::Error> {
     struct Counter(usize);
     impl Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -68,8 +74,8 @@ pub fn count(value: &impl Serialize) -> Option<usize> {
         }
     }
     let mut writer = Counter(0);
-    serde_json::to_writer(&mut writer, value).ok()?;
-    Some(writer.0)
+    serde_json::to_writer(&mut writer, value)?;
+    Ok(writer.0)
 }
 /// Owned raw graph role; row slots use the larger of the two actual DTOs.
 pub fn graph(limits: SnapshotReadLimits) -> Option<usize> {
