@@ -1379,7 +1379,7 @@ fn sqlalchemy_attribute_foreign_keys_resolve_to_declared_columns() {
     write(
         dir.path(),
         "app/models.py",
-        r#"
+        &r#"
 from sqlalchemy import Column, ForeignKey, Integer, String
 from sqlalchemy.orm import declarative_base
 
@@ -1393,6 +1393,16 @@ class User(Base, ModelMixin):
     code = Column("user_code", String)
     label = Column(String, name="user_label")
 
+class Employee(Base):
+    __tablename__ = "employee"
+    id = Column(Integer, primary_key=True)
+
+class Manager(Employee):
+    bonus = Column(Integer)
+
+class Engineer(Employee):
+    level = Column(Integer)
+
 class Alias(Base, ModelMixin):
     __tablename__ = "alias"
     user_id = Column(Integer, ForeignKey(User.id, ondelete="cascade"))
@@ -1401,7 +1411,13 @@ class Alias(Base, ModelMixin):
     label_ref = Column(String, ForeignKey(User.label))
     ghost_id = Column(Integer, ForeignKey(Ghost.id))
     call_id = Column(Integer, ForeignKey(lookup().id))
-"#,
+    bonus_ref = Column(Integer, ForeignKey(Manager.bonus))
+    engineer_id = Column(Integer, ForeignKey(Engineer.id))
+    parent_bonus = Column(Integer, ForeignKey(Employee.bonus))
+    sibling_bonus = Column(Integer, ForeignKey(Engineer.bonus))
+    long_ref = Column(Integer, ForeignKey(LONG.id))
+"#
+        .replace("LONG", &"V".repeat(300)),
     );
     // Evaluated where it is written: this mixin never imports `app`.
     write(
@@ -1465,6 +1481,7 @@ class Audit(Base, OwnedMixin):
         .nodes
         .iter()
         .filter(|n| n.label == "Gap" && n.id.starts_with("gap:sqlalchemy:"))
+        .filter(|n| !n.props["target"].as_str().unwrap().ends_with('…'))
         .map(|n| {
             (
                 n.props["target"].as_str().unwrap().to_string(),
@@ -1473,9 +1490,37 @@ class Audit(Base, OwnedMixin):
         })
         .collect();
     gaps.sort();
+    // STI siblings share the table, not their columns (#813 review).
+    let sti = references("alias", "employee").unwrap();
+    let targets: Vec<&str> = sti
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["target"].as_str().unwrap())
+        .collect();
+    assert_eq!(targets, ["Manager.bonus", "Engineer.id"]);
+    // Target text is capped like any other unprovable target.
+    let long = extraction
+        .nodes
+        .iter()
+        .find(|n| n.label == "Gap" && n.props["target"].as_str().unwrap_or("").ends_with('…'))
+        .unwrap();
+    assert!(long.props["target"].as_str().unwrap().len() <= 200 + '…'.len_utf8());
+    assert_eq!(
+        long.props["reason"],
+        "ForeignKey target class is not a recovered entity"
+    );
     assert_eq!(
         gaps,
         [
+            (
+                "Employee.bonus",
+                "ForeignKey target is not a declared column of the class"
+            ),
+            (
+                "Engineer.bonus",
+                "ForeignKey target is not a declared column of the class"
+            ),
             (
                 "Ghost.id",
                 "ForeignKey target class is not a recovered entity"
@@ -1490,7 +1535,7 @@ class Audit(Base, OwnedMixin):
             ),
             (
                 "User.missing",
-                "ForeignKey target is not a declared column of the entity"
+                "ForeignKey target is not a declared column of the class"
             ),
             (
                 "app.models.User.id",

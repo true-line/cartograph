@@ -547,7 +547,7 @@ fn parse_foreign_key(
                     FkTarget::Attribute(
                         cx.text(&object).to_string(),
                         cx.text(&attr).to_string(),
-                        cx.text(&arg).to_string(),
+                        bound_target_text(cx.text(&arg)),
                     )
                 }
                 _ => FkTarget::Unprovable(bound_target_text(cx.text(&arg))),
@@ -1707,9 +1707,17 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
         }
     }
 
-    // Entity id -> (table, declared column attributes -> renamed), for
-    // `ForeignKey(Model.column)` targets.
-    let mut entity_columns: HashMap<String, (String, BTreeMap<String, bool>)> = HashMap::new();
+    // Class key -> (table, the class's own and inherited column attributes ->
+    // renamed), for `ForeignKey(Model.column)` targets. Per class, not per
+    // entity: STI siblings share a table but not their columns (#813 review).
+    let mut class_columns: HashMap<(String, String), (String, BTreeMap<String, bool>)> =
+        HashMap::new();
+    let declared = |columns: &[ColumnDecl]| -> BTreeMap<String, bool> {
+        columns
+            .iter()
+            .map(|c| (c.name.clone(), c.renamed))
+            .collect()
+    };
     for &class in &candidate_classes {
         let TableName::Literal(store) = &class.tablename else {
             continue;
@@ -1759,6 +1767,10 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
         let entity_id = format!("data:{repo}@sqlalchemy:{qualified_table}");
         let (mut resolved_columns, mut resolved_fks, mut resolved_rels) =
             collect_inherited_members(class, &classes_by_key, &imports_by_file, &known_files);
+        class_columns.insert(
+            class.key.clone(),
+            (store.clone(), declared(&resolved_columns)),
+        );
         let mut seen_cols: BTreeSet<String> =
             resolved_columns.iter().map(|c| c.name.clone()).collect();
         let mut seen_rels: BTreeSet<String> =
@@ -1772,6 +1784,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
                     &imports_by_file,
                     &known_files,
                 );
+                class_columns.insert(child.key.clone(), (store.clone(), declared(&child_cols)));
                 for col in child_cols {
                     if seen_cols.insert(col.name.clone()) {
                         for fk in &child_fks {
@@ -1795,16 +1808,6 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
             }
         }
 
-        entity_columns.insert(
-            entity_id.clone(),
-            (
-                store.clone(),
-                resolved_columns
-                    .iter()
-                    .map(|c| (c.name.clone(), c.renamed))
-                    .collect(),
-            ),
-        );
         let mut evidence = vec![class.evidence.clone()];
         let mut columns_json = Vec::with_capacity(resolved_columns.len());
         for col in &resolved_columns {
@@ -1923,20 +1926,16 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
                     )
                     // The expression is evaluated where it is written, so only
                     // the declaring file's bindings name the class.
-                    .and_then(|key| by_class_key.get(&key).cloned());
+                    .and_then(|key| {
+                        Some((by_class_key.get(&key).cloned()?, class_columns.get(&key)?))
+                    });
                     let resolved = match dst {
                         None => Err("ForeignKey target class is not a recovered entity"),
-                        Some(dst) => {
-                            match entity_columns.get(&dst).map(|(t, c)| (t, c.get(column))) {
-                                Some((table, Some(false))) => Ok((dst, table.clone())),
-                                Some((_, Some(true))) => {
-                                    Err("ForeignKey target column declares its own name")
-                                }
-                                _ => {
-                                    Err("ForeignKey target is not a declared column of the entity")
-                                }
-                            }
-                        }
+                        Some((dst, (table, columns))) => match columns.get(column) {
+                            Some(false) => Ok((dst, table.clone())),
+                            Some(true) => Err("ForeignKey target column declares its own name"),
+                            None => Err("ForeignKey target is not a declared column of the class"),
+                        },
                     };
                     match resolved {
                         Ok((dst_entity_id, table)) => {
