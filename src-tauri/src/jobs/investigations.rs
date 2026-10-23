@@ -373,7 +373,7 @@ impl JobStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         validate(&tx, &self.namespace)?;
         let prior: Option<Option<String>> = tx.query_row(
-            "SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE nonce = ?1", [&request.request_nonce], |row| row.get(0),
+            "SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE request_namespace='app' AND nonce = ?1", [&request.request_nonce], |row| row.get(0),
         ).optional()?;
         if let Some(id) = prior {
             let id = id.ok_or(InvestigationStoreError::Invalid)?;

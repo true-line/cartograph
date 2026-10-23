@@ -9,7 +9,7 @@ impl JobStore {
         let hash = request.intent_hash()?;
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
-        let id:Option<Option<String>>=tx.query_row("SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE nonce=?1",[&request.request_nonce],|r|r.get(0)).optional()?;
+        let id:Option<Option<String>>=tx.query_row("SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE request_namespace='app' AND nonce=?1",[&request.request_nonce],|r|r.get(0)).optional()?;
         let detail = if let Some(id) = id {
             let task = load_task(&tx, &id.ok_or(InvestigationStoreError::Invalid)?)?;
             if task.intent_hash != hash {

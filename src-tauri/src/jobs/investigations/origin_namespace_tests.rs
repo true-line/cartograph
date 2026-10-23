@@ -155,3 +155,55 @@ fn task_origin_namespace_over_capacity_keeps_reads_and_retries() {
     );
     assert_eq!(fixture.store.investigation(&id).unwrap(), before);
 }
+
+// AC-0322/0323: an App retry cannot replay a foreign namespace's nonce.
+#[test]
+fn app_nonce_namespace_start_and_recovery_ignore_foreign_tasks() {
+    let mut fixture = Fixture::new();
+    let requested = request("namespace-collision", InvestigationProviderMode::Local);
+    let (foreign_id, _) = fixture.start("namespace-collision", InvestigationProviderMode::Local);
+    let mut task: StoredTask = serde_json::from_slice(&body(&fixture.store, &foreign_id)).unwrap();
+    task.detail.origin = InvestigationOrigin::Mcp {
+        client_id: McpClientId::from_host_bytes([7; 16]),
+    };
+    task.mcp_intent_hash = Some("a".repeat(64));
+    replace(
+        &fixture.store,
+        &task,
+        &task.detail.origin.request_namespace(),
+    );
+    assert!(
+        fixture
+            .store
+            .existing_investigation(&requested)
+            .unwrap()
+            .is_none()
+    );
+    let app = fixture
+        .store
+        .start_investigation(
+            &requested,
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap();
+    assert!(app.created);
+    assert_ne!(app.detail.summary.investigation_id, foreign_id);
+    assert_eq!(app.detail.origin, InvestigationOrigin::App);
+    let replay = fixture.store.start_investigation(&requested, None).unwrap();
+    assert!(!replay.created);
+    assert_eq!(replay.detail, app.detail);
+    assert_eq!(
+        fixture.store.existing_investigation(&requested).unwrap(),
+        Some(app.detail)
+    );
+    let mut changed = requested;
+    changed.question = "A different intent".into();
+    assert_eq!(
+        fixture.store.existing_investigation(&changed).unwrap_err(),
+        InvestigationStoreError::Conflict
+    );
+    assert_eq!(
+        fixture.store.investigation(&foreign_id).unwrap().origin,
+        task.detail.origin
+    );
+}

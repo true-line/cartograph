@@ -281,7 +281,7 @@ impl JobStore {
         validate(&tx, &self.namespace)?;
         let id: Option<String> = tx
             .query_row(
-                "SELECT id FROM investigation_tasks WHERE nonce=?1",
+                "SELECT id FROM investigation_tasks WHERE request_namespace='app' AND nonce=?1",
                 [&request.request_nonce],
                 |row| row.get(0),
             )
