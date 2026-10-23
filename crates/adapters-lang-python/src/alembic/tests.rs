@@ -500,6 +500,22 @@ fn alembic_replay_fails_closed() {
             rebound,
         ),
         ("    register(op)", "", rebound),
+        (
+            "    op.__dict__['add_column']('users', sa.Column('phantom', sa.String()))",
+            "",
+            rebound,
+        ),
+        ("    op.impl.add_column('users', None)", "", rebound),
+        (
+            "    op.get_context().bind.execute('DROP TABLE users')",
+            "",
+            rebound,
+        ),
+        (
+            "    with op.get_context().begin_transaction():\n        pass",
+            "",
+            rebound,
+        ),
         (phantom, "\nfrom fake import *\n", rebound),
         // Module-level ops, in a statement, a conditional or a class body.
         ("    pass", "\nop.drop_table('users')\n", outside),

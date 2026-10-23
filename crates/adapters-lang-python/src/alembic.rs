@@ -744,9 +744,9 @@ fn collect_calls<'t>(node: TsNode<'t>, out: &mut Vec<TsNode<'t>>) {
 }
 
 /// Where the file may make `op` other than Alembic's: any `op` that is not a
-/// call through one of its members (a bare read, a binding, a member read
-/// into a value, a member write or deletion), or a wildcard import that may
-/// rebind it.
+/// direct call of one of its members or the autocommit wrapper (a bare read,
+/// a binding, a member read into a value, a computed or chained member, a
+/// member write or deletion), or a wildcard import that may rebind it.
 fn op_replaced<'t>(cx: &FileCx<'_>, root: TsNode<'t>) -> Option<TsNode<'t>> {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
@@ -785,30 +785,34 @@ fn op_replaced<'t>(cx: &FileCx<'_>, root: TsNode<'t>) -> Option<TsNode<'t>> {
         if parent.kind() != "attribute" || !is_field(parent, "object") {
             return Some(node);
         }
-        // The member chain from `op`.
-        let mut top = parent;
-        while let Some(up) = top.parent() {
-            let holds = |field: &str| {
-                up.child_by_field_name(field)
-                    .is_some_and(|child| child.id() == top.id())
-            };
-            if (up.kind() == "attribute" && holds("object"))
-                || (up.kind() == "subscript" && holds("value"))
-            {
-                top = up;
-            } else {
-                break;
-            }
+        // Only the grammar replay reads: a direct call `op.add_column(...)`,
+        // or the whole `op.get_context().autocommit_block()` wrapper. A
+        // member read into a value, a computed or chained member, a write
+        // or a deletion may hide or replace an op.
+        fn called(callee: TsNode<'_>) -> Option<TsNode<'_>> {
+            callee.parent().filter(move |up| {
+                up.kind() == "call"
+                    && up
+                        .child_by_field_name("function")
+                        .is_some_and(|function| function.id() == callee.id())
+            })
         }
-        // Only a call through it (`op.add_column(...)`); a member read
-        // into a value, a write or a deletion may hide or replace an op.
-        let called = top.parent().is_some_and(|up| {
-            up.kind() == "call"
-                && up
-                    .child_by_field_name("function")
-                    .is_some_and(|function| function.id() == top.id())
-        });
-        if !called {
+        let member = parent.child_by_field_name("attribute").map(|a| cx.text(&a));
+        let admitted = match called(parent) {
+            Some(call) if member == Some("get_context") => call
+                .parent()
+                .filter(|up| {
+                    up.kind() == "attribute"
+                        && up
+                            .child_by_field_name("object")
+                            .is_some_and(|object| object.id() == call.id())
+                })
+                .and_then(called)
+                .is_some_and(|wrapper| cx.text(&wrapper) == "op.get_context().autocommit_block()"),
+            Some(_) => true,
+            None => false,
+        };
+        if !admitted {
             return Some(node);
         }
     }
