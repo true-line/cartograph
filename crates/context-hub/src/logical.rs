@@ -15,6 +15,9 @@ use std::{
     mem::size_of,
 };
 
+mod query;
+pub use query::{QueryWorkspace, query_workspace};
+
 /// Sum named roles, failing on the first unrepresentable total.
 pub fn sum(roles: &[usize]) -> Option<usize> {
     roles.iter().try_fold(0usize, |a, b| a.checked_add(*b))
