@@ -9,6 +9,9 @@
 //! - **Browser storage globals**: `indexedDB.open(name)`, `caches.open(name)`
 //!   and any `localStorage`/`sessionStorage` use, unless the file binds the
 //!   name itself (fail closed, like a shadowed `chrome`).
+//! - **WebExtension storage**: `chrome.storage.<area>` / `browser.storage.<area>`
+//!   through the unbound global or a `webextension-polyfill` import, one
+//!   resource per area.
 //! - **HTTP APIs**: the global `fetch(url)` and registry HTTP clients (axios,
 //!   ky). Each call whose URL starts with a proven absolute `http(s)` origin
 //!   uses one `http-api` resource per origin. A relative URL names no other
@@ -60,6 +63,12 @@ const STORAGE_GLOBALS: &[(&str, Option<&str>, &str)] = &[
 
 /// Receivers that reach a browser global (`window.indexedDB`).
 const GLOBAL_OBJECTS: &[&str] = &["window", "self", "globalThis"];
+
+/// WebExtension storage areas (`chrome.storage.sync`, `browser.storage.local`).
+const EXTENSION_STORAGE_AREAS: &[&str] = &["local", "sync", "session", "managed"];
+
+/// The module whose default or namespace import is the `browser` API.
+const EXTENSION_POLYFILL: &str = "webextension-polyfill";
 
 /// What a declaration binds its name to.
 #[derive(Debug, Clone, PartialEq)]
@@ -840,6 +849,47 @@ fn storage_global(
     (object.kind() != "identifier" || scopes.global(name, object)).then_some(entry)
 }
 
+/// The WebExtension storage area a member expression names, with the
+/// polyfill module when the API comes through one: `<api>.storage.<area>`,
+/// where `<api>` is the unbound `chrome` or `browser` global or any name a
+/// default or namespace import of [`EXTENSION_POLYFILL`] binds, and the file
+/// never writes `<api>.storage`.
+fn extension_storage(
+    cx: &FileCx,
+    node: TsNode,
+    scopes: &Scopes,
+) -> Option<(&'static str, Option<&'static str>)> {
+    let area = node.child_by_field_name("property")?;
+    let area = EXTENSION_STORAGE_AREAS
+        .iter()
+        .copied()
+        .find(|known| *known == cx.text(&area))?;
+    let storage = unwrap_assertions(node.child_by_field_name("object")?);
+    if storage.kind() != "member_expression"
+        || storage
+            .child_by_field_name("property")
+            .is_none_or(|property| cx.text(&property) != "storage")
+    {
+        return None;
+    }
+    let api = unwrap_assertions(storage.child_by_field_name("object")?);
+    let name = cx.text(&api);
+    if api.kind() != "identifier" || scopes.member_written(name, "storage") {
+        return None;
+    }
+    // Only an unbound name must be the global itself; a polyfill import
+    // proves the API under any local name (#789 review).
+    match scopes.resolve(name, api) {
+        None if matches!(name, "chrome" | "browser") => Some((area, None)),
+        Some(Declared::Module(module, Binding::Default | Binding::Namespace))
+            if module == EXTENSION_POLYFILL =>
+        {
+            Some((area, Some(EXTENSION_POLYFILL)))
+        }
+        _ => None,
+    }
+}
+
 /// Whether a callee is the platform `fetch`: the bare global, or a
 /// global receiver's `fetch`, neither bound nor written by the file.
 fn global_fetch(cx: &FileCx, callee: TsNode, scopes: &Scopes) -> bool {
@@ -1025,6 +1075,23 @@ fn extract_file(
             // global itself is the instance. Only the access whose object
             // is the global matches, so a chain counts once.
             "member_expression" => {
+                if let Some((area, module)) = extension_storage(&cx, node, &scopes) {
+                    let (symbol, byte_start, byte_end) = site(node);
+                    sites.push(ObservedSite {
+                        family: ObservedFamily::BrowserStorage,
+                        provider: "webextension-storage".into(),
+                        module: module.map(str::to_string),
+                        identity: Some(IdentityExpr::Literal(area.to_string())),
+                        identity_source: None,
+                        identity_assumption: None,
+                        registry: None,
+                        symbol,
+                        path: path.to_string(),
+                        byte_start,
+                        byte_end,
+                    });
+                    continue;
+                }
                 let Some(object) = node.child_by_field_name("object") else {
                     continue;
                 };
