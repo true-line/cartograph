@@ -13,6 +13,7 @@ use serde_json::Value;
 
 pub mod admission;
 pub mod capability;
+pub mod task_arguments;
 pub mod tools;
 
 /// Source-free framing failures. Underlying errors and payloads are not exposed.
