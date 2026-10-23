@@ -1192,6 +1192,55 @@ if __name__ == "__main__":
         format!("file:{REPO}@cron.py")
     );
 
+    // One statement binding the name twice runs the last item: the alias
+    // (#804 review). Same for the module `argparse`.
+    let rebound = cron.replacen(
+        "from app.mail import resend\n",
+        "from app.mail import resend, other as resend\n",
+        1,
+    );
+    assert_eq!(
+        entry(&run(&rebound), 1, "cron.yaml").dst,
+        format!("file:{REPO}@cron.py")
+    );
+    let rebound = cron.replacen(
+        "import argparse\n",
+        "import argparse, json as argparse\n",
+        1,
+    );
+    assert_eq!(
+        entry(&run(&rebound), 0, "cron.yaml").dst,
+        format!("file:{REPO}@cron.py")
+    );
+
+    // A repository module beside the script shadows the standard library:
+    // `asyncio` for an awaited call, `argparse` for every one (#804 review).
+    let shadowed = |module: &str| {
+        let mut files = vec![
+            ("cron.py", cron),
+            ("cron.yaml", yacron.as_str()),
+            (module, ""),
+        ];
+        files.extend(modules);
+        extract_with(&files, &symbols)
+    };
+    let out = shadowed("asyncio/__init__.py");
+    let hibp = entry(&out, 2, "cron.yaml");
+    assert_eq!(hibp.dst, format!("file:{REPO}@cron.py"));
+    assert_eq!(
+        hibp.props["dispatch_unresolved"],
+        "standard-library module shadowed by a repository file"
+    );
+    assert_eq!(
+        entry(&out, 0, "cron.yaml").dst,
+        format!("sym:{REPO}@tasks/domains.py#check_domains")
+    );
+    let domains = entry(&shadowed("argparse.py"), 0, "cron.yaml").clone();
+    assert_eq!(
+        domains.props["dispatch_unresolved"],
+        "standard-library module shadowed by a repository file"
+    );
+
     // A module resolves from the script's own directory.
     let files: BTreeSet<String> = ["jobs/run.py", "jobs/helpers/x.py", "helpers/x.py"]
         .iter()

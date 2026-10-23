@@ -273,11 +273,8 @@ fn runs_body(def: TsNode, awaited: bool) -> bool {
 /// from under its own name; `None` for a relative or aliased import.
 fn imported_from(source: &str, import: TsNode, name: &str) -> Option<String> {
     let module = import.child_by_field_name("module_name")?;
-    let mut walk = import.walk();
-    let plain = import
-        .children_by_field_name("name", &mut walk)
-        .any(|imported| imported.kind() == "dotted_name" && &source[imported.byte_range()] == name);
-    (module.kind() == "dotted_name" && plain).then(|| source[module.byte_range()].to_string())
+    (module.kind() == "dotted_name" && sole_plain_item(source, import, name))
+        .then(|| source[module.byte_range()].to_string())
 }
 
 /// Whether `source` binds `name` once in module scope, by an undecorated
@@ -442,10 +439,26 @@ fn imported_module(source: &str, root: TsNode, main: TsNode, module: &str) -> bo
         if import.kind() == "import_statement"
             && import.parent() == Some(root)
             && import.end_byte() <= main.start_byte()
-            && children(import).iter().any(|name| {
-                name.kind() == "dotted_name" && &source[name.byte_range()] == module
-            }))
+            && sole_plain_item(source, import, module))
     })
+}
+
+/// Whether exactly one item of the import statement binds `name`, and it
+/// does so under its own name: in `from m import f, g as f` the alias
+/// rebinds `f` after the plain item (#804 review).
+fn sole_plain_item(source: &str, import: TsNode, name: &str) -> bool {
+    let mut walk = import.walk();
+    let items: Vec<TsNode> = import
+        .children_by_field_name("name", &mut walk)
+        .filter(|item| match item.kind() {
+            "dotted_name" => &source[item.byte_range()] == name,
+            "aliased_import" => item
+                .child_by_field_name("alias")
+                .is_some_and(|alias| &source[alias.byte_range()] == name),
+            _ => false,
+        })
+        .collect();
+    matches!(items[..], [item] if item.kind() == "dotted_name")
 }
 
 /// The module-scope nodes that bind `name`: `def`s and classes (the

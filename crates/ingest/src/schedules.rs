@@ -140,6 +140,17 @@ pub fn extract_dir(
                 .then_some(Err(dispatch::UNPROVEN));
         };
         Some(dispatch::dispatch(&source, &args)?.and_then(|found| {
+            // `import argparse` / `asyncio` must load the standard library,
+            // not a repository module beside the script (#804 review).
+            let stdlib = ["argparse"]
+                .into_iter()
+                .chain(found.awaited.then_some("asyncio"));
+            if stdlib
+                .into_iter()
+                .any(|module| shadows(rel, module, &files))
+            {
+                return Err("standard-library module shadowed by a repository file");
+            }
             // An imported function is the one its module file defines.
             let file = match &found.import {
                 None => rel.to_string(),
@@ -523,6 +534,17 @@ fn module_file(rel: &str, module: &str, files: &BTreeSet<String>) -> Option<Stri
         Ok([file]) => Some(file),
         Err(_) => None,
     }
+}
+
+/// Whether a repository module beside the script at `rel` takes precedence
+/// over the top-level module `module`, as `sys.path[0]` does.
+fn shadows(rel: &str, module: &str, files: &BTreeSet<String>) -> bool {
+    let dir = rel
+        .rsplit_once('/')
+        .map_or(String::new(), |(dir, _)| format!("{dir}/"));
+    [format!("{module}.py"), format!("{module}/__init__.py")]
+        .iter()
+        .any(|candidate| files.contains(&format!("{dir}{candidate}")))
 }
 
 /// The command's words after the script it runs.
