@@ -1,9 +1,11 @@
 //! Scheduled jobs (#770): declared schedule files become `Schedule` flow
 //! triggers with an `ENTRY` into the file each job runs.
 //!
-//! The first reader is the yacron format (`jobs:` as a sequence of
-//! `{name, command, schedule, …}` mappings). A job's entry is resolved only
-//! from what the repository proves:
+//! Two readers share one node shape: the yacron format (`jobs:` as a
+//! sequence of `{name, command, schedule, …}` mappings) and crontab(5)
+//! files (`crontab`, `*.crontab`, `*.cron`, and files directly in a
+//! `cron.d` directory, whose lines carry a user field). A job's entry is
+//! resolved only from what the repository proves:
 //!
 //! - a script path, relative ones joined to the final stage's proven
 //!   `WORKDIR`, that lies under the directory the root `Dockerfile`'s final
@@ -72,6 +74,8 @@ struct Job {
     span: (u64, u64),
     /// Why the job's fields cannot be trusted as written.
     unreadable: Option<&'static str>,
+    /// The schedule file format (`yacron`, `crontab`).
+    format: &'static str,
 }
 
 /// How a job's entry resolved.
@@ -102,13 +106,19 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<ScheduleExtrac
     let mut out = ScheduleExtraction::default();
     let mut emitted_files = BTreeSet::new();
     for file in &walked {
-        if !(file.name.ends_with(".yml") || file.name.ends_with(".yaml")) {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&file.path) else {
+        let jobs = if file.name.ends_with(".yml") || file.name.ends_with(".yaml") {
+            let Ok(text) = std::fs::read_to_string(&file.path) else {
+                continue;
+            };
+            yacron_jobs(&text)
+        } else if let Some(system) = crontab_kind(&file.rel) {
+            let Ok(text) = std::fs::read_to_string(&file.path) else {
+                continue;
+            };
+            crontab_jobs(&text, system)
+        } else {
             continue;
         };
-        let jobs = yacron_jobs(&text);
         if jobs.is_empty() {
             continue;
         }
@@ -180,7 +190,7 @@ fn emit(
                 "schedule": job.schedule,
                 "command": job.command,
                 "file": rel,
-                "format": "yacron",
+                "format": job.format,
             }),
             ConfidenceTier::Confirmed,
             vec![evidence(rel, job.span)],
@@ -654,6 +664,108 @@ fn container_root(text: &str) -> Option<ContainerRoot> {
 
 /// Jobs of a yacron-format file: top-level `jobs` is a block sequence of
 /// mappings, at least one with a `schedule`. Anything else yields none.
+/// Whether `rel` names a crontab(5) file, and whether its lines carry a
+/// user field (`Some(true)` for a file directly in a `cron.d` directory).
+fn crontab_kind(rel: &str) -> Option<bool> {
+    let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+    if dir == "cron.d" || dir.ends_with("/cron.d") {
+        return (!name.starts_with('.')).then_some(true);
+    }
+    (name == "crontab" || name.ends_with(".crontab") || name.ends_with(".cron")).then_some(false)
+}
+
+/// The `@` schedule macros crontab(5) accepts in place of five fields.
+const CRON_MACROS: &[&str] = &[
+    "@reboot",
+    "@yearly",
+    "@annually",
+    "@monthly",
+    "@weekly",
+    "@daily",
+    "@midnight",
+    "@hourly",
+];
+
+/// Month and weekday names a crontab field may use (case-insensitive).
+const CRON_NAMES: [&str; 19] = [
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec", "sun",
+    "mon", "tue", "wed", "thu", "fri", "sat",
+];
+
+/// One crontab time field: `*`, numbers or month/weekday names, joined by
+/// `,` lists, `-` ranges and `/` steps.
+fn cron_field(field: &str) -> bool {
+    field.split([',', '-', '/']).all(|part| {
+        part == "*"
+            || (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            || CRON_NAMES.contains(&part.to_ascii_lowercase().as_str())
+    })
+}
+
+/// Jobs in a crontab(5) file. Blank, comment and environment (`NAME=value`)
+/// lines are not jobs. A job is five time fields or an `@` macro, then
+/// (with `system`) a user, then the command. The file declares jobs only
+/// when some line parses; then any other line is a Gap rather than skipped,
+/// and a command with an unescaped `%` (stdin and newline in cron) is too.
+fn crontab_jobs(text: &str, system: bool) -> Vec<Job> {
+    let mut jobs = Vec::new();
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let body = line.trim_end_matches(['\n', '\r']);
+        let trimmed = body.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let lead = body.len() - trimmed.len();
+        let span = (
+            (start + lead) as u64,
+            (start + body.trim_end().len()) as u64,
+        );
+        let first = trimmed.split_whitespace().next().unwrap_or_default();
+        if let Some((name, _)) = first.split_once('=')
+            && !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let mut job = Job {
+            name: None,
+            schedule: None,
+            command: None,
+            span,
+            unreadable: Some("crontab line is not a schedule entry"),
+            format: "crontab",
+        };
+        let words: Vec<&str> = trimmed.split_whitespace().collect();
+        let fields = if CRON_MACROS.contains(&words[0]) {
+            1
+        } else if words.len() > 5 && words[..5].iter().all(|field| cron_field(field)) {
+            5
+        } else {
+            jobs.push(job);
+            continue;
+        };
+        let skip = fields + usize::from(system);
+        if words.len() > skip {
+            job.schedule = Some(words[..fields].join(" "));
+            let command = words[skip..].join(" ");
+            job.unreadable = command
+                .split("\\%")
+                .any(|part| part.contains('%'))
+                .then_some("crontab command uses % (stdin and newlines)");
+            job.command = Some(command);
+        }
+        jobs.push(job);
+    }
+    if jobs.iter().any(|job| job.schedule.is_some()) {
+        jobs
+    } else {
+        Vec::new()
+    }
+}
+
 fn yacron_jobs(text: &str) -> Vec<Job> {
     let mut parser = Parser::new();
     if parser
@@ -729,6 +841,7 @@ fn job(text: &str, item: TsNode) -> Option<Job> {
         command: field("command").and_then(|value| scalar(text, value)),
         span: (item.start_byte() as u64, item.end_byte() as u64),
         unreadable,
+        format: "yacron",
     })
 }
 

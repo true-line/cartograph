@@ -393,3 +393,81 @@ fn ambiguous_modules_unscheduled_mappings_and_edited_jobs() {
     assert_ne!(base.0, moved.0);
     assert_ne!(base.1, moved.1);
 }
+
+// #779: crontab(5) files are a second reader behind the same node shape.
+// Five fields or an `@` macro, then (in `cron.d`) a user, then the command;
+// comments, blank and env lines are not jobs; any other line, and a command
+// using `%`, is a Gap naming the line. A file with no parsable job, or a
+// non-crontab name, declares nothing. (T-0332)
+#[test]
+fn crontab_files_become_schedules() {
+    let crontab = "# m h dom mon dow command\nSHELL=/bin/sh\n\n*/5 * * * * python /code/cron.py -j stats\n@daily python jobs/cleanup.py\n0 1 * * mon-fri python /code/cron.py -j notify  # weekday\n15 3 * * * date +\\%F > /tmp/x\n30 4 * * * echo hi % there\nthis is not a job line\n";
+    let cron_d = "MAILTO=\"\"\n0 2 * * * www-data python /code/cron.py -j delete\n";
+    let out = extract(&[
+        ("Dockerfile", DOCKERFILE),
+        ("deploy/crontab", crontab),
+        ("etc/cron.d/app", cron_d),
+        ("cron.py", ""),
+        ("jobs/cleanup.py", ""),
+        ("docs/notes.cron", "just prose\n"),
+    ]);
+    assert_eq!(out.files, 2);
+    let schedules: Vec<&Node> = out.nodes.iter().filter(|n| n.label == "Schedule").collect();
+    assert_eq!(schedules.len(), 7);
+    assert!(schedules.iter().all(|s| s.props["format"] == "crontab"));
+    assert_eq!(schedules[0].props["schedule"], "*/5 * * * *");
+    assert_eq!(
+        schedules[0].props["command"],
+        "python /code/cron.py -j stats"
+    );
+    assert_eq!(schedules[1].props["schedule"], "@daily");
+    let stats = entry(&out, 0, "deploy/crontab");
+    assert_eq!(stats.dst, format!("file:{REPO}@cron.py"));
+    assert_eq!(confidence(stats), "Confirmed");
+    let span = &stats.props["prov"]["evidence"][0];
+    let (start, end) = (
+        span["byte_start"].as_u64().unwrap() as usize,
+        span["byte_end"].as_u64().unwrap() as usize,
+    );
+    assert_eq!(
+        &crontab[start..end],
+        "*/5 * * * * python /code/cron.py -j stats"
+    );
+    assert_eq!(
+        entry(&out, 1, "deploy/crontab").dst,
+        format!("file:{REPO}@jobs/cleanup.py")
+    );
+    // The shell drops a trailing comment; the script is still the entry.
+    assert_eq!(
+        entry(&out, 2, "deploy/crontab").dst,
+        format!("file:{REPO}@cron.py")
+    );
+    for (index, reason) in [
+        (3, "shell-composed schedule command"),
+        (4, "crontab command uses % (stdin and newlines)"),
+        (5, "crontab line is not a schedule entry"),
+    ] {
+        assert_eq!(
+            entry(&out, index, "deploy/crontab").props["reason"],
+            reason,
+            "{index}"
+        );
+    }
+    let system = entry(&out, 0, "etc/cron.d/app");
+    assert_eq!(system.dst, format!("file:{REPO}@cron.py"));
+    let node = out
+        .nodes
+        .iter()
+        .find(|n| n.id == format!("sched:{REPO}@etc/cron.d/app#0"))
+        .unwrap();
+    assert_eq!(node.props["command"], "python /code/cron.py -j delete");
+
+    for (path, body) in [
+        ("crontab", "# only comments\nPATH=/usr/bin\n"),
+        ("crontab", "* * * * *\n"),
+        ("scripts/crontab.sh", "*/5 * * * * python cron.py\n"),
+    ] {
+        let out = extract(&[(path, body), ("cron.py", "")]);
+        assert_eq!(out.files, 0, "{path}: {body}");
+    }
+}
