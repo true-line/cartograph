@@ -46,7 +46,10 @@ impl WorkerReservation {
             request_peak,
         ])?;
         Some(Self {
-            required_bytes: session.acquisition_peak_bytes.max(ready_peak),
+            // Lazy acquisition runs after protocol admission, with prior IDs and
+            // the admitted call still alive.
+            required_bytes: sum(&[session.acquisition_peak_bytes, ids, current_argument])?
+                .max(ready_peak),
         })
     }
 }
@@ -62,7 +65,19 @@ mod tests {
         let limits = crate::mcp_reads::worker::tests::limits();
         let bound = WorkerReservation::for_limits(limits).unwrap();
         let session = session::SessionReservation::for_limits(limits).unwrap();
-        assert!(bound.required_bytes >= session.acquisition_peak_bytes);
+        let read = limits.max_request_frame_bytes.get();
+        let (ids, current_id) =
+            session::request_ids_bytes(limits.dispatch.max_request_ids.get(), read).unwrap();
+        let argument = sum(&[
+            json_bytes(read).unwrap(),
+            json_bytes(read).unwrap(),
+            read,
+            current_id,
+        ])
+        .unwrap();
+        assert!(
+            bound.required_bytes >= sum(&[session.acquisition_peak_bytes, ids, argument]).unwrap()
+        );
         assert!(bound.required_bytes > session.retained_session_bytes);
         let mut larger = limits;
         larger.max_request_frame_bytes =

@@ -50,7 +50,7 @@ fn target() -> Value {
         ],
     )
 }
-pub(super) fn descriptor(tool: ReadTool, graph: SnapshotReadLimits) -> Value {
+pub(in crate::mcp_reads) fn descriptor(tool: ReadTool, graph: SnapshotReadLimits) -> Value {
     let (description, schema) = match tool {
         ReadTool::Capabilities => (
             "Describe revision-bound scoped retrieval and its explicit limitations.",
