@@ -134,6 +134,35 @@ pub fn snapshot(limits: SnapshotReadLimits) -> Option<SnapshotReservation> {
         visibility,
     })
 }
+/// Reference-only scope selection owners; excludes the caller-admitted snapshot
+/// and consumed scope, collection capacity slack and native/allocator/RSS memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceWorkspace {
+    /// Returned reference set, conservatively charging the graph byte bound.
+    pub references_bytes: usize,
+    /// Reference set plus visited/frontier/next-frontier identities.
+    pub peak_bytes: usize,
+}
+/// Checked logical ownership for `ContextSnapshot::references_in_scope`.
+/// The scope is separately admitted and moved; an unknown anchor is returned
+/// without cloning. No fact payload or serialized response is constructed.
+pub fn reference_selection_workspace(limits: SnapshotReadLimits) -> Option<ReferenceWorkspace> {
+    let ids = sum(&[
+        size_of::<BTreeSet<String>>(),
+        limits.max_bytes,
+        set::<String>(limits.max_rows)?,
+    ])?;
+    let references_bytes = sum(&[
+        size_of::<BTreeSet<FactReference>>(),
+        limits.max_bytes,
+        set::<FactReference>(limits.max_rows)?,
+    ])?;
+    Some(ReferenceWorkspace {
+        references_bytes,
+        peak_bytes: sum(&[references_bytes, ids.checked_mul(3)?])?,
+    })
+}
+
 /// Module-owned coverage qualification and construction roles.
 #[derive(Debug, Clone, Copy)]
 pub struct CoverageReservation {

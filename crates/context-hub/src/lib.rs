@@ -7,6 +7,7 @@
 
 pub mod coverage;
 pub mod logical;
+mod scope_refs;
 
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance};
@@ -413,16 +414,7 @@ impl ContextSnapshot {
                     .kind
                     .is_none_or(|kind| fact.reference.kind() == kind)
                     && (selection.labels.is_empty() || selection.labels.contains(&fact.label))
-                    && neighborhood
-                        .as_ref()
-                        .is_none_or(|ids| match &fact.reference {
-                            FactReference::Node { id } => ids.contains(id),
-                            FactReference::Edge {
-                                source,
-                                destination,
-                                ..
-                            } => ids.contains(source) && ids.contains(destination),
-                        })
+                    && scope_refs::contains(&fact.reference, neighborhood.as_ref())
             })
             .collect();
         let offset = match request.cursor {
