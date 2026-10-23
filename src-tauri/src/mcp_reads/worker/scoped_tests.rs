@@ -48,15 +48,26 @@ fn scoped_worker_opens_large_graph_while_complete_mode_refuses_without_fallback(
     };
     tauri::async_runtime::block_on(async {
         let complete = limits();
-        let error = Worker::start(
+        let mut complete_worker = Worker::start(
             app.handle().clone(),
             "complete".into(),
             spec::ExportMode::VerifiedOnly,
             complete,
             budget(complete),
         )
-        .await;
-        assert!(matches!(error, Err(ReadError::Limit)));
+        .await
+        .unwrap();
+        assert!(matches!(complete_worker.receive(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}})).await.unwrap(), DispatchAction::Respond(_)));
+        complete_worker
+            .receive(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .await
+            .unwrap();
+        let DispatchAction::Respond(error) = complete_worker.receive(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cartograph_capabilities","arguments":{}}})).await.unwrap() else { panic!("expected bounded acquisition error") };
+        assert_eq!(error["result"]["isError"], true);
+        assert_eq!(
+            error["result"]["structuredContent"]["error"],
+            ReadError::Limit.to_string()
+        );
         let mut scoped = limits();
         scoped.acquisition_mode = AcquisitionMode::Scoped;
         scoped.reserved_bytes = nz(required_reservation(scoped).unwrap());

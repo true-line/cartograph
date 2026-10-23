@@ -6,6 +6,8 @@ use super::{
     dispatch::{DispatchAction, DispatchLimits, Dispatcher, EvidenceWorkLimits},
 };
 use mcp_local::work_budget::WorkBudget;
+use mcp_wire::admission::{Action, Admission, ReadTool};
+use serde_json::{Value, json};
 use std::num::NonZeroUsize;
 use tauri::Manager;
 use tokio::sync::{mpsc, oneshot};
@@ -61,72 +63,42 @@ impl Worker {
         limits: WorkerLimits,
         budget: WorkBudget,
     ) -> Result<Self, ReadError> {
+        if session_id.is_empty()
+            || (limits.acquisition_mode == AcquisitionMode::Scoped
+                && (session_id.len() > 64 || session_id.chars().any(char::is_control)))
+        {
+            return Err(ReadError::InvalidRequest);
+        }
+        if limits.acquisition_mode == AcquisitionMode::Scoped {
+            super::scoped_session::ScopedReadSession::validate_graph_limits(limits.graph)?;
+        }
         #[cfg(unix)]
         validate_reservation(limits)?;
         let permit = budget
             .try_acquire(limits.reserved_bytes, 0)
             .map_err(|_| ReadError::Limit)?;
         let (requests, mut incoming) = mpsc::channel::<Request>(1);
-        let (ready, initialized) = oneshot::channel();
+        let (ready, initialized) = oneshot::channel::<Result<(), ReadError>>();
         tauri::async_runtime::spawn_blocking(move || {
             // Own the permit in the actual worker, not in the async waiter.
             let _permit = permit;
             let state = app.state::<crate::AppState>();
+            let mut session_id = Some(session_id);
             let mut scope = || super::scope::coverage_scope(&app, &state, limits.scope);
             let mut context = super::scoped_session::ScopedReadContext {
                 graph: &state.graph,
                 decisions: &state.decisions,
                 scope: &mut scope,
             };
-            let result = (|| {
-                _permit.check_active().map_err(|_| ReadError::Limit)?;
-                if ready.is_closed() {
-                    return Err(ReadError::Storage);
-                }
-                match limits.acquisition_mode {
-                    AcquisitionMode::Complete => {
-                        let session = ReadSession::acquire(
-                            &state.graph,
-                            &state.decisions,
-                            || super::scope::coverage_scope(&app, &state, limits.scope),
-                            limits.graph,
-                            limits.coverage,
-                            mode,
-                        )?;
-                        Dispatcher::with_evidence(
-                            session,
-                            session_id,
-                            limits.dispatch,
-                            &state,
-                            limits.evidence,
-                        )
-                        .map(|dispatcher| ActiveDispatcher::Complete(Box::new(dispatcher)))
-                    }
-                    AcquisitionMode::Scoped => {
-                        let session = super::scoped_session::ScopedReadSession::acquire(
-                            &mut context,
-                            limits.graph,
-                            limits.coverage,
-                            mode,
-                        )?;
-                        super::scoped_dispatch::ScopedDispatcher::new(
-                            session,
-                            session_id,
-                            limits.dispatch,
-                            &state,
-                            limits.evidence,
-                        )
-                        .map(|dispatcher| ActiveDispatcher::Scoped(Box::new(dispatcher)))
-                    }
-                }
-            })();
-            let mut dispatcher = match result {
-                Ok(dispatcher) => dispatcher,
-                Err(error) => {
-                    let _ = ready.send(Err(error));
-                    return;
-                }
+            let tools = match limits.acquisition_mode {
+                AcquisitionMode::Complete => super::dispatch::IMPLEMENTED
+                    .into_iter()
+                    .chain([ReadTool::Evidence])
+                    .collect::<Vec<_>>(),
+                AcquisitionMode::Scoped => super::scoped_dispatch::TOOLS.to_vec(),
             };
+            let mut admission = Admission::new(tools, limits.dispatch.max_request_ids);
+            let mut dispatcher = None;
             if ready.send(Ok(())).is_err() {
                 return;
             }
@@ -141,10 +113,105 @@ impl Worker {
                     let _ = request.reply.send(Err(ReadError::Limit));
                     break;
                 }
-                let action = match &mut dispatcher {
-                    ActiveDispatcher::Complete(dispatcher) => dispatcher.receive(request.value),
-                    ActiveDispatcher::Scoped(dispatcher) => {
-                        dispatcher.receive(request.value, &mut context)
+                let action = match admission.receive(request.value) {
+                    Action::Ignore => DispatchAction::Ignore,
+                    Action::Close(_) => DispatchAction::Close,
+                    Action::Respond(value) => {
+                        bounded(value, limits.dispatch.max_response_bytes.get())
+                    }
+                    Action::ListTools { id, tools } => {
+                        let tools = tools
+                            .into_iter()
+                            .map(|tool| match limits.acquisition_mode {
+                                AcquisitionMode::Complete => super::dispatch::tool_descriptor(tool),
+                                AcquisitionMode::Scoped => {
+                                    super::scoped_dispatch::schemas::descriptor(tool, limits.graph)
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        bounded(
+                            json!({"jsonrpc":"2.0","id":id,"result":{"tools":tools}}),
+                            limits.dispatch.max_response_bytes.get(),
+                        )
+                    }
+                    Action::Call {
+                        id,
+                        tool,
+                        arguments,
+                    } => {
+                        let result = (|| {
+                            if dispatcher.is_none() {
+                                dispatcher = Some(match limits.acquisition_mode {
+                                    AcquisitionMode::Complete => {
+                                        let session = ReadSession::acquire(
+                                            &state.graph,
+                                            &state.decisions,
+                                            || {
+                                                super::scope::coverage_scope(
+                                                    &app,
+                                                    &state,
+                                                    limits.scope,
+                                                )
+                                            },
+                                            limits.graph,
+                                            limits.coverage,
+                                            mode,
+                                        )?;
+                                        ActiveDispatcher::Complete(Box::new(
+                                            Dispatcher::with_evidence(
+                                                session,
+                                                session_id
+                                                    .as_ref()
+                                                    .expect("unacquired session ID")
+                                                    .clone(),
+                                                limits.dispatch,
+                                                &state,
+                                                limits.evidence,
+                                            )?,
+                                        ))
+                                    }
+                                    AcquisitionMode::Scoped => {
+                                        let session =
+                                            super::scoped_session::ScopedReadSession::acquire(
+                                                &mut context,
+                                                limits.graph,
+                                                limits.coverage,
+                                                mode,
+                                            )?;
+                                        ActiveDispatcher::Scoped(Box::new(
+                                            super::scoped_dispatch::ScopedDispatcher::new(
+                                                session,
+                                                session_id
+                                                    .as_ref()
+                                                    .expect("unacquired session ID")
+                                                    .clone(),
+                                                limits.dispatch,
+                                                &state,
+                                                limits.evidence,
+                                            )?,
+                                        ))
+                                    }
+                                });
+                            }
+                            session_id = None; // Dispatcher now owns the session metadata.
+                            Ok::<_, ReadError>(())
+                        })();
+                        match result {
+                            Err(error) => bounded(
+                                super::dispatch::tool_error(&id, error),
+                                response_cap(tool, &arguments, limits),
+                            ),
+                            Ok(()) => {
+                                match dispatcher.as_mut().expect("successful read acquisition") {
+                                    ActiveDispatcher::Complete(dispatcher) => {
+                                        dispatcher.call_admitted(&id, tool, arguments)
+                                    }
+                                    ActiveDispatcher::Scoped(dispatcher) => {
+                                        dispatcher.call_admitted(&id, tool, arguments, &mut context)
+                                    }
+                                }
+                            }
+                        }
                     }
                 };
                 let close = matches!(action, DispatchAction::Close);
@@ -175,6 +242,41 @@ impl Worker {
             .await
             .map_err(|_| ReadError::Storage)?;
         response.await.map_err(|_| ReadError::Storage)?
+    }
+}
+
+fn response_cap(
+    tool: ReadTool,
+    arguments: &serde_json::Map<String, Value>,
+    limits: WorkerLimits,
+) -> usize {
+    let requested = match (limits.acquisition_mode, tool) {
+        (AcquisitionMode::Complete, ReadTool::Discover) => arguments
+            .get("request")
+            .and_then(|v| v.get("request"))
+            .and_then(|v| v.get("max_bytes")),
+        (AcquisitionMode::Scoped, ReadTool::Discover) => {
+            arguments.get("request").and_then(|v| v.get("max_bytes"))
+        }
+        _ => arguments.get("max_bytes"),
+    };
+    requested
+        .and_then(Value::as_u64)
+        .and_then(|v| usize::try_from(v).ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(limits.dispatch.max_response_bytes.get())
+        .min(limits.dispatch.max_response_bytes.get())
+}
+
+fn bounded(value: Value, cap: usize) -> DispatchAction {
+    if super::dispatch::fits(&value, cap) {
+        return DispatchAction::Respond(value);
+    }
+    let error = super::dispatch::error_response(value.get("id"), ReadError::Limit);
+    if super::dispatch::fits(&error, cap) {
+        DispatchAction::Respond(error)
+    } else {
+        DispatchAction::Close
     }
 }
 
@@ -497,3 +599,6 @@ mod scoped_tests;
 
 #[cfg(all(test, unix))]
 mod scoped_measure_tests;
+
+#[cfg(all(test, unix))]
+mod protocol_tests;

@@ -182,12 +182,7 @@ fn observe(
     Ok((revision, quals, coverage, rejected_before))
 }
 impl ScopedReadSession {
-    pub(crate) fn acquire(
-        ctx: &mut ScopedReadContext<'_>,
-        graph_limits: SnapshotReadLimits,
-        coverage_limits: CoverageReadLimits,
-        mode: spec::ExportMode,
-    ) -> Result<Self, ReadError> {
+    pub(super) fn validate_graph_limits(graph_limits: SnapshotReadLimits) -> Result<(), ReadError> {
         if graph_limits.max_rows == 0
             || graph_limits.max_rows > SnapshotReadLimits::MAX_ROWS
             || graph_limits.max_bytes == 0
@@ -199,6 +194,16 @@ impl ScopedReadSession {
         {
             return Err(ReadError::InvalidRequest);
         }
+        Ok(())
+    }
+
+    pub(crate) fn acquire(
+        ctx: &mut ScopedReadContext<'_>,
+        graph_limits: SnapshotReadLimits,
+        coverage_limits: CoverageReadLimits,
+        mode: spec::ExportMode,
+    ) -> Result<Self, ReadError> {
+        Self::validate_graph_limits(graph_limits)?;
         let (revision, qualifications, coverage, rejected) = observe(ctx, coverage_limits, mode)?;
         let id = hash(&("mcp-scoped-session-v1", &revision, &qualifications))?;
         let basis_id = format!(

@@ -145,15 +145,33 @@ fn scoped_mcp_synthetic_measurement() {
         complete.acquisition_mode = AcquisitionMode::Complete;
         complete.reserved_bytes = nz(required_reservation(complete).unwrap());
         let start = Instant::now();
-        let refused = Worker::start(
+        let mut complete_worker = Worker::start(
             app.handle().clone(),
             "complete-baseline".into(),
             spec::ExportMode::VerifiedOnly,
             complete,
             budget_for(complete),
         )
-        .await;
-        assert!(matches!(refused, Err(ReadError::Limit)));
+        .await
+        .unwrap();
+        assert!(matches!(complete_worker.receive(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cg731-measure","version":"1"}}})).await.unwrap(), DispatchAction::Respond(_)));
+        complete_worker
+            .receive(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .await
+            .unwrap();
+        let DispatchAction::Respond(refused) = complete_worker
+            .receive(call(2, "cartograph_capabilities", json!({})))
+            .await
+            .unwrap()
+        else {
+            panic!("expected bounded acquisition refusal")
+        };
+        assert_eq!(refused["result"]["isError"], true);
+        assert_eq!(
+            refused["result"]["structuredContent"]["error"],
+            ReadError::Limit.to_string()
+        );
+        drop(complete_worker);
         let complete_ns = start.elapsed().as_nanos().to_string();
         for repeat in 0..REPEATS {
             phase("session_start");
@@ -207,7 +225,7 @@ fn scoped_mcp_synthetic_measurement() {
             drop(auth);
             let mut samples = Vec::new();
             let ready_start = Instant::now();
-            let init=rpc(&mut client,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cg731-measure","version":"1"}}}),"initialize_including_worker_acquisition",&mut samples).await;
+            let init=rpc(&mut client,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cg731-measure","version":"1"}}}),"initialize_without_graph_acquisition",&mut samples).await;
             assert!(init.get("result").is_some());
             let ready_ns = ready_start.elapsed().as_nanos().to_string();
             let notification = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
@@ -381,7 +399,7 @@ fn scoped_mcp_synthetic_measurement() {
             rounds.push(row);
         }
         phase("sessions_done");
-        let result = json!({"schema_version":1,"fixture":{"nodes":NODES,"edges":NODES-1,"combined_rows":NODES*2-1,"seed":"ascending n000000..n060000 chain CALLS","graph_setup_ns":setup_ns},"transport":"real temporary UnixListener/Connection::connect, peer UID check, capability auth, serve_connection, Worker, ScopedDispatcher/ScopedReadSession","limits":{"frame_bytes_before_lf":FRAME,"scan_rows":WINDOW,"max_candidates":3,"request_ids":64,"session_seconds":300,"frame_deadline_seconds":60,"workers":1,"worker_reservation_model":SCOPED_WORKER_MODEL,"logical_reserved_bytes":policy.reserved_bytes.get(),"cumulative_validation_allowance_bytes":1_048_576,"validation_charge_per_dispatch":policy.evidence.max_file_validation_bytes.get()},"complete_worker_refusal":{"outcome":"ReadError::Limit","wall_ns":complete_ns,"path":"direct Worker::start, no implicit scoped fallback"},"rounds":rounds,"scope":{"providers":false,"real_target":false,"retained_positive_evidence":false,"partitions":false,"artifact_content":false,"listener_activation_ui":false,"multi_connection_contention":false,"logical_reservation_is_rss":false,"row_raw_or_canonical_bytes_exposed_by_mcp":false},"notes":["Discovery scans nodes only; edges are selected exactly with endpoint closure.","Memory measurement belongs to runner: process baseline/peak include test harness and allocator; not a worker ceiling.","Framed bytes are production mcp_wire reserialization including LF; no raw socket syscall instrumentation.","Three repetitions share one process and graph; not cold-cache measurements."]});
+        let result = json!({"schema_version":1,"fixture":{"nodes":NODES,"edges":NODES-1,"combined_rows":NODES*2-1,"seed":"ascending n000000..n060000 chain CALLS","graph_setup_ns":setup_ns},"transport":"real temporary UnixListener/Connection::connect, peer UID check, capability auth, serve_connection, Worker, ScopedDispatcher/ScopedReadSession","limits":{"frame_bytes_before_lf":FRAME,"scan_rows":WINDOW,"max_candidates":3,"request_ids":64,"session_seconds":300,"frame_deadline_seconds":60,"workers":1,"worker_reservation_model":SCOPED_WORKER_MODEL,"logical_reserved_bytes":policy.reserved_bytes.get(),"cumulative_validation_allowance_bytes":1_048_576,"validation_charge_per_dispatch":policy.evidence.max_file_validation_bytes.get()},"complete_worker_refusal":{"outcome":"ReadError::Limit","wall_ns":complete_ns,"path":"direct Worker::start and initialize, then first read; no implicit scoped fallback"},"rounds":rounds,"scope":{"providers":false,"real_target":false,"retained_positive_evidence":false,"partitions":false,"artifact_content":false,"listener_activation_ui":false,"multi_connection_contention":false,"logical_reservation_is_rss":false,"row_raw_or_canonical_bytes_exposed_by_mcp":false},"notes":["Discovery scans nodes only; edges are selected exactly with endpoint closure.","Memory measurement belongs to runner: process baseline/peak include test harness and allocator; not a worker ceiling.","Framed bytes are production mcp_wire reserialization including LF; no raw socket syscall instrumentation.","Three repetitions share one process and graph; not cold-cache measurements."]});
         println!("CARTOGRAPH_MCP_MEASURE_RESULT {result}");
     });
 }

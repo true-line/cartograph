@@ -19,7 +19,7 @@ use std::{
     num::NonZeroUsize,
 };
 
-const IMPLEMENTED: [ReadTool; 4] = [
+pub(super) const IMPLEMENTED: [ReadTool; 4] = [
     ReadTool::Capabilities,
     ReadTool::Discover,
     ReadTool::Artifacts,
@@ -46,12 +46,14 @@ pub(crate) enum DispatchAction {
 }
 
 pub(crate) struct Dispatcher<'state> {
+    #[cfg(test)]
     admission: Admission,
     session: ReadSession,
     session_id: String,
     basis_id: String,
     limits: DispatchLimits,
     evidence: Option<evidence::Backend<'state>>,
+    #[cfg(test)]
     closed: bool,
 }
 
@@ -66,12 +68,14 @@ impl<'state> Dispatcher<'state> {
         }
         let basis_id = session.basis_id()?;
         Ok(Self {
+            #[cfg(test)]
             admission: Admission::new(IMPLEMENTED, limits.max_request_ids),
             session,
             session_id,
             basis_id,
             limits,
             evidence: None,
+            #[cfg(test)]
             closed: false,
         })
     }
@@ -89,7 +93,10 @@ impl<'state> Dispatcher<'state> {
             state,
             limits: evidence_limits,
         });
-        dispatch.admission = Admission::new(dispatch.implemented(), limits.max_request_ids);
+        #[cfg(test)]
+        {
+            dispatch.admission = Admission::new(dispatch.implemented(), limits.max_request_ids);
+        }
         Ok(dispatch)
     }
 
@@ -101,6 +108,7 @@ impl<'state> Dispatcher<'state> {
         tools
     }
 
+    #[cfg(test)]
     pub(crate) fn receive(&mut self, message: Value) -> DispatchAction {
         if self.closed {
             return DispatchAction::Close;
@@ -110,17 +118,42 @@ impl<'state> Dispatcher<'state> {
             Action::Close(_)=>DispatchAction::Close,
             Action::Respond(response)=>self.bounded(response,self.limits.max_response_bytes.get()),
             Action::ListTools {id,tools}=>self.bounded(json!({"jsonrpc":"2.0","id":id,"result":{"tools":tools.into_iter().map(tool_descriptor).collect::<Vec<_>>()}}),self.limits.max_response_bytes.get()),
-            Action::Call {id,tool,arguments}=> {
-                let requested=match tool {ReadTool::Discover=>arguments.get("request").and_then(|qualified|qualified.get("request")).and_then(|request|request.get("max_bytes")),ReadTool::ReadArtifact|ReadTool::Evidence=>arguments.get("max_bytes"),_=>None};
-                let cap=requested.and_then(Value::as_u64).and_then(|value|usize::try_from(value).ok()).filter(|value|*value>0).unwrap_or(self.limits.max_response_bytes.get()).min(self.limits.max_response_bytes.get());
-                let response=self.call(&id,tool,arguments).unwrap_or_else(|error|if error==ReadError::InvalidRequest {error_response(Some(&id),error)} else {tool_error(&id,error)});
-                self.bounded(response,cap)
-            }
+            Action::Call {id,tool,arguments}=>self.call_admitted(&id,tool,arguments),
         };
         if action == DispatchAction::Close {
             self.closed = true;
         }
         action
+    }
+
+    pub(super) fn call_admitted(
+        &self,
+        id: &Value,
+        tool: ReadTool,
+        arguments: Map<String, Value>,
+    ) -> DispatchAction {
+        let requested = match tool {
+            ReadTool::Discover => arguments
+                .get("request")
+                .and_then(|qualified| qualified.get("request"))
+                .and_then(|request| request.get("max_bytes")),
+            ReadTool::ReadArtifact | ReadTool::Evidence => arguments.get("max_bytes"),
+            _ => None,
+        };
+        let cap = requested
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(self.limits.max_response_bytes.get())
+            .min(self.limits.max_response_bytes.get());
+        let response = self.call(id, tool, arguments).unwrap_or_else(|error| {
+            if error == ReadError::InvalidRequest {
+                error_response(Some(id), error)
+            } else {
+                tool_error(id, error)
+            }
+        });
+        self.bounded(response, cap)
     }
 
     fn bounded(&self, response: Value, cap: usize) -> DispatchAction {
@@ -449,7 +482,7 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
 fn session_properties() -> Value {
     json!({"session_id":{"type":"string"},"basis_id":{"type":"string"}})
 }
-fn tool_descriptor(tool: ReadTool) -> Value {
+pub(super) fn tool_descriptor(tool: ReadTool) -> Value {
     let (description, input_schema) = match tool {
         ReadTool::ReadFact => (
             "Unavailable in complete-session mode.",

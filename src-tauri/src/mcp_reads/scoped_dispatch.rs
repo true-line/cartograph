@@ -13,7 +13,7 @@ use mcp_wire::admission::{Action, Admission, ReadTool};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-const TOOLS: [ReadTool; 6] = [
+pub(super) const TOOLS: [ReadTool; 6] = [
     ReadTool::Capabilities,
     ReadTool::Discover,
     ReadTool::ReadFact,
@@ -22,12 +22,14 @@ const TOOLS: [ReadTool; 6] = [
     ReadTool::ReadArtifact,
 ];
 pub(crate) struct ScopedDispatcher<'a> {
+    #[cfg(test)]
     admission: Admission,
     session: ScopedReadSession,
     session_id: String,
     limits: DispatchLimits,
     state: &'a AppState,
     evidence_limits: EvidenceWorkLimits,
+    #[cfg(test)]
     closed: bool,
 }
 impl<'a> ScopedDispatcher<'a> {
@@ -47,15 +49,18 @@ impl<'a> ScopedDispatcher<'a> {
             return Err(ReadError::InvalidRequest);
         }
         Ok(Self {
+            #[cfg(test)]
             admission: Admission::new(TOOLS, limits.max_request_ids),
             session,
             session_id,
             limits,
             state,
             evidence_limits,
+            #[cfg(test)]
             closed: false,
         })
     }
+    #[cfg(test)]
     pub(crate) fn receive(
         &mut self,
         message: Value,
@@ -68,18 +73,43 @@ impl<'a> ScopedDispatcher<'a> {
             Action::Ignore=>DispatchAction::Ignore,Action::Close(_)=>DispatchAction::Close,
             Action::Respond(value)=>self.bounded(value,self.limits.max_response_bytes.get()),
             Action::ListTools{id,tools}=>self.bounded(json!({"jsonrpc":"2.0","id":id,"result":{"tools":tools.into_iter().map(|t|schemas::descriptor(t,self.session.graph_limits())).collect::<Vec<_>>()}}),self.limits.max_response_bytes.get()),
-            Action::Call{id,tool,arguments}=>{
-                let requested=if tool==ReadTool::Discover {arguments.get("request").and_then(|r|r.get("max_bytes"))} else {arguments.get("max_bytes")};
-                let cap=requested.and_then(Value::as_u64).and_then(|v|usize::try_from(v).ok()).filter(|v|*v>0).unwrap_or(self.limits.max_response_bytes.get()).min(self.limits.max_response_bytes.get());
-                let result=self.call(&id,tool,arguments,ctx,cap).unwrap_or_else(|e|if e==ReadError::InvalidRequest {error_response(Some(&id),e)}else{tool_error(&id,e)});
-                self.bounded(result,cap)
-            }
+            Action::Call {id,tool,arguments}=>self.call_admitted(&id,tool,arguments,ctx),
         };
         if action == DispatchAction::Close {
             self.closed = true;
         }
         action
     }
+    pub(super) fn call_admitted(
+        &self,
+        id: &Value,
+        tool: ReadTool,
+        arguments: Map<String, Value>,
+        ctx: &mut ScopedReadContext<'_>,
+    ) -> DispatchAction {
+        let requested = if tool == ReadTool::Discover {
+            arguments.get("request").and_then(|r| r.get("max_bytes"))
+        } else {
+            arguments.get("max_bytes")
+        };
+        let cap = requested
+            .and_then(Value::as_u64)
+            .and_then(|v| usize::try_from(v).ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(self.limits.max_response_bytes.get())
+            .min(self.limits.max_response_bytes.get());
+        let result = self
+            .call(id, tool, arguments, ctx, cap)
+            .unwrap_or_else(|e| {
+                if e == ReadError::InvalidRequest {
+                    error_response(Some(id), e)
+                } else {
+                    tool_error(id, e)
+                }
+            });
+        self.bounded(result, cap)
+    }
+
     fn bounded(&self, response: Value, cap: usize) -> DispatchAction {
         if fits(&response, cap) {
             return DispatchAction::Respond(response);
@@ -393,7 +423,7 @@ enum Evidence {
     },
 }
 mod logical;
-mod schemas;
+pub(super) mod schemas;
 pub(crate) use logical::logical_protocol_workspace_bytes;
 #[cfg(test)]
 mod tests;
