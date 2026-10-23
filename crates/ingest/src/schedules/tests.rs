@@ -833,6 +833,13 @@ if __name__ == "__main__":
         ("argparse.ArgumentParser()", "make_parser()"),
         ("import argparse\n", "from helpers import argparse\n"),
         ("import argparse\n", "if False:\n    import argparse\n"),
+        // An exception alias binds the name and then deletes it; an import
+        // binds its top-level package (#796 review).
+        (
+            "\nif __name__",
+            "\ntry:\n    pass\nexcept Exception as stats:\n    pass\n\nif __name__",
+        ),
+        ("import argparse\n", "import argparse\nimport stats.tools\n"),
         (
             "    parser = argparse.ArgumentParser()\n",
             "    if args_ready:\n        parser = argparse.ArgumentParser()\n",
@@ -899,8 +906,13 @@ if __name__ == "__main__":
         format!("file:{REPO}@cron.py")
     );
 
-    // Value-preserving keywords and argparse's default dest still prove it.
+    // Value-preserving keywords and argparse's default dest still prove it,
+    // and so does an import that only reads a module named like the function.
     for (from, to) in [
+        (
+            "import argparse\n",
+            "import argparse\nfrom app.stats import helper\nimport stats_lib as other\n",
+        ),
         (
             "help=\"job\", type=str)",
             "choices=[\"stats\", \"notify\"], action=\"store\")",

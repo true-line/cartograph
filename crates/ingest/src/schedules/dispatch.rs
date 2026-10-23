@@ -356,9 +356,10 @@ fn imported_module(source: &str, root: TsNode, main: TsNode, module: &str) -> bo
 }
 
 /// The module-scope nodes that bind `name`: `def`s and classes (the
-/// definition node), imports and deletions mentioning it, and assignment,
-/// loop, walrus and `as` targets (the assignment for a plain one). `None`
-/// when a binding cannot be placed: a wildcard import, or `global` naming
+/// definition node), imports binding it, deletions mentioning it, and
+/// assignment, loop, walrus and `as` targets (`with`, `except`, `case`) (the
+/// assignment for a plain one). `None` when a binding cannot be placed: a
+/// wildcard import, or `global` naming
 /// it in any function.
 fn binders<'t>(source: &str, root: TsNode<'t>, name: &str) -> Option<Vec<TsNode<'t>>> {
     let mut found = Vec::new();
@@ -379,10 +380,32 @@ fn binders<'t>(source: &str, root: TsNode<'t>, name: &str) -> Option<Vec<TsNode<
             "global_statement" if mentions(node) => return None,
             "wildcard_import" => return None,
             "function_definition" | "class_definition" => named("name"),
-            "import_statement"
-            | "import_from_statement"
-            | "delete_statement"
-            | "as_pattern_target" => mentions(node),
+            // An import binds only the names it names locally: the alias,
+            // else the imported name (`import a.b` binds `a`), never the
+            // module path it reads from (#796 review).
+            "import_statement" | "import_from_statement" => {
+                let mut walk = node.walk();
+                let from = node.kind() == "import_from_statement";
+                node.children_by_field_name("name", &mut walk)
+                    .any(|imported| {
+                        let bound = match imported.kind() {
+                            "aliased_import" => imported.child_by_field_name("alias"),
+                            _ => Some(imported),
+                        };
+                        bound.is_some_and(|bound| {
+                            let text = &source[bound.byte_range()];
+                            let text = if from || imported.kind() == "aliased_import" {
+                                text
+                            } else {
+                                text.split('.').next().unwrap_or(text)
+                            };
+                            text == name
+                        })
+                    })
+            }
+            // `with … as`, `except E as name` (which binds, then deletes
+            // the name) and `case … as` targets are `as_pattern_target`s.
+            "delete_statement" | "as_pattern_target" => mentions(node),
             "assignment" | "augmented_assignment" | "for_statement" => {
                 node.child_by_field_name("left").is_some_and(mentions)
             }
