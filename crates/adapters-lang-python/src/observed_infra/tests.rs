@@ -747,3 +747,126 @@ fn module_constants_fail_closed() {
             .is_none()
     );
 }
+
+const SERVICES: &str = r#"
+import limits.storage
+import smtplib
+
+def initialize_redis_services(app, redis_url: str):
+    if redis_url.startswith("redis://"):
+        return limits.storage.RedisStorage(redis_url)
+
+def mailer(host):
+    return smtplib.SMTP(host)
+"#;
+const SERVER: &str = r#"
+from app import config
+from app.services import initialize_redis_services, mailer
+
+def create_app(app):
+    initialize_redis_services(app, config.MEM_STORE_URI)
+    mailer(host="mail.internal")
+"#;
+
+fn with_services(overrides: &[(&str, &str)]) -> (Vec<Node>, Vec<Edge>) {
+    let mut files: BTreeMap<&str, &str> = [
+        ("app/__init__.py", ""),
+        (
+            "app/config.py",
+            "import os\nMEM_STORE_URI = os.environ.get(\"MEM_STORE_URI\", None)\n",
+        ),
+        ("app/services.py", SERVICES),
+        ("server.py", SERVER),
+    ]
+    .into_iter()
+    .collect();
+    files.extend(overrides.iter().copied());
+    extract(&files.into_iter().collect::<Vec<_>>())
+}
+
+// AC-0337: a parameter of a module-level function is followed to the
+// argument of its one caller, positional or keyword, and on into a
+// `config.X` constant; the result rests on static callers. (T-0337)
+#[test]
+fn parameters_are_followed_to_their_one_caller() {
+    let (nodes, edges) = with_services(&[]);
+    assert_eq!(
+        uses(&edges, "services.py"),
+        vec![res("redis:env:MEM_STORE_URI"), res("smtp:mail.internal")]
+    );
+    let redis = nodes
+        .iter()
+        .find(|n| n.id == res("redis:env:MEM_STORE_URI"))
+        .unwrap();
+    assert_eq!(redis.props["identity_assumes_static_callers"], true);
+    assert_eq!(redis.props["prov"]["confidence_tier"], "InferredStrong");
+    assert!(
+        redis
+            .props
+            .get("identity_assumes_method_receivers")
+            .is_none()
+    );
+    let edge = edges
+        .iter()
+        .find(|e| e.dst == res("redis:env:MEM_STORE_URI"))
+        .unwrap();
+    assert_eq!(edge.props["identity_from"], "app/config.py");
+    let smtp = edges
+        .iter()
+        .find(|e| e.dst == res("smtp:mail.internal"))
+        .unwrap();
+    assert_eq!(smtp.props["identity_from"], "server.py");
+
+    // Each way another caller may hide, or the parameter may not be what
+    // the caller passed, leaves the Redis site a Gap.
+    let gap = |overrides: &[(&str, &str)]| {
+        let (_, edges) = with_services(overrides);
+        let found = uses(&edges, "services.py");
+        found.iter().any(|dst| dst.starts_with("gap:"))
+            && !found.contains(&res("redis:env:MEM_STORE_URI").as_str())
+    };
+    let server = |extra: &str| format!("{SERVER}{extra}");
+    let services = |from: &str, to: &str| SERVICES.replacen(from, to, 1);
+    for (case, overrides) in [
+        ("second caller", vec![("server.py", server("\ninitialize_redis_services(None, \"redis://x\")\n"))]),
+        ("read as a value", vec![("server.py", server("\nhooks = [initialize_redis_services]\n"))]),
+        ("attribute of it", vec![("server.py", server("\nname = initialize_redis_services.__name__\n"))]),
+        ("re-exported", vec![("app/__init__.py", "from app.services import initialize_redis_services\n".to_string())]),
+        ("relative import", vec![("app/other.py", "from .services import initialize_redis_services\n".to_string())]),
+        ("local import", vec![("app/other.py", "def go():\n    from app.services import initialize_redis_services\n    initialize_redis_services(None, None)\n".to_string())]),
+        ("wildcard import", vec![("app/other.py", "from app.services import *\n".to_string())]),
+        ("splat call", vec![("server.py", SERVER.replacen("(app, config.MEM_STORE_URI)", "(*args)", 1))]),
+        ("named in its module", vec![("app/services.py", format!("{SERVICES}\nalias = initialize_redis_services\n"))]),
+        ("rebound in body", vec![("app/services.py", services("    if redis_url", "    redis_url = redis_url.strip()\n    if redis_url"))]),
+        ("default value", vec![("app/services.py", services("redis_url: str)", "redis_url: str = \"\")"))]),
+        ("nested function", vec![("app/services.py", services("def initialize_redis_services(app, redis_url: str):\n    if redis_url.startswith(\"redis://\"):\n        return", "def initialize_redis_services(app, redis_url: str):\n    def inner():\n        return"))]),
+        ("written via a holder", vec![("app/other.py", "def patch(holder):\n    holder.initialize_redis_services = print\n".to_string())]),
+        ("computed write in a chain", vec![("app/other.py", "def patch(holder):\n    setattr(holder.services, name, print)\n".to_string())]),
+        ("namespace write", vec![("app/services.py", format!("{SERVICES}\nglobals()[name] = print\n"))]),
+        ("trailing splat", vec![("server.py", SERVER.replacen("(app, config.MEM_STORE_URI)", "(app, config.MEM_STORE_URI, *rest)", 1))]),
+        ("positional and keyword", vec![("server.py", SERVER.replacen("(app, config.MEM_STORE_URI)", "(app, config.MEM_STORE_URI, redis_url=\"redis://x\")", 1))]),
+        ("member write", vec![("app/other.py", "import app.services\napp.services.initialize_redis_services = print\n".to_string())]),
+    ] {
+        let overrides: Vec<(&str, &str)> = overrides.iter().map(|(p, b)| (*p, b.as_str())).collect();
+        assert!(gap(&overrides), "{case}");
+    }
+    // A receiver write could rebind the function or the constant: both
+    // assumptions are marked.
+    let (nodes, _) = with_services(&[(
+        "app/model.py",
+        "class M:\n    def __init__(self, k, v):\n        setattr(self, k, v)\n",
+    )]);
+    let redis = nodes
+        .iter()
+        .find(|n| n.id == res("redis:env:MEM_STORE_URI"))
+        .unwrap();
+    assert_eq!(redis.props["identity_assumes_static_callers"], true);
+    assert_eq!(redis.props["identity_assumes_method_receivers"], true);
+    // A literal argument needs no constant follow, so the member-write
+    // refusal is the parameter step's own.
+    let (_, edges) = with_services(&[(
+        "app/other.py",
+        "def patch(holder):\n    setattr(holder.services, name, print)\n",
+    )]);
+    assert!(!uses(&edges, "services.py").contains(&res("smtp:mail.internal").as_str()));
+}

@@ -7,7 +7,7 @@ fn site(provider: &str, identity: Option<IdentityExpr>, start: u64) -> ObservedS
         module: Some(provider.into()),
         identity,
         identity_source: None,
-        identity_assumption: None,
+        identity_assumptions: Vec::new(),
         registry: None,
         symbol: None,
         path: "src/api.ts".into(),
@@ -64,7 +64,7 @@ fn merged_resources_keep_a_proven_module() {
             family: ObservedFamily::BrowserStorage,
             module: module.map(str::to_string),
             identity: Some(IdentityExpr::Literal("sync".into())),
-            identity_assumption: assumption,
+            identity_assumptions: assumption.into_iter().collect(),
             ..site("webextension-storage", None, start)
         };
     let source = ObservedSource {

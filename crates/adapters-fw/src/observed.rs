@@ -31,9 +31,9 @@ pub struct ObservedSite {
     /// Where a followed identity is defined, when outside the site (path
     /// and span): cited beside the site on the resource and `USES` edge.
     pub identity_source: Option<(String, u64, u64)>,
-    /// An assumption the identity rests on (a marker name): the resource
-    /// and `USES` edge are then `InferredStrong`, marked, not `Confirmed`.
-    pub identity_assumption: Option<&'static str>,
+    /// Assumptions the identity rests on (marker names): with any, the
+    /// resource and `USES` edge are `InferredStrong`, marked, not `Confirmed`.
+    pub identity_assumptions: Vec<&'static str>,
     /// Registry file that declared the client, when the site is table-driven.
     pub registry: Option<RegistryIdentity>,
     /// Enclosing symbol id; the file when the site is at module level.
@@ -208,9 +208,10 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
         };
         match identity {
             Ok(instance) => {
-                let confidence = match site.identity_assumption {
-                    Some(_) => ConfidenceTier::InferredStrong,
-                    None => ConfidenceTier::Confirmed,
+                let confidence = if site.identity_assumptions.is_empty() {
+                    ConfidenceTier::Confirmed
+                } else {
+                    ConfidenceTier::InferredStrong
                 };
                 let logical_id = match &instance {
                     Some((name, _)) => format!("observed:{}:{name}", provider),
@@ -229,8 +230,8 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                             confidence, &format!("Resource {resource_id}"),
                         ),
                     });
-                    if let Some(marker) = site.identity_assumption {
-                        props[marker] = serde_json::json!(true);
+                    for marker in &site.identity_assumptions {
+                        props[*marker] = serde_json::json!(true);
                     }
                     if let Some(module) = site.module.as_ref().filter(|_| !http) {
                         props["module"] = serde_json::json!(module);
@@ -278,8 +279,8 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                 if let Some((path, _, _)) = &site.identity_source {
                     edge_props.insert("identity_from".into(), serde_json::json!(path));
                 }
-                if let Some(marker) = site.identity_assumption {
-                    edge_props.insert(marker.into(), serde_json::json!(true));
+                for marker in &site.identity_assumptions {
+                    edge_props.insert((*marker).into(), serde_json::json!(true));
                 }
                 edge_props.insert(
                     "prov".into(),
