@@ -2,7 +2,8 @@
 //! nodes from import-proven declarative bases (`sqlalchemy.orm` /
 //! `sqlalchemy.ext.declarative` `declarative_base()`, `DeclarativeBase`,
 //! `registry().generate_base()`, Flask-SQLAlchemy `db.Model`, and subclasses
-//! across files), `REFERENCES` edges from literal `ForeignKey("table.col")`
+//! across files), `REFERENCES` edges from literal `ForeignKey("table.col")`,
+//! attribute `ForeignKey(Model.col)` naming a recovered model's declared column,
 //! and `relationship("Target")` / `relationship(Target)`, and explicit `Gap`
 //! nodes whenever a table name or relation target cannot be proven (R-INT-4).
 
@@ -120,6 +121,8 @@ struct ColumnDecl {
     col_type: Option<String>,
     nullable: Option<bool>,
     primary_key: Option<bool>,
+    /// A literal positional or `name=` database name differs from the attribute.
+    renamed: bool,
     proof: CallProof,
     evidence: EvidenceRef,
 }
@@ -128,6 +131,9 @@ struct ColumnDecl {
 #[derive(Debug, Clone)]
 enum FkTarget {
     Literal(String),
+    /// `Model.column` or `module.Model.column`: the class expression, the
+    /// attribute, and the source text.
+    Attribute(String, String, String),
     Unprovable(String),
 }
 
@@ -532,7 +538,20 @@ fn parse_foreign_key(
     let target = match first_or_keyword_arg(cx, fk_call, "column") {
         Some(arg) => match literal_string(cx, arg) {
             Some(lit) => FkTarget::Literal(lit),
-            None => FkTarget::Unprovable(bound_target_text(cx.text(&arg))),
+            None => match (
+                arg.kind(),
+                arg.child_by_field_name("object"),
+                arg.child_by_field_name("attribute"),
+            ) {
+                ("attribute", Some(object), Some(attr)) if is_dotted_identifier(arg) => {
+                    FkTarget::Attribute(
+                        cx.text(&object).to_string(),
+                        cx.text(&attr).to_string(),
+                        cx.text(&arg).to_string(),
+                    )
+                }
+                _ => FkTarget::Unprovable(bound_target_text(cx.text(&arg))),
+            },
         },
         None => FkTarget::Unprovable(bound_target_text(cx.text(&fk_call))),
     };
@@ -1018,6 +1037,7 @@ pub(crate) fn extract(
                         let mut col_type = None;
                         let mut nullable = None;
                         let mut primary_key = None;
+                        let mut renamed = false;
                         for arg in call_arguments(right) {
                             if arg.kind() == "keyword_argument" {
                                 let (Some(k), Some(v)) = (
@@ -1029,6 +1049,7 @@ pub(crate) fn extract(
                                 match cx.text(&k) {
                                     "nullable" => nullable = literal_bool(cx, v),
                                     "primary_key" => primary_key = literal_bool(cx, v),
+                                    "name" => renamed = true,
                                     "type_" if col_type.is_none() => {
                                         col_type = sqlalchemy_type(cx, v);
                                     }
@@ -1048,6 +1069,8 @@ pub(crate) fn extract(
                                     call_proof.clone(),
                                     fk_proof,
                                 ));
+                            } else if literal_string(cx, arg).is_some() {
+                                renamed = true;
                             } else if col_type.is_none() {
                                 col_type = sqlalchemy_type(cx, arg);
                             }
@@ -1057,6 +1080,7 @@ pub(crate) fn extract(
                             col_type,
                             nullable,
                             primary_key,
+                            renamed,
                             proof: call_proof,
                             evidence: cx.evidence(&assignment),
                         });
@@ -1683,6 +1707,9 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
         }
     }
 
+    // Entity id -> (table, declared column attributes -> renamed), for
+    // `ForeignKey(Model.column)` targets.
+    let mut entity_columns: HashMap<String, (String, BTreeMap<String, bool>)> = HashMap::new();
     for &class in &candidate_classes {
         let TableName::Literal(store) = &class.tablename else {
             continue;
@@ -1768,6 +1795,16 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
             }
         }
 
+        entity_columns.insert(
+            entity_id.clone(),
+            (
+                store.clone(),
+                resolved_columns
+                    .iter()
+                    .map(|c| (c.name.clone(), c.renamed))
+                    .collect(),
+            ),
+        );
         let mut evidence = vec![class.evidence.clone()];
         let mut columns_json = Vec::with_capacity(resolved_columns.len());
         for col in &resolved_columns {
@@ -1875,6 +1912,56 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
                                 fk.evidence.clone(),
                             );
                         }
+                    }
+                }
+                FkTarget::Attribute(class_expr, column, raw) => {
+                    let dst = resolve_symbol(
+                        &fk.evidence.path,
+                        class_expr,
+                        &imports_by_file,
+                        &known_files,
+                    )
+                    // The expression is evaluated where it is written, so only
+                    // the declaring file's bindings name the class.
+                    .and_then(|key| by_class_key.get(&key).cloned());
+                    let resolved = match dst {
+                        None => Err("ForeignKey target class is not a recovered entity"),
+                        Some(dst) => {
+                            match entity_columns.get(&dst).map(|(t, c)| (t, c.get(column))) {
+                                Some((table, Some(false))) => Ok((dst, table.clone())),
+                                Some((_, Some(true))) => {
+                                    Err("ForeignKey target column declares its own name")
+                                }
+                                _ => {
+                                    Err("ForeignKey target is not a declared column of the entity")
+                                }
+                            }
+                        }
+                    };
+                    match resolved {
+                        Ok((dst_entity_id, table)) => {
+                            resolved_references
+                                .entry((src_entity_id.clone(), dst_entity_id))
+                                .or_default()
+                                .push(ResolvedReference {
+                                    field: fk.field.clone(),
+                                    relation: "ForeignKey",
+                                    target: raw.clone(),
+                                    target_table: Some(table),
+                                    target_column: Some(column.clone()),
+                                    evidence: fk.evidence.clone(),
+                                });
+                        }
+                        Err(reason) => push_reference_gap(
+                            out,
+                            &mut emitted_gaps,
+                            repo,
+                            &src_entity_id,
+                            &fk.field,
+                            raw,
+                            reason,
+                            fk.evidence.clone(),
+                        ),
                     }
                 }
                 FkTarget::Unprovable(raw) => {

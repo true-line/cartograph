@@ -1371,6 +1371,138 @@ class Document(Base):
 }
 
 #[test]
+fn sqlalchemy_attribute_foreign_keys_resolve_to_declared_columns() {
+    // AC-0337: `ForeignKey(Model.column)` resolves only when the class is a
+    // recovered model (same file, or import-proven) and the attribute is one of
+    // its declared columns (mixins included) under its own name.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/models.py",
+        r#"
+from sqlalchemy import Column, ForeignKey, Integer, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class ModelMixin:
+    id = Column(Integer, primary_key=True)
+
+class User(Base, ModelMixin):
+    __tablename__ = "users"
+    code = Column("user_code", String)
+    label = Column(String, name="user_label")
+
+class Alias(Base, ModelMixin):
+    __tablename__ = "alias"
+    user_id = Column(Integer, ForeignKey(User.id, ondelete="cascade"))
+    missing_id = Column(Integer, ForeignKey(User.missing))
+    code_ref = Column(String, ForeignKey(User.code))
+    label_ref = Column(String, ForeignKey(User.label))
+    ghost_id = Column(Integer, ForeignKey(Ghost.id))
+    call_id = Column(Integer, ForeignKey(lookup().id))
+"#,
+    );
+    // Evaluated where it is written: this mixin never imports `app`.
+    write(
+        dir.path(),
+        "app/mixins.py",
+        r#"
+from sqlalchemy import Column, ForeignKey, Integer
+
+class OwnedMixin:
+    owner_id = Column(Integer, ForeignKey(app.models.User.id))
+"#,
+    );
+    write(
+        dir.path(),
+        "app/audit.py",
+        r#"
+from sqlalchemy import Column, ForeignKey, Integer
+from app.models import Base, User
+from app.mixins import OwnedMixin
+import app.models
+
+class Audit(Base, OwnedMixin):
+    __tablename__ = "audit"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey(User.id))
+    alias_id = Column(Integer, ForeignKey(app.models.Alias.id))
+"#,
+    );
+
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let references = |src: &str, dst: &str| {
+        extraction
+            .edges
+            .iter()
+            .find(|e| {
+                e.label == "REFERENCES"
+                    && e.src == format!("data:local/python-service@sqlalchemy:{src}")
+                    && e.dst == format!("data:local/python-service@sqlalchemy:{dst}")
+            })
+            .map(|e| e.props["references"].clone())
+    };
+    assert_eq!(
+        references("alias", "users"),
+        Some(serde_json::json!([{
+            "field": "user_id",
+            "relation": "ForeignKey",
+            "target": "User.id",
+            "target_table": "users",
+            "target_column": "id",
+        }]))
+    );
+    assert_eq!(
+        references("audit", "users").unwrap()[0]["target_table"],
+        "users"
+    );
+    assert_eq!(
+        references("audit", "alias").unwrap()[0]["target"],
+        "app.models.Alias.id"
+    );
+    let mut gaps: Vec<(String, String)> = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap" && n.id.starts_with("gap:sqlalchemy:"))
+        .map(|n| {
+            (
+                n.props["target"].as_str().unwrap().to_string(),
+                n.props["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        [
+            (
+                "Ghost.id",
+                "ForeignKey target class is not a recovered entity"
+            ),
+            (
+                "User.code",
+                "ForeignKey target column declares its own name"
+            ),
+            (
+                "User.label",
+                "ForeignKey target column declares its own name"
+            ),
+            (
+                "User.missing",
+                "ForeignKey target is not a declared column of the entity"
+            ),
+            (
+                "app.models.User.id",
+                "ForeignKey target class is not a recovered entity"
+            ),
+            ("lookup().id", "ForeignKey target is not a string literal"),
+        ]
+        .map(|(t, r)| (t.to_string(), r.to_string()))
+    );
+}
+
+#[test]
 fn sqlalchemy_push_reference_gap_emits_node_and_edge_once_per_entity_and_evidence() {
     // #738 review: calling `push_reference_gap` twice for the same
     // (src_entity_id, evidence) emits only one Gap node and one REFERENCES edge.
