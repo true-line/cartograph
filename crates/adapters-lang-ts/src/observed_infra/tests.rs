@@ -715,3 +715,71 @@ export async function load(config: object, k: string) {
     let gaps = ex.nodes.iter().filter(|node| node.label == "Gap").count();
     assert_eq!(gaps, 4, "{:?}", ex.nodes);
 }
+
+// AC-0316: WebExtension storage is observed infrastructure, one resource per
+// area, through the unbound `chrome`/`browser` global or an import of
+// `webextension-polyfill`; any other binding or a write of `<api>.storage`
+// proves nothing. (T-0316)
+#[test]
+fn webextension_storage_areas_become_observed_resources() {
+    let polyfill = r#"
+import browser from "webextension-polyfill";
+export async function save(key, value) {
+  await browser.storage.sync.set({ [key]: value });
+  return (await browser.storage.sync.get(key))[key];
+}
+browser.storage.onChanged.addListener(() => {});
+"#;
+    let global = "chrome.storage.local.get('k', () => {});\n";
+    let ex = extract(&[("src/SLStorage.js", polyfill), ("src/bg.js", global)]);
+    let sync = resource(&ex, "observed:webextension-storage:sync");
+    assert_eq!(sync.props["kind"], "browser-storage");
+    assert_eq!(sync.props["module"], "webextension-polyfill");
+    let local = resource(&ex, "observed:webextension-storage:local");
+    assert!(local.props.get("module").is_none());
+    let edges: Vec<_> = ex
+        .edges
+        .iter()
+        .filter(|edge| edge.dst.contains("webextension-storage"))
+        .collect();
+    assert_eq!(edges.len(), 3, "each access chain is one edge");
+    let (start, end) = span(
+        edges
+            .iter()
+            .find(|edge| edge.dst.ends_with(":local"))
+            .unwrap(),
+    );
+    assert_eq!(
+        &global[start as usize..end as usize],
+        "chrome.storage.local"
+    );
+
+    for (case, source) in [
+        (
+            "other module",
+            "import browser from './fake';\nbrowser.storage.sync.get('k');\n",
+        ),
+        (
+            "local binding",
+            "const chrome = makeMock();\nchrome.storage.local.get('k');\n",
+        ),
+        (
+            "parameter",
+            "export function f(browser) { return browser.storage.sync.get('k'); }\n",
+        ),
+        (
+            "storage written",
+            "chrome.storage = fake;\nchrome.storage.local.get('k');\n",
+        ),
+        ("unknown area", "chrome.storage.cloud.get('k');\n"),
+        ("computed area", "chrome.storage[area].get('k');\n"),
+    ] {
+        let ex = extract(&[("src/x.js", source)]);
+        assert!(
+            ex.nodes
+                .iter()
+                .all(|n| !n.id.contains("webextension-storage")),
+            "{case}"
+        );
+    }
+}
