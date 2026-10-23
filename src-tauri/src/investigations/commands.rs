@@ -139,6 +139,15 @@ pub(super) fn start<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     started: Instant,
 ) -> Result<InvestigationSummary, InvestigationStartError> {
+    start_access(request, app, started, None)
+}
+
+pub(super) fn start_access<R: tauri::Runtime>(
+    request: StartInvestigationRequest,
+    app: tauri::AppHandle<R>,
+    started: Instant,
+    session: Option<&McpTaskSession>,
+) -> Result<InvestigationSummary, InvestigationStartError> {
     let structured_errors = request.schema_version >= 2
         || request.specialist_id.uses_inspection_requirements()
         || request.specialist_id.uses_coverage_qualification();
@@ -150,26 +159,27 @@ pub(super) fn start<R: tauri::Runtime>(
         }
     })?;
     let state = app.state::<AppState>();
-    let _target_guards = if request.inspection_requirements.is_some() {
-        if let Some(prior) = state
+    let existing = || {
+        let jobs = state
             .jobs
             .lock()
-            .map_err(|_| HostError::Operational.to_string())?
-            .existing_investigation(&request)
-            .map_err(|e| e.to_string())?
-        {
-            return Ok(prior.summary);
+            .map_err(|_| HostError::Operational.to_string())?;
+        match session {
+            Some(session) => jobs.existing_investigation_access(&request, Some(session)),
+            None => jobs.existing_investigation(&request),
         }
+        .map_err(|error| error.to_string())
+    };
+    if (session.is_some() || request.inspection_requirements.is_some())
+        && let Some(prior) = existing()?
+    {
+        return Ok(prior.summary);
+    }
+    let _target_guards = if request.inspection_requirements.is_some() {
         match super::inspection::validate_targets(&state, &request) {
             Ok(guards) => guards,
             Err(error) => {
-                if let Some(prior) = state
-                    .jobs
-                    .lock()
-                    .map_err(|_| HostError::Operational.to_string())?
-                    .existing_investigation(&request)
-                    .map_err(|e| e.to_string())?
-                {
+                if let Some(prior) = existing()? {
                     return Ok(prior.summary);
                 }
                 return Err(rejected("refresh_required", error));
@@ -185,12 +195,16 @@ pub(super) fn start<R: tauri::Runtime>(
     let descriptor = provider
         .as_ref()
         .and_then(|provider| runtime::descriptor(provider.as_ref(), request.provider_mode).ok());
-    let committed = state
-        .jobs
-        .lock()
-        .map_err(|e| e.to_string())?
-        .start_investigation(&request, descriptor.as_ref())
-        .map_err(|e| e.to_string())?;
+    let committed = {
+        let mut jobs = state.jobs.lock().map_err(|error| error.to_string())?;
+        match session {
+            Some(session) => {
+                jobs.start_investigation_access(&request, descriptor.as_ref(), Some(session))
+            }
+            None => jobs.start_investigation(&request, descriptor.as_ref()),
+        }
+        .map_err(|error| error.to_string())?
+    };
     if !committed.created {
         return Ok(committed.detail.summary);
     }

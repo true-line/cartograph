@@ -37,20 +37,34 @@ pub(super) fn start<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     started: Instant,
 ) -> Result<InvestigationSummary, InvestigationStartError> {
+    start_access(request, app, started, None)
+}
+
+pub(super) fn start_access<R: tauri::Runtime>(
+    request: StagedObligationRequest,
+    app: tauri::AppHandle<R>,
+    started: Instant,
+    session: Option<&McpTaskSession>,
+) -> Result<InvestigationSummary, InvestigationStartError> {
     let policy = InvestigationPolicy::for_profile(&request.limit_profile)
         .ok_or_else(|| rejected("invalid_input", "Unknown investigation policy."))?;
     let request = request
         .normalized_with_policy(policy)
         .map_err(|error| rejected("invalid_input", error))?;
     let state = app.state::<AppState>();
+    let existing = || {
+        let jobs = state
+            .jobs
+            .lock()
+            .map_err(|_| HostError::Operational.to_string())?;
+        match session {
+            Some(session) => jobs.existing_investigation_completion_access(&request, Some(session)),
+            None => jobs.existing_investigation_completion(&request),
+        }
+        .map_err(|error| error.to_string())
+    };
     // Recover a committed nonce before consulting mutable source/provider state.
-    if let Some(prior) = state
-        .jobs
-        .lock()
-        .map_err(|_| HostError::Operational.to_string())?
-        .existing_investigation_completion(&request)
-        .map_err(|error| error.to_string())?
-    {
+    if let Some(prior) = existing()? {
         return Ok(prior.summary);
     }
     let specialist: SpecialistId =
@@ -65,13 +79,7 @@ pub(super) fn start<R: tauri::Runtime>(
     let _guards = match validate_targets(&app, &state, &request) {
         Ok(guards) => guards,
         Err(error) => {
-            if let Some(prior) = state
-                .jobs
-                .lock()
-                .map_err(|_| HostError::Operational.to_string())?
-                .existing_investigation_completion(&request)
-                .map_err(|error| error.to_string())?
-            {
+            if let Some(prior) = existing()? {
                 return Ok(prior.summary);
             }
             return Err(rejected("refresh_required", error));
@@ -86,10 +94,17 @@ pub(super) fn start<R: tauri::Runtime>(
         .and_then(|provider| runtime::descriptor(provider.as_ref(), request.provider_mode).ok());
     let committed = {
         let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
-        if specialist.uses_next_prompt_admission() {
-            jobs.start_next_prompt_investigation(&request, descriptor.as_ref())
-        } else {
-            jobs.start_completion_investigation(&request, descriptor.as_ref())
+        match session {
+            Some(session) => jobs.start_completion_access(
+                &request,
+                descriptor.as_ref(),
+                specialist.uses_next_prompt_admission(),
+                Some(session),
+            ),
+            None if specialist.uses_next_prompt_admission() => {
+                jobs.start_next_prompt_investigation(&request, descriptor.as_ref())
+            }
+            None => jobs.start_completion_investigation(&request, descriptor.as_ref()),
         }
         .map_err(|e| e.to_string())?
     };
