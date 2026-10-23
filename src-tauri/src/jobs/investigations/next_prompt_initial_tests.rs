@@ -533,3 +533,46 @@ fn next_prompt_initial_state_binds_original_request_owner_and_revision() {
         Err(InvestigationStoreError::Cancelled)
     ));
 }
+
+// AC-0324: the scoped path uses the same next-family terminal reservation.
+#[test]
+fn principal_task_access_next_family_cancellation_preserves_owner_parity() {
+    let mut f = fixture();
+    let id = f.task.detail.summary.investigation_id.clone();
+    let client = McpClientId::from_host_bytes([3; 16]);
+    f.task.detail.origin = InvestigationOrigin::Mcp {
+        client_id: client.clone(),
+    };
+    f.task.mcp_intent_hash = Some("a".repeat(64));
+    let bytes = encode(&f.task, MAX_RECORD_BYTES).unwrap();
+    f.store.conn.execute(
+        "UPDATE investigation_tasks SET record=?2,record_hash=?3,request_namespace=?4 WHERE id=?1",
+        params![id, bytes, core_prov::content_hash(&bytes), f.task.detail.origin.request_namespace()],
+    ).unwrap();
+    let before = f.store.investigation(&id).unwrap();
+    assert_eq!(
+        f.store.investigation_access(&id, Some(&client)).unwrap(),
+        before
+    );
+    let cancelled = f
+        .store
+        .cancel_investigation_access(&id, true, Some(&client))
+        .unwrap();
+    assert!(cancelled.summary.cancel_requested);
+    // The execution owner still holds the claim; cancellation is requested,
+    // not falsely reported as settled before that worker exits.
+    assert_eq!(cancelled.summary.status, before.summary.status);
+    assert!(matches!(
+        f.store.investigation_next_prompt_initial_state(
+            &f.execution,
+            cancelled.summary.revision,
+            &f.request,
+        ),
+        Err(InvestigationStoreError::Cancelled)
+    ));
+    assert_eq!(f.store.investigation(&id).unwrap(), cancelled);
+    assert_eq!(
+        f.store.cancel_next_prompt_investigation(&id).unwrap(),
+        cancelled
+    );
+}

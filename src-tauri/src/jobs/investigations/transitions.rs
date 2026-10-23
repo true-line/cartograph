@@ -404,36 +404,42 @@ impl JobStore {
         &mut self,
         id: &str,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate(&tx, &self.namespace)?;
-        let mut task = load_task(&tx, id)?;
-        if task.phase != Phase::Terminal && !task.detail.summary.cancel_requested {
-            let expected = task.detail.summary.revision;
-            request_cancel(&tx, &mut task)?;
-            save_task(&tx, &task, expected, true)?;
-        }
-        tx.commit()?;
-        Ok(task.detail)
+        self.cancel_investigation_access(id, false, None)
     }
 
-    /// Internal next-family cancellation uses the existing terminal reserve,
-    /// independently of the source stage allocations. No owner lease is needed
-    /// to request cancellation; settlement still requires owner or orphan proof.
+    /// Next-family cancellation retains its existing terminal reserve and
+    /// generation fencing; owner app and MCP use the same transition.
     pub(crate) fn cancel_next_prompt_investigation(
         &mut self,
         id: &str,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        self.cancel_investigation_access(id, true, None)
+    }
+
+    pub(super) fn cancel_investigation_access(
+        &mut self,
+        id: &str,
+        next_prompt: bool,
+        client: Option<&McpClientId>,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         validate(&tx, &self.namespace)?;
-        let mut task = load_next_prompt_task_base(&tx, id)?;
+        require_request_owner(&tx, id, client)?;
+        let mut task = if next_prompt {
+            load_next_prompt_task_base(&tx, id)?
+        } else {
+            load_task(&tx, id)?
+        };
         if task.phase != Phase::Terminal && !task.detail.summary.cancel_requested {
             let expected = task.detail.summary.revision;
             request_cancel(&tx, &mut task)?;
-            save_next_prompt_task(&tx, &task, expected, true)?;
+            if next_prompt {
+                save_next_prompt_task(&tx, &task, expected, true)?;
+            } else {
+                save_task(&tx, &task, expected, true)?;
+            }
         }
         tx.commit()?;
         Ok(task.detail)

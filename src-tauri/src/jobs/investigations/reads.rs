@@ -102,8 +102,18 @@ impl JobStore {
         id: &str,
         after_sequence: u64,
     ) -> Result<InvestigationEventPage, InvestigationStoreError> {
+        self.investigation_events_access(id, after_sequence, None)
+    }
+
+    pub(super) fn investigation_events_access(
+        &self,
+        id: &str,
+        after_sequence: u64,
+        client: Option<&McpClientId>,
+    ) -> Result<InvestigationEventPage, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
+        require_request_owner(&tx, id, client)?;
         let task = load_execution_task(&tx, id)?;
         if after_sequence > journal_event_limit(&task)? {
             return Err(InvestigationStoreError::Invalid);

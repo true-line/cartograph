@@ -570,8 +570,17 @@ impl JobStore {
         &self,
         id: &str,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        self.investigation_access(id, None)
+    }
+
+    fn investigation_access(
+        &self,
+        id: &str,
+        client: Option<&McpClientId>,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
+        require_request_owner(&tx, id, client)?;
         let task = load_execution_task(&tx, id)?;
         tx.commit()?;
         Ok(task.detail)
@@ -611,8 +620,17 @@ impl JobStore {
         &self,
         id: &str,
     ) -> Result<Option<InvestigationResult>, InvestigationStoreError> {
+        self.investigation_result_access(id, None)
+    }
+
+    fn investigation_result_access(
+        &self,
+        id: &str,
+        client: Option<&McpClientId>,
+    ) -> Result<Option<InvestigationResult>, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
+        require_request_owner(&tx, id, client)?;
         let task = load_execution_task(&tx, id)?;
         let result = load_result(&tx, &task)?;
         tx.commit()?;

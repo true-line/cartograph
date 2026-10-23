@@ -814,6 +814,33 @@ pub(super) fn load_task(
     Ok(task)
 }
 
+/// Owner app access is unrestricted; MCP must prove indexed ownership before
+/// reading a body. Missing and foreign identifiers deliberately share an error.
+pub(super) fn require_request_owner(
+    connection: &Connection,
+    id: &str,
+    client: Option<&McpClientId>,
+) -> Result<(), InvestigationStoreError> {
+    if let Some(client) = client {
+        if connection.is_autocommit() || !id_valid(id) {
+            return Err(InvestigationStoreError::Missing);
+        }
+        let namespace = InvestigationOrigin::Mcp {
+            client_id: client.clone(),
+        }
+        .request_namespace();
+        let owned: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM investigation_tasks WHERE id=?1 AND request_namespace=?2)",
+            params![id, namespace],
+            |r| r.get(0),
+        )?;
+        if !owned {
+            return Err(InvestigationStoreError::Missing);
+        }
+    }
+    Ok(())
+}
+
 /// Family routing for execution and public reads. The bounded, checksummed
 /// discriminator chooses a full validator; it never grants mutation authority.
 pub(super) fn load_execution_task(
