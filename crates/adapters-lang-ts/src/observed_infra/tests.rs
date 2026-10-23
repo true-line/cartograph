@@ -1,4 +1,5 @@
 use super::*;
+use core_graph::{Edge, Node};
 
 fn id() -> SourceId<'static> {
     SourceId {

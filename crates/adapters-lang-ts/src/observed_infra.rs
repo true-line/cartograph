@@ -22,27 +22,22 @@
 //! env reference records the variable name and never its value. A
 //! runtime-computed identity becomes a Gap naming the site, never a guess.
 
-use core_graph::{Edge, Node};
-use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tree_sitter::{Node as TsNode, Parser};
 
 use adapters_fw::events::{
     ClientForm, Ecosystem, IdentityArg, IdentityExpr, ObservedClient, ObservedFamily, Registries,
-    RegistryIdentity,
 };
+use adapters_fw::observed::{ObservedSite, ObservedSource};
 
 use crate::chrome_messaging::unwrap_assertions;
 use crate::{
-    ExtractError, Extraction, FileCx, SourceId, classify_identity, enclosing_symbol, file_id,
+    ExtractError, Extraction, FileCx, SourceId, classify_identity, enclosing_symbol,
     pair_value_in_args,
 };
 
 const EXTRACTOR_ID: &str = "t0.observed-infra";
-
-/// Longest literal identity kept on a resource id.
-const MAX_IDENTITY: usize = 128;
 
 /// How a local name is bound to a module.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,19 +50,6 @@ enum Binding {
     Namespace,
 }
 
-/// One proven site before identities are grouped into resources.
-struct Site {
-    family: ObservedFamily,
-    provider: String,
-    module: Option<String>,
-    identity: Option<IdentityExpr>,
-    registry: Option<RegistryIdentity>,
-    symbol: Option<String>,
-    path: String,
-    byte_start: u64,
-    byte_end: u64,
-}
-
 /// Browser storage globals and the call that names an instance.
 const STORAGE_GLOBALS: &[(&str, Option<&str>, &str)] = &[
     ("indexedDB", Some("open"), "indexeddb"),
@@ -78,30 +60,6 @@ const STORAGE_GLOBALS: &[(&str, Option<&str>, &str)] = &[
 
 /// Receivers that reach a browser global (`window.indexedDB`).
 const GLOBAL_OBJECTS: &[&str] = &["window", "self", "globalThis"];
-
-fn prov_value(
-    id: &SourceId,
-    path: &str,
-    span: (u64, u64),
-    confidence: ConfidenceTier,
-    fact: &str,
-) -> serde_json::Value {
-    let provenance = Provenance::new(
-        Tier::Deterministic,
-        confidence,
-        vec![EvidenceRef {
-            repo: id.repo.into(),
-            path: path.into(),
-            byte_start: span.0,
-            byte_end: span.1,
-            commit_sha: id.commit.into(),
-        }],
-        EXTRACTOR_ID,
-        fact.as_bytes(),
-    )
-    .expect("Deterministic within ceiling");
-    serde_json::to_value(provenance).expect("provenance serializes")
-}
 
 /// What a declaration binds its name to.
 #[derive(Debug, Clone, PartialEq)]
@@ -755,12 +713,6 @@ fn url_parts(cx: &FileCx, node: TsNode, scopes: &Scopes, lead: String) -> Head {
     }
 }
 
-/// Whether a literal URL is absolute `http(s)`, so it names an origin.
-fn absolute_http(value: &str) -> bool {
-    let value = value.trim().to_ascii_lowercase();
-    value.starts_with("http://") || value.starts_with("https://")
-}
-
 /// `(module, export)` a callee names through the binding visible at it:
 /// `X` → its binding; `ns.Y` → `Y` of the module `ns` is bound to.
 /// Calls that can write any property of their first argument.
@@ -928,7 +880,7 @@ fn extract_file(
     path: &str,
     id: &SourceId,
     registries: &Registries,
-    sites: &mut Vec<Site>,
+    sites: &mut Vec<ObservedSite>,
 ) -> Result<(), ExtractError> {
     let is_tsx = crate::vue::component_tsx(source, path).unwrap_or(path.ends_with(".tsx"));
     let language: tree_sitter::Language = if is_tsx {
@@ -991,11 +943,13 @@ fn extract_file(
                         _ => None,
                     };
                     let (symbol, byte_start, byte_end) = site(node);
-                    sites.push(Site {
+                    sites.push(ObservedSite {
                         family: client.family,
                         provider: client.provider.clone(),
                         module: Some(client.module.clone()),
                         identity,
+                        identity_source: None,
+                        identity_assumption: None,
                         registry: Some(client.registry.clone()),
                         symbol,
                         path: path.to_string(),
@@ -1017,11 +971,13 @@ fn extract_file(
                         ObservedFamily::HttpApi,
                     );
                     let (symbol, byte_start, byte_end) = site(node);
-                    sites.push(Site {
+                    sites.push(ObservedSite {
                         family: ObservedFamily::HttpApi,
                         provider: "fetch".into(),
                         module: None,
                         identity,
+                        identity_source: None,
+                        identity_assumption: None,
                         registry: None,
                         symbol,
                         path: path.to_string(),
@@ -1050,11 +1006,13 @@ fn extract_file(
                         )
                     });
                     let (symbol, byte_start, byte_end) = site(node);
-                    sites.push(Site {
+                    sites.push(ObservedSite {
                         family: ObservedFamily::BrowserStorage,
                         provider: provider.to_string(),
                         module: None,
                         identity,
+                        identity_source: None,
+                        identity_assumption: None,
                         registry: None,
                         symbol,
                         path: path.to_string(),
@@ -1072,11 +1030,13 @@ fn extract_file(
                 };
                 if let Some((global, None, provider)) = storage_global(&cx, object, &scopes) {
                     let (symbol, byte_start, byte_end) = site(node);
-                    sites.push(Site {
+                    sites.push(ObservedSite {
                         family: ObservedFamily::BrowserStorage,
                         provider: provider.to_string(),
                         module: None,
                         identity: Some(IdentityExpr::Literal(global.to_string())),
+                        identity_source: None,
+                        identity_assumption: None,
                         registry: None,
                         symbol,
                         path: path.to_string(),
@@ -1089,61 +1049,6 @@ fn extract_file(
         }
     }
     Ok(())
-}
-
-/// A computed identity's source text as a Gap may keep it: URL userinfo
-/// removed, recognized secrets redacted, at most [`MAX_IDENTITY`] bytes.
-fn withheld_raw(raw: &str) -> String {
-    let mut out = String::new();
-    let mut rest = raw;
-    while let Some(at) = rest.find("://") {
-        let (head, tail) = rest.split_at(at + 3);
-        out.push_str(head);
-        let end = tail
-            .find(|c: char| matches!(c, '/' | '?' | '#' | '"' | '\'' | '`') || c.is_whitespace())
-            .unwrap_or(tail.len());
-        let authority = &tail[..end];
-        out.push_str(authority.rsplit('@').next().unwrap_or(authority));
-        rest = &tail[end..];
-    }
-    out.push_str(rest);
-    let (mut out, _) = core_redact::redact_text(&out);
-    if out.len() > MAX_IDENTITY {
-        let mut cut = MAX_IDENTITY;
-        while !out.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        out.truncate(cut);
-        out.push('…');
-    }
-    out
-}
-
-/// A literal identity as recorded: a URL keeps its scheme and authority
-/// without credentials; anything else is kept up to [`MAX_IDENTITY`].
-/// `None` for a value that cannot be recorded safely (empty, too long,
-/// token-shaped or a recognized secret): the Gap then withholds it whole.
-fn recorded_literal(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if !core_redact::recognized_secrets(value).is_empty() {
-        return None;
-    }
-    let recorded = match value.split_once("://") {
-        Some((scheme, rest)) => {
-            let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-            let host = authority.rsplit('@').next().unwrap_or(authority);
-            if host.is_empty() {
-                return None;
-            }
-            format!("{scheme}://{host}")
-        }
-        None if core_redact::is_token_shaped(value) => return None,
-        None => value.to_string(),
-    };
-    (recorded.len() <= MAX_IDENTITY).then_some(recorded)
 }
 
 /// Observed infrastructure for the whole tree.
@@ -1186,158 +1091,28 @@ pub fn extract_captured(
     Ok(assemble(id, &sites))
 }
 
-/// Resources, `USES` edges and Gaps for the collected sites.
-fn assemble(id: &SourceId, sites: &[Site]) -> Extraction {
-    let mut out = Extraction::default();
-    let mut resources: BTreeMap<String, Node> = BTreeMap::new();
-    for site in sites {
-        let http = site.family == ObservedFamily::HttpApi;
-        // An HTTP call names an origin only through an absolute URL. One
-        // with no URL, or a relative one, is the caller's own origin or a
-        // base set elsewhere; a computed `fetch` is already the client-call
-        // pass's Gap.
-        if http
-            && !match &site.identity {
-                Some(IdentityExpr::Literal(value)) => absolute_http(value),
-                Some(IdentityExpr::EnvRef(_)) => true,
-                Some(IdentityExpr::Computed(_)) => site.provider != "fetch",
-                None => false,
-            }
-        {
-            continue;
-        }
-        // Every HTTP client of one origin uses the same resource.
-        let provider = if http {
-            "http-api"
-        } else {
-            site.provider.as_str()
-        };
-        let span = (site.byte_start, site.byte_end);
-        let src = site
-            .symbol
-            .clone()
-            .unwrap_or_else(|| file_id(id.repo, &site.path));
-        let mut edge_props = serde_json::Map::new();
-        if let Some(registry) = &site.registry {
-            edge_props.insert("registry".into(), serde_json::json!(registry.name));
-        }
-        if http {
-            edge_props.insert("client".into(), serde_json::json!(site.provider));
-        }
-        // Instance identity: `None` = the provider alone, `Err` = a Gap
-        // (reason, raw text a Gap may keep). A literal that cannot be
-        // recorded is withheld whole, never kept as raw (#758 review).
-        let identity = match &site.identity {
-            None => Ok(None),
-            Some(IdentityExpr::Literal(value)) => match recorded_literal(value) {
-                Some(value) => Ok(Some((
-                    value.clone(),
-                    serde_json::json!({ "identity": value }),
-                ))),
-                None => Err((
-                    format!("{} identity withheld: literal is not recordable", provider),
-                    None,
-                )),
-            },
-            Some(IdentityExpr::EnvRef(key)) => Ok(Some((
-                format!("env:{key}"),
-                serde_json::json!({ "env_key": key }),
-            ))),
-            Some(IdentityExpr::Computed(raw)) => Err((
-                format!("runtime-computed {} identity", provider),
-                Some(withheld_raw(raw)),
-            )),
-        };
-        match identity {
-            Ok(instance) => {
-                let logical_id = match &instance {
-                    Some((name, _)) => format!("observed:{}:{name}", provider),
-                    None => format!("observed:{}", provider),
-                };
-                let resource_id = format!("res:{}@{logical_id}", id.repo);
-                resources.entry(resource_id.clone()).or_insert_with(|| {
-                    let mut props = serde_json::json!({
-                        "type": provider,
-                        "provider": provider,
-                        "kind": site.family.as_str(),
-                        "observed": true,
-                        "logical_id": logical_id,
-                        "prov": prov_value(
-                            id, &site.path, span, ConfidenceTier::Confirmed,
-                            &format!("Resource {resource_id}"),
-                        ),
-                    });
-                    if let Some(module) = site.module.as_ref().filter(|_| !http) {
-                        props["module"] = serde_json::json!(module);
-                    }
-                    if let Some((_, extra)) = &instance
-                        && let (Some(props), Some(extra)) =
-                            (props.as_object_mut(), extra.as_object())
-                    {
-                        props.extend(extra.clone());
-                    }
-                    Node {
-                        id: resource_id.clone(),
-                        label: "Resource".into(),
-                        props,
-                    }
-                });
-                edge_props.insert(
-                    "prov".into(),
-                    prov_value(
-                        id,
-                        &site.path,
-                        span,
-                        ConfidenceTier::Confirmed,
-                        &format!("USES {src} -> {resource_id}"),
-                    ),
-                );
-                out.edges.push(Edge {
-                    src,
-                    dst: resource_id,
-                    label: "USES".into(),
-                    props: serde_json::Value::Object(edge_props),
-                });
-            }
-            Err((reason, raw)) => {
-                let gap_id = format!("gap:observed:{}@{}@{}", id.repo, site.path, site.byte_start);
-                out.nodes.push(Node {
-                    id: gap_id.clone(),
-                    label: "Gap".into(),
-                    props: serde_json::json!({
-                        "reason": reason,
-                        "raw": raw,
-                        "kind": site.family.as_str(),
-                        "provider": provider,
-                        "attempted_tiers": ["T0"],
-                        "prov": prov_value(
-                            id, &site.path, span, ConfidenceTier::Gap,
-                            &format!("Gap {gap_id}"),
-                        ),
-                    }),
-                });
-                edge_props.insert("reason".into(), serde_json::json!(reason));
-                edge_props.insert(
-                    "prov".into(),
-                    prov_value(
-                        id,
-                        &site.path,
-                        span,
-                        ConfidenceTier::Gap,
-                        &format!("USES {src} -> {gap_id}"),
-                    ),
-                );
-                out.edges.push(Edge {
-                    src,
-                    dst: gap_id,
-                    label: "USES".into(),
-                    props: serde_json::Value::Object(edge_props),
-                });
-            }
-        }
+/// Resources, `USES` edges and Gaps for the collected sites, assembled by
+/// the language-neutral [`adapters_fw::observed::assemble`]. A computed
+/// `fetch` URL is already the client-call pass's Gap, so it is not repeated.
+fn assemble(id: &SourceId, sites: &[ObservedSite]) -> Extraction {
+    let sites: Vec<ObservedSite> = sites
+        .iter()
+        .filter(|site| {
+            !(site.provider == "fetch" && matches!(site.identity, Some(IdentityExpr::Computed(_))))
+        })
+        .cloned()
+        .collect();
+    let source = ObservedSource {
+        repo: id.repo,
+        commit: id.commit,
+        extractor: EXTRACTOR_ID,
+    };
+    let (nodes, edges) = adapters_fw::observed::assemble(&source, &sites);
+    Extraction {
+        nodes,
+        edges,
+        ..Extraction::default()
     }
-    out.nodes.extend(resources.into_values());
-    out
 }
 
 #[cfg(test)]

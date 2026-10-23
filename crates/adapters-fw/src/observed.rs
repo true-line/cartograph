@@ -1,10 +1,13 @@
 //! Language-neutral assembly of observed infrastructure (#734): the
 //! `Resource` nodes, `USES` edges and Gaps an adapter's proven client sites
-//! become. Python uses it; the TypeScript producer keeps an equivalent copy
-//! until it moves here, so both languages must keep this shape identical:
-//! one resource per provider and instance identity, `props.observed = true`,
-//! `kind` = the family, a URL kept as scheme and authority only, an env
-//! reference by name only, and a runtime-computed identity as a Gap.
+//! become. The Python and TypeScript producers both assemble here, so the
+//! shape is one: one resource per provider and instance identity,
+//! `props.observed = true`, `kind` = the family, a URL kept as scheme and
+//! authority only, an env reference by name only, and a runtime-computed
+//! identity as a Gap. An HTTP API site names an origin only through an
+//! absolute `http(s)` URL (or an env reference or computed URL, which become
+//! a resource or a Gap): every client of one origin shares one `http-api`
+//! resource and the edge records which client made the call.
 
 use crate::events::{IdentityExpr, ObservedFamily, RegistryIdentity};
 use core_graph::{Edge, Node};
@@ -136,6 +139,12 @@ pub fn recorded_literal(value: &str) -> Option<String> {
     (recorded.len() <= MAX_IDENTITY).then_some(recorded)
 }
 
+/// Whether a literal URL is absolute `http(s)`, so it names an origin.
+pub fn absolute_http(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
 /// Resources, `USES` edges and Gaps for the collected sites.
 pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, Vec<Edge>) {
     let repo = source.repo;
@@ -143,6 +152,24 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
     let mut edges = Vec::new();
     let mut resources: BTreeMap<String, Node> = BTreeMap::new();
     for site in sites {
+        let http = site.family == ObservedFamily::HttpApi;
+        // An HTTP call with no URL, or a relative one, is the caller's own
+        // origin or a base set elsewhere: it names no other resource.
+        if http
+            && !match &site.identity {
+                Some(IdentityExpr::Literal(value)) => absolute_http(value),
+                Some(IdentityExpr::EnvRef(_) | IdentityExpr::Computed(_)) => true,
+                None => false,
+            }
+        {
+            continue;
+        }
+        // Every HTTP client of one origin uses the same resource.
+        let provider = if http {
+            "http-api"
+        } else {
+            site.provider.as_str()
+        };
         let span = (site.byte_start, site.byte_end);
         let src = site
             .symbol
@@ -151,6 +178,9 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
         let mut edge_props = serde_json::Map::new();
         if let Some(registry) = &site.registry {
             edge_props.insert("registry".into(), serde_json::json!(registry.name));
+        }
+        if http {
+            edge_props.insert("client".into(), serde_json::json!(site.provider));
         }
         // Instance identity: `None` = the provider alone, `Err` = a Gap
         // (reason, raw text a Gap may keep). A literal that cannot be
@@ -163,10 +193,7 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                     serde_json::json!({ "identity": value }),
                 ))),
                 None => Err((
-                    format!(
-                        "{} identity withheld: literal is not recordable",
-                        site.provider
-                    ),
+                    format!("{} identity withheld: literal is not recordable", provider),
                     None,
                 )),
             },
@@ -175,7 +202,7 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                 serde_json::json!({ "env_key": key }),
             ))),
             Some(IdentityExpr::Computed(raw)) => Err((
-                format!("runtime-computed {} identity", site.provider),
+                format!("runtime-computed {} identity", provider),
                 Some(withheld_raw(raw)),
             )),
         };
@@ -186,14 +213,14 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                     None => ConfidenceTier::Confirmed,
                 };
                 let logical_id = match &instance {
-                    Some((name, _)) => format!("observed:{}:{name}", site.provider),
-                    None => format!("observed:{}", site.provider),
+                    Some((name, _)) => format!("observed:{}:{name}", provider),
+                    None => format!("observed:{}", provider),
                 };
                 let resource_id = format!("res:{repo}@{logical_id}");
                 let resource = || {
                     let mut props = serde_json::json!({
-                        "type": site.provider,
-                        "provider": site.provider,
+                        "type": provider,
+                        "provider": provider,
                         "kind": site.family.as_str(),
                         "observed": true,
                         "logical_id": logical_id,
@@ -205,7 +232,7 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                     if let Some(marker) = site.identity_assumption {
                         props[marker] = serde_json::json!(true);
                     }
-                    if let Some(module) = &site.module {
+                    if let Some(module) = site.module.as_ref().filter(|_| !http) {
                         props["module"] = serde_json::json!(module);
                     }
                     if let Some((_, extra)) = &instance
@@ -267,7 +294,7 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                         "reason": reason,
                         "raw": raw,
                         "kind": site.family.as_str(),
-                        "provider": site.provider,
+                        "provider": provider,
                         "attempted_tiers": ["T0"],
                         "prov": prov_value(
                             source, &site.path, span, None, ConfidenceTier::Gap,
@@ -299,3 +326,7 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
     nodes.extend(resources.into_values());
     (nodes, edges)
 }
+
+#[cfg(test)]
+#[path = "observed/tests.rs"]
+mod tests;
