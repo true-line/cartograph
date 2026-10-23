@@ -229,7 +229,7 @@ impl SqliteGraphStore {
         // Shared connection borrowing lets the ordinary private readers/writers
         // run inside this transaction; nested transactions still fail at runtime.
         let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        if &self.read_snapshot_rows(None, None)? != expected {
+        if !self.snapshot_matches(expected)? {
             return Ok(false);
         }
         self.apply_patch_rows(patch)?;
@@ -290,6 +290,63 @@ impl SqliteGraphStore {
         }
         let edges = self.read_edges(edge_labels)?;
         Ok((nodes, edges))
+    }
+
+    /// Whether the whole graph equals `expected`, compared row by row in
+    /// snapshot order without materializing a second copy of the graph: a
+    /// publish already holds one snapshot, and the whole-graph re-read
+    /// doubled its peak (#725). Same answer as comparing
+    /// [`Self::read_snapshot_rows`], including its test hook between nodes
+    /// and edges.
+    fn snapshot_matches(&self, expected: &(Vec<Node>, Vec<Edge>)) -> Result<bool, GraphError> {
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, label, props FROM nodes ORDER BY id")?;
+            let mut rows = stmt.query([])?;
+            let mut expected_nodes = expected.0.iter();
+            while let Some(row) = rows.next()? {
+                let Some(node) = expected_nodes.next() else {
+                    return Ok(false);
+                };
+                if row.get::<_, String>(0)? != node.id
+                    || row.get::<_, String>(1)? != node.label
+                    || serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(2)?)?
+                        != node.props
+                {
+                    return Ok(false);
+                }
+            }
+            if expected_nodes.next().is_some() {
+                return Ok(false);
+            }
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let after_nodes = self.snapshot_after_nodes.borrow_mut().take();
+            if let Some(after_nodes) = after_nodes {
+                after_nodes()?;
+            }
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT src, dst, label, props FROM edges ORDER BY src, dst, label")?;
+        let mut rows = stmt.query([])?;
+        let mut expected_edges = expected.1.iter();
+        while let Some(row) = rows.next()? {
+            let Some(edge) = expected_edges.next() else {
+                return Ok(false);
+            };
+            if row.get::<_, String>(0)? != edge.src
+                || row.get::<_, String>(1)? != edge.dst
+                || row.get::<_, String>(2)? != edge.label
+                || serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)?)?
+                    != edge.props
+            {
+                return Ok(false);
+            }
+        }
+        Ok(expected_edges.next().is_none())
     }
 
     fn read_nodes(&self, labels: Option<&[&str]>) -> Result<Vec<Node>, GraphError> {
@@ -701,6 +758,52 @@ mod tests {
             assert_eq!(store.read_snapshot().unwrap(), current);
             writer.put_node(&node("later", "Symbol")).unwrap();
         }
+    }
+
+    #[test]
+    fn conditional_patch_rejects_a_snapshot_with_a_fact_added_or_missing() {
+        // AC-0142, AC-0147: the streamed comparison (#725) rejects a snapshot
+        // one fact longer or shorter than the graph, at either end of either
+        // table, exactly as a whole-graph re-read would.
+        let mut store = SqliteGraphStore::open_in_memory().unwrap();
+        for id in ["b", "c"] {
+            store.put_node(&node(id, "Symbol")).unwrap();
+        }
+        store.put_edge(&edge("b", "c", "CALLS")).unwrap();
+        let current = store.read_snapshot().unwrap();
+        type Change = fn(&mut (Vec<Node>, Vec<Edge>));
+        let stale: [Change; 8] = [
+            |s| s.0.insert(0, node("a", "Symbol")),
+            |s| s.0.push(node("d", "Symbol")),
+            |s| drop(s.0.remove(0)),
+            |s| drop(s.0.pop()),
+            |s| s.1.insert(0, edge("b", "b", "CALLS")),
+            |s| s.1.push(edge("c", "c", "CALLS")),
+            |s| s.1.clear(),
+            |s| s.1[0].label = "REFERENCES".into(),
+        ];
+        let patch = GraphPatch {
+            upsert_nodes: vec![node("adr", "ADR")],
+            ..GraphPatch::default()
+        };
+        for (case, change) in stale.iter().enumerate() {
+            let mut expected = current.clone();
+            change(&mut expected);
+            assert!(
+                !store
+                    .apply_patch_if_snapshot_matches(&expected, &patch)
+                    .unwrap(),
+                "case {case}"
+            );
+            assert!(store.conn.is_autocommit());
+            assert_eq!(store.read_snapshot().unwrap(), current, "case {case}");
+        }
+        assert!(
+            store
+                .apply_patch_if_snapshot_matches(&current, &patch)
+                .unwrap()
+        );
+        assert!(store.get_node("adr").unwrap().is_some());
     }
 
     #[test]
