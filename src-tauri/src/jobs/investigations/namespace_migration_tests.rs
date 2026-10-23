@@ -64,3 +64,36 @@ fn mcp_namespace_migration_preserves_app_history_nonce_and_ordinal_high_water() 
         .unwrap();
     assert_eq!(ordinal, 138);
 }
+
+// AC-0323: an empty legacy table still carries its persisted ordinal sequence.
+#[test]
+fn mcp_namespace_migration_preserves_empty_table_ordinal_high_water() {
+    let mut fixture = Fixture::new();
+    storage::version_two_fixture(&fixture.store.conn);
+    fixture
+        .store
+        .conn
+        .execute(
+            "UPDATE sqlite_sequence SET seq=137 WHERE name='investigation_tasks'",
+            [],
+        )
+        .unwrap();
+    fixture.store = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    let next = fixture
+        .store
+        .start_investigation(
+            &request("after-empty-migration", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap();
+    let ordinal: i64 = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT ordinal FROM investigation_tasks WHERE id=?1",
+            [&next.detail.summary.investigation_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ordinal, 138);
+}
