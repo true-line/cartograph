@@ -1,17 +1,20 @@
 //! Scheduled jobs (#770): declared schedule files become `Schedule` flow
 //! triggers with an `ENTRY` into the file each job runs.
 //!
-//! Two readers share one node shape: the yacron format (`jobs:` as a
-//! sequence of `{name, command, schedule, …}` mappings) and crontab(5)
-//! files (`crontab`, `*.crontab`, `*.cron`, and files directly in a
-//! `cron.d` directory, whose lines carry a user field). A job's entry is
-//! resolved only from what the repository proves:
+//! Three readers share one node shape: the yacron format (`jobs:` as a
+//! sequence of `{name, command, schedule, …}` mappings), crontab(5) files
+//! (`crontab`, `*.crontab`, `*.cron`, and files directly in a `cron.d`
+//! directory, whose lines carry a user field), and Kubernetes `CronJob`
+//! documents (one job per container, `command` then `args`). A job's entry
+//! is resolved only from what the repository proves:
 //!
 //! - a script path, relative ones joined to the final stage's proven
 //!   `WORKDIR`, that lies under the directory the root `Dockerfile`'s final
 //!   stage copies the repository into (`COPY . <dir>`) is `Confirmed`,
 //!   citing both files, unless a later `COPY`/`ADD`/`RUN` in that stage may
-//!   replace it (`InferredStrong`, marked `entry_may_be_replaced_in_image`);
+//!   replace it (`InferredStrong`, marked `entry_may_be_replaced_in_image`),
+//!   or the job is a `CronJob`, whose image is only assumed to be that
+//!   build (`InferredStrong`, marked `entry_image_assumed_from_dockerfile`);
 //! - a relative path without a proven working directory resolves against
 //!   the repository root (`InferredStrong`, marked
 //!   `entry_relative_to_repo_root`);
@@ -92,7 +95,8 @@ enum Entry {
     Gap(&'static str),
 }
 
-/// Walk `root` and turn every yacron-format schedule file into facts.
+/// Walk `root` and turn every schedule file (yacron, crontab, `CronJob`)
+/// into facts.
 pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<ScheduleExtraction> {
     let walked = source_walk::files(
         root,
@@ -110,7 +114,12 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<ScheduleExtrac
             let Ok(text) = std::fs::read_to_string(&file.path) else {
                 continue;
             };
-            yacron_jobs(&text)
+            let jobs = yacron_jobs(&text);
+            if jobs.is_empty() {
+                cronjob_jobs(&text)
+            } else {
+                jobs
+            }
         } else if let Some(system) = crontab_kind(&file.rel) {
             let Ok(text) = std::fs::read_to_string(&file.path) else {
                 continue;
@@ -231,6 +240,14 @@ fn emit(
             if let Some(marker) = marker {
                 props[marker] = true.into();
             }
+            // A CronJob names a registry image: that it was built from the
+            // root `Dockerfile` is an assumption, not a proof.
+            let confidence = if job.format == "kubernetes" && container_dir.is_some() {
+                props["entry_image_assumed_from_dockerfile"] = true.into();
+                ConfidenceTier::InferredStrong
+            } else {
+                confidence
+            };
             if let Some(dir) = container_dir {
                 props["container_dir"] = dir.into();
             }
@@ -897,6 +914,170 @@ fn job(text: &str, item: TsNode) -> Option<Job> {
         unreadable,
         format: "yacron",
     })
+}
+
+/// Kubernetes `CronJob` documents (`apiVersion: batch/…`): one job per
+/// container of `spec.jobTemplate.spec.template.spec.containers`, its
+/// command the container's `command` then `args`.
+fn cronjob_jobs(text: &str) -> Vec<Job> {
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_yaml::LANGUAGE.into())
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(text, None) else {
+        return Vec::new();
+    };
+    let root = tree.root_node();
+    if root.has_error() {
+        return Vec::new();
+    }
+    let mut walk = root.walk();
+    let documents: Vec<TsNode> = root
+        .named_children(&mut walk)
+        .filter(|node| node.kind() == "document")
+        .collect();
+    let mut jobs = Vec::new();
+    for document in documents {
+        let Some(top) = first_mapping(document) else {
+            continue;
+        };
+        let named = |mapping: TsNode, name: &str| {
+            value_of(text, mapping, name).and_then(|value| scalar(text, value))
+        };
+        if named(top, "kind").as_deref() != Some("CronJob")
+            || !named(top, "apiVersion").is_some_and(|api| api.starts_with("batch/"))
+        {
+            continue;
+        }
+        let path = |names: &[&str]| {
+            names.iter().try_fold(top, |mapping, name| {
+                value_of(text, mapping, name).and_then(|value| descend(value, "block_mapping"))
+            })
+        };
+        let name = path(&["metadata"]).and_then(|metadata| named(metadata, "name"));
+        let spec = path(&["spec"]);
+        let schedule = spec.and_then(|spec| named(spec, "schedule"));
+        let span = (document.start_byte() as u64, document.end_byte() as u64);
+        // A templated manifest (Helm) or a YAML alias, anchor or tag is not
+        // the text the cluster runs.
+        let document_unreadable = if text[document.byte_range()].contains("{{") {
+            Some("CronJob manifest is templated")
+        } else if contains_kind(document, &["alias", "anchor", "tag"]) {
+            Some("CronJob uses a YAML alias, anchor or tag")
+        } else {
+            None
+        };
+        let containers: Vec<TsNode> = path(&["spec", "jobTemplate", "spec", "template", "spec"])
+            .and_then(|pod| value_of(text, pod, "containers"))
+            .and_then(|value| descend(value, "block_sequence"))
+            .map(|sequence| {
+                let mut walk = sequence.walk();
+                sequence
+                    .named_children(&mut walk)
+                    .filter(|item| item.kind() == "block_sequence_item")
+                    .collect()
+            })
+            .unwrap_or_default();
+        if containers.is_empty() {
+            jobs.push(Job {
+                name,
+                schedule,
+                command: None,
+                span,
+                unreadable: Some("CronJob containers are not a block sequence"),
+                format: "kubernetes",
+            });
+            continue;
+        }
+        let several = containers.len() > 1;
+        for item in containers {
+            let container = descend(item, "block_mapping");
+            let field =
+                |field: &str| container.and_then(|container| value_of(text, container, field));
+            let (command, unreadable) = match (field("command"), field("args")) {
+                (None, _) => (None, Some("CronJob container runs its image entrypoint")),
+                (Some(command), args) => {
+                    match [Some(command), args]
+                        .into_iter()
+                        .flatten()
+                        .map(|list| words(text, list))
+                        .collect::<Option<Vec<Vec<String>>>>()
+                    {
+                        // An empty `command` list leaves the image
+                        // entrypoint in place, as an absent one does; an
+                        // empty or spaced argument has no word-split form.
+                        Some(lists) if lists[0].is_empty() => {
+                            (None, Some("CronJob container runs its image entrypoint"))
+                        }
+                        Some(lists) => {
+                            let words = lists.concat();
+                            let unsplittable = words
+                                .iter()
+                                .any(|word| word.is_empty() || word.contains(char::is_whitespace));
+                            (
+                                Some(words.join(" ")),
+                                unsplittable
+                                    .then_some("CronJob argument is empty or contains whitespace"),
+                            )
+                        }
+                        None => (
+                            None,
+                            Some("CronJob command is not a list of literal strings"),
+                        ),
+                    }
+                }
+            };
+            let unreadable = document_unreadable
+                .or(unreadable)
+                .or(field("workingDir").map(|_| "CronJob container sets workingDir"));
+            let container_name = container.and_then(|container| named(container, "name"));
+            jobs.push(Job {
+                name: match (&name, container_name) {
+                    (Some(job), Some(container)) if several => Some(format!("{job}/{container}")),
+                    (name, _) => name.clone(),
+                },
+                schedule: schedule.clone(),
+                command,
+                span,
+                unreadable,
+                format: "kubernetes",
+            });
+        }
+    }
+    jobs
+}
+
+/// The value of the `name` key in a block mapping.
+fn value_of<'t>(text: &str, mapping: TsNode<'t>, name: &str) -> Option<TsNode<'t>> {
+    pairs(mapping)
+        .into_iter()
+        .find(|(key, _)| scalar(text, *key).as_deref() == Some(name))
+        .map(|(_, value)| value)
+}
+
+/// A YAML sequence of literal scalars, block or flow; `None` otherwise.
+fn words(text: &str, node: TsNode) -> Option<Vec<String>> {
+    let sequence = descend(node, "block_sequence").or_else(|| descend(node, "flow_sequence"))?;
+    let mut walk = sequence.walk();
+    let items: Vec<TsNode> = sequence.named_children(&mut walk).collect();
+    items
+        .into_iter()
+        .filter(|item| item.kind() != "comment")
+        .map(|item| {
+            let value = match item.kind() {
+                "block_sequence_item" => {
+                    let mut walk = item.walk();
+                    let children: Vec<TsNode> = item.named_children(&mut walk).collect();
+                    *children.first()?
+                }
+                _ => item,
+            };
+            scalar(text, value)
+        })
+        .collect()
 }
 
 fn first_mapping(node: TsNode) -> Option<TsNode> {

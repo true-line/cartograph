@@ -520,3 +520,154 @@ fn crontab_files_become_schedules() {
         assert_eq!(out.files, 0, "{path}: {body}");
     }
 }
+
+// #779: Kubernetes `CronJob` documents are a third reader: one job per
+// container, `command` then `args`. Its image is only assumed to be the root
+// `Dockerfile` build, so a container-mapped entry is InferredStrong; an
+// entrypoint-only container, `workingDir`, a templated manifest or a
+// spaced argument is a Gap naming the job. Other kinds declare nothing.
+// (AC-0333, T-0333)
+#[test]
+fn kubernetes_cronjobs_become_schedules() {
+    let manifest = r#"apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: settings
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stats
+spec:
+  schedule: "0 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: main
+              image: registry.example/app:1
+              command: ["python", "/code/cron.py"]
+              args:
+                - -j
+                - stats
+            - name: sidecar
+              image: registry.example/app:1
+              command:
+                - python
+                - jobs/cleanup.py
+            - name: entrypoint
+              image: registry.example/app:1
+              args: ["--once"]
+            - name: shell
+              image: registry.example/app:1
+              command: ["sh", "-c", "python cron.py && echo done"]
+            - name: empty-command
+              image: registry.example/app:1
+              command: []
+              args: ["python", "cron.py"]
+            - name: empty-argument
+              image: registry.example/app:1
+              command: ["python", "", "cron.py"]
+            - name: elsewhere
+              image: registry.example/app:1
+              workingDir: /srv
+              command: ["python", "cron.py"]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nightly
+spec:
+  schedule: "@daily"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: only
+              image: registry.example/app:1
+              command: ["python", "-m", "app.tasks"]
+"#;
+    let out = extract(&[
+        ("Dockerfile", DOCKERFILE),
+        ("deploy/k8s/cron.yaml", manifest),
+        ("cron.py", ""),
+        ("jobs/cleanup.py", ""),
+        ("app/tasks.py", ""),
+        (
+            "chart/templates/cron.yaml",
+            "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: t\nspec:\n  schedule: \"{{ .Values.cron }}\"\n  jobTemplate:\n    spec:\n      template:\n        spec:\n          containers:\n            - name: t\n              command: [\"python\", \"cron.py\"]\n",
+        ),
+        (
+            "deploy/k8s/job.yaml",
+            "apiVersion: batch/v1\nkind: Job\nspec:\n  schedule: \"0 0 * * *\"\n",
+        ),
+        (
+            "deploy/k8s/custom.yaml",
+            "apiVersion: example.com/v1\nkind: CronJob\nspec:\n  schedule: \"0 0 * * *\"\n",
+        ),
+    ]);
+    let file = "deploy/k8s/cron.yaml";
+    let schedules: Vec<&Node> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Schedule" && n.props["file"] == file)
+        .collect();
+    assert_eq!(schedules.len(), 8);
+    assert!(schedules.iter().all(|s| s.props["format"] == "kubernetes"));
+    assert_eq!(schedules[0].props["name"], "stats/main");
+    assert_eq!(schedules[0].props["schedule"], "0 * * * *");
+    assert_eq!(
+        schedules[0].props["command"],
+        "python /code/cron.py -j stats"
+    );
+    assert_eq!(schedules[7].props["name"], "nightly");
+    assert_eq!(schedules[7].props["schedule"], "@daily");
+
+    let main = entry(&out, 0, file);
+    assert_eq!(main.dst, format!("file:{REPO}@cron.py"));
+    assert_eq!(confidence(main), "InferredStrong");
+    assert_eq!(main.props["entry_image_assumed_from_dockerfile"], true);
+    assert_eq!(main.props["container_dir"], "/code");
+    let sidecar = entry(&out, 1, file);
+    assert_eq!(sidecar.dst, format!("file:{REPO}@jobs/cleanup.py"));
+    assert_eq!(confidence(sidecar), "InferredStrong");
+    assert_eq!(
+        entry(&out, 7, file).dst,
+        format!("file:{REPO}@app/tasks.py")
+    );
+    for (index, reason) in [
+        (2, "CronJob container runs its image entrypoint"),
+        (3, "CronJob argument is empty or contains whitespace"),
+        (4, "CronJob container runs its image entrypoint"),
+        (5, "CronJob argument is empty or contains whitespace"),
+        (6, "CronJob container sets workingDir"),
+    ] {
+        assert_eq!(entry(&out, index, file).props["reason"], reason, "{index}");
+    }
+    let templated = entry(&out, 0, "chart/templates/cron.yaml");
+    assert_eq!(templated.props["reason"], "CronJob manifest is templated");
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|n| n.props["file"] == "deploy/k8s/job.yaml"
+                || n.props["file"] == "deploy/k8s/custom.yaml")
+    );
+    assert_eq!(out.files, 2);
+
+    // Without a Dockerfile, a relative path rests on the repository root
+    // and an absolute one on a unique suffix, as for the other readers.
+    let bare = extract(&[(file, manifest), ("cron.py", ""), ("jobs/cleanup.py", "")]);
+    let main = entry(&bare, 0, file);
+    assert_eq!(main.props["entry_path_suffix"], true);
+    assert!(
+        main.props
+            .get("entry_image_assumed_from_dockerfile")
+            .is_none()
+    );
+    assert_eq!(
+        entry(&bare, 1, file).props["entry_relative_to_repo_root"],
+        true
+    );
+}
