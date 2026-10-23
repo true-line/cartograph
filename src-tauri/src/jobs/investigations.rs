@@ -32,6 +32,8 @@ mod coverage;
 mod coverage_tests;
 #[path = "investigations/mcp_clients.rs"]
 mod mcp_clients;
+#[path = "investigations/mcp_start.rs"]
+mod mcp_start;
 #[cfg(test)]
 #[path = "investigations/metadata_host_fixture.rs"]
 pub(crate) mod metadata_host_fixture;
@@ -366,8 +368,23 @@ impl JobStore {
         request: &StartInvestigationRequest,
         provider: Option<&InvestigationProvider>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
-        let normalized = request.normalized()?;
-        self.start_investigation_internal(&normalized, provider, None, false, None)
+        self.start_investigation_access(request, provider, None)
+    }
+
+    pub(crate) fn start_investigation_access(
+        &mut self,
+        request: &StartInvestigationRequest,
+        provider: Option<&InvestigationProvider>,
+        session: Option<&McpTaskSession>,
+    ) -> Result<InvestigationStart, InvestigationStoreError> {
+        mcp_start::with_identity(
+            session,
+            || Ok(request.intent_hash()?),
+            |identity| {
+                let normalized = request.normalized()?;
+                self.start_investigation_internal(&normalized, provider, None, false, identity)
+            },
+        )
     }
     fn start_investigation_internal(
         &mut self,

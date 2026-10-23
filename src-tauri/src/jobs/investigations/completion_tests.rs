@@ -1552,3 +1552,6 @@ fn app_nonce_namespace_completion_recovery_ignores_foreign_tasks() {
         Some(original)
     );
 }
+
+#[path = "mcp_start_completion_tests.rs"]
+mod mcp_start_completion_tests;
