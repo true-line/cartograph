@@ -584,3 +584,59 @@ fn shared_coverage_projection_preserves_owned_wire_identity_and_cursor_contract(
         5
     );
 }
+
+// AC-0239: qualification stays inside the exact byte budget without sizing copies.
+#[test]
+fn qualified_query_counted_envelope_matches_wire_and_refusal_boundary() {
+    let scope = [scoped("acme/café", Some("src:café"), "config:v1")];
+    let context = CoverageContext::from_shared_snapshot(
+        Arc::new(snapshot()),
+        CoverageQualification::new(&scope, &[]).unwrap(),
+    )
+    .unwrap();
+    let wire = serde_json::to_vec(&QualifiedResponse {
+        context_id: context.context_id.clone(),
+        coverage: context.coverage.clone(),
+        response: Value::Null,
+    })
+    .unwrap()
+    .len()
+        - "null".len();
+    assert_eq!(context.inner_budget(wire + 1, false, &None).unwrap(), 1);
+    assert!(matches!(context.inner_budget(wire, false, &None),
+        Err(ContextError::ResponseBudgetExceeded { required_bytes, .. }) if required_bytes == wire + 1));
+    let request = QueryRequest {
+        max_facts: 1,
+        max_bytes: 4096,
+        ..Default::default()
+    };
+    let expected = context
+        .query(QualifiedRequest {
+            request: request.clone(),
+            context_id: None,
+        })
+        .unwrap();
+    let exact = serde_json::to_vec(&expected).unwrap().len();
+    assert_eq!(
+        context
+            .query(QualifiedRequest {
+                request: QueryRequest {
+                    max_bytes: exact,
+                    ..request.clone()
+                },
+                context_id: None
+            })
+            .unwrap(),
+        expected
+    );
+    assert!(matches!(
+        context.query(QualifiedRequest {
+            request: QueryRequest {
+                max_bytes: exact - 1,
+                ..request
+            },
+            context_id: None
+        }),
+        Err(ContextError::ResponseBudgetExceeded { .. })
+    ));
+}

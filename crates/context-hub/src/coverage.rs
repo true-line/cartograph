@@ -474,13 +474,17 @@ impl CoverageContext {
         {
             return Err(ContextError::CursorContextMismatch);
         }
-        let envelope = serde_json::to_vec(&QualifiedResponse {
-            context_id: self.context_id.clone(),
-            coverage: self.coverage.clone(),
-            response: Value::Null,
-        })?
-        .len()
-            - "null".len();
+        #[derive(Serialize)]
+        struct Envelope<'a> {
+            context_id: &'a str,
+            coverage: &'a CoverageQualification,
+            response: (),
+        }
+        let envelope = crate::logical::encoded_size(&Envelope {
+            context_id: &self.context_id,
+            coverage: &self.coverage,
+            response: (),
+        })? - "null".len();
         max_bytes
             .checked_sub(envelope)
             .filter(|inner| *inner > 0)
