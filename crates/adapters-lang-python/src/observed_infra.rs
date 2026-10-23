@@ -15,7 +15,10 @@
 //! `os.getenv("X")` record the variable name, never a value; a module-level
 //! name assigned once is followed one step, also into another repository
 //! module (`config.DB_URI`, `from app.config import DB_URI`) under the
-//! rules `follow_module` documents; anything else is a Gap naming the site.
+//! rules `follow_module` documents; a parameter of a module-level function
+//! is followed to the argument of that function's one caller under the
+//! rules `follow_parameter` documents; anything else is a Gap naming the
+//! site.
 
 use adapters_fw::events::{ClientForm, Ecosystem, IdentityArg, IdentityExpr, Registries};
 use adapters_fw::observed::{ObservedSite, ObservedSource, assemble};
@@ -59,6 +62,8 @@ struct Scope {
     members: HashMap<String, HashSet<MemberPath>>,
     /// A `from m import *` anywhere: it may rebind any name.
     wildcard: bool,
+    /// Each name a relative import imports, whatever its local alias.
+    relative: HashSet<String>,
     /// Dotted targets patched by name (`monkeypatch.setattr("a.b.X", …)`,
     /// `patch("a.b.X")`).
     patches: Vec<MemberPath>,
@@ -350,6 +355,29 @@ fn import_names(cx: &FileCx, node: TsNode) -> Vec<(String, Option<Bound>)> {
     out
 }
 
+/// The names a relative `from … import` imports, unaliased.
+fn relative_targets(cx: &FileCx, node: TsNode) -> Vec<String> {
+    if node
+        .child_by_field_name("module_name")
+        .is_none_or(|module| module.kind() != "relative_import")
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut walk = node.walk();
+    for child in node.children_by_field_name("name", &mut walk) {
+        let name = match child.kind() {
+            "aliased_import" => child.child_by_field_name("name"),
+            _ => Some(child),
+        };
+        if let Some(name) = name {
+            let text = cx.text(&name);
+            out.push(text.rsplit('.').next().unwrap_or(text).trim().to_string());
+        }
+    }
+    out
+}
+
 /// Every name a binding construct writes.
 fn written_names<'t>(node: TsNode<'t>, out: &mut Vec<TsNode<'t>>) {
     let field = |name: &str| node.child_by_field_name(name);
@@ -406,6 +434,7 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
         assigned: HashMap::new(),
         members: HashMap::new(),
         wildcard: false,
+        relative: HashSet::new(),
         patches: Vec::new(),
         computed_setattr: Vec::new(),
         receiver_setattr: false,
@@ -418,6 +447,7 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
         if matches!(node.kind(), "import_statement" | "import_from_statement") {
             // Only a statement directly under the module proves a binding.
             let module_level = node.parent().is_some_and(|parent| parent.id() == root.id());
+            scope.relative.extend(relative_targets(cx, node));
             for (name, bound) in import_names(cx, node) {
                 if name == "*" {
                     scope.wildcard = true;
@@ -555,10 +585,36 @@ struct Pending {
     local: MemberPath,
 }
 
+/// A site whose identity is a parameter of the module-level function it
+/// is in, resolved through that function's one caller once every file has
+/// been read.
+struct ParamPending {
+    site: usize,
+    module: String,
+    function: String,
+    /// The parameter's position, and its name for a keyword argument.
+    index: usize,
+    name: String,
+}
+
+/// A function export, `(module, name)`.
+type Export = (String, String);
+
 /// What cross-module follows need from every file.
 #[derive(Default)]
 struct Follows {
     pending: Vec<Pending>,
+    params: Vec<ParamPending>,
+    /// Calls through a proven import, by `(module, export)`: the caller's
+    /// file and the call's span.
+    calls: HashMap<Export, Vec<(String, usize, usize)>>,
+    /// `(module, export)`s some file reads other than by calling them
+    /// (a value, a re-export, an unproven import): a caller may hide.
+    escaped: HashSet<(String, String)>,
+    /// Names bound by an import naming no module (relative, `*`), and
+    /// modules imported other than provably: calls through them are unseen.
+    unseen_names: HashSet<String>,
+    unseen_modules: HashSet<String>,
     /// Dotted member paths written through a proven binding or patched by
     /// name; a `None` segment is any member.
     module_writes: Vec<MemberPath>,
@@ -571,6 +627,11 @@ struct Follows {
     /// A computed-name write on a method receiver somewhere: follows rest
     /// on the receiver convention.
     receiver_assumed: bool,
+}
+
+/// `a.b.c` from module segments.
+fn dotted(path: &MemberPath) -> String {
+    path.iter().flatten().cloned().collect::<Vec<_>>().join(".")
 }
 
 /// The dotted module a repository-relative Python file is.
@@ -707,6 +768,153 @@ fn classify(cx: &FileCx, root: TsNode, node: TsNode, scope: &Scope, follow: bool
     IdentityExpr::Computed(text.to_string())
 }
 
+/// The module-level, undecorated function whose plain positional parameter
+/// `value` is, never written in the function's body at any depth: the
+/// function's name and the parameter's position. A default, a splat or a
+/// separator anywhere in the list refuses it.
+fn param_of(cx: &FileCx, root: TsNode, call: TsNode, value: TsNode) -> Option<(String, usize)> {
+    if value.kind() != "identifier" {
+        return None;
+    }
+    let name = cx.text(&value);
+    let function = enclosing_function_node(call)?;
+    if function.parent().map(|parent| parent.id()) != Some(root.id()) {
+        return None;
+    }
+    let parameters = function.child_by_field_name("parameters")?;
+    let mut walk = parameters.walk();
+    let mut index = None;
+    for (at, parameter) in parameters
+        .named_children(&mut walk)
+        .filter(|parameter| parameter.kind() != "comment")
+        .enumerate()
+    {
+        let ident = match parameter.kind() {
+            "identifier" => parameter,
+            "typed_parameter" => {
+                let mut walk = parameter.walk();
+                parameter
+                    .named_children(&mut walk)
+                    .find(|child| child.kind() == "identifier")?
+            }
+            _ => return None,
+        };
+        if cx.text(&ident) == name {
+            index = Some(at);
+        }
+    }
+    let index = index?;
+    let mut written = Vec::new();
+    let mut imported = false;
+    let mut stack = vec![function.child_by_field_name("body")?];
+    while let Some(node) = stack.pop() {
+        written_names(node, &mut written);
+        // A local import may rebind the parameter, a wildcard any name.
+        imported |= import_names(cx, node)
+            .iter()
+            .any(|(bound, _)| bound == name || bound == "*");
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+    }
+    if imported || written.iter().any(|node| cx.text(node) == name) {
+        return None;
+    }
+    let function_name = cx.text(&function.child_by_field_name("name")?);
+    Some((function_name.to_string(), index))
+}
+
+/// Every proven-import reference in the file: calls through `(module,
+/// export)` are recorded; any other read of an import-bound function (a
+/// value, an attribute of it, an import never called) escapes; imports a
+/// call could be made through unseen are recorded too.
+fn collect_references(cx: &FileCx, root: TsNode, scope: &Scope, follows: &mut Follows) {
+    for (name, (bindings, _)) in &scope.imports {
+        for bound in bindings {
+            match bound {
+                None => {
+                    follows.unseen_names.insert(name.clone());
+                }
+                Some(Bound::Symbol(module, export)) if scope.proven(name).is_none() => {
+                    follows.escaped.insert((module.clone(), export.clone()));
+                }
+                Some(Bound::Module(module)) if scope.proven(name).is_none() => {
+                    follows.unseen_modules.insert(module.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut called = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "import_statement" | "import_from_statement") {
+            continue;
+        }
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+        let parent = node.parent();
+        let field_of = |field: &str| {
+            parent
+                .and_then(|parent| parent.child_by_field_name(field))
+                .is_some_and(|child| child.id() == node.id())
+        };
+        let resolved = match node.kind() {
+            "identifier" => {
+                // A member name, or a keyword's name, is not a read of it.
+                let kind = parent.map(|parent| parent.kind());
+                if (kind == Some("attribute") && field_of("attribute"))
+                    || (kind == Some("keyword_argument") && field_of("name"))
+                {
+                    continue;
+                }
+                match scope.proven(cx.text(&node)) {
+                    Some(Bound::Symbol(module, export)) => Some((module.clone(), export.clone())),
+                    // A module read other than for a member (`alias = svc`)
+                    // may reach any of its exports unseen.
+                    Some(Bound::Module(module))
+                        if !(kind == Some("attribute") && field_of("object")) =>
+                    {
+                        follows.unseen_modules.insert(module.clone());
+                        None
+                    }
+                    _ => None,
+                }
+            }
+            "attribute" => callee_export(cx, node, scope),
+            _ => None,
+        };
+        let Some(target) = resolved else {
+            continue;
+        };
+        let callee = parent.is_some_and(|parent| parent.kind() == "call") && field_of("function");
+        if callee && let Some(call) = parent {
+            called.insert(target.clone());
+            follows.calls.entry(target).or_default().push((
+                cx.path.to_string(),
+                call.start_byte(),
+                call.end_byte(),
+            ));
+        } else {
+            // A dotted module escaping its member access (`alias =
+            // app.services`) may reach any of its exports unseen.
+            if !(parent.is_some_and(|parent| parent.kind() == "attribute") && field_of("object")) {
+                follows
+                    .unseen_modules
+                    .insert(format!("{}.{}", target.0, target.1));
+            }
+            follows.escaped.insert(target);
+        }
+    }
+    // An import the file never calls may be a re-export.
+    for name in scope.imports.keys() {
+        if let Some(Bound::Symbol(module, export)) = scope.proven(name)
+            && !called.contains(&(module.clone(), export.clone()))
+        {
+            follows.escaped.insert((module.clone(), export.clone()));
+        }
+    }
+}
+
 fn extract_file(
     source: &[u8],
     path: &str,
@@ -766,9 +974,17 @@ fn extract_file(
             Namespace::Unknown => follows.any_member = true,
         }
     }
+    // A wildcard import clears the file's proven imports, so a call through
+    // it is unseen.
+    if scope.wildcard {
+        follows.unseen_names.insert("*".into());
+    }
+    // A call through a relative import is unseen under its target's name.
+    follows.unseen_names.extend(scope.relative.iter().cloned());
     if scope.imports.is_empty() {
         return Ok(());
     }
+    collect_references(&cx, root, &scope, follows);
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut walk = node.walk();
@@ -809,6 +1025,18 @@ fn extract_file(
             Some(IdentityArg::Key(key)) => keyword(&cx, args, key),
         };
         let identity = value.map(|value| classify(&cx, root, value, &scope, true));
+        // A parameter: the argument of the function's one caller.
+        if let (Some(IdentityExpr::Computed(_)), Some(value)) = (&identity, value)
+            && let Some((function, index)) = param_of(&cx, root, node, value)
+        {
+            follows.params.push(ParamPending {
+                site: sites.len(),
+                module: dotted(&module_of(path)),
+                function,
+                index,
+                name: cx.text(&value).to_string(),
+            });
+        }
         // `config.X` / an imported `X`: another module's constant.
         if let (Some(IdentityExpr::Computed(_)), Some(value)) = (&identity, value)
             && let Some((module, name)) = callee_export(&cx, value, &scope)
@@ -832,7 +1060,7 @@ fn extract_file(
             module: Some(client.module.clone()),
             identity,
             identity_source: None,
-            identity_assumption: None,
+            identity_assumptions: Vec::new(),
             registry: Some(client.registry.clone()),
             symbol,
             path: path.to_string(),
@@ -978,6 +1206,131 @@ fn follow_module(
     )))
 }
 
+/// A parameter's identity, one step through its function's caller: no
+/// wildcard, relative or unproven import could call the function unseen,
+/// nothing writes it as a member or reads it other than by calling it, its
+/// module defines it once and names it nowhere else, and exactly one call
+/// reaches it, without splats, passing the parameter positionally or by
+/// keyword (not both). The argument is classified in the caller, and a
+/// `config.X` argument followed as `follow_module` does. Dynamic lookups
+/// (`getattr(module, "f")`) are not seen, so the result carries
+/// `identity_assumes_static_callers`.
+fn follow_parameter(
+    root: &Path,
+    id: &SourceId,
+    known: &HashSet<&str>,
+    follows: &Follows,
+    modules: &mut HashMap<String, Option<ModuleFile>>,
+    param: &ParamPending,
+) -> Result<Option<Followed>, ExtractError> {
+    let (module, function) = (param.module.as_str(), param.function.as_str());
+    let target = (module.to_string(), function.to_string());
+    let last = module.rsplit('.').next().unwrap_or(module);
+    let read: MemberPath = module
+        .split('.')
+        .chain([function])
+        .map(|s| Some(s.to_string()))
+        .collect();
+    let written = follows.module_writes.iter().any(|path| {
+        path.iter()
+            .zip(&read)
+            .all(|(segment, read)| segment.is_none() || segment == read)
+    });
+    let unseen = ["*", function, last]
+        .iter()
+        .any(|name| follows.unseen_names.contains(*name))
+        || follows
+            .unseen_modules
+            .iter()
+            .any(|m| module == m || module.starts_with(&format!("{m}.")));
+    if unseen
+        || written
+        || follows.any_member
+        || follows.rebound.contains(function)
+        || follows.escaped.contains(&target)
+    {
+        return Ok(None);
+    }
+    let Some([(caller, start, end)]) = follows.calls.get(&target).map(Vec::as_slice) else {
+        return Ok(None);
+    };
+    // Defined once, and named nowhere else in its own module.
+    let Some(defining) = module_file(root, id, known, module)? else {
+        return Ok(None);
+    };
+    let cx = FileCx {
+        source: &defining.source,
+        path: &defining.rel,
+        id,
+    };
+    let mut mentions = 0;
+    let mut stack = vec![defining.tree.root_node()];
+    while let Some(node) = stack.pop() {
+        mentions += usize::from(node.kind() == "identifier" && cx.text(&node) == function);
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+    }
+    // One mention is the definition: any write or import of the name in
+    // its module is another (a wildcard anywhere is refused above).
+    if mentions != 1 {
+        return Ok(None);
+    }
+    let Some(file) = parse(root, caller)? else {
+        return Ok(None);
+    };
+    let cx = FileCx {
+        source: &file.source,
+        path: &file.rel,
+        id,
+    };
+    let caller_root = file.tree.root_node();
+    let Some(args) = caller_root
+        .descendant_for_byte_range(*start, *end)
+        .filter(|call| call.kind() == "call")
+        .and_then(|call| call.child_by_field_name("arguments"))
+    else {
+        return Ok(None);
+    };
+    let mut walk = args.walk();
+    if args
+        .named_children(&mut walk)
+        .any(|arg| matches!(arg.kind(), "list_splat" | "dictionary_splat"))
+    {
+        return Ok(None);
+    }
+    let value = match (
+        positional(args).get(param.index).copied(),
+        keyword(&cx, args, &param.name),
+    ) {
+        (Some(value), None) | (None, Some(value)) => value,
+        _ => return Ok(None),
+    };
+    let scope = collect_scope(&cx, caller_root);
+    let span = (
+        file.rel.clone(),
+        value.start_byte() as u64,
+        value.end_byte() as u64,
+    );
+    match classify(&cx, caller_root, value, &scope, true) {
+        IdentityExpr::Computed(_) => {}
+        identity => return Ok(Some((identity, span))),
+    }
+    let (Some((module, name)), Some((root_name, _))) =
+        (callee_export(&cx, value, &scope), member_path(&cx, value))
+    else {
+        return Ok(None);
+    };
+    let mut local = module_of(&file.rel);
+    local.push(Some(root_name));
+    let pending = Pending {
+        site: param.site,
+        module,
+        name,
+        local,
+    };
+    follow_module(root, id, known, follows, modules, &pending)
+}
+
 /// Observed infrastructure for every Python source under `root`.
 pub fn extract_dir(
     root: &Path,
@@ -995,15 +1348,33 @@ pub fn extract_dir(
     }
     let known: HashSet<&str> = files.iter().map(String::as_str).collect();
     let mut modules: HashMap<String, Option<ModuleFile>> = HashMap::new();
+    let receiver_assumption: Vec<&'static str> = follows
+        .receiver_assumed
+        .then_some("identity_assumes_method_receivers")
+        .into_iter()
+        .collect();
     for pending in &follows.pending {
         if let Some((identity, source)) =
             follow_module(root, id, &known, &follows, &mut modules, pending)?
         {
             sites[pending.site].identity = Some(identity);
             sites[pending.site].identity_source = Some(source);
-            sites[pending.site].identity_assumption = follows
-                .receiver_assumed
-                .then_some("identity_assumes_method_receivers");
+            sites[pending.site].identity_assumptions = receiver_assumption.clone();
+        }
+    }
+    for param in &follows.params {
+        if let Some((identity, source)) =
+            follow_parameter(root, id, &known, &follows, &mut modules, param)?
+        {
+            sites[param.site].identity = Some(identity);
+            sites[param.site].identity_source = Some(source);
+            // The caller's argument may itself rest on the receiver
+            // convention, and a receiver write could rebind the function.
+            sites[param.site].identity_assumptions = [
+                receiver_assumption.as_slice(),
+                &["identity_assumes_static_callers"],
+            ]
+            .concat();
         }
     }
     Ok(assemble(
