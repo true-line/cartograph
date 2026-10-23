@@ -120,10 +120,14 @@ impl InvestigationCoverageArchive {
         )?;
         let archive: Self =
             serde_json::from_str(body).map_err(|_| InvestigationError::InvalidInput)?;
+        // Missing optional fields can expand during typed serialization. Bound
+        // that encoding before allocating either comparison tree.
+        let canonical = bounded_bytes(&archive, MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES)?;
         let original: serde_json::Value =
             serde_json::from_str(body).map_err(|_| InvestigationError::InvalidInput)?;
-        if serde_json::to_value(&archive).map_err(|_| InvestigationError::InvalidInput)? != original
-        {
+        let round_trip: serde_json::Value =
+            serde_json::from_slice(&canonical).map_err(|_| InvestigationError::InvalidInput)?;
+        if round_trip != original {
             return Err(InvestigationError::InvalidInput);
         }
         archive.validate()?;
@@ -233,6 +237,12 @@ mod tests {
     use serde_json::json;
 
     pub(super) fn fixture() -> (InvestigationCoverageArchive, InvestigationCoverageRead) {
+        fixture_with_inventory_padding(0)
+    }
+
+    fn fixture_with_inventory_padding(
+        padding: usize,
+    ) -> (InvestigationCoverageArchive, InvestigationCoverageRead) {
         let record = CoverageRecord {
             repo_key: "acme/api".into(),
             registered_source_id: Some("src:api".into()),
@@ -241,7 +251,8 @@ mod tests {
             inventory_json: json!({"inventory":"coverage@1", "repo":"acme/api",
                 "commit":"a".repeat(40), "layer_hints":[], "producers":[],
                 "unsupported":[], "limited":false})
-            .to_string(),
+            .to_string()
+                + &" ".repeat(padding),
         };
         let stored = StoredCoverage {
             inventory_hash: record.inventory_hash(),
@@ -289,6 +300,50 @@ mod tests {
         );
     }
 
+    // AC-0327: the archive keeps its distinct ceiling, including escaped
+    // inventory JSON, and accepts the exact input boundary but not one byte more.
+    #[test]
+    fn archive_decode_preserves_distinct_byte_ceiling() {
+        let (archive, _) = fixture_with_inventory_padding(super::super::MAX_RECORD_BYTES);
+        let mut encoded = serde_json::to_string(&archive).unwrap();
+        assert!(encoded.len() > super::super::MAX_RECORD_BYTES);
+        assert_eq!(
+            InvestigationCoverageArchive::decode(&encoded).unwrap(),
+            archive
+        );
+        encoded.push_str(&" ".repeat(MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES - encoded.len()));
+        assert_eq!(
+            InvestigationCoverageArchive::decode(&encoded).unwrap(),
+            archive
+        );
+        encoded.push(' ');
+        assert_eq!(
+            InvestigationCoverageArchive::decode(&encoded),
+            Err(InvestigationError::LimitExceeded)
+        );
+    }
+
+    // AC-0327: a missing Option expands to null. Refuse canonical bytes before
+    // comparing Values or running semantic validation of this untrusted archive.
+    #[test]
+    fn archive_decode_bounds_canonical_expansion_before_comparison() {
+        let (archive, _) = fixture();
+        let mut value = serde_json::to_value(archive).unwrap();
+        let record = value["inventories"][0]["record"].as_object_mut().unwrap();
+        record.remove("registered_source_id");
+        record.insert("inventory_json".into(), "".into());
+        let overhead = serde_json::to_vec(&value).unwrap().len();
+        value["inventories"][0]["record"]["inventory_json"] = "x"
+            .repeat(MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES - overhead)
+            .into();
+        let body = serde_json::to_string(&value).unwrap();
+        assert_eq!(body.len(), MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES);
+        assert_eq!(
+            InvestigationCoverageArchive::decode(&body),
+            Err(InvestigationError::LimitExceeded)
+        );
+    }
+
     // AC-0239: a new context, wrong hash, or edited body never substitutes detail.
     #[test]
     fn retained_detail_rejects_context_hash_and_body_substitution() {
@@ -322,6 +377,12 @@ mod tests {
             1,
         );
         assert!(InvestigationCoverageArchive::decode(&duplicate).is_err());
+        let nested_duplicate = serde_json::to_string(&archive).unwrap().replacen(
+            "\"repo_key\":\"acme/api\"",
+            "\"repo_key\":\"acme/api\",\"repo_key\":\"acme/api\"",
+            1,
+        );
+        assert!(InvestigationCoverageArchive::decode(&nested_duplicate).is_err());
     }
     // AC-0239: stale and unrecorded repos stay qualified but grant no detail.
     #[test]
