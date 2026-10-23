@@ -1578,3 +1578,6 @@ mod namespace_migration_tests;
 
 #[path = "origin_namespace_tests.rs"]
 mod origin_namespace_tests;
+
+#[path = "principal_access_tests.rs"]
+mod principal_access_tests;
