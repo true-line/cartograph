@@ -398,7 +398,8 @@ fn ambiguous_modules_unscheduled_mappings_and_edited_jobs() {
 // Five fields or an `@` macro, then (in `cron.d`) a user, then the command;
 // comments, blank and env lines are not jobs; any other line, and a command
 // using `%`, is a Gap naming the line. A file with no parsable job, or a
-// non-crontab name, declares nothing. (T-0332)
+// non-crontab name, declares nothing. Fields are checked against their
+// bounds and the schedule and command are kept verbatim. (AC-0332, T-0332)
 #[test]
 fn crontab_files_become_schedules() {
     let crontab = "# m h dom mon dow command\nSHELL=/bin/sh\n\n*/5 * * * * python /code/cron.py -j stats\n@daily python jobs/cleanup.py\n0 1 * * mon-fri python /code/cron.py -j notify  # weekday\n15 3 * * * date +\\%F > /tmp/x\n30 4 * * * echo hi % there\nthis is not a job line\n";
@@ -461,6 +462,54 @@ fn crontab_files_become_schedules() {
         .find(|n| n.id == format!("sched:{REPO}@etc/cron.d/app#0"))
         .unwrap();
     assert_eq!(node.props["command"], "python /code/cron.py -j delete");
+
+    // The schedule and command are the source text, spacing included; a
+    // spaced assignment is an environment line, not a job.
+    let spaced = "SHELL = /bin/bash\n0  0 * * *   printf 'a  b' > /dev/null\n";
+    let out = extract(&[("crontab", spaced)]);
+    let nodes: Vec<&Node> = out.nodes.iter().filter(|n| n.label == "Schedule").collect();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].props["schedule"], "0  0 * * *");
+    assert_eq!(nodes[0].props["command"], "printf 'a  b' > /dev/null");
+
+    // Out-of-range values, names outside month/weekday, zero or dangling
+    // steps and inverted ranges are not schedule fields.
+    for fields in [
+        "99 * * * *",
+        "* 24 * * *",
+        "* * 0 * *",
+        "* * * 13 *",
+        "* * * * 8",
+        "mon * * * *",
+        "* * * * jan",
+        "*/0 * * * *",
+        "*/ * * * *",
+        "5/10 * * * *",
+        "30-10 * * * *",
+        "1,,2 * * * *",
+    ] {
+        let body = format!("* * * * * python cron.py\n{fields} python cron.py\n");
+        let out = extract(&[("crontab", &body), ("cron.py", "")]);
+        assert_eq!(
+            entry(&out, 1, "crontab").props["reason"],
+            "crontab line is not a schedule entry",
+            "{fields}"
+        );
+    }
+    for fields in [
+        "0-59/15 0-23 1-31 1-12 0-7",
+        "* * * JAN-dec Mon-Fri",
+        "1,2,30 */2 * feb sun",
+        "*/1 * * * 7",
+    ] {
+        let body = format!("{fields} python cron.py\n");
+        let out = extract(&[("crontab", &body), ("cron.py", "")]);
+        assert_eq!(
+            entry(&out, 0, "crontab").dst,
+            format!("file:{REPO}@cron.py"),
+            "{fields}"
+        );
+    }
 
     for (path, body) in [
         ("crontab", "# only comments\nPATH=/usr/bin\n"),

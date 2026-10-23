@@ -686,27 +686,81 @@ const CRON_MACROS: &[&str] = &[
     "@hourly",
 ];
 
-/// Month and weekday names a crontab field may use (case-insensitive).
-const CRON_NAMES: [&str; 19] = [
-    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec", "sun",
-    "mon", "tue", "wed", "thu", "fri", "sat",
+const MONTHS: [&str; 12] = [
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
 ];
+const WEEKDAYS: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
-/// One crontab time field: `*`, numbers or month/weekday names, joined by
-/// `,` lists, `-` ranges and `/` steps.
-fn cron_field(field: &str) -> bool {
-    field.split([',', '-', '/']).all(|part| {
-        part == "*"
-            || (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-            || CRON_NAMES.contains(&part.to_ascii_lowercase().as_str())
+/// Crontab field `position` (minute, hour, day of month, month, day of
+/// week): `*` or values and ranges within that field's bounds, `,` lists,
+/// and a `/` step of at least 1 after `*` or a range. Names are accepted
+/// only in the month and weekday fields.
+fn cron_field(field: &str, position: usize) -> bool {
+    let (low, high, names): (u32, u32, &[&str]) = match position {
+        0 => (0, 59, &[]),
+        1 => (0, 23, &[]),
+        2 => (1, 31, &[]),
+        3 => (1, 12, &MONTHS),
+        _ => (0, 7, &WEEKDAYS),
+    };
+    let value = |part: &str| -> Option<u32> {
+        let named = names
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(part))
+            .map(|index| index as u32 + low);
+        named
+            .or_else(|| {
+                (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                    .then(|| part.parse().ok())
+                    .flatten()
+            })
+            .filter(|value| (low..=high).contains(value))
+    };
+    field.split(',').all(|item| {
+        let (base, step) = match item.split_once('/') {
+            Some((base, step)) => (base, Some(step)),
+            None => (item, None),
+        };
+        let stepped = step.is_none_or(|step| {
+            !step.is_empty()
+                && step.bytes().all(|b| b.is_ascii_digit())
+                && step.parse::<u32>().is_ok_and(|step| step >= 1)
+        });
+        let ranged = match base.split_once('-') {
+            _ if base == "*" => true,
+            Some((from, to)) => matches!((value(from), value(to)), (Some(a), Some(b)) if a <= b),
+            None => step.is_none() && value(base).is_some(),
+        };
+        stepped && ranged
     })
 }
 
-/// Jobs in a crontab(5) file. Blank, comment and environment (`NAME=value`)
-/// lines are not jobs. A job is five time fields or an `@` macro, then
-/// (with `system`) a user, then the command. The file declares jobs only
-/// when some line parses; then any other line is a Gap rather than skipped,
-/// and a command with an unescaped `%` (stdin and newline in cron) is too.
+/// Byte ranges of the whitespace-separated words of `text`.
+fn word_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (at, c) in text.char_indices() {
+        match (c.is_whitespace(), start) {
+            (true, Some(from)) => {
+                spans.push((from, at));
+                start = None;
+            }
+            (false, None) => start = Some(at),
+            _ => {}
+        }
+    }
+    if let Some(from) = start {
+        spans.push((from, text.len()));
+    }
+    spans
+}
+
+/// Jobs in a crontab(5) file. Blank, comment and environment
+/// (`NAME = value`) lines are not jobs. A job is five time fields or an `@`
+/// macro, then (with `system`) a user, then the command, kept verbatim. The
+/// file declares jobs only when some line parses; then any other line is a
+/// Gap rather than skipped, and a command with an unescaped `%` (stdin and
+/// newline in cron) is too.
 fn crontab_jobs(text: &str, system: bool) -> Vec<Job> {
     let mut jobs = Vec::new();
     let mut offset = 0usize;
@@ -714,19 +768,18 @@ fn crontab_jobs(text: &str, system: bool) -> Vec<Job> {
         let start = offset;
         offset += line.len();
         let body = line.trim_end_matches(['\n', '\r']);
-        let trimmed = body.trim_start();
+        let trimmed = body.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let lead = body.len() - trimmed.len();
-        let span = (
-            (start + lead) as u64,
-            (start + body.trim_end().len()) as u64,
-        );
-        let first = trimmed.split_whitespace().next().unwrap_or_default();
-        if let Some((name, _)) = first.split_once('=')
-            && !name.is_empty()
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        let lead = body.len() - body.trim_start().len();
+        let span = ((start + lead) as u64, (start + lead + trimmed.len()) as u64);
+        if let Some((name, _)) = trimmed.split_once('=')
+            && !name.trim_end().is_empty()
+            && name
+                .trim_end()
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
         {
             continue;
         }
@@ -738,10 +791,11 @@ fn crontab_jobs(text: &str, system: bool) -> Vec<Job> {
             unreadable: Some("crontab line is not a schedule entry"),
             format: "crontab",
         };
-        let words: Vec<&str> = trimmed.split_whitespace().collect();
-        let fields = if CRON_MACROS.contains(&words[0]) {
+        let words = word_spans(trimmed);
+        let word = |index: usize| &trimmed[words[index].0..words[index].1];
+        let fields = if CRON_MACROS.contains(&word(0)) {
             1
-        } else if words.len() > 5 && words[..5].iter().all(|field| cron_field(field)) {
+        } else if words.len() > 5 && (0..5).all(|index| cron_field(word(index), index)) {
             5
         } else {
             jobs.push(job);
@@ -749,13 +803,13 @@ fn crontab_jobs(text: &str, system: bool) -> Vec<Job> {
         };
         let skip = fields + usize::from(system);
         if words.len() > skip {
-            job.schedule = Some(words[..fields].join(" "));
-            let command = words[skip..].join(" ");
+            job.schedule = Some(trimmed[..words[fields - 1].1].to_string());
+            let command = &trimmed[words[skip].0..];
             job.unreadable = command
                 .split("\\%")
                 .any(|part| part.contains('%'))
                 .then_some("crontab command uses % (stdin and newlines)");
-            job.command = Some(command);
+            job.command = Some(command.to_string());
         }
         jobs.push(job);
     }
