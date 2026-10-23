@@ -62,6 +62,8 @@ struct Scope {
     members: HashMap<String, HashSet<MemberPath>>,
     /// A `from m import *` anywhere: it may rebind any name.
     wildcard: bool,
+    /// Each name a relative import imports, whatever its local alias.
+    relative: HashSet<String>,
     /// Dotted targets patched by name (`monkeypatch.setattr("a.b.X", …)`,
     /// `patch("a.b.X")`).
     patches: Vec<MemberPath>,
@@ -353,6 +355,29 @@ fn import_names(cx: &FileCx, node: TsNode) -> Vec<(String, Option<Bound>)> {
     out
 }
 
+/// The names a relative `from … import` imports, unaliased.
+fn relative_targets(cx: &FileCx, node: TsNode) -> Vec<String> {
+    if node
+        .child_by_field_name("module_name")
+        .is_none_or(|module| module.kind() != "relative_import")
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut walk = node.walk();
+    for child in node.children_by_field_name("name", &mut walk) {
+        let name = match child.kind() {
+            "aliased_import" => child.child_by_field_name("name"),
+            _ => Some(child),
+        };
+        if let Some(name) = name {
+            let text = cx.text(&name);
+            out.push(text.rsplit('.').next().unwrap_or(text).trim().to_string());
+        }
+    }
+    out
+}
+
 /// Every name a binding construct writes.
 fn written_names<'t>(node: TsNode<'t>, out: &mut Vec<TsNode<'t>>) {
     let field = |name: &str| node.child_by_field_name(name);
@@ -409,6 +434,7 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
         assigned: HashMap::new(),
         members: HashMap::new(),
         wildcard: false,
+        relative: HashSet::new(),
         patches: Vec::new(),
         computed_setattr: Vec::new(),
         receiver_setattr: false,
@@ -421,6 +447,7 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
         if matches!(node.kind(), "import_statement" | "import_from_statement") {
             // Only a statement directly under the module proves a binding.
             let module_level = node.parent().is_some_and(|parent| parent.id() == root.id());
+            scope.relative.extend(relative_targets(cx, node));
             for (name, bound) in import_names(cx, node) {
                 if name == "*" {
                     scope.wildcard = true;
@@ -932,6 +959,8 @@ fn extract_file(
     if scope.wildcard {
         follows.unseen_names.insert("*".into());
     }
+    // A call through a relative import is unseen under its target's name.
+    follows.unseen_names.extend(scope.relative.iter().cloned());
     if scope.imports.is_empty() {
         return Ok(());
     }

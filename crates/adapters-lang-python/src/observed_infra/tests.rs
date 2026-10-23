@@ -833,6 +833,8 @@ fn parameters_are_followed_to_their_one_caller() {
         ("attribute of it", vec![("server.py", server("\nname = initialize_redis_services.__name__\n"))]),
         ("re-exported", vec![("app/__init__.py", "from app.services import initialize_redis_services\n".to_string())]),
         ("relative import", vec![("app/other.py", "from .services import initialize_redis_services\n".to_string())]),
+        ("aliased relative import", vec![("app/other.py", "from .services import initialize_redis_services as init\ninit(None, None)\n".to_string())]),
+        ("aliased relative module", vec![("app/other.py", "from . import services as svc\nsvc.initialize_redis_services(None, None)\n".to_string())]),
         ("local import", vec![("app/other.py", "def go():\n    from app.services import initialize_redis_services\n    initialize_redis_services(None, None)\n".to_string())]),
         ("wildcard import", vec![("app/other.py", "from app.services import *\n".to_string())]),
         ("splat call", vec![("server.py", SERVER.replacen("(app, config.MEM_STORE_URI)", "(*args)", 1))]),
