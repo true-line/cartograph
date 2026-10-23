@@ -292,6 +292,32 @@ impl JobStore {
         &self,
         request: &StagedObligationRequest,
     ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
+        self.existing_investigation_completion_access(request, None)
+    }
+
+    pub(crate) fn existing_investigation_completion_access(
+        &self,
+        request: &StagedObligationRequest,
+        session: Option<&McpTaskSession>,
+    ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
+        mcp_start::with_identity(
+            session,
+            || {
+                let policy = InvestigationPolicy::for_profile(&request.limit_profile)
+                    .ok_or(InvestigationStoreError::Invalid)?;
+                Ok(request.intent_hash_with_policy(policy)?)
+            },
+            |identity| match identity {
+                Some(identity) => mcp_start::existing(self, &request.request_nonce, identity),
+                None => self.existing_app_investigation_completion(request),
+            },
+        )
+    }
+
+    fn existing_app_investigation_completion(
+        &self,
+        request: &StagedObligationRequest,
+    ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
         let policy = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
         let hash = request.intent_hash_with_policy(policy)?;

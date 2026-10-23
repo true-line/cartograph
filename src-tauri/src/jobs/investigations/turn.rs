@@ -6,6 +6,28 @@ impl JobStore {
         &self,
         request: &StartInvestigationRequest,
     ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
+        self.existing_investigation_access(request, None)
+    }
+
+    pub(crate) fn existing_investigation_access(
+        &self,
+        request: &StartInvestigationRequest,
+        session: Option<&McpTaskSession>,
+    ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
+        mcp_start::with_identity(
+            session,
+            || Ok(request.intent_hash()?),
+            |identity| match identity {
+                Some(identity) => mcp_start::existing(self, &request.request_nonce, identity),
+                None => self.existing_app_investigation(request),
+            },
+        )
+    }
+
+    fn existing_app_investigation(
+        &self,
+        request: &StartInvestigationRequest,
+    ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
         let hash = request.intent_hash()?;
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
