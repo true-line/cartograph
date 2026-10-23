@@ -734,10 +734,10 @@ if __name__ == "__main__":
         "python cron.py -j stats",
         "python cron.py --job=notify",
         "python cron.py --mode fast",
+        "python cron.py -j dup",
         "python cron.py -j both",
         "python cron.py -j imported",
         "python cron.py -j twice",
-        "python cron.py -j dup",
         "python cron.py -j missing",
         "python cron.py -j stats --job notify",
     ];
@@ -771,7 +771,12 @@ if __name__ == "__main__":
         entry(&out, 2, "cron.yaml").dst,
         format!("sym:{REPO}@cron.py#notify")
     );
-    for (index, job) in jobs.iter().enumerate().skip(3) {
+    // In one `if`/`elif` chain the first matching clause wins.
+    assert_eq!(
+        entry(&out, 3, "cron.yaml").dst,
+        format!("sym:{REPO}@cron.py#stats")
+    );
+    for (index, job) in jobs.iter().enumerate().skip(4) {
         let edge = entry(&out, index, "cron.yaml");
         assert_eq!(edge.dst, format!("file:{REPO}@cron.py"), "{job}");
         assert!(edge.props.get("dispatch").is_none(), "{job}");
@@ -781,6 +786,97 @@ if __name__ == "__main__":
             dispatch::UNPROVEN
         };
         assert_eq!(edge.props["dispatch_unresolved"], reason, "{job}");
+    }
+
+    // Value-changing declarations, a chain off the straight-line path or
+    // behind an unrelated clause, a write to the parsed arguments, and a
+    // rebound or decorated function each prove no dispatch for `-j stats`.
+    for (from, to) in [
+        ("help=\"job\", type=str)", "type=str.upper)"),
+        ("help=\"job\", type=str)", "nargs=1)"),
+        ("help=\"job\", type=str)", "action=\"append\")"),
+        ("help=\"job\", type=str)", "choices=[\"notify\"])"),
+        ("    with open(\"x\"):\n", "    if False:\n"),
+        ("    with open(\"x\"):\n", "    for _ in range(1):\n"),
+        (
+            "        if args.job == \"stats\":",
+            "        if args.chosen:\n            pass\n        elif args.job == \"stats\":",
+        ),
+        (
+            "    args = parser.parse_args()\n",
+            "    args = parser.parse_args()\n    args.job = \"other\"\n",
+        ),
+        (
+            "    args = parser.parse_args()\n",
+            "    args = parser.parse_args()\n    tweak(args)\n",
+        ),
+        ("\nif __name__", "\nstats = notify\n\nif __name__"),
+        ("\ndef stats():", "\n@decorated\ndef stats():"),
+        (
+            "from app.jobs import imported_job",
+            "from app.jobs import imported_job as stats",
+        ),
+        (
+            "    args = parser.parse_args()\n",
+            "    args = parser.parse_args()\n    parser.add_argument(\"-j\")\n",
+        ),
+    ] {
+        assert!(cron.contains(from), "{from}");
+        let variant = cron.replacen(from, to, 1);
+        let out = extract_with(&[("cron.py", &variant), ("cron.yaml", &yacron)], &symbols);
+        let edge = entry(&out, 0, "cron.yaml");
+        assert_eq!(edge.dst, format!("file:{REPO}@cron.py"), "{to}");
+        assert_eq!(
+            edge.props["dispatch_unresolved"],
+            dispatch::UNPROVEN,
+            "{to}"
+        );
+    }
+    // The declaration must precede the parse that reads it.
+    let declaration = "    parser.add_argument(\"-j\", \"--job\", help=\"job\", type=str)\n";
+    let late = cron.replacen(declaration, "", 1).replacen(
+        "    args = parser.parse_args()\n",
+        &format!("    args = parser.parse_args()\n{declaration}"),
+        1,
+    );
+    assert_ne!(late, cron);
+    let out = extract_with(&[("cron.py", &late), ("cron.yaml", &yacron)], &symbols);
+    assert_eq!(
+        entry(&out, 0, "cron.yaml").dst,
+        format!("file:{REPO}@cron.py")
+    );
+
+    // A read of the arguments before they are bound fails at run time.
+    let early = cron.replacen(
+        "    args = parser.parse_args()\n",
+        "    print(args.job)\n    args = parser.parse_args()\n",
+        1,
+    );
+    let out = extract_with(&[("cron.py", &early), ("cron.yaml", &yacron)], &symbols);
+    assert_eq!(
+        entry(&out, 0, "cron.yaml").dst,
+        format!("file:{REPO}@cron.py")
+    );
+
+    // Value-preserving keywords and argparse's default dest still prove it.
+    for (from, to) in [
+        (
+            "help=\"job\", type=str)",
+            "choices=[\"stats\", \"notify\"], action=\"store\")",
+        ),
+        (
+            "\"-j\", \"--job\", help=\"job\", type=str)",
+            "\"--job\", \"-j\", required=True)",
+        ),
+    ] {
+        assert!(cron.contains(from), "{from}");
+        let variant = cron.replacen(from, to, 1);
+        let out = extract_with(&[("cron.py", &variant), ("cron.yaml", &yacron)], &symbols);
+        assert_eq!(
+            entry(&out, 0, "cron.yaml").dst,
+            format!("sym:{REPO}@cron.py#stats"),
+            "{to}"
+        );
     }
 
     // A function the adapter did not emit keeps the file, and so does a
