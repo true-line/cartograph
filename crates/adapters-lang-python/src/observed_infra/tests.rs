@@ -327,7 +327,56 @@ fn module_constants_are_followed_into_their_module() {
 // through a proven binding. An unrelated member write does not. (T-0331)
 #[test]
 fn module_constants_fail_closed() {
-    let cases: [(&str, &[(&str, &str)]); 22] = [
+    let cases: [(&str, &[(&str, &str)]); 29] = [
+        (
+            "computed setattr on a name also bound otherwise",
+            &[(
+                "tests/utils.py",
+                "def reset(g):\n    setattr(g, key, False)\ndef other():\n    from flask import g\n",
+            )],
+        ),
+        (
+            "computed setattr through an alias",
+            &[(
+                "app/db.py",
+                "from sqlalchemy import create_engine\nfrom app import config\nalias = config\nkey = \"DB_URI\"\nsetattr(alias, key, \"sqlite://\")\nengine = create_engine(config.DB_URI)\n",
+            )],
+        ),
+        (
+            "computed setattr through a parameter",
+            &[(
+                "tools/patch.py",
+                "def patch(cfg, key, value):\n    setattr(cfg, key, value)\n",
+            )],
+        ),
+        (
+            "computed setattr on a call",
+            &[(
+                "tools/patch.py",
+                "import importlib\nsetattr(importlib.import_module(name), key, value)\n",
+            )],
+        ),
+        (
+            "globals in the module",
+            &[(
+                "app/config.py",
+                "import os\nDB_URI = os.environ[\"DB_URI\"]\nfor key in OVERRIDES:\n    globals()[key] = OVERRIDES[key]\n",
+            )],
+        ),
+        (
+            "vars of the module",
+            &[(
+                "tools/patch.py",
+                "from app import config\nvars(config)[key] = value\n",
+            )],
+        ),
+        (
+            "dict of a parameter",
+            &[(
+                "tools/patch.py",
+                "def patch(module, key):\n    module.__dict__[key] = None\n",
+            )],
+        ),
         (
             "mock patch.object",
             &[(
@@ -500,7 +549,11 @@ fn module_constants_fail_closed() {
         ),
         (
             "app/model.py",
-            "class M:\n    def __init__(self, **kw):\n        for k, v in kw.items():\n            setattr(self, k, v)\n",
+            "class M:\n    def __init__(self, **kw):\n        for k, v in kw.items():\n            setattr(self, k, v)\n    @classmethod\n    def make(cls, k):\n        setattr(cls, k, None)\n\nglobals()[NAME] = 1\nresult = {}\nresult[key] = 1\n",
+        ),
+        (
+            "tests/utils.py",
+            "def reset():\n    from flask import g\n    setattr(g, \"%s_done\" % prefix, False)\n",
         ),
     ]);
     assert_eq!(

@@ -62,6 +62,110 @@ struct Scope {
     /// Dotted targets patched by name (`monkeypatch.setattr("a.b.X", …)`,
     /// `patch("a.b.X")`).
     patches: Vec<MemberPath>,
+    /// Roots whose members `setattr`/`delattr`/`patch.object` write by a
+    /// computed name, other than a method's own receiver.
+    computed_setattr: Vec<String>,
+    /// Namespaces written by computed key (`globals()[k] = …`,
+    /// `vars(x)[k] = …`, `x.__dict__[k] = …`).
+    namespaces: Vec<Namespace>,
+}
+
+/// A namespace a computed-key write reaches.
+#[derive(Debug, Clone, PartialEq)]
+enum Namespace {
+    /// `globals()`: the writing module's own.
+    Own,
+    /// `vars(x)` / `x.__dict__`: the one `x` names.
+    Of(String),
+    /// `vars(<expression>)`: unknown.
+    Unknown,
+}
+
+/// The namespace a write target reaches by computed key, if any.
+fn namespace_write(cx: &FileCx, target: TsNode, out: &mut Vec<Namespace>) {
+    match target.kind() {
+        "subscript" | "attribute" => {
+            let mut node = target;
+            let mut dict = false;
+            loop {
+                match node.kind() {
+                    "attribute" => {
+                        dict |= node
+                            .child_by_field_name("attribute")
+                            .is_some_and(|a| cx.text(&a) == "__dict__");
+                        let Some(object) = node.child_by_field_name("object") else {
+                            return;
+                        };
+                        node = object;
+                    }
+                    "subscript" => {
+                        let Some(value) = node.child_by_field_name("value") else {
+                            return;
+                        };
+                        node = value;
+                    }
+                    _ => break,
+                }
+            }
+            match node.kind() {
+                "identifier" if dict => out.push(Namespace::Of(cx.text(&node).to_string())),
+                "call" => {
+                    let callee = node.child_by_field_name("function");
+                    match callee.map(|callee| cx.text(&callee)) {
+                        Some("globals") => out.push(Namespace::Own),
+                        Some("vars") => out.push(
+                            node.child_by_field_name("arguments")
+                                .and_then(|args| positional(args).first().copied())
+                                .and_then(|arg| member_path(cx, arg))
+                                .map_or(Namespace::Unknown, |(root, _)| Namespace::Of(root)),
+                        ),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {
+            let mut walk = target.walk();
+            for child in target.named_children(&mut walk) {
+                namespace_write(cx, child, out);
+            }
+        }
+    }
+}
+
+/// Whether `object` is the first parameter of a method defined directly
+/// in a class body (`self`, `cls`): an instance, not a module.
+fn is_receiver(cx: &FileCx, object: TsNode) -> bool {
+    if object.kind() != "identifier" {
+        return false;
+    }
+    let mut node = object;
+    let function = loop {
+        match node.parent() {
+            Some(parent) if parent.kind() == "function_definition" => break parent,
+            Some(parent) => node = parent,
+            None => return false,
+        }
+    };
+    let mut owner = function.parent();
+    if owner.is_some_and(|o| o.kind() == "decorated_definition") {
+        owner = owner.and_then(|o| o.parent());
+    }
+    let in_class = owner
+        .filter(|block| block.kind() == "block")
+        .and_then(|block| block.parent())
+        .is_some_and(|class| class.kind() == "class_definition");
+    let first = function
+        .child_by_field_name("parameters")
+        .and_then(|params| {
+            let mut walk = params.walk();
+            params.named_children(&mut walk).next()
+        });
+    in_class
+        && first.is_some_and(|first| {
+            first.kind() == "identifier" && cx.text(&first) == cx.text(&object)
+        })
 }
 
 impl Scope {
@@ -73,6 +177,18 @@ impl Scope {
             (1, Some(Some(bound))) if *module_level && !self.writes.contains_key(name) => {
                 Some(bound)
             }
+            _ => None,
+        }
+    }
+
+    /// What a name denotes wherever the file uses it: every binding is an
+    /// import of one target (at any level) and nothing else writes it.
+    /// Weaker than [`Scope::proven`]; enough to say which module a write
+    /// through the name reaches.
+    fn imported_only(&self, name: &str) -> Option<&Bound> {
+        let (bindings, _) = self.imports.get(name)?;
+        match (bindings.len(), bindings.iter().next()) {
+            (1, Some(Some(bound))) if !self.writes.contains_key(name) => Some(bound),
             _ => None,
         }
     }
@@ -277,6 +393,8 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
         members: HashMap::new(),
         wildcard: false,
         patches: Vec::new(),
+        computed_setattr: Vec::new(),
+        namespaces: Vec::new(),
     };
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
@@ -329,8 +447,18 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
                             if let Some((name, mut path)) =
                                 first.and_then(|object| member_path(cx, object))
                             {
-                                path.push(args.get(1).and_then(|attr| literal_string(cx, *attr)));
+                                let attr = args.get(1).and_then(|attr| literal_string(cx, *attr));
+                                if attr.is_none()
+                                    && path.is_empty()
+                                    && !first.is_some_and(|object| is_receiver(cx, object))
+                                {
+                                    scope.computed_setattr.push(name.clone());
+                                }
+                                path.push(attr);
                                 scope.members.entry(name).or_default().insert(path);
+                            } else if first.is_some() {
+                                // `setattr(f(), k, v)`: an unknown object.
+                                scope.namespaces.push(Namespace::Unknown);
                             }
                         }
                         _ => {}
@@ -342,6 +470,7 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
         };
         if let Some(target) = target {
             member_writes(cx, target, &mut scope.members);
+            namespace_write(cx, target, &mut scope.namespaces);
         }
         let mut names = Vec::new();
         written_names(node, &mut names);
@@ -406,6 +535,9 @@ struct Follows {
     /// Member names written through any other root (an alias, a
     /// parameter, `self`): such a write may rebind a module's constant.
     rebound: HashSet<String>,
+    /// A computed-name member write through a root that may be any module
+    /// (an alias, a parameter): no follow is proven.
+    any_member: bool,
 }
 
 /// The dotted module a repository-relative Python file is.
@@ -562,7 +694,7 @@ fn extract_file(
     // Member writes through a proven module binding (`config.X = …`) may
     // replace another module's constant: no follow may read past them.
     for (name, paths) in &scope.members {
-        match scope.proven(name) {
+        match scope.imported_only(name) {
             Some(bound) => {
                 let base = bound_segments(bound);
                 follows.module_writes.extend(
@@ -579,6 +711,25 @@ fn extract_file(
         }
     }
     follows.module_writes.extend(scope.patches.iter().cloned());
+    for root in &scope.computed_setattr {
+        if scope.imported_only(root).is_none() {
+            follows.any_member = true;
+        }
+    }
+    for namespace in &scope.namespaces {
+        match namespace {
+            Namespace::Own => follows
+                .module_writes
+                .push([module_of(path), vec![None]].concat()),
+            Namespace::Of(root) => match scope.imported_only(root) {
+                Some(bound) => follows
+                    .module_writes
+                    .push([bound_segments(bound), vec![None]].concat()),
+                None => follows.any_member = true,
+            },
+            Namespace::Unknown => follows.any_member = true,
+        }
+    }
     if scope.imports.is_empty() {
         return Ok(());
     }
@@ -739,7 +890,8 @@ fn follow_module(
         })
     };
     let local_name = pending.local.last().cloned().flatten();
-    if overlaps(&read)
+    if follows.any_member
+        || overlaps(&read)
         || overlaps(&pending.local)
         || follows.rebound.contains(name)
         || local_name.is_some_and(|local| follows.rebound.contains(&local))
