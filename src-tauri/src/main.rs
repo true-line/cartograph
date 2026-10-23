@@ -233,6 +233,7 @@ struct LayerBreakdown {
     tf: LayerSummary,
     webext: LayerSummary,
     tools: LayerSummary,
+    schedules: LayerSummary,
 }
 
 impl LayerBreakdown {
@@ -245,6 +246,7 @@ impl LayerBreakdown {
         self.tf.add(other.tf);
         self.webext.add(other.webext);
         self.tools.add(other.tools);
+        self.schedules.add(other.schedules);
     }
 
     fn files(self) -> u64 {
@@ -1183,6 +1185,10 @@ fn repo_coverage(
                 ingest::toolchain::TOOLCHAIN_EXTRACTOR_ID,
                 count(&layers.tools),
             ),
+            (
+                ingest::schedules::SCHEDULE_EXTRACTOR_ID,
+                count(&layers.schedules),
+            ),
         ],
         plugins: reads.plugins.clone(),
         observations: vec![
@@ -1739,6 +1745,32 @@ fn extract_tree_with_registries(
                 .filter(|node| node.label != "File" || !known_files.contains(&node.id)),
         );
         extraction.edges.extend(tool_facts.edges);
+    }
+    // Scheduled jobs (#770): declared schedule files become Schedule flow
+    // triggers with an ENTRY into the file each job runs. An adapter's File
+    // node for that file supersedes the schedule reader's.
+    {
+        let schedule_id = ingest::schedules::SourceId { repo, commit };
+        let schedule_facts =
+            ingest::schedules::extract_dir(root, &schedule_id).map_err(|e| e.to_string())?;
+        layers.schedules = LayerSummary {
+            files: schedule_facts.files,
+            nodes: distinct_node_count(&schedule_facts.nodes),
+            edges: distinct_edge_count(&schedule_facts.edges),
+        };
+        let known_files: std::collections::BTreeSet<String> = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "File" && node.props.get("placeholder").is_none())
+            .map(|node| node.id.clone())
+            .collect();
+        extraction.nodes.extend(
+            schedule_facts
+                .nodes
+                .into_iter()
+                .filter(|node| node.label != "File" || !known_files.contains(&node.id)),
+        );
+        extraction.edges.extend(schedule_facts.edges);
     }
     // Gated plugin adapters (#201): route the files each active plugin
     // claims via its golden-corpus extensions. Every fact arrives pinned to

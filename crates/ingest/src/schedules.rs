@@ -1,0 +1,823 @@
+//! Scheduled jobs (#770): declared schedule files become `Schedule` flow
+//! triggers with an `ENTRY` into the file each job runs.
+//!
+//! The first reader is the yacron format (`jobs:` as a sequence of
+//! `{name, command, schedule, …}` mappings). A job's entry is resolved only
+//! from what the repository proves:
+//!
+//! - a script path, relative ones joined to the final stage's proven
+//!   `WORKDIR`, that lies under the directory the root `Dockerfile`'s final
+//!   stage copies the repository into (`COPY . <dir>`) is `Confirmed`,
+//!   citing both files, unless a later `COPY`/`ADD`/`RUN` in that stage may
+//!   replace it (`InferredStrong`, marked `entry_may_be_replaced_in_image`);
+//! - a relative path without a proven working directory resolves against
+//!   the repository root (`InferredStrong`, marked
+//!   `entry_relative_to_repo_root`);
+//! - an absolute path matched only by a unique repository suffix is
+//!   `InferredStrong`, marked `entry_path_suffix`;
+//! - anything else (a shell-composed command, inline code, an interpreter
+//!   option outside the modeled grammar, an unknown file, an ambiguous
+//!   suffix, a YAML alias or merge key) is a `Gap` naming the job.
+//!
+//! This tier never calls an LLM.
+
+use core_graph::{Edge, Node};
+use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use tree_sitter::{Node as TsNode, Parser};
+
+/// Extractor id recorded on every schedule fact.
+pub const SCHEDULE_EXTRACTOR_ID: &str = "t0.schedule";
+
+/// Repository identity for schedule facts.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceId<'a> {
+    /// Repository identity (`owner/name` or `local/<name>`).
+    pub repo: &'a str,
+    /// Commit the tree was read at.
+    pub commit: &'a str,
+}
+
+/// Facts from one directory walk.
+#[derive(Debug, Clone, Default)]
+pub struct ScheduleExtraction {
+    /// `Schedule` triggers, the entry `File`s they run and their `Gap`s.
+    pub nodes: Vec<Node>,
+    /// `ENTRY` edges (schedule → file or gap).
+    pub edges: Vec<Edge>,
+    /// Schedule files that declared at least one job.
+    pub files: u64,
+}
+
+/// Where the repository root sits inside the container, as the root
+/// `Dockerfile` proves it: the directory and the instruction spans.
+#[derive(Debug, Clone, PartialEq)]
+struct ContainerRoot {
+    dir: String,
+    spans: Vec<(u64, u64)>,
+    /// The final stage's working directory, when proven, and its `WORKDIR`.
+    cwd: Option<(String, (u64, u64))>,
+    /// Later instructions that may replace copied files: the destination
+    /// they write, or `None` when it could be anywhere (`RUN`).
+    writes: Vec<(Option<String>, (u64, u64))>,
+}
+
+/// One job read from a schedule file.
+#[derive(Debug, Clone, PartialEq)]
+struct Job {
+    name: Option<String>,
+    schedule: Option<String>,
+    command: Option<String>,
+    span: (u64, u64),
+    /// Why the job's fields cannot be trusted as written.
+    unreadable: Option<&'static str>,
+}
+
+/// How a job's entry resolved.
+#[derive(Debug, Clone, PartialEq)]
+enum Entry {
+    File {
+        rel: String,
+        confidence: ConfidenceTier,
+        marker: Option<&'static str>,
+        /// `Dockerfile` instruction spans the entry rests on.
+        dockerfile: Vec<(u64, u64)>,
+        container_dir: Option<String>,
+    },
+    Gap(&'static str),
+}
+
+/// Walk `root` and turn every yacron-format schedule file into facts.
+pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<ScheduleExtraction> {
+    let walked = source_walk::files(
+        root,
+        &crate::preflight::skip_dir,
+        source_walk::Gitignores::Honor,
+    )?;
+    let files: BTreeSet<String> = walked.iter().map(|file| file.rel.clone()).collect();
+    let container = std::fs::read_to_string(root.join("Dockerfile"))
+        .ok()
+        .and_then(|text| container_root(&text));
+    let mut out = ScheduleExtraction::default();
+    let mut emitted_files = BTreeSet::new();
+    for file in &walked {
+        if !(file.name.ends_with(".yml") || file.name.ends_with(".yaml")) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&file.path) else {
+            continue;
+        };
+        let jobs = yacron_jobs(&text);
+        if jobs.is_empty() {
+            continue;
+        }
+        out.files += 1;
+        for (index, job) in jobs.iter().enumerate() {
+            emit(
+                id,
+                &file.rel,
+                index,
+                job,
+                &files,
+                container.as_ref(),
+                &mut emitted_files,
+                &mut out,
+            );
+        }
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit(
+    id: &SourceId,
+    rel: &str,
+    index: usize,
+    job: &Job,
+    files: &BTreeSet<String>,
+    container: Option<&ContainerRoot>,
+    emitted_files: &mut BTreeSet<String>,
+    out: &mut ScheduleExtraction,
+) {
+    let evidence = |path: &str, (start, end): (u64, u64)| EvidenceRef {
+        repo: id.repo.to_string(),
+        path: path.to_string(),
+        byte_start: start,
+        byte_end: end,
+        commit_sha: id.commit.to_string(),
+    };
+    // The content hash covers the fact's properties as well as its identity,
+    // so an edited cron, command or entry changes the graph fingerprint.
+    let seal =
+        |mut props: serde_json::Value, confidence, spans: Vec<EvidenceRef>, identity: &str| {
+            let input =
+                serde_json::to_vec(&serde_json::json!([identity, &props])).expect("serializes");
+            props["prov"] = serde_json::to_value(
+                Provenance::new(
+                    Tier::Deterministic,
+                    confidence,
+                    spans,
+                    SCHEDULE_EXTRACTOR_ID,
+                    &input,
+                )
+                .expect("within ceiling"),
+            )
+            .expect("serializes");
+            props
+        };
+    let schedule_id = format!("sched:{}@{rel}#{index}", id.repo);
+    let display = job
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("{rel} job {}", index + 1));
+    out.nodes.push(Node {
+        id: schedule_id.clone(),
+        label: "Schedule".into(),
+        props: seal(
+            serde_json::json!({
+                "name": display,
+                "schedule": job.schedule,
+                "command": job.command,
+                "file": rel,
+                "format": "yacron",
+            }),
+            ConfidenceTier::Confirmed,
+            vec![evidence(rel, job.span)],
+            &schedule_id,
+        ),
+    });
+    let entry = match (job.unreadable, job.command.as_deref()) {
+        (Some(reason), _) => Entry::Gap(reason),
+        (None, None) => Entry::Gap("schedule job without a literal command"),
+        (None, Some(command)) => resolve_entry(command, files, container),
+    };
+    match entry {
+        Entry::File {
+            rel: entry_rel,
+            confidence,
+            marker,
+            dockerfile,
+            container_dir,
+        } => {
+            let file_id = format!("file:{}@{entry_rel}", id.repo);
+            let mut spans = vec![evidence(rel, job.span)];
+            spans.extend(dockerfile.iter().map(|span| evidence("Dockerfile", *span)));
+            if emitted_files.insert(file_id.clone()) {
+                // An adapter that owns this file supersedes this node.
+                out.nodes.push(Node {
+                    id: file_id.clone(),
+                    label: "File".into(),
+                    props: seal(
+                        serde_json::json!({ "path": entry_rel }),
+                        ConfidenceTier::Confirmed,
+                        spans.clone(),
+                        &file_id,
+                    ),
+                });
+            }
+            let identity = format!("{schedule_id} ENTRY {file_id}");
+            let mut props = serde_json::json!({ "command": job.command });
+            if let Some(marker) = marker {
+                props[marker] = true.into();
+            }
+            if let Some(dir) = container_dir {
+                props["container_dir"] = dir.into();
+            }
+            out.edges.push(Edge {
+                src: schedule_id,
+                dst: file_id,
+                label: "ENTRY".into(),
+                props: seal(props, confidence, spans, &identity),
+            });
+        }
+        Entry::Gap(reason) => {
+            let gap_id = format!("gap:schedule:{}@{rel}#{index}", id.repo);
+            let spans = vec![evidence(rel, job.span)];
+            out.nodes.push(Node {
+                id: gap_id.clone(),
+                label: "Gap".into(),
+                props: seal(
+                    serde_json::json!({
+                        "reason": reason,
+                        "command": job.command,
+                        "attempted_tiers": ["T0"],
+                    }),
+                    ConfidenceTier::Gap,
+                    spans.clone(),
+                    &gap_id,
+                ),
+            });
+            let identity = format!("{schedule_id} ENTRY {gap_id}");
+            out.edges.push(Edge {
+                src: schedule_id,
+                dst: gap_id,
+                label: "ENTRY".into(),
+                props: seal(
+                    serde_json::json!({ "reason": reason }),
+                    ConfidenceTier::Gap,
+                    spans,
+                    &identity,
+                ),
+            });
+        }
+    }
+}
+
+/// The repository path a job's command runs, or why it can't be proven.
+fn resolve_entry(
+    command: &str,
+    files: &BTreeSet<String>,
+    container: Option<&ContainerRoot>,
+) -> Entry {
+    if command.chars().any(|c| {
+        matches!(
+            c,
+            '|' | '&' | ';' | '<' | '>' | '$' | '`' | '(' | ')' | '\'' | '"' | '\\' | '*' | '?'
+        )
+    }) {
+        return Entry::Gap("shell-composed schedule command");
+    }
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let script = match script_of(&words) {
+        Ok(script) => script,
+        Err(reason) => return Entry::Gap(reason),
+    };
+    let candidates: Vec<String> = match script {
+        Script::Path(path) => vec![path.to_string()],
+        Script::Module(module) => {
+            let base = module.replace('.', "/");
+            vec![format!("{base}.py"), format!("{base}/__main__.py")]
+        }
+    };
+    let exists = |rel: &str| files.contains(rel).then(|| rel.to_string());
+    // A relative path runs from the final working directory, when proven.
+    let cwd = container.and_then(|container| container.cwd.as_ref());
+    let resolve = |candidate: &String| -> Option<Entry> {
+        let relative = candidate.trim_start_matches("./");
+        let (absolute, cwd_span) = match (candidate.starts_with('/'), cwd) {
+            (true, _) => (normalize(candidate), None),
+            (false, Some((dir, span))) => (normalize(&format!("{dir}/{relative}")), Some(*span)),
+            (false, None) => match exists(relative) {
+                Some(rel) => {
+                    return Some(Entry::File {
+                        rel,
+                        confidence: ConfidenceTier::InferredStrong,
+                        marker: Some("entry_relative_to_repo_root"),
+                        dockerfile: Vec::new(),
+                        container_dir: None,
+                    });
+                }
+                None => return None,
+            },
+        };
+        let container = container?;
+        let rel = absolute
+            .strip_prefix(&format!("{}/", container.dir))
+            .and_then(exists)?;
+        let mut dockerfile = container.spans.clone();
+        dockerfile.extend(cwd_span.filter(|span| !container.spans.contains(span)));
+        let replaced: Vec<(u64, u64)> = container
+            .writes
+            .iter()
+            .filter(|(dest, _)| {
+                dest.as_deref().is_none_or(|dest| {
+                    absolute == dest || absolute.starts_with(&format!("{dest}/"))
+                })
+            })
+            .map(|(_, span)| *span)
+            .collect();
+        let (confidence, marker) = if replaced.is_empty() {
+            (ConfidenceTier::Confirmed, None)
+        } else {
+            dockerfile.extend(replaced);
+            (
+                ConfidenceTier::InferredStrong,
+                Some("entry_may_be_replaced_in_image"),
+            )
+        };
+        Some(Entry::File {
+            rel,
+            confidence,
+            marker,
+            dockerfile,
+            container_dir: Some(container.dir.clone()),
+        })
+    };
+    // `python -m a.b` may name `a/b.py` or `a/b/__main__.py`: both is ambiguous.
+    let mut found = candidates.iter().filter_map(resolve);
+    match (found.next(), found.next()) {
+        (Some(entry), None) => return entry,
+        (Some(_), Some(_)) => return Entry::Gap("schedule module matches several files"),
+        (None, _) => {}
+    }
+    // A path no container mapping proves: a unique suffix only.
+    let unmapped = match script {
+        Script::Path(path) if path.starts_with('/') => Some(normalize(path)),
+        Script::Path(path) => cwd.map(|(dir, _)| normalize(&format!("{dir}/{path}"))),
+        Script::Module(_) => None,
+    };
+    if let Some(path) = unmapped {
+        let matches: Vec<&String> = files
+            .iter()
+            .filter(|rel| path.ends_with(&format!("/{rel}")))
+            .collect();
+        return match matches.as_slice() {
+            [rel] => Entry::File {
+                rel: (*rel).clone(),
+                confidence: ConfidenceTier::InferredStrong,
+                marker: Some("entry_path_suffix"),
+                dockerfile: Vec::new(),
+                container_dir: None,
+            },
+            [] => Entry::Gap("schedule entry not found in source tree"),
+            _ => Entry::Gap("schedule entry matches several files"),
+        };
+    }
+    Entry::Gap("schedule entry not found in source tree")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Script<'a> {
+    Path(&'a str),
+    Module(&'a str),
+}
+
+const NO_SCRIPT: &str = "schedule command runs no script file";
+const INLINE_CODE: &str = "schedule command evaluates inline code";
+const UNMODELED_OPTION: &str = "schedule command uses an unmodeled interpreter option";
+
+/// The closed argument grammar of an interpreter: anything outside it is
+/// unmodeled rather than skipped, since an option may stop file execution.
+struct Grammar {
+    /// Single-letter options without an operand; they may be combined.
+    flags: &'static str,
+    /// Single-letter options that evaluate their operand as code.
+    eval: &'static str,
+    /// Options taking exactly one operand word.
+    operand: &'static [&'static str],
+    /// Long options without an operand; a trailing `=` matches any value.
+    long: &'static [&'static str],
+    /// Long options that evaluate their operand as code.
+    eval_long: &'static [&'static str],
+}
+
+const PYTHON: Grammar = Grammar {
+    flags: "uBOsSEIqbdv",
+    eval: "c",
+    operand: &["-W", "-X"],
+    long: &[],
+    eval_long: &[],
+};
+const NODE: Grammar = Grammar {
+    flags: "",
+    eval: "ep",
+    operand: &[],
+    long: &[
+        "--enable-source-maps",
+        "--no-warnings",
+        "--no-deprecation",
+        "--trace-warnings",
+        "--max-old-space-size=",
+    ],
+    eval_long: &["--eval", "--print"],
+};
+const SHELL: Grammar = Grammar {
+    flags: "euxv",
+    eval: "c",
+    operand: &[],
+    long: &[],
+    eval_long: &[],
+};
+const RUBY: Grammar = Grammar {
+    flags: "w",
+    eval: "e",
+    operand: &[],
+    long: &[],
+    eval_long: &[],
+};
+const PERL: Grammar = Grammar {
+    flags: "w",
+    eval: "eE",
+    operand: &[],
+    long: &[],
+    eval_long: &[],
+};
+
+/// The script a command runs: `python[3[.x]] [options] path`,
+/// `python -m mod`, `node|bash|sh|ruby|perl [options] path`, or a path
+/// executed directly; otherwise why no script file is proven.
+fn script_of<'a>(words: &[&'a str]) -> Result<Script<'a>, &'static str> {
+    let (first, rest) = words.split_first().ok_or(NO_SCRIPT)?;
+    let program = first.rsplit('/').next().unwrap_or(first);
+    let python = program
+        .strip_prefix("python")
+        .is_some_and(|version| version.chars().all(|c| c.is_ascii_digit() || c == '.'));
+    let grammar = match program {
+        _ if python => &PYTHON,
+        "node" => &NODE,
+        "bash" | "sh" => &SHELL,
+        "ruby" => &RUBY,
+        "perl" => &PERL,
+        // A bare program name is looked up on PATH, not in the repository.
+        _ if first.contains('/') => return Ok(Script::Path(first)),
+        _ => return Err(NO_SCRIPT),
+    };
+    let mut args = rest.iter();
+    while let Some(arg) = args.next() {
+        match *arg {
+            "--" => return args.next().map(|path| Script::Path(path)).ok_or(NO_SCRIPT),
+            // `-` reads the program from standard input.
+            "-" => return Err(NO_SCRIPT),
+            "-m" if python => {
+                return args
+                    .next()
+                    .map(|module| Script::Module(module))
+                    .ok_or(NO_SCRIPT);
+            }
+            _ if arg.starts_with('+') => return Err(UNMODELED_OPTION),
+            _ if !arg.starts_with('-') => return Ok(Script::Path(arg)),
+            _ => {}
+        }
+        if grammar
+            .eval_long
+            .iter()
+            .any(|long| arg == long || arg.starts_with(&format!("{long}=")))
+        {
+            return Err(INLINE_CODE);
+        }
+        if grammar
+            .long
+            .iter()
+            .any(|long| arg == long || (long.ends_with('=') && arg.starts_with(long)))
+        {
+            continue;
+        }
+        if grammar.operand.contains(arg) {
+            args.next().ok_or(NO_SCRIPT)?;
+            continue;
+        }
+        let letters = arg
+            .strip_prefix('-')
+            .filter(|letters| !letters.starts_with('-'));
+        for letter in letters.ok_or(UNMODELED_OPTION)?.chars() {
+            if grammar.eval.contains(letter) {
+                return Err(INLINE_CODE);
+            }
+            if !grammar.flags.contains(letter) {
+                return Err(UNMODELED_OPTION);
+            }
+        }
+    }
+    Err(NO_SCRIPT)
+}
+
+/// A `Dockerfile` path as an absolute container path, relative ones joined
+/// to the working directory; `None` when it isn't a plain literal path.
+fn container_path(path: &str, workdir: Option<&(String, (u64, u64))>) -> Option<String> {
+    if path.contains(['"', '[', ']', '$', '*', '?']) {
+        return None;
+    }
+    if path.starts_with('/') {
+        return Some(normalize(path));
+    }
+    let (base, _) = workdir?;
+    Some(normalize(&format!("{base}/{path}")))
+}
+
+/// An absolute container path with `.`, `..` and repeated or trailing
+/// slashes resolved, so containment is a plain prefix test; `/` is `""`.
+fn normalize(absolute: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in absolute.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            _ => segments.push(segment),
+        }
+    }
+    segments
+        .iter()
+        .map(|segment| format!("/{segment}"))
+        .collect()
+}
+
+/// Logical `Dockerfile` instructions with their spans: continuation lines
+/// joined, comment and blank lines dropped.
+fn instructions(text: &str) -> Vec<((u64, u64), String)> {
+    let mut out = Vec::new();
+    let mut current: Option<(u64, String)> = None;
+    let mut offset = 0u64;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len() as u64;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let end = start + line.trim_end().len() as u64;
+        let (begin, mut body) = current.take().unwrap_or((start, String::new()));
+        match trimmed.strip_suffix('\\') {
+            Some(part) => {
+                body.push_str(part);
+                body.push(' ');
+                current = Some((begin, body));
+            }
+            None => {
+                body.push_str(trimmed);
+                out.push(((begin, end), body));
+            }
+        }
+    }
+    if let Some((begin, body)) = current {
+        out.push(((begin, offset), body));
+    }
+    out
+}
+
+/// The container directory the final stage copies the repository into, its
+/// final working directory and the later writes that may replace files.
+fn container_root(text: &str) -> Option<ContainerRoot> {
+    // A changed escape character or a heredoc changes how lines parse.
+    if text
+        .lines()
+        .any(|line| line.trim().to_ascii_lowercase().starts_with("# escape="))
+    {
+        return None;
+    }
+    let mut workdir: Option<(String, (u64, u64))> = None;
+    let mut found: Vec<ContainerRoot> = Vec::new();
+    let mut writes: Vec<(Option<String>, (u64, u64))> = Vec::new();
+    for (span, instruction) in instructions(text) {
+        if instruction.contains("<<") {
+            return None;
+        }
+        let mut words = instruction.split_whitespace();
+        let Some(keyword) = words.next() else {
+            continue;
+        };
+        let args: Vec<&str> = words.collect();
+        match keyword.to_ascii_uppercase().as_str() {
+            "FROM" => {
+                workdir = None;
+                found.clear();
+                writes.clear();
+            }
+            "WORKDIR" => {
+                workdir = match args.as_slice() {
+                    [dir] => container_path(dir, workdir.as_ref()).map(|dir| (dir, span)),
+                    _ => None,
+                };
+            }
+            "RUN" if !found.is_empty() => writes.push((None, span)),
+            "COPY" | "ADD" => {
+                let from = args.iter().any(|arg| arg.starts_with("--from"));
+                let paths: Vec<&str> = args
+                    .iter()
+                    .copied()
+                    .filter(|a| !a.starts_with("--"))
+                    .collect();
+                let destination = paths
+                    .last()
+                    .and_then(|dest| container_path(dest, workdir.as_ref()));
+                match (paths.as_slice(), destination) {
+                    ([".", _] | ["./", _], Some(dir)) if !from => {
+                        let mut spans: Vec<(u64, u64)> =
+                            workdir.iter().map(|(_, span)| *span).collect();
+                        spans.push(span);
+                        found.push(ContainerRoot {
+                            dir,
+                            spans,
+                            cwd: None,
+                            writes: Vec::new(),
+                        });
+                    }
+                    (_, destination) if !found.is_empty() => writes.push((destination, span)),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    // Two whole-repository copies in the final stage prove no single root.
+    match found.as_slice() {
+        [root] if !root.dir.is_empty() => Some(ContainerRoot {
+            cwd: workdir,
+            writes,
+            ..root.clone()
+        }),
+        _ => None,
+    }
+}
+
+/// Jobs of a yacron-format file: top-level `jobs` is a block sequence of
+/// mappings, at least one with a `schedule`. Anything else yields none.
+fn yacron_jobs(text: &str) -> Vec<Job> {
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_yaml::LANGUAGE.into())
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(text, None) else {
+        return Vec::new();
+    };
+    let root = tree.root_node();
+    if root.has_error() {
+        return Vec::new();
+    }
+    let Some(top) = first_mapping(root) else {
+        return Vec::new();
+    };
+    let Some(sequence) = pairs(top)
+        .into_iter()
+        .find(|(key, _)| scalar(text, *key).as_deref() == Some("jobs"))
+        .and_then(|(_, value)| descend(value, "block_sequence"))
+    else {
+        return Vec::new();
+    };
+    let mut walk = sequence.walk();
+    let items: Vec<TsNode> = sequence
+        .named_children(&mut walk)
+        .filter(|item| item.kind() == "block_sequence_item")
+        .collect();
+    let jobs: Vec<Job> = items
+        .into_iter()
+        .filter_map(|item| job(text, item))
+        .collect();
+    // A mapping without `schedule` is no job, unless a merge key or computed
+    // key could be hiding one: that stays a Gap rather than vanishing.
+    if jobs.iter().any(|job| job.schedule.is_some()) {
+        jobs.into_iter()
+            .filter(|job| job.schedule.is_some() || job.unreadable.is_some())
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn job(text: &str, item: TsNode) -> Option<Job> {
+    let mapping = descend(item, "block_mapping")?;
+    let mut fields: BTreeMap<String, TsNode> = BTreeMap::new();
+    let mut unreadable = None;
+    for (key, value) in pairs(mapping) {
+        match scalar(text, key) {
+            Some(name) if name == "<<" => unreadable = Some("schedule job uses a YAML merge key"),
+            Some(name) => {
+                fields.insert(name, value);
+            }
+            None => unreadable = Some("schedule job has a computed key"),
+        }
+    }
+    let field = |name: &str| fields.get(name).copied();
+    if [field("name"), field("command"), field("schedule")]
+        .into_iter()
+        .flatten()
+        .any(|value| contains_kind(value, &["alias", "anchor", "tag"]))
+    {
+        unreadable = Some("schedule job uses a YAML alias, anchor or tag");
+    }
+    let text_of = |node: TsNode| text[node.byte_range()].trim().to_string();
+    Some(Job {
+        name: field("name").and_then(|value| scalar(text, value)),
+        // A mapping schedule (`{minute: …}`) keeps its source text.
+        schedule: field("schedule")
+            .map(|value| scalar(text, value).unwrap_or_else(|| text_of(value))),
+        command: field("command").and_then(|value| scalar(text, value)),
+        span: (item.start_byte() as u64, item.end_byte() as u64),
+        unreadable,
+    })
+}
+
+fn first_mapping(node: TsNode) -> Option<TsNode> {
+    let mut walk = node.walk();
+    for child in node.named_children(&mut walk) {
+        match child.kind() {
+            "block_mapping" => return Some(child),
+            "document" | "block_node" | "stream" => {
+                if let Some(found) = first_mapping(child) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The first `kind` beneath `node` through `block_node` wrappers only.
+fn descend<'t>(node: TsNode<'t>, kind: &str) -> Option<TsNode<'t>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+    let mut walk = node.walk();
+    let children: Vec<TsNode<'t>> = node.named_children(&mut walk).collect();
+    children.into_iter().find_map(|child| match child.kind() {
+        k if k == kind => Some(child),
+        "block_node" => descend(child, kind),
+        _ => None,
+    })
+}
+
+fn pairs(mapping: TsNode) -> Vec<(TsNode, TsNode)> {
+    let mut walk = mapping.walk();
+    mapping
+        .named_children(&mut walk)
+        .filter(|pair| pair.kind() == "block_mapping_pair")
+        .filter_map(|pair| {
+            Some((
+                pair.child_by_field_name("key")?,
+                pair.child_by_field_name("value")?,
+            ))
+        })
+        .collect()
+}
+
+fn contains_kind(node: TsNode, kinds: &[&str]) -> bool {
+    if kinds.contains(&node.kind()) {
+        return true;
+    }
+    let mut walk = node.walk();
+    let children: Vec<TsNode> = node.named_children(&mut walk).collect();
+    children
+        .into_iter()
+        .any(|child| contains_kind(child, kinds))
+}
+
+/// A plain or quoted scalar's value; `None` for anything else, including a
+/// double-quoted scalar with escapes.
+fn scalar(text: &str, node: TsNode) -> Option<String> {
+    let mut node = node;
+    loop {
+        match node.kind() {
+            "flow_node" | "block_node" => {
+                let mut walk = node.walk();
+                let children: Vec<TsNode> = node.named_children(&mut walk).collect();
+                let [only] = children.as_slice() else {
+                    return None;
+                };
+                node = *only;
+            }
+            "plain_scalar" | "string_scalar" => {
+                return Some(text[node.byte_range()].trim().to_string());
+            }
+            "double_quote_scalar" => {
+                let raw = &text[node.byte_range()];
+                let inner = raw.strip_prefix('"')?.strip_suffix('"')?;
+                return (!inner.contains('\\')).then(|| inner.to_string());
+            }
+            "single_quote_scalar" => {
+                let raw = &text[node.byte_range()];
+                let inner = raw.strip_prefix('\'')?.strip_suffix('\'')?;
+                return Some(inner.replace("''", "'"));
+            }
+            _ => return None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

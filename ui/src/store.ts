@@ -118,6 +118,8 @@ export interface IngestSummary {
     webext: LayerSummary;
     /** Config-file evidence: Tool nodes + DEFINED_IN proofs (#215). */
     tools: LayerSummary;
+    /** Declared schedule files: Schedule triggers + ENTRY proofs (#770). */
+    schedules?: LayerSummary;
   };
   /**
    * A local or GitHub recovery's preflight report, reconciled with its AST
