@@ -751,7 +751,16 @@ fn finding_review_precoverage_upgrade_preserves_completed_history() {
         .collect();
     let path = fixture.directory.path().join("state.db");
     fixture.store = JobStore::open(&path).unwrap();
-    let upgraded = non_review_rows(&fixture.store);
+    let mut upgraded = non_review_rows(&fixture.store);
+    // The namespace migration adds one indexed scalar; all original task cells
+    // (including immutable record bytes and hash) must remain byte-for-byte.
+    for (name, rows) in &mut upgraded {
+        if name == "investigation_tasks" {
+            for row in rows {
+                assert_eq!(row.remove(3), rusqlite::types::Value::Text("app".into()));
+            }
+        }
+    }
     for old in originals {
         assert!(upgraded.contains(&old), "old table {} changed", old.0);
     }
@@ -760,7 +769,7 @@ fn finding_review_precoverage_upgrade_preserves_completed_history() {
         Some(result.clone())
     );
     let versions: (i64,i64) = fixture.store.conn.query_row("SELECT (SELECT version FROM investigation_meta),(SELECT version FROM investigation_coverage_meta)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
-    assert_eq!(versions, (2, 1));
+    assert_eq!(versions, (3, 1));
     let pending = fixture
         .store
         .investigation_finding_reviews(&id, &result.result_id)

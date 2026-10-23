@@ -76,7 +76,7 @@ fn extension_drop(connection: &Connection) {
 }
 
 fn legacy_layout(connection: &Connection) -> Vec<(String, String)> {
-    connection.prepare("SELECT name,sql FROM sqlite_schema WHERE (name GLOB 'investigation_*' OR tbl_name GLOB 'investigation_*') AND name NOT GLOB 'investigation_coverage_*' AND name NOT GLOB 'investigation_finding_*' AND name != 'investigation_meta' AND name NOT GLOB 'sqlite_*' ORDER BY name").unwrap()
+    connection.prepare("SELECT name,sql FROM sqlite_schema WHERE (name GLOB 'investigation_*' OR tbl_name GLOB 'investigation_*') AND name NOT GLOB 'investigation_coverage_*' AND name NOT GLOB 'investigation_finding_*' AND name != 'investigation_meta' AND name != 'investigation_tasks' AND name != 'investigation_mcp_clients' AND name NOT GLOB 'sqlite_*' ORDER BY name").unwrap()
         .query_map([],|row| Ok((row.get(0)?,row.get(1)?))).unwrap()
         .collect::<Result<_,_>>().unwrap()
 }
@@ -103,6 +103,13 @@ fn coverage_archive_migration_preserves_legacy_schema_and_records() {
     drop(store);
     let reopened = JobStore::open(&path).unwrap();
     assert_eq!(legacy_layout(&reopened.conn), before_layout);
+    let clients: i64 = reopened
+        .conn
+        .query_row("SELECT count(*) FROM investigation_mcp_clients", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(clients, 0, "migration must not invent client identities");
     let after: (Vec<u8>, String) = reopened
         .conn
         .query_row(
@@ -118,7 +125,7 @@ fn coverage_archive_migration_preserves_legacy_schema_and_records() {
         1
     );
     let versions: (i64,i64) = reopened.conn.query_row("SELECT (SELECT version FROM investigation_meta),(SELECT version FROM investigation_coverage_meta)",[],|row|Ok((row.get(0)?,row.get(1)?))).unwrap();
-    assert_eq!(versions, (2, 1));
+    assert_eq!(versions, (3, 1));
 }
 
 // AC-0239: partial, future or foreign layouts never get CREATE-repaired, and

@@ -142,7 +142,7 @@ fn read_reservation_production_preserves_original_coverage_migration_and_rejects
     assert!(
         legacy
             .iter()
-            .filter(|entry| entry.0 != "investigation_meta")
+            .filter(|entry| entry.0 != "investigation_meta" && entry.0 != "investigation_tasks")
             .all(|entry| migrated.contains(entry))
     );
     {
