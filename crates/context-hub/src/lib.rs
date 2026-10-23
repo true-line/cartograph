@@ -460,7 +460,7 @@ impl ContextSnapshot {
         for fact in selected.iter().skip(offset).take(request.max_facts) {
             response.facts.push((*fact).clone());
             response.next_cursor = cursor_at(offset + response.facts.len());
-            let bytes = serde_json::to_vec(&response)?.len();
+            let bytes = logical::encoded_size(&response)?;
             if bytes > request.max_bytes {
                 response.facts.pop();
                 if response.facts.is_empty() {
@@ -474,7 +474,7 @@ impl ContextSnapshot {
             }
         }
         // Empty selections and end-position cursors still have an envelope.
-        let bytes = serde_json::to_vec(&response)?.len();
+        let bytes = logical::encoded_size(&response)?;
         if bytes > request.max_bytes {
             return Err(ContextError::ResponseBudgetExceeded {
                 max_bytes: request.max_bytes,

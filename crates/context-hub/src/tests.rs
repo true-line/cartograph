@@ -665,3 +665,42 @@ fn typed_requests_and_responses_round_trip_delimiter_containing_identities() {
         neighborhood
     );
 }
+
+// #775: byte-budget admission and diagnostics retain exact serialization lengths.
+#[test]
+fn query_counting_keeps_exact_utf8_and_escaped_rejection_diagnostics() {
+    for text in ["é\n\"".repeat(1000), "\0".repeat(MAX_RESPONSE_BYTES / 5)] {
+        let snapshot =
+            ContextSnapshot::new(vec![node("a", "Rule", json!({"text":text}))], vec![]).unwrap();
+        let expected = QueryResponse {
+            snapshot_id: snapshot.id.clone(),
+            view: ContextView::RecoveredGraph,
+            total_selected: 1,
+            facts: snapshot.facts.clone(),
+            next_cursor: None,
+        };
+        let exact = serde_json::to_vec(&expected).unwrap().len();
+        let budget = exact.min(MAX_RESPONSE_BYTES);
+        if exact <= MAX_RESPONSE_BYTES {
+            assert_eq!(
+                serde_json::to_vec(
+                    &snapshot
+                        .query(QueryRequest {
+                            max_bytes: exact,
+                            ..Default::default()
+                        })
+                        .unwrap()
+                )
+                .unwrap()
+                .len(),
+                exact
+            );
+        }
+        let smaller = budget - 1;
+        assert!(
+            matches!(snapshot.query(QueryRequest { max_bytes: smaller, ..Default::default() }),
+            Err(ContextError::ResponseBudgetExceeded { max_bytes, required_bytes })
+                if max_bytes == smaller && required_bytes == exact)
+        );
+    }
+}
