@@ -83,9 +83,9 @@ struct Job {
     format: &'static str,
 }
 
-/// A scheduled entry's argument dispatch: the selected function, or why
-/// its options select none.
-type Dispatched = Result<dispatch::Dispatch, &'static str>;
+/// A scheduled entry's argument dispatch: the selected function with the
+/// repository file that defines it, or why its options select none.
+type Dispatched = Result<(dispatch::Dispatch, String), &'static str>;
 
 /// How a job's entry resolved.
 #[derive(Debug, Clone, PartialEq)]
@@ -127,20 +127,47 @@ pub fn extract_dir(
             return None;
         }
         let args = script_args(command)?;
-        let source = sources
-            .entry(rel.to_string())
-            .or_insert_with(|| std::fs::read_to_string(root.join(rel)).ok())
-            .as_deref();
-        let Some(source) = source else {
+        let mut read = |rel: &str| {
+            sources
+                .entry(rel.to_string())
+                .or_insert_with(|| std::fs::read_to_string(root.join(rel)).ok())
+                .clone()
+        };
+        let Some(source) = read(rel) else {
             return args
                 .iter()
                 .any(|arg| arg.starts_with('-'))
                 .then_some(Err(dispatch::UNPROVEN));
         };
-        Some(dispatch::dispatch(source, &args)?.and_then(|found| {
+        Some(dispatch::dispatch(&source, &args)?.and_then(|found| {
+            // `import argparse` / `asyncio` must load the standard library,
+            // not a repository module beside the script (#804 review).
+            let stdlib = ["argparse"]
+                .into_iter()
+                .chain(found.awaited.then_some("asyncio"));
+            if stdlib
+                .into_iter()
+                .any(|module| shadows(rel, module, &files))
+            {
+                return Err("standard-library module shadowed by a repository file");
+            }
+            // An imported function is the one its module file defines.
+            let file = match &found.import {
+                None => rel.to_string(),
+                Some((module, _)) => {
+                    let file = module_file(rel, module, &files)
+                        .ok_or("imported module is not one repository file")?;
+                    read(&file)
+                        .is_some_and(|text| {
+                            dispatch::defines(&text, &found.function, found.awaited)
+                        })
+                        .then_some(file)
+                        .ok_or("imported function is not one top-level def the call runs")?
+                }
+            };
             symbols
-                .contains(&format!("sym:{}@{rel}#{}", id.repo, found.function))
-                .then_some(found)
+                .contains(&format!("sym:{}@{file}#{}", id.repo, found.function))
+                .then_some((found, file))
                 .ok_or("dispatched function not emitted by the Python adapter")
         }))
     };
@@ -280,22 +307,28 @@ fn emit(
                 .as_deref()
                 .and_then(|command| dispatch_of(&entry_rel, command));
             let dst = match &dispatched {
-                Some(Ok(found)) => {
+                Some(Ok((found, file))) => {
                     spans.push(evidence(&entry_rel, found.span));
-                    format!("sym:{}@{entry_rel}#{}", id.repo, found.function)
+                    if let Some((_, span)) = &found.import {
+                        spans.push(evidence(&entry_rel, *span));
+                    }
+                    format!("sym:{}@{file}#{}", id.repo, found.function)
                 }
                 _ => file_id,
             };
             let identity = format!("{schedule_id} ENTRY {dst}");
             let mut props = serde_json::json!({ "command": job.command });
             let confidence = match dispatched {
-                Some(Ok(found)) => {
+                Some(Ok((found, file))) => {
                     props["dispatch"] = serde_json::json!({
                         "option": found.option,
                         "value": found.value,
                         "function": found.function,
-                        "file": entry_rel,
+                        "file": file,
                     });
+                    if let Some((module, _)) = found.import {
+                        props["dispatch"]["module"] = module.into();
+                    }
                     props["entry_argument_dispatch"] = true.into();
                     ConfidenceTier::InferredStrong
                 }
@@ -470,6 +503,48 @@ fn resolve_entry(
         };
     }
     Entry::Gap("schedule entry not found in source tree")
+}
+
+/// The one repository file `import <module>` loads from a script at `rel`,
+/// searched from the script's directory as Python's `sys.path[0]` is:
+/// `<module>.py` or `<module>/__init__.py`, with no package on the way
+/// shadowed by a same-named module file.
+fn module_file(rel: &str, module: &str, files: &BTreeSet<String>) -> Option<String> {
+    let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let join = |path: &str| {
+        if dir.is_empty() {
+            path.to_string()
+        } else {
+            format!("{dir}/{path}")
+        }
+    };
+    let parts: Vec<&str> = module.split('.').collect();
+    for depth in 1..parts.len() {
+        if files.contains(&join(&format!("{}.py", parts[..depth].join("/")))) {
+            return None;
+        }
+    }
+    let path = parts.join("/");
+    let found: Vec<String> = [format!("{path}.py"), format!("{path}/__init__.py")]
+        .iter()
+        .map(|candidate| join(candidate))
+        .filter(|candidate| files.contains(candidate))
+        .collect();
+    match <[String; 1]>::try_from(found) {
+        Ok([file]) => Some(file),
+        Err(_) => None,
+    }
+}
+
+/// Whether a repository module beside the script at `rel` takes precedence
+/// over the top-level module `module`, as `sys.path[0]` does.
+fn shadows(rel: &str, module: &str, files: &BTreeSet<String>) -> bool {
+    let dir = rel
+        .rsplit_once('/')
+        .map_or(String::new(), |(dir, _)| format!("{dir}/"));
+    [format!("{module}.py"), format!("{module}/__init__.py")]
+        .iter()
+        .any(|candidate| files.contains(&format!("{dir}{candidate}")))
 }
 
 /// The command's words after the script it runs.
