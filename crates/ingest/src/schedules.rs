@@ -1006,13 +1006,21 @@ fn cronjob_jobs(text: &str) -> Vec<Job> {
                         .map(|list| words(text, list))
                         .collect::<Option<Vec<Vec<String>>>>()
                     {
+                        // An empty `command` list leaves the image
+                        // entrypoint in place, as an absent one does; an
+                        // empty or spaced argument has no word-split form.
+                        Some(lists) if lists[0].is_empty() => {
+                            (None, Some("CronJob container runs its image entrypoint"))
+                        }
                         Some(lists) => {
                             let words = lists.concat();
-                            let spaced =
-                                words.iter().any(|word| word.contains(char::is_whitespace));
+                            let unsplittable = words
+                                .iter()
+                                .any(|word| word.is_empty() || word.contains(char::is_whitespace));
                             (
                                 Some(words.join(" ")),
-                                spaced.then_some("CronJob argument contains whitespace"),
+                                unsplittable
+                                    .then_some("CronJob argument is empty or contains whitespace"),
                             )
                         }
                         None => (

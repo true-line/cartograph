@@ -562,6 +562,13 @@ spec:
             - name: shell
               image: registry.example/app:1
               command: ["sh", "-c", "python cron.py && echo done"]
+            - name: empty-command
+              image: registry.example/app:1
+              command: []
+              args: ["python", "cron.py"]
+            - name: empty-argument
+              image: registry.example/app:1
+              command: ["python", "", "cron.py"]
             - name: elsewhere
               image: registry.example/app:1
               workingDir: /srv
@@ -607,7 +614,7 @@ spec:
         .iter()
         .filter(|n| n.label == "Schedule" && n.props["file"] == file)
         .collect();
-    assert_eq!(schedules.len(), 6);
+    assert_eq!(schedules.len(), 8);
     assert!(schedules.iter().all(|s| s.props["format"] == "kubernetes"));
     assert_eq!(schedules[0].props["name"], "stats/main");
     assert_eq!(schedules[0].props["schedule"], "0 * * * *");
@@ -615,8 +622,8 @@ spec:
         schedules[0].props["command"],
         "python /code/cron.py -j stats"
     );
-    assert_eq!(schedules[5].props["name"], "nightly");
-    assert_eq!(schedules[5].props["schedule"], "@daily");
+    assert_eq!(schedules[7].props["name"], "nightly");
+    assert_eq!(schedules[7].props["schedule"], "@daily");
 
     let main = entry(&out, 0, file);
     assert_eq!(main.dst, format!("file:{REPO}@cron.py"));
@@ -627,13 +634,15 @@ spec:
     assert_eq!(sidecar.dst, format!("file:{REPO}@jobs/cleanup.py"));
     assert_eq!(confidence(sidecar), "InferredStrong");
     assert_eq!(
-        entry(&out, 5, file).dst,
+        entry(&out, 7, file).dst,
         format!("file:{REPO}@app/tasks.py")
     );
     for (index, reason) in [
         (2, "CronJob container runs its image entrypoint"),
-        (3, "CronJob argument contains whitespace"),
-        (4, "CronJob container sets workingDir"),
+        (3, "CronJob argument is empty or contains whitespace"),
+        (4, "CronJob container runs its image entrypoint"),
+        (5, "CronJob argument is empty or contains whitespace"),
+        (6, "CronJob container sets workingDir"),
     ] {
         assert_eq!(entry(&out, index, file).props["reason"], reason, "{index}");
     }
