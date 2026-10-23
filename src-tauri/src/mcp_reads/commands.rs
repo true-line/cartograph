@@ -255,6 +255,25 @@ pub(crate) async fn mcp_reads_enable(
     }
 }
 
+/// Owner IPC only; new relay configuration is required after rotation.
+#[tauri::command]
+pub(crate) async fn mcp_reads_rotate(app: tauri::AppHandle) -> Result<(), CommandError> {
+    #[cfg(unix)]
+    {
+        let parent = runtime_parent(&app)?;
+        app.state::<super::service::Service>()
+            .rotate(app.clone(), &parent)
+            .await
+            .map(|_| ())
+            .map_err(|_| CommandError::Unavailable)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = app;
+        Err(CommandError::UnsupportedPlatform)
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn mcp_reads_disable(app: tauri::AppHandle) -> Result<(), CommandError> {
     #[cfg(unix)]

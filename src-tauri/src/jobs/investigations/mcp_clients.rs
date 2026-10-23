@@ -37,6 +37,22 @@ impl JobStore {
         Ok(client)
     }
 
+    /// Validate a host selection without loading registry pages or creating it.
+    pub(crate) fn mcp_client_exists(
+        &self,
+        client: &McpClientId,
+    ) -> Result<bool, InvestigationStoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let exists = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM investigation_mcp_clients WHERE id=?1)",
+            [client.as_str()],
+            |r| r.get(0),
+        )?;
+        tx.commit()?;
+        Ok(exists)
+    }
+
     /// Owner-only keyset page. Creation capacity does not limit reads of already
     /// admitted principals. No grant or credential is stored or returned.
     pub(crate) fn mcp_clients(

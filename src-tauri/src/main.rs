@@ -5874,6 +5874,7 @@ fn main() {
             mcp_reads::commands::mcp_task_clients,
             mcp_reads::commands::mcp_reads_enable,
             mcp_reads::commands::mcp_reads_disable,
+            mcp_reads::commands::mcp_reads_rotate,
             mcp_reads::commands::mcp_reads_client_configuration,
             mcp_reads::client_skill::mcp_reads_client_skill,
             primary_source::read_captured_source,
