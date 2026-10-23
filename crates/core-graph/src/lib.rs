@@ -299,6 +299,7 @@ impl SqliteGraphStore {
     /// [`Self::read_snapshot_rows`], including its test hook between nodes
     /// and edges.
     fn snapshot_matches(&self, expected: &(Vec<Node>, Vec<Edge>)) -> Result<bool, GraphError> {
+        let mut matches = true;
         {
             let mut stmt = self
                 .conn
@@ -306,20 +307,16 @@ impl SqliteGraphStore {
             let mut rows = stmt.query([])?;
             let mut expected_nodes = expected.0.iter();
             while let Some(row) = rows.next()? {
-                let Some(node) = expected_nodes.next() else {
-                    return Ok(false);
-                };
-                if row.get::<_, String>(0)? != node.id
-                    || row.get::<_, String>(1)? != node.label
-                    || serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(2)?)?
-                        != node.props
-                {
-                    return Ok(false);
-                }
+                // Every row is decoded even after a mismatch, so a corrupt
+                // row still surfaces as an error rather than a stale snapshot.
+                let id = row.get::<_, String>(0)?;
+                let label = row.get::<_, String>(1)?;
+                let props = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(2)?)?;
+                matches &= expected_nodes
+                    .next()
+                    .is_some_and(|n| id == n.id && label == n.label && props == n.props);
             }
-            if expected_nodes.next().is_some() {
-                return Ok(false);
-            }
+            matches &= expected_nodes.next().is_none();
         }
         #[cfg(any(test, feature = "test-support"))]
         {
@@ -334,19 +331,15 @@ impl SqliteGraphStore {
         let mut rows = stmt.query([])?;
         let mut expected_edges = expected.1.iter();
         while let Some(row) = rows.next()? {
-            let Some(edge) = expected_edges.next() else {
-                return Ok(false);
-            };
-            if row.get::<_, String>(0)? != edge.src
-                || row.get::<_, String>(1)? != edge.dst
-                || row.get::<_, String>(2)? != edge.label
-                || serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)?)?
-                    != edge.props
-            {
-                return Ok(false);
-            }
+            let src = row.get::<_, String>(0)?;
+            let dst = row.get::<_, String>(1)?;
+            let label = row.get::<_, String>(2)?;
+            let props = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)?)?;
+            matches &= expected_edges.next().is_some_and(|e| {
+                src == e.src && dst == e.dst && label == e.label && props == e.props
+            });
         }
-        Ok(expected_edges.next().is_none())
+        Ok(matches && expected_edges.next().is_none())
     }
 
     fn read_nodes(&self, labels: Option<&[&str]>) -> Result<Vec<Node>, GraphError> {
@@ -878,6 +871,32 @@ mod tests {
                     .unwrap()
             );
             assert!(writer.get_node("adr").unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn conditional_patch_reports_corrupt_rows_after_a_mismatch() {
+        // A stale earlier row must not hide a corrupt later node or edge.
+        for (table, key) in [("nodes", "id = 'b'"), ("edges", "src = 'b'")] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = SqliteGraphStore::open(dir.path().join("graph.db")).unwrap();
+            store.put_node(&node("a", "Symbol")).unwrap();
+            store.put_node(&node("b", "Symbol")).unwrap();
+            store.put_edge(&edge("b", "a", "CALLS")).unwrap();
+            let mut expected = store.read_snapshot().unwrap();
+            expected.0[0].label = "Stale".into();
+            store
+                .conn
+                .execute(
+                    &format!("UPDATE {table} SET props = 'invalid' WHERE {key}"),
+                    [],
+                )
+                .unwrap();
+            assert!(matches!(
+                store.apply_patch_if_snapshot_matches(&expected, &GraphPatch::default()),
+                Err(GraphError::Props(_))
+            ));
+            assert!(store.conn.is_autocommit());
         }
     }
 
