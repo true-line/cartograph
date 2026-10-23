@@ -255,6 +255,10 @@ fn later_writes_may_replace_the_copied_entry() {
     for (later, kept) in [
         ("COPY --from=builder /replacement /code/cron.py\n", false),
         ("COPY --from=npm /code /code\n", false),
+        ("COPY --from=other /code /tmp/../code\n", false),
+        ("COPY --from=other /out /code//./\n", false),
+        ("COPY --from=other /out static/../cron.py\n", false),
+        ("COPY --from=other /out /tmp/../codex\n", true),
         ("ADD build/ ./\n", false),
         ("COPY generated $DEST\n", false),
         ("RUN make\n", false),

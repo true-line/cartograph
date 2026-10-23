@@ -281,8 +281,8 @@ fn resolve_entry(
     for candidate in &candidates {
         let relative = candidate.trim_start_matches("./");
         let (absolute, cwd_span) = match (candidate.starts_with('/'), cwd) {
-            (true, _) => (candidate.clone(), None),
-            (false, Some((dir, span))) => (format!("{dir}/{relative}"), Some(*span)),
+            (true, _) => (normalize(candidate), None),
+            (false, Some((dir, span))) => (normalize(&format!("{dir}/{relative}")), Some(*span)),
             (false, None) => match exists(relative) {
                 Some(rel) => {
                     return Entry::File {
@@ -336,10 +336,8 @@ fn resolve_entry(
     }
     // A path no container mapping proves: a unique suffix only.
     let unmapped = match script {
-        Script::Path(path) if path.starts_with('/') => Some(path.to_string()),
-        Script::Path(path) => {
-            cwd.map(|(dir, _)| format!("{dir}/{}", path.trim_start_matches("./")))
-        }
+        Script::Path(path) if path.starts_with('/') => Some(normalize(path)),
+        Script::Path(path) => cwd.map(|(dir, _)| normalize(&format!("{dir}/{path}"))),
         Script::Module(_) => None,
     };
     if let Some(path) = unmapped {
@@ -504,17 +502,29 @@ fn container_path(path: &str, workdir: Option<&(String, (u64, u64))>) -> Option<
         return None;
     }
     if path.starts_with('/') {
-        return Some(path.trim_end_matches('/').to_string());
+        return Some(normalize(path));
     }
     let (base, _) = workdir?;
-    let relative = path.trim_start_matches("./").trim_end_matches('/');
-    if relative.split('/').any(|segment| segment == "..") {
-        return None;
+    Some(normalize(&format!("{base}/{path}")))
+}
+
+/// An absolute container path with `.`, `..` and repeated or trailing
+/// slashes resolved, so containment is a plain prefix test; `/` is `""`.
+fn normalize(absolute: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in absolute.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            _ => segments.push(segment),
+        }
     }
-    Some(match relative {
-        "" | "." => base.clone(),
-        _ => format!("{base}/{relative}"),
-    })
+    segments
+        .iter()
+        .map(|segment| format!("/{segment}"))
+        .collect()
 }
 
 /// Logical `Dockerfile` instructions with their spans: continuation lines
