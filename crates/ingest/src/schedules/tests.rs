@@ -3,6 +3,10 @@ use super::*;
 const REPO: &str = "local/app";
 
 fn extract(files: &[(&str, &str)]) -> ScheduleExtraction {
+    extract_with(files, &BTreeSet::new())
+}
+
+fn extract_with(files: &[(&str, &str)], symbols: &BTreeSet<String>) -> ScheduleExtraction {
     let dir = tempfile::tempdir().unwrap();
     for (path, body) in files {
         let path = dir.path().join(path);
@@ -15,6 +19,7 @@ fn extract(files: &[(&str, &str)]) -> ScheduleExtraction {
             repo: REPO,
             commit: "abc",
         },
+        symbols,
     )
     .unwrap()
 }
@@ -670,4 +675,298 @@ spec:
         entry(&bare, 1, file).props["entry_relative_to_repo_root"],
         true
     );
+}
+
+// #779: `python cron.py -j stats` runs one branch of the script's
+// `__main__` block. When the option, the parsed-args binding and a unique
+// literal comparison prove the branch, and its body makes one bare call to
+// a module-level function the adapter emitted, ENTRY enters that function
+// (InferredStrong, a static reading) and cites the branch; anything less
+// keeps the file and names why. (AC-0334, T-0334)
+#[test]
+fn argument_dispatch_enters_the_selected_function() {
+    let cron = r#"import argparse
+from app.jobs import imported_job
+
+
+def stats():
+    pass
+
+
+def notify():
+    pass
+
+
+def twice():
+    pass
+
+
+def twice():
+    pass
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-j", "--job", help="job", type=str)
+    parser.add_argument("--mode", dest="chosen")
+    args = parser.parse_args()
+    with open("x"):
+        if args.job == "stats":
+            LOG.d("Compute stats")
+            stats()
+        elif "notify" == args.job:
+            notify()
+        elif args.job == "both":
+            stats()
+            notify()
+        elif args.job == "imported":
+            imported_job()
+        elif args.job == "twice":
+            twice()
+        elif args.job == "dup":
+            stats()
+        elif args.job == "dup":
+            notify()
+    if args.chosen == "fast":
+        notify()
+"#;
+    let jobs = [
+        "python cron.py -j stats",
+        "python cron.py --job=notify",
+        "python cron.py --mode fast",
+        "python cron.py -j dup",
+        "python cron.py -j both",
+        "python cron.py -j imported",
+        "python cron.py -j twice",
+        "python cron.py -j missing",
+        "python cron.py -j stats --job notify",
+    ];
+    let yacron: String = std::iter::once("jobs:\n".to_string())
+        .chain(jobs.iter().map(|command| {
+            format!("  - name: {command}\n    command: {command}\n    schedule: \"0 0 * * *\"\n")
+        }))
+        .collect();
+    let symbols: BTreeSet<String> = ["stats", "notify", "twice", "imported_job"]
+        .iter()
+        .map(|name| format!("sym:{REPO}@cron.py#{name}"))
+        .collect();
+    let out = extract_with(&[("cron.py", cron), ("cron.yaml", &yacron)], &symbols);
+    let stats = entry(&out, 0, "cron.yaml");
+    assert_eq!(stats.dst, format!("sym:{REPO}@cron.py#stats"));
+    assert_eq!(confidence(stats), "InferredStrong");
+    assert_eq!(stats.props["entry_argument_dispatch"], true);
+    assert_eq!(
+        stats.props["dispatch"],
+        serde_json::json!({"option": "-j", "value": "stats", "function": "stats", "file": "cron.py"})
+    );
+    let branch = &stats.props["prov"]["evidence"][1];
+    assert_eq!(branch["path"], "cron.py");
+    let start = branch["byte_start"].as_u64().unwrap() as usize;
+    assert!(cron[start..].starts_with("if args.job == \"stats\":"));
+    assert_eq!(
+        entry(&out, 1, "cron.yaml").dst,
+        format!("sym:{REPO}@cron.py#notify")
+    );
+    assert_eq!(
+        entry(&out, 2, "cron.yaml").dst,
+        format!("sym:{REPO}@cron.py#notify")
+    );
+    // In one `if`/`elif` chain the first matching clause wins.
+    assert_eq!(
+        entry(&out, 3, "cron.yaml").dst,
+        format!("sym:{REPO}@cron.py#stats")
+    );
+    for (index, job) in jobs.iter().enumerate().skip(4) {
+        let edge = entry(&out, index, "cron.yaml");
+        assert_eq!(edge.dst, format!("file:{REPO}@cron.py"), "{job}");
+        assert!(edge.props.get("dispatch").is_none(), "{job}");
+        let reason = if job.contains("--job notify") {
+            dispatch::AMBIGUOUS
+        } else {
+            dispatch::UNPROVEN
+        };
+        assert_eq!(edge.props["dispatch_unresolved"], reason, "{job}");
+    }
+
+    // Value-changing declarations, a chain off the straight-line path or
+    // behind an unrelated clause, a write to the parsed arguments, and a
+    // rebound or decorated function each prove no dispatch for `-j stats`.
+    for (from, to) in [
+        ("help=\"job\", type=str)", "type=str.upper)"),
+        ("help=\"job\", type=str)", "nargs=1)"),
+        ("help=\"job\", type=str)", "action=\"append\")"),
+        ("help=\"job\", type=str)", "choices=[\"notify\"])"),
+        ("    with open(\"x\"):\n", "    if False:\n"),
+        ("    with open(\"x\"):\n", "    for _ in range(1):\n"),
+        (
+            "        if args.job == \"stats\":",
+            "        if args.chosen:\n            pass\n        elif args.job == \"stats\":",
+        ),
+        (
+            "    args = parser.parse_args()\n",
+            "    args = parser.parse_args()\n    args.job = \"other\"\n",
+        ),
+        (
+            "    args = parser.parse_args()\n",
+            "    args = parser.parse_args()\n    tweak(args)\n",
+        ),
+        ("\nif __name__", "\nstats = notify\n\nif __name__"),
+        ("\ndef stats():", "\n@decorated\ndef stats():"),
+        (
+            "from app.jobs import imported_job",
+            "from app.jobs import imported_job as stats",
+        ),
+        (
+            "    args = parser.parse_args()\n",
+            "    args = parser.parse_args()\n    parser.add_argument(\"-j\")\n",
+        ),
+        // The parser, its constructor and the converter must be the real
+        // ones; the selected def must have run before the guard.
+        (
+            "    args = parser.parse_args()\n",
+            "    parser = argparse.ArgumentParser()\n    args = parser.parse_args()\n",
+        ),
+        (
+            "    args = parser.parse_args()\n",
+            "    configure(parser)\n    args = parser.parse_args()\n",
+        ),
+        ("argparse.ArgumentParser()", "make_parser()"),
+        ("import argparse\n", "from helpers import argparse\n"),
+        ("import argparse\n", "if False:\n    import argparse\n"),
+        // An exception alias binds the name and then deletes it; an import
+        // binds its top-level package (#796 review).
+        (
+            "\nif __name__",
+            "\ntry:\n    pass\nexcept Exception as stats:\n    pass\n\nif __name__",
+        ),
+        ("import argparse\n", "import argparse\nimport stats.tools\n"),
+        (
+            "    parser = argparse.ArgumentParser()\n",
+            "    if args_ready:\n        parser = argparse.ArgumentParser()\n",
+        ),
+        (
+            "import argparse\n",
+            "import argparse\nfrom helpers import *\n",
+        ),
+        (
+            "\nif __name__",
+            "\nstr = lambda value: \"other\"\n\nif __name__",
+        ),
+        (
+            "\ndef stats():\n    pass\n",
+            "\nif False:\n    def stats():\n        pass\n",
+        ),
+    ] {
+        assert!(cron.contains(from), "{from}");
+        let variant = cron.replacen(from, to, 1);
+        let out = extract_with(&[("cron.py", &variant), ("cron.yaml", &yacron)], &symbols);
+        let edge = entry(&out, 0, "cron.yaml");
+        assert_eq!(edge.dst, format!("file:{REPO}@cron.py"), "{to}");
+        assert_eq!(
+            edge.props["dispatch_unresolved"],
+            dispatch::UNPROVEN,
+            "{to}"
+        );
+    }
+    // The declaration must precede the parse that reads it.
+    let declaration = "    parser.add_argument(\"-j\", \"--job\", help=\"job\", type=str)\n";
+    let late = cron.replacen(declaration, "", 1).replacen(
+        "    args = parser.parse_args()\n",
+        &format!("    args = parser.parse_args()\n{declaration}"),
+        1,
+    );
+    assert_ne!(late, cron);
+    let out = extract_with(&[("cron.py", &late), ("cron.yaml", &yacron)], &symbols);
+    assert_eq!(
+        entry(&out, 0, "cron.yaml").dst,
+        format!("file:{REPO}@cron.py")
+    );
+
+    // A def or import after the guard is not bound when the block runs.
+    for late in ["\ndef stats():\n    pass\n", "import argparse\n"] {
+        let after = format!("{}\n{late}", cron.replacen(late, "", 1));
+        assert_ne!(after, format!("{cron}\n{late}"));
+        let out = extract_with(&[("cron.py", &after), ("cron.yaml", &yacron)], &symbols);
+        assert_eq!(
+            entry(&out, 0, "cron.yaml").dst,
+            format!("file:{REPO}@cron.py"),
+            "{late}"
+        );
+    }
+
+    // A read of the arguments before they are bound fails at run time.
+    let early = cron.replacen(
+        "    args = parser.parse_args()\n",
+        "    print(args.job)\n    args = parser.parse_args()\n",
+        1,
+    );
+    let out = extract_with(&[("cron.py", &early), ("cron.yaml", &yacron)], &symbols);
+    assert_eq!(
+        entry(&out, 0, "cron.yaml").dst,
+        format!("file:{REPO}@cron.py")
+    );
+
+    // Value-preserving keywords and argparse's default dest still prove it,
+    // and so does an import that only reads a module named like the function.
+    for (from, to) in [
+        (
+            "import argparse\n",
+            "import argparse\nfrom app.stats import helper\nimport stats_lib as other\n",
+        ),
+        (
+            "help=\"job\", type=str)",
+            "choices=[\"stats\", \"notify\"], action=\"store\")",
+        ),
+        (
+            "\"-j\", \"--job\", help=\"job\", type=str)",
+            "\"--job\", \"-j\", required=True)",
+        ),
+    ] {
+        assert!(cron.contains(from), "{from}");
+        let variant = cron.replacen(from, to, 1);
+        let out = extract_with(&[("cron.py", &variant), ("cron.yaml", &yacron)], &symbols);
+        assert_eq!(
+            entry(&out, 0, "cron.yaml").dst,
+            format!("sym:{REPO}@cron.py#stats"),
+            "{to}"
+        );
+    }
+
+    // A function the adapter did not emit keeps the file, and so does a
+    // script without the `__main__` guard; each names why.
+    let out = extract_with(
+        &[("cron.py", cron), ("cron.yaml", &yacron)],
+        &BTreeSet::new(),
+    );
+    let unemitted = entry(&out, 0, "cron.yaml");
+    assert_eq!(unemitted.dst, format!("file:{REPO}@cron.py"));
+    assert_eq!(
+        unemitted.props["dispatch_unresolved"],
+        "dispatched function not emitted by the Python adapter"
+    );
+    let unguarded = cron.replace("if __name__ == \"__main__\":", "if True:");
+    let out = extract_with(&[("cron.py", &unguarded), ("cron.yaml", &yacron)], &symbols);
+    let unguarded = entry(&out, 0, "cron.yaml");
+    assert_eq!(unguarded.dst, format!("file:{REPO}@cron.py"));
+    assert_eq!(unguarded.props["dispatch_unresolved"], dispatch::UNPROVEN);
+    // Behind a Dockerfile the file entry is Confirmed; the dispatch onto a
+    // function stays a static reading.
+    let docked = "jobs:\n  - name: D\n    command: python /code/cron.py -j stats\n    schedule: \"0 0 * * *\"\n  - name: F\n    command: python /code/cron.py\n    schedule: \"0 0 * * *\"\n";
+    let out = extract_with(
+        &[
+            ("Dockerfile", DOCKERFILE),
+            ("cron.py", cron),
+            ("cron.yaml", docked),
+        ],
+        &symbols,
+    );
+    assert_eq!(confidence(entry(&out, 0, "cron.yaml")), "InferredStrong");
+    assert_eq!(confidence(entry(&out, 1, "cron.yaml")), "Confirmed");
+    // A command passing no option makes no dispatch claim at all.
+    let plain = "jobs:\n  - name: P\n    command: python cron.py\n    schedule: \"0 0 * * *\"\n";
+    let out = extract_with(&[("cron.py", cron), ("cron.yaml", plain)], &symbols);
+    let plain = entry(&out, 0, "cron.yaml");
+    assert_eq!(plain.dst, format!("file:{REPO}@cron.py"));
+    assert!(plain.props.get("dispatch_unresolved").is_none());
+    assert!(plain.props.get("entry_argument_dispatch").is_none());
 }

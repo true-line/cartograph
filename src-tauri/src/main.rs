@@ -1747,12 +1747,19 @@ fn extract_tree_with_registries(
         extraction.edges.extend(tool_facts.edges);
     }
     // Scheduled jobs (#770): declared schedule files become Schedule flow
-    // triggers with an ENTRY into the file each job runs. An adapter's File
-    // node for that file supersedes the schedule reader's.
+    // triggers with an ENTRY into the file each job runs, or into the
+    // adapter's function a proven argument dispatch selects (#779). An
+    // adapter's File node for that file supersedes the schedule reader's.
     {
         let schedule_id = ingest::schedules::SourceId { repo, commit };
-        let schedule_facts =
-            ingest::schedules::extract_dir(root, &schedule_id).map_err(|e| e.to_string())?;
+        let symbols: std::collections::BTreeSet<String> = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Symbol" && node.props.get("placeholder").is_none())
+            .map(|node| node.id.clone())
+            .collect();
+        let schedule_facts = ingest::schedules::extract_dir(root, &schedule_id, &symbols)
+            .map_err(|e| e.to_string())?;
         layers.schedules = LayerSummary {
             files: schedule_facts.files,
             nodes: distinct_node_count(&schedule_facts.nodes),

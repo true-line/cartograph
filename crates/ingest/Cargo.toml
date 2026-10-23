@@ -22,6 +22,8 @@ toml = "1.1"
 # Span-preserving YAML for declared schedule files (#770).
 tree-sitter = "0.27"
 tree-sitter-yaml = "0.7"
+# The `__main__` argument dispatch of a scheduled Python entry (#779).
+tree-sitter-python = "0.25"
 url = "2"
 dunce = "1"
 # Anchored no-follow reads of declared API docs, as in source-capture.
