@@ -800,7 +800,12 @@ fn extract_file(
         };
         let value = match &client.identity {
             None => None,
-            Some(IdentityArg::First) => first,
+            Some(IdentityArg::First) => first.or_else(|| {
+                client
+                    .keyword
+                    .as_deref()
+                    .and_then(|key| keyword(&cx, args, key))
+            }),
             Some(IdentityArg::Key(key)) => keyword(&cx, args, key),
         };
         let identity = value.map(|value| classify(&cx, root, value, &scope, true));

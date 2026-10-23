@@ -272,6 +272,10 @@ pub struct ObservedClient {
     pub form: ClientForm,
     /// Where the instance identity lives, if the client declares one.
     pub identity: Option<IdentityArg>,
+    /// For a `pypi` client whose identity is the first argument: that
+    /// parameter's name, so a call passing it by keyword (`uri=…`) names
+    /// the instance too.
+    pub keyword: Option<String>,
     /// The literal first argument the call must carry, if any.
     pub select: Option<ClientSelect>,
     /// The file that declared this entry.
@@ -290,6 +294,8 @@ struct ClientEntry {
     form: ClientForm,
     #[serde(default)]
     identity: Option<IdentityArg>,
+    #[serde(default)]
+    keyword: Option<String>,
     #[serde(default)]
     select: Option<ClientSelect>,
 }
@@ -549,6 +555,12 @@ impl Registries {
                 Some(IdentityArg::Key(key)) => valid_name(key),
                 Some(IdentityArg::First) | None => true,
             };
+            // A keyword spelling only exists for a Python first argument.
+            let keyword_valid = client.keyword.as_ref().is_none_or(|keyword| {
+                client.ecosystem == Ecosystem::Pypi
+                    && client.identity == Some(IdentityArg::First)
+                    && valid_name(keyword)
+            });
             let select_valid = client
                 .select
                 .as_ref()
@@ -557,6 +569,7 @@ impl Registries {
                 || !valid_name(&client.module)
                 || !valid_name(&client.export)
                 || !identity_valid
+                || !keyword_valid
                 || !select_valid
             {
                 return Err(format!("invalid client entry for {:?}", client.provider));
@@ -581,6 +594,7 @@ impl Registries {
                 export: client.export,
                 form: client.form,
                 identity: client.identity,
+                keyword: client.keyword,
                 select: client.select,
                 registry: registry.clone(),
             });
@@ -767,7 +781,8 @@ mod tests {
     // AC-0318: a Python client is registry data too: `pypi` entries name a
     // dotted module, and a factory that names its service (`boto3.client`)
     // is told apart by a literal first argument, so one export may carry
-    // one entry per service but never two for the same one. (T-0318)
+    // one entry per service but never two for the same one; only a Python
+    // first-argument identity has a keyword spelling. (T-0318)
     #[test]
     fn python_clients_carry_their_ecosystem_and_service_selector() {
         let builtin = Registries::builtin();
@@ -798,7 +813,30 @@ mod tests {
         let ec2 = Registries::layered(&[file("ec2.json", &entry(r#","select":{"first":"ec2"}"#))]);
         assert!(ec2.rejected.is_empty(), "{:?}", ec2.rejected);
         assert_eq!(ec2.clients.len(), builtin.clients.len() + 1);
+        // A Python first-argument identity may name its keyword spelling.
+        let keyed = Registries::layered(&[file(
+            "keyed.json",
+            &entry(r#","identity":"first","keyword":"endpoint_url""#),
+        )]);
+        assert!(keyed.rejected.is_empty(), "{:?}", keyed.rejected);
+        assert_eq!(
+            keyed.clients.last().unwrap().keyword.as_deref(),
+            Some("endpoint_url")
+        );
         for (name, json) in [
+            ("keyword-alone.json", entry(r#","keyword":"uri""#)),
+            (
+                "keyword-key.json",
+                entry(r#","identity":{"key":"host"},"keyword":"uri""#),
+            ),
+            (
+                "keyword-empty.json",
+                entry(r#","identity":"first","keyword":"""#),
+            ),
+            (
+                "keyword-npm.json",
+                entry(r#","identity":"first","keyword":"uri""#).replace("pypi", "npm"),
+            ),
             ("same-service.json", entry(r#","select":{"first":"s3"}"#)),
             ("bad-select.json", entry(r#","select":{"first":""}"#)),
             ("select-key.json", entry(r#","select":{"second":"ec2"}"#)),

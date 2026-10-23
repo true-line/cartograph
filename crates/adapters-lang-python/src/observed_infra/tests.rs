@@ -270,13 +270,15 @@ shadowed = create_engine(DB)
 }
 
 // AC-0318: Redis reached through the `limits` rate-limit storage is the same
-// `redis` resource, under either import form; a URL passed in is a Gap
-// naming the site. (T-0318)
+// `redis` resource, under either import form and with its URI passed by
+// position or as `uri=`; a URL passed in is a Gap naming the site, and any
+// other keyword names no instance. (T-0318)
 #[test]
 fn limits_redis_storage_is_observed_redis() {
-    let (nodes, edges) = extract(&[(
-        "app/redis_services.py",
-        r#"
+    let (nodes, edges) = extract(&[
+        (
+            "app/redis_services.py",
+            r#"
 import limits.storage
 from limits.storage import RedisSentinelStorage, RedisClusterStorage
 
@@ -289,15 +291,33 @@ def sentinel():
 def cluster():
     return RedisClusterStorage("redis+cluster://user:pw@cluster.internal:7000")
 
+def keyed():
+    return limits.storage.RedisStorage(uri="redis://keyed.internal:6379/0")
+
+def other_keyword():
+    return limits.storage.RedisStorage(options={"uri": "redis://ignored.internal"})
+
 memory = limits.storage.MemoryStorage()
 "#,
-    )]);
+        ),
+        (
+            "app/keyed.py",
+            "import os\nimport smtplib\nfrom sqlalchemy import create_engine\nsmtplib.SMTP(host=\"mail.keyed\")\ncreate_engine(url=os.environ[\"KEYED_DB\"])\n",
+        ),
+    ]);
+    // The keyword spelling holds for every Python first-argument client.
+    assert_eq!(
+        uses(&edges, "keyed.py"),
+        vec![res("smtp:mail.keyed"), res("sql-database:env:KEYED_DB")]
+    );
     assert_eq!(
         uses(&edges, "redis_services.py"),
         vec![
             format!("gap:observed:{REPO}@app/redis_services.py@131"),
+            res("redis"),
             res("redis:redis+cluster://cluster.internal:7000"),
             res("redis:redis+sentinel://sentinel.internal:26379"),
+            res("redis:redis://keyed.internal:6379"),
         ]
     );
     let gaps: Vec<&Node> = nodes.iter().filter(|n| n.label == "Gap").collect();
