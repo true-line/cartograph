@@ -6,9 +6,18 @@ fn validate_targets<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &AppState,
     request: &StagedObligationRequest,
+    scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
 ) -> Result<Vec<RetentionGuard>, String> {
     // Refuse an impossible obligation before any durable start/provider lookup.
-    super::super::completion_choices::validate_request(app, state, request)?;
+    match scope_limits {
+        Some(limits) => super::super::completion_choices::validate_request_with_scope(
+            app,
+            state,
+            request,
+            Some(limits),
+        ),
+        None => super::super::completion_choices::validate_request(app, state, request),
+    }?;
     let policy = InvestigationPolicy::for_profile(&request.limit_profile)
         .ok_or_else(|| "Unknown investigation policy.".to_owned())?;
     let mut guards = Vec::new();
@@ -77,7 +86,7 @@ pub(super) fn start_access<R: tauri::Runtime>(
             "This specialist version is not available.",
         ));
     }
-    let _guards = match validate_targets(&app, &state, &request) {
+    let _guards = match validate_targets(&app, &state, &request, scope_limits) {
         Ok(guards) => guards,
         Err(error) => {
             if let Some(prior) = existing()? {

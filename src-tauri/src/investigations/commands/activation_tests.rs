@@ -174,6 +174,35 @@ fn completion_replay(mcp: bool) {
                 mcp.then(|| crate::mcp_reads::worker::tests::limits().scope),
             )
         };
+        let mut refused_limits = crate::mcp_reads::worker::tests::limits().scope;
+        refused_limits.max_source_registry_bytes = std::num::NonZeroUsize::new(1).unwrap();
+        if mcp {
+            // AC-0327: refuse discovery before durable admission or provider lookup.
+            let profiles = provider.profiles.load(Ordering::SeqCst);
+            let error = completion_start::start_access(
+                request.clone(),
+                app.clone(),
+                Instant::now(),
+                session.as_ref(),
+                Some(refused_limits),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, InvestigationStartError::Rejected { code: "refresh_required", message, .. }
+                if message == crate::mcp_reads::ReadError::Limit.to_string())
+            );
+            assert!(
+                state
+                    .jobs
+                    .lock()
+                    .unwrap()
+                    .existing_investigation_completion_access(&request, session.as_ref())
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        }
         let started = start(request.clone()).unwrap();
         let saved = finished(app, &started.investigation_id);
         assert_eq!(
@@ -218,7 +247,19 @@ fn completion_replay(mcp: bool) {
             .unwrap();
         provider.available.store(false, Ordering::SeqCst);
         let profiles = provider.profiles.load(Ordering::SeqCst);
-        let recovered = start(request.clone()).unwrap();
+        // AC-0322: durable replay still wins over later tighter discovery caps.
+        let recovered = if mcp {
+            completion_start::start_access(
+                request.clone(),
+                app.clone(),
+                Instant::now(),
+                session.as_ref(),
+                Some(refused_limits),
+            )
+            .unwrap()
+        } else {
+            start(request.clone()).unwrap()
+        };
         assert_eq!(recovered, saved.summary);
         assert_eq!(detail(app, &started.investigation_id), saved);
         assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);

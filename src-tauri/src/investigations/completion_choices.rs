@@ -168,7 +168,21 @@ fn current_choices<R: tauri::Runtime>(
     state: &AppState,
     scope: &InvestigationScope,
 ) -> Result<ObligationChoices, String> {
-    let before = crate::context::coverage_scope(app, state)?;
+    current_choices_with_scope(app, state, scope, None)
+}
+
+fn current_choices_with_scope<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    scope: &InvestigationScope,
+    limits: Option<crate::mcp_reads::scope::ScopeLimits>,
+) -> Result<ObligationChoices, String> {
+    let read_scope = || match limits {
+        Some(limits) => crate::mcp_reads::scope::coverage_scope(app, state, limits)
+            .map_err(|error| error.to_string()),
+        None => crate::context::coverage_scope(app, state),
+    };
+    let before = read_scope()?;
     let (graph, recorded) = state
         .graph
         .lock()
@@ -178,7 +192,7 @@ fn current_choices<R: tauri::Runtime>(
             CoverageReadLimits::default(),
         )
         .map_err(|error| error.to_string())?;
-    let stable = crate::context::stable_scope(&before, crate::context::coverage_scope(app, state)?);
+    let stable = crate::context::stable_scope(&before, read_scope()?);
     let coverage =
         CoverageQualification::new(&stable, &recorded).map_err(|error| error.to_string())?;
     choices(graph, coverage, scope)
@@ -214,7 +228,16 @@ pub(super) fn validate_request<R: tauri::Runtime>(
     state: &AppState,
     request: &agents::investigation::StagedObligationRequest,
 ) -> Result<(), String> {
-    let current = current_choices(app, state, &request.scope)?;
+    validate_request_with_scope(app, state, request, None)
+}
+
+pub(super) fn validate_request_with_scope<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    request: &agents::investigation::StagedObligationRequest,
+    limits: Option<crate::mcp_reads::scope::ScopeLimits>,
+) -> Result<(), String> {
+    let current = current_choices_with_scope(app, state, &request.scope, limits)?;
     validate_selection(&current, request)
 }
 
