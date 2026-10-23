@@ -110,3 +110,48 @@ fn task_origin_namespace_rejects_invalid_intent_pairings() {
         );
     }
 }
+
+// AC-0322: the added three-byte App namespace charge cannot gate saved reads
+// or same-intent retries. This is an accounting fixture: SQLite creates opaque
+// event padding; the test does not claim that padding is executable history.
+#[test]
+fn task_origin_namespace_over_capacity_keeps_reads_and_retries() {
+    let mut fixture = Fixture::new();
+    let nonce = "namespace-capacity-retry";
+    let (id, _) = fixture.start(nonce, InvestigationProviderMode::Local);
+    let before = fixture.store.investigation(&id).unwrap();
+    let occupied = storage::stored_bytes(&fixture.store.conn, None).unwrap();
+    // A store exactly at the old ceiling becomes three bytes over when the
+    // one existing App task's namespace is charged. No policy is increased.
+    let padding = STORE_CAPACITY + 3 - occupied - 64 - 256;
+    fixture
+        .store
+        .conn
+        .execute(
+            "INSERT INTO investigation_events VALUES (?1,999,zeroblob(?2),?3)",
+            params![id, i64::try_from(padding).unwrap(), "0".repeat(64)],
+        )
+        .unwrap();
+    assert_eq!(
+        storage::stored_bytes(&fixture.store.conn, None).unwrap(),
+        STORE_CAPACITY + 3
+    );
+    assert_eq!(fixture.store.investigation(&id).unwrap(), before);
+    let requested = request(nonce, InvestigationProviderMode::Local);
+    assert_eq!(
+        fixture.store.existing_investigation(&requested).unwrap(),
+        Some(before.clone())
+    );
+    let retry = fixture.store.start_investigation(&requested, None).unwrap();
+    assert!(!retry.created);
+    assert_eq!(retry.detail, before);
+    let fresh = request("namespace-capacity-new", InvestigationProviderMode::Local);
+    assert_eq!(
+        fixture
+            .store
+            .start_investigation(&fresh, Some(&provider(InvestigationProviderMode::Local)))
+            .unwrap_err(),
+        InvestigationStoreError::Capacity
+    );
+    assert_eq!(fixture.store.investigation(&id).unwrap(), before);
+}
