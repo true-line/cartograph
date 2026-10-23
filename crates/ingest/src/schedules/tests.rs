@@ -820,6 +820,35 @@ if __name__ == "__main__":
             "    args = parser.parse_args()\n",
             "    args = parser.parse_args()\n    parser.add_argument(\"-j\")\n",
         ),
+        // The parser, its constructor and the converter must be the real
+        // ones; the selected def must have run before the guard.
+        (
+            "    args = parser.parse_args()\n",
+            "    parser = argparse.ArgumentParser()\n    args = parser.parse_args()\n",
+        ),
+        (
+            "    args = parser.parse_args()\n",
+            "    configure(parser)\n    args = parser.parse_args()\n",
+        ),
+        ("argparse.ArgumentParser()", "make_parser()"),
+        ("import argparse\n", "from helpers import argparse\n"),
+        ("import argparse\n", "if False:\n    import argparse\n"),
+        (
+            "    parser = argparse.ArgumentParser()\n",
+            "    if args_ready:\n        parser = argparse.ArgumentParser()\n",
+        ),
+        (
+            "import argparse\n",
+            "import argparse\nfrom helpers import *\n",
+        ),
+        (
+            "\nif __name__",
+            "\nstr = lambda value: \"other\"\n\nif __name__",
+        ),
+        (
+            "\ndef stats():\n    pass\n",
+            "\nif False:\n    def stats():\n        pass\n",
+        ),
     ] {
         assert!(cron.contains(from), "{from}");
         let variant = cron.replacen(from, to, 1);
@@ -845,6 +874,18 @@ if __name__ == "__main__":
         entry(&out, 0, "cron.yaml").dst,
         format!("file:{REPO}@cron.py")
     );
+
+    // A def or import after the guard is not bound when the block runs.
+    for late in ["\ndef stats():\n    pass\n", "import argparse\n"] {
+        let after = format!("{}\n{late}", cron.replacen(late, "", 1));
+        assert_ne!(after, format!("{cron}\n{late}"));
+        let out = extract_with(&[("cron.py", &after), ("cron.yaml", &yacron)], &symbols);
+        assert_eq!(
+            entry(&out, 0, "cron.yaml").dst,
+            format!("file:{REPO}@cron.py"),
+            "{late}"
+        );
+    }
 
     // A read of the arguments before they are bound fails at run time.
     let early = cron.replacen(

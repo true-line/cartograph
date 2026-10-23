@@ -3,9 +3,12 @@
 //! block, not the whole file. The branch is proven only when, inside
 //! `if __name__ == "__main__":`,
 //!
-//! - one `<parser>.add_argument(...)` declares the option the command
-//!   passes (literal option strings; `dest=`, else argparse's default,
-//!   names the attribute), with only value-preserving keywords;
+//! - `<parser> = argparse.ArgumentParser(...)`, with `import argparse` the
+//!   module's only binding of `argparse`, is the module's only binding of
+//!   `<parser>`, which the block then only reads as attributes;
+//! - after it, one `<parser>.add_argument(...)` declares the option the
+//!   command passes (literal option strings; `dest=`, else argparse's
+//!   default, names the attribute), with only value-preserving keywords;
 //! - after it, `<args> = <parser>.parse_args()` binds the parsed arguments,
 //!   which the block then only reads as attributes;
 //! - after that, one `if`/`elif` chain tests `<args>.<dest>`, every clause
@@ -13,7 +16,7 @@
 //!   run in order on the block's straight-line path (entering `with`
 //!   bodies only); and
 //! - the selected branch makes exactly one bare call to a name bound once
-//!   in module scope, by an undecorated `def`.
+//!   in module scope, by an undecorated top-level `def` before the guard.
 //!
 //! Anything else proves no dispatch: the entry stays the file, and the
 //! `ENTRY` names why (`dispatch_unresolved`).
@@ -96,7 +99,32 @@ fn proven(source: &str, option: String, value: String) -> Option<Dispatch> {
         .iter()
         .position(|statement| expression(*statement) == Some(*declaration))?;
     let (parser_name, _, arguments) = method_call(source, *declaration)?;
-    let dest = declared_dest(source, arguments, &value)?;
+    let dest = declared_dest(source, root, arguments, &value)?;
+    // The receiver is the module's one parser, built from the real argparse
+    // on the path before the declaration and only read after it: a
+    // replacement or a parser passed on may parse differently (#796 review).
+    let [constructed] = binders(source, root, parser_name)?[..] else {
+        return None;
+    };
+    // On the path; a use before it would fail, so it precedes the
+    // declaration.
+    path.iter()
+        .position(|statement| expression(*statement) == Some(constructed))?;
+    let constructor = constructed.child_by_field_name("right")?;
+    // Only a call has a `function`.
+    if constructor
+        .child_by_field_name("function")
+        .is_none_or(|function| text(function) != "argparse.ArgumentParser")
+        || !imported_module(source, root, main, "argparse")
+        || !read_as_attribute(
+            source,
+            &nodes,
+            parser_name,
+            constructed.child_by_field_name("left")?,
+        )
+    {
+        return None;
+    }
     // `<args> = <parser>.parse_args()` after it, on the path.
     let (_, args_name, binding) =
         path.iter()
@@ -117,21 +145,7 @@ fn proven(source: &str, option: String, value: String) -> Option<Dispatch> {
     // The parsed arguments are only read, as attributes, after the binding:
     // any other use (rebinding, `args.job = …`, passing `args` on) may
     // change the value.
-    let uses_only_read = nodes
-        .iter()
-        .filter(|node| {
-            node.kind() == "identifier" && text(**node) == args_name && **node != binding
-        })
-        .all(|node| {
-            // A read before the binding would fail at run time.
-            node.start_byte() >= binding.end_byte()
-                && node.parent().is_some_and(|parent| {
-                    parent.kind() == "attribute"
-                        && parent.child_by_field_name("object") == Some(*node)
-                        && !is_write_target(parent)
-                })
-        });
-    if !uses_only_read {
+    if !read_as_attribute(source, &nodes, args_name, binding) {
         return None;
     }
     // The one `if`/`elif` chain on the path that tests `<args>.<dest>` (so
@@ -180,7 +194,16 @@ fn proven(source: &str, option: String, value: String) -> Option<Dispatch> {
     let [function] = calls.as_slice() else {
         return None;
     };
-    module_function(source, root, function).then(|| Dispatch {
+    // The function is bound once, by an undecorated top-level `def` that
+    // has run before the guard: a conditional or later `def` may not exist
+    // when the branch calls it (#796 review).
+    let [def] = binders(source, root, function)?[..] else {
+        return None;
+    };
+    (def.kind() == "function_definition"
+        && def.parent() == Some(root)
+        && def.end_byte() <= main.start_byte())
+    .then(|| Dispatch {
         option,
         value,
         function: function.to_string(),
@@ -190,10 +213,10 @@ fn proven(source: &str, option: String, value: String) -> Option<Dispatch> {
 
 /// The attribute an `add_argument` call stores, when its keywords keep the
 /// passed string as is: `help`, `metavar`, `required`, `default`, `dest`,
-/// `type=str`, `action="store"`, and `choices` listing `value`. Anything
-/// else (a converting `type`, `nargs`, other actions, splats) proves no
-/// stored value.
-fn declared_dest(source: &str, arguments: TsNode, value: &str) -> Option<String> {
+/// `type=str` (the builtin, which the module never binds), `action="store"`,
+/// and `choices` listing `value`. Anything else (a converting `type`,
+/// `nargs`, other actions, splats) proves no stored value.
+fn declared_dest(source: &str, root: TsNode, arguments: TsNode, value: &str) -> Option<String> {
     let mut options = Vec::new();
     let mut dest = None;
     for argument in children(arguments) {
@@ -205,7 +228,9 @@ fn declared_dest(source: &str, arguments: TsNode, value: &str) -> Option<String>
                 match name {
                     "help" | "metavar" | "required" | "default" => {}
                     "dest" => dest = Some(literal(source, keyword)?),
-                    "type" if &source[keyword.byte_range()] == "str" => {}
+                    "type"
+                        if &source[keyword.byte_range()] == "str"
+                            && binders(source, root, "str")?.is_empty() => {}
                     "action" if literal(source, keyword).as_deref() == Some("store") => {}
                     "choices" => {
                         let listed = matches!(keyword.kind(), "list" | "tuple")
@@ -297,11 +322,46 @@ fn is_write_target(node: TsNode) -> bool {
     false
 }
 
-/// Whether `name` is bound once in module scope, by an undecorated `def`:
-/// no other assignment, import, class, loop or `with` target, deletion or
-/// `global` rebinding, which could make the call reach other code.
-fn module_function(source: &str, root: TsNode, name: &str) -> bool {
-    let mut defs = 0;
+/// Whether every use of `name` in `nodes` but `binding` is an attribute
+/// read after `binding`: a read before it would fail at run time, and any
+/// other use (rebinding, `x.a = …`, passing `x` on) may change the value.
+fn read_as_attribute(source: &str, nodes: &[TsNode], name: &str, binding: TsNode) -> bool {
+    nodes
+        .iter()
+        .filter(|node| {
+            node.kind() == "identifier" && &source[node.byte_range()] == name && **node != binding
+        })
+        .all(|node| {
+            node.start_byte() >= binding.end_byte()
+                && node.parent().is_some_and(|parent| {
+                    parent.kind() == "attribute"
+                        && parent.child_by_field_name("object") == Some(*node)
+                        && !is_write_target(parent)
+                })
+        })
+}
+
+/// Whether `module` is bound only by a top-level `import <module>` before
+/// the guard.
+fn imported_module(source: &str, root: TsNode, main: TsNode, module: &str) -> bool {
+    binders(source, root, module).is_some_and(|binders| {
+        matches!(binders[..], [import]
+        if import.kind() == "import_statement"
+            && import.parent() == Some(root)
+            && import.end_byte() <= main.start_byte()
+            && children(import).iter().any(|name| {
+                name.kind() == "dotted_name" && &source[name.byte_range()] == module
+            }))
+    })
+}
+
+/// The module-scope nodes that bind `name`: `def`s and classes (the
+/// definition node), imports and deletions mentioning it, and assignment,
+/// loop, walrus and `as` targets (the assignment for a plain one). `None`
+/// when a binding cannot be placed: a wildcard import, or `global` naming
+/// it in any function.
+fn binders<'t>(source: &str, root: TsNode<'t>, name: &str) -> Option<Vec<TsNode<'t>>> {
+    let mut found = Vec::new();
     let mut stack = vec![(root, false)];
     while let Some((node, in_function)) = stack.pop() {
         let named = |field: &str| {
@@ -309,37 +369,29 @@ fn module_function(source: &str, root: TsNode, name: &str) -> bool {
                 .is_some_and(|n| &source[n.byte_range()] == name)
         };
         let mentions = |node: TsNode| {
-            let mut found = Vec::new();
-            collect(node, &mut found);
-            found
+            let mut nodes = Vec::new();
+            collect(node, &mut nodes);
+            nodes
                 .iter()
                 .any(|n| n.kind() == "identifier" && &source[n.byte_range()] == name)
         };
-        match node.kind() {
-            "function_definition" if !in_function && named("name") => {
-                if node
-                    .parent()
-                    .is_some_and(|p| p.kind() == "decorated_definition")
-                {
-                    return false;
-                }
-                defs += 1;
+        let binds = match node.kind() {
+            "global_statement" if mentions(node) => return None,
+            "wildcard_import" => return None,
+            "function_definition" | "class_definition" => named("name"),
+            "import_statement"
+            | "import_from_statement"
+            | "delete_statement"
+            | "as_pattern_target" => mentions(node),
+            "assignment" | "augmented_assignment" | "for_statement" => {
+                node.child_by_field_name("left").is_some_and(mentions)
             }
-            "class_definition" if !in_function && named("name") => return false,
-            "global_statement" if mentions(node) => return false,
-            "import_statement" | "import_from_statement" | "delete_statement"
-                if !in_function && mentions(node) =>
-            {
-                return false;
-            }
-            "assignment" | "augmented_assignment" | "for_statement"
-                if !in_function && node.child_by_field_name("left").is_some_and(mentions) =>
-            {
-                return false;
-            }
-            "named_expression" if !in_function && named("name") => return false,
-            "as_pattern_target" if !in_function && mentions(node) => return false,
-            _ => {}
+            "named_expression" => named("name"),
+            _ => false,
+        };
+        if binds && !in_function {
+            // A plain assignment is its statement's expression.
+            found.push(node);
         }
         let nested =
             in_function || matches!(node.kind(), "function_definition" | "class_definition");
@@ -353,7 +405,7 @@ fn module_function(source: &str, root: TsNode, name: &str) -> bool {
             stack.push((child, inner));
         }
     }
-    defs == 1
+    Some(found)
 }
 
 /// The option and value the command passes: `-j v`, `--job v` or
