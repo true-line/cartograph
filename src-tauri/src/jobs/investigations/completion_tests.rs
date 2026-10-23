@@ -1511,3 +1511,44 @@ pub(in crate::jobs::investigations) mod next_prompt_contract_tests;
 
 #[path = "next_prompt_initial_fixture.rs"]
 pub(in crate::jobs::investigations) mod next_prompt_initial_fixture;
+
+// AC-0322/0323: staged recovery uses the same App-only nonce partition.
+#[test]
+fn app_nonce_namespace_completion_recovery_ignores_foreign_tasks() {
+    let fixture = Fixture::new();
+    let original = fixture
+        .store
+        .existing_investigation_completion(&fixture.request)
+        .unwrap()
+        .unwrap();
+    let mut task = {
+        let tx = fixture.store.conn.unchecked_transaction().unwrap();
+        let task = load_execution_task(&tx, &fixture.id).unwrap();
+        tx.commit().unwrap();
+        task
+    };
+    task.detail.origin = InvestigationOrigin::Mcp {
+        client_id: McpClientId::from_host_bytes([8; 16]),
+    };
+    task.mcp_intent_hash = Some("b".repeat(64));
+    let bytes = encode(&task, MAX_RECORD_BYTES).unwrap();
+    fixture.store.conn.execute("UPDATE investigation_tasks SET record=?2,record_hash=?3,request_namespace=?4 WHERE id=?1", params![fixture.id, bytes, core_prov::content_hash(&bytes), task.detail.origin.request_namespace()]).unwrap();
+    assert!(
+        fixture
+            .store
+            .existing_investigation_completion(&fixture.request)
+            .unwrap()
+            .is_none()
+    );
+    task.detail.origin = InvestigationOrigin::App;
+    task.mcp_intent_hash = None;
+    let bytes = encode(&task, MAX_RECORD_BYTES).unwrap();
+    fixture.store.conn.execute("UPDATE investigation_tasks SET record=?2,record_hash=?3,request_namespace='app' WHERE id=?1", params![fixture.id, bytes, core_prov::content_hash(&bytes)]).unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .existing_investigation_completion(&fixture.request)
+            .unwrap(),
+        Some(original)
+    );
+}
