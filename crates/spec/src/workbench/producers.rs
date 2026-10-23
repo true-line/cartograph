@@ -324,7 +324,12 @@ pub(super) fn drift(
     let adr_findings: Vec<_> = findings
         .iter()
         .copied()
-        .filter(|n| n.props["kind"].as_str() != Some("contract-drift"))
+        .filter(|n| {
+            !matches!(
+                n.props["kind"].as_str(),
+                Some("contract-drift" | "schema-drift")
+            )
+        })
         .collect();
     let mut contract_findings: Vec<_> = findings
         .iter()
@@ -423,7 +428,87 @@ pub(super) fn drift(
             content.push_str("| — | No API contract drift recovered | — | — | — |\n")?;
         }
     }
+    schema_drift(nodes, &findings, &mut content, &mut assertions)?;
     finish(content, assertions)
+}
+
+/// `## Schema drift`: each replayed migration history, then its findings
+/// and the tables it could not check (#833).
+fn schema_drift(
+    nodes: &[&Node],
+    findings: &[&Node],
+    content: &mut Text,
+    assertions: &mut Assertions,
+) -> Result<(), RenderLimit> {
+    let histories: Vec<&Node> = nodes
+        .iter()
+        .copied()
+        .filter(|n| n.label == "MigrationHistory")
+        .collect();
+    let mut drift: Vec<&Node> = findings
+        .iter()
+        .copied()
+        .filter(|n| n.props["kind"].as_str() == Some("schema-drift"))
+        .collect();
+    let mut gaps: Vec<&Node> = nodes
+        .iter()
+        .copied()
+        .filter(|n| is_gap_node(n) && n.props["kind"].as_str() == Some("migration-gap"))
+        .collect();
+    if histories.is_empty() && drift.is_empty() && gaps.is_empty() {
+        return Ok(());
+    }
+    content.push_str("\n## Schema drift\n\n")?;
+    for history in &histories {
+        assertions.node(history, None)?;
+        let count = |key: &str| history.props[key].as_u64().unwrap_or(0);
+        writeln!(
+            content,
+            "Migrations in `{}` replayed to head `{}` ({} revisions): {} modeled tables and {} columns compared.\n",
+            Safe(history.props["location"].as_str().unwrap_or("—")),
+            Safe(history.props["head"].as_str().unwrap_or("—")),
+            count("revisions"),
+            count("modeled_tables_compared"),
+            count("modeled_columns_compared"),
+        )?;
+    }
+    content.push_str(
+        "| Finding | Table / column | Modeled | Migrated | Confidence |\n|---|---|---|---|---|\n",
+    )?;
+    let key = |n: &&Node| {
+        (
+            n.props["drift_kind"].as_str().unwrap_or("").to_string(),
+            n.props["key"].as_str().unwrap_or(&n.id).to_string(),
+            n.id.clone(),
+        )
+    };
+    drift.sort_by_key(key);
+    for n in &drift {
+        let p = provenance(&n.props, &n.id);
+        writeln!(
+            content,
+            "| {} | `{}` | {} | {} | {:?} |",
+            Safe(n.props["drift_kind"].as_str().unwrap_or("schema-drift")),
+            Safe(n.props["key"].as_str().unwrap_or(&n.id)),
+            Safe(n.props["modeled"].as_str().unwrap_or("—")),
+            Safe(n.props["migrated"].as_str().unwrap_or("—")),
+            p.confidence_tier,
+        )?;
+    }
+    gaps.sort_by(|a, b| a.id.cmp(&b.id));
+    for g in &gaps {
+        assertions.node(g, None)?;
+        writeln!(
+            content,
+            "| gap | `{}` | {} | — | Gap |",
+            Safe(g.props["table"].as_str().unwrap_or("—")),
+            Safe(g.props["reason"].as_str().unwrap_or(&g.id)),
+        )?;
+    }
+    if drift.is_empty() && gaps.is_empty() {
+        content.push_str("| — | No schema drift recovered | — | — | — |\n")?;
+    }
+    Ok(())
 }
 fn contract_side_cell(
     drift: &Node,

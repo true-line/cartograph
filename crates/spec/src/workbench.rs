@@ -486,11 +486,12 @@ pub fn count_gap_findings<'a>(
             .count()
 }
 
-/// True when `edge` records ADR/code or API contract drift (see [`is_drift_node`]).
+/// True when `edge` records ADR/code, API contract or schema drift (see
+/// [`is_drift_node`]).
 pub fn is_drift_edge(edge: &Edge) -> bool {
     matches!(
         edge.label.as_str(),
-        "CONFLICTS" | "DRIFTS_FROM" | "DOCUMENTED_AS" | "SERVED_AS"
+        "CONFLICTS" | "DRIFTS_FROM" | "DOCUMENTED_AS" | "SERVED_AS" | "MODELED_AS"
     )
 }
 
@@ -519,13 +520,13 @@ fn class_id(index: usize) -> String {
     format!("C-{:02}", index + 1)
 }
 
-/// True when `node` records ADR/code or API contract drift (see [`is_gap_node`]
-/// for why these predicates are public).
+/// True when `node` records ADR/code, API contract or schema drift (see
+/// [`is_gap_node`] for why these predicates are public).
 pub fn is_drift_node(node: &Node) -> bool {
     node.label == "Drift"
         || matches!(
             node.props["kind"].as_str(),
-            Some("drift" | "contract-drift")
+            Some("drift" | "contract-drift" | "schema-drift")
         )
 }
 
@@ -2617,5 +2618,94 @@ mod tests {
                 .contains("| unclassified (unresolved relationship) | interpretation |")
         );
         assert_eq!(index["by_omission"][0]["unclassified"], true);
+    }
+
+    // AC-0338 (#833): a replayed migration history adds `## Schema drift`
+    // to drift_register.md: what was compared, each finding sorted, and the
+    // tables it could not check; an empty history still reads as checked.
+    #[test]
+    fn drift_register_renders_schema_drift_section() {
+        let mut history = node(
+            "migrations:local/shop@migrations",
+            "MigrationHistory",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        for (key, value) in [
+            ("location", serde_json::json!("migrations")),
+            ("head", serde_json::json!("d5")),
+            ("revisions", serde_json::json!(5)),
+            ("modeled_tables_compared", serde_json::json!(2)),
+            ("modeled_columns_compared", serde_json::json!(6)),
+        ] {
+            history.props[key] = value;
+        }
+        let drift = |key: &str, kind: &str, modeled: &str, migrated: &str| {
+            let mut n = node(
+                &format!("drift:schema:local/shop@{key}:{kind}"),
+                "Drift",
+                Tier::Deterministic,
+                ConfidenceTier::InferredStrong,
+            );
+            for (k, v) in [
+                ("kind", "schema-drift"),
+                ("drift_kind", kind),
+                ("key", key),
+                ("modeled", modeled),
+                ("migrated", migrated),
+            ] {
+                n.props[k] = serde_json::json!(v);
+            }
+            n
+        };
+        let mut gap = node(
+            "gap:alembic-table:local/shop@job",
+            "Gap",
+            Tier::Deterministic,
+            ConfidenceTier::Gap,
+        );
+        gap.props["kind"] = serde_json::json!("migration-gap");
+        gap.props["table"] = serde_json::json!("job");
+        gap.props["reason"] =
+            serde_json::json!("schema drift not checked for `job`: raw SQL reshapes it");
+        let register = |nodes: &[Node]| {
+            compile_spec(nodes, &[], &[], ExportMode::BestEffort, &BTreeSet::new())
+                .artifacts
+                .into_iter()
+                .find(|a| a.id == "drift-register")
+                .unwrap()
+                .content
+        };
+        let empty = register(std::slice::from_ref(&history));
+        assert!(empty.contains("\n## Schema drift\n\nMigrations in `migrations` replayed to head `d5` (5 revisions): 2 modeled tables and 6 columns compared.\n\n| Finding | Table / column | Modeled | Migrated | Confidence |\n|---|---|---|---|---|\n| — | No schema drift recovered | — | — | — |\n"));
+        assert!(empty.contains("| — | No ADR/code conflicts recovered |"));
+        let content = register(&[
+            history,
+            drift(
+                "users.note",
+                "modeled-not-migrated",
+                "app/models.py bytes 1..2",
+                "absent at head d5",
+            ),
+            drift(
+                "audit",
+                "migrated-not-modeled",
+                "no model maps it",
+                "migrations/versions/e6.py bytes 3..4",
+            ),
+            gap,
+        ]);
+        let audit = content
+            .find("| migrated-not-modeled | `audit` | no model maps it | migrations/versions/e6.py bytes 3..4 | InferredStrong |")
+            .unwrap();
+        let note = content
+            .find("| modeled-not-migrated | `users.note` | app/models.py bytes 1..2 | absent at head d5 | InferredStrong |")
+            .unwrap();
+        let unchecked = content
+            .find("| gap | `job` | schema drift not checked for `job`: raw SQL reshapes it | — | Gap |")
+            .unwrap();
+        assert!(audit < note && note < unchecked);
+        // Schema drift is not listed as an ADR conflict.
+        assert!(content.contains("| — | No ADR/code conflicts recovered |"));
     }
 }

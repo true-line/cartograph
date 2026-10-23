@@ -123,6 +123,8 @@ struct ColumnDecl {
     primary_key: Option<bool>,
     /// A literal positional or `name=` database name differs from the attribute.
     renamed: bool,
+    /// That database name, when it is a literal.
+    db_name: Option<String>,
     proof: CallProof,
     evidence: EvidenceRef,
 }
@@ -461,6 +463,35 @@ fn classify_orm_callee(
         ));
     }
     None
+}
+
+/// The column inside an import-proven `sqlalchemy.orm.deferred(column, …)`,
+/// which loads it lazily but maps it all the same; otherwise `node`.
+fn undeferred<'t>(
+    cx: &FileCx<'_>,
+    node: TsNode<'t>,
+    bindings: &HashMap<String, ImportBinding>,
+    shadowed_for_import: &BTreeSet<String>,
+) -> TsNode<'t> {
+    let Some(callee) = node
+        .child_by_field_name("function")
+        .filter(|callee| node.kind() == "call" && is_dotted_identifier(*callee))
+    else {
+        return node;
+    };
+    let text = cx.text(&callee).trim();
+    let head = text.split('.').next().unwrap_or(text);
+    let proven = !shadowed_for_import.contains(head)
+        && resolve_imported_symbol(text, bindings)
+            .is_some_and(|(module, name)| is_sqlalchemy_orm_module(&module) && name == "deferred");
+    let positional: Vec<_> = call_arguments(node)
+        .into_iter()
+        .filter(|arg| arg.kind() != "keyword_argument")
+        .collect();
+    match positional.as_slice() {
+        [column] if proven => *column,
+        _ => node,
+    }
 }
 
 /// Return the [`CallProof`] when `node` is a candidate `ForeignKey(...)` call.
@@ -1017,6 +1048,7 @@ pub(crate) fn extract(
                     }
                     continue;
                 }
+                let right = undeferred(cx, right, bindings, &shadowed_for_import);
                 if right.kind() != "call" {
                     continue;
                 }
@@ -1038,7 +1070,9 @@ pub(crate) fn extract(
                         let mut nullable = None;
                         let mut primary_key = None;
                         let mut renamed = false;
-                        for arg in call_arguments(right) {
+                        let mut db_name = None;
+                        let mut computed_first = false;
+                        for (index, arg) in call_arguments(right).into_iter().enumerate() {
                             if arg.kind() == "keyword_argument" {
                                 let (Some(k), Some(v)) = (
                                     arg.child_by_field_name("name"),
@@ -1049,7 +1083,10 @@ pub(crate) fn extract(
                                 match cx.text(&k) {
                                     "nullable" => nullable = literal_bool(cx, v),
                                     "primary_key" => primary_key = literal_bool(cx, v),
-                                    "name" => renamed = true,
+                                    "name" => {
+                                        renamed = true;
+                                        db_name = literal_string(cx, v);
+                                    }
                                     "type_" if col_type.is_none() => {
                                         col_type = sqlalchemy_type(cx, v);
                                     }
@@ -1069,18 +1106,25 @@ pub(crate) fn extract(
                                     call_proof.clone(),
                                     fk_proof,
                                 ));
-                            } else if literal_string(cx, arg).is_some() {
+                            } else if let Some(name) = literal_string(cx, arg) {
                                 renamed = true;
+                                db_name = Some(name);
                             } else if col_type.is_none() {
                                 col_type = sqlalchemy_type(cx, arg);
+                                computed_first |= index == 0 && col_type.is_none();
                             }
                         }
+                        // A first argument that is neither a name literal nor
+                        // a known type, followed by a known type, is a
+                        // computed database name.
+                        renamed |= computed_first && col_type.is_some();
                         columns.push(ColumnDecl {
                             name: attr_name,
                             col_type,
                             nullable,
                             primary_key,
                             renamed,
+                            db_name,
                             proof: call_proof,
                             evidence: cx.evidence(&assignment),
                         });
@@ -1814,6 +1858,10 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
             evidence.push(col.evidence.clone());
             let mut map = serde_json::Map::new();
             map.insert("name".into(), serde_json::Value::String(col.name.clone()));
+            // The database name, when it differs: `null` if not a literal.
+            if col.renamed {
+                map.insert("column".into(), serde_json::json!(col.db_name));
+            }
             if let Some(ty) = &col.col_type {
                 map.insert("type".into(), serde_json::Value::String(ty.clone()));
             }

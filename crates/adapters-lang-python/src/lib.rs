@@ -14,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 
+mod alembic;
 pub mod observed_infra;
 mod sqlalchemy;
 
@@ -1792,6 +1793,7 @@ pub fn extract_dir_incremental_with_progress(
     }
     resolve_routes(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
+    alembic::extract(root, id, &mut out)?;
     let local_names = local_module_names(root)?;
     let Extraction { nodes, edges, .. } = &mut out;
     core_graph::placeholder::close_over_endpoints(
