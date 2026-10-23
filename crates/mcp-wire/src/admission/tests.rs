@@ -276,3 +276,96 @@ fn selected_fact_tool_requires_explicit_host_implementation() {
         }
     ));
 }
+
+// #773 (prerequisite to #766): configuring the new vocabulary never expands a read-only session.
+#[test]
+fn task_vocabulary_does_not_expand_read_only_admission() {
+    use crate::tools::TaskTool;
+    let mut admission = ready(&[ReadTool::Capabilities]);
+    for (index, tool) in [
+        TaskTool::Start,
+        TaskTool::Status,
+        TaskTool::Events,
+        TaskTool::Result,
+        TaskTool::Cancel,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            code(admission.receive(request(
+                json!(index + 1),
+                "tools/call",
+                json!({"name":tool.name(),"arguments":{}})
+            ))),
+            -32602
+        );
+    }
+    assert_eq!(
+        admission.receive(request(json!(20), "tools/list", json!({}))),
+        Action::ListTools {
+            id: json!(20),
+            tools: vec![ReadTool::Capabilities]
+        }
+    );
+}
+
+// #773: mixed tools share lifecycle and ID limits. This is protocol
+// dispatch only; real handlers must still authenticate the activation grant.
+#[test]
+fn configured_tasks_share_read_lifecycle_and_request_identity_ledger() {
+    use crate::tools::{TaskTool, Tool};
+    let read = Tool::Read(ReadTool::Capabilities);
+    let task = Tool::Task(TaskTool::Status);
+    let mut admission = ProtocolAdmission::new([read, task], NonZeroUsize::new(16).unwrap());
+    let before = admission.receive(request(
+        json!(0),
+        "tools/call",
+        json!({"name":TaskTool::Status.name()}),
+    ));
+    assert!(matches!(before, Action::Respond(value) if value["error"]["code"] == -32600));
+    assert!(matches!(
+        admission.receive(init(json!(1))),
+        Action::Respond(_)
+    ));
+    assert_eq!(admission.receive(initialized()), Action::Ignore);
+    assert_eq!(
+        admission.receive(request(json!(2), "tools/list", json!({}))),
+        Action::ListTools {
+            id: json!(2),
+            tools: vec![read, task]
+        }
+    );
+    assert_eq!(
+        admission.receive(request(
+            json!(3),
+            "tools/call",
+            json!({"name":TaskTool::Status.name(), "arguments":{"id":"owned"}})
+        )),
+        Action::Call {
+            id: json!(3),
+            tool: task,
+            arguments: json!({"id":"owned"}).as_object().unwrap().clone()
+        }
+    );
+    let unknown = admission.receive(request(
+        json!(4),
+        "tools/call",
+        json!({"name":TaskTool::Start.name()}),
+    ));
+    assert!(matches!(unknown, Action::Respond(value) if value["error"]["code"] == -32602));
+    let augmentation = admission.receive(request(
+        json!(5),
+        "tools/call",
+        json!({"name":TaskTool::Status.name(),"task":{}}),
+    ));
+    assert!(matches!(augmentation, Action::Respond(value) if value["error"]["code"] == -32602));
+    assert_eq!(
+        admission.receive(request(
+            json!(3),
+            "tools/call",
+            json!({"name":ReadTool::Capabilities.name()})
+        )),
+        Action::Close(CloseReason::ReusedId)
+    );
+}

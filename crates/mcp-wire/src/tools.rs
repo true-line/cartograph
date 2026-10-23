@@ -1,0 +1,64 @@
+//! Closed protocol vocabulary. Listing a tool is never an execution grant;
+//! the host registers only handlers available to its authenticated session.
+use crate::admission::ReadTool;
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Closed identities accepted by the shared protocol lifecycle.
+pub trait ToolIdentity: sealed::Sealed + Copy + Ord {
+    /// Stable external tool name.
+    fn name(self) -> &'static str;
+}
+impl sealed::Sealed for ReadTool {}
+impl ToolIdentity for ReadTool {
+    fn name(self) -> &'static str {
+        ReadTool::name(self)
+    }
+}
+
+/// Durable Cartograph task tools, distinct from MCP task augmentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TaskTool {
+    /// Admit or recover a durable investigation request.
+    Start,
+    /// Read owned task status.
+    Status,
+    /// Read an ordered, bounded event page.
+    Events,
+    /// Read the owned saved result.
+    Result,
+    /// Request durable cancellation.
+    Cancel,
+}
+impl TaskTool {
+    /// Stable external name; no arbitrary host method dispatch.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Start => "cartograph_task_start",
+            Self::Status => "cartograph_task_status",
+            Self::Events => "cartograph_task_events",
+            Self::Result => "cartograph_task_result",
+            Self::Cancel => "cartograph_task_cancel",
+        }
+    }
+}
+
+/// Shared tool set for one lifecycle and one request-ID ledger per connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tool {
+    /// Existing recovered-context read.
+    Read(ReadTool),
+    /// Owner-granted durable investigation operation.
+    Task(TaskTool),
+}
+impl sealed::Sealed for Tool {}
+impl ToolIdentity for Tool {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Read(tool) => tool.name(),
+            Self::Task(tool) => tool.name(),
+        }
+    }
+}

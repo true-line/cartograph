@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeSet, num::NonZeroUsize};
 
+use crate::tools::ToolIdentity;
 use serde_json::{Map, Value, json};
 
 /// The sole protocol version understood by this admission layer.
@@ -50,7 +51,7 @@ pub enum CloseReason {
 /// An admitted action. The owner supplies real schemas, argument validation and
 /// handlers for configured tools, and sends their eventual bounded responses.
 #[derive(Debug, PartialEq)]
-pub enum Action {
+pub enum Action<T = ReadTool> {
     /// Send this lifecycle or protocol-error response.
     Respond(Value),
     /// List only these configured implementations with their real schemas.
@@ -58,14 +59,14 @@ pub enum Action {
         /// Original request ID.
         id: Value,
         /// Implemented tools in stable order.
-        tools: Vec<ReadTool>,
+        tools: Vec<T>,
     },
     /// Validate arguments and invoke exactly this configured read implementation.
     Call {
         /// Original request ID.
         id: Value,
         /// Closed read identity.
-        tool: ReadTool,
+        tool: T,
         /// Untrusted arguments; admission is not domain validation.
         arguments: Map<String, Value>,
     },
@@ -85,16 +86,19 @@ enum Phase {
 
 /// Session-local lifecycle and request-ID admission. Input must first pass
 /// bounded framing; this structure retains at most `max_ids` bounded IDs.
-pub struct Admission {
+pub struct ProtocolAdmission<T: ToolIdentity> {
     phase: Phase,
-    implemented: BTreeSet<ReadTool>,
+    implemented: BTreeSet<T>,
     ids: BTreeSet<String>,
     max_ids: NonZeroUsize,
 }
 
-impl Admission {
+/// Backward-compatible read-only lifecycle; it cannot configure task tools.
+pub type Admission = ProtocolAdmission<ReadTool>;
+
+impl<T: ToolIdentity> ProtocolAdmission<T> {
     /// Configure only tools with real implementations in the owning adapter.
-    pub fn new(implemented: impl IntoIterator<Item = ReadTool>, max_ids: NonZeroUsize) -> Self {
+    pub fn new(implemented: impl IntoIterator<Item = T>, max_ids: NonZeroUsize) -> Self {
         Self {
             phase: Phase::New,
             implemented: implemented.into_iter().collect(),
@@ -104,7 +108,7 @@ impl Admission {
     }
 
     /// Admit one framed value. No method name can become an arbitrary dispatch.
-    pub fn receive(&mut self, message: Value) -> Action {
+    pub fn receive(&mut self, message: Value) -> Action<T> {
         if let Phase::Closed(reason) = self.phase {
             return Action::Close(reason);
         }
@@ -195,7 +199,7 @@ impl Admission {
         }
     }
 
-    fn initialize(&mut self, id: Value, params: &Map<String, Value>) -> Action {
+    fn initialize(&mut self, id: Value, params: &Map<String, Value>) -> Action<T> {
         let client = params.get("clientInfo").and_then(Value::as_object);
         if !params.get("protocolVersion").is_some_and(Value::is_string)
             || !params.get("capabilities").is_some_and(Value::is_object)
@@ -223,11 +227,11 @@ impl Admission {
     }
 }
 
-fn response(id: Value, result: Value) -> Action {
+fn response<T>(id: Value, result: Value) -> Action<T> {
     Action::Respond(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
 
-fn error(id: Option<Value>, code: i32, message: &'static str) -> Action {
+fn error<T>(id: Option<Value>, code: i32, message: &'static str) -> Action<T> {
     let mut response = json!({"jsonrpc": "2.0", "error": {"code": code, "message": message}});
     if let Some(id) = id {
         response["id"] = id;
