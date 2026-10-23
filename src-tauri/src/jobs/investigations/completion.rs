@@ -229,7 +229,7 @@ impl JobStore {
         request: &StagedObligationRequest,
         provider: Option<&InvestigationProvider>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
-        self.start_completion_family(request, provider, false)
+        self.start_completion_family(request, provider, false, None)
     }
     /// Factory for the exact next-prompt request family.
     pub(crate) fn start_next_prompt_investigation(
@@ -237,13 +237,14 @@ impl JobStore {
         request: &StagedObligationRequest,
         provider: Option<&InvestigationProvider>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
-        self.start_completion_family(request, provider, true)
+        self.start_completion_family(request, provider, true, None)
     }
-    fn start_completion_family(
+    pub(super) fn start_completion_family(
         &mut self,
         request: &StagedObligationRequest,
         provider: Option<&InvestigationProvider>,
         next_prompt: bool,
+        mcp: Option<&McpRequestIdentity>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         let policy = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
@@ -268,7 +269,7 @@ impl JobStore {
             conversation_id: request.conversation_id.clone(),
             parent_id: request.parent_id.clone(),
         };
-        self.start_investigation_internal(&projected, provider, Some(intent), next_prompt)
+        self.start_investigation_internal(&projected, provider, Some(intent), next_prompt, mcp)
     }
     pub(crate) fn existing_investigation_completion(
         &self,

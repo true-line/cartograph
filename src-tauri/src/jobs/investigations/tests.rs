@@ -1581,3 +1581,6 @@ mod origin_namespace_tests;
 
 #[path = "principal_access_tests.rs"]
 mod principal_access_tests;
+
+#[path = "mcp_nonce_tests.rs"]
+mod mcp_nonce_tests;

@@ -576,3 +576,51 @@ fn principal_task_access_next_family_cancellation_preserves_owner_parity() {
         cancelled
     );
 }
+
+// AC-0322/0327: the completion factory persists attribution and replays before
+// provider/capacity admission. This queues metadata only; no worker is launched.
+#[test]
+fn mcp_nonce_completion_factory_replays_without_provider_or_new_capacity() {
+    let mut f = fixture();
+    let mut identity = McpRequestIdentity {
+        client: f
+            .store
+            .create_mcp_client(std::num::NonZeroUsize::new(1).unwrap())
+            .unwrap(),
+        normalized_intent_hash: core_prov::content_hash(b"normalized completion request"),
+        maximum_identities: 1,
+    };
+    let created = f
+        .store
+        .start_completion_family(
+            &f.request,
+            Some(&f.task.detail.provider),
+            true,
+            Some(&identity),
+        )
+        .unwrap();
+    assert!(created.created);
+    assert_ne!(
+        created.detail.summary.investigation_id,
+        f.task.detail.summary.investigation_id
+    );
+    assert_eq!(
+        created.detail.origin,
+        InvestigationOrigin::Mcp {
+            client_id: identity.client.clone()
+        }
+    );
+    identity.maximum_identities = 0;
+    let replay = f
+        .store
+        .start_completion_family(&f.request, None, true, Some(&identity))
+        .unwrap();
+    assert!(!replay.created);
+    assert_eq!(replay.detail, created.detail);
+    assert_eq!(
+        f.store
+            .investigation(&created.detail.summary.investigation_id)
+            .unwrap(),
+        created.detail
+    );
+}

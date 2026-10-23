@@ -321,6 +321,14 @@ struct StoredTask {
     action_tool: Option<InvestigationTool>,
 }
 
+/// Host-derived storage identity, never deserialized from transport arguments.
+/// The transport must separately authenticate the runtime task grant.
+struct McpRequestIdentity {
+    client: McpClientId,
+    normalized_intent_hash: String,
+    maximum_identities: usize,
+}
+
 impl JobStore {
     /// Display metadata only; elapsed time and ownership use separate authorities.
     pub(crate) fn investigation_timestamp(
@@ -344,7 +352,7 @@ impl JobStore {
         provider: Option<&InvestigationProvider>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         let normalized = request.normalized()?;
-        self.start_investigation_internal(&normalized, provider, None, false)
+        self.start_investigation_internal(&normalized, provider, None, false, None)
     }
     fn start_investigation_internal(
         &mut self,
@@ -352,6 +360,7 @@ impl JobStore {
         provider: Option<&InvestigationProvider>,
         completion_intent: Option<completion::CompletionIntent>,
         next_prompt: bool,
+        mcp: Option<&McpRequestIdentity>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         let policy = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
@@ -364,16 +373,32 @@ impl JobStore {
         {
             return Err(InvestigationStoreError::Invalid);
         }
-        let intent_hash = match &completion_intent {
-            Some(intent) => intent.request_hash.clone(),
-            None => request.intent_hash()?,
-        };
+
+        if mcp.is_some_and(|identity| !hash_valid(&identity.normalized_intent_hash)) {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let origin = mcp.map_or(InvestigationOrigin::App, |identity| {
+            InvestigationOrigin::Mcp {
+                client_id: identity.client.clone(),
+            }
+        });
+        let request_namespace = origin.request_namespace();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         validate(&tx, &self.namespace)?;
+        if let Some(identity) = mcp {
+            let registered: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM investigation_mcp_clients WHERE id=?1)",
+                [identity.client.as_str()],
+                |r| r.get(0),
+            )?;
+            if !registered {
+                return Err(InvestigationStoreError::Missing);
+            }
+        }
         let prior: Option<Option<String>> = tx.query_row(
-            "SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE request_namespace='app' AND nonce = ?1", [&request.request_nonce], |row| row.get(0),
+            "SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE request_namespace=?2 AND nonce = ?1", params![request.request_nonce,request_namespace], |row| row.get(0),
         ).optional()?;
         if let Some(id) = prior {
             let id = id.ok_or(InvestigationStoreError::Invalid)?;
@@ -382,7 +407,19 @@ impl JobStore {
             } else {
                 load_task(&tx, &id)?
             };
-            if record.intent_hash != intent_hash {
+            if record.detail.origin != origin {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            let same = if let Some(identity) = mcp {
+                record.mcp_intent_hash.as_deref() == Some(identity.normalized_intent_hash.as_str())
+            } else {
+                let intent_hash = match &completion_intent {
+                    Some(intent) => intent.request_hash.clone(),
+                    None => request.intent_hash()?,
+                };
+                record.intent_hash == intent_hash
+            };
+            if !same {
                 return Err(InvestigationStoreError::Conflict);
             }
             tx.commit()?;
@@ -390,6 +427,22 @@ impl JobStore {
                 detail: record.detail,
                 created: false,
             });
+        }
+        let intent_hash = match &completion_intent {
+            Some(intent) => intent.request_hash.clone(),
+            None => request.intent_hash()?,
+        };
+        if let Some(identity) = mcp {
+            let count: i64 = tx.query_row(
+                "SELECT count(*) FROM investigation_tasks WHERE request_namespace=?1",
+                [&request_namespace],
+                |r| r.get(0),
+            )?;
+            if usize::try_from(count).map_err(|_| InvestigationStoreError::Invalid)?
+                >= identity.maximum_identities
+            {
+                return Err(InvestigationStoreError::Capacity);
+            }
         }
         if completion_intent.is_some() {
             completion::initialize(&tx)?;
@@ -406,7 +459,12 @@ impl JobStore {
                     [id],
                     |r| r.get(0),
                 )?;
-                if !exists {
+                let foreign = if mcp.is_some() {
+                    !tx.query_row("SELECT EXISTS(SELECT 1 FROM investigation_tasks WHERE conversation_id=?1 AND request_namespace=?2) AND NOT EXISTS(SELECT 1 FROM investigation_tasks WHERE conversation_id=?1 AND request_namespace!=?2)", params![id,request_namespace], |r| r.get::<_, bool>(0))?
+                } else {
+                    false
+                };
+                if !exists || foreign {
                     return Err(InvestigationStoreError::Missing);
                 }
                 id.clone()
@@ -414,6 +472,7 @@ impl JobStore {
             None => new_id(&tx, "conversation")?,
         };
         if let Some(parent) = &request.parent_id {
+            require_request_owner(&tx, parent, mcp.map(|identity| &identity.client))?;
             if next_prompt {
                 next_parent_history::load(&tx, parent, &conversation_id)?;
             } else {
@@ -454,7 +513,7 @@ impl JobStore {
             }),
             completion_intent: completion_intent.clone(),
             nonce: request.request_nonce.clone(),
-            mcp_intent_hash: None,
+            mcp_intent_hash: mcp.map(|identity| identity.normalized_intent_hash.clone()),
             intent_hash,
             expected_graph_revision: request.expected_graph_revision.clone(),
             detail: InvestigationDetail {
@@ -506,7 +565,7 @@ impl JobStore {
                     updated_at: now,
                 },
                 context_owner: self.namespace.value.clone(),
-                origin: InvestigationOrigin::App,
+                origin,
                 specialist: request.specialist_id.definition()?,
                 provider: provider.clone(),
                 scope_snapshot_id: None,
