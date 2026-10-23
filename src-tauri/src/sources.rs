@@ -20,6 +20,10 @@ const MAX_DISPLAY_BYTES: usize = 4096;
 const MAX_REPO_BYTES: usize = 512;
 const ID_SUFFIX_BYTES: usize = 32;
 const ID_RETRIES: usize = 8;
+/// How long a writer waits for another registry connection's write
+/// transaction. With WAL and `synchronous=FULL`, one commit's fsync can take
+/// over a second on a loaded Windows disk (#839).
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const JOB_PREFIX: &str = "ingest-source-v1:";
 const STORE_ERROR: &str = "Source registry storage is unavailable or invalid";
 const INVALID_STATE: &str = "Source registry state is incompatible or corrupt";
@@ -162,8 +166,7 @@ impl SourceRegistry {
     ) -> Result<Self, String> {
         let app_data_dir = canonical_directory(app_data_dir.as_ref())?;
         let mut conn = Connection::open(state_path).map_err(storage_error)?;
-        conn.busy_timeout(std::time::Duration::from_secs(1))
-            .map_err(storage_error)?;
+        conn.busy_timeout(BUSY_TIMEOUT).map_err(storage_error)?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(storage_error)?;
         conn.pragma_update(None, "synchronous", "FULL")
