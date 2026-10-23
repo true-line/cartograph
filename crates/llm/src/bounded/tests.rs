@@ -207,6 +207,10 @@ fn bounded_providers_send_exact_generation_limits_and_consented_payload() {
     );
     assert_eq!(output.request_bytes, request.body.len() as u64);
     assert_eq!(output.response_bytes, local_body.len() as u64);
+    let workspace = limits.transport_workspace_bytes().unwrap();
+    assert!(request.body.len() <= workspace.request_peak_bytes);
+    assert!(local_body.len() <= workspace.response_peak_bytes);
+    assert!(serde_json::to_vec(&output).unwrap().len() <= workspace.completion_bytes);
     assert_eq!(output.usage.unwrap().output_tokens, Some(7));
     assert_eq!(output.response_model.as_deref(), Some("test-model"));
 
@@ -233,6 +237,9 @@ fn bounded_providers_send_exact_generation_limits_and_consented_payload() {
     assert_eq!(output.provider_request_id.as_deref(), Some("msg_fixture"));
     assert_eq!(output.request_bytes, request.body.len() as u64);
     assert_eq!(output.response_bytes, cloud_body.len() as u64);
+    assert!(request.body.len() <= workspace.request_peak_bytes);
+    assert!(cloud_body.len() <= workspace.response_peak_bytes);
+    assert!(serde_json::to_vec(&output).unwrap().len() <= workspace.completion_bytes);
     let usage = output.usage.unwrap();
     assert_eq!(usage.input_tokens, Some(23));
     assert_eq!(usage.cache_read_input_tokens, Some(2));
@@ -1051,4 +1058,107 @@ fn bounded_span_limits_preserve_legacy_wire_and_consent_identity() {
     firewall
         .authorize_bounded(&cloud, &prepared, Some(&grant))
         .unwrap();
+}
+
+// AC-0327: independently declared wire/output caps compose monotonically.
+#[test]
+fn transport_workspace_tracks_independent_limits() {
+    let values = CompletionLimitValues {
+        input_bytes: 1024,
+        request_bytes: 2048,
+        response_bytes: 4096,
+        output_text_bytes: 512,
+        ..Default::default()
+    };
+    let base = CompletionLimits::new(values)
+        .unwrap()
+        .transport_workspace_bytes()
+        .unwrap();
+    for field in 0..4 {
+        let mut larger = values;
+        match field {
+            0 => larger.input_bytes *= 2,
+            1 => larger.request_bytes *= 2,
+            2 => larger.response_bytes *= 2,
+            _ => larger.output_text_bytes *= 2,
+        }
+        let next = CompletionLimits::new(larger)
+            .unwrap()
+            .transport_workspace_bytes()
+            .unwrap();
+        assert!(next.request_peak_bytes >= base.request_peak_bytes);
+        assert!(next.response_peak_bytes > base.response_peak_bytes);
+        assert!(next.completion_bytes >= base.completion_bytes);
+        if field == 0 || field == 1 {
+            assert!(next.request_peak_bytes > base.request_peak_bytes);
+        }
+        if field == 3 {
+            assert!(next.completion_bytes > base.completion_bytes);
+        }
+    }
+    assert!(
+        CompletionLimits::new(CompletionLimitValues {
+            response_bytes: 0,
+            ..values
+        })
+        .is_err()
+    );
+}
+
+// AC-0327: the 32-block semantic limit cannot bound pre-validation decoding.
+#[test]
+fn transport_workspace_covers_rejected_response_owners() {
+    use super::response_wire::{AnthropicBlock, AnthropicResponse, OllamaResponse};
+    use std::mem::size_of;
+    let blocks = vec![serde_json::json!({"type":"text","text":"é\n".repeat(128)}); 64];
+    let wire = serde_json::to_vec(&serde_json::json!({
+        "type":"message", "role":"assistant", "stop_reason":"end_turn", "content":blocks
+    }))
+    .unwrap();
+    super::preflight_response(&wire).unwrap();
+    let decoded: AnthropicResponse = serde_json::from_slice(&wire).unwrap();
+    assert_eq!(decoded.content.len(), 64); // Production semantic check will refuse.
+    let owned = size_of::<AnthropicResponse>()
+        + decoded.content.len() * size_of::<AnthropicBlock>()
+        + decoded
+            .content
+            .iter()
+            .map(|b| b.kind.len() + b.text.as_ref().map_or(0, String::len))
+            .sum::<usize>();
+    let limits = CompletionLimits::new(CompletionLimitValues {
+        response_bytes: wire.len() as u64,
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(
+        owned + wire.len()
+            <= limits
+                .transport_workspace_bytes()
+                .unwrap()
+                .response_peak_bytes
+    );
+
+    let wire = serde_json::to_vec(&serde_json::json!({
+        "message":{"role":"assistant","content":"x","tool_calls":[{"arguments":vec!["é";1024]}]},
+        "done":true,"done_reason":"stop"
+    }))
+    .unwrap();
+    super::preflight_response(&wire).unwrap();
+    let decoded: OllamaResponse = serde_json::from_slice(&wire).unwrap();
+    assert!(!decoded.message.tool_calls.is_empty()); // Also rejected only after decode.
+    let nested = &decoded.message.tool_calls[0]["arguments"];
+    assert_eq!(nested.as_array().unwrap().len(), 1024);
+    let owners = size_of::<OllamaResponse>() + 1024 * (size_of::<Value>() + "é".len());
+    let limits = CompletionLimits::new(CompletionLimitValues {
+        response_bytes: wire.len() as u64,
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(
+        owners + wire.len()
+            <= limits
+                .transport_workspace_bytes()
+                .unwrap()
+                .response_peak_bytes
+    );
 }

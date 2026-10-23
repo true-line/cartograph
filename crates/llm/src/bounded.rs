@@ -12,6 +12,12 @@ use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 
 mod request_wire;
+mod response_wire;
+mod transport_workspace;
+pub use transport_workspace::TransportWorkspace;
+
+const RECEIVE_CHUNK_BYTES: usize = 8192;
+const MODEL_AND_RESPONSE_ID_BYTES: usize = 256;
 
 /// Immutable protocol identity, including fixed transport behavior.
 pub const PROTOCOL_VERSION: &str = "bounded-json-completion@2";
@@ -117,7 +123,7 @@ impl ProviderProfile {
     fn validate(&self) -> Result<(), BoundedCallError> {
         if self.protocol_version != PROTOCOL_VERSION
             || !identifier(&self.provider_id, 1024)
-            || !identifier(&self.requested_model, 256)
+            || !identifier(&self.requested_model, MODEL_AND_RESPONSE_ID_BYTES)
             || self.endpoint_id.len() > 4096
         {
             return Err(not_sent(FailureCode::InvalidProfile));
@@ -822,7 +828,7 @@ fn acquire(
         return Err(rejected(FailureCode::ResponseTooLarge));
     }
     let mut body = Vec::new();
-    let mut chunk = [0_u8; 8192];
+    let mut chunk = [0_u8; RECEIVE_CHUNK_BYTES];
     loop {
         // Always probe one byte beyond the cap; Content-Length is not authority.
         let read_limit = chunk.len().min(cap.saturating_sub(body.len()) + 1);
@@ -872,8 +878,12 @@ fn finish(
     if text.trim().is_empty() {
         return Err(rejected(FailureCode::EmptyCompletion));
     }
-    if model.as_ref().is_some_and(|model| !identifier(model, 256))
-        || id.as_ref().is_some_and(|id| !identifier(id, 256))
+    if model
+        .as_ref()
+        .is_some_and(|model| !identifier(model, MODEL_AND_RESPONSE_ID_BYTES))
+        || id
+            .as_ref()
+            .is_some_and(|id| !identifier(id, MODEL_AND_RESPONSE_ID_BYTES))
         || usage.as_ref().is_some_and(|usage| {
             [
                 usage.input_tokens,
@@ -964,26 +974,8 @@ pub(super) fn complete_ollama(
     )?;
     let (bytes, request_bytes) =
         acquire(client.post(&profile.endpoint_id), body, request, control)?;
-    #[derive(Deserialize)]
-    struct Message {
-        role: String,
-        content: String,
-        #[serde(default)]
-        tool_calls: Vec<serde_json::Value>,
-        #[serde(default)]
-        images: Vec<serde_json::Value>,
-    }
-    #[derive(Deserialize)]
-    struct Response {
-        message: Message,
-        done: bool,
-        done_reason: String,
-        model: Option<String>,
-        prompt_eval_count: Option<u64>,
-        eval_count: Option<u64>,
-    }
     preflight_response(&bytes)?;
-    let response: Response =
+    let response: response_wire::OllamaResponse =
         serde_json::from_slice(&bytes).map_err(|_| rejected(FailureCode::InvalidResponse))?;
     if !response.done || response.done_reason != "stop" {
         return Err(rejected(FailureCode::IncompleteResponse));
@@ -1044,37 +1036,7 @@ pub(super) fn complete_anthropic(
         .header("anthropic-version", "2023-06-01");
     let (bytes, request_bytes) = acquire(builder, body, request, control)?;
     preflight_response(&bytes)?;
-    #[derive(Deserialize)]
-    struct Block {
-        #[serde(rename = "type")]
-        kind: String,
-        text: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct StopDetails {
-        #[serde(rename = "type")]
-        kind: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct Usage {
-        input_tokens: Option<u64>,
-        output_tokens: Option<u64>,
-        cache_read_input_tokens: Option<u64>,
-        cache_creation_input_tokens: Option<u64>,
-    }
-    #[derive(Deserialize)]
-    struct Response {
-        #[serde(rename = "type")]
-        kind: String,
-        role: String,
-        content: Vec<Block>,
-        stop_reason: String,
-        stop_details: Option<StopDetails>,
-        model: Option<String>,
-        id: Option<String>,
-        usage: Option<Usage>,
-    }
-    let response: Response =
+    let response: response_wire::AnthropicResponse =
         serde_json::from_slice(&bytes).map_err(|_| rejected(FailureCode::InvalidResponse))?;
     if response.stop_reason == "refusal"
         || response
