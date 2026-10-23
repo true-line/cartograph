@@ -2064,8 +2064,8 @@ fn load_into_graph_with_bindings_and_omissions(
     let mut current_nodes = std::collections::BTreeMap::new();
     let mut colliding_ids = std::collections::BTreeSet::new();
     for node in &extraction.nodes {
-        if let Some(previous) = current_nodes.insert(node.id.clone(), node.clone())
-            && previous != *node
+        if let Some(previous) = current_nodes.insert(node.id.as_str(), node)
+            && previous != node
         {
             colliding_ids.insert(node.id.clone());
         }
@@ -2075,25 +2075,25 @@ fn load_into_graph_with_bindings_and_omissions(
         edges: extraction.edges.len() as u64 - distinct_edge_count(&extraction.edges),
         node_collisions: colliding_ids.len() as u64,
     };
-    current_nodes.insert(repo_node.id.clone(), repo_node);
+    current_nodes.insert(repo_node.id.as_str(), &repo_node);
     let current_edges = merge_edge_occurrences(&extraction.edges);
     let expected = graph.read_snapshot().map_err(|error| error.to_string())?;
+    // Borrowed, never cloned: the snapshot is the whole graph across every
+    // repo, so a second copy would double the publish peak (#725).
     let existing_nodes = expected
         .0
         .iter()
-        .cloned()
-        .map(|node| (node.id.clone(), node))
+        .map(|node| (node.id.as_str(), node))
         .collect::<std::collections::BTreeMap<_, _>>();
     let existing_edges = expected
         .1
         .iter()
-        .cloned()
-        .map(|edge| (edge_key(&edge), edge))
+        .map(|edge| (edge_key(edge), edge))
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut patch = core_graph::GraphPatch::default();
     let mut stats = ReconcileStats {
         published: PublishedFacts {
-            nodes: current_nodes.keys().cloned().collect(),
+            nodes: current_nodes.keys().map(|id| (*id).to_owned()).collect(),
             edges: current_edges.keys().cloned().collect(),
             merged,
         },
@@ -2111,36 +2111,40 @@ fn load_into_graph_with_bindings_and_omissions(
         }
     }
     remaining_edge_keys.extend(current_edges.keys().cloned());
-    for (id, node) in &existing_nodes {
+    // Endpoints of every remaining edge, once: not a scan per node.
+    let incident: std::collections::BTreeSet<&str> = remaining_edge_keys
+        .iter()
+        .flat_map(|(src, dst, _)| [src.as_str(), dst.as_str()])
+        .collect();
+    for (&id, node) in &existing_nodes {
         if current_nodes.contains_key(id) {
             continue;
         }
-        let has_remaining_incident = remaining_edge_keys
-            .iter()
-            .any(|(src, dst, _)| src == id || dst == id);
+        let has_remaining_incident = incident.contains(id);
         let owned = fact_owned_by_repo(&node.props, repo) || id_explicitly_owned_by_repo(id, repo);
         let orphan_placeholder =
             node.props["placeholder"].as_bool() == Some(true) && !has_remaining_incident;
         if (owned && (id_explicitly_owned_by_repo(id, repo) || !has_remaining_incident))
             || orphan_placeholder
         {
-            patch.delete_node_ids.push(id.clone());
+            patch.delete_node_ids.push(id.to_owned());
             stats.deleted += 1;
         }
     }
+    // Only changed facts are copied into the patch; merged edges move.
     for node in current_nodes.values() {
-        if existing_nodes.get(&node.id) == Some(node) {
+        if existing_nodes.get(node.id.as_str()) == Some(node) {
             stats.unchanged += 1;
         } else {
-            patch.upsert_nodes.push(node.clone());
+            patch.upsert_nodes.push((*node).clone());
             stats.inserted_or_updated += 1;
         }
     }
-    for (key, edge) in &current_edges {
-        if existing_edges.get(key) == Some(edge) {
+    for (key, edge) in current_edges {
+        if existing_edges.get(&key) == Some(&&edge) {
             stats.unchanged += 1;
         } else {
-            patch.upsert_edges.push(edge.clone());
+            patch.upsert_edges.push(edge);
             stats.inserted_or_updated += 1;
         }
     }

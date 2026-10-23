@@ -1158,7 +1158,7 @@ impl SqliteGraphStore {
         }
         let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         check_schema(&self.conn)?;
-        if &self.read_snapshot_rows(None, None)? != expected {
+        if !self.snapshot_matches(expected)? {
             return Ok(false);
         }
         // Check before patch triggers invalidate touched rows: a caller cannot
