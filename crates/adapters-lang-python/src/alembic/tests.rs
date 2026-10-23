@@ -124,6 +124,20 @@ fn alembic_history_replays_to_the_modeled_schema() {
     assert_eq!(history.props["modeled_tables_compared"], 2);
     assert_eq!(history.props["modeled_columns_compared"], 6);
     assert_eq!(history.props["prov"]["confidence_tier"], "Confirmed");
+
+    // A semicolon inside a quoted value does not end the statement.
+    let quoted = with(
+        &super::tests::history(),
+        "e6_x.py",
+        revision(
+            "e6",
+            "'d5'",
+            "    op.execute(\"UPDATE users SET email = '; ALTER TABLE users DROP COLUMN email'\")",
+        ),
+    );
+    let (nodes, _) = extract(MODELS, &quoted, &[]);
+    assert_eq!(drift(&nodes), Vec::<String>::new());
+    assert_eq!(gaps(&nodes), Vec::<String>::new());
 }
 
 // AC-0338: each difference is a cited InferredStrong Drift, both ways; a
@@ -189,6 +203,34 @@ fn alembic_drift_is_reported_both_ways() {
         "    user_id = sa.Column(sa.ForeignKey(\"users.id\"))\n    other = sa.Column(COLUMN, sa.Integer)\n    extra = sa.Column(sa.Integer, name=NAME)\n",
     );
     assert_ne!(opaque, models);
+    // A literal `schema=` qualifies the table as the model's schema does.
+    let auth = format!(
+        "{MODELS}\nclass Login(Base):\n    __tablename__ = 'users'\n    __table_args__ = {{'schema': 'auth'}}\n    id = sa.Column(sa.Integer, primary_key=True)\n"
+    );
+    let in_auth = with(
+        &history(),
+        "e6_auth.py",
+        revision(
+            "e6",
+            "'d5'",
+            "    op.create_table('users', sa.Column('id', sa.Integer()), schema='auth')",
+        ),
+    );
+    let (nodes, _) = extract(&auth, &in_auth, &[]);
+    assert_eq!(drift(&nodes), Vec::<String>::new());
+    let renamed = with(
+        &history(),
+        "e6_auth.py",
+        revision(
+            "e6",
+            "'d5'",
+            "    op.create_table('legacy', sa.Column('id', sa.Integer()), schema='auth')\n    op.rename_table('legacy', 'users', schema='auth')",
+        ),
+    );
+    let (nodes, _) = extract(&auth, &renamed, &[]);
+    assert_eq!(drift(&nodes), Vec::<String>::new());
+    let (nodes, _) = extract(&auth, &history(), &[]);
+    assert_eq!(drift(&nodes), ["modeled-not-migrated:auth.users"]);
     let (nodes, _) = extract(&opaque, &revisions, &[]);
     assert_eq!(
         drift(&nodes),
@@ -227,6 +269,10 @@ fn alembic_replay_fails_closed() {
             .ends_with("runs conditionally or in batch mode")
     );
     assert!(
+        unchecked("    match flag:\n        case 1:\n            op.drop_column('users', 'note')")
+            .ends_with("runs conditionally or in batch mode")
+    );
+    assert!(
         unchecked("    for _ in []:\n        op.execute('ALTER TABLE users DROP COLUMN note')")
             .ends_with("runs conditionally or in batch mode")
     );
@@ -259,6 +305,24 @@ fn alembic_replay_fails_closed() {
     assert!(
         unchecked("    op.create_table_from_select('users', query)")
             .ends_with("op.create_table_from_select is not replayed")
+    );
+    // A table no model maps is a Gap too when the replay loses it.
+    let audit = with(
+        &history(),
+        "e6_x.py",
+        revision(
+            "e6",
+            "'d5'",
+            "    op.create_table('audit', sa.Column('id', sa.Integer()))\n    if True:\n        op.drop_column('audit', 'id')",
+        ),
+    );
+    let (nodes, _) = extract(MODELS, &audit, &[]);
+    assert_eq!(drift(&nodes), Vec::<String>::new());
+    assert_eq!(
+        gaps(&nodes),
+        [
+            "schema drift not checked for `audit`: a migration op on it runs conditionally or in batch mode"
+        ]
     );
     // Two parallel branches both change `users`: their order is not fixed.
     let mut parallel = history();
@@ -343,6 +407,46 @@ fn alembic_replay_fails_closed() {
         ),
     );
     assert_eq!(refused(qualified, &[]), "raw SQL may change any table");
+    for sql in [
+        "UPDATE users SET email = 'open",
+        "UPDATE users SET email = 1 -- ; ALTER TABLE users DROP COLUMN email",
+        "DO $$ BEGIN ALTER TABLE users DROP COLUMN email; END $$",
+    ] {
+        let unreadable = with(
+            &history(),
+            "e6_x.py",
+            revision("e6", "'d5'", &format!("    op.execute(\"{sql}\")")),
+        );
+        assert_eq!(
+            refused(unreadable, &[]),
+            "raw SQL may change any table",
+            "{sql}"
+        );
+    }
+    // An escape inside the SQL literal is not read.
+    let escaped = with(
+        &history(),
+        "e6_x.py",
+        revision(
+            "e6",
+            "'d5'",
+            r#"    op.execute("UPDATE users SET email = 'a\nb'")"#,
+        ),
+    );
+    assert_eq!(refused(escaped, &[]), "raw SQL is not a literal");
+    let computed_schema = with(
+        &history(),
+        "e6_x.py",
+        revision(
+            "e6",
+            "'d5'",
+            "    op.drop_column('users', 'note', schema=SCHEMA)",
+        ),
+    );
+    assert_eq!(
+        refused(computed_schema, &[]),
+        "migration op names no literal schema"
+    );
     let helper = with(
         &history(),
         "e6_x.py",
@@ -372,39 +476,47 @@ fn alembic_replay_fails_closed() {
         )
     };
     let rebound = "`op` is rebound or its members replaced";
-    for (upgrade, tail) in [
-        (
-            "    op.add_column('users', sa.Column('phantom', sa.String()))",
-            "\nop = FakeOps()\n",
-        ),
+    let outside = "migration op outside upgrade()";
+    let phantom = "    op.add_column('users', sa.Column('phantom', sa.String()))";
+    for (upgrade, tail, reason) in [
+        (phantom, "\nop = FakeOps()\n", outside),
         (
             "    op = FakeOps()\n    op.add_column('users', sa.Column('phantom', sa.String()))",
             "",
+            rebound,
         ),
         (
             "    from fake import op\n    op.add_column('users', sa.Column('phantom', sa.String()))",
             "",
+            rebound,
         ),
-        (
-            "    op.add_column('users', sa.Column('phantom', sa.String()))",
-            "\nop.add_column = print\n",
-        ),
-        ("    op.impl.dialect = None", ""),
-        ("    op.impl['dialect'] = None", ""),
-        ("    del op.impl", ""),
+        (phantom, "\nop.add_column = print\n", outside),
+        ("    op.impl.dialect = None", "", rebound),
+        ("    op.impl['dialect'] = None", "", rebound),
+        ("    del op.impl", "", rebound),
         (
             "    add = op.add_column\n    add('users', sa.Column('phantom', sa.String()))",
             "",
+            rebound,
         ),
-        ("    register(op)", ""),
+        ("    register(op)", "", rebound),
+        (phantom, "\nfrom fake import *\n", rebound),
+        // Module-level ops, in a statement, a conditional or a class body.
+        ("    pass", "\nop.drop_table('users')\n", outside),
         (
-            "    op.add_column('users', sa.Column('phantom', sa.String()))",
-            "\nfrom fake import *\n",
+            "    pass",
+            "\nif True:\n    op.drop_table('users')\n",
+            outside,
+        ),
+        (
+            "    pass",
+            "\nclass Steps:\n    op.drop_table('users')\n",
+            outside,
         ),
     ] {
         assert_eq!(
             refused(replaced(upgrade, tail), &[]),
-            rebound,
+            reason,
             "{upgrade}{tail}"
         );
     }

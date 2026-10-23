@@ -465,6 +465,12 @@ fn replay(revision: &Revision, id: &SourceId<'_>, schema: &mut Schema) -> Replay
                     .join(" ");
                 op_bound |= text == "from alembic import op";
             }
+            "import_statement" => {}
+            // A module-level op (a statement, class body or decorated
+            // helper) runs outside the replay.
+            _ if mentions_op(&cx, statement) => {
+                return Err(inconclusive(statement, "migration op outside upgrade()"));
+            }
             _ => {}
         }
     }
@@ -592,6 +598,19 @@ fn replay(revision: &Revision, id: &SourceId<'_>, schema: &mut Schema) -> Replay
         let Some(table) = first.clone() else {
             return Err(inconclusive(call, "migration op names no literal table"));
         };
+        // A `schema=` names `schema.table`, as the models do.
+        let qualify = match keyword("schema") {
+            None => None,
+            Some(value) => Some(
+                literal_string(&cx, value)
+                    .ok_or_else(|| inconclusive(call, "migration op names no literal schema"))?,
+            ),
+        };
+        let qualified = |name: String| match &qualify {
+            Some(schema) => format!("{schema}.{name}"),
+            None => name,
+        };
+        let table = qualified(table);
         if conditional(&cx, call, body) || name == "batch_alter_table" {
             schema.forget(
                 &table,
@@ -634,7 +653,10 @@ fn replay(revision: &Revision, id: &SourceId<'_>, schema: &mut Schema) -> Replay
                 schema.unknown.remove(&table);
             }
             "rename_table" => {
-                let new = positional.get(1).and_then(|a| literal_string(&cx, *a));
+                let new = positional
+                    .get(1)
+                    .and_then(|a| literal_string(&cx, *a))
+                    .map(qualified);
                 match (new, schema.tables.remove(&table)) {
                     (Some(new), Some(mut state)) if !schema.unknown.contains_key(&table) => {
                         state.evidence = evidence;
@@ -820,6 +842,8 @@ fn conditional(cx: &FileCx<'_>, call: TsNode<'_>, body: TsNode<'_>) -> bool {
         if matches!(
             current.kind(),
             "if_statement"
+                | "match_statement"
+                | "case_clause"
                 | "for_statement"
                 | "while_statement"
                 | "try_statement"
@@ -893,7 +917,7 @@ fn column_name(cx: &FileCx<'_>, arg: TsNode<'_>) -> ColumnArg {
 
 /// A SQL literal: `"..."`, or `sa.text("...")` / `text("...")`.
 fn sql_literal(cx: &FileCx<'_>, arg: TsNode<'_>) -> Option<String> {
-    if let Some(sql) = literal_string(cx, arg) {
+    if let Some(sql) = exact_string(cx, arg) {
         return Some(sql);
     }
     let function = arg
@@ -909,9 +933,36 @@ fn sql_literal(cx: &FileCx<'_>, arg: TsNode<'_>) -> Option<String> {
     }
     let args = super::named_arguments(arg);
     match args.as_slice() {
-        [only] => literal_string(cx, *only),
+        [only] => exact_string(cx, *only),
         _ => None,
     }
+}
+
+/// A plain string literal's exact text: its own delimiters removed, quotes
+/// inside kept. Escapes, byte strings and f-strings are not read.
+fn exact_string(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
+    if node.kind() != "string" {
+        return None;
+    }
+    let text = cx.text(&node).trim();
+    let quote_at = text.find(['\'', '"'])?;
+    let prefix = &text[..quote_at];
+    if prefix.chars().any(|p| matches!(p, 'f' | 'F' | 'b' | 'B')) {
+        return None;
+    }
+    let body = &text[quote_at..];
+    let delimiter = [&body[..1], &body[..1], &body[..1]].concat();
+    let delimiter = if body.starts_with(&delimiter) {
+        delimiter
+    } else {
+        body[..1].to_string()
+    };
+    let inner = body
+        .strip_prefix(&delimiter)?
+        .strip_suffix(&delimiter)
+        .filter(|_| body.len() >= 2 * delimiter.len())?;
+    let raw = prefix.chars().any(|p| matches!(p, 'r' | 'R'));
+    (raw || !inner.contains('\\')).then(|| inner.to_string())
 }
 
 /// One shape change a literal SQL statement makes.
@@ -936,7 +987,7 @@ fn identifier(token: &str) -> String {
 /// change no shape; `ALTER TABLE t ADD|DROP [COLUMN] c` is read exactly.
 fn sql_effect(sql: &str) -> Option<Vec<SqlChange>> {
     let mut changes = Vec::new();
-    for statement in sql.split(';') {
+    for statement in statements(sql)? {
         let tokens: Vec<&str> = statement.split_whitespace().collect();
         let words: Vec<String> = tokens.iter().map(|w| w.to_ascii_uppercase()).collect();
         let word = |i: usize| words.get(i).map(String::as_str);
@@ -1007,6 +1058,31 @@ fn sql_effect(sql: &str) -> Option<Vec<SqlChange>> {
     Some(changes)
 }
 
+/// `sql` split at semicolons outside quotes; `None` when its boundaries
+/// cannot be read (an unclosed quote, a comment or dollar quoting).
+fn statements(sql: &str) -> Option<Vec<&str>> {
+    if sql.contains("--") || sql.contains("/*") || sql.contains('$') {
+        return None;
+    }
+    let (mut out, mut start, mut quote) = (Vec::new(), 0, None);
+    for (index, ch) in sql.char_indices() {
+        match (quote, ch) {
+            (None, '\'' | '"') => quote = Some(ch),
+            (Some(open), _) if ch == open => quote = None,
+            (None, ';') => {
+                out.push(&sql[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    out.push(&sql[start..]);
+    Some(out)
+}
+
 /// One modeled table: every `DataEntity` mapping it, merged.
 struct Modeled<'a> {
     entity: &'a Node,
@@ -1029,9 +1105,13 @@ fn compare(root: &Path, id: &SourceId<'_>, history: &History, out: &mut Extracti
         let Some(table) = entity.props["table"].as_str() else {
             continue;
         };
+        let table = match entity.props["schema"].as_str() {
+            Some(schema) => format!("{schema}.{table}"),
+            None => table.to_string(),
+        };
         let evidence: Vec<EvidenceRef> =
             serde_json::from_value(entity.props["prov"]["evidence"].clone()).unwrap_or_default();
-        let entry = modeled.entry(table.to_string()).or_insert_with(|| Modeled {
+        let entry = modeled.entry(table).or_insert_with(|| Modeled {
             entity,
             columns: BTreeMap::new(),
             opaque: false,
@@ -1123,10 +1203,17 @@ fn compare(root: &Path, id: &SourceId<'_>, history: &History, out: &mut Extracti
             }
         }
     }
+    // A migration-only table the replay lost is a Gap too.
+    for (table, (reason, evidence)) in &schema.unknown {
+        if !modeled.contains_key(table) {
+            gaps.push((table.clone(), reason.clone(), evidence.clone()));
+        }
+    }
     for (table, state) in &schema.tables {
         // A name a model file spells may be a `Table(...)` or a computed
         // `__tablename__`: not reported.
-        let spelled = [format!("\"{table}\""), format!("'{table}'")]
+        let bare = table.rsplit('.').next().unwrap_or(table);
+        let spelled = [format!("\"{bare}\""), format!("'{bare}'")]
             .iter()
             .any(|quoted| model_text.contains(quoted.as_str()));
         if !modeled.contains_key(table) && !spelled {
