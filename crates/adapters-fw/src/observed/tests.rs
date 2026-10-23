@@ -53,3 +53,39 @@ fn http_clients_of_one_origin_share_one_resource() {
     assert_eq!(gap.props["reason"], "runtime-computed http-api identity");
     assert_eq!(gap.props["provider"], "http-api");
 }
+
+// AC-0316 (#789 review): sites that merge into one resource keep the module
+// any of them proves, whichever site created the resource and even when a
+// Confirmed site replaces one that rested on an assumption.
+#[test]
+fn merged_resources_keep_a_proven_module() {
+    let storage =
+        |module: Option<&str>, assumption: Option<&'static str>, start: u64| ObservedSite {
+            family: ObservedFamily::BrowserStorage,
+            module: module.map(str::to_string),
+            identity: Some(IdentityExpr::Literal("sync".into())),
+            identity_assumption: assumption,
+            ..site("webextension-storage", None, start)
+        };
+    let source = ObservedSource {
+        repo: "local/p",
+        commit: "abc",
+        extractor: "t0.test",
+    };
+    for sites in [
+        [storage(None, None, 0), storage(Some("polyfill"), None, 20)],
+        [
+            storage(
+                Some("polyfill"),
+                Some("identity_assumes_method_receivers"),
+                0,
+            ),
+            storage(None, None, 20),
+        ],
+    ] {
+        let (nodes, _) = assemble(&source, &sites);
+        let resource = nodes.iter().find(|n| n.label == "Resource").unwrap();
+        assert_eq!(resource.props["module"], "polyfill");
+        assert_eq!(resource.props["prov"]["confidence_tier"], "Confirmed");
+    }
+}

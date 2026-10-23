@@ -851,8 +851,9 @@ fn storage_global(
 
 /// The WebExtension storage area a member expression names, with the
 /// polyfill module when the API comes through one: `<api>.storage.<area>`,
-/// where `<api>` is the unbound `chrome` or `browser` global or an import of
-/// [`EXTENSION_POLYFILL`], and the file never writes `<api>.storage`.
+/// where `<api>` is the unbound `chrome` or `browser` global or any name a
+/// default or namespace import of [`EXTENSION_POLYFILL`] binds, and the file
+/// never writes `<api>.storage`.
 fn extension_storage(
     cx: &FileCx,
     node: TsNode,
@@ -873,20 +874,19 @@ fn extension_storage(
     }
     let api = unwrap_assertions(storage.child_by_field_name("object")?);
     let name = cx.text(&api);
-    if api.kind() != "identifier"
-        || !matches!(name, "chrome" | "browser")
-        || scopes.member_written(name, "storage")
-    {
+    if api.kind() != "identifier" || scopes.member_written(name, "storage") {
         return None;
     }
+    // Only an unbound name must be the global itself; a polyfill import
+    // proves the API under any local name (#789 review).
     match scopes.resolve(name, api) {
-        None => Some((area, None)),
+        None if matches!(name, "chrome" | "browser") => Some((area, None)),
         Some(Declared::Module(module, Binding::Default | Binding::Namespace))
             if module == EXTENSION_POLYFILL =>
         {
             Some((area, Some(EXTENSION_POLYFILL)))
         }
-        Some(_) => None,
+        _ => None,
     }
 }
 

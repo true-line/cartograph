@@ -254,10 +254,24 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                         slot.insert(resource());
                     }
                     std::collections::btree_map::Entry::Occupied(mut slot) => {
+                        let prior = slot.get().props.get("module").cloned();
                         if confidence == ConfidenceTier::Confirmed
                             && slot.get().props["prov"]["confidence_tier"] != "Confirmed"
                         {
                             slot.insert(resource());
+                        }
+                        // The module any site proves stays on the merged
+                        // resource, whichever site created it (#789 review).
+                        let module = prior.or_else(|| {
+                            site.module
+                                .as_ref()
+                                .filter(|_| !http)
+                                .map(|module| serde_json::json!(module))
+                        });
+                        if let (Some(module), Some(props)) =
+                            (module, slot.get_mut().props.as_object_mut())
+                        {
+                            props.entry("module").or_insert(module);
                         }
                     }
                 }

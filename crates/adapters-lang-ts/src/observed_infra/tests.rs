@@ -717,8 +717,8 @@ export async function load(config: object, k: string) {
 }
 
 // AC-0316: WebExtension storage is observed infrastructure, one resource per
-// area, through the unbound `chrome`/`browser` global or an import of
-// `webextension-polyfill`; any other binding or a write of `<api>.storage`
+// area, through the unbound `chrome`/`browser` global or any name an import of
+// `webextension-polyfill` binds; any other binding or a write of `<api>.storage`
 // proves nothing. (T-0316)
 #[test]
 fn webextension_storage_areas_become_observed_resources() {
@@ -754,6 +754,27 @@ browser.storage.onChanged.addListener(() => {});
         "chrome.storage.local"
     );
 
+    // A polyfill import under any local name proves the API, and a global
+    // access sorted first does not drop the polyfill module (#789 review).
+    for alias in [
+        "import ext from \"webextension-polyfill\";\next.storage.sync.get('k');\n",
+        "import * as ext from \"webextension-polyfill\";\next.storage.sync.get('k');\n",
+        "const ext = require(\"webextension-polyfill\");\next.storage.sync.get('k');\n",
+    ] {
+        let ex = extract(&[
+            ("src/a.js", "chrome.storage.sync.get('k');\n"),
+            ("src/b.js", alias),
+        ]);
+        let sync = resource(&ex, "observed:webextension-storage:sync");
+        assert_eq!(sync.props["module"], "webextension-polyfill", "{alias}");
+        let edges = ex
+            .edges
+            .iter()
+            .filter(|edge| edge.dst.ends_with(":sync"))
+            .count();
+        assert_eq!(edges, 2, "{alias}");
+    }
+
     for (case, source) in [
         (
             "other module",
@@ -770,6 +791,11 @@ browser.storage.onChanged.addListener(() => {});
         (
             "storage written",
             "chrome.storage = fake;\nchrome.storage.local.get('k');\n",
+        ),
+        ("other global", "ext.storage.sync.get('k');\n"),
+        (
+            "alias storage written",
+            "import ext from \"webextension-polyfill\";\next.storage = fake;\next.storage.sync.get('k');\n",
         ),
         ("unknown area", "chrome.storage.cloud.get('k');\n"),
         ("computed area", "chrome.storage[area].get('k');\n"),
