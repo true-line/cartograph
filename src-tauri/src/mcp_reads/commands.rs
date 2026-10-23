@@ -277,7 +277,10 @@ pub(crate) async fn mcp_reads_owner_status(
 pub(crate) async fn mcp_reads_rotate(app: tauri::AppHandle) -> Result<(), CommandError> {
     #[cfg(unix)]
     {
-        let parent = runtime_parent(&app)?;
+        let path_app = app.clone();
+        let parent = tauri::async_runtime::spawn_blocking(move || runtime_parent(&path_app))
+            .await
+            .map_err(|_| CommandError::Unavailable)??;
         app.state::<super::service::Service>()
             .rotate(app.clone(), &parent)
             .await

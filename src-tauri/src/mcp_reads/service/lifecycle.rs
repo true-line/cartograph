@@ -60,13 +60,21 @@ impl Service {
         mut rotation: Rotation,
     ) -> Result<PathBuf, ReadError> {
         Self::await_cleanup(rotation.cleanup.take()).await?;
-        self.enable_transition(
-            app,
-            parent,
-            rotation.policy,
-            std::mem::take(&mut rotation.tasks),
-            Some(&rotation.token),
-        )
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| ReadError::Storage)?;
+        let shared = self.0.clone();
+        let parent = parent.to_path_buf();
+        let policy = rotation.policy;
+        let tasks = std::mem::take(&mut rotation.tasks);
+        let token = rotation.token.clone();
+        // Keep the Rotation guard in this future: cancellation invalidates the
+        // token even if the blocking job has not started. Startup checks it
+        // under the same lock as disable/shutdown before creating an endpoint.
+        tauri::async_runtime::spawn_blocking(move || {
+            let _runtime = runtime.enter();
+            Self::enable_transition(&shared, app, &parent, policy, tasks, Some(&token))
+        })
+        .await
+        .map_err(|_| ReadError::Storage)?
     }
 
     fn begin_rotation(&self) -> Result<Rotation, ReadError> {

@@ -252,11 +252,11 @@ impl Service {
                 agents::investigation::McpTaskActivation::granted(client, capacity)
             }
         };
-        self.enable_transition(app, parent, policy, tasks, None)
+        Self::enable_transition(&self.0, app, parent, policy, tasks, None)
     }
 
     fn enable_transition<R: tauri::Runtime>(
-        &self,
+        shared: &Mutex<State>,
         app: tauri::AppHandle<R>,
         parent: &Path,
         policy: Policy,
@@ -264,7 +264,7 @@ impl Service {
         rotation: Option<&Arc<()>>,
     ) -> Result<PathBuf, ReadError> {
         policy.validate()?;
-        let mut state = self.0.lock().map_err(|_| ReadError::Storage)?;
+        let mut state = shared.lock().map_err(|_| ReadError::Storage)?;
         match (&state.rotation, rotation) {
             (None, None) => {}
             (Some(current), Some(expected)) if Arc::ptr_eq(current, expected) => {}
