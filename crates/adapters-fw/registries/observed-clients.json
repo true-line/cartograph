@@ -1,6 +1,6 @@
 {
   "schema": "cartograph-observed-client-registry@1",
-  "version": "2026.10-py",
+  "version": "2026.10-py-limits",
   "clients": [
     {
       "family": "sdk-client",
@@ -480,7 +480,8 @@
       "module": "redis",
       "export": "from_url",
       "form": "call",
-      "identity": "first"
+      "identity": "first",
+      "keyword": "url"
     },
     {
       "family": "sdk-client",
@@ -489,7 +490,38 @@
       "module": "redis.Redis",
       "export": "from_url",
       "form": "call",
-      "identity": "first"
+      "identity": "first",
+      "keyword": "url"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "redis",
+      "ecosystem": "pypi",
+      "module": "limits.storage",
+      "export": "RedisStorage",
+      "form": "call",
+      "identity": "first",
+      "keyword": "uri"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "redis",
+      "ecosystem": "pypi",
+      "module": "limits.storage",
+      "export": "RedisSentinelStorage",
+      "form": "call",
+      "identity": "first",
+      "keyword": "uri"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "redis",
+      "ecosystem": "pypi",
+      "module": "limits.storage",
+      "export": "RedisClusterStorage",
+      "form": "call",
+      "identity": "first",
+      "keyword": "uri"
     },
     {
       "family": "sdk-client",
@@ -498,7 +530,8 @@
       "module": "smtplib",
       "export": "SMTP",
       "form": "call",
-      "identity": "first"
+      "identity": "first",
+      "keyword": "host"
     },
     {
       "family": "sdk-client",
@@ -507,7 +540,8 @@
       "module": "smtplib",
       "export": "SMTP_SSL",
       "form": "call",
-      "identity": "first"
+      "identity": "first",
+      "keyword": "host"
     },
     {
       "family": "sdk-client",
@@ -516,7 +550,8 @@
       "module": "sqlalchemy",
       "export": "create_engine",
       "form": "call",
-      "identity": "first"
+      "identity": "first",
+      "keyword": "url"
     }
   ]
 }
