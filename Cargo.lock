@@ -6,7 +6,9 @@ version = 4
 name = "adapters-fw"
 version = "0.22.0"
 dependencies = [
+ "core-graph",
  "core-prov",
+ "core-redact",
  "serde",
  "serde_json",
 ]
@@ -63,6 +65,7 @@ dependencies = [
 name = "adapters-lang-python"
 version = "0.22.0"
 dependencies = [
+ "adapters-fw",
  "core-graph",
  "core-prov",
  "serde_json",

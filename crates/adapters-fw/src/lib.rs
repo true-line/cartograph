@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod events;
+pub mod observed;
 pub mod tsconfig;
 pub mod vue;
 

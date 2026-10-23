@@ -1512,6 +1512,15 @@ fn extract_tree_with_registries(
         };
         extraction.nodes.extend(python.nodes);
         extraction.edges.extend(python.edges);
+        // Observed infrastructure from Python (#734): registry clients the
+        // code proves it talks to (boto3, redis, smtplib, SQLAlchemy).
+        let (observed_nodes, observed_edges) =
+            adapters_lang_python::observed_infra::extract_dir(root, &python_id, registries)
+                .map_err(|error| error.to_string())?;
+        layers.python.nodes += distinct_node_count(&observed_nodes);
+        layers.python.edges += distinct_edge_count(&observed_edges);
+        extraction.nodes.extend(observed_nodes);
+        extraction.edges.extend(observed_edges);
 
         let go_id = adapters_lang_go::SourceId { repo, commit };
         let mut go_progress = |path: &str| on_file(&format!("Reading Go sources — {path}"));

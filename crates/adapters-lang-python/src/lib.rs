@@ -14,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 
+pub mod observed_infra;
 mod sqlalchemy;
 
 const EXTRACTOR_ID: &str = "t0.adapter-python";

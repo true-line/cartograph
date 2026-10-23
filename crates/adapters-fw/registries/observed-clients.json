@@ -1,6 +1,6 @@
 {
   "schema": "cartograph-observed-client-registry@1",
-  "version": "ts-2026.10",
+  "version": "2026.10-py",
   "clients": [
     {
       "family": "sdk-client",
@@ -340,6 +340,183 @@
       "identity": {
         "key": "prefixUrl"
       }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-s3",
+      "ecosystem": "pypi",
+      "module": "boto3",
+      "export": "client",
+      "form": "call",
+      "select": {
+        "first": "s3"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-s3",
+      "ecosystem": "pypi",
+      "module": "boto3",
+      "export": "resource",
+      "form": "call",
+      "select": {
+        "first": "s3"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-sqs",
+      "ecosystem": "pypi",
+      "module": "boto3",
+      "export": "client",
+      "form": "call",
+      "select": {
+        "first": "sqs"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-sqs",
+      "ecosystem": "pypi",
+      "module": "boto3",
+      "export": "resource",
+      "form": "call",
+      "select": {
+        "first": "sqs"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-sns",
+      "ecosystem": "pypi",
+      "module": "boto3",
+      "export": "client",
+      "form": "call",
+      "select": {
+        "first": "sns"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-sns",
+      "ecosystem": "pypi",
+      "module": "boto3",
+      "export": "resource",
+      "form": "call",
+      "select": {
+        "first": "sns"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-dynamodb",
+      "ecosystem": "pypi",
+      "module": "boto3",
+      "export": "client",
+      "form": "call",
+      "select": {
+        "first": "dynamodb"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-dynamodb",
+      "ecosystem": "pypi",
+      "module": "boto3",
+      "export": "resource",
+      "form": "call",
+      "select": {
+        "first": "dynamodb"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-lambda",
+      "ecosystem": "pypi",
+      "module": "boto3",
+      "export": "client",
+      "form": "call",
+      "select": {
+        "first": "lambda"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "aws-secrets-manager",
+      "ecosystem": "pypi",
+      "module": "boto3",
+      "export": "client",
+      "form": "call",
+      "select": {
+        "first": "secretsmanager"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "redis",
+      "ecosystem": "pypi",
+      "module": "redis",
+      "export": "Redis",
+      "form": "call",
+      "identity": {
+        "key": "host"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "redis",
+      "ecosystem": "pypi",
+      "module": "redis",
+      "export": "StrictRedis",
+      "form": "call",
+      "identity": {
+        "key": "host"
+      }
+    },
+    {
+      "family": "sdk-client",
+      "provider": "redis",
+      "ecosystem": "pypi",
+      "module": "redis",
+      "export": "from_url",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "redis",
+      "ecosystem": "pypi",
+      "module": "redis.Redis",
+      "export": "from_url",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "smtp",
+      "ecosystem": "pypi",
+      "module": "smtplib",
+      "export": "SMTP",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "smtp",
+      "ecosystem": "pypi",
+      "module": "smtplib",
+      "export": "SMTP_SSL",
+      "form": "call",
+      "identity": "first"
+    },
+    {
+      "family": "sdk-client",
+      "provider": "sql-database",
+      "ecosystem": "pypi",
+      "module": "sqlalchemy",
+      "export": "create_engine",
+      "form": "call",
+      "identity": "first"
     }
   ]
 }
