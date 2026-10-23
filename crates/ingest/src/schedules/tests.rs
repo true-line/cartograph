@@ -1260,3 +1260,97 @@ if __name__ == "__main__":
         .collect();
     assert_eq!(module_file("run.py", "m", &both), None);
 }
+
+// #779: each `on.schedule` cron of a GitHub Actions workflow (a YAML file
+// directly in `.github/workflows`) is a Schedule whose ENTRY is the
+// workflow file itself, Confirmed; its steps are not traced through. A
+// cron outside the five-field grammar, a non-literal or aliased one is a
+// Gap; workflows without a schedule, and files elsewhere, declare nothing.
+// (AC-0335, T-0335)
+#[test]
+fn actions_schedules_enter_their_workflow() {
+    let workflow = r#"name: Nightly sync
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "15 3 * * 1-5"
+    - cron: '0  */6 * * *'
+    - cron: "61 * * * *"
+    - cron: *nightly
+    - when: "0 0 * * *"
+    - cron: "20/15 * * * *"
+    - !!map
+      cron: "0 1 * * *"
+  workflow_dispatch:
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - run: python scripts/sync.py
+"#;
+    let push_only = "name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n";
+    let out = extract(&[
+        (".github/workflows/nightly.yml", workflow),
+        (".github/workflows/ci.yaml", push_only),
+        (
+            ".github/workflows/nested/old.yml",
+            "on:\n  schedule:\n    - cron: \"0 0 * * *\"\n",
+        ),
+        ("scripts/sync.py", ""),
+        (
+            ".github/workflows/anchored.yml",
+            "on:\n  schedule: &nightlies\n    - cron: \"0 0 * * *\"\n",
+        ),
+        (
+            ".github/workflows/tagged.yml",
+            "on: !!map\n  schedule:\n    - cron: \"0 0 * * *\"\n",
+        ),
+    ]);
+    let file = ".github/workflows/nightly.yml";
+    assert_eq!(out.files, 3);
+    let schedules: Vec<&Node> = out.nodes.iter().filter(|n| n.label == "Schedule").collect();
+    assert_eq!(schedules.len(), 9);
+    assert!(
+        schedules
+            .iter()
+            .all(|s| s.props["format"] == "github-actions")
+    );
+    let schedules: Vec<&&Node> = schedules
+        .iter()
+        .filter(|s| s.props["name"] == "Nightly sync")
+        .collect();
+    assert_eq!(schedules.len(), 7);
+    assert_eq!(schedules[0].props["schedule"], "15 3 * * 1-5");
+    assert_eq!(schedules[1].props["schedule"], "0  */6 * * *");
+    assert_eq!(schedules[5].props["schedule"], "20/15 * * * *");
+    // GitHub documents a start-value step (`20/15`); crontab(5) does not.
+    assert!(cron_field("20/15", 0, true) && !cron_field("20/15", 0, false));
+    assert!(!cron_field("60/15", 0, true) && !cron_field("20/0", 0, true));
+    for index in [0, 1, 5] {
+        let edge = entry(&out, index, file);
+        assert_eq!(edge.dst, format!("file:{REPO}@{file}"));
+        assert_eq!(confidence(edge), "Confirmed");
+    }
+    for (index, reason) in [
+        (2, "workflow cron is not five schedule fields"),
+        (3, "workflow cron uses a YAML alias, anchor or tag"),
+        (4, "workflow schedule entry without a literal cron"),
+        // An anchor or tag on the item or a container (#799 review).
+        (6, "workflow cron uses a YAML alias, anchor or tag"),
+    ] {
+        assert_eq!(entry(&out, index, file).props["reason"], reason, "{index}");
+    }
+    for file in [
+        ".github/workflows/anchored.yml",
+        ".github/workflows/tagged.yml",
+    ] {
+        assert_eq!(
+            entry(&out, 0, file).props["reason"],
+            "workflow cron uses a YAML alias, anchor or tag",
+            "{file}"
+        );
+    }
+    // The steps' scripts are not entries.
+    assert!(!out.edges.iter().any(|e| e.dst.ends_with("scripts/sync.py")));
+}
