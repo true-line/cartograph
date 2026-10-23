@@ -18,6 +18,16 @@ pub use transport_workspace::TransportWorkspace;
 
 const RECEIVE_CHUNK_BYTES: usize = 8192;
 const MODEL_AND_RESPONSE_ID_BYTES: usize = 256;
+mod workspace;
+pub use workspace::FirewallWorkspace;
+
+// Shared by validation/serialization and the logical workspace component.
+const MAX_PROVIDER_ID_BYTES: usize = 1024;
+const MAX_MODEL_BYTES: usize = MODEL_AND_RESPONSE_ID_BYTES;
+const MAX_ENDPOINT_BYTES: usize = 4096;
+const MAX_ACTION_ID_BYTES: usize = 1024;
+const EGRESS_FINGERPRINT_BYTES: u64 = 512 * 1024;
+const ORIGINAL_ACTION_OVERHEAD_BYTES: u64 = 4096;
 
 /// Immutable protocol identity, including fixed transport behavior.
 pub const PROTOCOL_VERSION: &str = "bounded-json-completion@2";
@@ -122,9 +132,9 @@ pub struct ProviderProfile {
 impl ProviderProfile {
     fn validate(&self) -> Result<(), BoundedCallError> {
         if self.protocol_version != PROTOCOL_VERSION
-            || !identifier(&self.provider_id, 1024)
-            || !identifier(&self.requested_model, MODEL_AND_RESPONSE_ID_BYTES)
-            || self.endpoint_id.len() > 4096
+            || !identifier(&self.provider_id, MAX_PROVIDER_ID_BYTES)
+            || !identifier(&self.requested_model, MAX_MODEL_BYTES)
+            || self.endpoint_id.len() > MAX_ENDPOINT_BYTES
         {
             return Err(not_sent(FailureCode::InvalidProfile));
         }
@@ -247,9 +257,13 @@ pub fn bound_unread_source_action(
     sizes.original_action_bytes = add(
         sizes.original_action_bytes,
         escaped,
-        limits.0.input_bytes + 4096,
+        limits.0.input_bytes + ORIGINAL_ACTION_OVERHEAD_BYTES,
     )?;
-    sizes.egress_fingerprint_bytes = add(sizes.egress_fingerprint_bytes, escaped, 512 * 1024)?;
+    sizes.egress_fingerprint_bytes = add(
+        sizes.egress_fingerprint_bytes,
+        escaped,
+        EGRESS_FINGERPRINT_BYTES,
+    )?;
     Ok(sizes)
 }
 
@@ -487,7 +501,7 @@ fn prepare_wire(
     action: &CompletionAction,
     limits: &CompletionLimits,
 ) -> Result<PreparedWire, BoundedCallError> {
-    if !identifier(&action.action_id, 1024)
+    if !identifier(&action.action_id, MAX_ACTION_ID_BYTES)
         || action.payload.spans.len() > limits.0.max_spans as usize
     {
         return Err(not_sent(FailureCode::InvalidInput));
@@ -558,7 +572,7 @@ fn prepare_wire(
             &action.action_id,
             &payload,
         ),
-        512 * 1024,
+        EGRESS_FINGERPRINT_BYTES,
         FailureCode::InputTooLarge,
     )?;
     let payload_hash = blake3::hash(&hash_input).to_hex().to_string();
@@ -595,7 +609,7 @@ fn original_action_wire(
     encode(&action.payload, payload_limit, FailureCode::InputTooLarge)?;
     let bytes = encode(
         &("cartograph-original-bounded-action-v1", action),
-        payload_limit + 4096,
+        payload_limit + ORIGINAL_ACTION_OVERHEAD_BYTES,
         FailureCode::InputTooLarge,
     )?;
     Ok((
