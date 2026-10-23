@@ -70,6 +70,59 @@ struct AggregatePolicy {
     max_cumulative_read_bytes: NonZeroU64,
 }
 
+#[tauri::command]
+pub(crate) async fn mcp_task_client_create(
+    app: tauri::AppHandle,
+    maximum_clients: NonZeroUsize,
+) -> Result<agents::investigation::McpClientId, CommandError> {
+    #[cfg(unix)]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            app.state::<crate::AppState>()
+                .jobs
+                .lock()
+                .map_err(|_| CommandError::Unavailable)?
+                .create_mcp_client(maximum_clients)
+                .map_err(|_| CommandError::Unavailable)
+        })
+        .await
+        .map_err(|_| CommandError::Unavailable)?
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (app, maximum_clients);
+        Err(CommandError::UnsupportedPlatform)
+    }
+}
+
+/// Human IPC for selecting an existing principal after restart. This operation
+/// neither creates an activation nor restores a task grant.
+#[tauri::command]
+pub(crate) async fn mcp_task_clients(
+    app: tauri::AppHandle,
+    after: Option<agents::investigation::McpClientId>,
+    limit: NonZeroUsize,
+) -> Result<Vec<agents::investigation::McpClientId>, CommandError> {
+    #[cfg(unix)]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            app.state::<crate::AppState>()
+                .jobs
+                .lock()
+                .map_err(|_| CommandError::Unavailable)?
+                .mcp_clients(after.as_ref(), limit)
+                .map_err(|_| CommandError::Unavailable)
+        })
+        .await
+        .map_err(|_| CommandError::Unavailable)?
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (app, after, limit);
+        Err(CommandError::UnsupportedPlatform)
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CommandError {
