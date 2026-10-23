@@ -23,6 +23,25 @@ impl Drop for Rotation {
 }
 
 impl Service {
+    /// One owner observation. Selection is not authority; production task
+    /// dispatch remains unavailable until the worker admission slice lands.
+    pub(crate) fn owner_status(&self) -> Result<serde_json::Value, ReadError> {
+        let state = self.0.lock().map_err(|_| ReadError::Storage)?;
+        let selected = state
+            .active
+            .as_ref()
+            .map(|active| active.tasks.selected_client())
+            .transpose()
+            .map_err(|_| ReadError::Storage)?
+            .flatten();
+        Ok(serde_json::json!({
+            "service": state.status()?,
+            "selected_client": selected,
+            "task_dispatch_available": false,
+            "task_grant": null,
+        }))
+    }
+
     /// Replace endpoint credentials; retain selection, never task authority.
     /// The old activation owns cleanup even if this waiter is cancelled.
     pub(crate) async fn rotate<R: tauri::Runtime>(

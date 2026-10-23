@@ -142,9 +142,9 @@ pub(crate) enum Status {
     CleanupFailed,
 }
 
-impl Service {
-    pub(crate) fn status(&self) -> Result<Status, ReadError> {
-        let state = self.0.lock().map_err(|_| ReadError::Storage)?;
+impl State {
+    fn status(&self) -> Result<Status, ReadError> {
+        let state = self;
         if state.cleanup_failed {
             return Ok(Status::CleanupFailed);
         }
@@ -167,6 +167,12 @@ impl Service {
         } else {
             Ok(Status::Disabled)
         }
+    }
+}
+
+impl Service {
+    pub(crate) fn status(&self) -> Result<Status, ReadError> {
+        self.0.lock().map_err(|_| ReadError::Storage)?.status()
     }
 
     /// Generate a JSON client entry for an existing host-selected executable.
