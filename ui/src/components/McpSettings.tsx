@@ -78,5 +78,6 @@ function McpSettingsSession({ available }: { available: boolean }) {
     configuration={available ? configuration : null} onRefresh={() => void run()}
     onEnable={(policy) => void run(() => invoke('mcp_reads_enable', { policy }))}
     onDisable={() => void run(() => invoke('mcp_reads_disable'))}
+    onRotate={() => void run(() => invoke('mcp_reads_rotate'))}
     onConfiguration={() => void run(undefined, true)} />;
 }
