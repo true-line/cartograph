@@ -969,3 +969,39 @@ fn completion_v2_worker_accepts_selected_policy_and_reopens_exactly() {
 }
 
 pub(in crate::investigations) use next_prompt_tests::with_public_start_fixture;
+
+// AC-0327: detached preparation retains admitted source-discovery limits.
+#[test]
+fn completion_worker_preserves_admitted_source_limit_before_provider() {
+    let provider = Arc::new(Scripted::new(Mode::CompletionSupported));
+    let fixture = CompletionFixture::new(
+        provider.as_ref(),
+        SpecialistId::DomainAnalystV7,
+        true,
+        true,
+        false,
+    );
+    let mut limits = crate::mcp_reads::worker::tests::limits().scope;
+    limits.max_source_registry_bytes = std::num::NonZeroUsize::new(1).unwrap();
+    run_completion_with_scope(
+        fixture.base.app.handle().clone(),
+        fixture.id.clone(),
+        fixture.request.clone(),
+        fixture.execution.clone(),
+        provider.clone(),
+        fixture.live.clone(),
+        Instant::now(),
+        Some(limits),
+    );
+    let state = fixture.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&fixture.id).unwrap();
+    assert!(terminal(detail.summary.status));
+    assert_eq!(
+        detail.error.as_deref(),
+        Some("An investigation work or storage limit was reached.")
+    );
+    assert!(!detail.summary.has_result);
+    assert_eq!(detail.usage.model_invocations, 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}

@@ -37,7 +37,7 @@ pub(super) fn start<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     started: Instant,
 ) -> Result<InvestigationSummary, InvestigationStartError> {
-    start_access(request, app, started, None)
+    start_access(request, app, started, None, None)
 }
 
 pub(super) fn start_access<R: tauri::Runtime>(
@@ -45,6 +45,7 @@ pub(super) fn start_access<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     started: Instant,
     session: Option<&McpTaskSession>,
+    scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
 ) -> Result<InvestigationSummary, InvestigationStartError> {
     let policy = InvestigationPolicy::for_profile(&request.limit_profile)
         .ok_or_else(|| rejected("invalid_input", "Unknown investigation policy."))?;
@@ -140,10 +141,20 @@ pub(super) fn start_access<R: tauri::Runtime>(
     // async waiter goes away. Persisted history is the response authority.
     let worker_app = app.clone();
     let worker_id = id.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        worker::run_completion(
+    tauri::async_runtime::spawn_blocking(move || match scope_limits {
+        Some(limits) => worker::run_completion_with_scope(
+            worker_app,
+            worker_id,
+            request,
+            execution,
+            provider,
+            live,
+            started,
+            Some(limits),
+        ),
+        None => worker::run_completion(
             worker_app, worker_id, request, execution, provider, live, started,
-        );
+        ),
     });
     let detail = state
         .jobs
