@@ -674,3 +674,22 @@
 - **Performance:** Existing raw action/metadata response bounds and task/global storage ceilings; checked UTF-8/scalar/index accounting, off-thread IPC and bounded current rows only. No audit stream or new execution budgets.
 - **Trace:** W8b / H4 dependency (#730) · `agents`, `app`, `ui` · SPEC-03/SPEC-10 · T-0293..0296. Host and UI automation are mapped; native manual procedures remain UNEXECUTED.
 
+
+
+### US-0043 — Request durable specialist investigations through MCP
+- **Actor:** Authorized external agent
+- **As an** authorized external agent **I want** to request and follow a durable specialist investigation through MCP **so that** reconnects and retries preserve the same host-owned work and cited outcome.
+- **Priority:** Should · **Status:** Planned
+- **AC-0320** Read-only credentials reject start, status, events, result and cancel. Only an owner app action grants task access; client JSON cannot choose principal or grant.
+- **AC-0321** The same host-assigned principal survives reconnect/rotation; old credentials fail, rotated credentials lack a task grant until reconfirmed. Restart restores identity without execution authority.
+- **AC-0322** Same principal/nonce/normalized intent returns one task under concurrent requests and after graph/provider/capacity changes. Different intent refuses; another principal cannot collide with that namespace.
+- **AC-0323** Migration preserves every old App task, body hash and nonce interpretation. Invalid layout or interrupted migration leaves the old store intact; textual app/MCP nonce collisions cannot alias tasks.
+- **AC-0324** Status/events/result/cancel and follow-up history refuse foreign principals and App-created subjects without revealing which exists. Owner app inspection remains available.
+- **AC-0325** Disconnect/disable does not cancel admitted work; explicit cancellation and restart recovery use the existing coordinator and never duplicate unknown provider execution.
+- **AC-0326** MCP sees pending-consent status but cannot approve it. App approval remains bound to exact task/step/revision/payload; cloud egress remains subject to existing policy.
+- **AC-0327** Request bytes are bounded before parse; event pages and result envelopes are bounded before allocation. Full nonce capacity refuses new starts while preserving existing retries and reads.
+- **AC-0328** Shared host adapters preserve specialist version, scope, policy, citations, T3 ceiling and retention lifetimes. App and MCP observe the same durable outcome; no direct graph mutation or relay database access occurs.
+- **AC-0329** A real relay/socket fixture with deterministic provider observes start, ordered events, reconnect, cancel and result with clean shutdown. Evidence identifies exact build/profile and does not claim real-provider H4 or ACP H5.
+- **Security:** Owner-only task grant, host-derived principal, own-task visibility and owner-only consent; relay has no database or provider access.
+- **Performance:** Explicit bounded transport and storage admission; no silent nonce eviction or numeric investigation ceiling changes.
+- **Trace:** H4 (#766) · agents, app, mcp-wire, mcp-local, mcp-relay, ui · ADR-0028, ADR-0044 · T-0320..0329. Only the AC-0323 storage migration prerequisite is covered in #777; runtime authorization, principal isolation and relay acceptance remain planned in #766.

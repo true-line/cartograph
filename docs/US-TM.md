@@ -54,6 +54,8 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 
 | US-0042 | AC-0293..0296 | agents, app, ui | W8b / H4 dependency (#730) | — | — | T-0293..0296 |
 
+| US-0043 | AC-0320..0329 | agents, app, mcp-wire, mcp-local, mcp-relay, ui | H4 | — | ADR-0028, ADR-0044, ADR-0048 | T-0320..0329 |
+
 ## Coverage assertions
 - Every Must-priority US is anchored to an original milestone, post-M10 work, or a SPEC-01 delivery gate; a milestone label alone does not establish completion.
 - Every AC has at least one test ID reserved (T-XXXX), to be authored alongside the AC (test-trace mapping standard).
@@ -119,3 +121,5 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0047 | Graph store revision (proposed) |
 
 | ADR-0044 | App-owned read-only MCP with a separate local relay (proposed; #718) |
+
+| ADR-0048 | MCP investigation authority and durable client identity (proposed; owner review required) |

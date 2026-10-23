@@ -1572,3 +1572,6 @@ fn finish_only_tool_stop_preserves_call_charge_without_tool_or_input_publication
 
 #[path = "finding_review_tests.rs"]
 mod finding_review_tests;
+
+#[path = "namespace_migration_tests.rs"]
+mod namespace_migration_tests;

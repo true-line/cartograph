@@ -38,10 +38,30 @@ fn version_one_schema() -> Vec<(String, String, String)> {
 
 const META_V2: &str = "CREATE TABLE investigation_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=2), namespace TEXT NOT NULL) STRICT";
 
-fn schema() -> Vec<(String, String, String)> {
+fn version_two_schema() -> Vec<(String, String, String)> {
     let mut objects = version_one_schema();
     objects[0].2 = META_V2.into();
     objects.extend(super::finding_reviews::schema());
+    objects
+}
+
+const META_V3: &str = "CREATE TABLE investigation_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=3), namespace TEXT NOT NULL) STRICT";
+const MCP_CLIENTS_V3: &str = "CREATE TABLE investigation_mcp_clients (id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=32), created_at TEXT NOT NULL) STRICT";
+const TASKS_V3: &str = "CREATE TABLE investigation_tasks (ordinal INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, nonce TEXT NOT NULL, request_namespace TEXT NOT NULL DEFAULT 'app', conversation_id TEXT NOT NULL, job_id INTEGER NOT NULL UNIQUE, revision INTEGER NOT NULL CHECK(revision>=0), live INTEGER NOT NULL CHECK(live IN (0,1)), record BLOB NOT NULL, record_hash TEXT NOT NULL, UNIQUE(request_namespace,nonce)) STRICT";
+
+fn schema() -> Vec<(String, String, String)> {
+    let mut objects = version_two_schema();
+    objects[0].2 = META_V3.into();
+    objects
+        .iter_mut()
+        .find(|entry| entry.0 == "investigation_tasks")
+        .unwrap()
+        .2 = TASKS_V3.into();
+    objects.push((
+        "investigation_mcp_clients".into(),
+        "table".into(),
+        MCP_CLIENTS_V3.into(),
+    ));
     objects
 }
 
@@ -61,6 +81,29 @@ fn initialize_with_hook(
     mut hook: impl FnMut(u8) -> Result<(), InvestigationStoreError>,
 ) -> Result<(), InvestigationStoreError> {
     connection.pragma_update(None, "synchronous", "FULL")?;
+    let foreign_keys: bool = connection.pragma_query_value(None, "foreign_keys", |r| r.get(0))?;
+    let legacy_alter: bool =
+        connection.pragma_query_value(None, "legacy_alter_table", |r| r.get(0))?;
+    // SQLite's documented table-rebuild mode: preserve child references to the
+    // final table name, then validate referential integrity before commit.
+    connection.pragma_update(None, "foreign_keys", false)?;
+    if let Err(error) = connection.pragma_update(None, "legacy_alter_table", true) {
+        connection.pragma_update(None, "foreign_keys", foreign_keys)?;
+        return Err(error.into());
+    }
+    let result = initialize_transaction(connection, namespace, &mut hook);
+    let restore_legacy = connection.pragma_update(None, "legacy_alter_table", legacy_alter);
+    let restore_foreign = connection.pragma_update(None, "foreign_keys", foreign_keys);
+    restore_legacy?;
+    restore_foreign?;
+    result
+}
+
+fn initialize_transaction(
+    connection: &mut Connection,
+    namespace: &ExecutionNamespace,
+    hook: &mut impl FnMut(u8) -> Result<(), InvestigationStoreError>,
+) -> Result<(), InvestigationStoreError> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let count: i64 = tx.query_row(
         &format!("SELECT count(*) FROM sqlite_schema WHERE {OWNED}"),
@@ -110,11 +153,36 @@ fn initialize_with_hook(
             tx.execute_batch(&sql)?;
         }
         hook(2)?;
-    } else if version != 2 {
+    } else if version != 2 && version != 3 {
         return Err(InvestigationStoreError::Invalid);
+    }
+    if version <= 2 {
+        validate_version_schema(&tx, 2)?;
+        validate_metadata(&tx, namespace, 2)?;
+        // Preserve immutable record bytes/hashes and all existing scalar identity.
+        // No caller-supplied namespace is introduced by migration.
+        tx.execute_batch("ALTER TABLE investigation_tasks RENAME TO investigation_tasks_v2")?;
+        tx.execute_batch(TASKS_V3)?;
+        hook(4)?;
+        tx.execute_batch("INSERT INTO investigation_tasks(ordinal,id,nonce,request_namespace,conversation_id,job_id,revision,live,record,record_hash) SELECT ordinal,id,nonce,'app',conversation_id,job_id,revision,live,record,record_hash FROM investigation_tasks_v2; UPDATE sqlite_sequence SET seq=max(seq,coalesce((SELECT seq FROM sqlite_sequence WHERE name='investigation_tasks_v2'),0)) WHERE name='investigation_tasks'; DROP TABLE investigation_tasks_v2; DROP TABLE investigation_meta")?;
+        tx.execute_batch(META_V3)?;
+        tx.execute_batch(MCP_CLIENTS_V3)?;
+        one(tx.execute(
+            "INSERT INTO investigation_meta VALUES (1,3,?1)",
+            [&namespace.value],
+        )?)?;
+        hook(5)?;
     }
     validate(&tx, namespace)?;
     hook(3)?;
+    if tx
+        .prepare("PRAGMA foreign_key_check")?
+        .query([])?
+        .next()?
+        .is_some()
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
     tx.commit()?;
     Ok(())
 }
@@ -125,7 +193,7 @@ pub(super) fn validate(
 ) -> Result<(), InvestigationStoreError> {
     execution::validate(connection, namespace)?;
     validate_archive_schema(connection)?;
-    validate_metadata(connection, namespace, 2)
+    validate_metadata(connection, namespace, 3)
 }
 
 /// Validate the complete extended SQL layout before archive helpers use it.
@@ -133,7 +201,7 @@ pub(super) fn validate(
 pub(super) fn validate_archive_schema(
     connection: &Connection,
 ) -> Result<(), InvestigationStoreError> {
-    validate_version_schema(connection, 2)
+    validate_version_schema(connection, 3)
 }
 
 fn validate_version_schema(
@@ -142,6 +210,8 @@ fn validate_version_schema(
 ) -> Result<(), InvestigationStoreError> {
     let mut expected = if version == 1 {
         version_one_schema()
+    } else if version == 2 {
+        version_two_schema()
     } else {
         schema()
     };
@@ -1370,8 +1440,61 @@ pub(super) fn insert_body(
 }
 
 /// Construct an actual old layout for migration fixtures, never for runtime.
+/// Construct an actual old layout for migration fixtures, never for runtime.
+#[cfg(test)]
+pub(super) fn version_two_fixture(connection: &Connection) {
+    connection
+        .execute_batch("DROP TABLE investigation_mcp_clients")
+        .unwrap();
+    let foreign_keys: bool = connection
+        .pragma_query_value(None, "foreign_keys", |r| r.get(0))
+        .unwrap();
+    let legacy_alter: bool = connection
+        .pragma_query_value(None, "legacy_alter_table", |r| r.get(0))
+        .unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    connection
+        .pragma_update(None, "legacy_alter_table", true)
+        .unwrap();
+    let tx = connection.unchecked_transaction().unwrap();
+    tx.execute_batch("ALTER TABLE investigation_tasks RENAME TO investigation_tasks_v3")
+        .unwrap();
+    let old_tasks = legacy_schema()
+        .into_iter()
+        .find(|entry| entry.0 == "investigation_tasks")
+        .unwrap()
+        .2;
+    tx.execute_batch(&old_tasks).unwrap();
+    tx.execute_batch("INSERT INTO investigation_tasks (ordinal,id,nonce,conversation_id,job_id,revision,live,record,record_hash) SELECT ordinal,id,nonce,conversation_id,job_id,revision,live,record,record_hash FROM investigation_tasks_v3; DROP TABLE investigation_tasks_v3").unwrap();
+    tx.commit().unwrap();
+    connection
+        .pragma_update(None, "legacy_alter_table", legacy_alter)
+        .unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", foreign_keys)
+        .unwrap();
+    let namespace: String = connection
+        .query_row("SELECT namespace FROM investigation_meta", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    connection
+        .execute_batch("DROP TABLE investigation_meta")
+        .unwrap();
+    connection.execute_batch(META_V2).unwrap();
+    connection
+        .execute(
+            "INSERT INTO investigation_meta VALUES (1,2,?1)",
+            [&namespace],
+        )
+        .unwrap();
+}
+
 #[cfg(test)]
 pub(super) fn version_one_fixture(connection: &Connection) {
+    version_two_fixture(connection);
     for (name, kind, _) in super::finding_reviews::schema().into_iter().rev() {
         connection
             .execute_batch(&format!("DROP {} {name}", kind.to_uppercase()))

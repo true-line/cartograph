@@ -15,12 +15,23 @@ fn layout(connection: &Connection) -> Vec<(String, String, String)> {
 // AC-0294: production migration rolls back metadata DDL and review objects together.
 #[test]
 fn finding_review_migration_faults_restore_complete_v1_layout() {
-    for stage in [1, 2, 3] {
+    for stage in [1, 2, 3, 4, 5] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
         let mut store = JobStore::open(&path).unwrap();
         version_one_fixture(&store.conn);
         let old = layout(&store.conn);
+        let pragmas = |connection: &Connection| -> (bool, bool) {
+            (
+                connection
+                    .pragma_query_value(None, "foreign_keys", |r| r.get(0))
+                    .unwrap(),
+                connection
+                    .pragma_query_value(None, "legacy_alter_table", |r| r.get(0))
+                    .unwrap(),
+            )
+        };
+        let before_pragmas = pragmas(&store.conn);
         assert_eq!(
             initialize_with_hook(&mut store.conn, &store.namespace, |point| {
                 if point == stage {
@@ -31,6 +42,7 @@ fn finding_review_migration_faults_restore_complete_v1_layout() {
             }),
             Err(InvestigationStoreError::Storage)
         );
+        assert_eq!(pragmas(&store.conn), before_pragmas);
         let independent = Connection::open(&path).unwrap();
         assert_eq!(layout(&independent), old);
         let version: i64 = independent
@@ -38,6 +50,7 @@ fn finding_review_migration_faults_restore_complete_v1_layout() {
             .unwrap();
         assert_eq!(version, 1);
         initialize(&mut store.conn, &store.namespace).unwrap();
+        assert_eq!(pragmas(&store.conn), before_pragmas);
         validate(&store.conn, &store.namespace).unwrap();
         let upgraded = layout(&store.conn);
         drop(store);
@@ -61,7 +74,7 @@ fn finding_review_migration_refuses_partial_and_unknown_versions() {
     for sql in [
         "DROP TRIGGER investigation_finding_reviews_no_delete",
         "CREATE TABLE investigation_finding_review_extra (x TEXT) STRICT",
-        "PRAGMA ignore_check_constraints=ON; UPDATE investigation_meta SET version=3",
+        "PRAGMA ignore_check_constraints=ON; UPDATE investigation_meta SET version=4",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
@@ -98,12 +111,39 @@ fn finding_review_migration_preserves_supported_optional_extensions() {
         let after = layout(&reopened.conn);
         for entry in before
             .iter()
-            .filter(|entry| entry.0 != "investigation_meta")
+            .filter(|entry| entry.0 != "investigation_meta" && entry.0 != "investigation_tasks")
         {
             assert!(after.contains(entry));
         }
         let tx = reopened.conn.unchecked_transaction().unwrap();
         validate(&tx, &reopened.namespace).unwrap();
         tx.commit().unwrap();
+    }
+}
+
+// AC-0323: every v2 rebuild failure leaves the supported old store intact.
+#[test]
+fn mcp_namespace_migration_faults_preserve_v2_and_reject_old_layout_readers() {
+    for point in [3, 4, 5] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = JobStore::open(&path).unwrap();
+        version_two_fixture(&store.conn);
+        let old = layout(&store.conn);
+        assert_eq!(
+            initialize_with_hook(&mut store.conn, &store.namespace, |stage| {
+                if stage == point {
+                    Err(InvestigationStoreError::Storage)
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(InvestigationStoreError::Storage)
+        );
+        assert_eq!(layout(&Connection::open(&path).unwrap()), old);
+        validate_version_schema(&store.conn, 2).unwrap();
+        initialize(&mut store.conn, &store.namespace).unwrap();
+        assert!(validate_version_schema(&store.conn, 2).is_err());
+        validate(&store.conn, &store.namespace).unwrap();
     }
 }
