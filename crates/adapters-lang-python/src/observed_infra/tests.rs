@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 
 const REPO: &str = "local/py";
 
@@ -266,4 +267,244 @@ shadowed = create_engine(DB)
     }
     assert!(nodes.iter().any(|n| n.id == res("redis")));
     assert_eq!(edges.len(), 4);
+}
+
+const CONFIG: &str = "import os\nDB_URI = os.environ[\"DB_URI\"]\n";
+const DB: &str = "from sqlalchemy import create_engine\nfrom app import config\nengine = create_engine(config.DB_URI)\n";
+
+// AC-0331: another repository module's constant is followed one step
+// through a proven import (`config.X`, `from m import X`, `import a.b` then
+// `a.b.X`), and the resource and `USES` edge cite the assignment it rests
+// on beside the call. (T-0331)
+#[test]
+fn module_constants_are_followed_into_their_module() {
+    let (nodes, edges) = extract(&[
+        ("app/__init__.py", ""),
+        (
+            "app/config.py",
+            "import os\nDB_URI = os.environ[\"DB_URI\"]\nREDIS_URL = \"redis://cache.internal:6379/0\"\nSMTP_HOST = os.getenv(\"SMTP_HOST\")\n",
+        ),
+        ("app/db.py", DB),
+        (
+            "app/cache.py",
+            "import redis\nfrom app.config import REDIS_URL\nclient = redis.Redis.from_url(REDIS_URL)\n",
+        ),
+        (
+            "app/mail.py",
+            "import smtplib\nimport app.config\ns = smtplib.SMTP(app.config.SMTP_HOST)\n",
+        ),
+    ]);
+    assert_eq!(uses(&edges, "db.py"), vec![res("sql-database:env:DB_URI")]);
+    assert_eq!(
+        uses(&edges, "cache.py"),
+        vec![res("redis:redis://cache.internal:6379")]
+    );
+    assert_eq!(uses(&edges, "mail.py"), vec![res("smtp:env:SMTP_HOST")]);
+    assert!(nodes.iter().all(|node| node.label != "Gap"));
+    let edge = edges.iter().find(|e| e.src.contains("db.py")).unwrap();
+    assert_eq!(edge.props["identity_from"], "app/config.py");
+    let resource = nodes
+        .iter()
+        .find(|n| n.id == res("sql-database:env:DB_URI"))
+        .unwrap();
+    for prov in [&edge.props["prov"], &resource.props["prov"]] {
+        let evidence = prov["evidence"].as_array().unwrap();
+        assert_eq!(evidence.len(), 2);
+        assert_eq!(evidence[0]["path"], "app/db.py");
+        assert_eq!(evidence[1]["path"], "app/config.py");
+        let (start, end) = (
+            evidence[1]["byte_start"].as_u64().unwrap() as usize,
+            evidence[1]["byte_end"].as_u64().unwrap() as usize,
+        );
+        assert_eq!(&CONFIG[start..end], "DB_URI = os.environ[\"DB_URI\"]");
+    }
+}
+
+// AC-0331: the follow fails closed: the site stays a Gap when the module
+// is not one repository file, a package on the way binds the name, the
+// module writes, imports or star-imports it, assigns it other than once at
+// module level or to a computed value, or any file writes that member
+// through a proven binding. An unrelated member write does not. (T-0331)
+#[test]
+fn module_constants_fail_closed() {
+    let cases: [(&str, &[(&str, &str)]); 22] = [
+        (
+            "mock patch.object",
+            &[(
+                "tests/test_db.py",
+                "from unittest import mock\nfrom app import config\n@mock.patch.object(config, \"DB_URI\", \"x\")\ndef test():\n    pass\n",
+            )],
+        ),
+        (
+            "binding replaced through a parameter",
+            &[(
+                "tools/swap.py",
+                "def swap(module):\n    module.config = None\n",
+            )],
+        ),
+        (
+            "patched through an alias",
+            &[(
+                "tools/patch.py",
+                "from app import config\nc = config\nc.DB_URI = None\n",
+            )],
+        ),
+        (
+            "patched through a parameter",
+            &[("tools/patch.py", "def patch(cfg):\n    cfg.DB_URI = None\n")],
+        ),
+        (
+            "monkeypatch by object",
+            &[(
+                "tests/test_db.py",
+                "from app import config\ndef test(monkeypatch):\n    monkeypatch.setattr(config, \"DB_URI\", \"sqlite://\")\n",
+            )],
+        ),
+        (
+            "monkeypatch by name",
+            &[(
+                "tests/test_db.py",
+                "def test(monkeypatch):\n    monkeypatch.setattr(\"app.config.DB_URI\", \"sqlite://\")\n",
+            )],
+        ),
+        (
+            "mock patch",
+            &[(
+                "tests/test_db.py",
+                "from unittest.mock import patch\n@patch(\"app.config.DB_URI\", \"x\")\ndef test():\n    pass\n",
+            )],
+        ),
+        (
+            "reading module's binding patched",
+            &[(
+                "tests/test_db.py",
+                "def test(monkeypatch):\n    monkeypatch.setattr(\"app.db.config\", object())\n",
+            )],
+        ),
+        (
+            "assigned twice",
+            &[(
+                "app/config.py",
+                "import os\nDB_URI = \"postgres://a/b\"\nDB_URI = os.environ[\"X\"]\n",
+            )],
+        ),
+        (
+            "conditional",
+            &[(
+                "app/config.py",
+                "import os\nif os.environ:\n    DB_URI = \"postgres://a/b\"\n",
+            )],
+        ),
+        ("computed", &[("app/config.py", "DB_URI = build()\n")]),
+        (
+            "chained",
+            &[(
+                "app/config.py",
+                "import os\nBASE = os.environ[\"DB_URI\"]\nDB_URI = BASE\n",
+            )],
+        ),
+        (
+            "star import",
+            &[(
+                "app/config.py",
+                "from defaults import *\nDB_URI = \"postgres://h/d\"\n",
+            )],
+        ),
+        (
+            "imported",
+            &[(
+                "app/config.py",
+                "import os\nDB_URI = os.environ[\"DB_URI\"]\nfrom other import DB_URI\n",
+            )],
+        ),
+        (
+            "global write",
+            &[(
+                "app/config.py",
+                "import os\nDB_URI = os.environ[\"DB_URI\"]\ndef reset():\n    global DB_URI\n    DB_URI = None\n",
+            )],
+        ),
+        (
+            "patched elsewhere",
+            &[(
+                "tests/conftest.py",
+                "from app import config\nconfig.DB_URI = \"sqlite://\"\n",
+            )],
+        ),
+        (
+            "setattr elsewhere",
+            &[(
+                "tools/patch.py",
+                "import app.config\nsetattr(app.config, name, value)\n",
+            )],
+        ),
+        (
+            "package attribute",
+            &[("app/__init__.py", "config = object()\n")],
+        ),
+        (
+            "ambiguous module",
+            &[("app/config/__init__.py", "DB_URI = \"postgres://h/d\"\n")],
+        ),
+        (
+            "missing module",
+            &[(
+                "app/db.py",
+                "from sqlalchemy import create_engine\nfrom settings import config\nengine = create_engine(config.DB_URI)\n",
+            )],
+        ),
+        (
+            "rebound locally",
+            &[(
+                "app/db.py",
+                "from sqlalchemy import create_engine\nfrom app import config\nconfig = None\nengine = create_engine(config.DB_URI)\n",
+            )],
+        ),
+        (
+            "patched at the call",
+            &[(
+                "app/db.py",
+                "from sqlalchemy import create_engine\nfrom app import config\nconfig.DB_URI = \"sqlite://\"\nengine = create_engine(config.DB_URI)\n",
+            )],
+        ),
+    ];
+    for (label, overrides) in cases {
+        let mut files: BTreeMap<&str, &str> = [
+            ("app/__init__.py", ""),
+            ("app/config.py", CONFIG),
+            ("app/db.py", DB),
+        ]
+        .into_iter()
+        .collect();
+        files.extend(overrides.iter().copied());
+        let files: Vec<(&str, &str)> = files.into_iter().collect();
+        let (nodes, edges) = extract(&files);
+        let found = uses(&edges, "app/db.py");
+        assert!(
+            found.len() == 1 && found[0].starts_with("gap:observed"),
+            "{label}: {found:?}"
+        );
+        // The Gap keeps the call's own expression, not the module's.
+        let gap = nodes.iter().find(|n| n.id == found[0]).unwrap();
+        assert_eq!(gap.props["raw"], "config.DB_URI", "{label}");
+    }
+    // Writes of other members, of another module's `config` binding, or of
+    // a computed member of an unproven root leave the follow standing.
+    let (_, edges) = extract(&[
+        ("app/__init__.py", ""),
+        ("app/config.py", CONFIG),
+        ("app/db.py", DB),
+        (
+            "tests/conftest.py",
+            "from app import config\nconfig.OTHER = 1\ndef test(monkeypatch):\n    monkeypatch.setattr(config, \"SESSION\", True)\n    monkeypatch.setattr(\"app.abuser.config\", object())\n",
+        ),
+        (
+            "app/model.py",
+            "class M:\n    def __init__(self, **kw):\n        for k, v in kw.items():\n            setattr(self, k, v)\n",
+        ),
+    ]);
+    assert_eq!(
+        uses(&edges, "app/db.py"),
+        vec![res("sql-database:env:DB_URI")]
+    );
 }
