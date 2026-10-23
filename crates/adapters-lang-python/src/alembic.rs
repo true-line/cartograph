@@ -527,8 +527,9 @@ fn replay(revision: &Revision, id: &SourceId<'_>, schema: &mut Schema) -> Replay
             && function
                 .child_by_field_name("object")
                 .is_some_and(|o| o.kind() == "identifier" && cx.text(&o) == "op");
-        // Raw SQL through `op.execute` or any `.execute(...)`.
-        if attribute == Some("execute") {
+        // Raw SQL through `op.execute`, or any `.execute(...)` or
+        // `.exec_driver_sql(...)` on a bind or session.
+        if matches!(attribute, Some("execute" | "exec_driver_sql")) {
             let sql = positional
                 .first()
                 .and_then(|arg| sql_literal(&cx, *arg))
@@ -809,7 +810,15 @@ fn op_replaced<'t>(cx: &FileCx<'_>, root: TsNode<'t>) -> Option<TsNode<'t>> {
                 })
                 .and_then(called)
                 .is_some_and(|wrapper| cx.text(&wrapper) == "op.get_context().autocommit_block()"),
-            Some(_) => true,
+            // Its result is not chained: `op.get_bind().exec_driver_sql(...)`
+            // would run SQL replay never reads.
+            Some(call) => !call.parent().is_some_and(|up| {
+                ["attribute", "subscript", "call"].contains(&up.kind())
+                    && ["object", "value", "function"].iter().any(|field| {
+                        up.child_by_field_name(field)
+                            .is_some_and(|child| child.id() == call.id())
+                    })
+            }),
             None => false,
         };
         if !admitted {

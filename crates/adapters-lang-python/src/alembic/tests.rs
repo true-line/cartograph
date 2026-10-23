@@ -387,6 +387,17 @@ fn alembic_replay_fails_closed() {
         revision("e6", "'d5'", "    op.execute(statement)"),
     );
     assert_eq!(refused(sql, &[]), "raw SQL is not a literal");
+    // A bind taken from `op` runs raw SQL like `op.execute`.
+    let driver = with(
+        &history(),
+        "e6_x.py",
+        revision(
+            "e6",
+            "'d5'",
+            "    bind = op.get_bind()\n    bind.exec_driver_sql(statement)",
+        ),
+    );
+    assert_eq!(refused(driver, &[]), "raw SQL is not a literal");
     let ddl = with(
         &history(),
         "e6_x.py",
@@ -516,6 +527,13 @@ fn alembic_replay_fails_closed() {
             "",
             rebound,
         ),
+        (
+            "    op.get_bind().exec_driver_sql('DROP TABLE users')",
+            "",
+            rebound,
+        ),
+        ("    op.get_bind()['users']", "", rebound),
+        ("    op.get_bind()()", "", rebound),
         (phantom, "\nfrom fake import *\n", rebound),
         // Module-level ops, in a statement, a conditional or a class body.
         ("    pass", "\nop.drop_table('users')\n", outside),
