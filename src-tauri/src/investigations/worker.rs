@@ -90,6 +90,7 @@ pub(super) fn run<R: tauri::Runtime>(
         provider,
         live,
         started,
+        None,
     )
 }
 
@@ -104,6 +105,21 @@ pub(super) fn run_completion<R: tauri::Runtime>(
     live: Arc<LiveTask>,
     started: Instant,
 ) {
+    run_completion_with_scope(app, id, request, execution, provider, live, started, None);
+}
+
+/// Retain the caller's admitted discovery limits after detaching execution.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_completion_with_scope<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+    request: obligations::StagedObligationRequest,
+    execution: JobExecution,
+    provider: Arc<dyn LlmProvider>,
+    live: Arc<LiveTask>,
+    started: Instant,
+    scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
+) {
     match FrozenContext::completion_acquisition_request(&request) {
         Ok(projected) => run_inner(
             app,
@@ -114,6 +130,7 @@ pub(super) fn run_completion<R: tauri::Runtime>(
             provider,
             live,
             started,
+            scope_limits,
         ),
         Err(_) => {
             let state = app.state::<AppState>();
@@ -146,6 +163,7 @@ fn run_inner<R: tauri::Runtime>(
     provider: Arc<dyn LlmProvider>,
     live: Arc<LiveTask>,
     started: Instant,
+    scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
 ) {
     let state = app.state::<AppState>();
     let _cleanup = Cleanup {
@@ -165,6 +183,7 @@ fn run_inner<R: tauri::Runtime>(
             live: &live,
             detail,
             clock: &mut clock,
+            scope_limits,
         };
         worker.execute_inner(&request, completion_request.as_ref(), provider.as_ref())
     })();
@@ -206,6 +225,7 @@ struct Worker<'a, R: tauri::Runtime> {
     live: &'a LiveTask,
     detail: InvestigationDetail,
     clock: &'a mut RunClock,
+    scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
 }
 
 impl<R: tauri::Runtime> Worker<'_, R> {
@@ -250,13 +270,23 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         } else {
             None
         };
-        let mut context = FrozenContext::prepare_with_app(
-            self.app,
-            self.state,
-            request,
-            &history,
-            archive_capacity,
-        )?;
+        let mut context = match self.scope_limits {
+            Some(limits) => FrozenContext::prepare_with_app_scope(
+                self.app,
+                self.state,
+                request,
+                &history,
+                archive_capacity,
+                Some(limits),
+            ),
+            None => FrozenContext::prepare_with_app(
+                self.app,
+                self.state,
+                request,
+                &history,
+                archive_capacity,
+            ),
+        }?;
         if let Some(request) = completion_request {
             request.validate_ledger_with_policy(&context.ledger, policy)?;
         }

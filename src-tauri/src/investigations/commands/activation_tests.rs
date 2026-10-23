@@ -166,7 +166,13 @@ fn completion_replay(mcp: bool) {
         });
         let session = grant.as_ref().map(McpTaskActivation::session);
         let start = |request| {
-            completion_start::start_access(request, app.clone(), Instant::now(), session.as_ref())
+            completion_start::start_access(
+                request,
+                app.clone(),
+                Instant::now(),
+                session.as_ref(),
+                mcp.then(|| crate::mcp_reads::worker::tests::limits().scope),
+            )
         };
         let started = start(request.clone()).unwrap();
         let saved = finished(app, &started.investigation_id);

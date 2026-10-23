@@ -402,13 +402,33 @@ impl FrozenContext {
         history: &[String],
         archive_capacity: Option<usize>,
     ) -> Result<Self, HostError> {
+        Self::prepare_with_app_scope(app, state, request, history, archive_capacity, None)
+    }
+
+    pub(super) fn prepare_with_app_scope<R: tauri::Runtime>(
+        app: &tauri::AppHandle<R>,
+        state: &AppState,
+        request: impl TryInto<AcquisitionRequest, Error = HostError>,
+        history: &[String],
+        archive_capacity: Option<usize>,
+        scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
+    ) -> Result<Self, HostError> {
         let request = request.try_into()?;
         if !request.specialist_id.uses_coverage_qualification() {
             return Self::prepare(state, &request, history);
         }
         let archive_capacity = archive_capacity.ok_or(HostError::InvalidInput)?;
         Self::prepare_qualified_with_scope(state, &request, history, archive_capacity, || {
-            crate::context::coverage_scope(app, state).map_err(|_| HostError::Operational)
+            match scope_limits {
+                Some(limits) => crate::mcp_reads::scope::coverage_scope(app, state, limits)
+                    .map_err(|error| match error {
+                        crate::mcp_reads::ReadError::Limit => HostError::LimitExceeded,
+                        _ => HostError::Operational,
+                    }),
+                None => {
+                    crate::context::coverage_scope(app, state).map_err(|_| HostError::Operational)
+                }
+            }
         })
     }
 
