@@ -163,7 +163,11 @@ impl PrimarySourceStore {
             .receipt_status(&binding.receipt_id)
             .map_err(|_| PinnedReadError::Operational)?;
         match status {
-            ReceiptStatus::Present | ReceiptStatus::Unknown => Ok(false),
+            // A superseded receipt was not forgotten by the user: a later
+            // publish replaced it, so the caller's basis is merely stale.
+            ReceiptStatus::Present | ReceiptStatus::Unknown | ReceiptStatus::Superseded { .. } => {
+                Ok(false)
+            }
             ReceiptStatus::CaptureForgotten { tombstone } => {
                 if tombstone.source_id != guard.source_id {
                     return Err(PinnedReadError::Invalid);

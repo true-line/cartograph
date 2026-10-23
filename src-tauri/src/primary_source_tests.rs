@@ -2878,3 +2878,129 @@ fn mcp_real_store_capacity_omission_is_positive_guarded_and_stale_safe() {
         .unwrap();
     assert_eq!(describe(), ReadError::StaleBasis);
 }
+
+// ADR-0046 decision 5: once a later publish of the same source lands, the
+// receipts its graph no longer binds are reclaimed as superseded; bound and
+// pinned receipts stay, and a busy source is left for its next publish.
+#[test]
+fn primary_source_publish_reclaims_superseded_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let first = parse(&state, &source, || {});
+    publish(&state, &source, &first);
+    let pinned = first.receipts[0].clone();
+    let mut stored: BTreeSet<String> = first
+        .receipts
+        .iter()
+        .map(|receipt| receipt.id().to_owned())
+        .collect();
+    drop(first);
+    retain_staged_proposal_reference(&state, &source, &pinned);
+
+    std::fs::write(root.join("source.ts"), STABLE_B).unwrap();
+    let second = parse(&state, &source, || {});
+    let bound: BTreeSet<String> = publish(&state, &source, &second)
+        .into_iter()
+        .map(|binding| binding.receipt_id)
+        .collect();
+    stored.extend(
+        second
+            .receipts
+            .iter()
+            .map(|receipt| receipt.id().to_owned()),
+    );
+    let capture_id = second.input.capture.as_ref().unwrap().id().to_owned();
+    // The publish still holds its prepared input: no reclaim runs.
+    assert_eq!(
+        primary_source::reclaim_superseded(&state, &source, &capture_id).unwrap(),
+        0
+    );
+    drop(second);
+
+    let superseded: Vec<&String> = stored
+        .iter()
+        .filter(|id| !bound.contains(*id) && **id != pinned.id())
+        .collect();
+    assert!(!superseded.is_empty());
+    assert!(!bound.contains(pinned.id()));
+    assert_eq!(
+        primary_source::reclaim_superseded(&state, &source, &capture_id).unwrap(),
+        superseded.len() as u64
+    );
+    let receipts = state.primary_sources.receipts.lock().unwrap();
+    for id in &superseded {
+        match receipts.receipt_status(id).unwrap() {
+            primary_source::ReceiptStatus::Superseded { tombstone } => {
+                assert_eq!(tombstone.source_id, source.source_id);
+                assert_eq!(tombstone.receipts_reclaimed, superseded.len() as u64);
+                assert_eq!(tombstone.receipts_retained_pinned, 0);
+            }
+            other => panic!("expected Superseded, got {other:?}"),
+        }
+    }
+    for id in bound.iter().chain([&pinned.id().to_owned()]) {
+        assert_eq!(
+            receipts.receipt_status(id).unwrap(),
+            primary_source::ReceiptStatus::Present
+        );
+    }
+    drop(receipts);
+    // Settled: a repeat finds nothing more to reclaim.
+    assert_eq!(
+        primary_source::reclaim_superseded(&state, &source, &capture_id).unwrap(),
+        0
+    );
+}
+
+// ADR-0046 decision 5 through the production recovery path: a second local
+// recovery reclaims the receipts only the first one bound.
+#[test]
+fn second_recovery_reclaims_the_first_recoverys_superseded_receipts() {
+    use tauri::Manager;
+    let temp = tempfile::tempdir().unwrap();
+    let private = directory(temp.path(), "private");
+    let root = directory(temp.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&private));
+    app.manage(crate::PreflightRuns::default());
+    let state = app.state::<AppState>();
+    let source = register_local_source(&state, &root).unwrap();
+    let recover = || {
+        let operation = source_operation(&state, vec![(source.clone(), false)]).unwrap();
+        let (_, execution) = start_job(&state, &source.ingest_job_kind()).unwrap();
+        run_ingest(&source, &operation, &execution, app.handle(), &state).unwrap();
+        let conn = rusqlite::Connection::open_with_flags(
+            private.join("retained-source/receipts.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let ids: BTreeSet<String> = conn
+            .prepare("SELECT id FROM receipts")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        ids
+    };
+    let first = recover();
+    assert!(!first.is_empty());
+    std::fs::write(root.join("source.ts"), STABLE_B).unwrap();
+    let second = recover();
+    let superseded: Vec<_> = first.difference(&second).collect();
+    assert!(!superseded.is_empty());
+    let receipts = state.primary_sources.receipts.lock().unwrap();
+    for id in superseded {
+        assert!(matches!(
+            receipts.receipt_status(id).unwrap(),
+            primary_source::ReceiptStatus::Superseded { .. }
+        ));
+    }
+}

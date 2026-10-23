@@ -1999,6 +1999,29 @@ fn load_into_graph_with_bindings(
     )
 }
 
+/// ADR-0046 decision 5: once the graph holds a publish, release its prepared
+/// input and reclaim the receipts it superseded. Best effort: a failure keeps
+/// the old receipts retained and never undoes the publish.
+fn reclaim_superseded_receipts(
+    state: &AppState,
+    source: &RegisteredSource,
+    primary: primary_source::PrimaryInput,
+) {
+    let Some(capture_id) = primary
+        .capture
+        .as_ref()
+        .map(|capture| capture.id().to_owned())
+    else {
+        return;
+    };
+    // The prepared input holds the shared retention guard; the reclaim
+    // needs the exclusive one.
+    drop(primary);
+    if primary_source::reclaim_superseded(state, source, &capture_id).is_err() {
+        eprintln!("cartograph: superseded receipts were kept; they settle on the next recovery");
+    }
+}
+
 /// Publish `repo`'s facts, its source bindings, its coverage inventory and its
 /// per-fact receipt omission records in one write transaction.
 #[allow(clippy::too_many_arguments)]
@@ -4066,6 +4089,7 @@ fn run_ingest<R: tauri::Runtime>(
         stitch_backings(&mut graph, &mut published, &registries).map_err(&fail)?;
         stitch_name_unique(&mut graph, &mut published).map_err(&fail)?;
     }
+    reclaim_superseded_receipts(state, source, primary);
 
     relink_found_adrs(state, operation, execution, &mut published).map_err(&fail)?;
 
@@ -4499,6 +4523,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         stitch_backings(&mut graph, &mut published, &registries).map_err(&fail)?;
         stitch_name_unique(&mut graph, &mut published).map_err(&fail)?;
     }
+    reclaim_superseded_receipts(&state, &source, primary);
     relink_found_adrs(&state, &operation, &execution, &mut published).map_err(&fail)?;
     ensure_running_job(&state, &execution)?;
     record_ingest_metrics(
@@ -4808,6 +4833,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 .published,
             );
         }
+        reclaim_superseded_receipts(&state, source, primary);
         let sha12: String = commit.chars().take(12).collect();
         repos.push(format!("{repo}@{sha12}"));
         if repo_identities.insert(repo.clone()) {
