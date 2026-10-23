@@ -13,8 +13,9 @@
 //! Identity: a string literal names the instance (a URL keeps scheme and
 //! authority only); `os.environ["X"]`, `os.environ.get("X")` and
 //! `os.getenv("X")` record the variable name, never a value; a module-level
-//! name assigned once is followed one step; anything else is a Gap naming
-//! the site.
+//! name assigned once is followed one step, also into another repository
+//! module (`config.DB_URI`, `from app.config import DB_URI`) under the
+//! rules `follow_module` documents; anything else is a Gap naming the site.
 
 use adapters_fw::events::{ClientForm, Ecosystem, IdentityArg, IdentityExpr, Registries};
 use adapters_fw::observed::{ObservedSite, ObservedSource, assemble};
@@ -56,6 +57,129 @@ struct Scope {
     /// `redis.Redis.from_url = …`, `ns["k"] = …`); a `None` segment is
     /// any member (`setattr(ns, …)`, a computed key).
     members: HashMap<String, HashSet<MemberPath>>,
+    /// A `from m import *` anywhere: it may rebind any name.
+    wildcard: bool,
+    /// Dotted targets patched by name (`monkeypatch.setattr("a.b.X", …)`,
+    /// `patch("a.b.X")`).
+    patches: Vec<MemberPath>,
+    /// Roots whose members `setattr`/`delattr`/`patch.object` write by a
+    /// computed name, other than a method's own receiver, and whether the
+    /// write is at the root itself (not beneath a member chain).
+    computed_setattr: Vec<(String, bool)>,
+    /// A computed-name write on a method's receiver: harmless only if the
+    /// method is never called unbound with a module.
+    receiver_setattr: bool,
+    /// Namespaces written by computed key (`globals()[k] = …`,
+    /// `vars(x)[k] = …`, `x.__dict__[k] = …`).
+    namespaces: Vec<Namespace>,
+}
+
+/// A namespace a computed-key write reaches.
+#[derive(Debug, Clone, PartialEq)]
+enum Namespace {
+    /// `globals()`: the writing module's own.
+    Own,
+    /// `vars(x)` / `x.__dict__`: the one `x` names.
+    Of(String),
+    /// `vars(<expression>)`: unknown.
+    Unknown,
+}
+
+/// The namespace a write target reaches by computed key, if any.
+fn namespace_write(cx: &FileCx, target: TsNode, out: &mut Vec<Namespace>) {
+    match target.kind() {
+        "subscript" | "attribute" => {
+            let mut node = target;
+            let mut dict = false;
+            loop {
+                match node.kind() {
+                    "attribute" => {
+                        dict |= node
+                            .child_by_field_name("attribute")
+                            .is_some_and(|a| cx.text(&a) == "__dict__");
+                        let Some(object) = node.child_by_field_name("object") else {
+                            return;
+                        };
+                        node = object;
+                    }
+                    "subscript" => {
+                        let Some(value) = node.child_by_field_name("value") else {
+                            return;
+                        };
+                        node = value;
+                    }
+                    _ => break,
+                }
+            }
+            match node.kind() {
+                "identifier" if dict => out.push(Namespace::Of(cx.text(&node).to_string())),
+                "call" => {
+                    let callee = node.child_by_field_name("function");
+                    match callee.map(|callee| cx.text(&callee)) {
+                        Some("globals") => out.push(Namespace::Own),
+                        Some("vars") => out.push(
+                            node.child_by_field_name("arguments")
+                                .and_then(|args| positional(args).first().copied())
+                                .and_then(|arg| member_path(cx, arg))
+                                .map_or(Namespace::Unknown, |(root, _)| Namespace::Of(root)),
+                        ),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {
+            let mut walk = target.walk();
+            for child in target.named_children(&mut walk) {
+                namespace_write(cx, child, out);
+            }
+        }
+    }
+}
+
+/// Whether `object` is the first parameter of a method defined directly
+/// in a class body, undecorated or `@classmethod` (`self`, `cls`). By
+/// convention a receiver, not proof: an unbound call may pass anything.
+fn is_receiver(cx: &FileCx, object: TsNode) -> bool {
+    if object.kind() != "identifier" {
+        return false;
+    }
+    let mut node = object;
+    let function = loop {
+        match node.parent() {
+            Some(parent) if parent.kind() == "function_definition" => break parent,
+            Some(parent) => node = parent,
+            None => return false,
+        }
+    };
+    let mut owner = function.parent();
+    if let Some(decorated) = owner.filter(|o| o.kind() == "decorated_definition") {
+        // `@staticmethod` or an unknown decorator: any first argument.
+        let mut walk = decorated.walk();
+        let only_classmethod = decorated
+            .named_children(&mut walk)
+            .filter(|child| child.kind() == "decorator")
+            .all(|decorator| cx.text(&decorator).trim() == "@classmethod");
+        if !only_classmethod {
+            return false;
+        }
+        owner = decorated.parent();
+    }
+    let in_class = owner
+        .filter(|block| block.kind() == "block")
+        .and_then(|block| block.parent())
+        .is_some_and(|class| class.kind() == "class_definition");
+    let first = function
+        .child_by_field_name("parameters")
+        .and_then(|params| {
+            let mut walk = params.walk();
+            params.named_children(&mut walk).next()
+        });
+    in_class
+        && first.is_some_and(|first| {
+            first.kind() == "identifier" && cx.text(&first) == cx.text(&object)
+        })
 }
 
 impl Scope {
@@ -67,6 +191,18 @@ impl Scope {
             (1, Some(Some(bound))) if *module_level && !self.writes.contains_key(name) => {
                 Some(bound)
             }
+            _ => None,
+        }
+    }
+
+    /// What a name denotes wherever the file uses it: every binding is an
+    /// import of one target (at any level) and nothing else writes it.
+    /// Weaker than [`Scope::proven`]; enough to say which module a write
+    /// through the name reaches.
+    fn imported_only(&self, name: &str) -> Option<&Bound> {
+        let (bindings, _) = self.imports.get(name)?;
+        match (bindings.len(), bindings.iter().next()) {
+            (1, Some(Some(bound))) if !self.writes.contains_key(name) => Some(bound),
             _ => None,
         }
     }
@@ -269,8 +405,12 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
         writes: HashMap::new(),
         assigned: HashMap::new(),
         members: HashMap::new(),
+        wildcard: false,
+        patches: Vec::new(),
+        computed_setattr: Vec::new(),
+        receiver_setattr: false,
+        namespaces: Vec::new(),
     };
-    let mut wildcard = false;
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut walk = node.walk();
@@ -280,7 +420,7 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
             let module_level = node.parent().is_some_and(|parent| parent.id() == root.id());
             for (name, bound) in import_names(cx, node) {
                 if name == "*" {
-                    wildcard = true;
+                    scope.wildcard = true;
                     continue;
                 }
                 let (bindings, at_module) = scope.imports.entry(name).or_default();
@@ -297,14 +437,62 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
             // `setattr(x, …)` / `delattr(x, …)` may write any member of `x`:
             // a write at `x` overlaps every path beneath it.
             "call" => {
-                if let Some(callee) = node.child_by_field_name("function")
-                    && matches!(cx.text(&callee), "setattr" | "delattr")
-                    && let Some(object) = node
-                        .child_by_field_name("arguments")
-                        .and_then(|args| positional(args).first().copied())
-                    && let Some((name, path)) = member_path(cx, object)
-                {
-                    scope.members.entry(name).or_default().insert(path);
+                if let (Some(callee), Some(args)) = (
+                    node.child_by_field_name("function"),
+                    node.child_by_field_name("arguments"),
+                ) {
+                    let verb = match callee.kind() {
+                        "identifier" => Some(cx.text(&callee)),
+                        "attribute" => callee
+                            .child_by_field_name("attribute")
+                            .map(|attribute| cx.text(&attribute)),
+                        _ => None,
+                    };
+                    // Keyword forms (`patch.object(target=x, attribute="a")`,
+                    // `monkeypatch.setattr(target=…, name=…)`) name the same
+                    // operands; a splat may name any of them.
+                    let listed = positional(args);
+                    let splat = listed
+                        .iter()
+                        .any(|arg| matches!(arg.kind(), "list_splat" | "dictionary_splat"));
+                    if splat && matches!(verb, Some("setattr" | "delattr" | "patch" | "object")) {
+                        scope.namespaces.push(Namespace::Unknown);
+                    }
+                    let first = keyword(cx, args, "target").or(listed.first().copied());
+                    let attr_arg = keyword(cx, args, "attribute")
+                        .or(keyword(cx, args, "name"))
+                        .or(listed.get(1).copied());
+                    match (verb, first.and_then(|first| literal_string(cx, first))) {
+                        // `monkeypatch.setattr("a.b.X", v)`, `patch("a.b.X")`.
+                        (Some("setattr" | "delattr" | "patch"), Some(target)) => scope
+                            .patches
+                            .push(target.split('.').map(|s| Some(s.to_string())).collect()),
+                        // `setattr(x, "a", v)`, `monkeypatch.setattr(x, …)`,
+                        // `patch.object(x, "a")`: member `a` of `x`, or any
+                        // member when the name is computed.
+                        (Some("setattr" | "delattr" | "object"), None) => {
+                            if let Some((name, mut path)) =
+                                first.and_then(|object| member_path(cx, object))
+                            {
+                                let attr = attr_arg.and_then(|attr| literal_string(cx, attr));
+                                if attr.is_none() {
+                                    if first.is_some_and(|object| is_receiver(cx, object)) {
+                                        scope.receiver_setattr = true;
+                                    } else {
+                                        scope
+                                            .computed_setattr
+                                            .push((name.clone(), path.is_empty()));
+                                    }
+                                }
+                                path.push(attr);
+                                scope.members.entry(name).or_default().insert(path);
+                            } else if first.is_some() {
+                                // `setattr(f(), k, v)`: an unknown object.
+                                scope.namespaces.push(Namespace::Unknown);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 None
             }
@@ -312,6 +500,7 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
         };
         if let Some(target) = target {
             member_writes(cx, target, &mut scope.members);
+            namespace_write(cx, target, &mut scope.namespaces);
         }
         let mut names = Vec::new();
         written_names(node, &mut names);
@@ -335,10 +524,60 @@ fn collect_scope(cx: &FileCx, root: TsNode) -> Scope {
             );
         }
     }
-    if wildcard {
+    if scope.wildcard {
         scope.imports.clear();
     }
     scope
+}
+
+/// The dotted segments a proven binding names: `Module(a.b)` → `[a, b]`,
+/// `Symbol(m, x)` → `[m…, x]`.
+fn bound_segments(bound: &Bound) -> MemberPath {
+    let (module, name) = match bound {
+        Bound::Module(module) => (module.as_str(), None),
+        Bound::Symbol(module, name) => (module.as_str(), Some(name.clone())),
+    };
+    module
+        .split('.')
+        .map(|segment| Some(segment.to_string()))
+        .chain(name.map(Some))
+        .collect()
+}
+
+/// A site whose identity names a constant of another module, resolved
+/// once every file has been read.
+struct Pending {
+    site: usize,
+    module: String,
+    name: String,
+    /// The reading module's own binding the site reads through
+    /// (`app.db.config`): patching it replaces what the site sees.
+    local: MemberPath,
+}
+
+/// What cross-module follows need from every file.
+#[derive(Default)]
+struct Follows {
+    pending: Vec<Pending>,
+    /// Dotted member paths written through a proven binding or patched by
+    /// name; a `None` segment is any member.
+    module_writes: Vec<MemberPath>,
+    /// Member names written through any other root (an alias, a
+    /// parameter, `self`): such a write may rebind a module's constant.
+    rebound: HashSet<String>,
+    /// A computed-name member write through a root that may be any module
+    /// (an alias, a parameter): no follow is proven.
+    any_member: bool,
+    /// A computed-name write on a method receiver somewhere: follows rest
+    /// on the receiver convention.
+    receiver_assumed: bool,
+}
+
+/// The dotted module a repository-relative Python file is.
+fn module_of(path: &str) -> MemberPath {
+    let stem = path.strip_suffix(".py").unwrap_or(path);
+    let stem = stem.strip_suffix("/__init__").unwrap_or(stem);
+    stem.split('/').map(|s| Some(s.to_string())).collect()
 }
 
 /// The `(module, attribute)` a callee names through a proven import:
@@ -474,6 +713,7 @@ fn extract_file(
     id: &SourceId,
     registries: &Registries,
     sites: &mut Vec<ObservedSite>,
+    follows: &mut Follows,
 ) -> Result<(), ExtractError> {
     let language: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
@@ -484,6 +724,48 @@ fn extract_file(
     let root = tree.root_node();
     let cx = FileCx { source, path, id };
     let scope = collect_scope(&cx, root);
+    // Member writes through an import-bound name (`config.X = …`) may
+    // replace another module's constant: no follow may read past them.
+    for (name, paths) in &scope.members {
+        if let Some(bound) = scope.imported_only(name) {
+            let base = bound_segments(bound);
+            follows.module_writes.extend(
+                paths
+                    .iter()
+                    .map(|path| [base.clone(), path.clone()].concat()),
+            );
+        }
+        // Through any root, a named member write may rebind a constant of
+        // whatever module the chain reaches (`holder.cfg.DB_URI = …`).
+        follows.rebound.extend(
+            paths
+                .iter()
+                .filter_map(|path| path.last().cloned().flatten()),
+        );
+    }
+    follows.module_writes.extend(scope.patches.iter().cloned());
+    // A computed-name write is attributable only at an import-bound root
+    // itself; beneath a member chain (`holder.target`) it may be anything.
+    for (root, at_root) in &scope.computed_setattr {
+        if !at_root || scope.imported_only(root).is_none() {
+            follows.any_member = true;
+        }
+    }
+    follows.receiver_assumed |= scope.receiver_setattr;
+    for namespace in &scope.namespaces {
+        match namespace {
+            Namespace::Own => follows
+                .module_writes
+                .push([module_of(path), vec![None]].concat()),
+            Namespace::Of(root) => match scope.imported_only(root) {
+                Some(bound) => follows
+                    .module_writes
+                    .push([bound_segments(bound), vec![None]].concat()),
+                None => follows.any_member = true,
+            },
+            Namespace::Unknown => follows.any_member = true,
+        }
+    }
     if scope.imports.is_empty() {
         return Ok(());
     }
@@ -516,12 +798,26 @@ fn extract_file(
         }) else {
             continue;
         };
-        let identity = match &client.identity {
+        let value = match &client.identity {
             None => None,
             Some(IdentityArg::First) => first,
             Some(IdentityArg::Key(key)) => keyword(&cx, args, key),
+        };
+        let identity = value.map(|value| classify(&cx, root, value, &scope, true));
+        // `config.X` / an imported `X`: another module's constant.
+        if let (Some(IdentityExpr::Computed(_)), Some(value)) = (&identity, value)
+            && let Some((module, name)) = callee_export(&cx, value, &scope)
+            && let Some((root_name, _)) = member_path(&cx, value)
+        {
+            let mut local = module_of(path);
+            local.push(Some(root_name));
+            follows.pending.push(Pending {
+                site: sites.len(),
+                module,
+                name,
+                local,
+            });
         }
-        .map(|value| classify(&cx, root, value, &scope, true));
         let symbol = enclosing_function_node(node)
             .and_then(|function| qualified_function_name(&cx, function))
             .map(|name| symbol_id(id.repo, path, &name));
@@ -530,6 +826,8 @@ fn extract_file(
             provider: client.provider.clone(),
             module: Some(client.module.clone()),
             identity,
+            identity_source: None,
+            identity_assumption: None,
             registry: Some(client.registry.clone()),
             symbol,
             path: path.to_string(),
@@ -538,6 +836,141 @@ fn extract_file(
         });
     }
     Ok(())
+}
+
+/// A parsed repository module a follow reads.
+struct ModuleFile {
+    rel: String,
+    source: Vec<u8>,
+    tree: tree_sitter::Tree,
+}
+
+/// The repository file a dotted module is, when exactly one candidate
+/// exists and no package on the way binds the next segment itself (`from
+/// app import config` may then name `app/__init__.py`'s attribute).
+fn module_file(
+    root: &Path,
+    id: &SourceId,
+    known: &HashSet<&str>,
+    module: &str,
+) -> Result<Option<ModuleFile>, ExtractError> {
+    let base = module.replace('.', "/");
+    let candidates = [format!("{base}.py"), format!("{base}/__init__.py")];
+    let [rel] = candidates
+        .iter()
+        .filter(|rel| known.contains(rel.as_str()))
+        .collect::<Vec<_>>()[..]
+    else {
+        return Ok(None);
+    };
+    let segments: Vec<&str> = module.split('.').collect();
+    for depth in 1..segments.len() {
+        let package = format!("{}/__init__.py", segments[..depth].join("/"));
+        if !known.contains(package.as_str()) {
+            continue;
+        }
+        let Some(init) = parse(root, &package)? else {
+            return Ok(None);
+        };
+        let cx = FileCx {
+            source: &init.source,
+            path: &init.rel,
+            id,
+        };
+        let scope = collect_scope(&cx, init.tree.root_node());
+        let next = segments[depth];
+        if scope.wildcard || scope.writes.contains_key(next) || scope.imports.contains_key(next) {
+            return Ok(None);
+        }
+    }
+    parse(root, rel)
+}
+
+fn parse(root: &Path, rel: &str) -> Result<Option<ModuleFile>, ExtractError> {
+    let source = std::fs::read(root.join(rel))?;
+    let mut parser = Parser::new();
+    parser.set_language(&tree_sitter_python::LANGUAGE.into())?;
+    Ok(parser.parse(&source, None).map(|tree| ModuleFile {
+        rel: rel.to_string(),
+        source,
+        tree,
+    }))
+}
+
+/// A followed identity and the assignment it rests on (path and span).
+type Followed = (IdentityExpr, (String, u64, u64));
+
+/// Another module's constant as an identity, one step: the module is one
+/// repository file, it assigns the name once at module level and never
+/// otherwise writes or imports it (nor star-imports), no file writes that
+/// member through a proven binding, and the value is itself a literal or
+/// env read. Returns the identity and the assignment it rests on.
+fn follow_module(
+    root: &Path,
+    id: &SourceId,
+    known: &HashSet<&str>,
+    follows: &Follows,
+    modules: &mut HashMap<String, Option<ModuleFile>>,
+    pending: &Pending,
+) -> Result<Option<Followed>, ExtractError> {
+    let (module, name) = (pending.module.as_str(), pending.name.as_str());
+    let read: MemberPath = module
+        .split('.')
+        .chain([name])
+        .map(|s| Some(s.to_string()))
+        .collect();
+    let overlaps = |read: &MemberPath| {
+        follows.module_writes.iter().any(|path| {
+            path.iter()
+                .zip(read)
+                .all(|(segment, read)| segment.is_none() || segment == read)
+        })
+    };
+    let local_name = pending.local.last().cloned().flatten();
+    if follows.any_member
+        || overlaps(&read)
+        || overlaps(&pending.local)
+        || follows.rebound.contains(name)
+        || local_name.is_some_and(|local| follows.rebound.contains(&local))
+    {
+        return Ok(None);
+    }
+    if !modules.contains_key(module) {
+        let file = module_file(root, id, known, module)?;
+        modules.insert(module.to_string(), file);
+    }
+    let Some(Some(file)) = modules.get(module) else {
+        return Ok(None);
+    };
+    let cx = FileCx {
+        source: &file.source,
+        path: &file.rel,
+        id,
+    };
+    let root_node = file.tree.root_node();
+    let scope = collect_scope(&cx, root_node);
+    if scope.wildcard || scope.writes.get(name) != Some(&1) || scope.imports.contains_key(name) {
+        return Ok(None);
+    }
+    let Some(&(start, end)) = scope.assigned.get(name) else {
+        return Ok(None);
+    };
+    let Some(value) = root_node.descendant_for_byte_range(start, end) else {
+        return Ok(None);
+    };
+    let identity = classify(&cx, root_node, value, &scope, false);
+    if matches!(identity, IdentityExpr::Computed(_)) {
+        return Ok(None);
+    }
+    let statement = value.parent().unwrap_or(value);
+    Ok(Some((
+        identity,
+        (
+            file.rel.clone(),
+            statement.start_byte() as u64,
+            statement.end_byte() as u64,
+        ),
+    )))
 }
 
 /// Observed infrastructure for every Python source under `root`.
@@ -550,9 +983,23 @@ pub fn extract_dir(
     collect_python_files(root, &mut files)?;
     files.sort(); // deterministic order (US-0014)
     let mut sites = Vec::new();
+    let mut follows = Follows::default();
     for rel in &files {
         let source = std::fs::read(root.join(rel))?;
-        extract_file(&source, rel, id, registries, &mut sites)?;
+        extract_file(&source, rel, id, registries, &mut sites, &mut follows)?;
+    }
+    let known: HashSet<&str> = files.iter().map(String::as_str).collect();
+    let mut modules: HashMap<String, Option<ModuleFile>> = HashMap::new();
+    for pending in &follows.pending {
+        if let Some((identity, source)) =
+            follow_module(root, id, &known, &follows, &mut modules, pending)?
+        {
+            sites[pending.site].identity = Some(identity);
+            sites[pending.site].identity_source = Some(source);
+            sites[pending.site].identity_assumption = follows
+                .receiver_assumed
+                .then_some("identity_assumes_method_receivers");
+        }
     }
     Ok(assemble(
         &ObservedSource {

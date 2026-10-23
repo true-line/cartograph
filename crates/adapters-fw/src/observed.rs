@@ -25,6 +25,12 @@ pub struct ObservedSite {
     pub module: Option<String>,
     /// Instance identity, when the client declares one.
     pub identity: Option<IdentityExpr>,
+    /// Where a followed identity is defined, when outside the site (path
+    /// and span): cited beside the site on the resource and `USES` edge.
+    pub identity_source: Option<(String, u64, u64)>,
+    /// An assumption the identity rests on (a marker name): the resource
+    /// and `USES` edge are then `InferredStrong`, marked, not `Confirmed`.
+    pub identity_assumption: Option<&'static str>,
     /// Registry file that declared the client, when the site is table-driven.
     pub registry: Option<RegistryIdentity>,
     /// Enclosing symbol id; the file when the site is at module level.
@@ -51,19 +57,23 @@ fn prov_value(
     source: &ObservedSource,
     path: &str,
     span: (u64, u64),
+    also: Option<&(String, u64, u64)>,
     confidence: ConfidenceTier,
     fact: &str,
 ) -> serde_json::Value {
+    let evidence = |path: &str, start: u64, end: u64| EvidenceRef {
+        repo: source.repo.into(),
+        path: path.into(),
+        byte_start: start,
+        byte_end: end,
+        commit_sha: source.commit.into(),
+    };
+    let mut spans = vec![evidence(path, span.0, span.1)];
+    spans.extend(also.map(|(path, start, end)| evidence(path, *start, *end)));
     let provenance = Provenance::new(
         Tier::Deterministic,
         confidence,
-        vec![EvidenceRef {
-            repo: source.repo.into(),
-            path: path.into(),
-            byte_start: span.0,
-            byte_end: span.1,
-            commit_sha: source.commit.into(),
-        }],
+        spans,
         source.extractor,
         fact.as_bytes(),
     )
@@ -171,12 +181,16 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
         };
         match identity {
             Ok(instance) => {
+                let confidence = match site.identity_assumption {
+                    Some(_) => ConfidenceTier::InferredStrong,
+                    None => ConfidenceTier::Confirmed,
+                };
                 let logical_id = match &instance {
                     Some((name, _)) => format!("observed:{}:{name}", site.provider),
                     None => format!("observed:{}", site.provider),
                 };
                 let resource_id = format!("res:{repo}@{logical_id}");
-                resources.entry(resource_id.clone()).or_insert_with(|| {
+                let resource = || {
                     let mut props = serde_json::json!({
                         "type": site.provider,
                         "provider": site.provider,
@@ -184,10 +198,13 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                         "observed": true,
                         "logical_id": logical_id,
                         "prov": prov_value(
-                            source, &site.path, span, ConfidenceTier::Confirmed,
-                            &format!("Resource {resource_id}"),
+                            source, &site.path, span, site.identity_source.as_ref(),
+                            confidence, &format!("Resource {resource_id}"),
                         ),
                     });
+                    if let Some(marker) = site.identity_assumption {
+                        props[marker] = serde_json::json!(true);
+                    }
                     if let Some(module) = &site.module {
                         props["module"] = serde_json::json!(module);
                     }
@@ -202,14 +219,35 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                         label: "Resource".into(),
                         props,
                     }
-                });
+                };
+                // A site that proves the resource without an assumption
+                // replaces one that rested on it.
+                match resources.entry(resource_id.clone()) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(resource());
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut slot) => {
+                        if confidence == ConfidenceTier::Confirmed
+                            && slot.get().props["prov"]["confidence_tier"] != "Confirmed"
+                        {
+                            slot.insert(resource());
+                        }
+                    }
+                }
+                if let Some((path, _, _)) = &site.identity_source {
+                    edge_props.insert("identity_from".into(), serde_json::json!(path));
+                }
+                if let Some(marker) = site.identity_assumption {
+                    edge_props.insert(marker.into(), serde_json::json!(true));
+                }
                 edge_props.insert(
                     "prov".into(),
                     prov_value(
                         source,
                         &site.path,
                         span,
-                        ConfidenceTier::Confirmed,
+                        site.identity_source.as_ref(),
+                        confidence,
                         &format!("USES {src} -> {resource_id}"),
                     ),
                 );
@@ -232,7 +270,7 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                         "provider": site.provider,
                         "attempted_tiers": ["T0"],
                         "prov": prov_value(
-                            source, &site.path, span, ConfidenceTier::Gap,
+                            source, &site.path, span, None, ConfidenceTier::Gap,
                             &format!("Gap {gap_id}"),
                         ),
                     }),
@@ -244,6 +282,7 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                         source,
                         &site.path,
                         span,
+                        None,
                         ConfidenceTier::Gap,
                         &format!("USES {src} -> {gap_id}"),
                     ),
