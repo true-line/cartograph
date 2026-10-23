@@ -21,6 +21,7 @@ mod policy;
 mod privacy;
 mod projection;
 mod protocol;
+mod record_workspace;
 mod records;
 mod sealing;
 mod specialists;
@@ -50,6 +51,7 @@ pub use policy::{
 pub use privacy::{redacted_history_text, reject_prose_replay};
 pub use projection::*;
 pub use protocol::*;
+pub use record_workspace::record_decode_scratch_bytes;
 pub use records::*;
 pub use specialists::*;
 pub use turn::*;
@@ -63,6 +65,7 @@ pub const MAX_INPUT_BYTES: usize = 128 * 1024;
 pub const MAX_MANIFEST_BYTES: usize = 128 * 1024;
 pub const MAX_RESULT_BYTES: usize = 64 * 1024;
 pub const MAX_RECORD_BYTES: usize = 256 * 1024;
+const RECORD_MAX_DEPTH: usize = 32;
 /// Cumulative raw query acquisitions, including repeated identical pages.
 pub const MAX_TOTAL_QUERY_BYTES: usize = 96 * 1024;
 pub const MAX_QUERY_BYTES: usize = 32 * 1024;
@@ -108,7 +111,7 @@ pub(crate) fn text(value: &str, maximum: usize) -> bool {
 pub fn decode_record<T: serde::de::DeserializeOwned + serde::Serialize>(
     body: &str,
 ) -> Result<T, InvestigationError> {
-    strict::preflight(body, MAX_RECORD_BYTES, 32, 16384, 128)?;
+    strict::preflight(body, MAX_RECORD_BYTES, RECORD_MAX_DEPTH, 16384, 128)?;
     let value: T = serde_json::from_str(body).map_err(|_| InvestigationError::InvalidInput)?;
     // New investigation contracts have no legacy permissive fields. Typed
     // round-trip equality also closes nested DTOs reused from older contracts.

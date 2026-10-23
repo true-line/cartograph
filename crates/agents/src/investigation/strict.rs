@@ -28,6 +28,9 @@ pub(super) fn preflight(
     decoder.end().map_err(|_| InvestigationError::InvalidInput)
 }
 
+pub(super) const MAX_OBJECT_KEYS: usize = 64;
+pub(super) const MAX_KEY_BYTES: usize = 128;
+
 struct Seed<'a> {
     depth: usize,
     max_depth: usize,
@@ -99,7 +102,7 @@ impl<'de> Visitor<'de> for Seed<'_> {
     fn visit_map<A: MapAccess<'de>>(mut self, mut a: A) -> Result<(), A::Error> {
         let mut keys = BTreeSet::new();
         while let Some(key) = a.next_key::<String>()? {
-            if key.len() > 128 || keys.len() >= 64 || !keys.insert(key) {
+            if key.len() > MAX_KEY_BYTES || keys.len() >= MAX_OBJECT_KEYS || !keys.insert(key) {
                 return Err(A::Error::custom("object bound"));
             }
             a.next_value_seed(self.child())?;
