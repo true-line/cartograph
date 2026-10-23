@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 
+mod request_wire;
+
 /// Immutable protocol identity, including fixed transport behavior.
 pub const PROTOCOL_VERSION: &str = "bounded-json-completion@2";
 /// Connection ceiling of reusable bounded clients. A shorter total deadline also
@@ -951,14 +953,12 @@ pub(super) fn complete_ollama(
     check_request(profile, request, control)?;
     let user = user_message(request)?;
     let body = encode(
-        &serde_json::json!({
-            "model": profile.requested_model,
-            "messages": [{"role":"system", "content":request.payload().system}, {"role":"user", "content":user}],
-            // Short action turns should not inherit optional extended thinking.
-            // This is advisory to the model; full-body/time limits still apply.
-            "stream": false, "format": "json", "think": false,
-            "options": {"num_predict":request.limits().0.max_output_tokens}
-        }),
+        &request_wire::ollama(
+            &profile.requested_model,
+            &request.payload().system,
+            &user,
+            request.limits().0.max_output_tokens,
+        ),
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,
     )?;
@@ -1029,11 +1029,12 @@ pub(super) fn complete_anthropic(
     }
     let user = user_message(request)?;
     let body = encode(
-        &serde_json::json!({
-            "model":profile.requested_model, "max_tokens":request.limits().0.max_output_tokens,
-            "stream":false, "system":request.payload().system,
-            "messages":[{"role":"user", "content":user}]
-        }),
+        &request_wire::anthropic(
+            &profile.requested_model,
+            &request.payload().system,
+            &user,
+            request.limits().0.max_output_tokens,
+        ),
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,
     )?;
