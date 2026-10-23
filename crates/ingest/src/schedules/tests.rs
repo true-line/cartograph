@@ -144,6 +144,11 @@ fn unprovable_entries_are_gaps() {
         ),
         ("gunicorn wsgi:app", "schedule command runs no script file"),
         ("python -u", "schedule command runs no script file"),
+        ("node -e cron.py", "schedule command evaluates inline code"),
+        (
+            "node --require hook cron.py",
+            "schedule command uses an unmodeled interpreter option",
+        ),
     ];
     let mut crontab = String::from("jobs:\n");
     for (command, _) in &jobs {
@@ -197,5 +202,139 @@ fn container_root_comes_from_one_final_stage_copy() {
         "FROM a\nWORKDIR /code\nCOPY src .\n",
     ] {
         assert_eq!(container_root(unproven), None, "{unproven}");
+    }
+}
+
+const TWO_JOBS: &str = "jobs:\n  - command: python cron.py\n    schedule: \"* * * * *\"\n  - command: python /code/cron.py\n    schedule: \"* * * * *\"\n";
+
+// AC-0330: a relative entry is Confirmed only from the final stage's proven
+// working directory, never from the copy destination alone. (T-0330)
+#[test]
+fn relative_entries_need_the_final_working_directory() {
+    for dockerfile in [
+        "FROM a\nWORKDIR /code\nCOPY . .\nWORKDIR /other\n",
+        "FROM a\nWORKDIR /other\nCOPY . /code\n",
+    ] {
+        let out = extract(&[
+            ("Dockerfile", dockerfile),
+            ("crontab.yml", TWO_JOBS),
+            ("cron.py", ""),
+        ]);
+        let relative = entry(&out, 0, "crontab.yml");
+        assert_eq!(confidence(relative), "InferredStrong", "{dockerfile}");
+        assert_eq!(relative.props["entry_path_suffix"], true);
+        assert_eq!(confidence(entry(&out, 1, "crontab.yml")), "Confirmed");
+    }
+    let out = extract(&[
+        (
+            "Dockerfile",
+            "FROM a\nWORKDIR /code\nCOPY . .\nWORKDIR jobs\n",
+        ),
+        (
+            "crontab.yml",
+            "jobs:\n  - command: python cleanup.py\n    schedule: \"* * * * *\"\n",
+        ),
+        ("jobs/cleanup.py", ""),
+    ]);
+    let nested = entry(&out, 0, "crontab.yml");
+    assert_eq!(nested.dst, format!("file:{REPO}@jobs/cleanup.py"));
+    assert_eq!(confidence(nested), "Confirmed");
+    assert_eq!(
+        nested.props["prov"]["evidence"].as_array().unwrap().len(),
+        4
+    );
+}
+
+// AC-0330: a later COPY/ADD (any source, `--from` included) or RUN in the
+// final stage that may reach the entry leaves it InferredStrong, marked and
+// citing the instruction; writes elsewhere or before the copy keep it
+// Confirmed. (T-0330)
+#[test]
+fn later_writes_may_replace_the_copied_entry() {
+    let base = "FROM a\nWORKDIR /code\nCOPY . .\n";
+    for (later, kept) in [
+        ("COPY --from=builder /replacement /code/cron.py\n", false),
+        ("COPY --from=npm /code /code\n", false),
+        ("ADD build/ ./\n", false),
+        ("COPY generated $DEST\n", false),
+        ("RUN make\n", false),
+        ("RUN echo \\\n  COPY . /elsewhere\n", false),
+        ("COPY --from=npm /code/static /code/static/\n", true),
+        ("WORKDIR /code\nENV A=b\n", true),
+    ] {
+        let out = extract(&[
+            ("Dockerfile", &format!("{base}{later}")),
+            ("crontab.yml", TWO_JOBS),
+            ("cron.py", ""),
+        ]);
+        for index in 0..2 {
+            let edge = entry(&out, index, "crontab.yml");
+            assert_eq!(edge.dst, format!("file:{REPO}@cron.py"), "{later}");
+            assert_eq!(edge.props["container_dir"], "/code", "{later}");
+            if kept {
+                assert_eq!(confidence(edge), "Confirmed", "{later}");
+                assert!(edge.props.get("entry_may_be_replaced_in_image").is_none());
+            } else {
+                assert_eq!(confidence(edge), "InferredStrong", "{later}");
+                assert_eq!(edge.props["entry_may_be_replaced_in_image"], true);
+                let cited = edge.props["prov"]["evidence"].as_array().unwrap();
+                let last = cited.last().unwrap()["byte_start"].as_u64().unwrap();
+                assert_eq!(last, base.len() as u64, "{later}");
+            }
+        }
+    }
+    for before in [
+        "FROM a\nWORKDIR /code\nRUN x\nCOPY --from=b /y /code/cron.py\nCOPY . .\n",
+        "FROM a AS build\nWORKDIR /code\nCOPY . .\nRUN make\nFROM b\nWORKDIR /code\nCOPY . .\n",
+    ] {
+        let out = extract(&[
+            ("Dockerfile", before),
+            ("crontab.yml", TWO_JOBS),
+            ("cron.py", ""),
+        ]);
+        assert_eq!(
+            confidence(entry(&out, 1, "crontab.yml")),
+            "Confirmed",
+            "{before}"
+        );
+    }
+}
+
+// AC-0330: each interpreter has a closed argument grammar; inline code and
+// options outside it are never read as running a file. (T-0330)
+#[test]
+fn interpreter_options_outside_the_grammar_are_not_file_execution() {
+    let script = |command: &str| {
+        let words: Vec<&str> = command.split_whitespace().collect();
+        script_of(&words).map(|script| format!("{script:?}"))
+    };
+    for (command, expected) in [
+        ("python -W ignore cron.py", Ok("Path(\"cron.py\")")),
+        ("python3.12 -X dev -OO -u cron.py", Ok("Path(\"cron.py\")")),
+        ("python -- -odd.py", Ok("Path(\"-odd.py\")")),
+        ("python -I -m app.tasks", Ok("Module(\"app.tasks\")")),
+        (
+            "node --max-old-space-size=512 cron.js",
+            Ok("Path(\"cron.js\")"),
+        ),
+        ("bash -eu run.sh", Ok("Path(\"run.sh\")")),
+        ("node -e cron.js", Err(INLINE_CODE)),
+        ("node --eval=x cron.js", Err(INLINE_CODE)),
+        ("node -pe x cron.js", Err(INLINE_CODE)),
+        ("python -c cron.py", Err(INLINE_CODE)),
+        ("python3 -uc x cron.py", Err(INLINE_CODE)),
+        ("bash -ec run.sh", Err(INLINE_CODE)),
+        ("ruby -we x run.rb", Err(INLINE_CODE)),
+        ("perl -E x run.pl", Err(INLINE_CODE)),
+        ("node -r hook cron.js", Err(UNMODELED_OPTION)),
+        ("bash -o pipefail run.sh", Err(UNMODELED_OPTION)),
+        ("bash +e run.sh", Err(UNMODELED_OPTION)),
+        ("python -Wonce cron.py", Err(UNMODELED_OPTION)),
+        ("python --help", Err(UNMODELED_OPTION)),
+        ("python -", Err(NO_SCRIPT)),
+        ("python -W", Err(NO_SCRIPT)),
+        ("gunicorn wsgi:app", Err(NO_SCRIPT)),
+    ] {
+        assert_eq!(script(command), expected.map(str::to_string), "{command}");
     }
 }

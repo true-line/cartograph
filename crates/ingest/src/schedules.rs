@@ -5,16 +5,19 @@
 //! `{name, command, schedule, …}` mappings). A job's entry is resolved only
 //! from what the repository proves:
 //!
-//! - an absolute script path under the container directory that the root
-//!   `Dockerfile`'s final stage copies the repository into (`COPY . .` at a
-//!   `WORKDIR`) is `Confirmed`, citing both files;
-//! - a relative path is resolved against that same directory when the
-//!   mapping exists (`Confirmed`), otherwise against the repository root
-//!   (`InferredStrong`, marked `entry_relative_to_repo_root`);
+//! - a script path, relative ones joined to the final stage's proven
+//!   `WORKDIR`, that lies under the directory the root `Dockerfile`'s final
+//!   stage copies the repository into (`COPY . <dir>`) is `Confirmed`,
+//!   citing both files, unless a later `COPY`/`ADD`/`RUN` in that stage may
+//!   replace it (`InferredStrong`, marked `entry_may_be_replaced_in_image`);
+//! - a relative path without a proven working directory resolves against
+//!   the repository root (`InferredStrong`, marked
+//!   `entry_relative_to_repo_root`);
 //! - an absolute path matched only by a unique repository suffix is
 //!   `InferredStrong`, marked `entry_path_suffix`;
-//! - anything else (a shell-composed command, an unknown file, an
-//!   ambiguous suffix, a YAML alias or merge key) is a `Gap` naming the job.
+//! - anything else (a shell-composed command, inline code, an interpreter
+//!   option outside the modeled grammar, an unknown file, an ambiguous
+//!   suffix, a YAML alias or merge key) is a `Gap` naming the job.
 //!
 //! This tier never calls an LLM.
 
@@ -53,6 +56,11 @@ pub struct ScheduleExtraction {
 struct ContainerRoot {
     dir: String,
     spans: Vec<(u64, u64)>,
+    /// The final stage's working directory, when proven, and its `WORKDIR`.
+    cwd: Option<(String, (u64, u64))>,
+    /// Later instructions that may replace copied files: the destination
+    /// they write, or `None` when it could be anywhere (`RUN`).
+    writes: Vec<(Option<String>, (u64, u64))>,
 }
 
 /// One job read from a schedule file.
@@ -73,7 +81,9 @@ enum Entry {
         rel: String,
         confidence: ConfidenceTier,
         marker: Option<&'static str>,
-        via_container: bool,
+        /// `Dockerfile` instruction spans the entry rests on.
+        dockerfile: Vec<(u64, u64)>,
+        container_dir: Option<String>,
     },
     Gap(&'static str),
 }
@@ -177,18 +187,12 @@ fn emit(
             rel: entry_rel,
             confidence,
             marker,
-            via_container,
+            dockerfile,
+            container_dir,
         } => {
             let file_id = format!("file:{}@{entry_rel}", id.repo);
             let mut spans = vec![evidence(rel, job.span)];
-            if via_container && let Some(container) = container {
-                spans.extend(
-                    container
-                        .spans
-                        .iter()
-                        .map(|span| evidence("Dockerfile", *span)),
-                );
-            }
+            spans.extend(dockerfile.iter().map(|span| evidence("Dockerfile", *span)));
             if emitted_files.insert(file_id.clone()) {
                 // An adapter that owns this file supersedes this node.
                 out.nodes.push(Node {
@@ -208,8 +212,8 @@ fn emit(
             if let Some(marker) = marker {
                 props[marker] = true.into();
             }
-            if via_container && let Some(container) = container {
-                props["container_dir"] = container.dir.clone().into();
+            if let Some(dir) = container_dir {
+                props["container_dir"] = dir.into();
             }
             out.edges.push(Edge {
                 src: schedule_id,
@@ -260,8 +264,9 @@ fn resolve_entry(
         return Entry::Gap("shell-composed schedule command");
     }
     let words: Vec<&str> = command.split_whitespace().collect();
-    let Some(script) = script_of(&words) else {
-        return Entry::Gap("schedule command runs no script file");
+    let script = match script_of(&words) {
+        Ok(script) => script,
+        Err(reason) => return Entry::Gap(reason),
     };
     let candidates: Vec<String> = match script {
         Script::Path(path) => vec![path.to_string()],
@@ -271,48 +276,73 @@ fn resolve_entry(
         }
     };
     let exists = |rel: &str| files.contains(rel).then(|| rel.to_string());
-    let mut resolved = Vec::new();
+    // A relative path runs from the final working directory, when proven.
+    let cwd = container.and_then(|container| container.cwd.as_ref());
     for candidate in &candidates {
-        if let Some(rest) = candidate.strip_prefix('/') {
-            if let Some(container) = container
-                && let Some(rel) = rest.strip_prefix(container.dir.trim_start_matches('/'))
-                && let Some(rel) = rel.strip_prefix('/')
-                && let Some(rel) = exists(rel)
-            {
-                resolved.push(Entry::File {
-                    rel,
-                    confidence: ConfidenceTier::Confirmed,
-                    marker: None,
-                    via_container: true,
-                });
-            }
-        } else {
-            let relative = candidate.trim_start_matches("./");
-            if let Some(rel) = exists(relative) {
-                resolved.push(match container {
-                    Some(_) => Entry::File {
-                        rel,
-                        confidence: ConfidenceTier::Confirmed,
-                        marker: None,
-                        via_container: true,
-                    },
-                    None => Entry::File {
+        let relative = candidate.trim_start_matches("./");
+        let (absolute, cwd_span) = match (candidate.starts_with('/'), cwd) {
+            (true, _) => (candidate.clone(), None),
+            (false, Some((dir, span))) => (format!("{dir}/{relative}"), Some(*span)),
+            (false, None) => match exists(relative) {
+                Some(rel) => {
+                    return Entry::File {
                         rel,
                         confidence: ConfidenceTier::InferredStrong,
                         marker: Some("entry_relative_to_repo_root"),
-                        via_container: false,
-                    },
-                });
-            }
+                        dockerfile: Vec::new(),
+                        container_dir: None,
+                    };
+                }
+                None => continue,
+            },
+        };
+        let Some(container) = container else {
+            continue;
+        };
+        let Some(rel) = absolute
+            .strip_prefix(&format!("{}/", container.dir))
+            .and_then(exists)
+        else {
+            continue;
+        };
+        let mut dockerfile = container.spans.clone();
+        dockerfile.extend(cwd_span.filter(|span| !container.spans.contains(span)));
+        let replaced: Vec<(u64, u64)> = container
+            .writes
+            .iter()
+            .filter(|(dest, _)| {
+                dest.as_deref().is_none_or(|dest| {
+                    absolute == dest || absolute.starts_with(&format!("{dest}/"))
+                })
+            })
+            .map(|(_, span)| *span)
+            .collect();
+        let (confidence, marker) = if replaced.is_empty() {
+            (ConfidenceTier::Confirmed, None)
+        } else {
+            dockerfile.extend(replaced);
+            (
+                ConfidenceTier::InferredStrong,
+                Some("entry_may_be_replaced_in_image"),
+            )
+        };
+        return Entry::File {
+            rel,
+            confidence,
+            marker,
+            dockerfile,
+            container_dir: Some(container.dir.clone()),
+        };
+    }
+    // A path no container mapping proves: a unique suffix only.
+    let unmapped = match script {
+        Script::Path(path) if path.starts_with('/') => Some(path.to_string()),
+        Script::Path(path) => {
+            cwd.map(|(dir, _)| format!("{dir}/{}", path.trim_start_matches("./")))
         }
-    }
-    if let Some(entry) = resolved.into_iter().next() {
-        return entry;
-    }
-    // An absolute path no container mapping proves: a unique suffix only.
-    if let Script::Path(path) = script
-        && path.starts_with('/')
-    {
+        Script::Module(_) => None,
+    };
+    if let Some(path) = unmapped {
         let matches: Vec<&String> = files
             .iter()
             .filter(|rel| path.ends_with(&format!("/{rel}")))
@@ -322,7 +352,8 @@ fn resolve_entry(
                 rel: (*rel).clone(),
                 confidence: ConfidenceTier::InferredStrong,
                 marker: Some("entry_path_suffix"),
-                via_container: false,
+                dockerfile: Vec::new(),
+                container_dir: None,
             },
             [] => Entry::Gap("schedule entry not found in source tree"),
             _ => Entry::Gap("schedule entry matches several files"),
@@ -337,93 +368,259 @@ enum Script<'a> {
     Module(&'a str),
 }
 
-/// The script a command runs: `python[3[.x]] [-u…] path`, `python -m mod`,
-/// `node|bash|sh|ruby|perl path`, or a path executed directly.
-fn script_of<'a>(words: &[&'a str]) -> Option<Script<'a>> {
-    let (first, rest) = words.split_first()?;
+const NO_SCRIPT: &str = "schedule command runs no script file";
+const INLINE_CODE: &str = "schedule command evaluates inline code";
+const UNMODELED_OPTION: &str = "schedule command uses an unmodeled interpreter option";
+
+/// The closed argument grammar of an interpreter: anything outside it is
+/// unmodeled rather than skipped, since an option may stop file execution.
+struct Grammar {
+    /// Single-letter options without an operand; they may be combined.
+    flags: &'static str,
+    /// Single-letter options that evaluate their operand as code.
+    eval: &'static str,
+    /// Options taking exactly one operand word.
+    operand: &'static [&'static str],
+    /// Long options without an operand; a trailing `=` matches any value.
+    long: &'static [&'static str],
+    /// Long options that evaluate their operand as code.
+    eval_long: &'static [&'static str],
+}
+
+const PYTHON: Grammar = Grammar {
+    flags: "uBOsSEIqbdv",
+    eval: "c",
+    operand: &["-W", "-X"],
+    long: &[],
+    eval_long: &[],
+};
+const NODE: Grammar = Grammar {
+    flags: "",
+    eval: "ep",
+    operand: &[],
+    long: &[
+        "--enable-source-maps",
+        "--no-warnings",
+        "--no-deprecation",
+        "--trace-warnings",
+        "--max-old-space-size=",
+    ],
+    eval_long: &["--eval", "--print"],
+};
+const SHELL: Grammar = Grammar {
+    flags: "euxv",
+    eval: "c",
+    operand: &[],
+    long: &[],
+    eval_long: &[],
+};
+const RUBY: Grammar = Grammar {
+    flags: "w",
+    eval: "e",
+    operand: &[],
+    long: &[],
+    eval_long: &[],
+};
+const PERL: Grammar = Grammar {
+    flags: "w",
+    eval: "eE",
+    operand: &[],
+    long: &[],
+    eval_long: &[],
+};
+
+/// The script a command runs: `python[3[.x]] [options] path`,
+/// `python -m mod`, `node|bash|sh|ruby|perl [options] path`, or a path
+/// executed directly; otherwise why no script file is proven.
+fn script_of<'a>(words: &[&'a str]) -> Result<Script<'a>, &'static str> {
+    let (first, rest) = words.split_first().ok_or(NO_SCRIPT)?;
     let program = first.rsplit('/').next().unwrap_or(first);
     let python = program
         .strip_prefix("python")
         .is_some_and(|version| version.chars().all(|c| c.is_ascii_digit() || c == '.'));
-    if python || matches!(program, "node" | "bash" | "sh" | "ruby" | "perl") {
-        let mut args = rest.iter();
-        while let Some(arg) = args.next() {
-            if python && *arg == "-m" {
-                return args.next().map(|module| Script::Module(module));
+    let grammar = match program {
+        _ if python => &PYTHON,
+        "node" => &NODE,
+        "bash" | "sh" => &SHELL,
+        "ruby" => &RUBY,
+        "perl" => &PERL,
+        // A bare program name is looked up on PATH, not in the repository.
+        _ if first.contains('/') => return Ok(Script::Path(first)),
+        _ => return Err(NO_SCRIPT),
+    };
+    let mut args = rest.iter();
+    while let Some(arg) = args.next() {
+        match *arg {
+            "--" => return args.next().map(|path| Script::Path(path)).ok_or(NO_SCRIPT),
+            // `-` reads the program from standard input.
+            "-" => return Err(NO_SCRIPT),
+            "-m" if python => {
+                return args
+                    .next()
+                    .map(|module| Script::Module(module))
+                    .ok_or(NO_SCRIPT);
             }
-            if !arg.starts_with('-') {
-                return Some(Script::Path(arg));
+            _ if arg.starts_with('+') => return Err(UNMODELED_OPTION),
+            _ if !arg.starts_with('-') => return Ok(Script::Path(arg)),
+            _ => {}
+        }
+        if grammar
+            .eval_long
+            .iter()
+            .any(|long| arg == long || arg.starts_with(&format!("{long}=")))
+        {
+            return Err(INLINE_CODE);
+        }
+        if grammar
+            .long
+            .iter()
+            .any(|long| arg == long || (long.ends_with('=') && arg.starts_with(long)))
+        {
+            continue;
+        }
+        if grammar.operand.contains(arg) {
+            args.next().ok_or(NO_SCRIPT)?;
+            continue;
+        }
+        let letters = arg
+            .strip_prefix('-')
+            .filter(|letters| !letters.starts_with('-'));
+        for letter in letters.ok_or(UNMODELED_OPTION)?.chars() {
+            if grammar.eval.contains(letter) {
+                return Err(INLINE_CODE);
+            }
+            if !grammar.flags.contains(letter) {
+                return Err(UNMODELED_OPTION);
             }
         }
-        return None;
     }
-    // A bare program name is looked up on PATH, not in the repository.
-    first.contains('/').then_some(Script::Path(first))
+    Err(NO_SCRIPT)
 }
 
-/// The container directory the final stage copies the repository into.
-fn container_root(text: &str) -> Option<ContainerRoot> {
-    let mut workdir: Option<(String, (u64, u64))> = None;
-    let mut found: Vec<ContainerRoot> = Vec::new();
+/// A `Dockerfile` path as an absolute container path, relative ones joined
+/// to the working directory; `None` when it isn't a plain literal path.
+fn container_path(path: &str, workdir: Option<&(String, (u64, u64))>) -> Option<String> {
+    if path.contains(['"', '[', ']', '$', '*', '?']) {
+        return None;
+    }
+    if path.starts_with('/') {
+        return Some(path.trim_end_matches('/').to_string());
+    }
+    let (base, _) = workdir?;
+    let relative = path.trim_start_matches("./").trim_end_matches('/');
+    if relative.split('/').any(|segment| segment == "..") {
+        return None;
+    }
+    Some(match relative {
+        "" | "." => base.clone(),
+        _ => format!("{base}/{relative}"),
+    })
+}
+
+/// Logical `Dockerfile` instructions with their spans: continuation lines
+/// joined, comment and blank lines dropped.
+fn instructions(text: &str) -> Vec<((u64, u64), String)> {
+    let mut out = Vec::new();
+    let mut current: Option<(u64, String)> = None;
     let mut offset = 0u64;
     for line in text.split_inclusive('\n') {
         let start = offset;
         offset += line.len() as u64;
         let trimmed = line.trim();
-        let span = (start, start + line.trim_end().len() as u64);
-        let mut words = trimmed.split_whitespace();
-        let Some(instruction) = words.next() else {
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let end = start + line.trim_end().len() as u64;
+        let (begin, mut body) = current.take().unwrap_or((start, String::new()));
+        match trimmed.strip_suffix('\\') {
+            Some(part) => {
+                body.push_str(part);
+                body.push(' ');
+                current = Some((begin, body));
+            }
+            None => {
+                body.push_str(trimmed);
+                out.push(((begin, end), body));
+            }
+        }
+    }
+    if let Some((begin, body)) = current {
+        out.push(((begin, offset), body));
+    }
+    out
+}
+
+/// The container directory the final stage copies the repository into, its
+/// final working directory and the later writes that may replace files.
+fn container_root(text: &str) -> Option<ContainerRoot> {
+    // A changed escape character or a heredoc changes how lines parse.
+    if text
+        .lines()
+        .any(|line| line.trim().to_ascii_lowercase().starts_with("# escape="))
+    {
+        return None;
+    }
+    let mut workdir: Option<(String, (u64, u64))> = None;
+    let mut found: Vec<ContainerRoot> = Vec::new();
+    let mut writes: Vec<(Option<String>, (u64, u64))> = Vec::new();
+    for (span, instruction) in instructions(text) {
+        if instruction.contains("<<") {
+            return None;
+        }
+        let mut words = instruction.split_whitespace();
+        let Some(keyword) = words.next() else {
             continue;
         };
         let args: Vec<&str> = words.collect();
-        match instruction.to_ascii_uppercase().as_str() {
+        match keyword.to_ascii_uppercase().as_str() {
             "FROM" => {
                 workdir = None;
                 found.clear();
+                writes.clear();
             }
             "WORKDIR" => {
-                let [dir] = args.as_slice() else {
-                    workdir = None;
-                    continue;
-                };
-                workdir = match (&workdir, dir.starts_with('/')) {
-                    (_, true) => Some((dir.trim_end_matches('/').to_string(), span)),
-                    (Some((base, _)), false) => {
-                        Some((format!("{base}/{}", dir.trim_end_matches('/')), span))
-                    }
-                    (None, false) => None,
+                workdir = match args.as_slice() {
+                    [dir] => container_path(dir, workdir.as_ref()).map(|dir| (dir, span)),
+                    _ => None,
                 };
             }
+            "RUN" if !found.is_empty() => writes.push((None, span)),
             "COPY" | "ADD" => {
-                if args.iter().any(|arg| arg.starts_with("--from")) || trimmed.ends_with('\\') {
-                    continue;
-                }
+                let from = args.iter().any(|arg| arg.starts_with("--from"));
                 let paths: Vec<&str> = args
                     .iter()
                     .copied()
                     .filter(|a| !a.starts_with("--"))
                     .collect();
-                let [source, destination] = paths.as_slice() else {
-                    continue;
-                };
-                if !matches!(*source, "." | "./") {
-                    continue;
+                let destination = paths
+                    .last()
+                    .and_then(|dest| container_path(dest, workdir.as_ref()));
+                match (paths.as_slice(), destination) {
+                    ([".", _] | ["./", _], Some(dir)) if !from => {
+                        let mut spans: Vec<(u64, u64)> =
+                            workdir.iter().map(|(_, span)| *span).collect();
+                        spans.push(span);
+                        found.push(ContainerRoot {
+                            dir,
+                            spans,
+                            cwd: None,
+                            writes: Vec::new(),
+                        });
+                    }
+                    (_, destination) if !found.is_empty() => writes.push((destination, span)),
+                    _ => {}
                 }
-                let dir = match (*destination, &workdir) {
-                    ("." | "./", Some((dir, _))) => dir.clone(),
-                    (dest, _) if dest.starts_with('/') => dest.trim_end_matches('/').to_string(),
-                    _ => continue,
-                };
-                let mut spans: Vec<(u64, u64)> = workdir.iter().map(|(_, span)| *span).collect();
-                spans.push(span);
-                found.push(ContainerRoot { dir, spans });
             }
             _ => {}
         }
     }
     // Two whole-repository copies in the final stage prove no single root.
     match found.as_slice() {
-        [root] if !root.dir.is_empty() => Some(root.clone()),
+        [root] if !root.dir.is_empty() => Some(ContainerRoot {
+            cwd: workdir,
+            writes,
+            ..root.clone()
+        }),
         _ => None,
     }
 }
