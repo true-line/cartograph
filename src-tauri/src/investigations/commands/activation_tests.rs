@@ -138,14 +138,37 @@ fn finished(app: &tauri::AppHandle<tauri::test::MockRuntime>, id: &str) -> Inves
 
 #[test]
 fn public_completion_start_request7_runs_worker_and_recovers_nonce_without_sources_or_provider() {
+    completion_replay(false);
+}
+
+// AC-0320/0322: coordinator retry precedes mutable sources/provider and checks the live grant.
+#[test]
+fn mcp_coordinator_start_recovers_without_sources_or_provider_and_refuses_revoked_grant() {
+    completion_replay(true);
+}
+
+fn completion_replay(mcp: bool) {
     let provider = Arc::new(PublicProvider::new(false));
     worker::with_public_start_fixture(provider.clone(), false, |app, request, app_data| {
         let state = app.state::<AppState>();
         state
             .investigations
             .set_test_provider(InvestigationProviderMode::Local, provider.clone());
-        let started =
-            completion_start::start(request.clone(), app.clone(), Instant::now()).unwrap();
+        let capacity = std::num::NonZeroUsize::new(1).unwrap();
+        let grant = mcp.then(|| {
+            let client = state
+                .jobs
+                .lock()
+                .unwrap()
+                .create_mcp_client(capacity)
+                .unwrap();
+            McpTaskActivation::granted(client, capacity)
+        });
+        let session = grant.as_ref().map(McpTaskActivation::session);
+        let start = |request| {
+            completion_start::start_access(request, app.clone(), Instant::now(), session.as_ref())
+        };
+        let started = start(request.clone()).unwrap();
         let saved = finished(app, &started.investigation_id);
         assert_eq!(
             saved.summary.status,
@@ -154,6 +177,13 @@ fn public_completion_start_request7_runs_worker_and_recovers_nonce_without_sourc
             saved.error
         );
         assert_eq!(saved.summary.schema_version, 7);
+        let expected_origin = match grant.as_ref() {
+            Some(grant) => InvestigationOrigin::Mcp {
+                client_id: grant.selected_client().unwrap().unwrap(),
+            },
+            None => InvestigationOrigin::App,
+        };
+        assert_eq!(saved.origin, expected_origin);
         assert_eq!(
             saved.summary.completion_outcome,
             Some(InvestigationCompletionOutcome::Supported)
@@ -182,15 +212,21 @@ fn public_completion_start_request7_runs_worker_and_recovers_nonce_without_sourc
             .unwrap();
         provider.available.store(false, Ordering::SeqCst);
         let profiles = provider.profiles.load(Ordering::SeqCst);
-        let recovered =
-            completion_start::start(request.clone(), app.clone(), Instant::now()).unwrap();
+        let recovered = start(request.clone()).unwrap();
         assert_eq!(recovered, saved.summary);
         assert_eq!(detail(app, &started.investigation_id), saved);
         assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+        if let Some(grant) = grant.as_ref() {
+            grant.revoke();
+            assert!(start(request.clone()).is_err());
+            assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+            assert_eq!(detail(app, &started.investigation_id), saved);
+        }
         let mut fresh = request;
         fresh.request_nonce = "public-command-new-nonce-unavailable".into();
-        assert!(completion_start::start(fresh, app.clone(), Instant::now()).is_err());
+        assert!(start(fresh).is_err());
     });
 }
 
@@ -351,4 +387,74 @@ fn public_completion_consent_requires_exact_preview_for_approval_and_decline() {
             );
         });
     }
+}
+
+// AC-0322: legacy requests without inspection targets still recover before provider lookup.
+#[test]
+fn mcp_coordinator_legacy_retry_precedes_provider_and_checks_grant() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = crate::registered_source_tests::app_state(directory.path());
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(state);
+    let state = app.state::<AppState>();
+    let capacity = std::num::NonZeroUsize::new(1).unwrap();
+    let client = state
+        .jobs
+        .lock()
+        .unwrap()
+        .create_mcp_client(capacity)
+        .unwrap();
+    let grant = McpTaskActivation::granted(client, capacity);
+    let session = grant.session();
+    let request = StartInvestigationRequest {
+        schema_version: 1,
+        request_nonce: "coordinator-legacy-retry".into(),
+        specialist_id: SpecialistId::DomainAnalyst,
+        question: "What evidence supports the design?".into(),
+        scope: InvestigationScope::All,
+        provider_mode: InvestigationProviderMode::Local,
+        limit_profile: "investigation-v1".into(),
+        inspection_requirements: None,
+        expected_graph_revision: None,
+        expected_context_id: None,
+        conversation_id: None,
+        parent_id: None,
+    };
+    let provider = Arc::new(PublicProvider::new(false));
+    let descriptor = runtime::descriptor(provider.as_ref(), request.provider_mode).unwrap();
+    let saved = state
+        .jobs
+        .lock()
+        .unwrap()
+        .start_investigation_access(&request, Some(&descriptor), Some(&session))
+        .unwrap()
+        .detail;
+    provider.available.store(false, Ordering::SeqCst);
+    state
+        .investigations
+        .set_test_provider(request.provider_mode, provider.clone());
+    let profiles = provider.profiles.load(Ordering::SeqCst);
+    let recovered = start_access(
+        request.clone(),
+        app.handle().clone(),
+        Instant::now(),
+        Some(&session),
+    )
+    .unwrap();
+    assert_eq!(recovered, saved.summary);
+    grant.revoke();
+    assert!(
+        start_access(
+            request,
+            app.handle().clone(),
+            Instant::now(),
+            Some(&session)
+        )
+        .is_err()
+    );
+    assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(detail(app.handle(), &saved.summary.investigation_id), saved);
 }
