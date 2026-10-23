@@ -147,9 +147,11 @@ pub fn extract_dir(
                     let file = module_file(rel, module, &files)
                         .ok_or("imported module is not one repository file")?;
                     read(&file)
-                        .is_some_and(|text| dispatch::defines(&text, &found.function))
+                        .is_some_and(|text| {
+                            dispatch::defines(&text, &found.function, found.awaited)
+                        })
                         .then_some(file)
-                        .ok_or("imported function is not one top-level def in its module")?
+                        .ok_or("imported function is not one top-level def the call runs")?
                 }
             };
             symbols

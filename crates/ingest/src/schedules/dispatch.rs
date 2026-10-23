@@ -41,6 +41,8 @@ pub(super) struct Dispatch {
     /// The module the function is imported from (`from <module> import
     /// <function>`) and that import's span; `None` for a `def` in the entry.
     pub import: Option<(String, (u64, u64))>,
+    /// Whether the branch runs the function through `asyncio.run`.
+    pub awaited: bool,
 }
 
 /// Why a command's options select no proven function.
@@ -190,27 +192,28 @@ fn proven(source: &str, option: String, value: String) -> Option<Dispatch> {
     }
     let branch = branch?;
     let consequence = branch.child_by_field_name("consequence")?;
-    let calls: Vec<&str> = children(consequence)
+    // Each bare call, and whether `asyncio.run` (the real module) runs it.
+    let calls: Vec<(&str, bool)> = children(consequence)
         .into_iter()
         .filter_map(expression)
         .filter_map(|call| {
-            // `asyncio.run(f())` runs `f` when `asyncio` is the real module.
-            let call = match method_call(source, call) {
+            let (call, awaited) = match method_call(source, call) {
                 Some(("asyncio", "run", arguments))
                     if imported_module(source, root, main, "asyncio") =>
                 {
                     match children(arguments)[..] {
-                        [inner] => inner,
+                        [inner] => (inner, true),
                         _ => return None,
                     }
                 }
-                _ => call,
+                _ => (call, false),
             };
             let function = call.child_by_field_name("function")?;
-            (call.kind() == "call" && function.kind() == "identifier").then(|| text(function))
+            (call.kind() == "call" && function.kind() == "identifier")
+                .then(|| (text(function), awaited))
         })
         .collect();
-    let [function] = calls.as_slice() else {
+    let [(function, awaited)] = calls[..] else {
         return None;
     };
     // The function is bound once, by an undecorated top-level `def` or an
@@ -223,7 +226,7 @@ fn proven(source: &str, option: String, value: String) -> Option<Dispatch> {
         return None;
     }
     let import = match binder.kind() {
-        "function_definition" => None,
+        "function_definition" if runs_body(binder, awaited) => None,
         "import_from_statement" => Some((
             imported_from(source, binder, function)?,
             (binder.start_byte() as u64, binder.end_byte() as u64),
@@ -236,7 +239,34 @@ fn proven(source: &str, option: String, value: String) -> Option<Dispatch> {
         function: function.to_string(),
         span: (branch.start_byte() as u64, branch.end_byte() as u64),
         import,
+        awaited,
     })
+}
+
+/// Whether calling `def` the way the branch does runs its body: a plain
+/// call of a plain `def`, or `asyncio.run` of an `async def`. A bare call
+/// of a coroutine function, or of a generator, only creates an object, and
+/// `asyncio.run` of anything but a coroutine fails (#804 review).
+fn runs_body(def: TsNode, awaited: bool) -> bool {
+    let mut walk = def.walk();
+    let is_async = def.children(&mut walk).any(|child| child.kind() == "async");
+    let Some(body) = def.child_by_field_name("body") else {
+        return false;
+    };
+    // A `yield` in the body itself, not in a nested scope.
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "yield" {
+            return false;
+        }
+        stack.extend(children(node).into_iter().filter(|child| {
+            !matches!(
+                child.kind(),
+                "function_definition" | "class_definition" | "lambda"
+            )
+        }));
+    }
+    is_async == awaited
 }
 
 /// The absolute module a `from <module> import ... <name> ...` takes `name`
@@ -251,8 +281,9 @@ fn imported_from(source: &str, import: TsNode, name: &str) -> Option<String> {
 }
 
 /// Whether `source` binds `name` once in module scope, by an undecorated
-/// top-level `def`: what `from <module> import <name>` then imports.
-pub(super) fn defines(source: &str, name: &str) -> bool {
+/// top-level `def` whose body the call runs (see [`runs_body`]): what
+/// `from <module> import <name>` then imports.
+pub(super) fn defines(source: &str, name: &str, awaited: bool) -> bool {
     let mut parser = Parser::new();
     if parser
         .set_language(&tree_sitter_python::LANGUAGE.into())
@@ -267,7 +298,9 @@ pub(super) fn defines(source: &str, name: &str) -> bool {
     !root.has_error()
         && binders(source, root, name).is_some_and(|binders| {
             matches!(binders[..], [def]
-                if def.kind() == "function_definition" && def.parent() == Some(root))
+                if def.kind() == "function_definition"
+                    && def.parent() == Some(root)
+                    && runs_body(def, awaited))
         })
 }
 

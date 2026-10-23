@@ -981,7 +981,7 @@ if __name__ == "__main__":
 fn imported_and_async_dispatch_enters_the_defining_function() {
     let cron = r#"import argparse
 import asyncio
-from tasks.domains import check_domains
+from tasks.domains import check_domains, remote_coro
 from app.mail import resend
 from app.alias import aliased as renamed
 from .rel import relative_job
@@ -993,6 +993,20 @@ from lib.cond import conditional
 
 async def check_hibp():
     pass
+
+
+async def coro():
+    pass
+
+
+def sync_job():
+    def inner():
+        yield 1
+    return inner
+
+
+def gen_job():
+    yield 1
 
 
 if __name__ == "__main__":
@@ -1022,6 +1036,18 @@ if __name__ == "__main__":
         asyncio.run(check_hibp(), debug=True)
     elif args.job == "conditional":
         conditional()
+    elif args.job == "bare_coro":
+        coro()
+    elif args.job == "run_sync":
+        asyncio.run(sync_job())
+    elif args.job == "generator":
+        gen_job()
+    elif args.job == "sync":
+        sync_job()
+    elif args.job == "imported_coro":
+        asyncio.run(remote_coro())
+    elif args.job == "imported_bare_coro":
+        remote_coro()
 "#;
     let jobs = [
         "domains",
@@ -1035,6 +1061,12 @@ if __name__ == "__main__":
         "both",
         "debug",
         "conditional",
+        "bare_coro",
+        "run_sync",
+        "generator",
+        "sync",
+        "imported_coro",
+        "imported_bare_coro",
     ];
     let yacron: String = std::iter::once("jobs:\n".to_string())
         .chain(jobs.iter().map(|job| {
@@ -1042,7 +1074,10 @@ if __name__ == "__main__":
         }))
         .collect();
     let modules = [
-        ("tasks/domains.py", "def check_domains():\n    pass\n"),
+        (
+            "tasks/domains.py",
+            "def check_domains():\n    pass\n\n\nasync def remote_coro():\n    pass\n",
+        ),
         ("app/__init__.py", ""),
         ("app/mail.py", "def resend():\n    pass\n"),
         ("app/alias.py", "def aliased():\n    pass\n"),
@@ -1065,6 +1100,10 @@ if __name__ == "__main__":
         "shadow/pkg.py#shadowed",
         "lib/cond.py#conditional",
         "cron.py#check_hibp",
+        "cron.py#coro",
+        "cron.py#sync_job",
+        "cron.py#gen_job",
+        "tasks/domains.py#remote_coro",
     ]
     .iter()
     .map(|id| format!("sym:{REPO}@{id}"))
@@ -1111,20 +1150,40 @@ if __name__ == "__main__":
         (5, "imported module is not one repository file"),
         (
             6,
-            "imported function is not one top-level def in its module",
+            "imported function is not one top-level def the call runs",
         ),
         (7, "imported module is not one repository file"),
         (8, dispatch::UNPROVEN),
         (9, dispatch::UNPROVEN),
         (
             10,
-            "imported function is not one top-level def in its module",
+            "imported function is not one top-level def the call runs",
+        ),
+        // The call must run the body: `asyncio.run` exactly for an `async
+        // def`, and never a generator (#804 review).
+        (11, dispatch::UNPROVEN),
+        (12, dispatch::UNPROVEN),
+        (13, dispatch::UNPROVEN),
+        (
+            16,
+            "imported function is not one top-level def the call runs",
         ),
     ] {
         let edge = entry(&out, index, "cron.yaml");
         assert_eq!(edge.dst, format!("file:{REPO}@cron.py"), "{}", jobs[index]);
         assert_eq!(edge.props["dispatch_unresolved"], reason, "{}", jobs[index]);
     }
+
+    // A `yield` in a nested scope does not make a generator; an imported
+    // coroutine runs through `asyncio.run`.
+    assert_eq!(
+        entry(&out, 14, "cron.yaml").dst,
+        format!("sym:{REPO}@cron.py#sync_job")
+    );
+    assert_eq!(
+        entry(&out, 15, "cron.yaml").dst,
+        format!("sym:{REPO}@tasks/domains.py#remote_coro")
+    );
 
     // `asyncio` must be the real module, imported before the guard.
     let fake = cron.replacen("import asyncio\n", "from helpers import asyncio\n", 1);
