@@ -148,6 +148,13 @@ fn read_reservation_rows_rollback_reopen_and_reject_duplicate_replacement() {
         assert!(load(&tx, "task:1", "step:1").unwrap().is_none());
         tx.commit().unwrap();
     }
+    #[cfg(unix)]
+    {
+        // AC-0327: all three real immutable records can be retained together.
+        let bytes = serde_json::to_vec(&(&r, &charge, &acquired)).unwrap().len();
+        let (retained, peak) = workspace::next_prompt_read_reservation_workspace().unwrap();
+        assert!(retained >= bytes && peak >= retained);
+    }
     let body = encode(&r, MAX_MANIFEST_BYTES).unwrap();
     {
         let tx = conn.transaction().unwrap();

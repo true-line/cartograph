@@ -965,3 +965,7 @@ pub(super) fn task_accounting(
 #[cfg(test)]
 #[path = "read_reservation_tests.rs"]
 mod tests;
+
+#[cfg(unix)]
+#[path = "source_replay_workspace.rs"]
+pub(super) mod workspace;
