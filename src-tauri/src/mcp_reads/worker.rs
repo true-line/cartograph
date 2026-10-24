@@ -409,6 +409,10 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
                     .checked_add(agents::investigation::attempt_binding_validation_workspace(
                         &agents::investigation::INVESTIGATION_V2_POLICY,
                         agents::investigation::MAX_RECORD_BYTES,
+                    )?)?
+                    .checked_add(agents::investigation::disclosure_validation_workspace(
+                        &agents::investigation::INVESTIGATION_V2_POLICY,
+                        agents::investigation::MAX_RECORD_BYTES,
                     )?)?,
             )
             .checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?,
