@@ -70,7 +70,7 @@ impl Worker {
 
     /// Internal authenticated factory path. Public activation still calls start
     /// without tasks until the complete detached-execution admission lands.
-    pub(super) async fn start_with_tasks<R: tauri::Runtime>(
+    pub(crate) async fn start_with_tasks<R: tauri::Runtime>(
         app: tauri::AppHandle<R>,
         session_id: String,
         mode: spec::ExportMode,
