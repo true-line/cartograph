@@ -1758,6 +1758,11 @@ fn extract_tree_with_registries(
                 .filter(|node| node.label != "File" || !known_files.contains(&node.id)),
         );
         extraction.edges.extend(tool_facts.edges);
+        // An env-referenced observed resource (#734) names the env files
+        // that declare its key; key names only, never values (AC-0097).
+        let env_links = ingest::toolchain::link_env_resources(&extraction.nodes, &tool_id);
+        layers.tools.edges += distinct_edge_count(&env_links);
+        extraction.edges.extend(env_links);
     }
     // Scheduled jobs (#770): declared schedule files become Schedule flow
     // triggers with an ENTRY into the file each job runs, or into the

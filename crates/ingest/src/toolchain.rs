@@ -155,14 +155,23 @@ const LOCKFILES: &[(&str, &str, &str)] = &[
     ("uv.lock", "uv", "uv"),
 ];
 
-/// True for `.env`/`.env.*` files anywhere in the tree. Their facts carry
-/// **no evidence spans at all** (#216 review): an evidence span — even a
-/// zero-length one — lets the evidence reader open a source window around
-/// it and disclose the file's values, which would break the AC-0097
-/// keys-only guarantee the settings themselves honor.
+/// True for dotenv files anywhere in the tree: `.env`, `.env.*`, `*.env`
+/// (`example.env`, `test.env`) and the `env.example`-style templates. Their
+/// facts carry **no evidence spans at all** (#216 review): an evidence span
+/// — even a zero-length one — lets the evidence reader open a source window
+/// around it and disclose the file's values, which would break the AC-0097
+/// keys-only guarantee the settings themselves honor. A template is held to
+/// the same rule: placeholder values are often real.
 fn is_env_file(rel: &str) -> bool {
-    let base = rel.rsplit('/').next().unwrap_or(rel);
-    base == ".env" || base.starts_with(".env.")
+    let base = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
+    is_env_name(base)
+}
+
+fn is_env_name(name: &str) -> bool {
+    name == ".env"
+        || name.starts_with(".env.")
+        || (name.len() > ".env".len() && name.ends_with(".env"))
+        || matches!(name, "env.example" | "env.sample" | "env.template")
 }
 
 /// A stored string is dropped when it looks secret-shaped: one long
@@ -332,7 +341,7 @@ pub fn detect_in_file(name: &str, rel: &str, path: &Path) -> Detection {
     if name.ends_with(".tf") {
         detection.framework_labels.push("Terraform".into());
     }
-    if name == ".env" || name.starts_with(".env.") {
+    if is_env_name(name) {
         detect_env(rel, path, &mut detection);
     }
     detect_code_config(name, rel, &mut detection);
@@ -716,27 +725,76 @@ fn detect_workflow(rel: &str, path: &Path, detection: &mut Detection) {
     ));
 }
 
+/// The assigned key names of a dotenv text, in order. A line counts only
+/// as `[export ]KEY=…` with a well-formed key; anything else (a stray
+/// fragment, a comment) is skipped. A quoted value left open on its line
+/// swallows every following line until it closes, so the lines of a
+/// multiline secret (a PEM body, which may itself contain `=`) are never
+/// read as keys. An unterminated quote skips the rest of the file: fail
+/// closed.
+fn env_keys(text: &str) -> Vec<&str> {
+    let mut keys = Vec::new();
+    let mut open: Option<char> = None;
+    for line in text.lines() {
+        if let Some(quote) = open {
+            if closing_quote(line, quote).is_some() {
+                open = None;
+            }
+            continue;
+        }
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let assignment = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = assignment.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let mut chars = key.chars();
+        let well_formed = chars
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+        if !well_formed {
+            continue;
+        }
+        keys.push(key);
+        let value = value.trim_start();
+        if let Some(quote) = value
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '"' | '\'' | '`'))
+            && closing_quote(&value[1..], quote).is_none()
+        {
+            open = Some(quote);
+        }
+    }
+    keys
+}
+
+/// Byte offset of the first `quote` in `text` that a backslash does not
+/// escape (single quotes take no escapes).
+fn closing_quote(text: &str, quote: char) -> Option<usize> {
+    let mut escaped = false;
+    for (offset, c) in text.char_indices() {
+        if c == quote && !escaped {
+            return Some(offset);
+        }
+        escaped = quote != '\'' && c == '\\' && !escaped;
+    }
+    None
+}
+
 /// `.env*`: key names ONLY — values are never read into settings, never
 /// stored, never hashed (AC-0097, fail closed).
 fn detect_env(rel: &str, path: &Path, detection: &mut Detection) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
-    let keys: Vec<serde_json::Value> = text
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                return None;
-            }
-            let key = line.strip_prefix("export ").unwrap_or(line);
-            let key = key.split('=').next()?.trim();
-            if key.is_empty() {
-                None
-            } else {
-                Some(serde_json::Value::String(key.into()))
-            }
-        })
+    let keys: Vec<serde_json::Value> = env_keys(&text)
+        .into_iter()
+        .map(|key| serde_json::Value::String(key.into()))
         .collect();
     let mut settings = BTreeMap::new();
     settings.insert("keys".into(), serde_json::Value::Array(keys));
@@ -933,6 +991,63 @@ pub fn extract_dir(
     Ok(extraction)
 }
 
+/// Edge from an observed resource to an env file declaring its key.
+pub const CONFIGURED_IN: &str = "CONFIGURED_IN";
+
+/// `CONFIGURED_IN` edges from each `Resource` whose identity is an env
+/// reference (`props.env_key`, #734) to every env file whose key names
+/// include it: the code reads `KEY`, and the file declares `KEY`. Which file
+/// a deployment loads is not proven, so each declaring file gets its own
+/// edge. Like the env facts, the edge carries no evidence span (AC-0097).
+pub fn link_env_resources(nodes: &[Node], id: &SourceId) -> Vec<Edge> {
+    let mut declared: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for node in nodes
+        .iter()
+        .filter(|node| node.label == "Tool" && node.props["category"] == "environment")
+    {
+        let Some(path) = node.props["name"].as_str().filter(|path| is_env_file(path)) else {
+            continue;
+        };
+        for key in node.props["settings"]["keys"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            declared.entry(key).or_default().push(path);
+        }
+    }
+    let mut edges = Vec::new();
+    for node in nodes.iter().filter(|node| node.label == "Resource") {
+        let Some(key) = node.props["env_key"].as_str() else {
+            continue;
+        };
+        let mut paths = declared.get(key).cloned().unwrap_or_default();
+        paths.sort_unstable();
+        paths.dedup();
+        for path in paths {
+            let prov = Provenance::new(
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+                vec![],
+                TOOLCHAIN_EXTRACTOR_ID,
+                format!("{} {CONFIGURED_IN} {path}:{key}", node.id).as_bytes(),
+            )
+            .expect("within ceiling");
+            edges.push(Edge {
+                src: node.id.clone(),
+                dst: format!("file:{}@{path}", id.repo),
+                label: CONFIGURED_IN.into(),
+                props: serde_json::json!({
+                    "env_key": key,
+                    "prov": serde_json::to_value(prov).expect("serializes"),
+                }),
+            });
+        }
+    }
+    edges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1099,6 +1214,115 @@ mod tests {
         let edge_prov: Provenance =
             serde_json::from_value(defined_in.props["prov"].clone()).unwrap();
         assert!(edge_prov.evidence.is_empty());
+    }
+
+    #[test]
+    fn env_keys_skip_multiline_values_and_non_assignments() {
+        // A PEM body inside a quoted value, including a `==`-padded line,
+        // must never surface as a key (AC-0097).
+        let text = "A=1\n\
+            PRIVATE_KEY=\"-----BEGIN KEY-----\n\
+            MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n\
+            KUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQ==\n\
+            -----END KEY-----\"\n\
+            B='one line'\n\
+            stray fragment without assignment\n\
+            9BAD=x\n\
+            export C.D = \"esc \\\" still open\nE=inside\n\" \n\
+            F=`x`\n\
+            G=\"never closed\nH=1\n";
+        assert_eq!(env_keys(text), ["A", "PRIVATE_KEY", "B", "C.D", "F", "G"]);
+    }
+
+    #[test]
+    fn env_templates_are_env_files_and_link_env_keyed_resources() {
+        // `example.env`-style templates hold the same keys-only line as
+        // `.env*`: placeholder values are often real credentials.
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "example.env",
+            "DB_URI=postgresql://myuser:mypassword@sl-db:5432/sl\nUNUSED=1\n",
+        );
+        write(dir.path(), "tests/test.env", "DB_URI=sqlite://\n");
+        write(dir.path(), "config/env.example", "OTHER=x\n");
+        // Not env files: no `.env` suffix boundary, or not a template name.
+        write(dir.path(), "myenv", "A=1\n");
+        write(dir.path(), "environment.yml", "name: x\n");
+        let extraction = extract(dir.path());
+        for path in ["example.env", "tests/test.env", "config/env.example"] {
+            let env = tool_node(&extraction, &format!("tool:local/tools@{path}"));
+            assert_eq!(env.props["category"], "environment");
+            let prov: Provenance = serde_json::from_value(env.props["prov"].clone()).unwrap();
+            assert!(prov.evidence.is_empty());
+        }
+        assert!(!is_env_file("src/.envrc.ts") && !is_env_file("environment.yml"));
+        assert!(!is_env_name("env") && !is_env_name("myenv") && is_env_name(".env"));
+        assert!(
+            !serde_json::to_string(&extraction.nodes)
+                .unwrap()
+                .contains("mypassword")
+        );
+        assert!(
+            !serde_json::to_string(&extraction.edges)
+                .unwrap()
+                .contains("mypassword")
+        );
+
+        let resource = |id: &str, key: Option<&str>| Node {
+            id: id.into(),
+            label: "Resource".into(),
+            props: key.map_or(
+                serde_json::json!({}),
+                |key| serde_json::json!({ "env_key": key }),
+            ),
+        };
+        let mut nodes = extraction.nodes.clone();
+        nodes.push(resource(
+            "res:local/tools@observed:sql:env:DB_URI",
+            Some("DB_URI"),
+        ));
+        nodes.push(resource(
+            "res:local/tools@observed:redis:env:MISSING",
+            Some("MISSING"),
+        ));
+        nodes.push(resource("res:local/tools@observed:s3", None));
+        let id = SourceId {
+            repo: "local/tools",
+            commit: "c0ffee",
+        };
+        let links = link_env_resources(&nodes, &id);
+        let targets: Vec<(&str, &str)> = links
+            .iter()
+            .map(|edge| (edge.src.as_str(), edge.dst.as_str()))
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                (
+                    "res:local/tools@observed:sql:env:DB_URI",
+                    "file:local/tools@example.env"
+                ),
+                (
+                    "res:local/tools@observed:sql:env:DB_URI",
+                    "file:local/tools@tests/test.env"
+                ),
+            ]
+        );
+        for edge in &links {
+            assert_eq!(edge.label, CONFIGURED_IN);
+            assert_eq!(edge.props["env_key"], "DB_URI");
+            let prov: Provenance = serde_json::from_value(edge.props["prov"].clone()).unwrap();
+            assert!(prov.evidence.is_empty());
+            // Every link lands on a File node the toolchain produced.
+            assert!(
+                extraction
+                    .nodes
+                    .iter()
+                    .any(|n| n.id == edge.dst && n.label == "File")
+            );
+        }
+        assert_eq!(link_env_resources(&nodes, &id), links);
     }
 
     #[test]
