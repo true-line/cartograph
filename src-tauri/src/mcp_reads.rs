@@ -36,6 +36,7 @@ pub(crate) mod scoped_evidence;
 pub(crate) mod scoped_session;
 #[cfg(unix)]
 pub(crate) mod service;
+pub(crate) mod task_reservation;
 pub(crate) mod worker;
 
 /// Closed source-free failures; never expose storage diagnostics or input text.
