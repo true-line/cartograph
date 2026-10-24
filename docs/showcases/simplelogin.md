@@ -106,6 +106,32 @@ The decorators supply the 401, 403 and 440 statuses ([`app/api/base.py`](https:/
 The keys now include the success bodies built by `auth_payload` (login, MFA) and the `ret` dict of `GET /api/v5/alias/options`. The remaining misses are the per-alias fields of `GET /api/v2/aliases`, which `api.md` lists as top-level bullets although they are nested under `aliases`. The undocumented keys are the `error` keys of the documented endpoints' failure returns.
 
 
+## Tests (#946)
+
+SimpleLogin's own pytest suite is read as test arrangements: what each test requests and what it expects back. All 1,047 tests become `TestCase` facts citing their definitions. The suite's tests reach the app through the `flask_client` fixture in `tests/conftest.py`, which yields `app.test_client()`. A call in a test is read only when its receiver is proven to be that client.
+
+| Measure | Value |
+|---|---|
+| Client calls in test bodies read | 418 |
+| Test → endpoint references (`REQUESTS`) | 241, from 289 calls |
+| Recovered endpoints referenced by a test | 81 / 248 |
+| Under `/api` | 43 / 56 |
+| Unresolved test requests (Gaps) | 129 |
+
+`test_arrangements.md` lists each referenced endpoint with its number of tests and the statuses they assert, then the 167 endpoints that no test references. These are static references, not coverage. They show that a test issues a request, not that the test runs, passes or reaches a given branch. Each reference is InferredStrong and marked `client_app_assumed`, because the fixture's app is assumed to be the one serving the recovered routes. A hand-checked sample of 12 references was correct.
+
+The 129 Gaps, by reason:
+
+- **63** use a Flask-Admin endpoint name (`url_for("admin.…")`). Flask-Admin builds its views at runtime, so they are not recovered endpoints.
+- **34** request a computed URL.
+- **30** name an `oauth.*` endpoint. The OAuth Blueprint is registered twice, so its names build more than one URL.
+- **1** requests a path that no recovered endpoint serves (below).
+- **1** matches more than one endpoint equally (`GET /`).
+
+**The one unserved path is a test bug.** `test_cannot_create_alias_with_admin_disabled_mailbox_via_api` posts to `/api/aliases/random/new` ([`tests/api/test_alias.py:752`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/tests/api/test_alias.py#L752)), but the route is `/api/alias/random/new` ([`new_random_alias.py:21`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/app/api/views/new_random_alias.py#L21)). The request gets a 404. The test checks the mailbox only `if r.status_code == 201`, so it passes without testing what its name says.
+
+Seven client calls are in helper functions such as `login()` and are not followed.
+
 ## What else was recovered
 
 | Source | Producers that ran | Nodes | Edges | Coverage |
@@ -191,4 +217,5 @@ Verified at Cartograph `d326a47e`, in `$OUT/verified-only/drift_register.md` und
 
 - Swift is unsupported; no iOS client was ingested.
 - There is no Terraform or other IaC in these repos. The topology shows only what the source proves: five observed resources (gap 3).
+- Tests are read only for pytest and the Flask test client. Calls in helper functions are not followed, and a test reference is static: it does not prove that the test ran.
 - Request inputs are recorded only from the handler body. Responses also follow repository wrapper decorators and dict-building helpers (#940), but not `make_response(…)`, decorator factories or helpers outside the repository, and nested response fields are not recovered.
