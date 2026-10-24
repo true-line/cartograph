@@ -66,6 +66,11 @@ mod storage;
 mod task_record_workspace;
 #[cfg(any(unix, test))]
 pub(crate) use task_record_workspace::next_prompt_record_workspace;
+#[cfg(any(unix, test))]
+#[path = "investigations/attempt_record_workspace.rs"]
+mod attempt_record_workspace;
+#[cfg(any(unix, test))]
+pub(crate) use attempt_record_workspace::next_prompt_attempt_acquisition_workspace;
 #[cfg(test)]
 #[path = "investigations/tests.rs"]
 mod tests;
