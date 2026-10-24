@@ -88,7 +88,17 @@ impl Worker {
             super::scoped_session::ScopedReadSession::validate_graph_limits(limits.graph)?;
         }
         #[cfg(unix)]
-        validate_reservation(limits)?;
+        {
+            validate_reservation(limits)?;
+            if tasks
+                .as_ref()
+                .is_some_and(|session| session.with_grant(|_, _| ()).is_ok())
+                && limits.reserved_bytes.get()
+                    < task_preparation_minimum(limits).ok_or(ReadError::Limit)?
+            {
+                return Err(ReadError::Limit);
+            }
+        }
         let permit = budget
             .try_acquire(limits.reserved_bytes, 0)
             .map_err(|_| ReadError::Limit)?;
@@ -363,6 +373,19 @@ pub(crate) fn required_reservation(limits: WorkerLimits) -> Option<usize> {
     }
 }
 
+/// Enforced preparation floor only. Store replay, later reads and provider
+/// phases still need composition before public task activation can be enabled.
+#[cfg(unix)]
+pub(crate) fn task_preparation_minimum(limits: WorkerLimits) -> Option<usize> {
+    let (_, preparation) = crate::investigations::preparation_workspace::workspace_bytes(
+        limits.scope,
+        agents::investigation::MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
+        limits.max_request_frame_bytes.get(),
+    )?;
+    required_reservation(limits)?
+        .checked_add(preparation.checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?)
+}
+
 struct RequestCounter {
     size: usize,
     limit: usize,
@@ -443,6 +466,16 @@ pub(crate) mod tests {
                     .unwrap()
                     .required_bytes,
             );
+            limits
+        };
+        limits
+    }
+    pub(crate) fn task_limits() -> WorkerLimits {
+        let limits = limits();
+        #[cfg(unix)]
+        let limits = {
+            let mut limits = limits;
+            limits.reserved_bytes = nz(task_preparation_minimum(limits).unwrap());
             limits
         };
         limits

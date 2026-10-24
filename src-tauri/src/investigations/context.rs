@@ -1,3 +1,6 @@
+#[cfg(unix)]
+#[path = "context_preparation_workspace.rs"]
+pub(crate) mod preparation_workspace;
 use super::{AcquisitionSink, HostError, evidence::EvidenceGuards};
 use crate::AppState;
 use agents::investigation::*;

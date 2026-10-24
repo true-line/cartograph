@@ -138,13 +138,73 @@ fn authenticated_task_tools_share_lifecycle_and_revocation_precedes_store_access
         McpClientId::from_host_bytes([9; 16]),
         NonZeroUsize::new(4).unwrap(),
     );
-    let limits = tests::limits();
+    let limits = tests::task_limits();
     let budget = WorkBudget::new(WorkLimits {
         max_workers: NonZeroUsize::new(1).unwrap(),
         max_reserved_bytes: limits.reserved_bytes,
         max_cumulative_read_bytes: 100_000,
     });
     tauri::async_runtime::block_on(async {
+        // AC-0321/0327: unavailable grants retain ordinary read-only admission.
+        let revoked = McpTaskActivation::granted(
+            McpClientId::from_host_bytes([8; 16]),
+            NonZeroUsize::new(4).unwrap(),
+        );
+        revoked.revoke();
+        for unavailable in [McpTaskActivation::default(), revoked] {
+            let read_limits = tests::limits();
+            let read_budget = WorkBudget::new(WorkLimits {
+                max_workers: NonZeroUsize::new(1).unwrap(),
+                max_reserved_bytes: read_limits.reserved_bytes,
+                max_cumulative_read_bytes: 100_000,
+            });
+            let mut reader = Worker::start_with_tasks(
+                app.handle().clone(),
+                "read-only-grant".into(),
+                spec::ExportMode::VerifiedOnly,
+                read_limits,
+                read_budget,
+                Some(unavailable.session()),
+            )
+            .await
+            .unwrap();
+            reader.receive(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}})).await.unwrap();
+            reader
+                .receive(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+                .await
+                .unwrap();
+            let DispatchAction::Respond(list) = reader
+                .receive(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
+                .await
+                .unwrap()
+            else {
+                panic!("read-only tools")
+            };
+            let tools = list["result"]["tools"].as_array().unwrap();
+            assert!(!tools.is_empty());
+            assert!(tools.iter().all(|tool| {
+                !mcp_dispatch::TOOLS
+                    .iter()
+                    .any(|task| tool["name"] == task.name())
+            }));
+        }
+        #[cfg(unix)]
+        {
+            let mut insufficient = limits;
+            insufficient.reserved_bytes =
+                NonZeroUsize::new(limits.reserved_bytes.get() - 1).unwrap();
+            let refused = Worker::start_with_tasks(
+                app.handle().clone(),
+                "too-small".into(),
+                spec::ExportMode::VerifiedOnly,
+                insufficient,
+                budget.clone(),
+                Some(grant.session()),
+            )
+            .await;
+            assert!(matches!(refused, Err(ReadError::Limit)));
+            assert!(budget.is_idle().unwrap());
+        }
         let mut worker = Worker::start_with_tasks(
             app.handle().clone(),
             "tasks".into(),
