@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node as TsNode, Query, QueryCursor};
+use tree_sitter::{Node as TsNode, QueryCursor};
 
 use crate::chrome_messaging::unwrap_assertions;
 use crate::{FileCx, literal_string, object_entries};
@@ -145,11 +145,10 @@ pub(crate) fn is_exported(node: TsNode) -> bool {
 pub(crate) fn collect_imports(
     cx: &FileCx,
     root: TsNode,
-    language: &tree_sitter::Language,
+    grammar: crate::grammar::Grammar,
     index: &mut ConstIndex,
 ) -> bool {
-    let query = Query::new(
-        language,
+    let query = grammar.query(
         r#"
         (import_statement
             (import_clause
@@ -162,12 +161,11 @@ pub(crate) fn collect_imports(
                 ])
             source: (string) @source)
         "#,
-    )
-    .expect("static query");
+    );
     let mut bindings = ImportBindings::new();
     let mut shadows_chrome = false;
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, cx.source);
+    let mut matches = cursor.matches(query, root, cx.source);
     while let Some(m) = matches.next() {
         let (mut default, mut name, mut alias, mut namespace, mut source) =
             (None, None, None, None, None);
@@ -201,16 +199,13 @@ pub(crate) fn collect_imports(
 pub(crate) fn collect_const_objects(
     cx: &FileCx,
     root: TsNode,
-    language: &tree_sitter::Language,
+    grammar: crate::grammar::Grammar,
     index: &mut ConstIndex,
 ) {
-    let query = Query::new(
-        language,
-        r#"(variable_declarator name: (identifier) @name value: (_) @value) @decl"#,
-    )
-    .expect("static query");
+    let query =
+        grammar.query(r#"(variable_declarator name: (identifier) @name value: (_) @value) @decl"#);
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, cx.source);
+    let mut matches = cursor.matches(query, root, cx.source);
     while let Some(m) = matches.next() {
         let (mut name, mut value, mut decl) = (None, None, None);
         for c in m.captures() {

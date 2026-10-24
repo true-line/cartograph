@@ -28,7 +28,7 @@ use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
+use tree_sitter::{Node as TsNode, Parser, QueryCursor};
 
 /// Extraction errors.
 #[derive(Debug, thiserror::Error)]
@@ -1395,11 +1395,8 @@ fn extract_source_recording(
     // PLANNED_ADAPTERS in `ingest::preflight` — this crate covers it
     // directly). The queries below are valid against both grammars. A
     // `.vue` component follows its script blocks' `lang` the same way.
-    let language: tree_sitter::Language = if is_tsx {
-        tree_sitter_typescript::LANGUAGE_TSX.into()
-    } else {
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
-    };
+    let grammar = crate::grammar::Grammar::new(is_tsx);
+    let language = grammar.language();
     let mut parser = Parser::new();
     parser.set_language(&language)?;
     let tree = parser
@@ -1493,21 +1490,19 @@ fn extract_source_recording(
     declarations::emit(&cx, root, &syntax_nodes, &mut out, direct.as_deref_mut());
 
     // --- Imports: IMPORTS edges + imported-name -> foreign symbol map -------
-    let q_imports = Query::new(
-        &language,
+    let q_imports = grammar.query(
         r#"
         (import_statement
             (import_clause)? @clause
             source: (string (string_fragment) @source)) @stmt
         "#,
-    )
-    .expect("static query");
+    );
     let mut imported: HashMap<String, String> = HashMap::new(); // local name -> foreign sym id
     let mut import_modules: HashMap<String, String> = HashMap::new(); // local name -> module spec
     let mut imported_names: HashMap<String, String> = HashMap::new(); // local -> exported name
     let mut imported_types: HashMap<String, (String, String)> = HashMap::new(); // local -> (file, exported type)
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_imports, root, source);
+    let mut matches = cursor.matches(q_imports, root, source);
     while let Some(m) = matches.next() {
         let mut spec = None;
         let mut stmt = None;
@@ -1599,15 +1594,13 @@ fn extract_source_recording(
         args: TsNode<'tree>,
     }
 
-    let q_pulumi = Query::new(
-        &language,
+    let q_pulumi = grammar.query(
         r#"
         (new_expression
             constructor: [(identifier) (member_expression)] @ctor
             arguments: (arguments) @args) @new
         "#,
-    )
-    .expect("static query");
+    );
     let mut declarations = Vec::new();
     let mut resources = imported
         .iter()
@@ -1619,7 +1612,7 @@ fn extract_source_recording(
         })
         .collect::<HashMap<_, _>>();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_pulumi, root, source);
+    let mut matches = cursor.matches(q_pulumi, root, source);
     while let Some(m) = matches.next() {
         let (mut constructor, mut site, mut args) = (None, None, None);
         for capture in m.captures() {
@@ -1806,18 +1799,16 @@ fn extract_source_recording(
     }
 
     // --- Framework receivers: vars bound to an import-proven router factory -
-    let q_factories = Query::new(
-        &language,
+    let q_factories = grammar.query(
         r#"
         (variable_declarator
             name: (identifier) @var
             value: (call_expression function: [(identifier) (member_expression)] @callee))
         "#,
-    )
-    .expect("static query");
+    );
     let mut routers = HashMap::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_factories, root, source);
+    let mut matches = cursor.matches(q_factories, root, source);
     while let Some(m) = matches.next() {
         let mut var = None;
         let mut callee = None;
@@ -1842,8 +1833,7 @@ fn extract_source_recording(
     }
 
     // --- Endpoints: router.<verb>('/route', handler) -------------------------
-    let q_endpoints = Query::new(
-        &language,
+    let q_endpoints = grammar.query(
         r#"
         (call_expression
             function: (member_expression
@@ -1851,10 +1841,9 @@ fn extract_source_recording(
                 property: (property_identifier) @method)
             arguments: (arguments . (string (string_fragment) @route))) @call
         "#,
-    )
-    .expect("static query");
+    );
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_endpoints, root, source);
+    let mut matches = cursor.matches(q_endpoints, root, source);
     while let Some(m) = matches.next() {
         let mut recv = None;
         let mut method = None;
@@ -1920,13 +1909,9 @@ fn extract_source_recording(
     }
 
     // --- NestJS endpoints: @Controller prefix + import-proven method decorator
-    let q_classes = Query::new(
-        &language,
-        r#"(class_declaration body: (class_body) @body) @class"#,
-    )
-    .expect("static query");
+    let q_classes = grammar.query(r#"(class_declaration body: (class_body) @body) @class"#);
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_classes, root, source);
+    let mut matches = cursor.matches(q_classes, root, source);
     while let Some(m) = matches.next() {
         let (mut class_node, mut body) = (None, None);
         for capture in m.captures() {
@@ -2010,18 +1995,16 @@ fn extract_source_recording(
     // at T0 (same-file, deterministic). Only `const` counts: `let`/`var`
     // bindings are reassignable, so promoting them would stamp Confirmed on
     // a runtime value — those stay computed and escalate (AC-0012).
-    let q_consts = Query::new(
-        &language,
+    let q_consts = grammar.query(
         r#"
         (variable_declarator
             name: (identifier) @name
             value: (string (string_fragment) @lit)) @decl
         "#,
-    )
-    .expect("static query");
+    );
     let mut const_strings: HashMap<String, String> = HashMap::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_consts, root, source);
+    let mut matches = cursor.matches(q_consts, root, source);
     while let Some(m) = matches.next() {
         let (mut name, mut lit, mut decl) = (None, None, None);
         for c in m.captures() {
@@ -2053,8 +2036,8 @@ fn extract_source_recording(
     // classified for preflight (escalation ladder: no guessing).
     {
         let mut eval_consts = const_resolution::ConstIndex::default();
-        const_resolution::collect_imports(&cx, root, &language, &mut eval_consts);
-        const_resolution::collect_const_objects(&cx, root, &language, &mut eval_consts);
+        const_resolution::collect_imports(&cx, root, grammar, &mut eval_consts);
+        const_resolution::collect_const_objects(&cx, root, grammar, &mut eval_consts);
         let prove_code = |node: &TsNode| -> EvalArg {
             if let Some(lit) = literal_string(&cx, *node) {
                 return EvalArg::Literal(lit);
@@ -2079,8 +2062,7 @@ fn extract_source_recording(
             imported.contains_key("eval") || import_modules.contains_key("eval");
         let mut function_shadowed =
             imported.contains_key("Function") || import_modules.contains_key("Function");
-        let q_shadow_bindings = Query::new(
-            &language,
+        let q_shadow_bindings = grammar.query(
             r#"
             (variable_declarator name: (identifier) @binding)
             (required_parameter pattern: (identifier) @binding)
@@ -2089,10 +2071,9 @@ fn extract_source_recording(
             (function_declaration name: (identifier) @binding)
             (class_declaration name: (type_identifier) @binding)
             "#,
-        )
-        .expect("static query");
+        );
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&q_shadow_bindings, root, source);
+        let mut matches = cursor.matches(q_shadow_bindings, root, source);
         while let Some(m) = matches.next() {
             for c in m.captures() {
                 match cx.text(&c.node) {
@@ -2103,13 +2084,11 @@ fn extract_source_recording(
             }
         }
 
-        let q_eval = Query::new(
-            &language,
+        let q_eval = grammar.query(
             r#"(call_expression function: (identifier) @fn arguments: (arguments) @args) @call"#,
-        )
-        .expect("static query");
+        );
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&q_eval, root, source);
+        let mut matches = cursor.matches(q_eval, root, source);
         while let Some(m) = matches.next() {
             let (mut fn_name, mut args, mut call) = (None, None, None);
             for c in m.captures() {
@@ -2156,13 +2135,11 @@ fn extract_source_recording(
         // `new Function("a", "b", "body")`: the LAST string argument is the
         // body; earlier ones are parameter names. Every argument must be
         // compile-time-proven or the whole site stays unextracted.
-        let q_new_function = Query::new(
-            &language,
+        let q_new_function = grammar.query(
             r#"(new_expression constructor: (identifier) @ctor arguments: (arguments) @args) @new"#,
-        )
-        .expect("static query");
+        );
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&q_new_function, root, source);
+        let mut matches = cursor.matches(q_new_function, root, source);
         while let Some(m) = matches.next() {
             let (mut ctor, mut args, mut site) = (None, None, None);
             for c in m.captures() {
@@ -2221,19 +2198,17 @@ fn extract_source_recording(
     }
 
     // Vars bound to `new Ctor(...)` — receiver proof for Method patterns.
-    let q_news = Query::new(
-        &language,
+    let q_news = grammar.query(
         r#"
         (variable_declarator
             name: (identifier) @var
             value: (new_expression
                 constructor: [(identifier) (member_expression)] @ctor))
         "#,
-    )
-    .expect("static query");
+    );
     let mut constructed: HashMap<String, String> = HashMap::new(); // var -> ctor text
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_news, root, source);
+    let mut matches = cursor.matches(q_news, root, source);
     while let Some(m) = matches.next() {
         let (mut var, mut ctor) = (None, None);
         for c in m.captures() {
@@ -2250,8 +2225,7 @@ fn extract_source_recording(
 
     // Vars bound to `obj.factory()` where `obj` was constructed from the SDK
     // module — receiver proof for FactoryMethod patterns (kafkajs).
-    let q_factory_recv = Query::new(
-        &language,
+    let q_factory_recv = grammar.query(
         r#"
         (variable_declarator
             name: (identifier) @var
@@ -2260,12 +2234,11 @@ fn extract_source_recording(
                     object: (identifier) @obj
                     property: (property_identifier) @factory)))
         "#,
-    )
-    .expect("static query");
+    );
     // var -> (module of obj's constructor, factory name)
     let mut factory_receivers: HashMap<String, (String, String)> = HashMap::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_factory_recv, root, source);
+    let mut matches = cursor.matches(q_factory_recv, root, source);
     while let Some(m) = matches.next() {
         let (mut var, mut obj, mut factory) = (None, None, None);
         for c in m.captures() {
@@ -2322,17 +2295,15 @@ fn extract_source_recording(
     };
 
     // Constructor pattern: `new SendMessageCommand({ QueueUrl: … })`.
-    let q_cmd = Query::new(
-        &language,
+    let q_cmd = grammar.query(
         r#"
         (new_expression
             constructor: (identifier) @ctor
             arguments: (arguments) @args) @new
         "#,
-    )
-    .expect("static query");
+    );
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_cmd, root, source);
+    let mut matches = cursor.matches(q_cmd, root, source);
     while let Some(m) = matches.next() {
         let (mut ctor, mut args, mut site) = (None, None, None);
         for c in m.captures() {
@@ -2359,8 +2330,7 @@ fn extract_source_recording(
     }
 
     // Method + FactoryMethod patterns: `recv.method(…)` with proven receiver.
-    let q_member_calls = Query::new(
-        &language,
+    let q_member_calls = grammar.query(
         r#"
         (call_expression
             function: (member_expression
@@ -2368,10 +2338,9 @@ fn extract_source_recording(
                 property: (property_identifier) @method)
             arguments: (arguments) @args) @call
         "#,
-    )
-    .expect("static query");
+    );
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_member_calls, root, source);
+    let mut matches = cursor.matches(q_member_calls, root, source);
     while let Some(m) = matches.next() {
         let (mut recv, mut method, mut args, mut site) = (None, None, None, None);
         for c in m.captures() {
@@ -2423,20 +2392,18 @@ fn extract_source_recording(
             // JSX usage: <Comp/> inside a component body -> RENDERS edge. Only
             // capitalized names resolved through locals/imports count — plain
             // HTML tags and unproven names are skipped.
-            let q_jsx = Query::new(
-                &language,
+            let q_jsx = grammar.query(
                 r#"
             [
                 (jsx_self_closing_element name: (identifier) @tag) @el
                 (jsx_opening_element name: (identifier) @tag) @el
             ]
             "#,
-            )
-            .expect("static query");
+            );
             let mut renders: Vec<(String, String, TsNode)> = Vec::new();
             let mut route_elements: Vec<TsNode> = Vec::new();
             let mut cursor = QueryCursor::new();
-            let mut matches = cursor.matches(&q_jsx, root, source);
+            let mut matches = cursor.matches(q_jsx, root, source);
             while let Some(m) = matches.next() {
                 let (mut tag, mut el) = (None, None);
                 for c in m.captures() {
@@ -2614,13 +2581,11 @@ fn extract_source_recording(
             };
 
         // fetch(url, opts?) — the browser global.
-        let q_fetch = Query::new(
-            &language,
+        let q_fetch = grammar.query(
             r#"(call_expression function: (identifier) @fn arguments: (arguments) @args) @call"#,
-        )
-        .expect("static query");
+        );
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&q_fetch, root, source);
+        let mut matches = cursor.matches(q_fetch, root, source);
         while let Some(m) = matches.next() {
             let (mut fn_name, mut args, mut call) = (None, None, None);
             for c in m.captures() {
@@ -2660,8 +2625,7 @@ fn extract_source_recording(
         }
 
         // axios.get/post/… (url) — member form, import-proven.
-        let q_axios = Query::new(
-            &language,
+        let q_axios = grammar.query(
             r#"
             (call_expression
                 function: (member_expression
@@ -2669,10 +2633,9 @@ fn extract_source_recording(
                     property: (property_identifier) @method)
                 arguments: (arguments) @args) @call
             "#,
-        )
-        .expect("static query");
+        );
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&q_axios, root, source);
+        let mut matches = cursor.matches(q_axios, root, source);
         while let Some(m) = matches.next() {
             let (mut obj, mut method, mut args, mut call) = (None, None, None, None);
             for c in m.captures() {
@@ -2742,8 +2705,7 @@ fn extract_source_recording(
     // This is intentionally syntax-bound: explicit annotations and `new`
     // expressions only. Ambiguous unions/structural types remain unresolved
     // for a higher tier instead of being guessed at T0.
-    let q_typed_bindings = Query::new(
-        &language,
+    let q_typed_bindings = grammar.query(
         r#"
         (variable_declarator
             name: (identifier) @name
@@ -2758,8 +2720,7 @@ fn extract_source_recording(
             name: (_) @name
             type: (type_annotation) @type) @binding
         "#,
-    )
-    .expect("static query");
+    );
     #[derive(Clone)]
     struct ReceiverProof {
         name: String,
@@ -2786,7 +2747,7 @@ fn extract_source_recording(
     let mut receiver_types: HashMap<usize, ReceiverProof> = HashMap::new();
     let mut this_properties: HashMap<(String, String), ReceiverProof> = HashMap::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_typed_bindings, root, source);
+    let mut matches = cursor.matches(q_typed_bindings, root, source);
     while let Some(m) = matches.next() {
         let (mut name, mut type_node, mut binding) = (None, None, None);
         for capture in m.captures() {
@@ -2845,13 +2806,9 @@ fn extract_source_recording(
     }
 
     // --- Calls: caller symbol -> callee symbol (local/import/typed member) --
-    let q_calls = Query::new(
-        &language,
-        r#"(call_expression function: (identifier) @callee) @call"#,
-    )
-    .expect("static query");
+    let q_calls = grammar.query(r#"(call_expression function: (identifier) @callee) @call"#);
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_calls, root, source);
+    let mut matches = cursor.matches(q_calls, root, source);
     while let Some(m) = matches.next() {
         let mut callee_node = None;
         let mut call = None;
@@ -2897,18 +2854,16 @@ fn extract_source_recording(
         // are not useful within-repo semantic candidates and remain omitted.
     }
 
-    let q_member_calls = Query::new(
-        &language,
+    let q_member_calls = grammar.query(
         r#"
         (call_expression
             function: (member_expression
                 object: (_) @receiver
                 property: (property_identifier) @method)) @call
         "#,
-    )
-    .expect("static query");
+    );
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_member_calls, root, source);
+    let mut matches = cursor.matches(q_member_calls, root, source);
     while let Some(m) = matches.next() {
         let (mut receiver, mut method, mut call) = (None, None, None);
         for capture in m.captures() {
@@ -3389,6 +3344,7 @@ pub mod chrome_messaging;
 pub mod client_table;
 pub(crate) mod const_resolution;
 pub mod declarations;
+mod grammar;
 pub mod indexeddb;
 mod local_definitions;
 pub mod observed_infra;

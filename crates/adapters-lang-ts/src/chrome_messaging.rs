@@ -29,7 +29,7 @@ use adapters_fw::events::{ChannelRole, EventSite, IdentityExpr};
 use std::collections::BTreeMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
+use tree_sitter::{Node as TsNode, Parser, QueryCursor};
 
 use crate::const_resolution::{ConstIndex, collect_const_objects, collect_imports};
 use crate::{ExtractError, FileCx, SourceId, enclosing_symbol, literal_string, object_entries};
@@ -164,11 +164,8 @@ fn extract_file(
     index: &mut RepoIndex,
 ) -> Result<(), ExtractError> {
     let is_tsx = crate::vue::component_tsx(source, path).unwrap_or(path.ends_with(".tsx"));
-    let language: tree_sitter::Language = if is_tsx {
-        tree_sitter_typescript::LANGUAGE_TSX.into()
-    } else {
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
-    };
+    let grammar = crate::grammar::Grammar::new(is_tsx);
+    let language = grammar.language();
     let mut parser = Parser::new();
     parser.set_language(&language)?;
     let view = crate::vue::parse_view(source, path);
@@ -185,13 +182,12 @@ fn extract_file(
         registries: adapters_fw::events::Registries::builtin(),
     };
 
-    let mut chrome_shadowed = collect_imports(&cx, root, &language, &mut index.consts);
-    collect_const_objects(&cx, root, &language, &mut index.consts);
+    let mut chrome_shadowed = collect_imports(&cx, root, grammar, &mut index.consts);
+    collect_const_objects(&cx, root, grammar, &mut index.consts);
 
     // Any other local binding named `chrome` — variable, parameter, or
     // function — shadows the platform API too (#149 review, fail closed).
-    let q_bindings = Query::new(
-        &language,
+    let q_bindings = grammar.query(
         r#"
         (variable_declarator name: (identifier) @binding)
         (required_parameter pattern: (identifier) @binding)
@@ -199,10 +195,9 @@ fn extract_file(
         (arrow_function parameter: (identifier) @binding)
         (function_declaration name: (identifier) @binding)
         "#,
-    )
-    .expect("static query");
+    );
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_bindings, root, source);
+    let mut matches = cursor.matches(q_bindings, root, source);
     while let Some(m) = matches.next() {
         for c in m.captures() {
             if cx.text(&c.node) == "chrome" {
@@ -212,13 +207,11 @@ fn extract_file(
     }
 
     // Arrow-const creators: `const createPing = () => ({ type: … })`.
-    let q_arrow_creators = Query::new(
-        &language,
+    let q_arrow_creators = grammar.query(
         r#"(variable_declarator name: (identifier) @name value: (arrow_function) @arrow) @decl"#,
-    )
-    .expect("static query");
+    );
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_arrow_creators, root, source);
+    let mut matches = cursor.matches(q_arrow_creators, root, source);
     while let Some(m) = matches.next() {
         let (mut name, mut arrow, mut decl) = (None, None, None);
         for c in m.captures() {
@@ -249,13 +242,11 @@ fn extract_file(
     }
 
     // Function-declaration creators: `function createPing() { return { type } }`.
-    let q_funcs = Query::new(
-        &language,
+    let q_funcs = grammar.query(
         r#"(function_declaration name: (identifier) @name body: (statement_block) @body) @decl"#,
-    )
-    .expect("static query");
+    );
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_funcs, root, source);
+    let mut matches = cursor.matches(q_funcs, root, source);
     while let Some(m) = matches.next() {
         let (mut name, mut body, mut decl) = (None, None, None);
         for c in m.captures() {
@@ -291,13 +282,9 @@ fn extract_file(
     }
 
     // Producer and listener sites.
-    let q_calls = Query::new(
-        &language,
-        r#"(call_expression function: (member_expression) @callee arguments: (arguments) @args) @call"#,
-    )
-    .expect("static query");
+    let q_calls = grammar.query(r#"(call_expression function: (member_expression) @callee arguments: (arguments) @args) @call"#);
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_calls, root, source);
+    let mut matches = cursor.matches(q_calls, root, source);
     while let Some(m) = matches.next() {
         let (mut callee, mut args, mut call) = (None, None, None);
         for c in m.captures() {
@@ -349,17 +336,15 @@ fn extract_file(
 
     // Dispatch tables: `[MessageType.X]: handler` — an explicit handler
     // registration keyed by a message-type constant.
-    let q_keys = Query::new(
-        &language,
+    let q_keys = grammar.query(
         r#"
         (pair
             key: (computed_property_name (member_expression) @member)
             value: (_) @handler) @pair
         "#,
-    )
-    .expect("static query");
+    );
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_keys, root, source);
+    let mut matches = cursor.matches(q_keys, root, source);
     while let Some(m) = matches.next() {
         let (mut member, mut handler, mut pair) = (None, None, None);
         for c in m.captures() {
