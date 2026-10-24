@@ -634,7 +634,20 @@ pub(in crate::investigations) fn with_public_start_fixture(
         &std::path::Path,
     ),
 ) {
-    let fixture = CompletionFixture::new(
+    with_public_start_fixture_then(provider, legacy_completed, test, |(), _| {});
+}
+
+pub(in crate::investigations) fn with_public_start_fixture_then<T>(
+    provider: Arc<dyn LlmProvider>,
+    legacy_completed: bool,
+    test: impl FnOnce(
+        &tauri::AppHandle<tauri::test::MockRuntime>,
+        StagedObligationRequest,
+        &std::path::Path,
+    ) -> T,
+    after_drop: impl FnOnce(T, &std::path::Path),
+) {
+    let mut fixture = CompletionFixture::new(
         provider.as_ref(),
         SpecialistId::DomainAnalystV9,
         true,
@@ -677,7 +690,13 @@ pub(in crate::investigations) fn with_public_start_fixture(
         request.specialist_id = "domain-analyst@10".into();
         request.request_nonce = "public-command-activation-fixture".into();
     }
-    test(fixture.base.app.handle(), request, &fixture.base.app_data);
+    let result = test(fixture.base.app.handle(), request, &fixture.base.app_data);
+    let app_data = fixture.base.app_data.clone();
+    // Keep only the disposable directory, dropping every old host/store owner.
+    let directory = std::mem::replace(&mut fixture.base._directory, tempfile::tempdir().unwrap());
+    drop(fixture);
+    after_drop(result, &app_data);
+    drop(directory);
 }
 
 // AC-0187, AC-0287: cancellation during a dispatched completion preserves a

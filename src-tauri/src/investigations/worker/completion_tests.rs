@@ -968,7 +968,9 @@ fn completion_v2_worker_accepts_selected_policy_and_reopens_exactly() {
     }
 }
 
-pub(in crate::investigations) use next_prompt_tests::with_public_start_fixture;
+pub(in crate::investigations) use next_prompt_tests::{
+    with_public_start_fixture, with_public_start_fixture_then,
+};
 
 // AC-0327: detached preparation retains admitted source-discovery limits.
 #[test]
