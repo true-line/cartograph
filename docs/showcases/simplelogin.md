@@ -75,7 +75,7 @@ No route was promoted to `Confirmed` from a receiver it couldn't prove.
 | browser-extension | TypeScript/JS (28 files), WebExtension manifest, toolchain | 609 | 698 | limited |
 | Simple-Login-Android | Kotlin (195 files), toolchain, cross-repo HTTP stitching | 1,297 | 3,202 | complete for the producers that ran |
 
-Source: `ingest.json`, coverage producers, from the manifest run. Android's totals include 41 nodes and 41 `FETCHES` edges from cross-repo HTTP stitching. The coverage record charges these to `t0.adapter-ts`, which ran on no Android files and is marked not applicable there (#874). Every coverage record cites its repository's commit (gap 6).
+Source: `ingest.json`, coverage producers, from the manifest run. Android's totals include 41 nodes and 41 `FETCHES` edges from cross-repo HTTP stitching. At `2508c5a4` the coverage record charged these to `t0.adapter-ts`, which ran on no Android files; since #874 they are the `t0.events` row's. Every coverage record cites its repository's commit (gap 6).
 
 The bundle has 26,662 assertions, 7,171 open gap findings in 26 cause classes and 3 security findings (`bundle.json`, `gap_register.md`, `security.md`), regenerated at `2508c5a4`. At `d326a47e` it had 29,256 assertions and 7,495 findings in 27 classes; the gap 8 fixes account for most of the difference. Class numbers below are this run's: the register numbers classes by size, so they shift between runs. The security findings are three over-broad host permissions in the extension manifest: `http://*/*`, `https://*/*` and `https://*.simplelogin.io/*`.
 

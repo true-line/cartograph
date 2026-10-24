@@ -272,6 +272,8 @@ const DETERMINISTIC: &[(&str, &str, Option<&[&str]>)] = &[
         "scheduled jobs",
         None,
     ),
+    // Stitching consumes every layer's event and client-call sites.
+    ("t0.events", "event and client-call site", None),
 ];
 
 fn selected(hints: &[String], id: &str, layers: Option<&[&str]>) -> bool {

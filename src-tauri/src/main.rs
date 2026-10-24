@@ -234,6 +234,8 @@ struct LayerBreakdown {
     webext: LayerSummary,
     tools: LayerSummary,
     schedules: LayerSummary,
+    /// Channel and client-call stitching over every layer's sites (#874).
+    events: LayerSummary,
 }
 
 impl LayerBreakdown {
@@ -247,6 +249,7 @@ impl LayerBreakdown {
         self.webext.add(other.webext);
         self.tools.add(other.tools);
         self.schedules.add(other.schedules);
+        self.events.add(other.events);
     }
 
     fn files(self) -> u64 {
@@ -1189,6 +1192,7 @@ fn repo_coverage(
                 ingest::schedules::SCHEDULE_EXTRACTOR_ID,
                 count(&layers.schedules),
             ),
+            (events::STITCH_EXTRACTOR_ID, count(&layers.events)),
         ],
         plugins: reads.plugins.clone(),
         observations: vec![
@@ -1673,9 +1677,18 @@ fn extract_tree_with_registries(
     cfg.apply_manifest(manifest_env, ingest::manifest::MANIFEST_NAME);
     cfg.defer_origins(deferred_origins);
     let ev_id = events::SourceId { repo, commit };
+    // Stitching reads every layer's sites, so its facts are its own row,
+    // never the TypeScript adapter's (#874).
+    layers.events.files = extraction
+        .event_sites
+        .iter()
+        .map(|site| site.path.as_str())
+        .chain(extraction.fetch_sites.iter().map(|site| site.path.as_str()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64;
     let stitched = events::stitch(&extraction.event_sites, &cfg, &ev_id);
-    layers.ts.nodes += distinct_node_count(&stitched.nodes);
-    layers.ts.edges += distinct_edge_count(&stitched.edges);
+    layers.events.nodes += distinct_node_count(&stitched.nodes);
+    layers.events.edges += distinct_edge_count(&stitched.edges);
     extraction.nodes.extend(stitched.nodes);
     extraction.edges.extend(stitched.edges);
     let endpoint_ids: Vec<String> = extraction
@@ -1685,8 +1698,8 @@ fn extract_tree_with_registries(
         .map(|n| n.id.clone())
         .collect();
     let fetched = events::stitch_fetches(&extraction.fetch_sites, &endpoint_ids, &cfg, &ev_id);
-    layers.ts.nodes += distinct_node_count(&fetched.nodes);
-    layers.ts.edges += distinct_edge_count(&fetched.edges);
+    layers.events.nodes += distinct_node_count(&fetched.nodes);
+    layers.events.edges += distinct_edge_count(&fetched.edges);
     extraction.nodes.extend(fetched.nodes);
     extraction.edges.extend(fetched.edges);
     // T1: observed messaging identities fill only explicit channel Gaps;
@@ -8351,6 +8364,11 @@ export function queueOrder() {
         )
         .unwrap();
         assert_eq!(client_summary.kotlin.files, 2);
+        // #874: the client call's stitched FETCHES fact is the stitching
+        // pass's own, not a TypeScript adapter count in a repo without TS.
+        assert_eq!(client_summary.ts, crate::LayerSummary::default());
+        assert_eq!(client_summary.events.files, 1);
+        assert!(client_summary.events.edges >= 1, "{client_summary:?}");
         assert!(
             client_only
                 .fetch_sites

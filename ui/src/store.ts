@@ -120,6 +120,8 @@ export interface IngestSummary {
     tools: LayerSummary;
     /** Declared schedule files: Schedule triggers + ENTRY proofs (#770). */
     schedules?: LayerSummary;
+    /** Channel and client-call stitching over every layer's sites (#874). */
+    events?: LayerSummary;
   };
   /**
    * A local or GitHub recovery's preflight report, reconciled with its AST
