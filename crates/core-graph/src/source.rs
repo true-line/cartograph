@@ -637,14 +637,12 @@ fn load_binding(
     fact: &FactKey,
 ) -> Result<Option<SourceBinding>, GraphError> {
     let row: Option<(String, String, String)> = match fact {
-        FactKey::Node { id } => connection.query_row(
+        FactKey::Node { id } => connection.prepare_cached(
             "SELECT repo_key, receipt_id, emitted_fact_digest FROM source_node_bindings WHERE node_id = ?1",
-            [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).optional()?,
-        FactKey::Edge { source, label, destination } => connection.query_row(
+        )?.query_row([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?,
+        FactKey::Edge { source, label, destination } => connection.prepare_cached(
             "SELECT repo_key, receipt_id, emitted_fact_digest FROM source_edge_bindings WHERE source = ?1 AND label = ?2 AND destination = ?3",
-            params![source, label, destination], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).optional()?,
+        )?.query_row(params![source, label, destination], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?,
     };
     row.map(|(repo_key, receipt_id, emitted_fact_digest)| {
         let binding = SourceBinding {
@@ -824,25 +822,23 @@ fn replace_omissions(
             continue;
         };
         let changes = match fact {
-            FactKey::Node { id } => transaction.execute(
+            FactKey::Node { id } => transaction.prepare_cached(
                 "INSERT OR IGNORE INTO source_node_omissions(node_id, repo_key, kind, emitted_fact_digest) VALUES (?1, ?2, ?3, ?4)",
-                params![id, repo_key, kind.as_str(), emitted_fact_digest],
-            )?,
+            )?.execute(params![id, repo_key, kind.as_str(), emitted_fact_digest])?,
             FactKey::Edge {
                 source,
                 label,
                 destination,
-            } => transaction.execute(
+            } => transaction.prepare_cached(
                 "INSERT OR IGNORE INTO source_edge_omissions(source, label, destination, repo_key, kind, emitted_fact_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    source,
-                    label,
-                    destination,
-                    repo_key,
-                    kind.as_str(),
-                    emitted_fact_digest
-                ],
-            )?,
+            )?.execute(params![
+                source,
+                label,
+                destination,
+                repo_key,
+                kind.as_str(),
+                emitted_fact_digest
+            ])?,
         };
         inserted += changes as i64;
     }
@@ -956,11 +952,8 @@ fn current_digest(connection: &Connection, fact: &FactKey) -> Result<Option<Stri
     match fact {
         FactKey::Node { id } => {
             let row: Option<(String, String)> = connection
-                .query_row(
-                    "SELECT label, props FROM nodes WHERE id = ?1",
-                    [id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
+                .prepare_cached("SELECT label, props FROM nodes WHERE id = ?1")?
+                .query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))
                 .optional()?;
             row.map(|(label, props)| {
                 node_digest(&Node {
@@ -977,11 +970,10 @@ fn current_digest(connection: &Connection, fact: &FactKey) -> Result<Option<Stri
             destination,
         } => {
             let props: Option<String> = connection
-                .query_row(
+                .prepare_cached(
                     "SELECT props FROM edges WHERE src = ?1 AND label = ?2 AND dst = ?3",
-                    params![source, label, destination],
-                    |row| row.get(0),
-                )
+                )?
+                .query_row(params![source, label, destination], |row| row.get(0))
                 .optional()?;
             props
                 .map(|props| {
@@ -1189,14 +1181,12 @@ impl SqliteGraphStore {
                 ));
             }
             let inserted = match &binding.fact {
-                FactKey::Node { id } => transaction.execute(
+                FactKey::Node { id } => transaction.prepare_cached(
                     "INSERT INTO source_node_bindings(node_id, repo_key, receipt_id, emitted_fact_digest) VALUES (?1, ?2, ?3, ?4)",
-                    params![id, repo_key, binding.receipt_id, binding.emitted_fact_digest],
-                )?,
-                FactKey::Edge { source, label, destination } => transaction.execute(
+                )?.execute(params![id, repo_key, binding.receipt_id, binding.emitted_fact_digest])?,
+                FactKey::Edge { source, label, destination } => transaction.prepare_cached(
                     "INSERT INTO source_edge_bindings(source, label, destination, repo_key, receipt_id, emitted_fact_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![source, label, destination, repo_key, binding.receipt_id, binding.emitted_fact_digest],
-                )?,
+                )?.execute(params![source, label, destination, repo_key, binding.receipt_id, binding.emitted_fact_digest])?,
             };
             if inserted != 1 {
                 return Err(GraphError::SourceBinding("association publication failed"));
