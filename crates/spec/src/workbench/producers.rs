@@ -685,6 +685,7 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
         slots::<&Node>(rows)?,
         slots::<&Edge>(rows)?,
         set_slots::<&str>(rows)?,
+        set_slots::<&str>(rows)?, // topology backed + configured
         slots::<&str>(values)?,
     ])?;
     Some(data.max(tools).max(simple))

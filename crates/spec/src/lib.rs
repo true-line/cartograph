@@ -337,6 +337,25 @@ mod tests {
         assert!(mmd.contains(r#"[/"tests/test.env"/]"#));
         assert!(mmd.contains("-.->|CONFIGURED_IN|"));
         assert!(!mmd.contains("example.env"));
+        // A quote or line break in a legal filename cannot close the label
+        // or start a new diagram line.
+        let odd = "cfg/a\"]\nX-->Y.env";
+        let mmd_odd = topology_mermaid(
+            &[
+                resource(
+                    "res:local/app@observed:sql-database:env:DB_URI",
+                    "observed:sql-database:env:DB_URI",
+                ),
+                file(odd),
+            ],
+            &[edge(
+                "res:local/app@observed:sql-database:env:DB_URI",
+                &format!("file:local/app@{odd}"),
+                "CONFIGURED_IN",
+            )],
+        );
+        assert!(mmd_odd.contains(r#"[/"cfg/a#quot;] X-->Y.env"/]"#));
+        assert!(!mmd_odd.lines().any(|line| line.starts_with("X-->")));
         assert_eq!(
             mmd,
             topology_mermaid(

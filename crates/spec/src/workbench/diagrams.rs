@@ -83,8 +83,15 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
         )?;
     }
     // Env files declaring a resource's key: parallelograms, named by path.
+    // A legal filename may hold a quote or line break; neither may end the
+    // label or start a diagram line.
     for (id, path) in &configs {
-        writeln!(out, "    {}[/\"{}\"/]", aliases[id], path)?;
+        writeln!(
+            out,
+            "    {}[/\"{}\"/]",
+            aliases[id],
+            Replace(path, MERMAID_LABEL)
+        )?;
     }
     let mut lines = Vec::new();
     for edge in edges {
@@ -116,6 +123,9 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
     }
     Ok(())
 }
+
+/// Mermaid entity codes for the characters that would break a quoted label.
+const MERMAID_LABEL: &[(char, &str)] = &[('"', "#quot;"), ('\n', " "), ('\r', " ")];
 
 /// `File` nodes a `Resource` is `CONFIGURED_IN` (#734), with their paths.
 pub(crate) fn configuring_files<'a>(
@@ -228,6 +238,9 @@ pub(super) fn logical_index_bytes(bytes: usize, rows: usize, hops: usize) -> Opt
         map_slots::<&str, &Node>(rows)?, // resources/channels
         set_slots::<&str>(rows)?,
         map_slots::<&str, String>(rows)?, // backed/aliases
+        set_slots::<&str>(rows)?,
+        set_slots::<&str>(rows)?,
+        map_slots::<&str, &str>(rows)?, // configuring_files resources/targets/configs
         bytes,
         rows.checked_mul(crate::mermaid_id("").len())?, // alias payload + generated hash suffix
         bytes, // one current sanitized source ID during format!
