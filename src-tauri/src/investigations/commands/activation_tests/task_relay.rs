@@ -119,30 +119,47 @@ impl Drop for Relay {
 #[test]
 #[ignore = "requires explicit source-built CARTOGRAPH_TEST_MCP_RELAY"]
 fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
-    exercise_task_relay(None);
+    exercise_task_relay(None, false);
 }
 
 #[test]
 #[ignore = "requires explicit source-built CARTOGRAPH_TEST_MCP_RELAY"]
 fn mcp_task_relay_active_cancellation_preserves_definitive_outcome() {
-    exercise_task_relay(Some(llm::bounded::InvocationOutcome::NotDispatched));
+    exercise_task_relay(Some(llm::bounded::InvocationOutcome::NotDispatched), false);
 }
 
 #[test]
 #[ignore = "requires explicit source-built CARTOGRAPH_TEST_MCP_RELAY"]
 fn mcp_task_relay_active_cancellation_preserves_unknown_without_reexecution() {
-    exercise_task_relay(Some(llm::bounded::InvocationOutcome::Unknown));
+    exercise_task_relay(Some(llm::bounded::InvocationOutcome::Unknown), false);
 }
 
-fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>) {
+#[test]
+#[ignore = "requires explicit source-built CARTOGRAPH_TEST_MCP_RELAY"]
+fn mcp_task_relay_consent_reconnect_and_owner_decline_preserve_zero_calls() {
+    exercise_task_relay(None, true);
+}
+
+fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>, decline: bool) {
     // AC-0321/0323/0324/0325: actual capability handshake and Worker protocol.
     // Fixture factory grants a session; public activation and byte admission stay off.
-    let provider = Arc::new(PublicProvider::new(false));
+    let provider = Arc::new(PublicProvider::new(decline));
     *provider.cancel_outcome.lock().unwrap() = cancel_outcome;
     let (resume, paused) = mpsc::channel();
-    *provider.pause.lock().unwrap() = Some(paused);
-    worker::with_public_start_fixture(provider.clone(), false, |app, request, _| {
+    if !decline {
+        *provider.pause.lock().unwrap() = Some(paused);
+    }
+    let seed = Arc::new(PublicProvider::new(false));
+    worker::with_public_start_fixture(seed, false, |app, mut request, _| {
         let state = app.state::<AppState>();
+        if decline {
+            let mut settings = state.settings.lock().unwrap();
+            settings.set_provider("T3", "cloud").unwrap();
+            settings
+                .grant_consent("T3", "Synthetic relay fixture; no network.")
+                .unwrap();
+            request.provider_mode = InvestigationProviderMode::Cloud;
+        }
         state
             .investigations
             .set_test_provider(request.provider_mode, provider.clone());
@@ -170,8 +187,11 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>) 
         let session = principal.clone();
         let limits = crate::mcp_reads::worker::tests::task_limits();
         let budget = WorkBudget::new(WorkLimits {
-            max_workers: one,
-            max_reserved_bytes: limits.reserved_bytes,
+            max_workers: if decline { two_clients } else { one },
+            max_reserved_bytes: std::num::NonZeroUsize::new(
+                limits.reserved_bytes.get() * if decline { 2 } else { 1 },
+            )
+            .unwrap(),
             max_cumulative_read_bytes: 1_000_000,
         });
         let observed_budget = budget.clone();
@@ -246,9 +266,20 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>) 
                 .unwrap()
                 .to_owned();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while !provider.entered.load(Ordering::SeqCst) {
+            while !decline && !provider.entered.load(Ordering::SeqCst) {
                 assert!(std::time::Instant::now() < deadline);
                 std::thread::sleep(Duration::from_millis(10));
+            }
+            if decline {
+                wait(|| super::pending(&state, &id).unwrap());
+                let owner = detail(app, &id);
+                assert_eq!(owner.summary.status, InvestigationStatus::AwaitingConsent);
+                let status = relay.call("cartograph_task_status", json!({"task_id":id}));
+                assert_eq!(
+                    status["result"]["structuredContent"],
+                    serde_json::to_value(owner.summary).unwrap()
+                );
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
             }
             let pending = relay.call("cartograph_task_result", json!({"task_id":id}));
             assert_eq!(pending["result"]["isError"], false);
@@ -283,9 +314,46 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>) 
                     .unwrap()
                     .is_none()
             );
-            resume.send(()).unwrap();
+            if decline {
+                // Consent keeps the detached worker's permit; reconnect needs a
+                // separately admitted connection in this synthetic budget.
+                assert!(!observed_budget.is_idle().unwrap());
+                let mut reconnected = Relay::open(&record);
+                let replay = reconnected.call("cartograph_task_start", json!({"request":request}));
+                assert_eq!(
+                    replay["result"]["structuredContent"]["investigation_id"],
+                    id
+                );
+                let consent = super::pending(&state, &id).unwrap().unwrap();
+                let before = detail(app, &id);
+                for (revision, hash) in [
+                    (consent.revision + 1, consent.preview.payload_hash.clone()),
+                    (consent.revision, "0".repeat(64)),
+                ] {
+                    assert!(
+                        consent_decision(app, &id, &consent.step_id, revision, &hash, false)
+                            .is_err()
+                    );
+                    assert_eq!(detail(app, &id), before);
+                }
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+                consent_decision(
+                    app,
+                    &id,
+                    &consent.step_id,
+                    consent.revision,
+                    &consent.preview.payload_hash,
+                    false,
+                )
+                .unwrap();
+                reconnected.close();
+                wait(|| observed_budget.is_idle().unwrap().then_some(()));
+            } else {
+                resume.send(()).unwrap();
+            }
             let terminal = finished(app, &id);
             let expected = match cancel_outcome {
+                None if decline => InvestigationStatus::Cancelled,
                 None => InvestigationStatus::Completed,
                 Some(llm::bounded::InvocationOutcome::NotDispatched) => {
                     InvestigationStatus::Cancelled
@@ -296,7 +364,10 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>) 
                 Some(llm::bounded::InvocationOutcome::ResponseReceived) => unreachable!(),
             };
             assert_eq!(terminal.summary.status, expected);
-            assert_eq!(terminal.summary.cancel_requested, cancel_outcome.is_some());
+            assert_eq!(
+                terminal.summary.cancel_requested,
+                cancel_outcome.is_some() || decline
+            );
             let mut relay = Relay::open(&record);
             let replay = relay.call("cartograph_task_start", json!({"request":request}));
             assert_eq!(
@@ -338,7 +409,7 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>) 
                 )
                 .unwrap()
             );
-            if cancel_outcome.is_some() {
+            if cancel_outcome.is_some() || decline {
                 assert!(result["result"]["structuredContent"]["result"].is_null());
             }
             let cancel = relay.call("cartograph_task_cancel", json!({"task_id":id}));
@@ -391,7 +462,13 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>) 
             assert!(!record.exists());
             assert_eq!(
                 provider.calls.load(Ordering::SeqCst),
-                if cancel_outcome.is_some() { 1 } else { 3 }
+                if decline {
+                    0
+                } else if cancel_outcome.is_some() {
+                    1
+                } else {
+                    3
+                }
             );
         });
     });
