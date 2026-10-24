@@ -721,6 +721,22 @@ fn mcp_adapter_runs_all_task_operations_and_preserves_principal_replay() {
                 256 * 1024,
             )
         };
+        // AC-0327: source admission must retain its task-specific refusal code.
+        let mut bounded_scope = crate::mcp_reads::worker::tests::limits().scope;
+        bounded_scope.max_source_registry_bytes = one;
+        let refused = dispatcher
+            .call(
+                app,
+                &json!("bounded-source"),
+                TaskTool::Start,
+                json!({"request":request}).as_object().unwrap().clone(),
+                bounded_scope,
+                256 * 1024,
+            )
+            .unwrap_err();
+        assert_eq!(refused, ReadError::AdmissionLimit);
+        assert_eq!(refused.to_string(), "limit_exceeded");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
         let started = call(&dispatcher, TaskTool::Start, json!({"request":request})).unwrap();
         let id = started["result"]["structuredContent"]["investigation_id"]
             .as_str()

@@ -64,7 +64,11 @@ impl TaskDispatcher {
                     super::commands::InvestigationStartError::Rejected {
                         code: "limit_exceeded",
                         ..
-                    } => ReadError::Limit,
+                    } => ReadError::AdmissionLimit,
+                    super::commands::InvestigationStartError::Rejected {
+                        code: "refresh_required",
+                        ..
+                    } => ReadError::RefreshRequired,
                     super::commands::InvestigationStartError::Rejected { .. } => {
                         ReadError::InvalidRequest
                     }

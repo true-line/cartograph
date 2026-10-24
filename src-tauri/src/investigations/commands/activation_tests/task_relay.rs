@@ -209,6 +209,16 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
                         .any(|tool| tool["name"] == name)
                 );
             }
+            // AC-0327: preserve the task refusal code across the real relay.
+            let mut stale = request.clone();
+            stale.request_nonce = "relay-stale-context".into();
+            stale.expected_context_id = format!("context-v2:{}", "0".repeat(64));
+            let refused = relay.call("cartograph_task_start", json!({"request":stale}));
+            assert_eq!(refused["result"]["isError"], true);
+            assert_eq!(
+                refused["result"]["structuredContent"]["error"],
+                "refresh_required"
+            );
             let start = relay.call("cartograph_task_start", json!({"request":request}));
             let id = start["result"]["structuredContent"]["investigation_id"]
                 .as_str()
