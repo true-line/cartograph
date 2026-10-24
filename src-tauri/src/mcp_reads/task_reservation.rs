@@ -2,11 +2,12 @@
 //! The byte model must include MAX_LIVE_TASKS overlapping executions in addition
 //! to connection work. This module enforces lifetime/count, not that byte model.
 use mcp_local::work_budget::{WorkDenied, WorkPermit};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 struct Inner {
     permit: Arc<WorkPermit>,
     live: Mutex<usize>,
+    admission: Mutex<()>,
 }
 
 pub(crate) struct TaskReservations(Arc<Inner>);
@@ -17,11 +18,19 @@ impl From<Arc<WorkPermit>> for TaskReservations {
         Self(Arc::new(Inner {
             permit,
             live: Mutex::new(0),
+            admission: Mutex::new(()),
         }))
     }
 }
 
 impl TaskReservations {
+    /// Serialize nonce recovery through durable publication on this connection.
+    /// A matching concurrent retry must observe the first admission before it
+    /// competes for a detached slot. This guard never enters the worker.
+    pub(crate) fn admission(&self) -> Result<MutexGuard<'_, ()>, WorkDenied> {
+        self.0.admission.lock().map_err(|_| WorkDenied)
+    }
+
     /// Called after durable nonce recovery but before new-task preparation or
     /// publication. A rejected attempt has no queue and owns no execution slot.
     pub(crate) fn try_acquire(&self) -> Result<DetachedReservation, WorkDenied> {

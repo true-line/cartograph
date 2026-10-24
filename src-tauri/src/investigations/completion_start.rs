@@ -67,6 +67,10 @@ pub(super) fn start_access<R: tauri::Runtime>(
         .normalized_with_policy(policy)
         .map_err(|error| rejected("invalid_input", error))?;
     let state = app.state::<AppState>();
+    let _admission = reservations
+        .map(|reservations| reservations.admission())
+        .transpose()
+        .map_err(|error| rejected("limit_exceeded", error))?;
     let existing = || {
         let jobs = state
             .jobs

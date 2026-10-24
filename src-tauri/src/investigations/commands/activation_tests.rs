@@ -608,15 +608,40 @@ fn mcp_completion_retains_reservation_until_detached_worker_exits() {
         drop((first, second));
         let (release, gate) = std::sync::mpsc::channel();
         *provider.pause.lock().unwrap() = Some(gate);
-        let started = completion_start::start_access(
-            request.clone(),
-            app.clone(),
-            Instant::now(),
-            Some(&session),
-            Some(limits),
-            Some(&permit),
-        )
-        .unwrap();
+        // AC-0322: three matching starts share one remaining detached slot.
+        // Keep the other slot occupied and the actual worker blocked throughout
+        // admission so duplicate attempts cannot rely on an execution finishing.
+        let occupied = permit.try_acquire().unwrap();
+        let barrier = std::sync::Barrier::new(3);
+        let starts = std::thread::scope(|threads| {
+            let handles: Vec<_> = (0..3)
+                .map(|_| {
+                    let barrier = &barrier;
+                    let request = &request;
+                    let session = &session;
+                    let permit = &permit;
+                    threads.spawn(move || {
+                        barrier.wait();
+                        completion_start::start_access(
+                            request.clone(),
+                            app.clone(),
+                            Instant::now(),
+                            Some(session),
+                            Some(limits),
+                            Some(permit),
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut starts = starts.into_iter().map(Result::unwrap);
+        let started = starts.next().unwrap();
+        assert!(starts.all(|start| start.investigation_id == started.investigation_id));
+        drop(occupied);
         wait(|| provider.entered.load(Ordering::SeqCst).then_some(()));
         budget.revoke();
         drop(permit); // connection no longer owns the reservation
