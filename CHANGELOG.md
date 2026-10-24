@@ -1,5 +1,12 @@
 # cartograph
 
+## 0.24.0
+
+### Minor Changes
+
+- e4dde62: Read env templates such as `example.env`, `test.env` and `env.example` as environment files, keeping key names only, and link each env-referenced observed resource to the files that declare its key.
+- d82ecf2: Draw the env files that declare an observed resource's key on the topology map, as dotted `CONFIGURED_IN` links to the file named by its path.
+
 ## 0.23.4
 
 ### Patch Changes
