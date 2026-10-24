@@ -2187,3 +2187,151 @@ def global_rebind():
         ]
     );
 }
+
+fn request_inputs<'a>(
+    extraction: &'a Extraction,
+    method: &str,
+    path: &str,
+) -> &'a serde_json::Value {
+    &extraction
+        .nodes
+        .iter()
+        .find(|node| {
+            node.label == "Endpoint" && node.props["method"] == method && node.props["path"] == path
+        })
+        .unwrap_or_else(|| panic!("{method} {path}"))
+        .props["request_inputs"]
+}
+
+#[test]
+fn flask_handlers_record_literal_request_inputs() {
+    // #721: the literal JSON body, query and form names a Flask handler reads,
+    // with the reason whenever a read is not literal.
+    let source = br#"
+from flask import Flask, request
+
+app = Flask(__name__)
+
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.get_json() or {}
+    email = data.get("email")
+    password = data["password"]
+    device = data.get("device", "unknown")
+    hostname = request.args.get("hostname")
+    page = request.args["page_id"]
+    tags = request.args.getlist("tag")
+    pinned = "pinned" in request.args
+    remember = "remember" not in data
+    return ""
+
+@app.route("/direct", methods=["POST"])
+def direct():
+    name = request.get_json(silent=True).get("name")
+    note = request.json["note"]
+    form = request.form.get("csrf")
+    both = request.values.get("q")
+    agent = request.headers.get("User-Agent")
+    return ""
+
+@app.route("/dynamic", methods=["POST"])
+def dynamic(key):
+    data = request.get_json()
+    value = data.get(key)
+    helper(data)
+    q = request.args.get(key)
+    return ""
+
+@app.route("/passed")
+def passed():
+    def inner():
+        return request.args.get("hidden")
+    return process(request)
+
+@app.route("/none")
+def nothing():
+    return ""
+"#;
+    let extraction = extract_source(source, "app.py", &id()).unwrap();
+    assert_eq!(
+        request_inputs(&extraction, "POST", "/login"),
+        &serde_json::json!({
+            "body": ["device", "email", "password", "remember"],
+            "query": ["hostname", "page_id", "pinned", "tag"],
+            "scope": "handler_body",
+        })
+    );
+    assert_eq!(
+        request_inputs(&extraction, "POST", "/direct"),
+        &serde_json::json!({
+            "body": ["name", "note"],
+            "query": ["q"],
+            "form": ["csrf", "q"],
+            "scope": "handler_body",
+        })
+    );
+    assert_eq!(
+        request_inputs(&extraction, "POST", "/dynamic"),
+        &serde_json::json!({
+            "partial": ["body_read_dynamically", "query_read_dynamically"],
+            "scope": "handler_body",
+        })
+    );
+    // A nested function is outside the handler; passing `request` itself is
+    // a partial read.
+    assert_eq!(
+        request_inputs(&extraction, "GET", "/passed"),
+        &serde_json::json!({ "partial": ["request_passed"], "scope": "handler_body" })
+    );
+    assert!(request_inputs(&extraction, "GET", "/none").is_null());
+}
+
+#[test]
+fn request_inputs_need_flask_request_and_follow_blueprint_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/base.py",
+        "from flask import Blueprint\napi_bp = Blueprint(\"api\", __name__, url_prefix=\"/api\")\n",
+    );
+    write(
+        dir.path(),
+        "app/views.py",
+        r#"
+import flask
+from app.base import api_bp
+
+@api_bp.route("/aliases", methods=["POST"])
+def create():
+    data = flask.request.get_json()
+    return data["alias_prefix"] + flask.request.args.get("hostname")
+"#,
+    );
+    write(
+        dir.path(),
+        "app/other.py",
+        r#"
+from app.base import api_bp
+from mylib import request
+
+@api_bp.route("/lookalike")
+def lookalike():
+    return request.args.get("not_flask")
+"#,
+    );
+    write(
+        dir.path(),
+        "server.py",
+        "from flask import Flask\nfrom app.base import api_bp\napp = Flask(__name__)\napp.register_blueprint(api_bp)\n",
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        request_inputs(&extraction, "POST", "/api/aliases"),
+        &serde_json::json!({
+            "body": ["alias_prefix"],
+            "query": ["hostname"],
+            "scope": "handler_body",
+        })
+    );
+    assert!(request_inputs(&extraction, "GET", "/api/lookalike").is_null());
+}

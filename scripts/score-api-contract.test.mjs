@@ -3,7 +3,15 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { canonicalEndpoint, documentedEndpoints, recoveredEndpoints, score } from './score-api-contract.mjs';
+import {
+  canonicalEndpoint,
+  documentedEndpoints,
+  documentedInputs,
+  recoveredEndpoints,
+  recoveredInputs,
+  score,
+  scoreInputs,
+} from './score-api-contract.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -58,5 +66,65 @@ test('shared fixture produces the exact canonical endpoint set expected by Rust 
     'PATCH /api/profile/{}',
     'POST /api/aliases/{}/items/{}',
     'PUT /api/v2/settings',
+  ]);
+});
+
+test('documented inputs skip headers, path parameters and prose bullets', () => {
+  const markdown = [
+    '#### POST /api/v3/alias/custom/new',
+    'Input:',
+    '- `Authentication` header that contains the api key',
+    '- (Optional but recommended) `hostname` passed in query string',
+    '- Request Message Body in json (`Content-Type` is `application/json`)',
+    '    - alias_prefix: string.',
+    '    - (Optional) note: alias note',
+    '- `alias_id` in url.',
+    '- Or the correct cookie is set',
+    '- 401 if user is not authenticated',
+    '- email',
+    'Output:',
+    '- name: not an input',
+    '#### GET /api/x',
+    'Input:',
+    '- `page_id` in query.',
+    '#### DELETE /api/mailboxes/:mailbox_id',
+    'Input:',
+    '- mailbox_id: in url',
+    '- transfer_aliases_to: optional',
+  ].join('\n');
+  const inputs = documentedInputs(markdown);
+  assert.deepEqual([...inputs.get('POST /api/v3/alias/custom/new')].sort(), [
+    'alias_prefix',
+    'email',
+    'hostname',
+    'note',
+  ]);
+  assert.deepEqual([...inputs.get('GET /api/x')], ['page_id']);
+  assert.deepEqual([...inputs.get('DELETE /api/mailboxes/{}')], ['transfer_aliases_to']);
+});
+
+test('input score compares names across locations and flags partial recoveries', () => {
+  const documented = new Map([
+    ['POST /api/auth/login', new Set(['email', 'password', 'device'])],
+    ['GET /api/x', new Set(['page_id'])],
+  ]);
+  const recovered = recoveredInputs([
+    {
+      id: 'a',
+      props: {
+        method: 'POST',
+        path: '/api/auth/login',
+        request_inputs: { body: ['email', 'password'], query: ['otp'], partial: ['body_read_dynamically'] },
+      },
+    },
+    { id: 'b', props: { method: 'GET', path: '/api/x', request_inputs: { query: ['page_id'] } } },
+  ]);
+  const result = scoreInputs(documented, recovered);
+  assert.equal(result.documented_names, 4);
+  assert.equal(result.matched_names, 3);
+  assert.equal(result.recall, 0.75);
+  assert.equal(result.precision, 0.75);
+  assert.deepEqual(result.differences, [
+    { endpoint: 'POST /api/auth/login', missed: ['device'], undocumented: ['otp'], partial: true },
   ]);
 });

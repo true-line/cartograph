@@ -16,6 +16,7 @@ use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 
 mod alembic;
 pub mod observed_infra;
+mod request_inputs;
 mod sqlalchemy;
 
 const EXTRACTOR_ID: &str = "t0.adapter-python";
@@ -90,6 +91,8 @@ struct PendingRoute {
     listed_methods: Vec<String>,
     handler: String,
     evidence: EvidenceRef,
+    /// Request inputs the handler body reads (Flask), as endpoint props.
+    inputs: Option<serde_json::Value>,
 }
 
 /// `parent.register_blueprint(bp, url_prefix=...)` /
@@ -1402,6 +1405,7 @@ fn resolve_routes(out: &mut Extraction, repo: &str) {
                     &evidence,
                     served.confidence,
                     mount,
+                    route.inputs.as_ref(),
                 );
             }
         }
@@ -1419,6 +1423,7 @@ fn push_endpoint(
     evidence: &[EvidenceRef],
     confidence: ConfidenceTier,
     mount: Option<&str>,
+    inputs: Option<&serde_json::Value>,
 ) {
     let endpoint = format!("ep:{repo}@{method}:{route}");
     let framework_name = match framework {
@@ -1435,6 +1440,9 @@ fn push_endpoint(
     });
     if let Some(mount) = mount {
         props["mount"] = mount.into();
+    }
+    if let Some(inputs) = inputs {
+        props["request_inputs"] = inputs.clone();
     }
     out.nodes.push(Node {
         id: endpoint.clone(),
@@ -1543,6 +1551,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         functions.push((function, symbol));
     }
 
+    let request = request_inputs::request_names(&bindings);
     for (function, handler) in &functions {
         let Some(parent) = function
             .parent()
@@ -1550,6 +1559,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         else {
             continue;
         };
+        let mut inputs = None;
         let mut walk = parent.walk();
         for decorator in parent
             .named_children(&mut walk)
@@ -1558,6 +1568,11 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             let Some(route) = route_decorator(&cx, decorator) else {
                 continue;
             };
+            let inputs = inputs
+                .get_or_insert_with(|| {
+                    request_inputs::handler_inputs(&cx, *function, &request).to_props()
+                })
+                .clone();
             let receiver = cx.text(&route.receiver).to_string();
             if let Some(framework) = receivers.get(&receiver).copied() {
                 for method in methods_for(framework, &route.verb, &route.listed_methods) {
@@ -1571,6 +1586,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                         &[cx.evidence(&decorator)],
                         ConfidenceTier::Confirmed,
                         None,
+                        inputs.as_ref(),
                     );
                 }
                 continue;
@@ -1597,6 +1613,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                     listed_methods: route.listed_methods,
                     handler: handler.clone(),
                     evidence: cx.evidence(&decorator),
+                    inputs,
                 });
             }
         }
