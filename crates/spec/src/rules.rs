@@ -268,19 +268,29 @@ struct Observation<'a> {
     assertions: Vec<Assertion<'a>>,
 }
 
-/// Each node's partition relationships to visible nodes, sorted by label then
-/// target, indexed once so rendering every rule is not a scan of every edge
-/// per rule. Ties keep edge order, as the stable per-rule sort did.
+/// Each selected rule's partition relationships to visible nodes, sorted by
+/// label then target, indexed once so rendering every rule is not a scan of
+/// every edge per rule. Ties keep edge order, as the stable per-rule sort did.
+/// Only the selected rules are keys, so edges from other sources are never
+/// retained and an inventory without rules allocates nothing.
 struct Relationships<'a>(BTreeMap<&'a str, Vec<&'a Edge>>);
 
 impl<'a> Relationships<'a> {
-    fn new(edges: &[&'a Edge], visible: &BTreeMap<&str, &Node>) -> Self {
-        let mut by_source: BTreeMap<&'a str, Vec<&'a Edge>> = BTreeMap::new();
+    fn new(edges: &[&'a Edge], visible: &BTreeMap<&str, &Node>, rules: &[&'a Node]) -> Self {
+        let mut by_source: BTreeMap<&'a str, Vec<&'a Edge>> = rules
+            .iter()
+            .map(|rule| (rule.id.as_str(), Vec::new()))
+            .collect();
+        if by_source.is_empty() {
+            return Self(by_source);
+        }
         for edge in edges.iter().copied().filter(|edge| {
             PARTITION_EDGE_LABELS.contains(&edge.label.as_str())
                 && visible.contains_key(edge.dst.as_str())
         }) {
-            by_source.entry(&edge.src).or_default().push(edge);
+            if let Some(relationships) = by_source.get_mut(edge.src.as_str()) {
+                relationships.push(edge);
+            }
         }
         for relationships in by_source.values_mut() {
             relationships
@@ -744,7 +754,7 @@ pub(crate) fn inventory_selected_roots(
         .filter(|node| roots.is_none_or(|roots| roots.contains(&node.id)))
         .collect();
     rules.sort_by(|left, right| left.id.cmp(&right.id));
-    let relations = Relationships::new(edges, &visible);
+    let relations = Relationships::new(edges, &visible, &rules);
     let observations = observations(&rules, &relations, selection.markdown);
     let assertion_count: usize = observations
         .iter()
@@ -996,9 +1006,10 @@ pub(crate) fn logical_workspace_bytes(bytes: usize, rows: usize, values: usize) 
         slots::<core_graph::omission::Omission>(rows)?,
         set_slots::<String>(rows)?,
         bytes,
-        rows.checked_mul(2)?,  // deduplicated asserted edge IDs
-        bytes,                 // current concatenated edge ID before set clone/insertion
-        slots::<&Edge>(rows)?, // one rule's relationships, borrowed
+        rows.checked_mul(2)?,                 // deduplicated asserted edge IDs
+        bytes, // current concatenated edge ID before set clone/insertion
+        map_slots::<&str, Vec<&Edge>>(rows)?, // relationship index, one entry per rule
+        slots::<&Edge>(rows)?, // indexed relationships, borrowed
         map_slots::<Option<(&str, &str)>, Vec<&Observation<'_>>>(rows)?,
         slots::<(Option<(&str, &str)>, Vec<&Observation<'_>>)>(rows)?,
         slots::<&Observation<'_>>(rows)?,
@@ -1169,7 +1180,8 @@ mod tests {
             edge("fn:x", "fn:y", "DEPENDS_ON", t, c),
         ];
         let edges: Vec<&Edge> = edges.iter().collect();
-        let relations = Relationships::new(&edges, &visible);
+        let rules = [visible["rule:a"], visible["fn:x"]];
+        let relations = Relationships::new(&edges, &visible, &rules);
         let of = |id: &str| -> Vec<(String, String)> {
             relations
                 .of(visible[id])
@@ -1188,6 +1200,9 @@ mod tests {
         );
         assert_eq!(of("fn:x"), [pair("DEPENDS_ON", "fn:y")]);
         assert!(of("fn:y").is_empty());
+        let only_rule = Relationships::new(&edges, &visible, &[visible["rule:a"]]);
+        assert!(only_rule.of(visible["fn:x"]).is_empty());
+        assert!(Relationships::new(&edges, &visible, &[]).0.is_empty());
     }
 
     fn rule_node(id: &str, tier: Tier, confidence: ConfidenceTier) -> Node {

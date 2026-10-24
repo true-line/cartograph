@@ -963,6 +963,8 @@ pub(super) fn logical_workspace_bytes(
         slots::<core_prov::EvidenceRef>(values.checked_add(flow_bytes)?)?,
         slots::<Omission>(candidates)?,
         super::render::logical_origin_bytes(rows)?,
+        map_slots::<&str, &str>(rows)?, // gap edge labels by destination
+        map_slots::<&str, &str>(rows)?, // gap edge labels by source
     ])?;
     let groups = sum(&[
         set_slots::<Text<'_>>(rows)?,
