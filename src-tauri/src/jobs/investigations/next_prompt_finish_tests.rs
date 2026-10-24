@@ -22,6 +22,23 @@ fn next_prompt_finish_boundary_accepted_result7_reopens_and_rejects_family_downg
     let saved = f.saved();
     let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
     let result = load_result(&tx, &saved).unwrap().unwrap();
+    #[cfg(unix)]
+    {
+        let ledger = load_ledger(&tx, &saved).unwrap().unwrap();
+        assert_eq!(
+            Some(
+                ledger
+                    .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+                    .unwrap()
+            ),
+            saved.ledger_hash
+        );
+        let (owner, _) = InvestigationInputLedger::decode_workspace_bytes().unwrap();
+        assert!(
+            next_prompt_ledger_workspace().unwrap()
+                >= owner + coverage::archive_acquisition_workspace().unwrap()
+        );
+    }
     assert_eq!(result.schema_version, 7);
     assert!(
         result

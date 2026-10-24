@@ -403,6 +403,7 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
             .max(provider)
             .max(validation)
             .max(crate::jobs::investigations::archive_acquisition_workspace()?)
+            .max(crate::jobs::investigations::next_prompt_ledger_workspace()?)
             .checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?,
     )
 }
