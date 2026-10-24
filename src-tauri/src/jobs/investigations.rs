@@ -73,6 +73,11 @@ mod attempt_record_workspace;
 pub(crate) use attempt_record_workspace::next_prompt_attempt_acquisition_workspace;
 #[cfg(unix)]
 pub(crate) use attempt_record_workspace::next_prompt_attempt_replay_workspace;
+#[cfg(unix)]
+#[path = "investigations/metadata_history_workspace.rs"]
+mod metadata_history_workspace;
+#[cfg(unix)]
+pub(crate) use metadata_history_workspace::next_prompt_metadata_workspace;
 #[cfg(test)]
 #[path = "investigations/tests.rs"]
 mod tests;
