@@ -777,11 +777,8 @@ fn extract_file(
     index: &mut RepoIndex,
 ) -> Result<(), ExtractError> {
     let is_tsx = crate::vue::component_tsx(source, path).unwrap_or(path.ends_with(".tsx"));
-    let language: tree_sitter::Language = if is_tsx {
-        tree_sitter_typescript::LANGUAGE_TSX.into()
-    } else {
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
-    };
+    let grammar = crate::grammar::Grammar::new(is_tsx);
+    let language = grammar.language();
     let mut parser = Parser::new();
     parser.set_language(&language)?;
     let view = crate::vue::parse_view(source, path);
@@ -796,7 +793,7 @@ fn extract_file(
         id,
         registries: adapters_fw::events::Registries::builtin(),
     };
-    collect_imports(&cx, root, &language, &mut index.imports);
+    collect_imports(&cx, root, grammar, &mut index.imports);
 
     let mut nodes = Vec::new();
     let mut stack = vec![root];

@@ -17,7 +17,7 @@ use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::BTreeMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
+use tree_sitter::{Node as TsNode, Parser, QueryCursor};
 
 use crate::chrome_messaging::unwrap_assertions;
 use crate::const_resolution::{ConstIndex, collect_const_objects, collect_imports};
@@ -123,11 +123,8 @@ fn extract_file(
     index: &mut RepoIndex,
 ) -> Result<(), ExtractError> {
     let is_tsx = crate::vue::component_tsx(source, path).unwrap_or(path.ends_with(".tsx"));
-    let language: tree_sitter::Language = if is_tsx {
-        tree_sitter_typescript::LANGUAGE_TSX.into()
-    } else {
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
-    };
+    let grammar = crate::grammar::Grammar::new(is_tsx);
+    let language = grammar.language();
     let mut parser = Parser::new();
     parser.set_language(&language)?;
     let view = crate::vue::parse_view(source, path);
@@ -146,21 +143,18 @@ fn extract_file(
 
     // Imports and const-string maps go through the shared binding-proven
     // index (#149 review) — same rule as chrome messaging.
-    collect_imports(&cx, root, &language, &mut index.consts);
-    collect_const_objects(&cx, root, &language, &mut index.consts);
+    collect_imports(&cx, root, grammar, &mut index.consts);
+    collect_const_objects(&cx, root, grammar, &mut index.consts);
 
     // `const store = tx.objectStore(X)` binds a handle for later ops. The
     // binding is scoped to its enclosing function (#150 review): two
     // sibling functions each using a local `store` for different object
     // stores must never share one file-wide binding.
-    let q_decls = Query::new(
-        &language,
-        r#"(variable_declarator name: (identifier) @name value: (_) @value)"#,
-    )
-    .expect("static query");
+    let q_decls =
+        grammar.query(r#"(variable_declarator name: (identifier) @name value: (_) @value)"#);
     let mut store_vars: BTreeMap<(Option<String>, String), StoreName> = BTreeMap::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_decls, root, source);
+    let mut matches = cursor.matches(q_decls, root, source);
     while let Some(m) = matches.next() {
         let (mut name, mut value) = (None, None);
         for c in m.captures() {
@@ -181,13 +175,9 @@ fn extract_file(
     }
 
     // Calls: declarations, chained ops, and ops on bound handles.
-    let q_calls = Query::new(
-        &language,
-        r#"(call_expression function: (member_expression) @callee arguments: (arguments) @args) @call"#,
-    )
-    .expect("static query");
+    let q_calls = grammar.query(r#"(call_expression function: (member_expression) @callee arguments: (arguments) @args) @call"#);
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_calls, root, source);
+    let mut matches = cursor.matches(q_calls, root, source);
     while let Some(m) = matches.next() {
         let (mut callee, mut args, mut call) = (None, None, None);
         for c in m.captures() {
