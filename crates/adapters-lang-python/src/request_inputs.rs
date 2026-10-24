@@ -175,7 +175,8 @@ pub(crate) fn handler_inputs(
 }
 
 /// Names the handler binds itself: parameters, and assignment, `for`, `with`,
-/// `except`, `import` and `global`-free walrus targets in its own body.
+/// `except`, walrus and `import`/`from … import` targets and nested `def`/
+/// `class` names in its own body.
 pub(crate) fn handler_bindings(
     cx: &FileCx<'_>,
     function: TsNode<'_>,
@@ -217,10 +218,35 @@ pub(crate) fn handler_bindings(
             {
                 node.named_child(0)
             }
+            // `from m import name`: the imported name, not the module.
+            "dotted_name"
+                if node.parent().is_some_and(|p| {
+                    p.kind() == "import_from_statement"
+                        && p.child_by_field_name("module_name") != Some(node)
+                }) =>
+            {
+                node.named_child(node.named_child_count().saturating_sub(1) as u32)
+            }
             _ => None,
         };
         if let Some(target) = target {
             bound_names(cx, target, &mut names);
+        }
+        // Nested definitions bind their name in the handler, although the
+        // walk does not enter their bodies.
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            let definition = if child.kind() == "decorated_definition" {
+                child.child_by_field_name("definition")
+            } else {
+                Some(child)
+            };
+            if let Some(name) = definition
+                .filter(|d| matches!(d.kind(), "function_definition" | "class_definition"))
+                .and_then(|d| d.child_by_field_name("name"))
+            {
+                names.insert(cx.text(&name).to_string());
+            }
         }
     });
     names

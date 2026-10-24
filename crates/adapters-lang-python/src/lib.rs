@@ -228,6 +228,14 @@ fn symbol_id(repo: &str, path: &str, name: &str) -> String {
 }
 
 fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
+    // Handler request inputs and responses carry their own provenance.
+    for nested in NESTED_PROV {
+        if let Some(value) = props.get_mut(nested)
+            && value.is_object()
+        {
+            retarget_props_commit(value, commit);
+        }
+    }
     let Ok(mut provenance) =
         serde_json::from_value::<Provenance>(props.get("prov").cloned().unwrap_or_default())
     else {
@@ -238,6 +246,9 @@ fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
     }
     props["prov"] = serde_json::to_value(provenance).expect("provenance serializes");
 }
+
+/// Endpoint props whose objects carry a nested `prov`.
+const NESTED_PROV: &[&str] = &["request_inputs", "responses"];
 
 fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for node in &mut extraction.nodes {
@@ -251,6 +262,12 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     }
     for route in &mut extraction.pending_routes {
         route.evidence.commit_sha = commit.into();
+        for nested in [&mut route.inputs, &mut route.responses]
+            .into_iter()
+            .flatten()
+        {
+            retarget_props_commit(nested, commit);
+        }
     }
     for mount in &mut extraction.mounts {
         mount.evidence.commit_sha = commit.into();
@@ -1409,7 +1426,11 @@ fn resolve_routes(out: &mut Extraction, repo: &str) {
                     served.confidence,
                     mount,
                     route.inputs.as_ref(),
-                    route.responses.as_ref(),
+                    // Responses read Flask's `(body, status)` semantics.
+                    route
+                        .responses
+                        .as_ref()
+                        .filter(|_| def.framework == Framework::Flask),
                 );
             }
         }
@@ -1604,7 +1625,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                         ConfidenceTier::Confirmed,
                         None,
                         inputs.as_ref(),
-                        responses.as_ref(),
+                        responses.as_ref().filter(|_| framework == Framework::Flask),
                     );
                 }
                 continue;

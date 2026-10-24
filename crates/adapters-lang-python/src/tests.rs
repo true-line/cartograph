@@ -2607,3 +2607,88 @@ def b():
         serde_json::json!({ "partial": ["response_not_proven"], "scope": "handler_body" })
     );
 }
+
+#[test]
+fn handler_inputs_and_responses_follow_the_route_and_the_commit() {
+    // #941 review: nested `prov` is retargeted on cache reuse, including for
+    // pending Blueprint routes; responses are only read for Flask routes; a
+    // handler-local `from … import jsonify` or nested `def jsonify` is not
+    // Flask's.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/base.py",
+        "from flask import Blueprint\napi_bp = Blueprint(\"api\", __name__, url_prefix=\"/api\")\n",
+    );
+    write(
+        dir.path(),
+        "app/views.py",
+        r#"
+from flask import Flask, jsonify, request
+from fastapi import FastAPI
+from app.base import api_bp
+
+app = Flask(__name__)
+app.register_blueprint(api_bp)
+fast = FastAPI()
+
+@api_bp.route("/items", methods=["POST"])
+def create():
+    name = request.args.get("name")
+    return jsonify(id=1), 201
+
+@fast.get("/fast")
+def fast_items():
+    return {"items": []}, 201
+
+@app.route("/imported")
+def imported():
+    from custom import jsonify
+    return jsonify(ok=True)
+
+@app.route("/nested")
+def nested():
+    def jsonify(**kwargs):
+        return kwargs
+    return jsonify(ok=True)
+"#,
+    );
+    let endpoint = |extraction: &Extraction, method: &str, path: &str| {
+        extraction
+            .nodes
+            .iter()
+            .find(|node| {
+                node.label == "Endpoint"
+                    && node.props["method"] == method
+                    && node.props["path"] == path
+            })
+            .unwrap_or_else(|| panic!("{method} {path}"))
+            .props
+            .clone()
+    };
+    let mut cache = IncrementalCache::default();
+    let (first, _) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+    let created = endpoint(&first, "POST", "/api/items");
+    assert_eq!(created["responses"]["statuses"], serde_json::json!([201]));
+    assert!(endpoint(&first, "GET", "/fast").get("responses").is_none());
+    for path in ["/imported", "/nested"] {
+        assert_eq!(
+            endpoint(&first, "GET", path)["responses"]["partial"],
+            serde_json::json!(["response_not_proven"]),
+            "{path}"
+        );
+    }
+    let next_id = SourceId {
+        repo: "local/python-service",
+        commit: "def456",
+    };
+    let (reused, stats) = extract_dir_incremental(dir.path(), &next_id, &mut cache).unwrap();
+    assert_eq!(stats.recomputed_files, 0);
+    let created = endpoint(&reused, "POST", "/api/items");
+    for nested in ["request_inputs", "responses"] {
+        assert_eq!(
+            created[nested]["prov"]["evidence"][0]["commit_sha"], "def456",
+            "{nested}"
+        );
+    }
+}
