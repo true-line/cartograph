@@ -18,12 +18,13 @@ pub(crate) fn next_prompt_attempt_replay_workspace() -> Option<usize> {
         slots::<String>(1)?,
     ])?;
     let step = sum(&[MAX_INVOCATION_BYTES, slots::<Vec<u8>>(1)?])?;
-    // Turn validation only borrows/computes indexes after sequential ledger
-    // validation; acquisition already retains current and previous ledgers.
+    // Acquisition retains both ledgers. Turn validation also compares its
+    // retained basis hash with a separately returned fingerprint String.
     let turn = sum(&[
         ledger_validation_workspace(policy, MAX_RECORD_BYTES)?,
         size_of::<InvestigationTurnBasis>(),
-        64,
+        128,                 // basis hash plus comparison fingerprint payloads
+        slots::<String>(1)?, // returned fingerprint; basis header is inline
     ])?;
     let (archive, _) = InvestigationCoverageArchive::decode_workspace_bytes()?;
     let (_, read) = InvestigationCoverageArchive::read_workspace_bytes()?;
