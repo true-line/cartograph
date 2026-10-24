@@ -30,6 +30,48 @@ fn supplied(text: &[u8]) -> DisclosureRepresentation {
     }
 }
 
+// AC-0327: real coverage/query-history reconstruction and identity refusal.
+#[test]
+fn disclosure_workspace_covers_qualified_progressive_validation() {
+    let mut basis = basis_with_source();
+    basis.queries.push(basis.queries[0].clone());
+    basis.schema_version = 2;
+    basis.coverage = Some(
+        context_hub::coverage::CoverageQualification::new(&[], &[])
+            .unwrap()
+            .durable_proof(&basis.scope_snapshot_id)
+            .unwrap(),
+    );
+    let policy = &INVESTIGATION_V2_POLICY;
+    let mut disclosure = manifest(&basis);
+    disclosure.schema_version = 5;
+    disclosure.policy = QUERY_HISTORY_DISCLOSURE_POLICY.into();
+    disclosure.queries[0].representation = DisclosureRepresentation::Omitted {
+        reason: DisclosureOmissionReason::ReferenceOnly,
+    };
+    disclosure.coverage =
+        Some(DisclosedInvestigationCoverage::from_proof(basis.coverage.as_ref().unwrap()).unwrap());
+    disclosure.completion_contract_hash = Some("a".repeat(64));
+    disclosure.completion_metadata_hash = Some("b".repeat(64));
+    disclosure.query_history =
+        Some(DisclosedQueryHistory::from_ledger(&"c".repeat(64), &basis, policy).unwrap());
+    disclosure.input_ledger_hash = basis.fingerprint_with_policy(policy).unwrap();
+    disclosure.validate_with_policy(&basis, policy).unwrap();
+    let row = serde_json::to_vec(&basis).unwrap().len();
+    let bound = disclosure_validation_workspace(policy, row).unwrap();
+    let public = serde_json::to_value(&basis.coverage.as_ref().unwrap().qualification).unwrap();
+    assert!(bound >= serde_json::to_vec(&public).unwrap().len() + row * 2);
+    assert!(bound >= serde_json::to_vec(&disclosure).unwrap().len());
+    disclosure.query_history.as_mut().unwrap().query_ids[0] = "d".repeat(64);
+    assert_eq!(
+        disclosure.validate_with_policy(&basis, policy),
+        Err(InvestigationError::InvalidInput)
+    );
+    assert!(disclosure_validation_workspace(policy, MAX_RECORD_BYTES).unwrap() >= bound);
+    assert!(disclosure_validation_workspace(policy, MAX_RECORD_BYTES + 1).is_none());
+    assert!(disclosure_validation_workspace(policy, usize::MAX).is_none());
+}
+
 fn manifest(basis: &InvestigationInputLedger) -> InvestigationDisclosure {
     InvestigationDisclosure {
         admission: None,
