@@ -7,10 +7,13 @@ import {
   canonicalEndpoint,
   documentedEndpoints,
   documentedInputs,
+  documentedOutputs,
   recoveredEndpoints,
   recoveredInputs,
+  recoveredOutputs,
   score,
   scoreInputs,
+  scoreOutputs,
 } from './score-api-contract.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -128,5 +131,65 @@ test('input score compares names across locations and flags partial recoveries',
   assert.equal(result.precision, 0.75);
   assert.deepEqual(result.differences, [
     { endpoint: 'POST /api/auth/login', missed: ['device'], undocumented: ['otp'], partial: true },
+  ]);
+});
+
+test('documented outputs read top-level key bullets and mentioned statuses', () => {
+  const markdown = [
+    '#### POST /api/auth/login',
+    'Input:',
+    '- email',
+    'Output:',
+    '- name: user name',
+    '- `api_key`: the key',
+    '    - nested: a field of api_key',
+    'Return 403 if user has enabled FIDO.',
+    '#### POST /api/auth/activate',
+    'Output:',
+    '- 200: account is activated',
+    '- 400: wrong email or code',
+    'Max 100 aliases.',
+  ].join('\n');
+  const outputs = documentedOutputs(markdown);
+  const login = outputs.get('POST /api/auth/login');
+  assert.deepEqual([...login.keys], ['name', 'api_key']);
+  assert.deepEqual([...login.statuses], [403]);
+  const activate = outputs.get('POST /api/auth/activate');
+  assert.deepEqual([...activate.keys], []);
+  assert.deepEqual([...activate.statuses], [200, 400]);
+});
+
+test('output score: key recall and precision, documented-status recall', () => {
+  const documented = new Map([
+    ['POST /api/auth/login', { keys: new Set(['name', 'api_key']), statuses: new Set([403]) }],
+    ['POST /api/auth/activate', { keys: new Set(), statuses: new Set([200, 410]) }],
+  ]);
+  const recovered = recoveredOutputs([
+    { props: { method: 'POST', path: '/api/auth/login', responses: { keys: ['api_key', 'error'], statuses: [200, 400] } } },
+    { props: { method: 'POST', path: '/api/auth/activate', responses: { statuses: [200], partial: ['response_built_elsewhere'] } } },
+  ]);
+  const result = scoreOutputs(documented, recovered);
+  assert.deepEqual(result.keys, {
+    endpoints_with_documented_keys: 1,
+    documented: 2,
+    matched: 1,
+    recall: 0.5,
+    precision: 0.5,
+  });
+  assert.deepEqual(result.statuses, {
+    endpoints_with_documented_statuses: 2,
+    documented: 3,
+    matched: 1,
+    recall: 0.3333,
+  });
+  assert.deepEqual(result.differences, [
+    { endpoint: 'POST /api/auth/activate', partial: true, missed_statuses: [410] },
+    {
+      endpoint: 'POST /api/auth/login',
+      partial: false,
+      missed_keys: ['name'],
+      undocumented_keys: ['error'],
+      missed_statuses: [403],
+    },
   ]);
 });

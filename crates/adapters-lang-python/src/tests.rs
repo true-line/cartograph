@@ -2425,3 +2425,270 @@ def local():
     assert!(request_inputs(&extraction, "GET", "/param/<request>").is_null());
     assert!(request_inputs(&extraction, "GET", "/local").is_null());
 }
+
+fn responses_cited(
+    extraction: &Extraction,
+    source: &str,
+    method: &str,
+    path: &str,
+) -> (serde_json::Value, Vec<String>) {
+    let mut responses = extraction
+        .nodes
+        .iter()
+        .find(|node| {
+            node.label == "Endpoint" && node.props["method"] == method && node.props["path"] == path
+        })
+        .unwrap_or_else(|| panic!("{method} {path}"))
+        .props["responses"]
+        .clone();
+    let cited = responses
+        .as_object_mut()
+        .and_then(|responses| responses.remove("prov"))
+        .map(|prov| {
+            assert_eq!(prov["confidence_tier"], "Confirmed");
+            prov["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|span| {
+                    source[span["byte_start"].as_u64().unwrap() as usize
+                        ..span["byte_end"].as_u64().unwrap() as usize]
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (responses, cited)
+}
+
+#[test]
+fn flask_handlers_record_literal_response_statuses_and_keys() {
+    // #721: statuses and top-level JSON keys a handler's own returns prove,
+    // with the reason whenever a response is built elsewhere.
+    let source = r#"
+from flask import Flask, jsonify, redirect, render_template
+
+app = Flask(__name__)
+
+@app.route("/login", methods=["POST"])
+def login():
+    if bad():
+        return jsonify(error="wrong password"), 400
+    if locked():
+        return (jsonify(error="locked"), 403)
+    if legacy():
+        return {"ok": False, "reason": "legacy"}, 410
+    return jsonify({"api_key": key(), "email": "e"})
+
+@app.route("/built")
+def built():
+    if a():
+        return jsonify(user_to_dict(u))
+    if b():
+        return jsonify(**payload), 201
+    if c():
+        return jsonify(ok=True), code
+    def inner():
+        return jsonify(hidden=1), 500
+    return redirect("/")
+
+@app.route("/page")
+def page():
+    if moved():
+        return redirect("/new", code=301)
+    if other():
+        return response
+    return render_template("page.html")
+
+@app.route("/none")
+def nothing():
+    do()
+"#;
+    let extraction = extract_source(source.as_bytes(), "app.py", &id()).unwrap();
+    let (responses, cited) = responses_cited(&extraction, source, "POST", "/login");
+    assert_eq!(
+        responses,
+        serde_json::json!({
+            "kinds": ["json"],
+            "statuses": [200, 400, 403, 410],
+            "keys": ["api_key", "email", "error", "ok", "reason"],
+            "scope": "handler_body",
+        })
+    );
+    assert_eq!(cited.len(), 4);
+    assert!(cited[0].starts_with("return jsonify(error="));
+    let (responses, cited) = responses_cited(&extraction, source, "GET", "/built");
+    assert_eq!(
+        responses,
+        serde_json::json!({
+            "kinds": ["json", "redirect"],
+            "statuses": [200, 201, 302],
+            "keys": ["ok"],
+            "partial": ["response_built_elsewhere", "status_computed"],
+            "scope": "handler_body",
+        })
+    );
+    assert_eq!(cited.len(), 4);
+    let (responses, cited) = responses_cited(&extraction, source, "GET", "/page");
+    assert_eq!(
+        responses,
+        serde_json::json!({
+            "kinds": ["html", "redirect"],
+            "statuses": [200, 301],
+            "partial": ["response_not_proven"],
+            "scope": "handler_body",
+        })
+    );
+    assert_eq!(
+        cited,
+        [
+            r#"return redirect("/new", code=301)"#,
+            r#"return render_template("page.html")"#
+        ]
+    );
+    assert!(
+        extraction
+            .nodes
+            .iter()
+            .find(|node| node.label == "Endpoint" && node.props["path"] == "/none")
+            .unwrap()
+            .props
+            .get("responses")
+            .is_none()
+    );
+}
+
+#[test]
+fn responses_need_flask_and_an_unshadowed_jsonify() {
+    let fastapi = br#"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/items")
+def items():
+    return {"items": []}, 201
+"#;
+    let extraction = extract_source(fastapi, "main.py", &id()).unwrap();
+    let endpoint = extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "Endpoint")
+        .unwrap();
+    assert!(endpoint.props.get("responses").is_none());
+    let shadowed = r#"
+import flask
+
+app = flask.Flask(__name__)
+
+@app.route("/a")
+def a(jsonify):
+    return flask.jsonify(ok=True)
+
+@app.route("/b")
+def b():
+    flask = other()
+    return flask.jsonify(ok=True)
+"#;
+    let extraction = extract_source(shadowed.as_bytes(), "app.py", &id()).unwrap();
+    let (a, _) = responses_cited(&extraction, shadowed, "GET", "/a");
+    assert_eq!(
+        a,
+        serde_json::json!({
+            "kinds": ["json"],
+            "statuses": [200],
+            "keys": ["ok"],
+            "scope": "handler_body",
+        })
+    );
+    let (b, _) = responses_cited(&extraction, shadowed, "GET", "/b");
+    assert_eq!(
+        b,
+        serde_json::json!({ "partial": ["response_not_proven"], "scope": "handler_body" })
+    );
+}
+
+#[test]
+fn handler_inputs_and_responses_follow_the_route_and_the_commit() {
+    // #941 review: nested `prov` is retargeted on cache reuse, including for
+    // pending Blueprint routes; responses are only read for Flask routes; a
+    // handler-local `from … import jsonify` or nested `def jsonify` is not
+    // Flask's.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/base.py",
+        "from flask import Blueprint\napi_bp = Blueprint(\"api\", __name__, url_prefix=\"/api\")\n",
+    );
+    write(
+        dir.path(),
+        "app/views.py",
+        r#"
+from flask import Flask, jsonify, request
+from fastapi import FastAPI
+from app.base import api_bp
+
+app = Flask(__name__)
+app.register_blueprint(api_bp)
+fast = FastAPI()
+
+@api_bp.route("/items", methods=["POST"])
+def create():
+    name = request.args.get("name")
+    return jsonify(id=1), 201
+
+@fast.get("/fast")
+def fast_items():
+    return {"items": []}, 201
+
+@app.route("/imported")
+def imported():
+    from custom import jsonify
+    return jsonify(ok=True)
+
+@app.route("/nested")
+def nested():
+    def jsonify(**kwargs):
+        return kwargs
+    return jsonify(ok=True)
+"#,
+    );
+    let endpoint = |extraction: &Extraction, method: &str, path: &str| {
+        extraction
+            .nodes
+            .iter()
+            .find(|node| {
+                node.label == "Endpoint"
+                    && node.props["method"] == method
+                    && node.props["path"] == path
+            })
+            .unwrap_or_else(|| panic!("{method} {path}"))
+            .props
+            .clone()
+    };
+    let mut cache = IncrementalCache::default();
+    let (first, _) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+    let created = endpoint(&first, "POST", "/api/items");
+    assert_eq!(created["responses"]["statuses"], serde_json::json!([201]));
+    assert!(endpoint(&first, "GET", "/fast").get("responses").is_none());
+    for path in ["/imported", "/nested"] {
+        assert_eq!(
+            endpoint(&first, "GET", path)["responses"]["partial"],
+            serde_json::json!(["response_not_proven"]),
+            "{path}"
+        );
+    }
+    let next_id = SourceId {
+        repo: "local/python-service",
+        commit: "def456",
+    };
+    let (reused, stats) = extract_dir_incremental(dir.path(), &next_id, &mut cache).unwrap();
+    assert_eq!(stats.recomputed_files, 0);
+    let created = endpoint(&reused, "POST", "/api/items");
+    for nested in ["request_inputs", "responses"] {
+        assert_eq!(
+            created[nested]["prov"]["evidence"][0]["commit_sha"], "def456",
+            "{nested}"
+        );
+    }
+}
