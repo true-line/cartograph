@@ -151,7 +151,7 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
         // connections; neither the relay nor an RPC argument supplies it.
         let principal = Arc::new(std::sync::Mutex::new(grant.session()));
         let session = principal.clone();
-        let limits = crate::mcp_reads::worker::tests::limits();
+        let limits = crate::mcp_reads::worker::tests::task_limits();
         let budget = WorkBudget::new(WorkLimits {
             max_workers: one,
             max_reserved_bytes: limits.reserved_bytes,

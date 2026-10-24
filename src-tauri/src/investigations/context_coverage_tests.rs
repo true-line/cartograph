@@ -805,3 +805,33 @@ fn qualified_neighborhood_preparation_keeps_large_facts_without_response_pages()
         assert!(fixture.prepare(&requested).is_err());
     }
 }
+
+// AC-0327: preparation accounting covers actual qualified owners and fails closed.
+#[cfg(unix)]
+#[test]
+fn qualified_preparation_workspace_covers_fixture_and_rejects_overflow() {
+    use context_hub::logical::count;
+    let fixture = Fixture::new(3);
+    let requested = request();
+    let frame = serde_json::to_vec(&requested).unwrap().len();
+    let scope = crate::mcp_reads::scope::tests::limits();
+    let (retained, peak) =
+        preparation_workspace::workspace_bytes(scope, TEST_ARCHIVE_CAPACITY, frame).unwrap();
+    let prepared = fixture.prepare(&requested).unwrap();
+    let observed = count(&prepared.graph).unwrap()
+        + count(&prepared.ledger).unwrap()
+        + count(&prepared.coverage_archive).unwrap();
+    assert!(retained >= observed);
+    assert!(peak >= retained);
+    assert!(prepared.coverage_archive.is_some());
+    assert!(prepared.query_pages.is_empty() && prepared.evidence.is_empty());
+    let larger_request =
+        preparation_workspace::workspace_bytes(scope, TEST_ARCHIVE_CAPACITY, frame + 1024).unwrap();
+    assert!(larger_request.1 > peak);
+    let larger_archive =
+        preparation_workspace::workspace_bytes(scope, TEST_ARCHIVE_CAPACITY * 2, frame).unwrap();
+    assert!(larger_archive.1 > peak);
+    assert!(
+        preparation_workspace::workspace_bytes(scope, TEST_ARCHIVE_CAPACITY, usize::MAX,).is_none()
+    );
+}
