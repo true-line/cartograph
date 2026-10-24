@@ -678,6 +678,8 @@ impl FrozenContext {
         if authoritative != preliminary {
             return Err(HostError::InputChanged);
         }
+        drop(preliminary);
+        drop(keys);
         let mut options = Vec::new();
         for fact in &page.page().facts {
             let selected = authoritative
@@ -696,10 +698,19 @@ impl FrozenContext {
                     // The core page budget excludes this host's evidence inventory.
                     // Shrink only the ordered suffix and let the frozen service
                     // produce the exact continuation; never skip a large fact.
-                    response.context = query_page(response.context.page().facts.len() - 1)?;
-                    response
-                        .evidence_options
-                        .truncate(response.context.page().facts.len());
+                    let InvestigationQueryPage {
+                        context,
+                        mut evidence_options,
+                    } = response;
+                    let max_facts = context.page().facts.len() - 1;
+                    // Release the old page before constructing its replacement.
+                    drop(context);
+                    let context = query_page(max_facts)?;
+                    evidence_options.truncate(context.page().facts.len());
+                    response = InvestigationQueryPage {
+                        context,
+                        evidence_options,
+                    };
                 }
                 Err(error) => return Err(error),
             }
@@ -771,6 +782,9 @@ impl FrozenContext {
             total_selected: response.context.page().total_selected,
             has_more: response.context.page().next_cursor.is_some(),
         });
+        drop(response);
+        drop(authoritative);
+        drop(returned_keys);
         ledger.validate_with_policy(self.policy)?;
         let raw = String::from_utf8(raw).map_err(|_| HostError::InvalidInput)?;
         Ok(PreparedContextRead {

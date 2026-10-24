@@ -243,6 +243,7 @@ fn qualified_query_and_archive_stay_frozen_after_inventory_replacement() {
 }
 
 // AC-0239: qualification and host evidence inventory both consume page bytes.
+// Retiring old owners must preserve the exact prefix, options and cursor.
 // Shrinking drops only the fact suffix and preserves exact continuation/basis.
 #[test]
 fn qualified_host_page_budget_preserves_qualification_and_continuation() {
@@ -285,6 +286,16 @@ fn qualified_host_page_budget_preserves_qualification_and_continuation() {
         .unwrap()
         .len();
     assert!(returned > 0 && returned < 3);
+    assert_eq!(
+        page["context"]["response"]["facts"],
+        serde_json::to_value(&initial.response.facts[..returned]).unwrap()
+    );
+    let options = page["evidence_options"].as_array().unwrap();
+    assert_eq!(options.len(), returned);
+    for (option, fact) in options.iter().zip(&initial.response.facts) {
+        let key = crate::task_evidence::task_fact(&graph_reference(&fact.reference));
+        assert_eq!(option["fact"], serde_json::to_value(key).unwrap());
+    }
     assert_eq!(
         page["context"]["coverage"],
         serde_json::to_value(&proof.qualification).unwrap()
