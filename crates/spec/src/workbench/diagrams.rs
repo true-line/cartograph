@@ -43,10 +43,12 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
         })
         .map(|e| e.dst.as_str())
         .collect();
+    let configs = configuring_files(nodes, edges);
     let aliases: BTreeMap<_, _> = resources
         .keys()
         .copied()
         .chain(backed.iter().copied())
+        .chain(configs.keys().copied())
         .map(|id| (id, crate::mermaid_id(id)))
         .collect();
     out.write_str("flowchart LR\n")?;
@@ -80,6 +82,17 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
             id.strip_prefix("chan:").unwrap_or(id)
         )?;
     }
+    // Env files declaring a resource's key: parallelograms, named by path.
+    // A legal filename may hold a quote or line break; neither may end the
+    // label or start a diagram line.
+    for (id, path) in &configs {
+        writeln!(
+            out,
+            "    {}[/\"{}\"/]",
+            aliases[id],
+            Replace(path, MERMAID_LABEL)
+        )?;
+    }
     let mut lines = Vec::new();
     for edge in edges {
         let Some((_, arrow)) = crate::TOPOLOGY_EDGES.iter().find(|(l, _)| *l == edge.label) else {
@@ -87,7 +100,8 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
         };
         if !(resources.contains_key(edge.src.as_str())
             && (resources.contains_key(edge.dst.as_str())
-                || (edge.label == "BACKS" && backed.contains(edge.dst.as_str()))))
+                || (edge.label == "BACKS" && backed.contains(edge.dst.as_str()))
+                || (edge.label == "CONFIGURED_IN" && configs.contains_key(edge.dst.as_str()))))
         {
             continue;
         }
@@ -108,6 +122,36 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
         )?;
     }
     Ok(())
+}
+
+/// Mermaid entity codes for the characters that would break a quoted label.
+const MERMAID_LABEL: &[(char, &str)] = &[('"', "#quot;"), ('\n', " "), ('\r', " ")];
+
+/// `File` nodes a `Resource` is `CONFIGURED_IN` (#734), with their paths.
+pub(crate) fn configuring_files<'a>(
+    nodes: &'a [Node],
+    edges: &[Edge],
+) -> BTreeMap<&'a str, &'a str> {
+    let resources: BTreeSet<_> = nodes
+        .iter()
+        .filter(|n| n.label == "Resource")
+        .map(|n| n.id.as_str())
+        .collect();
+    let targets: BTreeSet<_> = edges
+        .iter()
+        .filter(|e| e.label == "CONFIGURED_IN" && resources.contains(e.src.as_str()))
+        .map(|e| e.dst.as_str())
+        .collect();
+    nodes
+        .iter()
+        .filter(|n| n.label == "File" && targets.contains(n.id.as_str()))
+        .map(|n| {
+            let path = n.props["path"]
+                .as_str()
+                .unwrap_or_else(|| n.id.split_once('@').map_or(n.id.as_str(), |(_, path)| path));
+            (n.id.as_str(), path)
+        })
+        .collect()
 }
 
 pub(crate) fn flows(out: &mut impl fmt::Write, flows: &[Flow]) -> fmt::Result {
@@ -194,6 +238,9 @@ pub(super) fn logical_index_bytes(bytes: usize, rows: usize, hops: usize) -> Opt
         map_slots::<&str, &Node>(rows)?, // resources/channels
         set_slots::<&str>(rows)?,
         map_slots::<&str, String>(rows)?, // backed/aliases
+        set_slots::<&str>(rows)?,
+        set_slots::<&str>(rows)?,
+        map_slots::<&str, &str>(rows)?, // configuring_files resources/targets/configs
         bytes,
         rows.checked_mul(crate::mermaid_id("").len())?, // alias payload + generated hash suffix
         bytes, // one current sanitized source ID during format!

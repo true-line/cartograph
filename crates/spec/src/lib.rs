@@ -73,6 +73,7 @@ pub const TOPOLOGY_EDGE_LABELS: &[&str] = &[
     "BACKS",
     "DEPENDS_ON",
     "REFERENCES",
+    "CONFIGURED_IN",
 ];
 
 /// Edge labels that appear on the topology map, with their arrow style.
@@ -85,6 +86,7 @@ const TOPOLOGY_EDGES: &[(&str, &str)] = &[
     ("BACKS", "-->"),
     ("DEPENDS_ON", "-.->"),
     ("REFERENCES", "-.->"),
+    ("CONFIGURED_IN", "-.->"),
 ];
 
 /// Mermaid identifier for a graph node id: sanitized for readability plus
@@ -308,6 +310,70 @@ mod tests {
         // No BACKS edge, no cylinder: channels are not infra topology on
         // their own.
         assert!(!mmd.contains("1/other"));
+    }
+
+    #[test]
+    fn configured_in_edge_renders_the_env_file_by_path() {
+        // #734: an env file joins the map only through a resource's
+        // CONFIGURED_IN edge, drawn dotted and named by its path.
+        let db = resource(
+            "res:local/app@observed:sql-database:env:DB_URI",
+            "observed:sql-database:env:DB_URI",
+        );
+        let file = |path: &str| Node {
+            id: format!("file:local/app@{path}"),
+            label: "File".into(),
+            props: serde_json::json!({ "path": path, "redacted": true }),
+        };
+        let configured = edge(
+            "res:local/app@observed:sql-database:env:DB_URI",
+            "file:local/app@tests/test.env",
+            "CONFIGURED_IN",
+        );
+        let mmd = topology_mermaid(
+            &[db, file("tests/test.env"), file("example.env")],
+            &[configured],
+        );
+        assert!(mmd.contains(r#"[/"tests/test.env"/]"#));
+        assert!(mmd.contains("-.->|CONFIGURED_IN|"));
+        assert!(!mmd.contains("example.env"));
+        // A quote or line break in a legal filename cannot close the label
+        // or start a new diagram line.
+        let odd = "cfg/a\"]\nX-->Y.env";
+        let mmd_odd = topology_mermaid(
+            &[
+                resource(
+                    "res:local/app@observed:sql-database:env:DB_URI",
+                    "observed:sql-database:env:DB_URI",
+                ),
+                file(odd),
+            ],
+            &[edge(
+                "res:local/app@observed:sql-database:env:DB_URI",
+                &format!("file:local/app@{odd}"),
+                "CONFIGURED_IN",
+            )],
+        );
+        assert!(mmd_odd.contains(r#"[/"cfg/a#quot;] X-->Y.env"/]"#));
+        assert!(!mmd_odd.lines().any(|line| line.starts_with("X-->")));
+        assert_eq!(
+            mmd,
+            topology_mermaid(
+                &[
+                    resource(
+                        "res:local/app@observed:sql-database:env:DB_URI",
+                        "observed:sql-database:env:DB_URI",
+                    ),
+                    file("example.env"),
+                    file("tests/test.env"),
+                ],
+                &[edge(
+                    "res:local/app@observed:sql-database:env:DB_URI",
+                    "file:local/app@tests/test.env",
+                    "CONFIGURED_IN",
+                )],
+            )
+        );
     }
 
     #[test]

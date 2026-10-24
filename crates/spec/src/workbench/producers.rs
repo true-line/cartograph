@@ -102,11 +102,18 @@ pub(super) fn topology(
         .filter(|e| e.label == "BACKS")
         .map(|e| e.dst.as_str())
         .collect();
+    let configured: BTreeSet<_> = selected_edges
+        .iter()
+        .filter(|e| e.label == "CONFIGURED_IN")
+        .map(|e| e.dst.as_str())
+        .collect();
     let selected_nodes: Vec<Node> = nodes
         .iter()
         .copied()
         .filter(|n| {
-            n.label == "Resource" || (n.label == "Channel" && backed.contains(n.id.as_str()))
+            n.label == "Resource"
+                || (n.label == "Channel" && backed.contains(n.id.as_str()))
+                || (n.label == "File" && configured.contains(n.id.as_str()))
         })
         .filter(nongap)
         .cloned()
@@ -678,6 +685,7 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
         slots::<&Node>(rows)?,
         slots::<&Edge>(rows)?,
         set_slots::<&str>(rows)?,
+        set_slots::<&str>(rows)?, // topology backed + configured
         slots::<&str>(values)?,
     ])?;
     Some(data.max(tools).max(simple))
