@@ -5,8 +5,10 @@ use super::{
     ReadError, ReadSession,
     dispatch::{DispatchAction, DispatchLimits, Dispatcher, EvidenceWorkLimits},
 };
+use crate::investigations::mcp_dispatch::{self, TaskDispatcher};
 use mcp_local::work_budget::WorkBudget;
-use mcp_wire::admission::{Action, Admission, ReadTool};
+use mcp_wire::admission::{Action, ProtocolAdmission, ReadTool};
+use mcp_wire::tools::Tool;
 use serde_json::{Value, json};
 use std::num::NonZeroUsize;
 use tauri::Manager;
@@ -63,6 +65,19 @@ impl Worker {
         limits: WorkerLimits,
         budget: WorkBudget,
     ) -> Result<Self, ReadError> {
+        Self::start_with_tasks(app, session_id, mode, limits, budget, None).await
+    }
+
+    /// Internal authenticated factory path. Public activation still calls start
+    /// without tasks until the complete detached-execution admission lands.
+    pub(super) async fn start_with_tasks<R: tauri::Runtime>(
+        app: tauri::AppHandle<R>,
+        session_id: String,
+        mode: spec::ExportMode,
+        limits: WorkerLimits,
+        budget: WorkBudget,
+        tasks: Option<agents::investigation::McpTaskSession>,
+    ) -> Result<Self, ReadError> {
         if session_id.is_empty()
             || (limits.acquisition_mode == AcquisitionMode::Scoped
                 && (session_id.len() > 64 || session_id.chars().any(char::is_control)))
@@ -81,7 +96,13 @@ impl Worker {
         let (ready, initialized) = oneshot::channel::<Result<(), ReadError>>();
         tauri::async_runtime::spawn_blocking(move || {
             // Own the permit in the actual worker, not in the async waiter.
-            let _permit = permit;
+            let _permit = std::sync::Arc::new(permit);
+            let tasks = tasks.map(|session| {
+                TaskDispatcher::new(
+                    session,
+                    super::task_reservation::TaskReservations::from(_permit.clone()),
+                )
+            });
             let state = app.state::<crate::AppState>();
             let mut session_id = Some(session_id);
             let mut scope = || super::scope::coverage_scope(&app, &state, limits.scope);
@@ -97,7 +118,11 @@ impl Worker {
                     .collect::<Vec<_>>(),
                 AcquisitionMode::Scoped => super::scoped_dispatch::TOOLS.to_vec(),
             };
-            let mut admission = Admission::new(tools, limits.dispatch.max_request_ids);
+            let mut tools = tools.into_iter().map(Tool::Read).collect::<Vec<_>>();
+            if tasks.as_ref().is_some_and(TaskDispatcher::available) {
+                tools.extend(mcp_dispatch::TOOLS.into_iter().map(Tool::Task));
+            }
+            let mut admission = ProtocolAdmission::new(tools, limits.dispatch.max_request_ids);
             let mut dispatcher = None;
             if ready.send(Ok(())).is_err() {
                 return;
@@ -122,11 +147,23 @@ impl Worker {
                     Action::ListTools { id, tools } => {
                         let tools = tools
                             .into_iter()
-                            .map(|tool| match limits.acquisition_mode {
-                                AcquisitionMode::Complete => super::dispatch::tool_descriptor(tool),
-                                AcquisitionMode::Scoped => {
-                                    super::scoped_dispatch::schemas::descriptor(tool, limits.graph)
-                                }
+                            .filter(|tool| {
+                                !matches!(tool, Tool::Task(_))
+                                    || tasks.as_ref().is_some_and(TaskDispatcher::available)
+                            })
+                            .map(|tool| match tool {
+                                Tool::Task(tool) => mcp_dispatch::descriptor(tool),
+                                Tool::Read(tool) => match limits.acquisition_mode {
+                                    AcquisitionMode::Complete => {
+                                        super::dispatch::tool_descriptor(tool)
+                                    }
+                                    AcquisitionMode::Scoped => {
+                                        super::scoped_dispatch::schemas::descriptor(
+                                            tool,
+                                            limits.graph,
+                                        )
+                                    }
+                                },
                             })
                             .collect::<Vec<_>>();
                         bounded(
@@ -136,7 +173,31 @@ impl Worker {
                     }
                     Action::Call {
                         id,
-                        tool,
+                        tool: Tool::Task(tool),
+                        arguments,
+                    } => {
+                        let result =
+                            tasks
+                                .as_ref()
+                                .ok_or(ReadError::InvalidRequest)
+                                .and_then(|tasks| {
+                                    tasks.call(
+                                        &app,
+                                        &id,
+                                        tool,
+                                        arguments,
+                                        limits.scope,
+                                        limits.dispatch.max_response_bytes.get(),
+                                    )
+                                });
+                        bounded(
+                            result.unwrap_or_else(|error| super::dispatch::tool_error(&id, error)),
+                            limits.dispatch.max_response_bytes.get(),
+                        )
+                    }
+                    Action::Call {
+                        id,
+                        tool: Tool::Read(tool),
                         arguments,
                     } => {
                         let result = (|| {

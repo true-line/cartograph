@@ -1,0 +1,187 @@
+//! Authenticated transport adapter over the existing durable coordinator.
+//! No provider configuration, principal or consent decision comes from the wire.
+use crate::mcp_reads::{ReadError, scope::ScopeLimits, task_reservation::TaskReservations};
+use agents::investigation::McpTaskSession;
+use mcp_wire::{task_arguments::TaskArguments, tools::TaskTool};
+use serde::Serialize;
+use serde_json::{Map, Value, json};
+use tauri::Manager;
+
+pub(crate) const TOOLS: [TaskTool; 5] = [
+    TaskTool::Start,
+    TaskTool::Status,
+    TaskTool::Events,
+    TaskTool::Result,
+    TaskTool::Cancel,
+];
+
+pub(crate) struct TaskDispatcher {
+    session: McpTaskSession,
+    reservations: TaskReservations,
+}
+
+impl TaskDispatcher {
+    pub(crate) fn new(session: McpTaskSession, reservations: TaskReservations) -> Self {
+        Self {
+            session,
+            reservations,
+        }
+    }
+
+    pub(crate) fn available(&self) -> bool {
+        self.session.with_grant(|_, _| ()).is_ok()
+    }
+
+    pub(crate) fn call<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        id: &Value,
+        tool: TaskTool,
+        arguments: Map<String, Value>,
+        scope: ScopeLimits,
+        cap: usize,
+    ) -> Result<Value, ReadError> {
+        // Refuse before decoding a domain request or touching storage. Each
+        // durable operation independently holds the same grant during access.
+        if !self.available() {
+            return Err(ReadError::InvalidRequest);
+        }
+        let request =
+            TaskArguments::parse(tool, arguments).map_err(|_| ReadError::InvalidRequest)?;
+        let state = app.state::<crate::AppState>();
+        match request {
+            TaskArguments::Start { request } => {
+                let request = serde_json::from_value(Value::Object(request))
+                    .map_err(|_| ReadError::InvalidRequest)?;
+                let summary = super::commands::start_mcp(
+                    request,
+                    app.clone(),
+                    &self.session,
+                    scope,
+                    &self.reservations,
+                )
+                .map_err(|error| match error {
+                    super::commands::InvestigationStartError::Rejected {
+                        code: "limit_exceeded",
+                        ..
+                    } => ReadError::Limit,
+                    super::commands::InvestigationStartError::Rejected { .. } => {
+                        ReadError::InvalidRequest
+                    }
+                    super::commands::InvestigationStartError::Legacy(_) => ReadError::Storage,
+                })?;
+                response(id, &summary, cap)
+            }
+            TaskArguments::Status { task_id } => {
+                let detail = state
+                    .jobs
+                    .lock()
+                    .map_err(|_| ReadError::Storage)?
+                    .investigation_access(&task_id, Some(&self.session))
+                    .map_err(|_| ReadError::InvalidRequest)?;
+                response(id, &detail.summary, cap)
+            }
+            TaskArguments::Events { task_id, after } => {
+                let page = state
+                    .jobs
+                    .lock()
+                    .map_err(|_| ReadError::Storage)?
+                    .investigation_events_access(&task_id, after, Some(&self.session))
+                    .map_err(|_| ReadError::InvalidRequest)?;
+                response(id, &page, cap)
+            }
+            TaskArguments::Result { task_id } => {
+                let result = state
+                    .jobs
+                    .lock()
+                    .map_err(|_| ReadError::Storage)?
+                    .investigation_result_access(&task_id, Some(&self.session))
+                    .map_err(|_| ReadError::InvalidRequest)?;
+                response(id, &result, cap)
+            }
+            TaskArguments::Cancel { task_id } => {
+                let detail = state
+                    .jobs
+                    .lock()
+                    .map_err(|_| ReadError::Storage)?
+                    .cancel_investigation_access(&task_id, false, Some(&self.session))
+                    .map_err(|_| ReadError::InvalidRequest)?;
+                state.investigations.wake(&task_id);
+                super::emit_changed(app, &detail);
+                response(id, &detail.summary, cap)
+            }
+        }
+    }
+}
+
+fn response(id: &Value, payload: &impl Serialize, cap: usize) -> Result<Value, ReadError> {
+    #[derive(Serialize)]
+    struct ResultBody<'a, T> {
+        content: [Text; 1],
+        #[serde(rename = "structuredContent")]
+        structured_content: &'a T,
+        #[serde(rename = "isError")]
+        is_error: bool,
+    }
+    #[derive(Serialize)]
+    struct Text {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        text: &'static str,
+    }
+    #[derive(Serialize)]
+    struct Reply<'a, T> {
+        jsonrpc: &'static str,
+        id: &'a Value,
+        result: ResultBody<'a, T>,
+    }
+    let reply = Reply {
+        jsonrpc: "2.0",
+        id,
+        result: ResultBody {
+            content: [Text {
+                kind: "text",
+                text: "Task response; consume structuredContent.",
+            }],
+            structured_content: payload,
+            is_error: false,
+        },
+    };
+    // Serialize the borrowed DTO with the full envelope limit before allocating
+    // a JSON tree. The bounded bytes and resulting tree overlap explicitly.
+    let bytes = super::context::bounded_json(&reply, cap).map_err(|_| ReadError::Limit)?;
+    serde_json::from_slice(&bytes).map_err(|_| ReadError::Storage)
+}
+
+pub(crate) fn descriptor(tool: TaskTool) -> Value {
+    let schema = match tool {
+        TaskTool::Start => {
+            json!({"type":"object","properties":{"request":{"type":"object"}},"required":["request"],"additionalProperties":false})
+        }
+        TaskTool::Events => {
+            json!({"type":"object","properties":{"task_id":{"type":"string"},"after":{"type":"integer","minimum":0}},"required":["task_id","after"],"additionalProperties":false})
+        }
+        _ => {
+            json!({"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"],"additionalProperties":false})
+        }
+    };
+    json!({"name":tool.name(),"description":"Owner-granted durable investigation operation.","inputSchema":schema})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_response_bounds_complete_envelope_before_value_decode() {
+        // AC-0327: id escaping and the MCP wrapper spend the same byte cap.
+        let id = json!("escaped\"λ");
+        let payload = json!({"result":"quoted\"λ"});
+        let value = response(&id, &payload, 4096).unwrap();
+        let exact = serde_json::to_vec(&value).unwrap().len();
+        assert_eq!(response(&id, &payload, exact).unwrap(), value);
+        assert_eq!(response(&id, &payload, exact - 1), Err(ReadError::Limit));
+        assert_eq!(response(&id, &"x".repeat(4096), 256), Err(ReadError::Limit));
+        assert_eq!(value["result"]["structuredContent"], payload);
+    }
+}

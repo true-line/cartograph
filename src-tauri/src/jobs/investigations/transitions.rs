@@ -416,7 +416,7 @@ impl JobStore {
         self.cancel_investigation_access(id, true, None)
     }
 
-    pub(super) fn cancel_investigation_access(
+    pub(crate) fn cancel_investigation_access(
         &mut self,
         id: &str,
         next_prompt: bool,

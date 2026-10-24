@@ -105,7 +105,7 @@ impl JobStore {
         self.investigation_events_access(id, after_sequence, None)
     }
 
-    pub(super) fn investigation_events_access(
+    pub(crate) fn investigation_events_access(
         &self,
         id: &str,
         after_sequence: u64,

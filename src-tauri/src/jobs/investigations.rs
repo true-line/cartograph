@@ -664,7 +664,7 @@ impl JobStore {
         self.investigation_access(id, None)
     }
 
-    fn investigation_access(
+    pub(crate) fn investigation_access(
         &self,
         id: &str,
         session: Option<&McpTaskSession>,
@@ -716,7 +716,7 @@ impl JobStore {
         self.investigation_result_access(id, None)
     }
 
-    fn investigation_result_access(
+    pub(crate) fn investigation_result_access(
         &self,
         id: &str,
         session: Option<&McpTaskSession>,

@@ -118,6 +118,25 @@ fn rejected(code: &'static str, message: impl ToString) -> InvestigationStartErr
         definitive: true,
     }
 }
+/// Authenticated transport entrypoint, already on the blocking worker. Authority
+/// and admitted scope/slot ownership come from the host, never request fields.
+pub(crate) fn start_mcp<R: tauri::Runtime>(
+    request: StagedObligationRequest,
+    app: tauri::AppHandle<R>,
+    session: &McpTaskSession,
+    scope: crate::mcp_reads::scope::ScopeLimits,
+    reservations: &crate::mcp_reads::task_reservation::TaskReservations,
+) -> Result<InvestigationSummary, InvestigationStartError> {
+    completion_start::start_access(
+        request,
+        app,
+        Instant::now(),
+        Some(session),
+        Some(scope),
+        Some(reservations),
+    )
+}
+
 #[tauri::command]
 pub(crate) async fn start_investigation(
     request: InvestigationStartRequest,
