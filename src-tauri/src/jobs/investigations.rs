@@ -82,6 +82,8 @@ pub(crate) use metadata_history_workspace::next_prompt_metadata_workspace;
 #[path = "investigations/saved_call_workspace.rs"]
 mod saved_call_workspace;
 #[cfg(unix)]
+pub(crate) use admission_journal::timeline_workspace::next_prompt_timeline_workspace;
+#[cfg(unix)]
 pub(crate) use saved_call_workspace::next_prompt_saved_call_workspace;
 #[cfg(test)]
 #[path = "investigations/tests.rs"]

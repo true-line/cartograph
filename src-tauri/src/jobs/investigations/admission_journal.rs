@@ -822,3 +822,7 @@ pub(super) fn append(
 #[cfg(test)]
 #[path = "admission_journal_tests.rs"]
 pub(super) mod tests;
+
+#[cfg(unix)]
+#[path = "timeline_workspace.rs"]
+pub(super) mod timeline_workspace;
