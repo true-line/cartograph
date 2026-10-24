@@ -342,6 +342,13 @@ fn admission_journal_refuse_accept_and_historical_cutoffs_use_logical_ordinals()
         let (core, _) = next_prompt_saved_call_workspace().unwrap();
         assert!(retained >= core * INVESTIGATION_V2_POLICY.limits().model_invocations as usize);
         assert!(peak >= retained + next_prompt_metadata_workspace().unwrap().2);
+        let entries = read_entries(&tx, &f.task, &line).unwrap();
+        assert_eq!(entries.len(), 2);
+        let (rows, replay) = next_prompt_capacity_replay_workspace().unwrap();
+        let actual = serde_json::to_vec(&entries).unwrap().len()
+            + entries.len() * std::mem::size_of::<Entry>();
+        assert!(rows >= actual);
+        assert!(replay >= peak && replay >= retained + rows);
     }
     assert_eq!(
         derive_at(&tx, &f.task, &first_step).unwrap(),
