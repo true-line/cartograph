@@ -394,6 +394,7 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
     required_reservation(limits)?.checked_add(
         preparation
             .max(provider)
+            .max(crate::jobs::investigations::next_prompt_contract_workspace()?)
             .checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?,
     )
 }
