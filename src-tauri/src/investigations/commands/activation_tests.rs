@@ -20,6 +20,7 @@ struct PublicProvider {
     calls: AtomicUsize,
     pause: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     entered: AtomicBool,
+    cancel_outcome: std::sync::Mutex<Option<llm::bounded::InvocationOutcome>>,
 }
 impl PublicProvider {
     fn new(cloud: bool) -> Self {
@@ -30,6 +31,7 @@ impl PublicProvider {
             calls: AtomicUsize::new(0),
             pause: std::sync::Mutex::new(None),
             entered: AtomicBool::new(false),
+            cancel_outcome: std::sync::Mutex::new(None),
         }
     }
 }
@@ -75,6 +77,14 @@ impl LlmProvider for PublicProvider {
         if let Some(wait) = self.pause.lock().unwrap().take() {
             self.entered.store(true, Ordering::SeqCst);
             wait.recv_timeout(Duration::from_secs(30)).unwrap();
+        }
+        if let Some(outcome) = *self.cancel_outcome.lock().unwrap() {
+            assert_eq!((control.check)(), CallDirective::Cancelled);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            return Err(BoundedCallError {
+                code: llm::bounded::FailureCode::Cancelled,
+                outcome,
+            });
         }
         assert_eq!((control.check)(), CallDirective::Continue);
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();

@@ -52,6 +52,8 @@ struct Request {
 }
 
 pub(crate) struct Worker {
+    #[cfg(test)]
+    pub(crate) test_exit: Option<tauri::async_runtime::JoinHandle<()>>,
     requests: mpsc::Sender<Request>,
     max_request_frame_bytes: NonZeroUsize,
 }
@@ -104,7 +106,7 @@ impl Worker {
             .map_err(|_| ReadError::Limit)?;
         let (requests, mut incoming) = mpsc::channel::<Request>(1);
         let (ready, initialized) = oneshot::channel::<Result<(), ReadError>>();
-        tauri::async_runtime::spawn_blocking(move || {
+        let worker_exit = tauri::async_runtime::spawn_blocking(move || {
             // Own the permit in the actual worker, not in the async waiter.
             let _permit = std::sync::Arc::new(permit);
             let tasks = tasks.map(|session| {
@@ -291,8 +293,12 @@ impl Worker {
                 }
             }
         });
+        #[cfg(not(test))]
+        drop(worker_exit);
         initialized.await.map_err(|_| ReadError::Storage)??;
         Ok(Self {
+            #[cfg(test)]
+            test_exit: Some(worker_exit),
             requests,
             max_request_frame_bytes: limits.max_request_frame_bytes,
         })
@@ -500,6 +506,7 @@ pub(crate) mod tests {
             let bytes = serde_json::to_vec(&value).unwrap().len();
             let (requests, mut incoming) = mpsc::channel::<Request>(1);
             let mut worker = Worker {
+                test_exit: None,
                 requests,
                 max_request_frame_bytes: nz(bytes - 1),
             };

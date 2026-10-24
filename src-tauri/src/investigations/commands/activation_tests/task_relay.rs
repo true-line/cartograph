@@ -119,9 +119,26 @@ impl Drop for Relay {
 #[test]
 #[ignore = "requires explicit source-built CARTOGRAPH_TEST_MCP_RELAY"]
 fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
+    exercise_task_relay(None);
+}
+
+#[test]
+#[ignore = "requires explicit source-built CARTOGRAPH_TEST_MCP_RELAY"]
+fn mcp_task_relay_active_cancellation_preserves_definitive_outcome() {
+    exercise_task_relay(Some(llm::bounded::InvocationOutcome::NotDispatched));
+}
+
+#[test]
+#[ignore = "requires explicit source-built CARTOGRAPH_TEST_MCP_RELAY"]
+fn mcp_task_relay_active_cancellation_preserves_unknown_without_reexecution() {
+    exercise_task_relay(Some(llm::bounded::InvocationOutcome::Unknown));
+}
+
+fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>) {
     // AC-0321/0323/0324/0325: actual capability handshake and Worker protocol.
     // Fixture factory grants a session; public activation and byte admission stay off.
     let provider = Arc::new(PublicProvider::new(false));
+    *provider.cancel_outcome.lock().unwrap() = cancel_outcome;
     let (resume, paused) = mpsc::channel();
     *provider.pause.lock().unwrap() = Some(paused);
     worker::with_public_start_fixture(provider.clone(), false, |app, request, _| {
@@ -158,6 +175,7 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
             max_cumulative_read_bytes: 1_000_000,
         });
         let observed_budget = budget.clone();
+        let (worker_exits, worker_exit) = mpsc::channel();
         let endpoint = tempfile::tempdir().unwrap();
         let handle = app.clone();
         tauri::async_runtime::block_on(async {
@@ -171,13 +189,14 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
                     session_lifetime: Duration::from_secs(60),
                 },
                 move || {
-                    let (app, session, budget) = (
+                    let (app, session, budget, worker_exits) = (
                         handle.clone(),
                         session.lock().unwrap().clone(),
                         budget.clone(),
+                        worker_exits.clone(),
                     );
                     async move {
-                        Worker::start_with_tasks(
+                        let mut worker = Worker::start_with_tasks(
                             app,
                             "task-relay".into(),
                             spec::ExportMode::VerifiedOnly,
@@ -186,7 +205,9 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
                             Some(session),
                         )
                         .await
-                        .map_err(|_| ServeError::Application)
+                        .map_err(|_| ServeError::Application)?;
+                        worker_exits.send(worker.test_exit.take().unwrap()).unwrap();
+                        Ok(worker)
                     }
                 },
             )
@@ -235,7 +256,23 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
                 pending["result"]["structuredContent"],
                 json!({"result":null})
             );
+            if cancel_outcome.is_some() {
+                // AC-0325/0329: cancel through transport while invocation is held.
+                let cancelled = relay.call("cartograph_task_cancel", json!({"task_id":id}));
+                assert_eq!(cancelled["result"]["isError"], false);
+                assert_eq!(
+                    cancelled["result"]["structuredContent"]["cancel_requested"],
+                    true
+                );
+                assert!(!observed_budget.is_idle().unwrap());
+            }
             relay.close();
+            // The connection worker has exited; the held task must retain the permit.
+            let exit = worker_exit.recv_timeout(Duration::from_secs(10)).unwrap();
+            tokio::time::timeout(Duration::from_secs(10), exit)
+                .await
+                .unwrap()
+                .unwrap();
             assert!(!observed_budget.is_idle().unwrap());
             assert!(
                 state
@@ -248,7 +285,18 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
             );
             resume.send(()).unwrap();
             let terminal = finished(app, &id);
-            assert_eq!(terminal.summary.status, InvestigationStatus::Completed);
+            let expected = match cancel_outcome {
+                None => InvestigationStatus::Completed,
+                Some(llm::bounded::InvocationOutcome::NotDispatched) => {
+                    InvestigationStatus::Cancelled
+                }
+                Some(llm::bounded::InvocationOutcome::Unknown) => {
+                    InvestigationStatus::OutcomeUnknown
+                }
+                Some(llm::bounded::InvocationOutcome::ResponseReceived) => unreachable!(),
+            };
+            assert_eq!(terminal.summary.status, expected);
+            assert_eq!(terminal.summary.cancel_requested, cancel_outcome.is_some());
             let mut relay = Relay::open(&record);
             let replay = relay.call("cartograph_task_start", json!({"request":request}));
             assert_eq!(
@@ -290,6 +338,9 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
                 )
                 .unwrap()
             );
+            if cancel_outcome.is_some() {
+                assert!(result["result"]["structuredContent"]["result"].is_null());
+            }
             let cancel = relay.call("cartograph_task_cancel", json!({"task_id":id}));
             assert_eq!(
                 cancel["result"]["structuredContent"],
@@ -338,7 +389,10 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
             foreign_relay.close();
             activation.disable().await.unwrap();
             assert!(!record.exists());
-            assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+            assert_eq!(
+                provider.calls.load(Ordering::SeqCst),
+                if cancel_outcome.is_some() { 1 } else { 3 }
+            );
         });
     });
 }
