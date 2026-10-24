@@ -25,6 +25,8 @@ pub use definitions::{
 };
 #[cfg(test)]
 mod definition_tests;
+mod workspace;
+pub use workspace::validation_workspace_bytes;
 
 /// An observed guarded local exit, with explicitly incomplete interpretation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

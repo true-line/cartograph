@@ -1120,6 +1120,8 @@ mod tests {
     }
 }
 
+mod workspace;
+pub use workspace::fact_match_workspace_bytes;
 #[cfg(test)]
 mod v2_tests;
 #[cfg(test)]

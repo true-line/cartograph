@@ -533,3 +533,68 @@ fn local_definition_depth_payload_and_admitted_use_boundaries_hold() {
         .push("gap:definition-order".into());
     self_reference.validate().unwrap();
 }
+
+fn strings_and_values(value: &serde_json::Value) -> (usize, usize) {
+    match value {
+        serde_json::Value::String(text) => (text.len(), 1),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(strings_and_values)
+            .fold((0, 1), |(bytes, count), (b, c)| (bytes + b, count + c)),
+        serde_json::Value::Object(values) => {
+            values.iter().fold((0, 1), |(bytes, count), (k, v)| {
+                let (b, c) = strings_and_values(v);
+                (bytes + k.len() + b, count + c)
+            })
+        }
+        _ => (0, 1),
+    }
+}
+
+#[test]
+fn rule_validation_workspace_covers_real_decode_and_wire_refusal() {
+    // AC-0327: typed rule owners are sized by the admitted wire, including a
+    // preflight refusal, and unrepresentable totals refuse.
+    let rule = fixture();
+    let value = serde_json::to_value(&rule).unwrap();
+    let wire = serde_json::to_vec(&value).unwrap().len();
+    let (strings, values) = strings_and_values(&value);
+    let definitions = rule.local_definitions.as_deref().unwrap();
+    let typed = std::mem::size_of_val(&rule)
+        + std::mem::size_of_val(rule.conditions.as_slice())
+        + std::mem::size_of_val(rule.dependencies.as_slice())
+        + std::mem::size_of_val(rule.redactions.as_slice())
+        + std::mem::size_of_val(definitions)
+        + definitions
+            .iter()
+            .map(|d| {
+                std::mem::size_of_val(d.uses.as_slice())
+                    + std::mem::size_of_val(d.dependencies.as_slice())
+                    + std::mem::size_of_val(d.expression.nodes.as_slice())
+            })
+            .sum::<usize>();
+    let model = validation_workspace_bytes(wire).unwrap();
+    assert!(strings <= wire && values <= wire);
+    assert!(model >= typed + strings + values * std::mem::size_of::<serde_json::Value>());
+    assert_eq!(
+        GuardedExitEvidence::from_value(value.clone()).unwrap(),
+        rule
+    );
+
+    // A wide untrusted payload fills preflight's pending list before the
+    // visit limit refuses it; its wire still sizes that owner.
+    let mut wide = value;
+    let row: serde_json::Value = vec![serde_json::Value::Null; 20].into();
+    wide["untrusted"] = vec![row; 1_000].into();
+    let wire = serde_json::to_vec(&wide).unwrap().len();
+    let model = validation_workspace_bytes(wire).unwrap();
+    assert!(model >= 21_001 * std::mem::size_of::<(&serde_json::Value, usize)>());
+    assert!(matches!(
+        GuardedExitEvidence::from_value(wide),
+        Err(RuleValidationError::Limit(_))
+    ));
+
+    assert!(validation_workspace_bytes(wire + 1).unwrap() > model);
+    assert!(validation_workspace_bytes(usize::MAX).is_none());
+    assert!(validation_workspace_bytes(usize::MAX / 2).is_none());
+}

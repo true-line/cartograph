@@ -18,7 +18,7 @@ pub const MAX_RULE_PAYLOAD_BYTES: usize = 64 * 1024;
 
 const MAX_TEXT_BYTES: usize = 8 * 1024;
 const MAX_ID_BYTES: usize = 4096;
-const MAX_USES: usize = 256;
+pub(super) const MAX_USES: usize = 256;
 
 /// An initializer as written, not a substituted value or execution predicate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

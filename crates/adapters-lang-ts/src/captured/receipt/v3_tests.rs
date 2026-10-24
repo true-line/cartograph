@@ -287,3 +287,72 @@ fn expansion_preflight_is_exact_for_the_ranges_validate_measures() {
         None
     );
 }
+
+fn string_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(text) => text.len(),
+        serde_json::Value::Array(values) => values.iter().map(string_bytes).sum(),
+        serde_json::Value::Object(values) => values
+            .iter()
+            .map(|(key, value)| key.len() + string_bytes(value))
+            .sum(),
+        _ => 0,
+    }
+}
+
+#[test]
+fn fact_match_workspace_covers_real_match_and_rejected_inventories() {
+    // AC-0327: one model covers a real rule fact's key, digest and inventory
+    // owners, including a corrupt rule and provenance past the range cap.
+    let (node, receipt) = captured_rule_receipt();
+    assert!(receipt.matches_node(&node));
+    let wire = serde_json::to_vec(&node).unwrap().len();
+    // The digest re-encodes the same values, so its body is the fact wire.
+    let encoded = serde_json::to_vec(&canonical(serde_json::to_value(&node).unwrap()));
+    assert_eq!(encoded.unwrap().len(), wire);
+    let provenance: Provenance = serde_json::from_value(node.props["prov"].clone()).unwrap();
+    let rule = GuardedExitEvidence::from_value(node.props["rule"].clone()).unwrap();
+    let owners = std::mem::size_of::<FactKey>()
+        + node.id.len()
+        + std::mem::size_of::<Provenance>()
+        + std::mem::size_of_val(provenance.evidence.as_slice())
+        + string_bytes(&node.props["prov"])
+        + std::mem::size_of_val(receipt.ranges())
+        + std::mem::size_of_val(&rule)
+        + std::mem::size_of_val(rule.conditions.as_slice())
+        + string_bytes(&node.props["rule"]);
+    let model = fact_match_workspace_bytes(wire).unwrap();
+    assert!(model >= owners + wire);
+    assert!(model >= core_graph::rules::validation_workspace_bytes(wire).unwrap());
+
+    let mut corrupt = node.clone();
+    corrupt.props["rule"]["owner_id"] = "".into();
+    assert!(!receipt.matches_node(&corrupt));
+    assert!(GuardedExitEvidence::from_value(corrupt.props["rule"].clone()).is_err());
+    assert!(matches!(
+        inventory(&corrupt.props, receipt.content.schema_version),
+        Err(CapturedError::Invalid(_))
+    ));
+    assert!(fact_match_workspace_bytes(serde_json::to_vec(&corrupt).unwrap().len()).is_some());
+
+    // Provenance past the range cap decodes in full before the refusal.
+    let mut large = node.clone();
+    let evidence = large.props["prov"]["evidence"][0].clone();
+    large.props["prov"]["evidence"] = vec![evidence; MAX_RECEIPT_RANGES + 1].into();
+    assert!(matches!(
+        inventory(&large.props, receipt.content.schema_version),
+        Err(CapturedError::Limit(_))
+    ));
+    assert!(!receipt.matches_node(&large));
+    let wire = serde_json::to_vec(&large).unwrap().len();
+    let decoded = (MAX_RECEIPT_RANGES + 1) * std::mem::size_of::<EvidenceRef>()
+        + string_bytes(&large.props["prov"])
+        + MAX_RECEIPT_RANGES * std::mem::size_of::<(RangeRole, u32, EvidenceRef)>();
+    assert!(fact_match_workspace_bytes(wire).unwrap() >= decoded + wire);
+
+    assert!(
+        fact_match_workspace_bytes(wire + 1).unwrap() > fact_match_workspace_bytes(wire).unwrap()
+    );
+    assert!(fact_match_workspace_bytes(usize::MAX).is_none());
+    assert!(fact_match_workspace_bytes(usize::MAX / 4).is_none());
+}
