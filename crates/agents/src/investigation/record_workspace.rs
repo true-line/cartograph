@@ -12,7 +12,7 @@ pub fn record_decode_scratch_bytes() -> Option<usize> {
     scratch(MAX_RECORD_BYTES, RECORD_MAX_DEPTH)
 }
 
-fn scratch(bytes: usize, depth: usize) -> Option<usize> {
+pub(super) fn scratch(bytes: usize, depth: usize) -> Option<usize> {
     let objects = depth.checked_add(1)?;
     let keys = objects
         .checked_mul(strict::MAX_OBJECT_KEYS)?

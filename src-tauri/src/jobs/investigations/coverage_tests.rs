@@ -478,3 +478,46 @@ fn coverage_archive_first_input_transition_is_atomic_and_history_bound() {
         Err(InvestigationStoreError::Invalid)
     );
 }
+
+// AC-0327: exercise actual optional schema validation and durable archive load.
+#[cfg(unix)]
+#[test]
+fn coverage_archive_workspace_covers_optional_layout_and_restore() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = JobStore::open(directory.path().join("state.db")).unwrap();
+    let id = start(&mut store, "workspace");
+    let original = archive(4096, 2);
+    let tx = store.conn.unchecked_transaction().unwrap();
+    read_reservations::initialize(&tx).unwrap();
+    admission_journal::initialize(&tx).unwrap();
+    coverage::insert(&tx, &id, &original).unwrap();
+    assert_eq!(coverage::load(&tx, &id).unwrap(), Some(original.clone()));
+    let rows = tx
+        .prepare("SELECT name,type,sql FROM sqlite_schema WHERE name GLOB 'investigation_*'")
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let actual = std::mem::size_of_val(&rows)
+        + rows
+            .iter()
+            .map(|(n, k, s)| {
+                std::mem::size_of::<(String, String, String)>() + n.len() + k.len() + s.len()
+            })
+            .sum::<usize>();
+    assert!(storage::archive_schema_workspace().unwrap() >= actual * 2);
+    let wire = serde_json::to_vec(&original).unwrap();
+    let (_, decode) = InvestigationCoverageArchive::decode_workspace_bytes().unwrap();
+    let (caller, authentication) = next_prompt_record_workspace(MAX_RECORD_BYTES).unwrap();
+    let bound = coverage::archive_acquisition_workspace().unwrap();
+    assert!(bound >= caller + decode + wire.len());
+    assert!(bound >= caller + authentication);
+    assert!(bound >= caller * 2 + next_prompt_contract_workspace().unwrap());
+}

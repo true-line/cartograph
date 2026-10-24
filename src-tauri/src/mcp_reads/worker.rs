@@ -379,7 +379,7 @@ pub(crate) fn required_reservation(limits: WorkerLimits) -> Option<usize> {
     }
 }
 
-/// Preparation/provider component floors only. Caller input, store replay and
+/// Preparation/provider/archive component floors only. Caller input, other store replay and
 /// later reads still need composition before public task activation is enabled.
 #[cfg(unix)]
 pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
@@ -402,6 +402,7 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
         preparation
             .max(provider)
             .max(validation)
+            .max(crate::jobs::investigations::archive_acquisition_workspace()?)
             .checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?,
     )
 }
