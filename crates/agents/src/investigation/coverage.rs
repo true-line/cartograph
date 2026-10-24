@@ -282,6 +282,31 @@ mod tests {
         )
     }
 
+    // AC-0327: actual archive serialization and sequential original validation.
+    #[test]
+    fn archive_validation_workspace_covers_real_retained_inventory() {
+        let (archive, _) = fixture_with_inventory_padding(8192);
+        archive.validate().unwrap();
+        let wire = bounded_bytes(&archive, MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES).unwrap();
+        let bound = super::super::coverage_archive_validation_workspace().unwrap();
+        assert!(bound >= wire.len());
+        assert!(
+            bound
+                >= context_hub::logical::coverage_batch_validation_workspace(
+                    context_hub::logical::count(archive.proof()).unwrap(),
+                    archive.inventories[0].record.inventory_json.len(),
+                    archive.proof.qualification.repos.len(),
+                )
+                .unwrap()
+        );
+        let mut stale = archive;
+        stale.inventories[0].record.ingest_id.push_str(":changed");
+        assert!(matches!(
+            stale.validate(),
+            Err(InvestigationError::InvalidInput)
+        ));
+    }
+
     // AC-0239: progressive detail binds the retained preparation-time identity,
     // not a current graph lookup; exact UTF-8 response bytes include its envelope.
     #[test]
