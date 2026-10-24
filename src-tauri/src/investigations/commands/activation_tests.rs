@@ -520,6 +520,7 @@ fn mcp_coordinator_legacy_retry_precedes_provider_and_checks_grant() {
 // AC-0325/0327: connection revocation cannot refund a still-running provider call.
 #[test]
 fn mcp_completion_retains_reservation_until_detached_worker_exits() {
+    use crate::mcp_reads::task_reservation::TaskReservations;
     use mcp_local::work_budget::{WorkBudget, WorkLimits};
     let provider = Arc::new(PublicProvider::new(false));
     worker::with_public_start_fixture(provider.clone(), false, |app, request, _| {
@@ -540,7 +541,8 @@ fn mcp_completion_retains_reservation_until_detached_worker_exits() {
             })
         };
         let rejected_budget = new_budget();
-        let rejected_permit = Arc::new(rejected_budget.try_acquire(one, 0).unwrap());
+        let rejected_permit =
+            TaskReservations::from(Arc::new(rejected_budget.try_acquire(one, 0).unwrap()));
         rejected_budget.revoke();
         let profiles = provider.profiles.load(Ordering::SeqCst);
         let limits = crate::mcp_reads::worker::tests::limits().scope;
@@ -550,7 +552,7 @@ fn mcp_completion_retains_reservation_until_detached_worker_exits() {
             Instant::now(),
             Some(&session),
             Some(limits),
-            Some(rejected_permit.clone()),
+            Some(&rejected_permit),
         )
         .unwrap_err();
         assert!(matches!(
@@ -572,7 +574,38 @@ fn mcp_completion_retains_reservation_until_detached_worker_exits() {
         assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
         let budget = new_budget();
-        let permit = Arc::new(budget.try_acquire(one, 0).unwrap());
+        let permit = TaskReservations::from(Arc::new(budget.try_acquire(one, 0).unwrap()));
+        // Full detached slots refuse before durable task or provider admission.
+        let first = permit.try_acquire().unwrap();
+        let second = permit.try_acquire().unwrap();
+        let error = completion_start::start_access(
+            request.clone(),
+            app.clone(),
+            Instant::now(),
+            Some(&session),
+            Some(limits),
+            Some(&permit),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            InvestigationStartError::Rejected {
+                code: "limit_exceeded",
+                ..
+            }
+        ));
+        assert!(
+            state
+                .jobs
+                .lock()
+                .unwrap()
+                .existing_investigation_completion_access(&request, Some(&session))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        drop((first, second));
         let (release, gate) = std::sync::mpsc::channel();
         *provider.pause.lock().unwrap() = Some(gate);
         let started = completion_start::start_access(
@@ -581,7 +614,7 @@ fn mcp_completion_retains_reservation_until_detached_worker_exits() {
             Instant::now(),
             Some(&session),
             Some(limits),
-            Some(permit.clone()),
+            Some(&permit),
         )
         .unwrap();
         wait(|| provider.entered.load(Ordering::SeqCst).then_some(()));
@@ -596,7 +629,7 @@ fn mcp_completion_retains_reservation_until_detached_worker_exits() {
             Instant::now(),
             Some(&session),
             Some(limits),
-            Some(rejected_permit),
+            Some(&rejected_permit),
         )
         .unwrap();
         assert_eq!(replay.investigation_id, started.investigation_id);

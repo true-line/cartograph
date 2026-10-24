@@ -71,7 +71,7 @@ impl InvestigationRuntime {
 
     pub(super) fn insert(&self, id: &str) -> Result<Arc<LiveTask>, HostError> {
         let mut live = self.live.lock().map_err(|_| HostError::Operational)?;
-        if live.contains_key(id) || live.len() >= 2 {
+        if live.contains_key(id) || live.len() >= crate::jobs::investigations::MAX_LIVE_TASKS {
             return Err(HostError::Operational);
         }
         let task = Arc::new(LiveTask::default());

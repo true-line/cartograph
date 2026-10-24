@@ -59,7 +59,7 @@ pub(super) fn start_access<R: tauri::Runtime>(
     started: Instant,
     session: Option<&McpTaskSession>,
     scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
-    reservation: Option<std::sync::Arc<mcp_local::work_budget::WorkPermit>>,
+    reservations: Option<&crate::mcp_reads::task_reservation::TaskReservations>,
 ) -> Result<InvestigationSummary, InvestigationStartError> {
     let policy = InvestigationPolicy::for_profile(&request.limit_profile)
         .ok_or_else(|| rejected("invalid_input", "Unknown investigation policy."))?;
@@ -84,11 +84,10 @@ pub(super) fn start_access<R: tauri::Runtime>(
     }
     // A retry above needs no new execution reservation. New work must retain
     // the host's already-admitted permit through preparation and worker exit.
-    if let Some(permit) = reservation.as_ref() {
-        permit
-            .check_active()
-            .map_err(|error| rejected("limit_exceeded", error))?;
-    }
+    let reservation = reservations
+        .map(|reservations| reservations.try_acquire())
+        .transpose()
+        .map_err(|error| rejected("limit_exceeded", error))?;
     let specialist: SpecialistId =
         serde_json::from_value(serde_json::Value::String(request.specialist_id.clone()))
             .map_err(|error| rejected("invalid_input", error))?;

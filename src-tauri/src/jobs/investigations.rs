@@ -91,7 +91,7 @@ fn with_task_access<T>(
 
 pub(crate) const KIND_PREFIX: &str = "investigation-v1:";
 const MAX_TASKS: usize = 128;
-const MAX_LIVE_TASKS: usize = 2;
+pub(crate) const MAX_LIVE_TASKS: usize = 2;
 const TASK_CAPACITY: usize = 2 * 1024 * 1024;
 const TERMINAL_RESERVE: usize = 256 * 1024;
 const STORE_CAPACITY: usize = 256 * 1024 * 1024;
