@@ -346,3 +346,66 @@ fn retained_inventory_batch_requires_exact_recorded_set() {
         .unwrap();
     empty.validate_inventories(&[]).unwrap();
 }
+
+// AC-0327: semantic validation temporaries are separate from borrowed inputs
+// and decoder ownership, including bodies rejected after parse/derive.
+#[test]
+fn coverage_batch_workspace_covers_identity_and_rejected_inventory() {
+    use crate::logical::{count, coverage_batch_validation_workspace};
+    let (mut proof, mut stored) = fixture();
+    stored.record.ingest_id = "job:\"\\界".into();
+    proof.basis[0].ingest_id = stored.record.ingest_id.clone();
+    let hints = vec!["quoted\"\\\t界".repeat(8), "server".into()];
+    let mut body: Value = serde_json::from_str(&stored.record.inventory_json).unwrap();
+    body["layer_hints"] = json!(hints);
+    stored.record.inventory_json = body.to_string();
+    stored.inventory_hash = stored.record.inventory_hash();
+    proof.qualification.repos[0].layer_hints = Some(normalized(hints));
+    proof.qualification.repos[0].inventory_hash = Some(stored.inventory_hash.clone());
+    proof.basis[0].inventory_hash = stored.inventory_hash.clone();
+    reseal(&mut proof);
+    proof
+        .validate_inventories(std::slice::from_ref(&stored))
+        .unwrap();
+    let proof_bytes = count(&proof).unwrap();
+    let bound =
+        coverage_batch_validation_workspace(proof_bytes, stored.record.inventory_json.len(), 1)
+            .unwrap();
+    let identity = QualificationIdentity {
+        contract: &proof.qualification.contract,
+        exhaustive: proof.qualification.exhaustive,
+        repos: &proof.qualification.repos,
+        basis: &proof.basis,
+    };
+    let wire = serde_json::to_vec(&(
+        "coverage-context-v1",
+        serde_json::to_value(identity).unwrap(),
+    ))
+    .unwrap();
+    let (commit, hints, _) =
+        derive(&stored.record.repo_key, &stored.record.inventory_json).unwrap();
+    assert!(bound >= wire.len() + proof.qualification.coverage_id.len());
+    assert!(
+        bound
+            >= stored.record.inventory_json.len()
+                + commit.len()
+                + hints.iter().map(String::len).sum::<usize>()
+    );
+
+    // Valid JSON/hash/basis, but a late producer error after copying commit and
+    // hints. Do not mistake an early hash rejection for exercising this path.
+    body["producers"] = json!([{"state":"invalid"}]);
+    stored.record.inventory_json = body.to_string();
+    stored.inventory_hash = stored.record.inventory_hash();
+    proof.qualification.repos[0].inventory_hash = Some(stored.inventory_hash.clone());
+    proof.basis[0].inventory_hash = stored.inventory_hash.clone();
+    reseal(&mut proof);
+    proof.validate().unwrap();
+    assert!(matches!(
+        proof.validate_inventories(&[stored]),
+        Err(ContextError::InvalidCoverage(_))
+    ));
+    assert!(coverage_batch_validation_workspace(usize::MAX, 0, 0).is_none());
+    assert!(coverage_batch_validation_workspace(0, usize::MAX, 0).is_none());
+    assert!(coverage_batch_validation_workspace(0, 0, usize::MAX).is_none());
+}

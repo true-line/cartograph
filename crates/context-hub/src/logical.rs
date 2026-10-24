@@ -15,6 +15,9 @@ use std::{
     mem::size_of,
 };
 
+mod coverage_validation;
+pub use coverage_validation::coverage_batch_validation_workspace;
+
 mod query;
 pub use query::{QueryWorkspace, query_workspace};
 
