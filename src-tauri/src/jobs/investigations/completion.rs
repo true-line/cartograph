@@ -645,12 +645,16 @@ pub(super) fn attempts(
                 if step.input_ledger_hash != before.fingerprint_with_policy(policy)? {
                     return Err(InvestigationStoreError::Invalid);
                 }
-                InvestigationTurnBasis {
+                let basis = InvestigationTurnBasis {
                     input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
-                    previous_ledger: Some(before.clone()),
+                    previous_ledger: Some(before),
                     completed_tool: Some(expected_tool),
-                }
-                .validate_with_policy(&ledger, policy)?;
+                };
+                basis.validate_with_policy(&ledger, policy)?;
+                let before = basis
+                    .previous_ledger
+                    .as_ref()
+                    .ok_or(InvestigationStoreError::Invalid)?;
                 match &entry.record.outcome {
                     AttemptOutcome::SourceAcquired { citation_id } => {
                         if ledger
