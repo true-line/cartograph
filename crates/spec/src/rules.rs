@@ -268,28 +268,46 @@ struct Observation<'a> {
     assertions: Vec<Assertion<'a>>,
 }
 
-fn relationships<'a>(
-    node: &Node,
-    edges: &[&'a Edge],
-    visible: &BTreeMap<&str, &Node>,
-) -> Vec<&'a Edge> {
-    let mut relationships: Vec<_> = edges
-        .iter()
-        .copied()
-        .filter(|edge| {
-            edge.src == node.id
-                && PARTITION_EDGE_LABELS.contains(&edge.label.as_str())
+/// Each selected rule's partition relationships to visible nodes, sorted by
+/// label then target, indexed once so rendering every rule is not a scan of
+/// every edge per rule. Ties keep edge order, as the stable per-rule sort did.
+/// Only the selected rules are keys, so edges from other sources are never
+/// retained and an inventory without rules allocates nothing.
+struct Relationships<'a>(BTreeMap<&'a str, Vec<&'a Edge>>);
+
+impl<'a> Relationships<'a> {
+    fn new(edges: &[&'a Edge], visible: &BTreeMap<&str, &Node>, rules: &[&'a Node]) -> Self {
+        let mut by_source: BTreeMap<&'a str, Vec<&'a Edge>> = rules
+            .iter()
+            .map(|rule| (rule.id.as_str(), Vec::new()))
+            .collect();
+        if by_source.is_empty() {
+            return Self(by_source);
+        }
+        for edge in edges.iter().copied().filter(|edge| {
+            PARTITION_EDGE_LABELS.contains(&edge.label.as_str())
                 && visible.contains_key(edge.dst.as_str())
-        })
-        .collect();
-    relationships.sort_by(|left, right| (&left.label, &left.dst).cmp(&(&right.label, &right.dst)));
-    relationships
+        }) {
+            if let Some(relationships) = by_source.get_mut(edge.src.as_str()) {
+                relationships.push(edge);
+            }
+        }
+        for relationships in by_source.values_mut() {
+            relationships
+                .sort_by(|left, right| (&left.label, &left.dst).cmp(&(&right.label, &right.dst)));
+        }
+        Self(by_source)
+    }
+
+    fn of(&self, node: &Node) -> &[&'a Edge] {
+        self.0.get(node.id.as_str()).map_or(&[], Vec::as_slice)
+    }
 }
 
 fn render_observation(
     output: &mut impl fmt::Write,
     observation: &Observation<'_>,
-    edges: &[&Edge],
+    relations: &Relationships<'_>,
     visible: &BTreeMap<&str, &Node>,
 ) -> fmt::Result {
     let node = observation.node;
@@ -389,7 +407,7 @@ fn render_observation(
         )?;
     }
     output.write_str("\n### Visible graph relationships\n\n| Relation | Target | Tier | Confidence |\n|---|---|---|---|\n")?;
-    let relationships = relationships(node, edges, visible);
+    let relationships = relations.of(node);
     if relationships.is_empty() {
         output.write_str("| — | No relationships available in this export | — | — |\n")?;
     }
@@ -535,8 +553,7 @@ impl Serialize for AssertionSequence<'_, '_> {
 
 fn observations<'a>(
     rules: &[&'a Node],
-    edges: &[&'a Edge],
-    visible: &BTreeMap<&str, &Node>,
+    relations: &Relationships<'a>,
     include_provenance: bool,
 ) -> Vec<Observation<'a>> {
     let mut asserted_edges = BTreeSet::new();
@@ -561,7 +578,7 @@ fn observations<'a>(
                     .flatten(),
             }];
             if parsed.is_some() {
-                for edge in relationships(node, edges, visible) {
+                for edge in relations.of(node) {
                     // Keep the existing native concatenated-identity deduplication,
                     // including its legacy collision behavior. Keys are linear
                     // in the admitted edge input, not rendered output expansion.
@@ -737,7 +754,8 @@ pub(crate) fn inventory_selected_roots(
         .filter(|node| roots.is_none_or(|roots| roots.contains(&node.id)))
         .collect();
     rules.sort_by(|left, right| left.id.cmp(&right.id));
-    let observations = observations(&rules, edges, &visible, selection.markdown);
+    let relations = Relationships::new(edges, &visible, &rules);
+    let observations = observations(&rules, &relations, selection.markdown);
     let assertion_count: usize = observations
         .iter()
         .map(|observation| observation.assertions.len())
@@ -761,7 +779,7 @@ pub(crate) fn inventory_selected_roots(
                     &observations,
                     &files,
                     assertion_count,
-                    edges,
+                    &relations,
                     &visible,
                 )?;
                 markdown_bytes = counter.bytes;
@@ -790,7 +808,7 @@ pub(crate) fn inventory_selected_roots(
             &observations,
             &files,
             assertion_count,
-            edges,
+            &relations,
             &visible,
         )
         .expect("admitted rule Markdown");
@@ -829,7 +847,7 @@ fn render_markdown(
     observations: &[Observation<'_>],
     files: &FileGroups<'_, '_>,
     assertion_count: usize,
-    edges: &[&Edge],
+    relations: &Relationships<'_>,
     visible: &BTreeMap<&str, &Node>,
 ) -> fmt::Result {
     #[cfg(test)]
@@ -840,7 +858,7 @@ fn render_markdown(
     }
     if observations.len() <= RULE_EVIDENCE_FLAT_LIMIT {
         for observation in observations {
-            render_observation(output, observation, edges, visible)?;
+            render_observation(output, observation, relations, visible)?;
         }
         append_rule_assertions(
             output,
@@ -900,7 +918,7 @@ fn render_markdown(
                         line_start: true,
                     },
                     observation,
-                    edges,
+                    relations,
                     visible,
                 )?;
                 representatives.extend(&observation.assertions);
@@ -988,9 +1006,10 @@ pub(crate) fn logical_workspace_bytes(bytes: usize, rows: usize, values: usize) 
         slots::<core_graph::omission::Omission>(rows)?,
         set_slots::<String>(rows)?,
         bytes,
-        rows.checked_mul(2)?,  // deduplicated asserted edge IDs
-        bytes,                 // current concatenated edge ID before set clone/insertion
-        slots::<&Edge>(rows)?, // one rule's relationships, borrowed
+        rows.checked_mul(2)?,                 // deduplicated asserted edge IDs
+        bytes, // current concatenated edge ID before set clone/insertion
+        map_slots::<&str, Vec<&Edge>>(rows)?, // relationship index, one entry per rule
+        slots::<&Edge>(rows)?, // indexed relationships, borrowed
         map_slots::<Option<(&str, &str)>, Vec<&Observation<'_>>>(rows)?,
         slots::<(Option<(&str, &str)>, Vec<&Observation<'_>>)>(rows)?,
         slots::<&Observation<'_>>(rows)?,
@@ -1141,6 +1160,49 @@ mod tests {
             label: label.into(),
             props: json!({"name": id, "prov": provenance}),
         }
+    }
+
+    #[test]
+    fn relationships_index_keeps_visible_partition_edges_in_label_target_order() {
+        let (t, c) = (Tier::Deterministic, ConfidenceTier::Confirmed);
+        let nodes = [
+            node("rule:a", "BusinessRule", t, c),
+            node("fn:x", "Function", t, c),
+            node("fn:y", "Function", t, c),
+        ];
+        let visible: BTreeMap<_, _> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        let edges = [
+            edge("rule:a", "fn:y", "GOVERNS", t, c),
+            edge("rule:a", "fn:hidden", "GOVERNS", t, c),
+            edge("rule:a", "fn:x", "CALLS", t, c),
+            edge("rule:a", "fn:x", "GOVERNS", t, c),
+            edge("rule:a", "fn:y", "DEPENDS_ON", t, c),
+            edge("fn:x", "fn:y", "DEPENDS_ON", t, c),
+        ];
+        let edges: Vec<&Edge> = edges.iter().collect();
+        let rules = [visible["rule:a"], visible["fn:x"]];
+        let relations = Relationships::new(&edges, &visible, &rules);
+        let of = |id: &str| -> Vec<(String, String)> {
+            relations
+                .of(visible[id])
+                .iter()
+                .map(|e| (e.label.clone(), e.dst.clone()))
+                .collect()
+        };
+        let pair = |l: &str, d: &str| (l.to_owned(), d.to_owned());
+        assert_eq!(
+            of("rule:a"),
+            [
+                pair("DEPENDS_ON", "fn:y"),
+                pair("GOVERNS", "fn:x"),
+                pair("GOVERNS", "fn:y"),
+            ]
+        );
+        assert_eq!(of("fn:x"), [pair("DEPENDS_ON", "fn:y")]);
+        assert!(of("fn:y").is_empty());
+        let only_rule = Relationships::new(&edges, &visible, &[visible["rule:a"]]);
+        assert!(only_rule.of(visible["fn:x"]).is_empty());
+        assert!(Relationships::new(&edges, &visible, &[]).0.is_empty());
     }
 
     fn rule_node(id: &str, tier: Tier, confidence: ConfidenceTier) -> Node {
