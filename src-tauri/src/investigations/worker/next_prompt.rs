@@ -215,11 +215,10 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             policy,
         )?;
         let action = input.action(format!("{}:step-1", self.id))?;
-        let mut transport = CompletionLimits::default().values();
-        transport.max_output_tokens = policy.limits().generated_tokens_per_invocation;
-        transport.max_spans =
-            u32::try_from(policy.limits().evidence_items).map_err(|_| HostError::InvalidInput)?;
-        let limits = CompletionLimits::new(transport).map_err(provider_failure)?;
+        let limits = CompletionLimits::new(
+            super::super::provider_workspace::completion_limit_values(policy)?,
+        )
+        .map_err(provider_failure)?;
         let prepared = firewall(self.state)?
             .prepare_bounded(provider, &action, &limits)
             .map_err(provider_failure)?;

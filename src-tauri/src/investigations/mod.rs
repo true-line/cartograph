@@ -11,6 +11,7 @@ pub(crate) mod finding_review_commands;
 mod history;
 pub(crate) mod inspection;
 pub(crate) mod mcp_dispatch;
+pub(crate) mod provider_workspace;
 mod recovery;
 mod runtime;
 mod worker;

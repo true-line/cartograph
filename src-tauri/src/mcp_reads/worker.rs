@@ -94,7 +94,7 @@ impl Worker {
                 .as_ref()
                 .is_some_and(|session| session.with_grant(|_, _| ()).is_ok())
                 && limits.reserved_bytes.get()
-                    < task_preparation_minimum(limits).ok_or(ReadError::Limit)?
+                    < task_phase_minimum(limits).ok_or(ReadError::Limit)?
             {
                 return Err(ReadError::Limit);
             }
@@ -373,17 +373,23 @@ pub(crate) fn required_reservation(limits: WorkerLimits) -> Option<usize> {
     }
 }
 
-/// Enforced preparation floor only. Store replay, later reads and provider
-/// phases still need composition before public task activation can be enabled.
+/// Preparation/provider component floors only. Caller input, store replay and
+/// later reads still need composition before public task activation is enabled.
 #[cfg(unix)]
-pub(crate) fn task_preparation_minimum(limits: WorkerLimits) -> Option<usize> {
-    let (_, preparation) = crate::investigations::preparation_workspace::workspace_bytes(
+pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
+    let (context, preparation) = crate::investigations::preparation_workspace::workspace_bytes(
         limits.scope,
         agents::investigation::MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
         limits.max_request_frame_bytes.get(),
     )?;
-    required_reservation(limits)?
-        .checked_add(preparation.checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?)
+    let provider = context.checked_add(crate::investigations::provider_workspace::payload_peak(
+        &agents::investigation::INVESTIGATION_V2_POLICY,
+    )?)?;
+    required_reservation(limits)?.checked_add(
+        preparation
+            .max(provider)
+            .checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?,
+    )
 }
 
 struct RequestCounter {
@@ -475,7 +481,7 @@ pub(crate) mod tests {
         #[cfg(unix)]
         let limits = {
             let mut limits = limits;
-            limits.reserved_bytes = nz(task_preparation_minimum(limits).unwrap());
+            limits.reserved_bytes = nz(task_phase_minimum(limits).unwrap());
             limits
         };
         limits
