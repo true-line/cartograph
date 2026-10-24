@@ -627,3 +627,32 @@ fn mcp_nonce_completion_factory_replays_without_provider_or_new_capacity() {
         created.detail
     );
 }
+
+// AC-0327: direct loading enforces metadata byte bounds without schema preflight.
+#[test]
+fn next_prompt_base_load_rejects_namespace_byte_overflow_without_schema_preflight() {
+    let f = fixture();
+    let id = &f.task.detail.summary.investigation_id;
+    for invalid in [
+        "x".repeat(31),
+        "é".repeat(32),
+        "x".repeat(MAX_RECORD_BYTES + 1),
+    ] {
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        tx.execute(
+            "UPDATE investigation_meta SET namespace=?1 WHERE singleton=1",
+            [&invalid],
+        )
+        .unwrap();
+        assert!(matches!(
+            load_next_prompt_task_base(&tx, id),
+            Err(InvestigationStoreError::Invalid)
+        ));
+        tx.rollback().unwrap();
+    }
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    assert_eq!(
+        load_next_prompt_task_base(&tx, id).unwrap().detail,
+        f.task.detail
+    );
+}

@@ -932,11 +932,12 @@ fn load_task_base_contract(
     } else {
         validate_task(&task)?;
     }
-    let namespace: String = connection.query_row(
-        "SELECT namespace FROM investigation_meta WHERE singleton=1",
+    let namespace: Option<String> = connection.query_row(
+        "SELECT CASE WHEN typeof(namespace)='text' AND length(CAST(namespace AS BLOB))=32 THEN namespace END FROM investigation_meta WHERE singleton=1",
         [],
         |r| r.get(0),
     )?;
+    let namespace = namespace.ok_or(InvestigationStoreError::Invalid)?;
     if task.detail.origin.request_namespace() != request_namespace
         || task.detail.summary.investigation_id != id
         || signed(task.detail.summary.revision)? != revision
