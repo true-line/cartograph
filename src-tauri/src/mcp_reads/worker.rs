@@ -90,7 +90,9 @@ impl Worker {
         #[cfg(unix)]
         {
             validate_reservation(limits)?;
-            if tasks.is_some()
+            if tasks
+                .as_ref()
+                .is_some_and(|session| session.with_grant(|_, _| ()).is_ok())
                 && limits.reserved_bytes.get()
                     < task_preparation_minimum(limits).ok_or(ReadError::Limit)?
             {
