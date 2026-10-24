@@ -391,10 +391,17 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
     let provider = context.checked_add(crate::investigations::provider_workspace::payload_peak(
         &agents::investigation::INVESTIGATION_V2_POLICY,
     )?)?;
+    let (_, decode) = crate::jobs::investigations::next_prompt_record_workspace(
+        agents::investigation::MAX_RECORD_BYTES,
+    )?;
+    // Keep the row/decode owners through pure validation conservatively; do
+    // not rely on later row-lifetime optimizations in the parent branch.
+    let validation =
+        decode.checked_add(crate::jobs::investigations::next_prompt_contract_workspace()?)?;
     required_reservation(limits)?.checked_add(
         preparation
             .max(provider)
-            .max(crate::jobs::investigations::next_prompt_contract_workspace()?)
+            .max(validation)
             .checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?,
     )
 }
