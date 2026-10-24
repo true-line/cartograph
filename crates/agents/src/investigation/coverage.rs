@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 /// Separate archive bound; these bodies are not eagerly included in prompts.
 pub const MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES: usize = 16 * 1024 * 1024;
+const ARCHIVE_DEPTH: usize = 32;
+const ARCHIVE_VALUES: usize = 262144;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,8 +116,8 @@ impl InvestigationCoverageArchive {
         super::strict::preflight(
             body,
             MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
-            32,
-            262144,
+            ARCHIVE_DEPTH,
+            ARCHIVE_VALUES,
             context_hub::coverage::MAX_COVERAGE_REPOS,
         )?;
         let archive: Self =
@@ -132,6 +134,35 @@ impl InvestigationCoverageArchive {
         }
         archive.validate()?;
         Ok(archive)
+    }
+
+    /// Logical (retained archive, decode peak), excluding the borrowed wire,
+    /// SQL/schema owners, caller task, capacity slack and allocator/native RSS.
+    /// Shape admission precedes typed decode; semantic field limits do not.
+    pub fn decode_workspace_bytes() -> Option<(usize, usize)> {
+        use context_hub::coverage::{CoverageBasis, MAX_COVERAGE_REPOS, RepoQualification};
+        use context_hub::logical::{slots, sum};
+        let bytes = MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES;
+        let retained = sum(&[
+            slots::<Self>(1)?,
+            bytes, // aggregate decoded string payload cannot exceed admitted JSON
+            slots::<StoredCoverage>(MAX_COVERAGE_REPOS)?,
+            slots::<CoverageBasis>(MAX_COVERAGE_REPOS)?,
+            slots::<RepoQualification>(MAX_COVERAGE_REPOS)?,
+            // compared/layer_hints vectors can be populated before validation.
+            // Charge every admitted value as a String slot, including malformed
+            // input; per-repo semantic limits are not yet established.
+            slots::<String>(ARCHIVE_VALUES)?,
+        ])?;
+        // decode retains canonical bytes and both comparison Values while
+        // validate runs. The scratch helper includes parser escape storage too;
+        // summing validation is deliberately conservative for that overlap.
+        let peak = sum(&[
+            retained,
+            super::record_workspace::scratch(bytes, ARCHIVE_DEPTH)?,
+            super::coverage_archive_validation_workspace()?,
+        ])?;
+        Some((retained, peak))
     }
 
     /// Reconcile saved acquisition metadata with this archive, never live data.
@@ -334,6 +365,31 @@ mod tests {
         let detail = archive.read(&request).unwrap();
         let encoded = serde_json::to_string(&archive).unwrap();
         let restored = InvestigationCoverageArchive::decode(&encoded).unwrap();
+        let (archive_owner, decode_peak) =
+            InvestigationCoverageArchive::decode_workspace_bytes().unwrap();
+        let actual_slots = std::mem::size_of::<InvestigationCoverageArchive>()
+            + archive.inventories.len() * std::mem::size_of::<StoredCoverage>()
+            + archive.proof.basis.len()
+                * std::mem::size_of::<context_hub::coverage::CoverageBasis>()
+            + archive.proof.qualification.repos.len()
+                * std::mem::size_of::<context_hub::coverage::RepoQualification>()
+            + archive
+                .proof
+                .qualification
+                .repos
+                .iter()
+                .map(|repo| {
+                    (repo.compared.len() + repo.layer_hints.as_ref().map_or(0, Vec::len))
+                        * std::mem::size_of::<String>()
+                })
+                .sum::<usize>();
+        // Wire length is used only as a conservative payload charge; DTO and
+        // nested vector element owners are counted separately above.
+        assert!(archive_owner >= actual_slots + encoded.len());
+        assert!(
+            decode_peak
+                >= archive_owner + super::super::coverage_archive_validation_workspace().unwrap()
+        );
         assert_eq!(restored.read(&request).unwrap(), detail);
         request.max_bytes = serde_json::to_vec(&detail).unwrap().len();
         assert_eq!(restored.read(&request).unwrap(), detail);

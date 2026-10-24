@@ -13,7 +13,7 @@ const OWNED: &str = "name GLOB 'investigation_admission_*' OR (tbl_name GLOB 'in
 const MAX_ENTRY_BYTES: usize = 64 * 1024;
 const ROW_ALLOWANCE: usize = 256;
 
-fn schema() -> Vec<String> {
+pub(super) fn schema() -> Vec<String> {
     let mut sql = vec!["CREATE TABLE investigation_admission_refusals (task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 64), step_id TEXT NOT NULL, invocation_ordinal INTEGER NOT NULL CHECK(invocation_ordinal BETWEEN 1 AND 64), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence), UNIQUE(task_id,step_id), UNIQUE(task_id,invocation_ordinal)) STRICT".into()];
     for verb in ["UPDATE", "DELETE"] {
         sql.push(format!("CREATE TRIGGER investigation_admission_refusals_no_{} BEFORE {verb} ON investigation_admission_refusals BEGIN SELECT RAISE(ABORT, 'immutable admission refusal'); END",verb.to_lowercase()));

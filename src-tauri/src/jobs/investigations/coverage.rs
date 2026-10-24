@@ -197,6 +197,32 @@ fn load_with_cancellation_reserve(
     .transpose()
 }
 
+/// Qualified load_for_task ownership: borrowed caller task remains live while
+/// a saved witness authenticates cancellation, then releases before archive
+/// acquisition. Other nested task replay remains outside this component.
+#[cfg(unix)]
+pub(crate) fn archive_acquisition_workspace() -> Option<usize> {
+    use context_hub::logical::{slots, sum};
+    let (_, decode) = InvestigationCoverageArchive::decode_workspace_bytes()?;
+    let body = sum(&[
+        TASK_CAPACITY.min(MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES),
+        slots::<Vec<u8>>(1)?,
+        128, // stored and recomputed integrity hashes
+        slots::<String>(2)?,
+        decode,
+        // Store canonical comparison follows decoder validation, retaining its
+        // archive. Including this buffer with decode is conservative.
+        MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
+        slots::<Vec<u8>>(1)?,
+    ])?;
+    let (task, task_decode) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
+    let authenticate = task_decode.max(task.checked_add(next_prompt_contract_workspace()?)?);
+    task.checked_add(
+        body.max(storage::archive_schema_workspace()?)
+            .max(authenticate),
+    )
+}
+
 fn require_transaction(
     connection: &Connection,
     task_id: &str,

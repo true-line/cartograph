@@ -196,6 +196,42 @@ pub(super) fn validate(
     validate_metadata(connection, namespace, 3)
 }
 
+/// Logical owners in version3 schema validation, including both optional
+/// namespaces. Trusted DDL construction is bounded independently of stored SQL.
+#[cfg(unix)]
+pub(super) fn archive_schema_workspace() -> Option<usize> {
+    use context_hub::logical::{slots, sum};
+    let base = schema();
+    let reads = super::read_reservations::schema();
+    let admission = super::admission_journal::schema();
+    if base
+        .iter()
+        .chain(&reads)
+        .any(|(name, kind, sql)| name.len() > 128 || kind.len() > 16 || sql.len() > 4096)
+        || admission.iter().any(|sql| sql.len() > 4096)
+    {
+        return None;
+    }
+    let rows = base
+        .len()
+        .checked_add(reads.len())?
+        .checked_add(admission.len())?;
+    let layout = sum(&[
+        rows.checked_mul(128 + 16 + 4096)?,
+        slots::<(String, String, String)>(rows)?,
+        slots::<Vec<(String, String, String)>>(1)?,
+    ])?;
+    // Parent expected layout remains live during optional namespace checks.
+    // Charge parent + optional expected + actual (or returned clone), using
+    // the full inventory for each. Sorting needs at most one element array.
+    sum(&[
+        layout.checked_mul(3)?,
+        slots::<(String, String, String)>(rows)?,
+        4096, // one fixed SQL format buffer; no untrusted interpolation
+        slots::<String>(1)?,
+    ])
+}
+
 /// Validate the complete extended SQL layout before archive helpers use it.
 /// Namespace/owner checks remain the caller's existing JobStore admission.
 pub(super) fn validate_archive_schema(
