@@ -197,6 +197,12 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
                 assert!(std::time::Instant::now() < deadline);
                 std::thread::sleep(Duration::from_millis(10));
             }
+            let pending = relay.call("cartograph_task_result", json!({"task_id":id}));
+            assert_eq!(pending["result"]["isError"], false);
+            assert_eq!(
+                pending["result"]["structuredContent"],
+                json!({"result":null})
+            );
             relay.close();
             assert!(!observed_budget.is_idle().unwrap());
             assert!(
@@ -241,7 +247,7 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
             );
             let result = relay.call("cartograph_task_result", json!({"task_id":id}));
             assert_eq!(
-                result["result"]["structuredContent"],
+                result["result"]["structuredContent"]["result"],
                 serde_json::to_value(
                     state
                         .jobs

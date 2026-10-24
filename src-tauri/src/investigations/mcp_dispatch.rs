@@ -97,7 +97,13 @@ impl TaskDispatcher {
                     .map_err(|_| ReadError::Storage)?
                     .investigation_result_access(&task_id, Some(&self.session))
                     .map_err(|_| ReadError::InvalidRequest)?;
-                response(id, &result, cap)
+                // MCP structuredContent remains an object even before a saved
+                // result exists; pending and ready use the same envelope.
+                #[derive(Serialize)]
+                struct ResultReply<'a, T> {
+                    result: &'a Option<T>,
+                }
+                response(id, &ResultReply { result: &result }, cap)
             }
             TaskArguments::Cancel { task_id } => {
                 let detail = state

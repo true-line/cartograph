@@ -760,7 +760,7 @@ fn mcp_adapter_runs_all_task_operations_and_preserves_principal_replay() {
         let saved = state.jobs.lock().unwrap().investigation_result(id).unwrap();
         assert!(saved.is_some());
         assert_eq!(
-            result["result"]["structuredContent"],
+            result["result"]["structuredContent"]["result"],
             serde_json::to_value(&saved).unwrap()
         );
         let cancelled = call(&dispatcher, TaskTool::Cancel, json!({"task_id":id})).unwrap();
