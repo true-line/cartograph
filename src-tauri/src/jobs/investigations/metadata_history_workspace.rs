@@ -1,0 +1,113 @@
+//! SavedMetadataHistory load/metadata_at owners, not SavedCallCore or RSS.
+use super::*;
+use agents::investigation::{staged_attempt::AttemptRecord, staged_finish::FeedbackEntry};
+use context_hub::logical::{json_bytes, map, set, slots, sum};
+use std::mem::size_of;
+
+/// Retained history, additional metadata projection, and complete load/project
+/// peak including its borrowed task owner. Schema preflight is caller-owned.
+#[cfg(unix)]
+pub(crate) fn next_prompt_metadata_workspace() -> Option<(usize, usize, usize)> {
+    let policy = &INVESTIGATION_V2_POLICY;
+    let calls = usize::try_from(policy.limits().model_invocations).ok()?;
+    let attempts = policy.max_completed_attempts();
+    // Closed union of invocation/refusal rows. Every dynamic element consumes
+    // an admitted JSON value; strings fit the row wire. No allocating defaults.
+    // Refusals are not semantically validated by raw_refusals: use record caps,
+    // not the smaller valid-feedback/assessment limits, even for rejected rows.
+    let element = [
+        size_of::<String>(),
+        size_of::<AttemptRecord>(),
+        size_of::<ObligationObservation>(),
+        size_of::<FeedbackEntry>(),
+        size_of::<DisclosedInvestigationFact>(),
+        size_of::<DisclosedInvestigationQuery>(),
+        size_of::<DisclosedInvestigationSource>(),
+        size_of::<DisclosedInvestigationCoverageDetail>(),
+    ]
+    .into_iter()
+    .max()?;
+    let row = sum(&[
+        size_of::<PendingInvestigationStep>().max(size_of::<staged::JournalEntry>()),
+        MAX_RECORD_BYTES,
+        element.checked_mul(RECORD_MAX_VALUES)?,
+    ])?;
+    let decoder = record_decode_scratch_bytes()?
+        .max(json_bytes(MAX_RECORD_BYTES)?.checked_mul(RECORD_MAX_DEPTH.checked_add(1)?)?);
+    let acquire = sum(&[
+        row,
+        decoder,
+        MAX_RECORD_BYTES,
+        64,
+        slots::<Vec<u8>>(1)?,
+        slots::<String>(2)?,
+        4096, // fixed body-read SQL and hash/key owners
+    ])?;
+    let steps = sum(&[
+        slots::<Vec<(u32, PendingInvestigationStep)>>(1)?,
+        row.checked_mul(calls)?,
+        slots::<(u32, PendingInvestigationStep)>(calls)?,
+    ])?;
+    let index = sum(&[map::<String, u32>(calls)?, calls.checked_mul(128)?])?;
+    let entries = sum(&[
+        slots::<Vec<completion::AttemptEntry>>(1)?,
+        slots::<completion::AttemptEntry>(attempts)?,
+        attempts.checked_mul(MAX_RECORD_BYTES)?,
+        slots::<Vec<staged::JournalEntry>>(1)?,
+        row.checked_mul(2)?,
+    ])?;
+    let (archive, _) = InvestigationCoverageArchive::decode_workspace_bytes()?;
+    let history = sum(&[
+        steps,
+        index,
+        entries,
+        archive,
+        size_of::<completion::SavedMetadataHistory<'_>>(),
+    ])?;
+    // The SQL sweep admits count and 128-byte keys before collecting. The
+    // owning key iterator and accumulated steps overlap each next row decode.
+    // Stable sort may allocate another element array. Admission validation
+    // borrows scalar fields; validate_step uses bounded sequential encodings.
+    let sweep = sum(&[
+        slots::<Vec<String>>(1)?,
+        slots::<String>(calls)?,
+        calls.checked_mul(128)?,
+        slots::<(u32, PendingInvestigationStep)>(calls)?,
+        acquire.max(MAX_INVOCATION_BYTES.checked_add(MAX_DISCLOSURE_BYTES)?),
+    ])?;
+    // metadata_at clones IDs and the last refusal's feedback before validating
+    // it. Reserve a whole untrusted refusal row for that clone, plus output IDs.
+    let metadata = sum(&[
+        size_of::<ProtectedCompletionMetadata>(),
+        row,
+        slots::<String>(attempts)?,
+        attempts.checked_mul(MAX_RECORD_BYTES)?,
+        MAX_RECORD_BYTES, // copied request/obligation IDs from the admitted task
+        slots::<&RefusalRecord>(2)?,
+        slots::<Vec<&RefusalRecord>>(1)?,
+    ])?;
+    let project = sum(&[
+        metadata,
+        next_prompt_contract_workspace()?.max(sum(&[
+            MAX_MANIFEST_BYTES.max(
+                agents::investigation::staged_finish::RefusalFeedback::max_bytes_with_policy(
+                    policy,
+                )
+                .ok()?,
+            ),
+            slots::<Vec<u8>>(1)?,
+            set::<&String>(attempts)?,
+        ])?),
+    ])?;
+    let (task, _) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
+    let peak = sum(&[
+        task,
+        history,
+        sweep
+            .max(next_prompt_attempt_replay_workspace()?)
+            .max(acquire)
+            .max(coverage::archive_acquisition_workspace()?)
+            .max(project),
+    ])?;
+    Some((history, project, peak))
+}

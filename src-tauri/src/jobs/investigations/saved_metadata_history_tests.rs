@@ -2,6 +2,31 @@
 use super::*;
 use completion::FinishFixture;
 
+#[cfg(unix)]
+#[test]
+fn saved_metadata_history_workspace_includes_completion_refusal_feedback() {
+    let mut f = FinishFixture::new(false);
+    f.begin();
+    assert_eq!(f.publish().unwrap().completion.unwrap().refusal_count, 1);
+    f.next();
+    f.begin();
+    let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+    let history = SavedMetadataHistory::load(&tx, &f.base.f.task).unwrap();
+    assert_eq!(history.refusals.len(), 1);
+    let step = &history.steps.last().unwrap().1;
+    let metadata = history.metadata_at(&step.step_id).unwrap();
+    assert_eq!(metadata.refusal_count, 1);
+    assert_eq!(
+        metadata,
+        metadata_at_saved_step(&tx, &f.base.f.task, step).unwrap()
+    );
+    let (retained, project, peak) = next_prompt_metadata_workspace().unwrap();
+    let refusal_bytes = serde_json::to_vec(&history.refusals).unwrap().len();
+    assert!(retained >= refusal_bytes);
+    assert!(project >= serde_json::to_vec(&metadata).unwrap().len());
+    assert!(peak >= retained.checked_add(project).unwrap());
+}
+
 #[test]
 fn saved_metadata_history_matches_standalone_cutoffs_with_one_sweep_per_timeline() {
     let mut f = FinishFixture::new(true);
@@ -12,7 +37,27 @@ fn saved_metadata_history_matches_standalone_cutoffs_with_one_sweep_per_timeline
     let task = &f.base.f.task;
     let history = SavedMetadataHistory::load(&tx, task).unwrap();
     assert_eq!(history.steps.len(), 4);
+    // AC-0327: genuine history keeps all of these owners live during projection.
+    #[cfg(unix)]
+    let projection_bound = {
+        let (retained, project, peak) = next_prompt_metadata_workspace().unwrap();
+        let bytes = serde_json::to_vec(&history.steps).unwrap().len()
+            + serde_json::to_vec(&history.ordinals).unwrap().len()
+            + serde_json::to_vec(&history.attempts).unwrap().len()
+            + serde_json::to_vec(&history.refusals).unwrap().len()
+            + serde_json::to_vec(&history.archive).unwrap().len();
+        assert!(retained >= bytes);
+        assert!(peak >= retained.checked_add(project).unwrap());
+        project
+    };
     for (_, step) in &history.steps {
+        #[cfg(unix)]
+        assert!(
+            projection_bound
+                >= serde_json::to_vec(&history.metadata_at(&step.step_id).unwrap())
+                    .unwrap()
+                    .len()
+        );
         assert_eq!(
             history.metadata_at(&step.step_id).unwrap(),
             metadata_at_saved_step(&tx, task, step).unwrap()
