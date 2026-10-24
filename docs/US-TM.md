@@ -55,7 +55,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0042 | AC-0293..0296 | agents, app, ui | W8b / H4 dependency (#730) | — | — | T-0293..0296 |
 
 | US-0043 | AC-0320..0329 | agents (durable client identity, task attribution, runtime grant primitive, record decoder scratch component, bounded archive comparison and ledger/archive semantic-validation and inventory-preparation DTO workspace), app (shared receipt decode workspace used by evidence reservation, host activation lifecycle, grant-guarded principal-scoped storage reads/cancel and caller-intent-derived start admission and early retry lookup through the existing coordinator, pre-admission and detached completion source-discovery limits with typed cap refusals, detached reservation count and lifetime; transport integration remains planned), ui (owner credential rotation), llm (checked bounded HTTP payload and firewall ownership components; complete worker admission remains planned), context-hub (scope reference selection, checked core/qualified query workspace and coverage batch validation workspace; host preparation/worker composition remain planned), adapters-lang-ts and core-graph (receipt fact-match and rule-validation workspace), mcp-wire (closed task argument envelopes), mcp-local, mcp-relay | H4 | — | ADR-0028, ADR-0044, ADR-0048 | T-0320..0329 |
-| US-0044 | AC-0343 | adapters-lang-python | W10a (#946) | — | — | T-0343 |
+| US-0044 | AC-0343..0344 | adapters-lang-python, spec (`test_arrangements.md`), ui | W10a (#946) | — | — | T-0343..0344 |
 
 ## Coverage assertions
 - Every Must-priority US is anchored to an original milestone, post-M10 work, or a SPEC-01 delivery gate; a milestone label alone does not establish completion.

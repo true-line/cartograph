@@ -32,6 +32,7 @@ const ARTIFACT_CARDS: { file: string; title: string; icon: string }[] = [
   { file: 'flow_dossiers.md', title: 'Flow dossiers', icon: 'account_tree' },
   { file: 'US-TM.md', title: 'US-TM.md', icon: 'table_chart' },
   { file: 'topology.md', title: 'Topology / resource map', icon: 'map' },
+  { file: 'test_arrangements.md', title: 'Test arrangements', icon: 'science' },
   { file: 'gap_register.md', title: 'Gap register', icon: 'report' },
   { file: 'adrs.md', title: 'ADR set + drift', icon: 'gavel' },
 ];

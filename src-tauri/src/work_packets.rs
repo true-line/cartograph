@@ -366,6 +366,7 @@ fn parse_generation(
         "drift-register",
         "security-view",
         "toolchain",
+        "test-arrangements",
         "rule-evidence",
         "rule-evidence-index",
     ];
