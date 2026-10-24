@@ -572,3 +572,43 @@ fn prospective_context_borrows_exact_candidate_and_rejects_changed_basis() {
         ));
     }
 }
+
+// AC-0327: compare the shared DTO model with real host-owned preparation,
+// including an appended candidate rejected after the original ledger validates.
+#[test]
+fn inventory_workspace_covers_host_preparation_and_candidate_refusal() {
+    use context_hub::logical::{count, json_bytes, slots, sum};
+    let fixture = Fixture::new();
+    let mut context = fixture.prepare();
+    let read = fixture.inventory(&context);
+    let wire = count(&context.ledger).unwrap();
+    let model = inventory_preparation_workspace(context.policy, wire).unwrap();
+    let prepared = context.prepare_inventory(read.clone()).unwrap();
+    let actual = sum(&[
+        slots::<InvestigationInputLedger>(2).unwrap(),
+        json_bytes(count(prepared.base_ledger()).unwrap()).unwrap(),
+        json_bytes(count(prepared.ledger()).unwrap()).unwrap(),
+        prepared.raw.len(),
+        slots::<String>(1).unwrap(),
+    ])
+    .unwrap();
+    assert!(model.retained >= actual);
+    assert!(model.peak >= model.retained);
+    assert!(inventory_preparation_workspace(context.policy, usize::MAX).is_none());
+    let remaining = context.policy.limits().tool_actions as usize - context.ledger.queries.len();
+    context.ledger.coverage_reads = vec![
+        InvestigationCoverageReadManifest {
+            request: read.clone(),
+            response_hash: "a".repeat(64),
+            response_bytes: 1,
+        };
+        remaining
+    ];
+    context.ledger.validate_with_policy(context.policy).unwrap();
+    let before = context.ledger.clone();
+    assert!(matches!(
+        context.prepare_inventory(read),
+        Err(HostError::LimitExceeded)
+    ));
+    assert_eq!(context.ledger, before);
+}
