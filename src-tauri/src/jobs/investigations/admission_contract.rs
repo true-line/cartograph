@@ -193,14 +193,17 @@ impl SavedCallBasis {
         if saved != *ledger {
             return Err(InvestigationStoreError::Invalid);
         }
+        drop(saved);
         let archive = coverage::load_for_task(connection, task)?;
         if ledger.coverage.as_ref() != archive.as_ref().map(|archive| archive.proof()) {
             return Err(InvestigationStoreError::Invalid);
         }
+        drop(archive);
         let actual_metadata = completion::metadata_current_next_prompt(connection, task)?;
         if actual_metadata != *metadata {
             return Err(InvestigationStoreError::Invalid);
         }
+        drop(actual_metadata);
         let capacity = admission_journal::derive_current(connection, task)?;
         Self::from_pre_call(task, step, ledger, metadata, &capacity)
     }
@@ -337,10 +340,16 @@ impl SavedCallBasis {
         if state.current_call.as_ref() != Some(self) {
             return Err(InvestigationStoreError::Invalid);
         }
-        let core = load_saved_call_basis_core(connection, task, self)?;
+        let SavedCallCore {
+            step,
+            ledger,
+            metadata,
+            ..
+        } = load_saved_call_basis_core(connection, task, self)?;
+        drop((ledger, metadata));
         let capacity = admission_journal::derive_at(connection, task, &self.step_id)?;
         self.validate_capacity_state(&capacity)?;
-        self.validate_charged_usage(task, &core.step)
+        self.validate_charged_usage(task, &step)
     }
 }
 
@@ -386,6 +395,7 @@ pub(super) fn load_saved_call_basis_core(
     if ledger.coverage.as_ref() != archive.as_ref().map(|archive| archive.proof()) {
         return Err(InvestigationStoreError::Invalid);
     }
+    drop(archive);
     let metadata = completion::metadata_at_saved_step(connection, task, &step)?;
     basis.validate_core(task, &step, &ledger, &metadata)?;
     Ok(SavedCallCore {
