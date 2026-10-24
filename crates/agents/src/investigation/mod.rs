@@ -33,6 +33,7 @@ pub mod staged_finish;
 #[doc(hidden)]
 pub mod staged_refusal;
 mod strict;
+mod task_validation_workspace;
 mod turn;
 mod validation_workspace;
 
@@ -57,6 +58,7 @@ pub use protocol::*;
 pub use record_workspace::record_decode_scratch_bytes;
 pub use records::*;
 pub use specialists::*;
+pub use task_validation_workspace::next_prompt_validation_workspace;
 pub use turn::*;
 pub use validation_workspace::{
     coverage_archive_validation_workspace, ledger_validation_workspace,

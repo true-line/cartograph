@@ -390,6 +390,21 @@ pub(super) fn validate_next_prompt_task(task: &StoredTask) -> Result<(), Investi
     validate_task_contract(task, true)
 }
 
+/// Pure @10 validation only: borrowed task, row decoding and nested durable
+/// replay remain separate owners. Pairing rejects legacy families first.
+#[cfg(unix)]
+pub(crate) fn next_prompt_contract_workspace() -> Option<usize> {
+    let encoding = MAX_RECORD_BYTES
+        .max(MAX_INVOCATION_BYTES)
+        .max(MAX_DISCLOSURE_BYTES)
+        .max(4096);
+    context_hub::logical::sum(&[
+        next_prompt_validation_workspace()?,
+        encoding,
+        context_hub::logical::slots::<Vec<u8>>(1)?,
+    ])
+}
+
 fn validate_task_contract(
     task: &StoredTask,
     allow_next_prompt: bool,

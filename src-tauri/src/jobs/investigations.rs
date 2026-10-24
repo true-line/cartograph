@@ -70,6 +70,8 @@ mod transitions;
 mod turn;
 
 use agents::investigation::{staged_attempt::*, staged_finish::*, staged_refusal::*};
+#[cfg(unix)]
+pub(crate) use storage::next_prompt_contract_workspace;
 use storage::*;
 
 pub(super) use transitions::{attach_execution, cancel_for_job};
