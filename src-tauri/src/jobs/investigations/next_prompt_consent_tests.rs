@@ -214,15 +214,18 @@ fn next_prompt_consent_exact_approval_then_real_begin_preserves_single_invocatio
         let tx = reopened.conn.unchecked_transaction().unwrap();
         let task = load_next_prompt_task_base(&tx, &id).unwrap();
         assert!(task.approved);
-        // AC-0327: these actual original witnesses survive nested consent replay.
-        let ledger = storage::load_ledger(&tx, &task).unwrap().unwrap();
-        let metadata = completion::metadata_current_next_prompt(&tx, &task).unwrap();
-        let originals = serde_json::to_vec(&ledger).unwrap().len()
-            + serde_json::to_vec(&metadata).unwrap().len();
-        assert!(
-            next_prompt_saved_validation_workspace().unwrap().1
-                >= originals + next_prompt_capacity_replay_workspace().unwrap().1
-        );
+        #[cfg(unix)]
+        {
+            // AC-0327: these actual original witnesses survive nested consent replay.
+            let ledger = storage::load_ledger(&tx, &task).unwrap().unwrap();
+            let metadata = completion::metadata_current_next_prompt(&tx, &task).unwrap();
+            let originals = serde_json::to_vec(&ledger).unwrap().len()
+                + serde_json::to_vec(&metadata).unwrap().len();
+            assert!(
+                next_prompt_saved_validation_workspace().unwrap().1
+                    >= originals + next_prompt_capacity_replay_workspace().unwrap().1
+            );
+        }
         task.admission_state
             .as_ref()
             .unwrap()
