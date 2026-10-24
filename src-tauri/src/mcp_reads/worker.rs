@@ -404,7 +404,13 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
             .max(validation)
             .max(crate::jobs::investigations::archive_acquisition_workspace()?)
             .max(crate::jobs::investigations::next_prompt_ledger_workspace()?)
-            .max(crate::jobs::investigations::next_prompt_attempt_acquisition_workspace()?)
+            .max(
+                crate::jobs::investigations::next_prompt_attempt_acquisition_workspace()?
+                    .checked_add(agents::investigation::attempt_binding_validation_workspace(
+                        &agents::investigation::INVESTIGATION_V2_POLICY,
+                        agents::investigation::MAX_RECORD_BYTES,
+                    )?)?,
+            )
             .checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?,
     )
 }

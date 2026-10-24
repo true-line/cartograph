@@ -61,7 +61,8 @@ pub use specialists::*;
 pub use task_validation_workspace::next_prompt_validation_workspace;
 pub use turn::*;
 pub use validation_workspace::{
-    coverage_archive_validation_workspace, ledger_validation_workspace,
+    attempt_binding_validation_workspace, coverage_archive_validation_workspace,
+    ledger_validation_workspace,
 };
 
 #[cfg(test)]

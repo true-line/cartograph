@@ -44,7 +44,7 @@ fn definition_workspace(role: SpecialistId) -> Option<usize> {
     ])
 }
 
-fn envelope_workspace(policy: &InvestigationPolicy) -> Option<usize> {
+pub(super) fn envelope_workspace(policy: &InvestigationPolicy) -> Option<usize> {
     let n = policy.max_completion_obligations();
     let bytes = policy.envelope_bytes();
     // Normalization admits raw bytes before map construction or cloning. Two
