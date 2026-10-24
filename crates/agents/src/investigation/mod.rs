@@ -12,6 +12,7 @@ mod disclosure;
 mod finding_review;
 mod input;
 mod inspection;
+mod inventory_workspace;
 mod mcp_client_id;
 mod mcp_grant;
 // Separate completion families preserve every legacy generation and identity.
@@ -42,6 +43,7 @@ pub use disclosure::*;
 pub use finding_review::*;
 pub use input::*;
 pub use inspection::*;
+pub use inventory_workspace::{InventoryPreparationWorkspace, inventory_preparation_workspace};
 pub use mcp_client_id::McpClientId;
 pub use mcp_grant::{McpGrantSnapshot, McpGrantUnavailable, McpTaskActivation, McpTaskSession};
 pub use obligations::*;

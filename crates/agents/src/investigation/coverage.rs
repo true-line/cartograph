@@ -187,6 +187,25 @@ impl InvestigationCoverageArchive {
         Ok(())
     }
 
+    /// Logical (retained detail, peak) for read(), excluding the borrowed
+    /// archive/request. Successful lookup bounds identities before cloning;
+    /// the body can fit while the later serialized envelope is refused.
+    pub fn read_workspace_bytes() -> Option<(usize, usize)> {
+        use context_hub::logical::{slots, sum};
+        let retained = sum(&[
+            slots::<InvestigationCoverageDetail>(1)?,
+            "context-v2:".len().checked_add(64)?,
+            context_hub::coverage::MAX_COVERAGE_IDENTITY_BYTES,
+            64,
+            MAX_QUERY_BYTES,
+        ])?;
+        let encoding = sum(&[retained, MAX_QUERY_BYTES, slots::<Vec<u8>>(1)?])?;
+        Some((
+            retained,
+            encoding.max(super::coverage_archive_validation_workspace()?),
+        ))
+    }
+
     /// The response envelope consumes the caller's budget along with the body.
     pub fn read(
         &self,
@@ -318,6 +337,15 @@ mod tests {
         assert_eq!(restored.read(&request).unwrap(), detail);
         request.max_bytes = serde_json::to_vec(&detail).unwrap().len();
         assert_eq!(restored.read(&request).unwrap(), detail);
+        let (retained, peak) = InvestigationCoverageArchive::read_workspace_bytes().unwrap();
+        let actual = std::mem::size_of::<InvestigationCoverageDetail>()
+            + detail.context_id.len()
+            + detail.repo.len()
+            + detail.inventory_hash.len()
+            + detail.inventory_json.len();
+        assert!(retained >= actual);
+        assert!(peak >= retained + request.max_bytes);
+        assert!(detail.inventory_json.len() < request.max_bytes - 1);
         request.max_bytes -= 1;
         assert_eq!(
             restored.read(&request),
