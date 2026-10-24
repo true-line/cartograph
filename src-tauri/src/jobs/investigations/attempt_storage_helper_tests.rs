@@ -80,6 +80,30 @@ fn exact_step_attempt_helper_preserves_committed_ids_bytes_and_caller_rollback()
             let entries = attempts(&tx, &task).unwrap();
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].record.step_id, step);
+            #[cfg(unix)]
+            {
+                // AC-0327: replay retains the attempt set while restoring the
+                // real archive, even though the one-byte inventory read refuses.
+                use crate::jobs::investigations::coverage;
+                let archive = coverage::load_for_task(&tx, &task).unwrap().unwrap();
+                let peak = next_prompt_attempt_replay_workspace().unwrap();
+                let (retained, _) = InvestigationCoverageArchive::decode_workspace_bytes().unwrap();
+                let (_, read_peak) = InvestigationCoverageArchive::read_workspace_bytes().unwrap();
+                assert!(
+                    peak >= next_prompt_attempt_acquisition_workspace().unwrap()
+                        + coverage::archive_acquisition_workspace().unwrap()
+                        + retained
+                        + read_peak
+                );
+                assert!(retained >= serde_json::to_vec(&archive).unwrap().len());
+                let schema_bytes: i64 = tx.query_row(
+                    "SELECT sum(length(CAST(sql AS BLOB))) FROM sqlite_schema WHERE name GLOB 'completion_*'",
+                    [], |row| row.get(0),
+                ).unwrap();
+                assert!(
+                    attempt_schema_workspace().unwrap() >= usize::try_from(schema_bytes).unwrap()
+                );
+            }
             let bytes = attempt_bytes(&tx, &fixture.id);
             assert_eq!(bytes.1, core_prov::content_hash(&bytes.0));
             let record = entries[0].record.clone();

@@ -436,6 +436,20 @@ const ATTEMPT_SCHEMA: &[&str] = &[
     "CREATE TRIGGER completion_attempts_no_update BEFORE UPDATE ON completion_attempts BEGIN SELECT RAISE(ABORT,'immutable completion attempt'); END",
     "CREATE TRIGGER completion_attempts_no_delete BEFORE DELETE ON completion_attempts BEGIN SELECT RAISE(ABORT,'immutable completion attempt'); END",
 ];
+#[cfg(unix)]
+pub(super) fn attempt_schema_workspace() -> Option<usize> {
+    use context_hub::logical::{slots, sum};
+    // validate_schema_version checks count and SQL byte length before collecting
+    // the actual Strings. Expected schema entries are borrowed static text.
+    if ATTEMPT_SCHEMA.iter().any(|sql| sql.len() > 4096) {
+        return None;
+    }
+    sum(&[
+        ATTEMPT_SCHEMA.len().checked_mul(4096)?,
+        slots::<String>(ATTEMPT_SCHEMA.len())?,
+        slots::<Vec<String>>(1)?,
+    ])
+}
 pub(super) fn initialize(tx: &Transaction<'_>) -> Result<(), InvestigationStoreError> {
     let count: i64 = tx.query_row(
         "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'completion_*'",

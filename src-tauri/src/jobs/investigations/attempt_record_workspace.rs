@@ -1,7 +1,52 @@
-//! Acquisition owners in completion::attempts, not its semantic replay or RSS.
+//! Acquisition and replay owners in completion::attempts; not outer task replay or RSS.
 use super::*;
 use context_hub::logical::{json_bytes, slots, sum};
 use std::mem::size_of;
+
+/// Caller/record acquisition stays live throughout every sequential replay
+/// phase. Saved-call metadata and outer result/task owners remain separate.
+#[cfg(unix)]
+pub(crate) fn next_prompt_attempt_replay_workspace() -> Option<usize> {
+    let policy = &INVESTIGATION_V2_POLICY;
+    // Binding validation admits the whole AttemptRecord before read_action_hash
+    // builds its smaller action Value. All action fields come from that record.
+    let action = sum(&[
+        json_bytes(MAX_RECORD_BYTES)?,
+        MAX_ACTION_BYTES,
+        slots::<Vec<u8>>(1)?,
+        64,
+        slots::<String>(1)?,
+    ])?;
+    let step = sum(&[MAX_INVOCATION_BYTES, slots::<Vec<u8>>(1)?])?;
+    // Turn validation only borrows/computes indexes after sequential ledger
+    // validation; acquisition already retains current and previous ledgers.
+    let turn = sum(&[
+        ledger_validation_workspace(policy, MAX_RECORD_BYTES)?,
+        size_of::<InvestigationTurnBasis>(),
+        64,
+    ])?;
+    let (archive, _) = InvestigationCoverageArchive::decode_workspace_bytes()?;
+    let (_, read) = InvestigationCoverageArchive::read_workspace_bytes()?;
+    let unavailable = sum(&[
+        super::coverage::archive_acquisition_workspace()?,
+        archive,
+        read,
+        size_of::<InvestigationCoverageRead>(),
+        MAX_RECORD_BYTES, // three request strings cloned from the admitted record
+    ])?;
+    next_prompt_attempt_acquisition_workspace()?.checked_add(
+        next_prompt_contract_workspace()?
+            .max(completion::attempt_schema_workspace()?)
+            .max(attempt_binding_validation_workspace(
+                policy,
+                MAX_RECORD_BYTES,
+            )?)
+            .max(action)
+            .max(step)
+            .max(turn)
+            .max(unavailable),
+    )
+}
 
 pub(crate) fn next_prompt_attempt_acquisition_workspace() -> Option<usize> {
     // Closed DTO union: only the invocation disclosure has dynamic containers.
