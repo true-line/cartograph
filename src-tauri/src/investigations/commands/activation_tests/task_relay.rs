@@ -175,6 +175,7 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>) 
             max_cumulative_read_bytes: 1_000_000,
         });
         let observed_budget = budget.clone();
+        let (worker_exits, worker_exit) = mpsc::channel();
         let endpoint = tempfile::tempdir().unwrap();
         let handle = app.clone();
         tauri::async_runtime::block_on(async {
@@ -188,13 +189,14 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>) 
                     session_lifetime: Duration::from_secs(60),
                 },
                 move || {
-                    let (app, session, budget) = (
+                    let (app, session, budget, worker_exits) = (
                         handle.clone(),
                         session.lock().unwrap().clone(),
                         budget.clone(),
+                        worker_exits.clone(),
                     );
                     async move {
-                        Worker::start_with_tasks(
+                        let mut worker = Worker::start_with_tasks(
                             app,
                             "task-relay".into(),
                             spec::ExportMode::VerifiedOnly,
@@ -203,7 +205,9 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>) 
                             Some(session),
                         )
                         .await
-                        .map_err(|_| ServeError::Application)
+                        .map_err(|_| ServeError::Application)?;
+                        worker_exits.send(worker.test_exit.take().unwrap()).unwrap();
+                        Ok(worker)
                     }
                 },
             )
@@ -263,6 +267,12 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>) 
                 assert!(!observed_budget.is_idle().unwrap());
             }
             relay.close();
+            // The connection worker has exited; the held task must retain the permit.
+            let exit = worker_exit.recv_timeout(Duration::from_secs(10)).unwrap();
+            tokio::time::timeout(Duration::from_secs(10), exit)
+                .await
+                .unwrap()
+                .unwrap();
             assert!(!observed_budget.is_idle().unwrap());
             assert!(
                 state
