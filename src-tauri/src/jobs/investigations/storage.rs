@@ -930,6 +930,8 @@ fn load_task_base_contract(
         return Err(InvestigationStoreError::Invalid);
     };
     let task: StoredTask = decode(&bytes, &hash)?;
+    // Canonical decode owns the task; its row buffers need not overlap validation.
+    drop((bytes, hash));
     if next_prompt {
         validate_next_prompt_task(&task)?;
     } else {
@@ -952,6 +954,8 @@ fn load_task_base_contract(
     {
         return Err(InvestigationStoreError::Invalid);
     }
+    // All scalar mirrors have been checked before entering nested saved reads.
+    drop((nonce, conversation, request_namespace, namespace));
     if next_prompt {
         if task.pending_source_read.is_some() {
             source_validation::validate_saved_pending(connection, &task)?;
