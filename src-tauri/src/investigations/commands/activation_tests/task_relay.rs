@@ -130,9 +130,27 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
             .investigations
             .set_test_provider(request.provider_mode, provider.clone());
         let one = std::num::NonZeroUsize::new(1).unwrap();
-        let client = state.jobs.lock().unwrap().create_mcp_client(one).unwrap();
+        let two_clients = std::num::NonZeroUsize::new(2).unwrap();
+        let owner_task = state
+            .jobs
+            .lock()
+            .unwrap()
+            .investigation_history(None, None)
+            .unwrap()
+            .items[0]
+            .investigation_id
+            .clone();
+        let client = state
+            .jobs
+            .lock()
+            .unwrap()
+            .create_mcp_client(two_clients)
+            .unwrap();
         let grant = McpTaskActivation::granted(client, one);
-        let session = grant.session();
+        // Only the host fixture changes the authenticated principal between
+        // connections; neither the relay nor an RPC argument supplies it.
+        let principal = Arc::new(std::sync::Mutex::new(grant.session()));
+        let session = principal.clone();
         let limits = crate::mcp_reads::worker::tests::limits();
         let budget = WorkBudget::new(WorkLimits {
             max_workers: one,
@@ -153,7 +171,11 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
                     session_lifetime: Duration::from_secs(60),
                 },
                 move || {
-                    let (app, session, budget) = (handle.clone(), session.clone(), budget.clone());
+                    let (app, session, budget) = (
+                        handle.clone(),
+                        session.lock().unwrap().clone(),
+                        budget.clone(),
+                    );
                     async move {
                         Worker::start_with_tasks(
                             app,
@@ -267,6 +289,43 @@ fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
             let denied = relay.call("cartograph_task_status", json!({"task_id":id}));
             assert_eq!(denied["result"]["isError"], true);
             relay.close();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !observed_budget.is_idle().unwrap() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let foreign = state
+                .jobs
+                .lock()
+                .unwrap()
+                .create_mcp_client(two_clients)
+                .unwrap();
+            let foreign_grant = McpTaskActivation::granted(foreign, one);
+            *principal.lock().unwrap() = foreign_grant.session();
+            let mut foreign_relay = Relay::open(&record);
+            for name in [
+                "cartograph_task_status",
+                "cartograph_task_events",
+                "cartograph_task_result",
+                "cartograph_task_cancel",
+            ] {
+                let mut refusal = None;
+                for hidden_id in [&id, &owner_task, &"missing-task".to_owned()] {
+                    let args = if name == "cartograph_task_events" {
+                        json!({"task_id":hidden_id,"after":0})
+                    } else {
+                        json!({"task_id":hidden_id})
+                    };
+                    let denied = foreign_relay.call(name, args);
+                    assert_eq!(denied["result"]["isError"], true);
+                    if let Some(expected) = &refusal {
+                        assert_eq!(&denied["result"], expected);
+                    }
+                    refusal = Some(denied["result"].clone());
+                }
+            }
+            assert_eq!(detail(app, &id), terminal);
+            foreign_relay.close();
             activation.disable().await.unwrap();
             assert!(!record.exists());
             assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
