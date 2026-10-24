@@ -237,6 +237,76 @@ fn import_targets_carry_provenance_and_only_proven_externals_confirm() {
     assert_eq!(boundary("mod:orders.models"), ("unresolved".into(), Gap));
 }
 
+#[test]
+fn absolute_imports_resolve_to_files_from_the_repository_root() {
+    // AC-0207 (#721): an absolute import names the recovered module or
+    // package file from the root; an ambiguous or absent target stays `mod:`.
+    let dir = tempfile::tempdir().unwrap();
+    for path in [
+        "app/__init__.py",
+        "app/db.py",
+        "tasks/clean.py",
+        "dup.py",
+        "dup/__init__.py",
+        "src/orders/__init__.py",
+        "plain.py",
+        "plain/sub.py",
+        "deep/__init__.py",
+        "deep/mid.py",
+        "deep/mid/leaf.py",
+        "pkg.py",
+        "pkg/__init__.py",
+        "pkg/mod.py",
+    ] {
+        let file = dir.path().join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "").unwrap();
+    }
+    std::fs::write(
+        dir.path().join("main.py"),
+        "import app\nfrom app.db import Session\nimport tasks.clean\nimport dup\nimport orders.models\nimport requests\nimport plain.sub\nimport deep.mid.leaf\nimport pkg.mod\n",
+    )
+    .unwrap();
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let imports = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "IMPORTS" && edge.src.ends_with("@main.py"))
+        .map(|edge| {
+            (
+                edge.props["specifier"].as_str().unwrap().to_string(),
+                edge.dst.clone(),
+                edge.props
+                    .get("resolution")
+                    .and_then(|r| r.as_str())
+                    .map(str::to_string),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let file = |path: &str| format!("file:{}@{path}", id().repo);
+    let proven = Some("directory-proven".to_string());
+    assert_eq!(
+        imports,
+        BTreeSet::from([
+            ("app".into(), file("app/__init__.py"), proven.clone()),
+            ("app.db".into(), file("app/db.py"), proven.clone()),
+            ("tasks.clean".into(), file("tasks/clean.py"), proven),
+            ("dup".into(), "mod:dup".into(), None),
+            ("orders.models".into(), "mod:orders.models".into(), None),
+            ("requests".into(), "mod:requests".into(), None),
+            // A plain module shadows the directory: `plain.sub` cannot import.
+            ("plain.sub".into(), "mod:plain.sub".into(), None),
+            ("deep.mid.leaf".into(), "mod:deep.mid.leaf".into(), None),
+            // A package beside a same-named module still proves its children.
+            (
+                "pkg.mod".into(),
+                file("pkg/mod.py"),
+                Some("directory-proven".into())
+            ),
+        ])
+    );
+}
+
 fn endpoint_facts(extraction: &Extraction) -> Vec<(String, String, String, Option<String>)> {
     let mut facts = extraction
         .nodes

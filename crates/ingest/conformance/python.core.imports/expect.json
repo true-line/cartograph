@@ -3,7 +3,7 @@
     {
       "label": "IMPORTS",
       "src": "file:local/p@app.py",
-      "dst": "mod:helpers"
+      "dst": "file:local/p@helpers.py"
     }
   ]
 }

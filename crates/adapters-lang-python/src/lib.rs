@@ -1007,6 +1007,51 @@ fn enclosing_function(mut node: TsNode<'_>, functions: &HashMap<usize, String>) 
     None
 }
 
+/// Point an absolute import at the recovered file it names from the
+/// repository root, the same root `directory-proven` calls resolve against:
+/// `a.b` is `a/b.py` or the package `a/b/__init__.py`. When both exist, or
+/// neither, or a parent is a plain module (`a.py` without `a/__init__.py`,
+/// which Python loads ahead of the directory, so `a.b` cannot import), the
+/// import keeps its `mod:` endpoint for boundary classification.
+fn resolve_absolute_imports(out: &mut Extraction, repo: &str) {
+    let files = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "File")
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+    for edge in out.edges.iter_mut().filter(|edge| edge.label == "IMPORTS") {
+        let Some(module) = edge.dst.strip_prefix("mod:") else {
+            continue;
+        };
+        if module.starts_with('.') {
+            continue;
+        }
+        let Some(module_path) = module_file("", module) else {
+            continue;
+        };
+        let parts = module.split('.').collect::<Vec<_>>();
+        let blocked = (1..parts.len()).any(|end| {
+            let prefix = parts[..end].join("/");
+            files.contains(&file_id(repo, &format!("{prefix}.py")))
+                && !files.contains(&file_id(repo, &format!("{prefix}/__init__.py")))
+        });
+        if blocked {
+            continue;
+        }
+        let package = format!("{}/__init__.py", module_path.trim_end_matches(".py"));
+        let found = [module_path, package]
+            .into_iter()
+            .map(|path| file_id(repo, &path))
+            .filter(|file| files.contains(file))
+            .collect::<Vec<_>>();
+        if let [file] = found.as_slice() {
+            edge.dst = file.clone();
+            edge.props["resolution"] = "directory-proven".into();
+        }
+    }
+}
+
 /// Every name a repository source could answer an absolute import's top
 /// level with: each directory beneath the walk and each module stem
 /// (`.py`/`.pyi`/`.pyx`/`.pxd` sources and built `.so`/`.pyd` extensions),
@@ -1791,6 +1836,7 @@ pub fn extract_dir_incremental_with_progress(
             out.edges.push(edge);
         }
     }
+    resolve_absolute_imports(&mut out, id.repo);
     resolve_routes(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
     alembic::extract(root, id, &mut out)?;
