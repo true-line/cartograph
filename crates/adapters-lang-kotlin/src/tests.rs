@@ -1031,8 +1031,9 @@ class App
 
 // AC-0098 (#721): constructing an imported repository class is not an
 // unresolved call (constructor calls are not modeled, as for a same-file
-// class); an ambiguous class still gaps, a factory function of the same
-// name still resolves, and an undeclared generated member still gaps.
+// class); an ambiguous class, an object's `invoke` call and an undeclared
+// generated member still gap, and a factory function of the same name still
+// resolves.
 #[test]
 fn imported_class_constructor_calls_are_not_unresolved_gaps() {
     let dir = tempfile::tempdir().unwrap();
@@ -1050,9 +1051,15 @@ fn imported_class_constructor_calls_are_not_unresolved_gaps() {
     }
     write(
         dir.path(),
+        "src/main/kotlin/com/demo/model/Factory.kt",
+        "package com.demo.model\n\nobject Factory {\n    operator fun invoke() = 1\n}\n",
+    );
+    write(
+        dir.path(),
         "src/main/kotlin/com/demo/App.kt",
         r#"package com.demo
 
+import com.demo.model.Factory
 import com.demo.model.LoginBody
 import com.demo.model.Session
 import com.demo.model.Twice
@@ -1061,6 +1068,7 @@ fun run() {
     LoginBody("a@b.c")
     Session()
     Twice()
+    Factory()
     LoginBody.serializer()
 }
 "#,
@@ -1075,7 +1083,11 @@ fun run() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         gaps,
-        BTreeSet::from(["Twice".to_string(), "LoginBody.serializer".to_string()])
+        BTreeSet::from([
+            "Twice".to_string(),
+            "Factory".to_string(),
+            "LoginBody.serializer".to_string(),
+        ])
     );
     edge(
         &out.edges,

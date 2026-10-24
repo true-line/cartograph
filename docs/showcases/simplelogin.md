@@ -76,7 +76,7 @@ No route was promoted to `Confirmed` from a receiver it couldn't prove.
 
 Source: `ingest.json`, coverage producers, from the manifest run. Every coverage record cites its repository's commit (gap 6).
 
-The bundle has 29,256 assertions, 7,495 open gap findings in 27 cause classes and 3 security findings (`bundle.json`, `gap_register.md`, `security.md`). The security findings are three over-broad host permissions in the extension manifest: `http://*/*`, `https://*/*` and `https://*.simplelogin.io/*`.
+The bundle has 29,256 assertions, 7,495 open gap findings in 27 cause classes and 3 security findings (`bundle.json`, `gap_register.md`, `security.md`). These totals are from that run. The fixes in gap 8 have since removed 261 of those findings in remeasurements of their own classes (C-10, C-12, C-16), but the bundle has not been regenerated. The security findings are three over-broad host permissions in the extension manifest: `http://*/*`, `https://*/*` and `https://*.simplelogin.io/*`.
 
 ## Gaps, ranked by impact
 

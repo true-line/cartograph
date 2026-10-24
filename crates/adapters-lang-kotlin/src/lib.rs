@@ -84,6 +84,9 @@ struct Declared {
     fqn: String,
     path: String,
     qualified: String,
+    /// A class, whose `Name(...)` is a constructor call. An object's is a
+    /// call to its `invoke` operator.
+    class: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -611,6 +614,7 @@ fn collect_importables(
             fqn: format!("{package}.{qualified}"),
             path: path.to_string(),
             qualified,
+            class: false,
         });
     };
     let mut walk = root.walk();
@@ -811,6 +815,7 @@ pub fn extract_source(
                 fqn: format!("{package}.{qualified}"),
                 path: path.to_string(),
                 qualified,
+                class: decl.kind() == "class_declaration",
             });
         }
     }
@@ -895,6 +900,7 @@ pub fn extract_source(
                 fqn: format!("{package}.{name}"),
                 path: path.to_string(),
                 qualified: name.clone(),
+                class: false,
             });
         }
         functions.push((function, symbol));
@@ -1374,10 +1380,10 @@ pub fn extract_dir_incremental_with_progress(
         // `Foo(...)` on an imported repository class is a constructor call,
         // which this adapter does not model as a call (as for a same-file
         // class), not an unresolved function. A factory function of the same
-        // name still resolves below.
+        // name still resolves below, and an object's `invoke` still gaps.
         if pending.member.is_none()
             && !functions_by_fqn.contains_key(&pending.fqn)
-            && matches!(types_by_fqn.get(&pending.fqn), Some(Some(_)))
+            && matches!(types_by_fqn.get(&pending.fqn), Some(Some(unique)) if unique.class)
         {
             continue;
         }
