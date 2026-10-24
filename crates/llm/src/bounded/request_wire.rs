@@ -78,5 +78,46 @@ pub(super) fn anthropic<'a>(
     }
 }
 
+#[derive(Serialize)]
+struct ResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct OpenAiCompatible<'a> {
+    max_tokens: u32,
+    messages: [Message<'a>; 2],
+    model: &'a str,
+    response_format: ResponseFormat,
+    stream: bool,
+}
+
+pub(super) fn openai_compatible<'a>(
+    model: &'a str,
+    system: &'a str,
+    user: &'a str,
+    max_tokens: u32,
+) -> impl Serialize + 'a {
+    OpenAiCompatible {
+        max_tokens,
+        messages: [
+            Message {
+                content: system,
+                role: "system",
+            },
+            Message {
+                content: user,
+                role: "user",
+            },
+        ],
+        model,
+        response_format: ResponseFormat {
+            kind: "json_object",
+        },
+        stream: false,
+    }
+}
+
 #[cfg(test)]
 mod tests;

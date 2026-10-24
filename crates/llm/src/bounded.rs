@@ -751,6 +751,25 @@ pub(super) fn ollama_profile(
     Ok(profile)
 }
 
+pub(super) fn openai_compatible_profile(
+    id: &str,
+    base: &reqwest::Url,
+    model: &str,
+) -> Result<ProviderProfile, BoundedCallError> {
+    let endpoint = base
+        .join("v1/chat/completions")
+        .map_err(|_| not_sent(FailureCode::InvalidProfile))?;
+    let profile = ProviderProfile {
+        protocol_version: PROTOCOL_VERSION.into(),
+        provider_id: id.into(),
+        locality: Locality::Local,
+        endpoint_id: endpoint.to_string(),
+        requested_model: model.into(),
+    };
+    profile.validate()?;
+    Ok(profile)
+}
+
 fn check_control(control: &CompletionControl<'_>, sent: bool) -> Result<(), BoundedCallError> {
     let code = match (control.check)() {
         CallDirective::Cancelled => Some(FailureCode::Cancelled),
@@ -1012,6 +1031,77 @@ pub(super) fn complete_ollama(
         response.message.content,
         response.model,
         None,
+        usage,
+        request,
+        request_bytes,
+        bytes.len(),
+    )
+}
+
+pub(super) fn complete_openai_compatible(
+    client: &Client,
+    profile: &ProviderProfile,
+    request: &AuthorizedBoundedCompletion,
+    control: &CompletionControl<'_>,
+) -> Result<BoundedCompletion, BoundedCallError> {
+    check_request(profile, request, control)?;
+    let user = user_message(request)?;
+    let body = encode(
+        &request_wire::openai_compatible(
+            &profile.requested_model,
+            &request.payload().system,
+            &user,
+            request.limits().0.max_output_tokens,
+        ),
+        request.limits().0.request_bytes,
+        FailureCode::RequestTooLarge,
+    )?;
+    let (bytes, request_bytes) =
+        acquire(client.post(&profile.endpoint_id), body, request, control)?;
+    preflight_response(&bytes)?;
+    let response: response_wire::OpenAiResponse =
+        serde_json::from_slice(&bytes).map_err(|_| rejected(FailureCode::InvalidResponse))?;
+    if response.object != "chat.completion" || response.choices.len() != 1 {
+        return Err(rejected(FailureCode::InvalidResponse));
+    }
+    let choice = response
+        .choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| rejected(FailureCode::InvalidResponse))?;
+    let refused = choice.finish_reason.as_deref() == Some("content_filter")
+        || choice
+            .message
+            .refusal
+            .as_ref()
+            .is_some_and(|refusal| !refusal.is_empty());
+    if refused {
+        return Err(rejected(FailureCode::Refused));
+    }
+    if choice.finish_reason.as_deref() != Some("stop") {
+        return Err(rejected(FailureCode::IncompleteResponse));
+    }
+    // A separate `reasoning` field is ignored but counted in the body cap.
+    if choice.message.role != "assistant"
+        || choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+        || choice.message.function_call.is_some()
+    {
+        return Err(rejected(FailureCode::InvalidResponse));
+    }
+    let usage = response.usage.map(|usage| ReportedUsage {
+        input_tokens: usage.prompt_tokens,
+        output_tokens: usage.completion_tokens,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+    });
+    finish(
+        choice.message.content.unwrap_or_default(),
+        response.model,
+        response.id,
         usage,
         request,
         request_bytes,

@@ -50,3 +50,20 @@ fn borrowed_anthropic_request_preserves_wire_and_exact_cap() {
         }
     }
 }
+
+#[test]
+fn borrowed_openai_compatible_request_preserves_wire_and_exact_cap() {
+    // #938: the same encoded-byte boundary for a local OpenAI-compatible server.
+    for text in [String::new(), "café\n\"\\\0".into(), "\0".repeat(4096)] {
+        for tokens in [0, 1, u32::MAX] {
+            matches_wire_and_cap(
+                &openai_compatible(&text, &text, &text, tokens),
+                json!({
+                    "model":text,"max_tokens":tokens,"stream":false,
+                    "response_format":{"type":"json_object"},
+                    "messages":[{"role":"system","content":text},{"role":"user","content":text}]
+                }),
+            );
+        }
+    }
+}
