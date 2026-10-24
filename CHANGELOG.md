@@ -1,5 +1,11 @@
 # cartograph
 
+## 0.26.0
+
+### Minor Changes
+
+- 6dc29d8: Investigations can use an owner-hosted OpenAI-compatible server (vLLM, LiteLLM, llama.cpp) as a local, loopback-only provider with the same bounded transport limits as Ollama.
+
 ## 0.25.0
 
 ### Minor Changes
