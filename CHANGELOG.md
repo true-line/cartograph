@@ -1,5 +1,15 @@
 # cartograph
 
+## 0.23.4
+
+### Patch Changes
+
+- d8cd613: Index gap-node edge labels and rule relationships once per bundle instead of scanning every edge per node, cutting spec bundle time on large graphs by more than half.
+- d10266c: Reuse prepared SQL statements and keep statement subjournals in memory when publishing graph patches, speeding up the database phase of ingest.
+- add3554: Prepare investigation neighborhoods from fact references without building temporary response pages, preserving graph-admitted facts that exceed the public query response limit.
+- 97dfd93: Reject malformed investigation namespace metadata before copying it into Rust during task loading.
+- bd19308: Compile each TypeScript tree-sitter query once per grammar instead of once per file, roughly halving TypeScript ingest time on large repositories.
+
 ## 0.23.3
 
 ### Patch Changes
