@@ -288,21 +288,27 @@ showcase. The showcase points to **W10 first**:
 
 | Id | Slice | Owner | Exit gate |
 |----|-------|-------|-----------|
-| W10a | Python target tests: pytest test functions, fixtures and `conftest.py` scope; each Flask test-client call resolved to a recovered `Endpoint` by endpoint name (Blueprint name and handler) or by literal path through the existing route matcher; asserted status codes and response keys recorded as expectations; an unresolved call stays a Gap naming the call | Claude | On SimpleLogin, `test_arrangements.md` lists for each endpoint the tests that exercise it and what they assert, and each endpoint with no test is a named omission. Content acceptance uses an independently hand-labelled sample of tests and endpoints, not counts |
-| W10b | Test and contract drift: an asserted status or key that the recovered responses lack, and a recovered status that no test asserts | Claude | `drift_register.md` reports both directions on SimpleLogin, cited on both sides |
+| W10a | Python target tests as static references: pytest test functions, fixtures and `conftest.py` scope; each Flask test-client call resolved to a recovered `Endpoint` by endpoint name (Blueprint name and handler) or by literal path through the existing route matcher; asserted status codes and response keys recorded as declared expectations; an unresolved or dynamic call, and fixture setup that is not read, stays a Gap naming the call | Claude | On SimpleLogin, `test_arrangements.md` lists for each endpoint the tests that reference it and what they assert. An endpoint with no recovered reference is a named omission. That omission is not proof that no test exists, and a reference is not proof that a test ran or which branches it reaches. Content acceptance uses an independently hand-labelled sample of tests and endpoints, not counts |
+| W10b | Test and contract drift: an asserted status or key that the recovered responses lack, and a recovered status that no test asserts, compared only where the endpoint and response scope are the same | Claude | `drift_register.md` reports both directions on SimpleLogin, cited on both sides, and an endpoint whose responses or test references are partial is reported as incomplete evidence, not as drift |
 | W10c | A second test framework as its own module, behind the W9 coverage matrix's target-test capability | Claude | Vendure's end-to-end suite links its operations to recovered resolvers, which gives #590's 41 unexecuted decision cases their test evidence or a named omission |
-| W10d | Flows qualified by tests: each flow dossier names the tests that exercise its participants and the steps no test reaches | Claude | SimpleLogin's 18 scheduled flows and its client-to-server flows show test coverage per step |
+| W10d | Flows qualified by test references: each flow dossier names the tests that statically reference its participants and the steps no recovered test references | Claude | SimpleLogin's 18 scheduled flows and its client-to-server flows show test references per step, never claimed as executed coverage |
 | W11 | Journeys: deterministic client navigation facts first (Android activities and Compose navigation, the extension's popup routes), then journey candidates over those facts, client calls (#737), server flows and their tests | Claude, design reviewed by Codex | One SimpleLogin journey, such as creating an alias from the extension, scored against an expected set written from SimpleLogin's public help before the run. Journey candidates are T2 rule-derived and InferredWeak, never T0 |
 
 The agentic side runs alongside this, and each part is Codex's to scope:
 
-- **#937 first.** It unblocks the next local acceptance run on the
-  OpenAI-compatible provider (#943).
-- **W8a.** The read surface gains test arrangements once W10a lands.
-- **W6.** A product-generated work packet turns an untested endpoint or a
-  test and contract drift entry into a ready-to-implement task. That task
-  carries the endpoint, its cited handler, its recovered responses and the
-  missing assertion. This is the first end-to-end use of the north-star
+- **#937 first.** It makes finish refusals diagnosable. Bounded correction
+  or retry is qualified separately, and the fix does not promise that a
+  model passes, reads source or recovers. #766's unfinished delivery
+  remains an existing obligation alongside the lanes below.
+- **W8a.** The read surface gains test arrangements once W10a's producer
+  contract is stable: bounded, revision-pinned reads with provenance and
+  explicit unknown and omission semantics.
+- **W6.** A product-generated work packet proposes a task from an
+  endpoint with no recovered test reference, or from a test and contract
+  drift entry. It carries the endpoint, its cited handler, its recovered
+  responses, the missing assertion and the evidence's limitations. A packet
+  is a proposal: it does not prove a missing implementation or authorize
+  its execution. This is the first end-to-end use of the north-star
   cycle's "hand the gap to an implementer".
 
 W12, the explorable estate view, gains a tests layer from W10 and a journeys
@@ -310,4 +316,6 @@ layer from W11. It stays planned after both.
 
 Identifiers: US-0044 and AC-0343 onward for W10. W11 takes the next story
 and an ADR for journey identity and tier, which Claude drafts before W11
-starts. ADR-0049 is Codex's draft, so that ADR takes the number after it.
+starts. ADR-0049 stays reserved for the shared extraction-cache draft under
+review, so the journey ADR takes the next number unused on `main` when it
+is drafted.
