@@ -43,10 +43,12 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
         })
         .map(|e| e.dst.as_str())
         .collect();
+    let configs = configuring_files(nodes, edges);
     let aliases: BTreeMap<_, _> = resources
         .keys()
         .copied()
         .chain(backed.iter().copied())
+        .chain(configs.keys().copied())
         .map(|id| (id, crate::mermaid_id(id)))
         .collect();
     out.write_str("flowchart LR\n")?;
@@ -80,6 +82,10 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
             id.strip_prefix("chan:").unwrap_or(id)
         )?;
     }
+    // Env files declaring a resource's key: parallelograms, named by path.
+    for (id, path) in &configs {
+        writeln!(out, "    {}[/\"{}\"/]", aliases[id], path)?;
+    }
     let mut lines = Vec::new();
     for edge in edges {
         let Some((_, arrow)) = crate::TOPOLOGY_EDGES.iter().find(|(l, _)| *l == edge.label) else {
@@ -87,7 +93,8 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
         };
         if !(resources.contains_key(edge.src.as_str())
             && (resources.contains_key(edge.dst.as_str())
-                || (edge.label == "BACKS" && backed.contains(edge.dst.as_str()))))
+                || (edge.label == "BACKS" && backed.contains(edge.dst.as_str()))
+                || (edge.label == "CONFIGURED_IN" && configs.contains_key(edge.dst.as_str()))))
         {
             continue;
         }
@@ -108,6 +115,33 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
         )?;
     }
     Ok(())
+}
+
+/// `File` nodes a `Resource` is `CONFIGURED_IN` (#734), with their paths.
+pub(crate) fn configuring_files<'a>(
+    nodes: &'a [Node],
+    edges: &[Edge],
+) -> BTreeMap<&'a str, &'a str> {
+    let resources: BTreeSet<_> = nodes
+        .iter()
+        .filter(|n| n.label == "Resource")
+        .map(|n| n.id.as_str())
+        .collect();
+    let targets: BTreeSet<_> = edges
+        .iter()
+        .filter(|e| e.label == "CONFIGURED_IN" && resources.contains(e.src.as_str()))
+        .map(|e| e.dst.as_str())
+        .collect();
+    nodes
+        .iter()
+        .filter(|n| n.label == "File" && targets.contains(n.id.as_str()))
+        .map(|n| {
+            let path = n.props["path"]
+                .as_str()
+                .unwrap_or_else(|| n.id.split_once('@').map_or(n.id.as_str(), |(_, path)| path));
+            (n.id.as_str(), path)
+        })
+        .collect()
 }
 
 pub(crate) fn flows(out: &mut impl fmt::Write, flows: &[Flow]) -> fmt::Result {

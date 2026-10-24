@@ -102,11 +102,18 @@ pub(super) fn topology(
         .filter(|e| e.label == "BACKS")
         .map(|e| e.dst.as_str())
         .collect();
+    let configured: BTreeSet<_> = selected_edges
+        .iter()
+        .filter(|e| e.label == "CONFIGURED_IN")
+        .map(|e| e.dst.as_str())
+        .collect();
     let selected_nodes: Vec<Node> = nodes
         .iter()
         .copied()
         .filter(|n| {
-            n.label == "Resource" || (n.label == "Channel" && backed.contains(n.id.as_str()))
+            n.label == "Resource"
+                || (n.label == "Channel" && backed.contains(n.id.as_str()))
+                || (n.label == "File" && configured.contains(n.id.as_str()))
         })
         .filter(nongap)
         .cloned()

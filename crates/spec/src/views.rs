@@ -275,12 +275,18 @@ pub fn compile_spec_with_views(
         .filter(|edge| edge.label == "BACKS")
         .map(|edge| edge.dst.as_str())
         .collect();
+    let configured_files: BTreeSet<&str> = topology_edges
+        .iter()
+        .filter(|edge| edge.label == "CONFIGURED_IN")
+        .map(|edge| edge.dst.as_str())
+        .collect();
     let mut topology_node_ids: BTreeSet<String> = filtered_nodes
         .iter()
         .copied()
         .filter(|node| {
             node.label == "Resource"
                 || (node.label == "Channel" && backed_channels.contains(node.id.as_str()))
+                || (node.label == "File" && configured_files.contains(node.id.as_str()))
         })
         .map(|node| node.id.clone())
         .collect();
