@@ -33,6 +33,7 @@ pub mod staged_finish;
 pub mod staged_refusal;
 mod strict;
 mod turn;
+mod validation_workspace;
 
 pub use completion::*;
 pub use coverage::*;
@@ -55,6 +56,9 @@ pub use record_workspace::record_decode_scratch_bytes;
 pub use records::*;
 pub use specialists::*;
 pub use turn::*;
+pub use validation_workspace::{
+    coverage_archive_validation_workspace, ledger_validation_workspace,
+};
 
 #[cfg(test)]
 mod tests;
