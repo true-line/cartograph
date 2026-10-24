@@ -57,6 +57,7 @@ export const WithSummary: Story = {
         webext: { files: 0, nodes: 0, edges: 0 },
         // #215 (AC-0096): config files land as Tool facts with DEFINED_IN proofs.
         tools: { files: 3, nodes: 6, edges: 5 },
+        events: { files: 2, nodes: 1, edges: 4 },
       },
     },
   },
@@ -64,6 +65,10 @@ export const WithSummary: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByTestId('tools-layer-summary').textContent).toBe(
       '3 configs · 6 nodes · 5 edges',
+    );
+    // #874: stitched facts are their own row, not TypeScript's.
+    await expect(canvas.getByTestId('events-layer-summary').textContent).toBe(
+      '2 files · 1 nodes · 4 edges',
     );
     // AC-0196: nothing merged, so no merge line.
     await expect(canvas.queryByTestId('merged-summary')).toBeNull();

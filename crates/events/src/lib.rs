@@ -49,7 +49,9 @@ pub struct SourceId<'a> {
     pub commit: &'a str,
 }
 
-const EXTRACTOR_ID: &str = "t0.events";
+/// Extractor id of channel and client-call stitching over extracted sites.
+pub const STITCH_EXTRACTOR_ID: &str = "t0.events";
+const EXTRACTOR_ID: &str = STITCH_EXTRACTOR_ID;
 
 /// Env keys resolved from env files present in the repo (AC-0011). Only
 /// files literally named `.env` or `.env.*` participate — this is the

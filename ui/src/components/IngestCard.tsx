@@ -109,6 +109,15 @@ export function IngestCard({ busy, summary, error, canIngest, onConnect }: Inges
                 {summary.layers.tools.edges} edges
               </dd>
             </div>
+            {summary.layers.events && (
+              <div>
+                <dt>Events and calls</dt>
+                <dd data-testid="events-layer-summary">
+                  {summary.layers.events.files} files · {summary.layers.events.nodes} nodes ·{' '}
+                  {summary.layers.events.edges} edges
+                </dd>
+              </div>
+            )}
           </dl>
           {summary.delta && (
             <p className="muted" data-testid="delta-summary">
