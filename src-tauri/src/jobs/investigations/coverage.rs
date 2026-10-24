@@ -143,6 +143,7 @@ pub(super) fn load_for_task(
         return Err(InvestigationStoreError::Invalid);
     };
     let saved: StoredTask = decode(&body, &hash)?;
+    drop((body, hash));
     validate_next_prompt_task(&saved)?;
     if saved.detail.summary.investigation_id != *id
         || signed(saved.detail.summary.revision)? != revision
@@ -152,7 +153,10 @@ pub(super) fn load_for_task(
     {
         return Err(InvestigationStoreError::Invalid);
     }
-    load_with_cancellation_reserve(connection, id, saved.detail.summary.cancel_requested)
+    let cancelled = saved.detail.summary.cancel_requested;
+    // Authentication is complete; do not retain its task witness during archive loading.
+    drop(saved);
+    load_with_cancellation_reserve(connection, id, cancelled)
 }
 
 fn load_with_cancellation_reserve(
