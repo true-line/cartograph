@@ -9,6 +9,7 @@
 pub mod anthropic;
 pub mod bounded;
 pub mod catalog;
+pub mod openai_compatible;
 
 use reqwest::Url;
 use reqwest::blocking::{Client, ClientBuilder};
@@ -243,6 +244,9 @@ pub enum ProviderError {
     /// Provider returned an empty completion.
     #[error("provider returned an empty completion")]
     EmptyCompletion,
+    /// Provider returned an oversized or structurally invalid response.
+    #[error("invalid provider response: {0}")]
+    InvalidResponse(String),
     /// A cloud provider's safety classifiers declined the request. The
     /// escalation surfaces this as an explicit outcome, never a retry storm.
     #[error("cloud provider {provider} declined the request (category: {category:?})")]
@@ -422,20 +426,7 @@ impl OllamaProvider {
         completion_model: impl Into<String>,
         timeout: Duration,
     ) -> Result<Self, ProviderError> {
-        let mut base_url =
-            Url::parse(base_url).map_err(|error| ProviderError::InvalidUrl(error.to_string()))?;
-        let loopback = base_url.host_str().is_some_and(|host| {
-            host.eq_ignore_ascii_case("localhost")
-                || host
-                    .parse::<IpAddr>()
-                    .is_ok_and(|address| address.is_loopback())
-        });
-        if base_url.scheme() != "http" || !loopback {
-            return Err(ProviderError::NonLoopback(base_url.to_string()));
-        }
-        if !base_url.path().ends_with('/') {
-            base_url.set_path(&format!("{}/", base_url.path()));
-        }
+        let base_url = loopback_base(base_url)?;
         let client = build_direct_loopback_client(Client::builder(), timeout)?;
         let bounded_client = bounded::build_client(Client::builder(), true)?;
         let embedding_model = embedding_model.into();
@@ -510,14 +501,40 @@ impl OllamaProvider {
     }
 }
 
-/// Ollama is declared Local, so its transport must never inherit either
-/// environment/system proxies or a caller-added proxy. Otherwise loopback
-/// evidence could leave the device without passing cloud consent.
+/// A plain-HTTP loopback base URL ending in `/`; any other host is not Local.
+fn loopback_base(base_url: &str) -> Result<Url, ProviderError> {
+    let mut base_url =
+        Url::parse(base_url).map_err(|error| ProviderError::InvalidUrl(error.to_string()))?;
+    let loopback = base_url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if base_url.scheme() != "http" || !loopback {
+        return Err(ProviderError::NonLoopback(base_url.to_string()));
+    }
+    if !base_url.path().ends_with('/') {
+        base_url.set_path(&format!("{}/", base_url.path()));
+    }
+    Ok(base_url)
+}
+
+/// Local providers' transport must never inherit either environment/system
+/// proxies or a caller-added proxy, nor follow a redirect off loopback.
+/// Otherwise loopback evidence could leave the device without passing cloud
+/// consent.
 fn build_direct_loopback_client(
     builder: ClientBuilder,
     timeout: Duration,
 ) -> Result<Client, ProviderError> {
-    Ok(builder.no_proxy().timeout(timeout).build()?)
+    Ok(builder
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()?)
 }
 
 #[derive(Serialize)]

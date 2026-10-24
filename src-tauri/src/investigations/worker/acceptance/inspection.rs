@@ -8,6 +8,9 @@ pub(super) fn local_provider_acceptance(specialists: AcceptanceSpecialists) {
     let model = required("CARTOGRAPH_ACCEPTANCE_MODEL");
     let digest = required("CARTOGRAPH_ACCEPTANCE_MODEL_DIGEST");
     let runtime = required("CARTOGRAPH_ACCEPTANCE_RUNTIME");
+    // `ollama` (default) or `openai-compatible` (#938), both loopback-only.
+    let protocol =
+        std::env::var("CARTOGRAPH_ACCEPTANCE_PROTOCOL").unwrap_or_else(|_| "ollama".into());
     let output = PathBuf::from(required("CARTOGRAPH_ACCEPTANCE_OUTPUT"));
     let source_revision = source_revision();
     assert!(
@@ -26,7 +29,7 @@ pub(super) fn local_provider_acceptance(specialists: AcceptanceSpecialists) {
         "mechanical_pass": false,
         "operator_supplied_identity": {
             "endpoint": url, "requested_model": model, "model_digest": digest, "runtime": runtime,
-            "independently_verified": false,
+            "protocol": protocol, "independently_verified": false,
         },
         "fixture": { "path": "rule.ts", "content_hash": content_hash(ORIGINAL.as_bytes()), "byte_len": ORIGINAL.len() },
         "independent_citation_review": "pending",
@@ -35,10 +38,16 @@ pub(super) fn local_provider_acceptance(specialists: AcceptanceSpecialists) {
         "delivery_gate_pass": false,
     });
     write_report(&output, &report);
-    let provider =
-        Arc::new(llm::OllamaProvider::new(&url, &model, Duration::from_secs(180)).unwrap());
-    // This calls the real bounded Ollama implementation. No mock, retry wrapper,
-    // cloud fallback, shell or model download is installed by the harness.
+    let timeout = Duration::from_secs(180);
+    let provider: Arc<dyn LlmProvider> = match protocol.as_str() {
+        "ollama" => Arc::new(llm::OllamaProvider::new(&url, &model, timeout).unwrap()),
+        "openai-compatible" => Arc::new(
+            llm::openai_compatible::OpenAiCompatibleProvider::new(&url, &model, timeout).unwrap(),
+        ),
+        _ => panic!("CARTOGRAPH_ACCEPTANCE_PROTOCOL must be ollama or openai-compatible"),
+    };
+    // This calls the real bounded provider implementation. No mock, retry
+    // wrapper, cloud fallback, shell or model download is installed by the harness.
     let mut directory = tempfile::tempdir_in(&output).unwrap();
     directory.disable_cleanup(true);
     report["retained_fixture_directory"] = json!(directory.path());

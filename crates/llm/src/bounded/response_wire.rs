@@ -50,3 +50,30 @@ pub(super) struct AnthropicResponse {
     pub(super) id: Option<String>,
     pub(super) usage: Option<AnthropicUsage>,
 }
+
+#[derive(Deserialize)]
+pub(super) struct OpenAiMessage {
+    pub(super) role: String,
+    pub(super) content: Option<String>,
+    pub(super) refusal: Option<String>,
+    pub(super) tool_calls: Option<Vec<serde_json::Value>>,
+    pub(super) function_call: Option<serde_json::Value>,
+}
+#[derive(Deserialize)]
+pub(super) struct OpenAiChoice {
+    pub(super) message: OpenAiMessage,
+    pub(super) finish_reason: Option<String>,
+}
+#[derive(Deserialize)]
+pub(super) struct OpenAiUsage {
+    pub(super) prompt_tokens: Option<u64>,
+    pub(super) completion_tokens: Option<u64>,
+}
+#[derive(Deserialize)]
+pub(super) struct OpenAiResponse {
+    pub(super) object: String,
+    pub(super) choices: Vec<OpenAiChoice>,
+    pub(super) model: Option<String>,
+    pub(super) id: Option<String>,
+    pub(super) usage: Option<OpenAiUsage>,
+}

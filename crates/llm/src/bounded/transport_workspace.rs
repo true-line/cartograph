@@ -1,5 +1,7 @@
 //! Logical HTTP payload ownership, not a process or allocator memory ceiling.
-use super::response_wire::{AnthropicBlock, AnthropicResponse, OllamaResponse};
+use super::response_wire::{
+    AnthropicBlock, AnthropicResponse, OllamaResponse, OpenAiChoice, OpenAiResponse,
+};
 use super::{
     BoundedCompletion, CompletionLimits, MODEL_AND_RESPONSE_ID_BYTES, RECEIVE_CHUNK_BYTES,
 };
@@ -50,11 +52,14 @@ impl CompletionLimits {
         ])?;
         let nested_values = sum(&[response, response.checked_add(1)?.checked_mul(json_slot)?])?;
         let typed = sum(&[
-            size_of::<AnthropicResponse>().max(size_of::<OllamaResponse>()),
+            size_of::<AnthropicResponse>()
+                .max(size_of::<OllamaResponse>())
+                .max(size_of::<OpenAiResponse>()),
             response,
+            // Anthropic content blocks or OpenAI-compatible choices.
             response
                 .checked_add(1)?
-                .checked_mul(size_of::<AnthropicBlock>())?,
+                .checked_mul(size_of::<AnthropicBlock>().max(size_of::<OpenAiChoice>()))?,
             nested_values,
         ])?;
         // Profile validation and finish share the identifier cap.

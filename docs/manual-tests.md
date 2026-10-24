@@ -736,6 +736,15 @@ analyst control. Existing @2–@4 controls and their receipts are unchanged. Thi
 @5 control is a production-module observation, not a native-app run, a Vendure
 acceptance result, or proof that model conclusions follow from the source.
 
+The @5 entrypoint can also run an owner-hosted OpenAI-compatible server (vLLM,
+LiteLLM, llama.cpp) by adding `CARTOGRAPH_ACCEPTANCE_PROTOCOL=openai-compatible`;
+the default is `ollama`. The URL is the server root (the provider appends
+`v1/chat/completions`) and must be loopback, so reach another machine through an
+explicit tunnel such as `ssh -fN -L 18000:127.0.0.1:8000 <host>`, then use
+`http://127.0.0.1:18000/`. Such a server reports no weight digest: record the
+served model root or another operator-checked identity as the digest, which the
+report keeps as operator-supplied and unverified.
+
 The ignored `investigation_qualified_local_provider_acceptance` entrypoint selects
 @6. In addition to the common environment above, set
 `CARTOGRAPH_ACCEPTANCE_RUBRIC` to the absolute evaluator-only rubric path and

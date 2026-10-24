@@ -1,6 +1,7 @@
 use super::*;
 use crate::anthropic::{AnthropicProvider, ClaudeLane};
-use crate::{AnalysisTier, EgressPolicy, OllamaProvider, PayloadSpan};
+use crate::openai_compatible::OpenAiCompatibleProvider;
+use crate::{AnalysisTier, EgressPolicy, OllamaProvider, PayloadSpan, ProviderError};
 use serde_json::{Value, json};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1213,4 +1214,309 @@ fn firewall_workspace_covers_redacted_preparation_and_authorized_copy() {
     assert!(smaller.prepare_peak_bytes < model.prepare_peak_bytes);
     values.input_bytes = u64::MAX;
     assert!(CompletionLimits::new(values).is_err());
+}
+
+fn openai_body(text: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "id":"chatcmpl-fixture", "object":"chat.completion", "model":"test-model",
+        "choices":[{"index":0, "message":{"role":"assistant", "content":text,
+            "refusal":null, "tool_calls":[], "function_call":null, "reasoning":"PRIVATE THOUGHT"},
+            "finish_reason":"stop"}],
+        "usage":{"prompt_tokens":19, "completion_tokens":5, "total_tokens":24},
+    }))
+    .unwrap()
+}
+
+fn openai(endpoint: &str) -> OpenAiCompatibleProvider {
+    OpenAiCompatibleProvider::new(endpoint, "test-model", Duration::from_secs(10)).unwrap()
+}
+
+// #938: a local OpenAI-compatible server gets the same finite generation limit,
+// identity encoding and consented payload; its id, model and usage are kept.
+#[test]
+fn openai_compatible_bounded_sends_limits_and_reads_its_choice() {
+    let limits = CompletionLimits::new(CompletionLimitValues {
+        max_output_tokens: 37,
+        ..Default::default()
+    })
+    .unwrap();
+    let body = openai_body(r#"{"action":"query_context"}"#);
+    let (endpoint, server) = http(framed(&body));
+    let provider = openai(&endpoint);
+    let profile = provider.bounded_profile().unwrap();
+    assert_eq!(
+        profile.endpoint_id,
+        format!("{endpoint}v1/chat/completions")
+    );
+    assert_eq!(profile.locality, Locality::Local);
+    let output = provider
+        .complete_bounded(&authorize(&provider, limits), &control())
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.headers.starts_with("POST /v1/chat/completions "));
+    let headers = request.headers.to_ascii_lowercase();
+    assert!(headers.contains("accept-encoding: identity"));
+    assert!(!headers.contains("authorization"));
+    let wire: Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(wire["max_tokens"], 37);
+    assert_eq!(wire["model"], "test-model");
+    assert_eq!(wire["stream"], false);
+    assert_eq!(wire["response_format"], json!({"type":"json_object"}));
+    assert!(wire.get("tools").is_none());
+    assert!(
+        wire["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("if (blocked) return false;")
+    );
+    assert_eq!(output.text, r#"{"action":"query_context"}"#);
+    assert_eq!(
+        output.provider_request_id.as_deref(),
+        Some("chatcmpl-fixture")
+    );
+    assert_eq!(output.response_model.as_deref(), Some("test-model"));
+    let usage = output.usage.as_ref().unwrap();
+    assert_eq!(
+        (usage.input_tokens, usage.output_tokens),
+        (Some(19), Some(5))
+    );
+    assert_eq!(output.request_bytes, request.body.len() as u64);
+    assert_eq!(output.response_bytes, body.len() as u64);
+    let workspace = limits.transport_workspace_bytes().unwrap();
+    assert!(request.body.len() <= workspace.request_peak_bytes);
+    assert!(body.len() <= workspace.response_peak_bytes);
+    assert!(serde_json::to_vec(&output).unwrap().len() <= workspace.completion_bytes);
+    assert!(!format!("{output:?}").contains("PRIVATE THOUGHT"));
+}
+
+// #938: truncation, refusals, tool calls and unknown envelopes fail closed
+// without echoing provider content.
+#[test]
+fn openai_compatible_rejects_truncated_refused_and_unknown_envelopes() {
+    let base: Value = serde_json::from_slice(&openai_body("{}")).unwrap();
+    let mut cases = Vec::new();
+    let mut case = |edit: &dyn Fn(&mut Value), expected| {
+        let mut body = base.clone();
+        edit(&mut body);
+        cases.push((body, expected));
+    };
+    case(
+        &|b| b["choices"][0]["finish_reason"] = json!("length"),
+        FailureCode::IncompleteResponse,
+    );
+    case(
+        &|b| b["choices"][0]["finish_reason"] = Value::Null,
+        FailureCode::IncompleteResponse,
+    );
+    case(
+        &|b| b["choices"][0]["finish_reason"] = json!("content_filter"),
+        FailureCode::Refused,
+    );
+    case(
+        &|b| b["choices"][0]["message"]["refusal"] = json!("PRIVATE SOURCE"),
+        FailureCode::Refused,
+    );
+    case(
+        &|b| {
+            b["choices"][0]["message"]["tool_calls"] =
+                json!([{"function":{"name":"shell","arguments":"PRIVATE SOURCE"}}])
+        },
+        FailureCode::InvalidResponse,
+    );
+    case(
+        &|b| b["choices"][0]["message"]["function_call"] = json!({"name":"shell"}),
+        FailureCode::InvalidResponse,
+    );
+    case(
+        &|b| b["choices"][0]["message"]["role"] = json!("tool"),
+        FailureCode::InvalidResponse,
+    );
+    case(
+        &|b| {
+            let choice = b["choices"][0].clone();
+            b["choices"] = json!([choice.clone(), choice]);
+        },
+        FailureCode::InvalidResponse,
+    );
+    case(&|b| b["choices"] = json!([]), FailureCode::InvalidResponse);
+    case(
+        &|b| b["object"] = json!("chat.completion.chunk"),
+        FailureCode::InvalidResponse,
+    );
+    case(
+        &|b| b["choices"][0]["message"]["content"] = Value::Null,
+        FailureCode::EmptyCompletion,
+    );
+    case(
+        &|b| b["usage"]["completion_tokens"] = json!(2049),
+        FailureCode::InvalidResponse,
+    );
+    for (body, expected) in cases {
+        let (endpoint, server) = http(framed(&serde_json::to_vec(&body).unwrap()));
+        let provider = openai(&endpoint);
+        let error = provider
+            .complete_bounded(
+                &authorize(&provider, CompletionLimits::default()),
+                &control(),
+            )
+            .unwrap_err();
+        assert_eq!(error, rejected(expected), "{body}");
+        assert!(!format!("{error:?} {error}").contains("PRIVATE SOURCE"));
+        server.join().unwrap();
+    }
+}
+
+// #938: a declared local provider is plain-HTTP loopback only, so a LAN or
+// HTTPS host is refused at construction, and a caller-added proxy is ignored.
+#[test]
+fn openai_compatible_is_loopback_only_and_ignores_proxies() {
+    for endpoint in [
+        "http://192.168.65.177:8000/",
+        "http://spark.lan:8000/",
+        "https://127.0.0.1:8000/",
+    ] {
+        assert!(matches!(
+            OpenAiCompatibleProvider::new(endpoint, "m", Duration::from_secs(1)),
+            Err(ProviderError::NonLoopback(_))
+        ));
+    }
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (endpoint, server) = http(framed(&openai_body("{}")));
+    let mut provider = openai(&endpoint);
+    provider.bounded_client = build_client(
+        Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://{}", proxy.local_addr().unwrap())).unwrap()),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        provider
+            .complete_bounded(
+                &authorize(&provider, CompletionLimits::default()),
+                &control()
+            )
+            .unwrap()
+            .text,
+        "{}"
+    );
+    server.join().unwrap();
+    assert_no_request(&proxy);
+}
+
+// #938: the served model ids are listed with a bounded read; embeddings are
+// unsupported rather than silently routed elsewhere.
+#[test]
+fn openai_compatible_lists_models_and_declines_embeddings() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        set_timeouts(&stream);
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            let mut byte = [0_u8];
+            stream.read_exact(&mut byte).unwrap();
+            headers.push(byte[0]);
+        }
+        let body = br#"{"object":"list","data":[{"id":"nemotron-lightning","object":"model","max_model_len":262144}]}"#;
+        stream.write_all(&framed(body)).unwrap();
+        String::from_utf8(headers).unwrap()
+    });
+    let provider = openai(&endpoint);
+    assert_eq!(provider.list_models().unwrap(), ["nemotron-lightning"]);
+    assert!(server.join().unwrap().starts_with("GET /v1/models "));
+    assert!(!provider.capabilities().embeddings);
+    assert!(matches!(
+        provider.embed(&["x".into()]),
+        Err(ProviderError::Unsupported("embeddings"))
+    ));
+    assert_eq!(
+        provider.completion_model_id(),
+        "openai-compatible:test-model"
+    );
+}
+
+// #943 review: the non-bounded local client never follows a redirect off
+// loopback, and a bracketed IPv6 loopback base is Local.
+#[test]
+fn local_legacy_clients_never_follow_redirects_and_accept_ipv6_loopback() {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    let location = format!(
+        "http://{}/v1/chat/completions",
+        target.local_addr().unwrap()
+    );
+    let redirect = format!(
+        "HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes();
+    let request = crate::ProviderCompletionRequest {
+        payload: action().payload,
+    };
+    let (endpoint, server) = http(redirect.clone());
+    assert!(openai(&endpoint).complete(&request).is_err());
+    server.join().unwrap();
+    let (endpoint, server) = http(redirect);
+    let ollama = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+    assert!(ollama.complete(&request).is_err());
+    server.join().unwrap();
+    assert_no_request(&target);
+    for endpoint in ["http://[::1]:8000/", "http://localhost:8000"] {
+        assert!(OpenAiCompatibleProvider::new(endpoint, "m", Duration::from_secs(1)).is_ok());
+        assert!(OllamaProvider::new(endpoint, "m", Duration::from_secs(1)).is_ok());
+    }
+}
+
+// #943 review (Codex): the legacy completion shares the bounded envelope
+// admission, so only one assistant choice that stopped normally completes.
+#[test]
+fn openai_compatible_legacy_completion_admits_only_a_stopped_assistant_choice() {
+    let request = crate::ProviderCompletionRequest {
+        payload: action().payload,
+    };
+    let base: Value = serde_json::from_slice(&openai_body(r#"{"action":"finish"}"#)).unwrap();
+    let (endpoint, server) = http(framed(&serde_json::to_vec(&base).unwrap()));
+    assert_eq!(
+        openai(&endpoint).complete(&request).unwrap().text,
+        r#"{"action":"finish"}"#
+    );
+    let wire: Value = serde_json::from_slice(&server.join().unwrap().body).unwrap();
+    assert_eq!(wire["response_format"], json!({"type":"json_object"}));
+    type Edit<'a> = (&'a dyn Fn(&mut Value), bool);
+    let edits: [Edit; 6] = [
+        (
+            &|b| b["choices"][0]["finish_reason"] = json!("length"),
+            false,
+        ),
+        (
+            &|b| b["choices"][0]["finish_reason"] = json!("content_filter"),
+            true,
+        ),
+        (
+            &|b| b["choices"][0]["message"]["refusal"] = json!("PRIVATE SOURCE"),
+            true,
+        ),
+        (
+            &|b| b["choices"][0]["message"]["role"] = json!("tool"),
+            false,
+        ),
+        (
+            &|b| b["choices"][0]["message"]["tool_calls"] = json!([{"function":{"name":"shell"}}]),
+            false,
+        ),
+        (&|b| b["choices"] = json!([]), false),
+    ];
+    for (edit, refused) in edits {
+        let mut body = base.clone();
+        edit(&mut body);
+        let (endpoint, server) = http(framed(&serde_json::to_vec(&body).unwrap()));
+        let error = openai(&endpoint).complete(&request).unwrap_err();
+        assert_eq!(
+            matches!(error, ProviderError::Refused { .. }),
+            refused,
+            "{body}"
+        );
+        assert!(refused || matches!(error, ProviderError::InvalidResponse(_)));
+        assert!(!format!("{error:?} {error}").contains("PRIVATE SOURCE"));
+        server.join().unwrap();
+    }
 }
