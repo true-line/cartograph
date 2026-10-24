@@ -240,16 +240,17 @@ impl SqliteGraphStore {
     /// Apply scoped changes inside the caller's transaction.
     fn apply_patch_rows(&self, patch: &GraphPatch) -> Result<(), GraphError> {
         for (src, dst, label) in &patch.delete_edges {
-            self.conn.execute(
-                "DELETE FROM edges WHERE src = ?1 AND dst = ?2 AND label = ?3",
-                params![src, dst, label],
-            )?;
+            self.conn
+                .prepare_cached("DELETE FROM edges WHERE src = ?1 AND dst = ?2 AND label = ?3")?
+                .execute(params![src, dst, label])?;
         }
         for id in &patch.delete_node_ids {
             self.conn
-                .execute("DELETE FROM edges WHERE src = ?1 OR dst = ?1", params![id])?;
+                .prepare_cached("DELETE FROM edges WHERE src = ?1 OR dst = ?1")?
+                .execute(params![id])?;
             self.conn
-                .execute("DELETE FROM nodes WHERE id = ?1", params![id])?;
+                .prepare_cached("DELETE FROM nodes WHERE id = ?1")?
+                .execute(params![id])?;
         }
         for node in &patch.upsert_nodes {
             self.write_node(node)?;
@@ -399,25 +400,31 @@ impl SqliteGraphStore {
     }
 
     fn write_node(&self, node: &Node) -> Result<(), GraphError> {
-        self.conn.execute(
-            "INSERT INTO nodes (id, label, props) VALUES (?1, ?2, ?3)
+        self.conn
+            .prepare_cached(
+                "INSERT INTO nodes (id, label, props) VALUES (?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET label = excluded.label, props = excluded.props",
-            params![node.id, node.label, serde_json::to_string(&node.props)?],
-        )?;
+            )?
+            .execute(params![
+                node.id,
+                node.label,
+                serde_json::to_string(&node.props)?
+            ])?;
         Ok(())
     }
 
     fn write_edge(&self, edge: &Edge) -> Result<(), GraphError> {
-        self.conn.execute(
-            "INSERT INTO edges (src, dst, label, props) VALUES (?1, ?2, ?3, ?4)
+        self.conn
+            .prepare_cached(
+                "INSERT INTO edges (src, dst, label, props) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(src, dst, label) DO UPDATE SET props = excluded.props",
-            params![
+            )?
+            .execute(params![
                 edge.src,
                 edge.dst,
                 edge.label,
                 serde_json::to_string(&edge.props)?
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
@@ -432,6 +439,10 @@ impl SqliteGraphStore {
         // WAL is a no-op for in-memory databases; harmless to set anyway.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Statement subjournals hold only the pages one statement changes and
+        // are discarded after it; keeping them in memory stops every upsert
+        // inside a publication transaction from writing a temp file.
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         // Schema observation, additive migration and destructive-reset decision
         // share the writer lock; a waiting opener must reread the committed version.
         let transaction = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
