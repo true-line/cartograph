@@ -109,21 +109,6 @@ struct ResponseFormat {
     kind: &'static str,
 }
 
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: ChoiceMessage,
-}
-
-#[derive(Deserialize)]
-struct ChoiceMessage {
-    content: Option<String>,
-}
-
 impl LlmProvider for OpenAiCompatibleProvider {
     fn id(&self) -> &str {
         &self.provider_id
@@ -173,12 +158,19 @@ impl LlmProvider for OpenAiCompatibleProvider {
             })
             .send()?
             .error_for_status()?;
-        let response: ChatResponse = serde_json::from_slice(&read_capped(response)?)?;
-        let [choice] = <[Choice; 1]>::try_from(response.choices)
-            .map_err(|_| ProviderError::InvalidResponse("expected one choice".into()))?;
-        Ok(Completion {
-            text: choice.message.content.unwrap_or_default(),
-        })
+        // The bounded path's envelope admission, so a truncated, refused or
+        // tool-calling response is never a completion here either.
+        let (text, ..) =
+            bounded::openai_compatible_envelope(&read_capped(response)?).map_err(|error| {
+                match error.code {
+                    bounded::FailureCode::Refused => ProviderError::Refused {
+                        provider: self.provider_id.clone(),
+                        category: None,
+                    },
+                    code => ProviderError::InvalidResponse(format!("{code:?}")),
+                }
+            })?;
+        Ok(Completion { text })
     }
 
     fn bounded_profile(&self) -> Result<bounded::ProviderProfile, bounded::BoundedCallError> {

@@ -1465,3 +1465,58 @@ fn local_legacy_clients_never_follow_redirects_and_accept_ipv6_loopback() {
         assert!(OllamaProvider::new(endpoint, "m", Duration::from_secs(1)).is_ok());
     }
 }
+
+// #943 review (Codex): the legacy completion shares the bounded envelope
+// admission, so only one assistant choice that stopped normally completes.
+#[test]
+fn openai_compatible_legacy_completion_admits_only_a_stopped_assistant_choice() {
+    let request = crate::ProviderCompletionRequest {
+        payload: action().payload,
+    };
+    let base: Value = serde_json::from_slice(&openai_body(r#"{"action":"finish"}"#)).unwrap();
+    let (endpoint, server) = http(framed(&serde_json::to_vec(&base).unwrap()));
+    assert_eq!(
+        openai(&endpoint).complete(&request).unwrap().text,
+        r#"{"action":"finish"}"#
+    );
+    let wire: Value = serde_json::from_slice(&server.join().unwrap().body).unwrap();
+    assert_eq!(wire["response_format"], json!({"type":"json_object"}));
+    type Edit<'a> = (&'a dyn Fn(&mut Value), bool);
+    let edits: [Edit; 6] = [
+        (
+            &|b| b["choices"][0]["finish_reason"] = json!("length"),
+            false,
+        ),
+        (
+            &|b| b["choices"][0]["finish_reason"] = json!("content_filter"),
+            true,
+        ),
+        (
+            &|b| b["choices"][0]["message"]["refusal"] = json!("PRIVATE SOURCE"),
+            true,
+        ),
+        (
+            &|b| b["choices"][0]["message"]["role"] = json!("tool"),
+            false,
+        ),
+        (
+            &|b| b["choices"][0]["message"]["tool_calls"] = json!([{"function":{"name":"shell"}}]),
+            false,
+        ),
+        (&|b| b["choices"] = json!([]), false),
+    ];
+    for (edit, refused) in edits {
+        let mut body = base.clone();
+        edit(&mut body);
+        let (endpoint, server) = http(framed(&serde_json::to_vec(&body).unwrap()));
+        let error = openai(&endpoint).complete(&request).unwrap_err();
+        assert_eq!(
+            matches!(error, ProviderError::Refused { .. }),
+            refused,
+            "{body}"
+        );
+        assert!(refused || matches!(error, ProviderError::InvalidResponse(_)));
+        assert!(!format!("{error:?} {error}").contains("PRIVATE SOURCE"));
+        server.join().unwrap();
+    }
+}

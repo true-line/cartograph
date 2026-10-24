@@ -1038,29 +1038,21 @@ pub(super) fn complete_ollama(
     )
 }
 
-pub(super) fn complete_openai_compatible(
-    client: &Client,
-    profile: &ProviderProfile,
-    request: &AuthorizedBoundedCompletion,
-    control: &CompletionControl<'_>,
-) -> Result<BoundedCompletion, BoundedCallError> {
-    check_request(profile, request, control)?;
-    let user = user_message(request)?;
-    let body = encode(
-        &request_wire::openai_compatible(
-            &profile.requested_model,
-            &request.payload().system,
-            &user,
-            request.limits().0.max_output_tokens,
-        ),
-        request.limits().0.request_bytes,
-        FailureCode::RequestTooLarge,
-    )?;
-    let (bytes, request_bytes) =
-        acquire(client.post(&profile.endpoint_id), body, request, control)?;
-    preflight_response(&bytes)?;
+/// Admitted completion text, response model, response id and usage.
+pub(super) type Admitted = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<ReportedUsage>,
+);
+
+/// An OpenAI-compatible completion's text, model, id and usage, admitted
+/// only as one assistant choice that stopped normally without tool calls.
+/// Shared by the bounded and legacy completion paths.
+pub(super) fn openai_compatible_envelope(bytes: &[u8]) -> Result<Admitted, BoundedCallError> {
+    preflight_response(bytes)?;
     let response: response_wire::OpenAiResponse =
-        serde_json::from_slice(&bytes).map_err(|_| rejected(FailureCode::InvalidResponse))?;
+        serde_json::from_slice(bytes).map_err(|_| rejected(FailureCode::InvalidResponse))?;
     if response.object != "chat.completion" || response.choices.len() != 1 {
         return Err(rejected(FailureCode::InvalidResponse));
     }
@@ -1098,15 +1090,36 @@ pub(super) fn complete_openai_compatible(
         cache_read_input_tokens: None,
         cache_creation_input_tokens: None,
     });
-    finish(
+    Ok((
         choice.message.content.unwrap_or_default(),
         response.model,
         response.id,
         usage,
-        request,
-        request_bytes,
-        bytes.len(),
-    )
+    ))
+}
+
+pub(super) fn complete_openai_compatible(
+    client: &Client,
+    profile: &ProviderProfile,
+    request: &AuthorizedBoundedCompletion,
+    control: &CompletionControl<'_>,
+) -> Result<BoundedCompletion, BoundedCallError> {
+    check_request(profile, request, control)?;
+    let user = user_message(request)?;
+    let body = encode(
+        &request_wire::openai_compatible(
+            &profile.requested_model,
+            &request.payload().system,
+            &user,
+            request.limits().0.max_output_tokens,
+        ),
+        request.limits().0.request_bytes,
+        FailureCode::RequestTooLarge,
+    )?;
+    let (bytes, request_bytes) =
+        acquire(client.post(&profile.endpoint_id), body, request, control)?;
+    let (text, model, id, usage) = openai_compatible_envelope(&bytes)?;
+    finish(text, model, id, usage, request, request_bytes, bytes.len())
 }
 
 pub(super) fn complete_anthropic(
