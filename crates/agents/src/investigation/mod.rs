@@ -73,7 +73,10 @@ pub const MAX_INPUT_BYTES: usize = 128 * 1024;
 pub const MAX_MANIFEST_BYTES: usize = 128 * 1024;
 pub const MAX_RESULT_BYTES: usize = 64 * 1024;
 pub const MAX_RECORD_BYTES: usize = 256 * 1024;
-const RECORD_MAX_DEPTH: usize = 32;
+/// Shape limits shared with logical admission models; values are unchanged.
+pub const RECORD_MAX_DEPTH: usize = 32;
+pub const RECORD_MAX_VALUES: usize = 16384;
+pub const RECORD_MAX_ARRAY_ITEMS: usize = 128;
 /// Cumulative raw query acquisitions, including repeated identical pages.
 pub const MAX_TOTAL_QUERY_BYTES: usize = 96 * 1024;
 pub const MAX_QUERY_BYTES: usize = 32 * 1024;
@@ -119,7 +122,13 @@ pub(crate) fn text(value: &str, maximum: usize) -> bool {
 pub fn decode_record<T: serde::de::DeserializeOwned + serde::Serialize>(
     body: &str,
 ) -> Result<T, InvestigationError> {
-    strict::preflight(body, MAX_RECORD_BYTES, RECORD_MAX_DEPTH, 16384, 128)?;
+    strict::preflight(
+        body,
+        MAX_RECORD_BYTES,
+        RECORD_MAX_DEPTH,
+        RECORD_MAX_VALUES,
+        RECORD_MAX_ARRAY_ITEMS,
+    )?;
     let value: T = serde_json::from_str(body).map_err(|_| InvestigationError::InvalidInput)?;
     // New investigation contracts have no legacy permissive fields. Typed
     // round-trip equality also closes nested DTOs reused from older contracts.

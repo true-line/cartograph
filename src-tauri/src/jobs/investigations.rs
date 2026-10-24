@@ -61,6 +61,11 @@ mod staged;
 pub(crate) use finding_reviews::FindingReviewError;
 #[path = "investigations/storage.rs"]
 mod storage;
+#[cfg(any(unix, test))]
+#[path = "investigations/task_record_workspace.rs"]
+mod task_record_workspace;
+#[cfg(any(unix, test))]
+pub(crate) use task_record_workspace::next_prompt_record_workspace;
 #[cfg(test)]
 #[path = "investigations/tests.rs"]
 mod tests;

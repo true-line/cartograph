@@ -196,3 +196,37 @@ fn next_prompt_finish_boundary_final_write_rollback_and_lost_ack_are_exact() {
         assert_eq!(f.rows(), after);
     }
 }
+
+// AC-0327: real pending and completed task records, including derived flatten
+// and default fields. No store mutation is needed for decoder refusal controls.
+#[test]
+fn task_record_workspace_covers_pending_completed_and_flattened_refusal() {
+    let (retained, peak) = next_prompt_record_workspace(MAX_RECORD_BYTES).unwrap();
+    assert!(peak > retained);
+    assert!(next_prompt_record_workspace(MAX_RECORD_BYTES + 1).is_none());
+    assert!(next_prompt_record_workspace(usize::MAX).is_none());
+    for completed in [false, true] {
+        let mut f = Fixture::new(true);
+        f.begin();
+        if completed {
+            f.publish().unwrap();
+        }
+        let task = f.saved();
+        assert_eq!(task.detail.summary.has_result, completed);
+        assert_eq!(task.pending.is_some(), !completed);
+        let bytes = encode(&task, MAX_RECORD_BYTES).unwrap();
+        let decoded: StoredTask = decode(&bytes, &core_prov::content_hash(&bytes)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&task).unwrap()
+        );
+        let (actual_cap, actual_peak) = next_prompt_record_workspace(bytes.len()).unwrap();
+        assert!(retained >= actual_cap && peak >= actual_peak);
+        assert!(actual_cap >= std::mem::size_of::<StoredTask>() + bytes.len());
+        let mut malformed = serde_json::to_value(&task).unwrap();
+        malformed["detail"]["unexpected"] = serde_json::json!({"nested": "雪\n".repeat(1024)});
+        let raw = serde_json::to_string(&malformed).unwrap();
+        assert!(raw.len() < MAX_RECORD_BYTES);
+        assert!(agents::investigation::decode_record::<StoredTask>(&raw).is_err());
+    }
+}
