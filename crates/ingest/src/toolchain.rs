@@ -725,27 +725,76 @@ fn detect_workflow(rel: &str, path: &Path, detection: &mut Detection) {
     ));
 }
 
+/// The assigned key names of a dotenv text, in order. A line counts only
+/// as `[export ]KEY=…` with a well-formed key; anything else (a stray
+/// fragment, a comment) is skipped. A quoted value left open on its line
+/// swallows every following line until it closes, so the lines of a
+/// multiline secret (a PEM body, which may itself contain `=`) are never
+/// read as keys. An unterminated quote skips the rest of the file: fail
+/// closed.
+fn env_keys(text: &str) -> Vec<&str> {
+    let mut keys = Vec::new();
+    let mut open: Option<char> = None;
+    for line in text.lines() {
+        if let Some(quote) = open {
+            if closing_quote(line, quote).is_some() {
+                open = None;
+            }
+            continue;
+        }
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let assignment = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = assignment.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let mut chars = key.chars();
+        let well_formed = chars
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+        if !well_formed {
+            continue;
+        }
+        keys.push(key);
+        let value = value.trim_start();
+        if let Some(quote) = value
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '"' | '\'' | '`'))
+            && closing_quote(&value[1..], quote).is_none()
+        {
+            open = Some(quote);
+        }
+    }
+    keys
+}
+
+/// Byte offset of the first `quote` in `text` that a backslash does not
+/// escape (single quotes take no escapes).
+fn closing_quote(text: &str, quote: char) -> Option<usize> {
+    let mut escaped = false;
+    for (offset, c) in text.char_indices() {
+        if c == quote && !escaped {
+            return Some(offset);
+        }
+        escaped = quote != '\'' && c == '\\' && !escaped;
+    }
+    None
+}
+
 /// `.env*`: key names ONLY — values are never read into settings, never
 /// stored, never hashed (AC-0097, fail closed).
 fn detect_env(rel: &str, path: &Path, detection: &mut Detection) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
-    let keys: Vec<serde_json::Value> = text
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                return None;
-            }
-            let key = line.strip_prefix("export ").unwrap_or(line);
-            let key = key.split('=').next()?.trim();
-            if key.is_empty() {
-                None
-            } else {
-                Some(serde_json::Value::String(key.into()))
-            }
-        })
+    let keys: Vec<serde_json::Value> = env_keys(&text)
+        .into_iter()
+        .map(|key| serde_json::Value::String(key.into()))
         .collect();
     let mut settings = BTreeMap::new();
     settings.insert("keys".into(), serde_json::Value::Array(keys));
@@ -1165,6 +1214,24 @@ mod tests {
         let edge_prov: Provenance =
             serde_json::from_value(defined_in.props["prov"].clone()).unwrap();
         assert!(edge_prov.evidence.is_empty());
+    }
+
+    #[test]
+    fn env_keys_skip_multiline_values_and_non_assignments() {
+        // A PEM body inside a quoted value, including a `==`-padded line,
+        // must never surface as a key (AC-0097).
+        let text = "A=1\n\
+            PRIVATE_KEY=\"-----BEGIN KEY-----\n\
+            MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n\
+            KUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQ==\n\
+            -----END KEY-----\"\n\
+            B='one line'\n\
+            stray fragment without assignment\n\
+            9BAD=x\n\
+            export C.D = \"esc \\\" still open\nE=inside\n\" \n\
+            F=`x`\n\
+            G=\"never closed\nH=1\n";
+        assert_eq!(env_keys(text), ["A", "PRIVATE_KEY", "B", "C.D", "F", "G"]);
     }
 
     #[test]
