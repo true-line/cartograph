@@ -49,7 +49,17 @@ fn mcp_granted_completion_start_preserves_families_and_refuses_revocation() {
             saved.mcp_intent_hash,
             Some(request.intent_hash_with_policy(policy).unwrap())
         );
-        tx.commit().unwrap();
+        // AC-0327: releasing routing owners must not skip the full validator.
+        tx.execute(
+            "UPDATE investigation_tasks SET revision=revision+1 WHERE id=?1",
+            [&first.detail.summary.investigation_id],
+        )
+        .unwrap();
+        assert!(matches!(
+            load_execution_task(&tx, &first.detail.summary.investigation_id),
+            Err(InvestigationStoreError::Invalid)
+        ));
+        tx.rollback().unwrap();
         let replay = store
             .start_completion_access(&request, None, next, Some(&session))
             .unwrap();

@@ -858,12 +858,15 @@ pub(super) fn load_execution_task(
         return Err(InvestigationStoreError::Invalid);
     };
     let discriminator: StoredTask = decode(&bytes, &hash)?;
-    if discriminator
+    let next_prompt = discriminator
         .detail
         .summary
         .specialist_id
-        .uses_next_prompt_admission()
-    {
+        .uses_next_prompt_admission();
+    // The full family reader acquires its own row and decoded task. Routing
+    // owners must not overlap that second acquisition and saved-state validation.
+    drop((discriminator, bytes, hash));
+    if next_prompt {
         load_next_prompt_task(connection, id)
     } else {
         load_task(connection, id)
