@@ -44,7 +44,16 @@ fn containers(values: usize) -> Option<usize> {
 /// the caller's; the decoded DTO is included. Overflow returns `None`.
 pub fn validation_workspace_bytes(rule_wire: usize) -> Option<usize> {
     // Every JSON value, and so every typed element, spends at least one byte.
-    let values = rule_wire.checked_add(1)?;
+    validation_workspace(rule_wire, rule_wire.checked_add(1)?)
+}
+
+/// [`validation_workspace_bytes`] with a separately admitted bound on the
+/// rule's JSON values. `rule_values` must count every value the input holds,
+/// including envelopes and malformed or unknown members, but not object keys.
+/// Every typed element and every tagged subtree is at least one value. A
+/// bound above the wire's own is never looser than the wire-only model.
+pub fn validation_workspace(rule_wire: usize, rule_values: usize) -> Option<usize> {
+    let values = rule_values.min(rule_wire.checked_add(1)?);
     // V2 preflight holds unvisited values with their depth.
     let preflight = slots::<(&Value, usize)>(values)?;
     // The DTO owns at most the wire's string bytes. Typed elements are sized

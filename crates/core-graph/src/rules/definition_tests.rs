@@ -598,3 +598,19 @@ fn rule_validation_workspace_covers_real_decode_and_wire_refusal() {
     assert!(validation_workspace_bytes(usize::MAX).is_none());
     assert!(validation_workspace_bytes(usize::MAX / 2).is_none());
 }
+
+#[test]
+fn rule_validation_value_bound_matches_wire_model_at_its_ceiling() {
+    // AC-0327: the wire-only model is the value-bound model at wire + 1.
+    let value = serde_json::to_value(fixture()).unwrap();
+    let wire = serde_json::to_vec(&value).unwrap().len();
+    let (_, values) = strings_and_values(&value);
+    let wire_only = validation_workspace_bytes(wire).unwrap();
+    assert_eq!(validation_workspace(wire, wire + 1), Some(wire_only));
+    assert_eq!(validation_workspace(wire, usize::MAX), Some(wire_only));
+    let model = validation_workspace(wire, values).unwrap();
+    assert!(model < wire_only);
+    assert!(model >= std::mem::size_of::<GuardedExitEvidence>() + wire);
+    assert!(validation_workspace(usize::MAX, 1).is_none());
+    assert!(validation_workspace(usize::MAX / 2, usize::MAX / 2).is_none());
+}

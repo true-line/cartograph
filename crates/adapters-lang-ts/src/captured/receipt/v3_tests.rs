@@ -356,3 +356,59 @@ fn fact_match_workspace_covers_real_match_and_rejected_inventories() {
     assert!(fact_match_workspace_bytes(usize::MAX).is_none());
     assert!(fact_match_workspace_bytes(usize::MAX / 4).is_none());
 }
+
+/// Values counted like `SnapshotReadLimits::max_values`: keys are not values.
+fn value_count(value: &serde_json::Value) -> usize {
+    1 + match value {
+        serde_json::Value::Array(values) => values.iter().map(value_count).sum(),
+        serde_json::Value::Object(values) => values.values().map(value_count).sum(),
+        _ => 0,
+    }
+}
+
+#[test]
+fn fact_match_value_bound_tightens_the_wire_model_on_real_inputs() {
+    // AC-0327: an admitted value count only replaces the one-value-per-byte
+    // assumption; it still covers real valid and malformed matches.
+    let (node, receipt) = captured_rule_receipt();
+    let fact = serde_json::to_value(&node).unwrap();
+    let wire = serde_json::to_vec(&fact).unwrap().len();
+    let values = value_count(&fact);
+    let wire_only = fact_match_workspace_bytes(wire).unwrap();
+    assert_eq!(fact_match_workspace(wire, wire + 1), Some(wire_only));
+    assert_eq!(fact_match_workspace(wire, usize::MAX), Some(wire_only));
+    let model = fact_match_workspace(wire, values).unwrap();
+    assert!(model < wire_only);
+    let provenance: Provenance = serde_json::from_value(node.props["prov"].clone()).unwrap();
+    let rule = GuardedExitEvidence::from_value(node.props["rule"].clone()).unwrap();
+    assert!(
+        model
+            >= std::mem::size_of::<FactKey>()
+                + node.id.len()
+                + std::mem::size_of_val(provenance.evidence.as_slice())
+                + std::mem::size_of_val(receipt.ranges())
+                + std::mem::size_of_val(&rule)
+                + values * std::mem::size_of::<serde_json::Value>()
+                + 2 * wire
+    );
+    assert!(model >= core_graph::rules::validation_workspace(wire, values).unwrap());
+
+    // A malformed rule member is counted and still refused.
+    let mut malformed = node.clone();
+    let row: serde_json::Value = vec![serde_json::Value::Null; 20].into();
+    malformed.props["rule"]["untrusted"] = vec![row; 1_000].into();
+    assert!(!receipt.matches_node(&malformed));
+    assert!(matches!(
+        inventory(&malformed.props, receipt.content.schema_version),
+        Err(CapturedError::Invalid(_))
+    ));
+    let fact = serde_json::to_value(&malformed).unwrap();
+    let wire = serde_json::to_vec(&fact).unwrap().len();
+    let values = value_count(&fact);
+    let model = fact_match_workspace(wire, values).unwrap();
+    assert!(model < fact_match_workspace_bytes(wire).unwrap());
+    assert!(model >= values * std::mem::size_of::<(&serde_json::Value, usize)>() + wire);
+
+    assert!(fact_match_workspace(usize::MAX, 1).is_none());
+    assert!(fact_match_workspace(usize::MAX / 4, usize::MAX / 4).is_none());
+}

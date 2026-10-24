@@ -32,7 +32,16 @@ fn containers(values: usize) -> Option<usize> {
 /// Overflow returns `None`.
 pub fn fact_match_workspace_bytes(fact_wire: usize) -> Option<usize> {
     // Every JSON value spends at least one wire byte.
-    let values = fact_wire.checked_add(1)?;
+    fact_match_workspace(fact_wire, fact_wire.checked_add(1)?)
+}
+
+/// [`fact_match_workspace_bytes`] with a separately admitted bound on the
+/// fact's JSON values, counted like `SnapshotReadLimits::max_values`: every
+/// value including the fact envelope and malformed or unknown members, but
+/// not object keys. A bound above the wire's own is never looser than the
+/// wire-only model. Overflow returns `None`.
+pub fn fact_match_workspace(fact_wire: usize, fact_values: usize) -> Option<usize> {
+    let values = fact_values.min(fact_wire.checked_add(1)?);
     let value = sum(&[fact_wire, containers(values)?])?;
     // The compared key is a temporary of the whole match expression.
     let key = sum(&[slots::<FactKey>(1)?, fact_wire])?;
@@ -47,7 +56,7 @@ pub fn fact_match_workspace_bytes(fact_wire: usize) -> Option<usize> {
         "node-v1:".len().checked_add(64)?.checked_add(64)?,
     ])?;
     // Inventory: the provenance clone decodes into a typed owner whose
-    // tagged `method` buffers once. Its evidence is sized by the wire.
+    // tagged `method` buffers once. Each evidence entry is at least one value.
     let provenance = sum(&[
         slots::<Provenance>(1)?,
         fact_wire,
@@ -65,7 +74,7 @@ pub fn fact_match_workspace_bytes(fact_wire: usize) -> Option<usize> {
         provenance,
         ranges,
         value,
-        core_graph::rules::validation_workspace_bytes(fact_wire)?,
+        core_graph::rules::validation_workspace(fact_wire, values)?,
     ])?;
     sum(&[key, digest.max(provenance_decode).max(rule)])
 }

@@ -19,7 +19,7 @@ use std::path::Path;
 mod receipt;
 pub use receipt::{
     Grammar, MAX_RECEIPT_BYTES, MAX_RECEIPT_RANGES, RangeRole, Receipt, ReceiptRange,
-    fact_match_workspace_bytes,
+    fact_match_workspace, fact_match_workspace_bytes,
 };
 
 /// Maximum directory entries examined, including excluded entries.
