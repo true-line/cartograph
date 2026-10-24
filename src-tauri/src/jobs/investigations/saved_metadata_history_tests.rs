@@ -87,6 +87,21 @@ fn saved_metadata_history_matches_standalone_cutoffs_with_one_sweep_per_timeline
     assert_eq!(reused.ledger, actual.ledger);
     assert_eq!(reused.metadata, actual.metadata);
     assert_eq!(reused.ordinal, actual.ordinal);
+    #[cfg(unix)]
+    {
+        let (retained, peak) = next_prompt_saved_call_workspace().unwrap();
+        let core_bytes = serde_json::to_vec(&actual.step).unwrap().len()
+            + serde_json::to_vec(&actual.ledger).unwrap().len()
+            + serde_json::to_vec(&actual.metadata).unwrap().len();
+        assert!(retained >= core_bytes);
+        // Originals and returned clones coexist during timeline validation.
+        let (_, _, history_peak) = next_prompt_metadata_workspace().unwrap();
+        assert!(
+            peak >= history_peak
+                .checked_add(retained.checked_mul(2).unwrap())
+                .unwrap()
+        );
+    }
 }
 
 #[test]
