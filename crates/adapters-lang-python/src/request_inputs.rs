@@ -186,19 +186,35 @@ pub(crate) fn handler_bindings(
     if let Some(parameters) = function.child_by_field_name("parameters") {
         let mut cursor = parameters.walk();
         for parameter in parameters.named_children(&mut cursor) {
-            let name = if parameter.kind() == "identifier" {
-                Some(parameter)
-            } else {
-                parameter
-                    .child_by_field_name("name")
-                    .or_else(|| parameter.named_child(0))
-                    .filter(|name| name.kind() == "identifier")
-            };
-            if let Some(name) = name {
+            if let Some(name) = parameter_name(parameter) {
                 names.insert(cx.text(&name).to_string());
             }
         }
     }
+    binding_sites(cx, body, &mut |_, bound| {
+        names.extend(bound.iter().cloned())
+    });
+    names
+}
+
+/// The identifier a parameter binds, typed or defaulted.
+pub(crate) fn parameter_name(parameter: TsNode<'_>) -> Option<TsNode<'_>> {
+    if parameter.kind() == "identifier" {
+        return Some(parameter);
+    }
+    parameter
+        .child_by_field_name("name")
+        .or_else(|| parameter.named_child(0))
+        .filter(|name| name.kind() == "identifier")
+}
+
+/// Each statement or clause of `body`'s own scope that binds names, with
+/// the names it binds.
+pub(crate) fn binding_sites<'t>(
+    cx: &FileCx<'_>,
+    body: TsNode<'t>,
+    f: &mut dyn FnMut(TsNode<'t>, &BTreeSet<String>),
+) {
     let walker = Walker {
         cx,
         request: &BTreeSet::new(),
@@ -230,7 +246,11 @@ pub(crate) fn handler_bindings(
             _ => None,
         };
         if let Some(target) = target {
+            let mut names = BTreeSet::new();
             bound_names(cx, target, &mut names);
+            if !names.is_empty() {
+                f(node, &names);
+            }
         }
         // Nested definitions bind their name in the handler, although the
         // walk does not enter their bodies.
@@ -245,14 +265,13 @@ pub(crate) fn handler_bindings(
                 .filter(|d| matches!(d.kind(), "function_definition" | "class_definition"))
                 .and_then(|d| d.child_by_field_name("name"))
             {
-                names.insert(cx.text(&name).to_string());
+                f(child, &BTreeSet::from([cx.text(&name).to_string()]));
             }
         }
     });
-    names
 }
 
-fn bound_names(cx: &FileCx<'_>, target: TsNode<'_>, names: &mut BTreeSet<String>) {
+pub(crate) fn bound_names(cx: &FileCx<'_>, target: TsNode<'_>, names: &mut BTreeSet<String>) {
     match target.kind() {
         "identifier" => {
             names.insert(cx.text(&target).to_string());
@@ -276,7 +295,7 @@ fn bound_names(cx: &FileCx<'_>, target: TsNode<'_>, names: &mut BTreeSet<String>
 
 /// Whether `node` (a subscript) is only written: an assignment or `for`
 /// target, possibly inside a destructuring pattern, or deleted.
-fn is_write_target(node: TsNode<'_>) -> bool {
+pub(crate) fn is_write_target(node: TsNode<'_>) -> bool {
     let mut child = node;
     while let Some(parent) = child.parent() {
         match parent.kind() {
