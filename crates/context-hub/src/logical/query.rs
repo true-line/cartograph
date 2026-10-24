@@ -57,6 +57,42 @@ pub fn query_workspace(limits: SnapshotReadLimits, request_wire: usize) -> Optio
     })
 }
 
+/// Compose the actual `CoverageContext::query` wrapper around the core query.
+/// `request_wire` bounds the complete qualified request before this call; its
+/// optional context ID has no independent public size limit. Coverage inputs
+/// use the same separately admitted limits as `coverage`. This excludes the
+/// borrowed frozen context, host evidence/guards, a previous page retained by
+/// a caller during replacement, transport encoding and allocator/native/RSS.
+/// The complete coverage retained currency conservatively bounds its clone;
+/// this does not imply that query rebuilds inventories or the shared snapshot.
+pub fn qualified_query_workspace(
+    limits: SnapshotReadLimits,
+    coverage_limits: CoverageReadLimits,
+    scoped_repos: usize,
+    scope_identity_bytes: usize,
+    request_wire: usize,
+) -> Option<QueryWorkspace> {
+    let core = query_workspace(limits, request_wire)?;
+    let coverage = coverage(coverage_limits, scoped_repos, scope_identity_bytes)?;
+    let outer_request = sum(&[
+        request_wire, // context ID survives inner query and response assembly
+        size_of::<crate::coverage::QualifiedRequest<crate::QueryRequest>>(),
+    ])?;
+    let response_bytes = sum(&[
+        core.response_bytes,
+        coverage.retained,
+        "context-v2:".len().checked_add(blake3::OUT_LEN * 2)?,
+        size_of::<crate::coverage::QualifiedResponse<crate::QueryResponse>>(),
+    ])?;
+    // inner_budget counts a borrowed envelope without allocating a JSON copy.
+    // The core query completes before respond clones the qualification.
+    let peak_bytes = sum(&[outer_request, core.peak_bytes.max(response_bytes)])?;
+    Some(QueryWorkspace {
+        response_bytes,
+        peak_bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +171,30 @@ mod tests {
             },
         ] {
             assert_eq!(query_workspace(oversized, 128), None);
+        }
+    }
+    // AC-0327: qualification growth and all independent inputs fail checked.
+    #[test]
+    fn qualified_query_workspace_composes_and_refuses_overflow() {
+        let graph = SnapshotReadLimits::default();
+        let cov = CoverageReadLimits::default();
+        let base = qualified_query_workspace(graph, cov, 1, 64, 128).unwrap();
+        let core = query_workspace(graph, 128).unwrap();
+        assert!(base.response_bytes > core.response_bytes);
+        assert!(base.peak_bytes > core.peak_bytes);
+        for (repos, identities, request) in [(2, 64, 128), (1, 128, 128), (1, 64, 256)] {
+            let larger = qualified_query_workspace(graph, cov, repos, identities, request).unwrap();
+            assert!(larger.peak_bytes > base.peak_bytes);
+        }
+        for (repos, identities, request) in [
+            (usize::MAX, 64, 128),
+            (1, usize::MAX, 128),
+            (1, 64, usize::MAX),
+        ] {
+            assert_eq!(
+                qualified_query_workspace(graph, cov, repos, identities, request),
+                None
+            );
         }
     }
 }

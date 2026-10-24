@@ -19,7 +19,7 @@ mod coverage_validation;
 pub use coverage_validation::coverage_batch_validation_workspace;
 
 mod query;
-pub use query::{QueryWorkspace, query_workspace};
+pub use query::{QueryWorkspace, qualified_query_workspace, query_workspace};
 
 /// Sum named roles, failing on the first unrepresentable total.
 pub fn sum(roles: &[usize]) -> Option<usize> {
