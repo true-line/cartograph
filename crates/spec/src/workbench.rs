@@ -223,12 +223,35 @@ fn text_prop<'a>(node: &'a Node, keys: &[&str]) -> Option<&'a str> {
 /// direction/cardinality, same as that lookup. Leaves the final `"CALLS"`
 /// default out (unlike planning): `None` here reads as "unknown" to the
 /// register, and stays offered rather than being pinned to a guess.
-fn gap_node_edge_label<'a>(node: &'a Node, edges: &[&'a Edge]) -> Option<&'a str> {
-    edges
-        .iter()
-        .find(|edge| edge.dst == node.id)
-        .or_else(|| edges.iter().find(|edge| edge.src == node.id))
-        .map(|edge| edge.label.as_str())
+/// The label of the first edge into each node, then of the first edge out
+/// of it, indexed once so labelling every gap node is not a scan of every
+/// edge per node.
+struct GapEdgeLabels<'a> {
+    into: BTreeMap<&'a str, &'a str>,
+    out_of: BTreeMap<&'a str, &'a str>,
+}
+
+impl<'a> GapEdgeLabels<'a> {
+    fn new(edges: &[&'a Edge]) -> Self {
+        let mut labels = Self {
+            into: BTreeMap::new(),
+            out_of: BTreeMap::new(),
+        };
+        for edge in edges {
+            labels.into.entry(&edge.dst).or_insert(&edge.label);
+            labels.out_of.entry(&edge.src).or_insert(&edge.label);
+        }
+        labels
+    }
+}
+
+fn gap_node_edge_label<'a>(node: &'a Node, labels: &GapEdgeLabels<'a>) -> Option<&'a str> {
+    let id = node.id.as_str();
+    labels
+        .into
+        .get(id)
+        .or_else(|| labels.out_of.get(id))
+        .copied()
         .or_else(|| node.props["edge_label"].as_str())
 }
 
@@ -588,6 +611,28 @@ mod tests {
                 src: src.into(), dst: dst.into(), label: label.into(), props: serde_json::json!({})
             }))}),
         }
+    }
+
+    #[test]
+    fn gap_edge_labels_prefer_first_incoming_then_first_outgoing_then_prop() {
+        let (t, c) = (Tier::Deterministic, ConfidenceTier::Gap);
+        let edges = [
+            edge("gap:a", "x", "OUT_A", t, c),
+            edge("y", "gap:a", "IN_A", t, c),
+            edge("z", "gap:a", "IN_A_LATER", t, c),
+            edge("gap:b", "x", "OUT_B", t, c),
+            edge("gap:b", "y", "OUT_B_LATER", t, c),
+        ];
+        let edges: Vec<&Edge> = edges.iter().collect();
+        let labels = GapEdgeLabels::new(&edges);
+        let a = node("gap:a", "Gap", t, c);
+        let b = node("gap:b", "Gap", t, c);
+        let mut lone = node("gap:c", "Gap", t, c);
+        assert_eq!(gap_node_edge_label(&a, &labels), Some("IN_A"));
+        assert_eq!(gap_node_edge_label(&b, &labels), Some("OUT_B"));
+        assert_eq!(gap_node_edge_label(&lone, &labels), None);
+        lone.props["edge_label"] = "CALLS".into();
+        assert_eq!(gap_node_edge_label(&lone, &labels), Some("CALLS"));
     }
 
     fn flow_hop(confidence: ConfidenceTier, id: &str) -> Hop {

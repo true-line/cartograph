@@ -119,7 +119,7 @@ fn node_name_text(node: &Node) -> Text<'_> {
     )
     .unwrap_or(&node.id)])
 }
-fn node_candidate<'a>(node: &'a Node, edges: &[&'a Edge]) -> Candidate<'a> {
+fn node_candidate<'a>(node: &'a Node, labels: &GapEdgeLabels<'a>) -> Candidate<'a> {
     let mut summary = Text::new([node.label.as_str(), ": "]);
     summary.0.extend(node_name_text(node).0);
     let provenance = candidate_provenance(&node.props, &Text::new(["node:", &node.id]));
@@ -131,7 +131,7 @@ fn node_candidate<'a>(node: &'a Node, edges: &[&'a Edge]) -> Candidate<'a> {
         summary,
         provenance,
         omission,
-        edge_label: gap_node_edge_label(node, edges),
+        edge_label: gap_node_edge_label(node, labels),
     }
 }
 fn edge_candidate(edge: &Edge) -> Candidate<'_> {
@@ -860,11 +860,12 @@ pub(super) fn gap_selected(
         });
     }
     let origins = render::Origins::new(nodes, edges);
+    let labels = GapEdgeLabels::new(edges);
     let mut rows: Vec<_> = nodes
         .iter()
         .copied()
         .filter(|n| is_gap_node(n))
-        .map(|n| node_candidate(n, edges))
+        .map(|n| node_candidate(n, &labels))
         .collect();
     rows.extend(
         edges
