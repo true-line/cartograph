@@ -1010,7 +1010,9 @@ fn enclosing_function(mut node: TsNode<'_>, functions: &HashMap<usize, String>) 
 /// Point an absolute import at the recovered file it names from the
 /// repository root, the same root `directory-proven` calls resolve against:
 /// `a.b` is `a/b.py` or the package `a/b/__init__.py`. When both exist, or
-/// neither, the import keeps its `mod:` endpoint for boundary classification.
+/// neither, or a parent is a plain module (`a.py` without `a/__init__.py`,
+/// which Python loads ahead of the directory, so `a.b` cannot import), the
+/// import keeps its `mod:` endpoint for boundary classification.
 fn resolve_absolute_imports(out: &mut Extraction, repo: &str) {
     let files = out
         .nodes
@@ -1028,6 +1030,15 @@ fn resolve_absolute_imports(out: &mut Extraction, repo: &str) {
         let Some(module_path) = module_file("", module) else {
             continue;
         };
+        let parts = module.split('.').collect::<Vec<_>>();
+        let blocked = (1..parts.len()).any(|end| {
+            let prefix = parts[..end].join("/");
+            files.contains(&file_id(repo, &format!("{prefix}.py")))
+                && !files.contains(&file_id(repo, &format!("{prefix}/__init__.py")))
+        });
+        if blocked {
+            continue;
+        }
         let package = format!("{}/__init__.py", module_path.trim_end_matches(".py"));
         let found = [module_path, package]
             .into_iter()

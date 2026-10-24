@@ -920,3 +920,95 @@ fn retrofit_bases_must_be_unique_and_keep_their_text() {
         IdentityExpr::Computed("no Retrofit base URL in repo".into())
     );
 }
+
+// AC-0098 (#721): imports of extension functions (overloads included),
+// top-level properties, type aliases, annotation classes (the grammar's
+// expression-shaped parse too) and enum entries name their declaring file;
+// a name declared in two files, or not at all, keeps its `mod:` endpoint.
+#[test]
+fn non_symbol_import_targets_resolve_to_their_declaring_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let common = "src/main/kotlin/com/demo/common/Common.kt";
+    write(
+        dir.path(),
+        common,
+        r#"package com.demo.common
+
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class LoadingState
+
+typealias LoadingFlow = MutableStateFlow<Boolean>
+
+const val PAGE_SIZE = 20
+
+fun String.format(): String = this
+fun Int.format(): String = toString()
+
+enum class Theme(val dark: Boolean) {
+    @SerializedName("dark")
+    DARK(true),
+    LIGHT(false);
+}
+
+fun String.twice(): String = this
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/common/Other.kt",
+        "package com.demo.common\n\nfun String.twice(): String = this\n",
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/App.kt",
+        r#"package com.demo
+
+import com.demo.common.LoadingState
+import com.demo.common.LoadingFlow
+import com.demo.common.PAGE_SIZE
+import com.demo.common.format
+import com.demo.common.Theme.DARK
+import com.demo.common.twice
+import com.demo.common.missing
+
+class App
+"#,
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+    let app = "file:local/demo@src/main/kotlin/com/demo/App.kt";
+    let targets = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "IMPORTS" && edge.src == app)
+        .map(|edge| {
+            (
+                edge.props["specifier"].as_str().unwrap().to_string(),
+                edge.dst.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let declaring = format!("file:local/demo@{common}");
+    for name in [
+        "LoadingState",
+        "LoadingFlow",
+        "PAGE_SIZE",
+        "format",
+        "Theme.DARK",
+    ] {
+        assert_eq!(
+            targets[&format!("com.demo.common.{name}")],
+            declaring,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        targets["com.demo.common.twice"],
+        "mod:com.demo.common.twice"
+    );
+    assert_eq!(
+        targets["com.demo.common.missing"],
+        "mod:com.demo.common.missing"
+    );
+}

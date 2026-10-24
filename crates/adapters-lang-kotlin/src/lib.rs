@@ -56,6 +56,10 @@ pub struct Extraction {
     pending_calls: Vec<PendingCall>,
     declared_types: Vec<Declared>,
     declared_functions: Vec<Declared>,
+    /// Further import targets (#721): extension functions, top-level
+    /// properties, type aliases, annotation classes and enum entries. They
+    /// prove only which file an import names, never a call target.
+    declared_importables: Vec<Declared>,
     /// Package headers, one per file that has one.
     packages: Vec<String>,
 }
@@ -592,9 +596,83 @@ fn extension_receiver(cx: &FileCx<'_>, function: TsNode<'_>, name: TsNode<'_>) -
     None
 }
 
+/// Import targets that are not call-resolvable Symbols (#721), each keyed
+/// `package.Name`, or `package.Type.ENTRY` for an enum entry.
+fn collect_importables(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    language: &tree_sitter::Language,
+    package: &str,
+    path: &str,
+    out: &mut Vec<Declared>,
+) {
+    let mut push = |qualified: String| {
+        out.push(Declared {
+            fqn: format!("{package}.{qualified}"),
+            path: path.to_string(),
+            qualified,
+        });
+    };
+    let mut walk = root.walk();
+    for declaration in root.named_children(&mut walk) {
+        let name = match declaration.kind() {
+            // Extension functions: top-level plain ones are already types'
+            // and functions' business.
+            "function_declaration" => declaration
+                .child_by_field_name("name")
+                .filter(|name| extension_receiver(cx, declaration, *name).is_some()),
+            "type_alias" => declaration.child_by_field_name("type"),
+            "property_declaration" => declaration
+                .named_children(&mut declaration.walk())
+                .find(|child| child.kind() == "variable_declaration")
+                .and_then(|variable| variable.named_child(0))
+                .filter(|name| name.kind() == "identifier"),
+            // tree-sitter-kotlin-ng parses `@A(...) annotation class Name` as
+            // an infix expression. `class` is a hard keyword that can never
+            // name an infix function, so this exact shape is that declaration.
+            "annotated_expression" => annotation_class_name(cx, declaration),
+            _ => None,
+        };
+        if let Some(name) = name {
+            push(cx.text(&name).to_string());
+        }
+    }
+    let query = Query::new(language, "(enum_entry (identifier) @entry)").expect("static query");
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, root, cx.source);
+    while let Some(found) = matches.next() {
+        let entry = found.captures()[0].node;
+        let mut chain = enclosing_type_chain(cx, entry);
+        chain.push(cx.text(&entry).to_string());
+        push(chain.join("."));
+    }
+}
+
+/// `Name` of a top-level `annotation class Name` the grammar read as an
+/// annotated infix expression.
+fn annotation_class_name<'t>(cx: &FileCx<'_>, mut node: TsNode<'t>) -> Option<TsNode<'t>> {
+    while node.kind() == "annotated_expression" {
+        node = node.named_children(&mut node.walk()).last()?;
+    }
+    let parts = (node.kind() == "infix_expression")
+        .then(|| node.named_children(&mut node.walk()).collect::<Vec<_>>())?;
+    match parts.as_slice() {
+        [annotation, class, name]
+            if parts.iter().all(|part| part.kind() == "identifier")
+                && cx.text(annotation) == "annotation"
+                && cx.text(class) == "class" =>
+        {
+            Some(*name)
+        }
+        _ => None,
+    }
+}
+
 /// Retarget each `IMPORTS` edge whose complete target this repository
 /// declares exactly once — a type, a top-level function, or a member whose
-/// `Symbol` the declaring type defines — to the declaring `File`. A prefix
+/// `Symbol` the declaring type defines — or declares in exactly one file
+/// (overloads, extension functions, top-level properties, type aliases,
+/// annotation classes, enum entries) to the declaring `File`. A prefix
 /// alone never proves it (`a.Foo.missing` is not `a.Foo`): unproven targets
 /// keep their `mod:` id and are classified by [`classify_import`].
 fn resolve_repo_imports(
@@ -603,6 +681,7 @@ fn resolve_repo_imports(
     types: &BTreeMap<String, Option<Declared>>,
     functions: &BTreeMap<String, Option<Declared>>,
     known_symbols: &HashSet<String>,
+    importable_files: &BTreeMap<String, Option<String>>,
 ) {
     for edge in edges {
         if edge.label != "IMPORTS" {
@@ -626,8 +705,11 @@ fn resolve_repo_imports(
                 ))
                 .then_some(owner)
         });
-        if let Some(unique) = unique {
-            edge.dst = file_id(repo, &unique.path);
+        let path = unique
+            .map(|unique| unique.path.as_str())
+            .or_else(|| importable_files.get(module).and_then(Option::as_deref));
+        if let Some(path) = path {
+            edge.dst = file_id(repo, path);
             edge.props["resolution"] = "import-proven".into();
         }
     }
@@ -812,6 +894,17 @@ pub fn extract_source(
             });
         }
         functions.push((function, symbol));
+    }
+
+    if let Some(package) = &package {
+        collect_importables(
+            &cx,
+            root,
+            &language,
+            package,
+            path,
+            &mut out.declared_importables,
+        );
     }
 
     // Spring Web endpoints: annotation-proven controllers, class-level
@@ -1210,6 +1303,8 @@ pub fn extract_dir_incremental_with_progress(
             out.pending_calls.extend(extraction.pending_calls);
             out.declared_types.extend(extraction.declared_types);
             out.declared_functions.extend(extraction.declared_functions);
+            out.declared_importables
+                .extend(extraction.declared_importables);
             out.packages.extend(extraction.packages);
             out.fetch_sites.extend(extraction.fetch_sites);
             out.retrofit_bases.extend(extraction.retrofit_bases);
@@ -1241,6 +1336,24 @@ pub fn extract_dir_incremental_with_progress(
         by_fqn
     };
     let types_by_fqn = unique_by_fqn(&out.declared_types);
+    // An import names a file, so overloads declared in one file still prove
+    // it; a name declared in two files proves neither.
+    let mut importable_files: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for item in out
+        .declared_types
+        .iter()
+        .chain(&out.declared_functions)
+        .chain(&out.declared_importables)
+    {
+        importable_files
+            .entry(item.fqn.clone())
+            .and_modify(|unique| {
+                if unique.as_deref() != Some(item.path.as_str()) {
+                    *unique = None;
+                }
+            })
+            .or_insert_with(|| Some(item.path.clone()));
+    }
     let functions_by_fqn = unique_by_fqn(&out.declared_functions);
     // Every package this repository declares — Java sources included, so a
     // mixed JVM tree never mistakes its own Java package for external.
@@ -1292,6 +1405,7 @@ pub fn extract_dir_incremental_with_progress(
         &types_by_fqn,
         &functions_by_fqn,
         &known,
+        &importable_files,
     );
     // #464 (ADR-0033): an import proven external is re-keyed on its package
     // id rather than the imported type/member — `mod:kotlinx.coroutines`,

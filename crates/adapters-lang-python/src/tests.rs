@@ -249,6 +249,14 @@ fn absolute_imports_resolve_to_files_from_the_repository_root() {
         "dup.py",
         "dup/__init__.py",
         "src/orders/__init__.py",
+        "plain.py",
+        "plain/sub.py",
+        "deep/__init__.py",
+        "deep/mid.py",
+        "deep/mid/leaf.py",
+        "pkg.py",
+        "pkg/__init__.py",
+        "pkg/mod.py",
     ] {
         let file = dir.path().join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -256,7 +264,7 @@ fn absolute_imports_resolve_to_files_from_the_repository_root() {
     }
     std::fs::write(
         dir.path().join("main.py"),
-        "import app\nfrom app.db import Session\nimport tasks.clean\nimport dup\nimport orders.models\nimport requests\n",
+        "import app\nfrom app.db import Session\nimport tasks.clean\nimport dup\nimport orders.models\nimport requests\nimport plain.sub\nimport deep.mid.leaf\nimport pkg.mod\n",
     )
     .unwrap();
     let out = extract_dir(dir.path(), &id()).unwrap();
@@ -286,6 +294,15 @@ fn absolute_imports_resolve_to_files_from_the_repository_root() {
             ("dup".into(), "mod:dup".into(), None),
             ("orders.models".into(), "mod:orders.models".into(), None),
             ("requests".into(), "mod:requests".into(), None),
+            // A plain module shadows the directory: `plain.sub` cannot import.
+            ("plain.sub".into(), "mod:plain.sub".into(), None),
+            ("deep.mid.leaf".into(), "mod:deep.mid.leaf".into(), None),
+            // A package beside a same-named module still proves its children.
+            (
+                "pkg.mod".into(),
+                file("pkg/mod.py"),
+                Some("directory-proven".into())
+            ),
         ])
     );
 }
