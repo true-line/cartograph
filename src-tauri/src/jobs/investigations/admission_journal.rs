@@ -662,6 +662,16 @@ fn validate_proposal(
     ledger: &InvestigationInputLedger,
     call: &SavedCallBasis,
 ) -> Result<(), InvestigationStoreError> {
+    // Capacity refusals are read proposals only. Exclude the broader finish
+    // decoder before it can acquire findings that this journal always rejects.
+    if proposal.get("schema_version").is_some()
+        || !matches!(
+            proposal.get("type").and_then(Value::as_str),
+            Some("query_context" | "replay_query" | "read_evidence" | "read_coverage_inventory")
+        )
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
     let raw = encode(proposal, MAX_ACTION_BYTES)?;
     let context = ledger
         .coverage
@@ -826,3 +836,7 @@ pub(super) mod tests;
 #[cfg(unix)]
 #[path = "timeline_workspace.rs"]
 pub(super) mod timeline_workspace;
+
+#[cfg(unix)]
+#[path = "refusal_workspace.rs"]
+pub(super) mod refusal_workspace;
