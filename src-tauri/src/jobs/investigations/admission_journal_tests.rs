@@ -321,6 +321,28 @@ fn admission_journal_refuse_accept_and_historical_cutoffs_use_logical_ordinals()
         }
     );
     let tx = f.store.conn.unchecked_transaction().unwrap();
+    #[cfg(unix)]
+    {
+        // AC-0327: actual multi-call replay retains all cores and publications.
+        let line = timeline(&tx, &f.task).unwrap();
+        assert_eq!(line.calls.len(), 3);
+        assert_eq!(line.publications.len(), 2);
+        let (retained, peak) = next_prompt_timeline_workspace().unwrap();
+        let actual: usize = line
+            .calls
+            .values()
+            .map(|w| {
+                serde_json::to_vec(&(&w.call, &w.core.step, &w.core.ledger, &w.core.metadata))
+                    .unwrap()
+                    .len()
+                    + std::mem::size_of::<CallWitness>()
+            })
+            .sum();
+        assert!(retained >= actual + line.publications.len() * std::mem::size_of::<Publication>());
+        let (core, _) = next_prompt_saved_call_workspace().unwrap();
+        assert!(retained >= core * INVESTIGATION_V2_POLICY.limits().model_invocations as usize);
+        assert!(peak >= retained + next_prompt_metadata_workspace().unwrap().2);
+    }
     assert_eq!(
         derive_at(&tx, &f.task, &first_step).unwrap(),
         CapacityState::default()
