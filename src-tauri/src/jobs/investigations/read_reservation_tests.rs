@@ -398,6 +398,30 @@ fn read_reservation_corrupt_rows_are_bounded_and_never_release_unvalidated_claim
         pending_storage_claims(&tx, None),
         Err(InvestigationStoreError::Invalid)
     );
+    // AC-0327: nested malformed Content in either tagged path still fails
+    // closed; JSON nesting does not introduce recursive typed enum layers.
+    for pointer in ["/binding/original_read/fact/id", "/source/fact/id"] {
+        let mut value = serde_json::to_value(&r).unwrap();
+        let mut nested = json!("not an id");
+        for _ in 0..48 {
+            nested = json!([nested]);
+        }
+        *value.pointer_mut(pointer).unwrap() = nested;
+        let malformed = serde_json::to_vec(&value).unwrap();
+        assert!(malformed.len() < MAX_MANIFEST_BYTES);
+        replace_body(
+            &tx,
+            TABLES[0],
+            "task:1",
+            "step:1",
+            &malformed,
+            &content_hash(&malformed),
+        );
+        assert_eq!(
+            load(&tx, "task:1", "step:1"),
+            Err(InvestigationStoreError::Invalid)
+        );
+    }
     let mut value = serde_json::to_value(&r).unwrap();
     value["foreign"] = json!(true);
     let foreign = serde_json::to_vec(&value).unwrap();

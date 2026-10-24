@@ -15,9 +15,11 @@ pub(crate) fn next_prompt_read_reservation_workspace() -> Option<(usize, usize)>
     let retained = sum(&[size_of::<SavedRead>(), wire.checked_mul(3)?])?;
     let decoder = sum(&[
         wire.checked_mul(2)?, // row and serde string scratch
-        // serde_json's default recursion limit is 128. Conservatively retain
-        // one Content/Value layout per level for internally tagged enums.
-        json_bytes(wire)?.checked_mul(129)?,
+        // ReadIntent::Source -> TaskFactKey is the deepest tagged path (2).
+        // source.fact has only TaskFactKey; other fields are closed structs,
+        // strings or scalars. Malformed nested input occupies one buffered
+        // Content tree per typed layer, not one whole tree per JSON depth.
+        json_bytes(wire)?.checked_mul(2)?,
         wire.checked_mul(6)?, // canonical escaping before encode rejects
         slots::<Vec<u8>>(3)?,
         64,
