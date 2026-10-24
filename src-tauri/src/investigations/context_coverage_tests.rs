@@ -734,3 +734,74 @@ fn qualified_preparation_shares_one_scoped_projection_and_halves_construction_wo
         );
     }
 }
+
+// AC-0328: scope preparation selects references, not public response pages.
+#[test]
+fn qualified_neighborhood_preparation_keeps_large_facts_without_response_pages() {
+    use core_graph::GraphStore;
+    for padding in [0, context_hub::MAX_RESPONSE_BYTES + 1] {
+        let fixture = Fixture::new(3);
+        {
+            let mut graph = fixture.state.graph.lock().unwrap();
+            graph
+                .put_node(&Node {
+                    id: "mod:0".into(),
+                    label: "Module".into(),
+                    props: json!({"text": "x".repeat(padding)}),
+                })
+                .unwrap();
+            graph
+                .put_edge(&Edge {
+                    src: "mod:0".into(),
+                    dst: "mod:1".into(),
+                    label: "CALLS".into(),
+                    props: json!({}),
+                })
+                .unwrap();
+        }
+        let graph = fixture
+            .state
+            .graph
+            .lock()
+            .unwrap()
+            .read_snapshot_bounded(SnapshotReadLimits::default())
+            .unwrap();
+        let complete = projection(graph.0.clone(), graph.1.clone()).unwrap();
+        if padding > 0 {
+            assert!(matches!(
+                complete.query(QueryRequest::default()),
+                Err(context_hub::ContextError::ResponseBudgetExceeded { .. })
+            ));
+        }
+        let expected = projection(
+            graph
+                .0
+                .iter()
+                .filter(|n| n.id != "mod:2")
+                .cloned()
+                .collect(),
+            graph.1.clone(),
+        )
+        .unwrap();
+        let mut requested = request();
+        requested.scope = InvestigationScope::Neighborhood {
+            anchor: "mod:0".into(),
+            hops: 1,
+        };
+        let prepared = fixture.prepare(&requested).unwrap();
+        assert_eq!(prepared.snapshot.id(), expected.id());
+        assert_eq!(prepared.graph, graph);
+        assert!(
+            prepared
+                .qualified
+                .as_ref()
+                .unwrap()
+                .shares_snapshot(&prepared.snapshot)
+        );
+        requested.scope = InvestigationScope::Neighborhood {
+            anchor: "missing".into(),
+            hops: 1,
+        };
+        assert!(fixture.prepare(&requested).is_err());
+    }
+}

@@ -550,25 +550,9 @@ impl FrozenContext {
             InvestigationScope::Neighborhood { .. } => {
                 // Reuse the service's actual scope selection rather than a
                 // subtly different application-specific graph traversal.
-                let mut references = BTreeSet::new();
-                let mut cursor = None;
-                loop {
-                    let page = complete
-                        .query(QueryRequest {
-                            scope: scope(requested),
-                            kind: None,
-                            labels: vec![],
-                            max_facts: context_hub::MAX_FACTS,
-                            max_bytes: context_hub::MAX_RESPONSE_BYTES,
-                            cursor,
-                        })
-                        .map_err(context_error)?;
-                    references.extend(page.facts.into_iter().map(|f| f.reference));
-                    let Some(next) = page.next_cursor else {
-                        break;
-                    };
-                    cursor = Some(next);
-                }
+                let references = complete
+                    .references_in_scope(scope(requested))
+                    .map_err(context_error)?;
                 let nodes = graph
                     .0
                     .iter()
