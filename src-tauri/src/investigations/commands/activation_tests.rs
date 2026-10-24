@@ -671,3 +671,159 @@ fn mcp_completion_retains_reservation_until_detached_worker_exits() {
         wait(|| budget.is_idle().unwrap().then_some(()));
     });
 }
+
+#[test]
+fn mcp_adapter_runs_all_task_operations_and_preserves_principal_replay() {
+    // AC-0321/0323/0324/0325: real coordinator + in-process synthetic provider.
+    // Direct adapter evidence; this does not qualify the socket/relay or bytes.
+    use crate::investigations::mcp_dispatch::TaskDispatcher;
+    use crate::mcp_reads::{ReadError, task_reservation::TaskReservations};
+    use mcp_local::work_budget::{WorkBudget, WorkLimits};
+    use mcp_wire::tools::TaskTool;
+    let provider = Arc::new(PublicProvider::new(false));
+    worker::with_public_start_fixture(provider.clone(), false, |app, request, _| {
+        let state = app.state::<AppState>();
+        state
+            .investigations
+            .set_test_provider(request.provider_mode, provider.clone());
+        let one = std::num::NonZeroUsize::new(1).unwrap();
+        let mut jobs = state.jobs.lock().unwrap();
+        let owner_task = jobs.investigation_history(None, None).unwrap().items[0]
+            .investigation_id
+            .clone();
+        let client_capacity = std::num::NonZeroUsize::new(2).unwrap();
+        let client = jobs.create_mcp_client(client_capacity).unwrap();
+        let foreign = jobs.create_mcp_client(client_capacity).unwrap();
+        drop(jobs);
+        let grant = McpTaskActivation::granted(client, one);
+        let foreign_grant = McpTaskActivation::granted(foreign, one);
+        let make_dispatch = |session| {
+            // Unit permit tests lifetime plumbing, not aggregate admission.
+            let budget = WorkBudget::new(WorkLimits {
+                max_workers: one,
+                max_reserved_bytes: one,
+                max_cumulative_read_bytes: 0,
+            });
+            TaskDispatcher::new(
+                session,
+                TaskReservations::from(Arc::new(budget.try_acquire(one, 0).unwrap())),
+            )
+        };
+        let dispatcher = make_dispatch(grant.session());
+        let other = make_dispatch(foreign_grant.session());
+        let call = |dispatcher: &TaskDispatcher, tool, args: Value| {
+            dispatcher.call(
+                app,
+                &json!("request"),
+                tool,
+                args.as_object().unwrap().clone(),
+                crate::mcp_reads::worker::tests::limits().scope,
+                256 * 1024,
+            )
+        };
+        // AC-0327: source admission must retain its task-specific refusal code.
+        let mut bounded_scope = crate::mcp_reads::worker::tests::limits().scope;
+        bounded_scope.max_source_registry_bytes = one;
+        let refused = dispatcher
+            .call(
+                app,
+                &json!("bounded-source"),
+                TaskTool::Start,
+                json!({"request":request}).as_object().unwrap().clone(),
+                bounded_scope,
+                256 * 1024,
+            )
+            .unwrap_err();
+        assert_eq!(refused, ReadError::AdmissionLimit);
+        assert_eq!(refused.to_string(), "limit_exceeded");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        let started = call(&dispatcher, TaskTool::Start, json!({"request":request})).unwrap();
+        let id = started["result"]["structuredContent"]["investigation_id"]
+            .as_str()
+            .unwrap();
+        let terminal = finished(app, id);
+        assert_eq!(terminal.summary.status, InvestigationStatus::Completed);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+        let status = call(&dispatcher, TaskTool::Status, json!({"task_id":id})).unwrap();
+        assert_eq!(
+            status["result"]["structuredContent"],
+            serde_json::to_value(&terminal.summary).unwrap()
+        );
+        let events = call(
+            &dispatcher,
+            TaskTool::Events,
+            json!({"task_id":id,"after":0}),
+        )
+        .unwrap();
+        let owner_events = state
+            .jobs
+            .lock()
+            .unwrap()
+            .investigation_events(id, 0)
+            .unwrap();
+        assert_eq!(
+            events["result"]["structuredContent"],
+            serde_json::to_value(&owner_events).unwrap()
+        );
+        assert!(!owner_events.items.is_empty());
+        assert!(
+            owner_events
+                .items
+                .windows(2)
+                .all(|pair| pair[1].sequence == pair[0].sequence + 1)
+        );
+        let result = call(&dispatcher, TaskTool::Result, json!({"task_id":id})).unwrap();
+        let saved = state.jobs.lock().unwrap().investigation_result(id).unwrap();
+        assert!(saved.is_some());
+        assert_eq!(
+            result["result"]["structuredContent"]["result"],
+            serde_json::to_value(&saved).unwrap()
+        );
+        let cancelled = call(&dispatcher, TaskTool::Cancel, json!({"task_id":id})).unwrap();
+        assert_eq!(
+            cancelled["result"]["structuredContent"],
+            status["result"]["structuredContent"]
+        );
+        // A saved nonce survives a now-unavailable provider without another call.
+        provider.available.store(false, Ordering::SeqCst);
+        let profiles = provider.profiles.load(Ordering::SeqCst);
+        let replay = call(&dispatcher, TaskTool::Start, json!({"request":request})).unwrap();
+        assert_eq!(
+            replay["result"]["structuredContent"]["investigation_id"],
+            id
+        );
+        assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+        let mut changed = request.clone();
+        changed.question.push_str(" changed");
+        assert!(call(&dispatcher, TaskTool::Start, json!({"request":changed})).is_err());
+        for tool in [
+            TaskTool::Status,
+            TaskTool::Events,
+            TaskTool::Result,
+            TaskTool::Cancel,
+        ] {
+            let args = |id| {
+                if tool == TaskTool::Events {
+                    json!({"task_id":id,"after":0})
+                } else {
+                    json!({"task_id":id})
+                }
+            };
+            assert_eq!(call(&other, tool, args(id)), Err(ReadError::InvalidRequest));
+            assert_eq!(
+                call(&dispatcher, tool, args(&owner_task)),
+                Err(ReadError::InvalidRequest)
+            );
+        }
+        grant.revoke();
+        assert_eq!(
+            call(&dispatcher, TaskTool::Start, json!({"request":request})),
+            Err(ReadError::InvalidRequest)
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    });
+}
+
+#[cfg(unix)]
+#[path = "activation_tests/task_relay.rs"]
+mod task_relay;

@@ -124,3 +124,92 @@ fn scoped_worker_refuses_invalid_graph_limits_before_reserving_or_advertising() 
         }
     }
 }
+
+#[test]
+fn authenticated_task_tools_share_lifecycle_and_revocation_precedes_store_access() {
+    // AC-0320/0321/0325: internal factory only; public task activation stays off.
+    use agents::investigation::{McpClientId, McpTaskActivation};
+    let dir = tempfile::tempdir().unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(crate::registered_source_tests::app_state(dir.path()));
+    let grant = McpTaskActivation::granted(
+        McpClientId::from_host_bytes([9; 16]),
+        NonZeroUsize::new(4).unwrap(),
+    );
+    let limits = tests::limits();
+    let budget = WorkBudget::new(WorkLimits {
+        max_workers: NonZeroUsize::new(1).unwrap(),
+        max_reserved_bytes: limits.reserved_bytes,
+        max_cumulative_read_bytes: 100_000,
+    });
+    tauri::async_runtime::block_on(async {
+        let mut worker = Worker::start_with_tasks(
+            app.handle().clone(),
+            "tasks".into(),
+            spec::ExportMode::VerifiedOnly,
+            limits,
+            budget,
+            Some(grant.session()),
+        )
+        .await
+        .unwrap();
+        worker.receive(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}})).await.unwrap();
+        worker
+            .receive(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .await
+            .unwrap();
+        let DispatchAction::Respond(list) = worker
+            .receive(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
+            .await
+            .unwrap()
+        else {
+            panic!("list")
+        };
+        for tool in mcp_dispatch::TOOLS {
+            assert!(
+                list["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v["name"] == tool.name())
+            );
+        }
+        grant.revoke();
+        // A revoked request must not try the store even when it is unavailable.
+        let state = app.state::<crate::AppState>();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = state.jobs.lock().unwrap();
+            panic!("poison fixture store");
+        }));
+        for (index, tool) in mcp_dispatch::TOOLS.into_iter().enumerate() {
+            let DispatchAction::Respond(error) = worker.receive(json!({"jsonrpc":"2.0","id":index+3,"method":"tools/call","params":{"name":tool.name(),"arguments":{}}})).await.unwrap() else { panic!("error") };
+            assert_eq!(error["result"]["isError"], true);
+            assert!(error.to_string().contains("invalid_request"));
+            assert!(!error.to_string().contains("storage_unavailable"));
+        }
+        state.jobs.clear_poison();
+        let DispatchAction::Respond(list) = worker
+            .receive(json!({"jsonrpc":"2.0","id":8,"method":"tools/list"}))
+            .await
+            .unwrap()
+        else {
+            panic!("list")
+        };
+        assert!(
+            !list["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["name"].as_str().unwrap().starts_with("cartograph_task_"))
+        );
+        assert_eq!(
+            worker
+                .receive(json!({"jsonrpc":"2.0","id":3,"method":"ping"}))
+                .await
+                .unwrap(),
+            DispatchAction::Close
+        );
+    });
+}

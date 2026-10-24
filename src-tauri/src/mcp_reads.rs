@@ -46,6 +46,10 @@ pub(crate) enum ReadError {
     StaleBasis,
     #[error("response_limit")]
     Limit,
+    #[error("limit_exceeded")]
+    AdmissionLimit,
+    #[error("refresh_required")]
+    RefreshRequired,
     #[error("storage_unavailable")]
     Storage,
     #[error("artifact_unavailable")]
