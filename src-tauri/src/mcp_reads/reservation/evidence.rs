@@ -2,9 +2,9 @@
 //! transport DOMs. These are logical owner/header units, not allocator or RSS
 //! bounds.
 use crate::mcp_reads::dispatch::EvidenceWorkLimits;
-use adapters_lang_ts::captured::{MAX_RECEIPT_BYTES, MAX_RECEIPT_RANGES, Receipt, ReceiptRange};
+use adapters_lang_ts::captured::MAX_RECEIPT_BYTES;
 use agents::investigation::InvestigationInspectionTarget;
-use context_hub::logical::{json_bytes, set, slots, string_wire, sum};
+use context_hub::logical::{slots, string_wire, sum};
 use std::mem::size_of;
 
 /// Maximum additional payload during either evidence description or text read.
@@ -25,26 +25,10 @@ pub(crate) fn evidence_peak_bytes(
         slots::<source_capture::FileEntry>(manifest.checked_add(1)?)?,
     ])?;
     let manifest_parse = sum(&[manifest, manifest_typed, manifest])?; // raw/DTO/canonical
-    let receipt_typed = sum(&[
-        receipt,
-        size_of::<Receipt>(),
-        slots::<ReceiptRange>(receipt.checked_add(1)?)?,
-    ])?;
-    // Receipt.validate first serializes even invalid input; escaping may expand
-    // every string byte sixfold. Accepted content_id canonicalizes a Value by
-    // moving children through an intermediate map/array, then serializes and
-    // copies the bytes into its domain-prefixed hash input. Two Value role sets
-    // cover the old/new container headers during that move (not two receipts).
+    let receipt_workspace = super::receipt::workspace_bytes()?;
+    let receipt_typed = receipt_workspace.retained;
+    let receipt_parse = receipt_workspace.peak;
     let receipt_wire = string_wire(receipt)?;
-    let receipt_identity = sum(&[
-        json_bytes(receipt_wire)?,
-        json_bytes(receipt_wire)?,
-        receipt_wire,
-        receipt_wire,
-        b"cartograph:ts-primary-receipt:v2\0".len(),
-        set::<(adapters_lang_ts::captured::RangeRole, u32)>(MAX_RECEIPT_RANGES)?,
-    ])?;
-    let receipt_parse = sum(&[receipt, receipt_typed, receipt_identity])?;
     let hash = core_prov::content_hash(&[]);
     let snapshot_id = format!("context-v1:{hash}").len();
     // A target selects one receipt range plus its receipt/fact identities. Its

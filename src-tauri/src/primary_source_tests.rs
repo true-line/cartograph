@@ -3004,3 +3004,40 @@ fn second_recovery_reclaims_the_first_recoverys_superseded_receipts() {
         ));
     }
 }
+
+// AC-0327: exercise the real v3 producer and decoder, not a second receipt DTO.
+#[test]
+fn receipt_workspace_covers_capture_roundtrip_and_range_refusal() {
+    use adapters_lang_ts::captured::{MAX_RECEIPT_BYTES, MAX_RECEIPT_RANGES, ReceiptRange};
+    let temp = tempfile::tempdir().unwrap();
+    let private = directory(temp.path(), "private");
+    let root = directory(temp.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&private);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    let model = crate::mcp_reads::reservation::receipt::workspace_bytes().unwrap();
+    for receipt in &parsed.receipts {
+        let raw = receipt.to_json().unwrap();
+        assert!(receipt.id().starts_with("ts-primary-v3:"));
+        let decoded = Receipt::from_json(&raw).unwrap();
+        assert_eq!(decoded.to_json().unwrap(), raw);
+        let range_wire = serde_json::to_vec(decoded.ranges()).unwrap().len();
+        let actual = std::mem::size_of::<Receipt>()
+            + raw.len()
+            + range_wire
+            + std::mem::size_of_val::<[ReceiptRange]>(decoded.ranges());
+        assert!(model.retained >= actual);
+        assert!(model.peak >= model.retained + raw.len());
+        let mut invalid: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let range = invalid["content"]["ranges"][0].clone();
+        let expanded = vec![decoded.ranges()[0].clone(); MAX_RECEIPT_RANGES];
+        assert!(serde_json::to_vec(&expanded).unwrap().len() > MAX_RECEIPT_BYTES);
+        for count in [MAX_RECEIPT_RANGES, MAX_RECEIPT_RANGES + 1] {
+            invalid["content"]["ranges"] = serde_json::json!(vec![range.clone(); count]);
+            let rejected = serde_json::to_string(&invalid).unwrap();
+            assert!(rejected.len() <= MAX_RECEIPT_BYTES);
+            assert!(Receipt::from_json(&rejected).is_err());
+        }
+    }
+}

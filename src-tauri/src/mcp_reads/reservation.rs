@@ -4,6 +4,7 @@
 //! SQLite caches, executor tasks, native stacks, kernel buffers or process RSS.
 //! The worker's phase minimum is composed separately in worker_bound.
 pub(crate) mod evidence;
+pub(crate) mod receipt;
 pub(crate) mod schema;
 pub(crate) mod scoped_bound;
 pub(crate) mod session;
