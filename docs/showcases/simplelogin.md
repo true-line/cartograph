@@ -36,7 +36,7 @@ The harness is in `src-tauri/src/showcase_tests.rs`. It uses the production path
 
 The scorer, `scripts/score-api-contract.mjs`, reduces `:x`, `<x>` and `{x}` to one parameter shape, then compares each `METHOD /path` pair.
 
-On an M4 laptop, ingesting and exporting all three repos through the system manifest (gap 1) took 18.7 s wall time, with an already built release test binary. The first build takes about 20 minutes. Peak resident memory was 1.05 GiB (`/usr/bin/time -l` on the test binary). It was 1.09 GiB at `d326a47e`, and 1.39 GiB before the publish snapshot check stopped re-reading the whole graph (#768). Measured at Cartograph `2508c5a4`.
+On an M4 laptop, ingesting and exporting all three repos through the system manifest (gap 1) took 18.9 s wall time, with an already built release test binary. The first build takes about 20 minutes. Peak resident memory was 1.03 GiB (`/usr/bin/time -l` on the test binary). It was 1.09 GiB at `d326a47e`, and 1.39 GiB before the publish snapshot check stopped re-reading the whole graph (#768). Measured at Cartograph `2508c5a4`.
 
 ## Score
 
@@ -73,9 +73,9 @@ No route was promoted to `Confirmed` from a receiver it couldn't prove.
 |---|---|---|---|---|
 | app | TypeScript/JS (49 files), Python (717 files), toolchain, schedules (2 files) | 24,670 | 34,271 | limited: no `otel_jsonl` declared, so 250 endpoint and channel facts stay T0 |
 | browser-extension | TypeScript/JS (28 files), WebExtension manifest, toolchain | 609 | 698 | limited |
-| Simple-Login-Android | Kotlin (195 files), toolchain | 1,256 | 3,161 | complete for the producers that ran |
+| Simple-Login-Android | Kotlin (195 files), toolchain, cross-repo HTTP stitching | 1,297 | 3,202 | complete for the producers that ran |
 
-Source: `ingest.json`, coverage producers, from the manifest run. Every coverage record cites its repository's commit (gap 6).
+Source: `ingest.json`, coverage producers, from the manifest run. Android's totals include 41 nodes and 41 `FETCHES` edges from cross-repo HTTP stitching. The coverage record charges these to `t0.adapter-ts`, which ran on no Android files and is marked not applicable there (#874). Every coverage record cites its repository's commit (gap 6).
 
 The bundle has 26,662 assertions, 7,171 open gap findings in 26 cause classes and 3 security findings (`bundle.json`, `gap_register.md`, `security.md`), regenerated at `2508c5a4`. At `d326a47e` it had 29,256 assertions and 7,495 findings in 27 classes; the gap 8 fixes account for most of the difference. Class numbers below are this run's: the register numbers classes by size, so they shift between runs. The security findings are three over-broad host permissions in the extension manifest: `http://*/*`, `https://*/*` and `https://*.simplelogin.io/*`.
 
