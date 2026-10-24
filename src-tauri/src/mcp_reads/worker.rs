@@ -405,6 +405,7 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
             .max(crate::jobs::investigations::archive_acquisition_workspace()?)
             .max(crate::jobs::investigations::next_prompt_ledger_workspace()?)
             .max(crate::jobs::investigations::next_prompt_metadata_workspace()?.2)
+            .max(crate::jobs::investigations::next_prompt_saved_call_workspace()?.1)
             .max(
                 crate::jobs::investigations::next_prompt_attempt_replay_workspace()?.checked_add(
                     agents::investigation::disclosure_validation_workspace(

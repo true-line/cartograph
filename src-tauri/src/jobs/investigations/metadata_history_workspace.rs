@@ -11,27 +11,7 @@ pub(crate) fn next_prompt_metadata_workspace() -> Option<(usize, usize, usize)> 
     let policy = &INVESTIGATION_V2_POLICY;
     let calls = usize::try_from(policy.limits().model_invocations).ok()?;
     let attempts = policy.max_completed_attempts();
-    // Closed union of invocation/refusal rows. Every dynamic element consumes
-    // an admitted JSON value; strings fit the row wire. No allocating defaults.
-    // Refusals are not semantically validated by raw_refusals: use record caps,
-    // not the smaller valid-feedback/assessment limits, even for rejected rows.
-    let element = [
-        size_of::<String>(),
-        size_of::<AttemptRecord>(),
-        size_of::<ObligationObservation>(),
-        size_of::<FeedbackEntry>(),
-        size_of::<DisclosedInvestigationFact>(),
-        size_of::<DisclosedInvestigationQuery>(),
-        size_of::<DisclosedInvestigationSource>(),
-        size_of::<DisclosedInvestigationCoverageDetail>(),
-    ]
-    .into_iter()
-    .max()?;
-    let row = sum(&[
-        size_of::<PendingInvestigationStep>().max(size_of::<staged::JournalEntry>()),
-        MAX_RECORD_BYTES,
-        element.checked_mul(RECORD_MAX_VALUES)?,
-    ])?;
+    let row = row_workspace()?;
     let decoder = record_decode_scratch_bytes()?
         .max(json_bytes(MAX_RECORD_BYTES)?.checked_mul(RECORD_MAX_DEPTH.checked_add(1)?)?);
     let acquire = sum(&[
@@ -110,4 +90,29 @@ pub(crate) fn next_prompt_metadata_workspace() -> Option<(usize, usize, usize)> 
             .max(project),
     ])?;
     Some((history, project, peak))
+}
+
+/// Shared typed row owner for invocation and unvalidated refusal rows.
+pub(super) fn row_workspace() -> Option<usize> {
+    // Closed union of invocation/refusal rows. Every dynamic element consumes
+    // an admitted JSON value; strings fit the row wire. No allocating defaults.
+    // Refusals are not semantically validated by raw_refusals: use record caps,
+    // not the smaller valid-feedback/assessment limits, even for rejected rows.
+    let element = [
+        size_of::<String>(),
+        size_of::<AttemptRecord>(),
+        size_of::<ObligationObservation>(),
+        size_of::<FeedbackEntry>(),
+        size_of::<DisclosedInvestigationFact>(),
+        size_of::<DisclosedInvestigationQuery>(),
+        size_of::<DisclosedInvestigationSource>(),
+        size_of::<DisclosedInvestigationCoverageDetail>(),
+    ]
+    .into_iter()
+    .max()?;
+    sum(&[
+        size_of::<PendingInvestigationStep>().max(size_of::<staged::JournalEntry>()),
+        MAX_RECORD_BYTES,
+        element.checked_mul(RECORD_MAX_VALUES)?,
+    ])
 }
