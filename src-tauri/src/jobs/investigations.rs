@@ -77,9 +77,9 @@ mod turn;
 use agents::investigation::{staged_attempt::*, staged_finish::*, staged_refusal::*};
 #[cfg(unix)]
 pub(crate) use coverage::archive_acquisition_workspace;
-#[cfg(unix)]
-pub(crate) use storage::next_prompt_contract_workspace;
 use storage::*;
+#[cfg(unix)]
+pub(crate) use storage::{next_prompt_contract_workspace, next_prompt_ledger_workspace};
 
 pub(super) use transitions::{attach_execution, cancel_for_job};
 

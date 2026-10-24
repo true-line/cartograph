@@ -1389,6 +1389,12 @@ pub(super) fn bump(
     Ok(())
 }
 
+fn body_read_sql(table: &str, key_column: &str) -> String {
+    format!(
+        "SELECT CASE WHEN typeof(body)='blob' AND length(body)<=262144 THEN body END, CASE WHEN typeof(body_hash)='text' AND length(CAST(body_hash AS BLOB))=64 THEN body_hash END FROM {table} WHERE task_id=?1 AND {key_column}=?2"
+    )
+}
+
 pub(super) fn read_body<T: serde::de::DeserializeOwned + Serialize>(
     connection: &Connection,
     table: &str,
@@ -1396,9 +1402,7 @@ pub(super) fn read_body<T: serde::de::DeserializeOwned + Serialize>(
     id: &str,
     key: &dyn rusqlite::ToSql,
 ) -> Result<Option<T>, InvestigationStoreError> {
-    let sql = format!(
-        "SELECT CASE WHEN typeof(body)='blob' AND length(body)<=262144 THEN body END, CASE WHEN typeof(body_hash)='text' AND length(CAST(body_hash AS BLOB))=64 THEN body_hash END FROM {table} WHERE task_id=?1 AND {key_column}=?2"
-    );
+    let sql = body_read_sql(table, key_column);
     let row = connection
         .query_row(&sql, params![id, key], |r| {
             Ok((
@@ -1414,6 +1418,49 @@ pub(super) fn read_body<T: serde::de::DeserializeOwned + Serialize>(
         decode(&body, &hash)
     })
     .transpose()
+}
+
+/// Next-family saved ledger load, including retained caller/archive through
+/// inventory validation and fingerprinting. Other replay callers remain separate.
+#[cfg(unix)]
+pub(crate) fn next_prompt_ledger_workspace() -> Option<usize> {
+    use context_hub::logical::{slots, sum};
+    let (task, _) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
+    let (ledger, decode) = InvestigationInputLedger::decode_workspace_bytes()?;
+    let (archive, _) = InvestigationCoverageArchive::decode_workspace_bytes()?;
+    let (detail, read) = InvestigationCoverageArchive::read_workspace_bytes()?;
+    let validation = ledger_validation_workspace(&INVESTIGATION_V2_POLICY, MAX_RECORD_BYTES)?;
+    // read_body's static query identifiers cannot originate from the client.
+    let acquisition = sum(&[
+        task,
+        MAX_RECORD_BYTES,
+        slots::<Vec<u8>>(1)?,
+        128,
+        slots::<String>(3)?,
+        body_read_sql("investigation_inputs", "revision").len(),
+        decode,
+    ])?;
+    let validate = sum(&[task, ledger, validation])?;
+    // The archive helper already includes the caller task and saved witness.
+    let load = ledger.checked_add(super::coverage::archive_acquisition_workspace()?)?;
+    // Each read is sequential; its returned detail survives bounded encoding
+    // and hashing. The archive remains live through ledger fingerprinting too.
+    let read_encode = sum(&[
+        detail,
+        MAX_QUERY_BYTES,
+        slots::<Vec<u8>>(1)?,
+        64,
+        slots::<String>(1)?,
+    ])?;
+    let replay = sum(&[
+        task,
+        ledger,
+        archive,
+        read.max(read_encode).max(validation),
+        64,
+        slots::<String>(1)?,
+    ])?;
+    Some(acquisition.max(validate).max(load).max(replay))
 }
 
 pub(super) fn load_ledger(
