@@ -84,6 +84,9 @@ struct Declared {
     fqn: String,
     path: String,
     qualified: String,
+    /// A class or data class, whose `Name(...)` can be a constructor call.
+    /// An object's or an interface's is a call to an `invoke` operator.
+    constructible: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -611,6 +614,7 @@ fn collect_importables(
             fqn: format!("{package}.{qualified}"),
             path: path.to_string(),
             qualified,
+            constructible: false,
         });
     };
     let mut walk = root.walk();
@@ -811,6 +815,7 @@ pub fn extract_source(
                 fqn: format!("{package}.{qualified}"),
                 path: path.to_string(),
                 qualified,
+                constructible: matches!(declaration_kind(&cx, decl), "class" | "data class"),
             });
         }
     }
@@ -895,6 +900,7 @@ pub fn extract_source(
                 fqn: format!("{package}.{name}"),
                 path: path.to_string(),
                 qualified: name.clone(),
+                constructible: false,
             });
         }
         functions.push((function, symbol));
@@ -1371,6 +1377,26 @@ pub fn extract_dir_incremental_with_progress(
         .map(|node| node.id.clone())
         .collect::<HashSet<_>>();
     for pending in std::mem::take(&mut out.pending_calls) {
+        // `Foo(...)` on an imported repository class is a constructor call,
+        // which this adapter does not model as a call (as for a same-file
+        // class), not an unresolved function. A factory function of the same
+        // name still resolves below. An object's or interface's `invoke`
+        // still gaps, and so does a class declaring any `invoke` (a companion
+        // one is transparent, so it is not told apart from a member one).
+        if pending.member.is_none()
+            && !functions_by_fqn.contains_key(&pending.fqn)
+            && matches!(
+                types_by_fqn.get(&pending.fqn),
+                Some(Some(unique)) if unique.constructible
+                    && !known.contains(&symbol_id(
+                        id.repo,
+                        &unique.path,
+                        &format!("{}.invoke", unique.qualified),
+                    ))
+            )
+        {
+            continue;
+        }
         let resolved = match &pending.member {
             Some(member) => types_by_fqn.get(&pending.fqn).and_then(|unique| {
                 unique.as_ref().map(|declared| {

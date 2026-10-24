@@ -1028,3 +1028,95 @@ class App
         "mod:com.demo.common.mixed"
     );
 }
+
+// AC-0098 (#721): constructing an imported repository class is not an
+// unresolved call (constructor calls are not modeled, as for a same-file
+// class); an ambiguous class, an object's or interface's `invoke` call, a
+// class declaring `invoke` and an undeclared generated member still gap, and
+// a factory function of the same name still resolves.
+#[test]
+fn imported_class_constructor_calls_are_not_unresolved_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/model/Body.kt",
+        "package com.demo.model\n\ndata class LoginBody(val email: String)\n\nclass Session\n\nfun Session(): Session = TODO()\n",
+    );
+    for root in ["src/main/kotlin", "src/test/kotlin"] {
+        write(
+            dir.path(),
+            &format!("{root}/com/demo/model/Twice.kt"),
+            "package com.demo.model\n\nclass Twice\n",
+        );
+    }
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/model/Factory.kt",
+        "package com.demo.model\n\nobject Factory {\n    operator fun invoke() = 1\n}\n\ninterface Maker {\n    companion object {\n        operator fun invoke() = 1\n    }\n}\n\nclass Built {\n    companion object {\n        operator fun invoke(n: Int) = n\n    }\n}\n",
+    );
+    // `invoke` declared as an extension in another file: only the
+    // declaration kind keeps these from passing as constructor calls.
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/model/Remote.kt",
+        "package com.demo.model\n\nobject Thing\n\ninterface Port {\n    companion object\n}\n",
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/model/RemoteInvoke.kt",
+        "package com.demo.model\n\noperator fun Thing.invoke() = 1\n\noperator fun Port.Companion.invoke() = 1\n",
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/App.kt",
+        r#"package com.demo
+
+import com.demo.model.Built
+import com.demo.model.Factory
+import com.demo.model.LoginBody
+import com.demo.model.Maker
+import com.demo.model.Port
+import com.demo.model.Thing
+import com.demo.model.Session
+import com.demo.model.Twice
+
+fun run() {
+    LoginBody("a@b.c")
+    Session()
+    Twice()
+    Factory()
+    Maker()
+    Built(1)
+    Thing()
+    Port()
+    LoginBody.serializer()
+}
+"#,
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+    let gaps = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap")
+        .map(|node| node.props["callee"].as_str().unwrap().to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        gaps,
+        BTreeSet::from([
+            "Twice".to_string(),
+            "Factory".to_string(),
+            "Maker".to_string(),
+            "Built".to_string(),
+            "Thing".to_string(),
+            "Port".to_string(),
+            "LoginBody.serializer".to_string(),
+        ])
+    );
+    edge(
+        &out.edges,
+        "sym:local/demo@src/main/kotlin/com/demo/App.kt#run",
+        "sym:local/demo@src/main/kotlin/com/demo/model/Body.kt#Session",
+        "CALLS",
+    );
+}
