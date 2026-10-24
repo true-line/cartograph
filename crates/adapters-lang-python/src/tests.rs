@@ -2724,10 +2724,29 @@ def require_auth(f):
 def tagged(f):
     f.tagged = True
     return f
+
+def typed_auth(f: Callable):
+    def wrapper(*args, **kwargs):
+        if banned():
+            return jsonify(error="Banned"), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+def rebound(f):
+    def wrapper(*args, **kwargs):
+        result = authorize()
+        try:
+            check()
+        except Error as result:
+            pass
+        if result:
+            return result
+        return f(*args, **kwargs)
+    return wrapper
 "#;
     let views = r#"
 from flask import jsonify
-from app.base import api_bp, require_auth, tagged
+from app.base import api_bp, require_auth, tagged, typed_auth, rebound
 from app.serial import payload, loose
 
 @api_bp.route("/me")
@@ -2749,6 +2768,23 @@ def mutated():
     ret.update(extra)
     if other():
         return jsonify(loose())
+    return jsonify(ret)
+
+@api_bp.route("/typed")
+@typed_auth
+def typed():
+    return jsonify(ok=True)
+
+@api_bp.route("/rebound")
+@rebound
+def rebound_view():
+    return jsonify(ok=True)
+
+@api_bp.route("/alias")
+def alias():
+    ret = {"a": 1}
+    other = ret
+    other[key] = 2
     return jsonify(ret)
 "#;
     let serial = r#"
@@ -2853,6 +2889,23 @@ def loose():
             "scope": "handler_body",
         })
     );
+    // #942 review: a typed wrapped parameter is still a decorator; a check
+    // result rebound by `except … as` is not followed; a dict escaping
+    // through an alias is not proven.
+    let (typed, _) = responses(&first, "/api/typed");
+    assert_eq!(typed["statuses"], serde_json::json!([200, 403]));
+    let (rebound, _) = responses(&first, "/api/rebound");
+    assert_eq!(rebound["statuses"], serde_json::json!([200]));
+    assert_eq!(
+        rebound["partial"],
+        serde_json::json!(["response_not_proven"])
+    );
+    let (alias, _) = responses(&first, "/api/alias");
+    assert_eq!(
+        alias["partial"],
+        serde_json::json!(["response_built_elsewhere"])
+    );
+    assert!(alias.get("keys").is_none());
     let next_id = SourceId {
         repo: "local/python-service",
         commit: "def456",

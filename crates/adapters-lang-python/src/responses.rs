@@ -32,7 +32,9 @@
 //!   `jsonify(helper(…))` / `jsonify(**helper(…))` when every return of the
 //!   repository `helper` is such a dict or a dict literal; an unproven helper
 //!   is `response_built_elsewhere`.
-use crate::request_inputs::{bound_names, handler_bindings, visit_scope};
+use crate::request_inputs::{
+    binding_sites, handler_bindings, is_write_target, parameter_name, visit_scope,
+};
 use crate::{Extraction, FileCx, ImportBinding, literal_string, module_file, prov_from, symbol_id};
 use core_prov::{ConfidenceTier, EvidenceRef};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -342,9 +344,7 @@ fn wrapper_facts(
     let [wrapped] = parameters.as_slice() else {
         return None;
     };
-    if wrapped.kind() != "identifier" {
-        return None;
-    }
+    let wrapped = parameter_name(*wrapped)?;
     let body = function.child_by_field_name("body")?;
     let mut inner = HashMap::new();
     for statement in named(body) {
@@ -370,7 +370,7 @@ fn wrapper_facts(
         }
     });
     let mode = Mode::Wrapper {
-        wrapped: cx.text(wrapped),
+        wrapped: cx.text(&wrapped),
     };
     Some(read_function(cx, wrapper?, helpers, resolver, mode))
 }
@@ -504,20 +504,9 @@ impl Reader<'_, '_, '_> {
         }
         let name = self.cx.text(&value);
         let mut writes = Vec::new();
-        visit_scope(self.body, &mut |node| {
-            let target = match node.kind() {
-                "assignment" | "augmented_assignment" | "for_statement" => {
-                    node.child_by_field_name("left")
-                }
-                "named_expression" => node.child_by_field_name("name"),
-                _ => None,
-            };
-            if let Some(target) = target {
-                let mut names = BTreeSet::new();
-                bound_names(self.cx, target, &mut names);
-                if names.contains(name) {
-                    writes.push(node);
-                }
+        binding_sites(self.cx, self.body, &mut |node, bound| {
+            if bound.contains(name) {
+                writes.push(node);
             }
         });
         let [write] = writes.as_slice() else {
@@ -541,7 +530,7 @@ impl Reader<'_, '_, '_> {
         match body.kind() {
             "dictionary" => return dict_keys(cx, body),
             "identifier" => {
-                if let Some((keys, evidence)) = built_dict(cx, self.body, cx.text(&body)) {
+                if let Some((keys, evidence)) = built_dict(cx, self.body, body) {
                     return Body::Json(keys, evidence);
                 }
             }
@@ -579,7 +568,7 @@ impl Reader<'_, '_, '_> {
             };
             return match dict.kind() {
                 "dictionary" => dict_keys(cx, dict),
-                "identifier" => match built_dict(cx, self.body, cx.text(&dict)) {
+                "identifier" => match built_dict(cx, self.body, dict) {
                     Some((keys, evidence)) => Body::Json(keys, evidence),
                     None => Body::JsonElsewhere,
                 },
@@ -640,7 +629,7 @@ fn built_keys(cx: &FileCx<'_>, function: TsNode<'_>) -> Option<(Vec<String>, Vec
                 Body::Json(keys, _) => Some((keys, Vec::new())),
                 _ => None,
             },
-            Some(("identifier", name)) => built_dict(cx, body, cx.text(&name)),
+            Some(("identifier", name)) => built_dict(cx, body, name),
             _ => None,
         };
         match built {
@@ -655,77 +644,82 @@ fn built_keys(cx: &FileCx<'_>, function: TsNode<'_>) -> Option<(Vec<String>, Vec
     (proven && !evidence.is_empty()).then_some((keys, evidence))
 }
 
-/// `name = {…}` bound once in `scope`, extended only by `name["k"] = …`:
-/// its literal keys and the statements proving them.
+/// The dict `used` (an identifier read in `scope`) names, when it is bound
+/// once in `scope` to a dict literal and otherwise only read by subscript,
+/// returned, or extended by `name["k"] = …`: its literal keys and the
+/// statements proving them. Any other use (an alias, an argument, a method
+/// call, `del`, a closure) may change it.
 fn built_dict(
     cx: &FileCx<'_>,
     scope: TsNode<'_>,
-    name: &str,
+    used: TsNode<'_>,
 ) -> Option<(Vec<String>, Vec<EvidenceRef>)> {
-    let mut keys = Vec::new();
-    let mut evidence = Vec::new();
-    let mut bound = false;
+    let name = cx.text(&used);
+    let mut sites = Vec::new();
+    binding_sites(cx, scope, &mut |node, bound| {
+        if bound.contains(name) {
+            sites.push(node);
+        }
+    });
+    let [init] = sites.as_slice() else {
+        return None;
+    };
+    let left = init.child_by_field_name("left")?;
+    let right = init.child_by_field_name("right").map(unparenthesize)?;
+    if init.kind() != "assignment" || left.kind() != "identifier" || right.kind() != "dictionary" {
+        return None;
+    }
+    let Body::Json(mut keys, _) = dict_keys(cx, right) else {
+        return None;
+    };
+    let mut evidence = vec![cx.evidence(init)];
     let mut proven = true;
-    let is_name = |node: TsNode<'_>| node.kind() == "identifier" && cx.text(&node) == name;
-    visit_scope(scope, &mut |node| {
-        if !proven {
+    every_descendant(scope, &mut |node| {
+        if !proven || node.kind() != "identifier" || cx.text(&node) != name || node == left {
             return;
         }
-        match node.kind() {
-            "assignment" | "augmented_assignment" | "for_statement" => {
-                let Some(left) = node.child_by_field_name("left") else {
-                    return;
-                };
-                let assignment = node.kind() == "assignment";
-                if is_name(left) {
-                    let right = node.child_by_field_name("right").map(unparenthesize);
-                    match right
-                        .filter(|_| assignment && !bound)
-                        .map(|r| dict_keys(cx, r))
-                    {
-                        Some(Body::Json(literal, _))
-                            if right.is_some_and(|r| r.kind() == "dictionary") =>
-                        {
-                            bound = true;
-                            keys.extend(literal);
-                            evidence.push(cx.evidence(&node));
-                        }
-                        _ => proven = false,
-                    }
-                } else if left.kind() == "subscript"
-                    && left.child_by_field_name("value").is_some_and(is_name)
-                {
-                    match left
+        let Some(parent) = node.parent() else {
+            return;
+        };
+        let field = |field: &str| parent.child_by_field_name(field) == Some(node);
+        match parent.kind() {
+            // `x.name`, `f(name=…)`: another name.
+            "attribute" if field("attribute") => {}
+            "keyword_argument" if field("name") => {}
+            "return_statement" => {}
+            _ if node == used => {}
+            "subscript" if field("value") => {
+                let assigned = parent.parent().filter(|statement| {
+                    statement.kind() == "assignment"
+                        && statement.child_by_field_name("left") == Some(parent)
+                });
+                match assigned {
+                    Some(statement) => match parent
                         .child_by_field_name("subscript")
-                        .filter(|_| assignment)
                         .and_then(|key| literal_string(cx, key))
                     {
                         Some(key) => {
                             keys.push(key);
-                            evidence.push(cx.evidence(&node));
+                            evidence.push(cx.evidence(&statement));
                         }
                         None => proven = false,
-                    }
-                } else {
-                    let mut names = BTreeSet::new();
-                    bound_names(cx, left, &mut names);
-                    proven = !names.contains(name);
+                    },
+                    None => proven = !is_write_target(parent),
                 }
             }
-            "named_expression" => {
-                proven = !node.child_by_field_name("name").is_some_and(is_name);
-            }
-            // `ret.update(…)`, `del ret[k]`: mutated beyond literal keys.
-            "attribute" => proven = !node.child_by_field_name("object").is_some_and(is_name),
-            "delete_statement" => {
-                let mut mentioned = false;
-                visit_scope(node, &mut |inner| mentioned |= is_name(inner));
-                proven = !mentioned;
-            }
-            _ => {}
+            _ => proven = false,
         }
     });
-    (proven && bound).then_some((keys, evidence))
+    proven.then_some((keys, evidence))
+}
+
+/// Every node under `node`, nested scopes included.
+fn every_descendant<'t>(node: TsNode<'t>, f: &mut dyn FnMut(TsNode<'t>)) {
+    f(node);
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        every_descendant(child, f);
+    }
 }
 
 /// Merge every handler's follows into its Flask endpoints, once all files
