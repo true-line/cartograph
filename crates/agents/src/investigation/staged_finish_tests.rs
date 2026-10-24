@@ -1027,3 +1027,71 @@ fn sealing_reconstructs_contract_sourced_targets_for_the_selected_policy() {
         Err(InvestigationError::InvalidInput)
     );
 }
+
+// AC-0327: real source/inventory binding validation, including forged identity
+// refusal, exercises the pure component used by the host reservation.
+#[test]
+fn attempt_binding_workspace_covers_real_policy_validation() {
+    for policy in [&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY] {
+        let f = fixture_policy(true, true, false, Some(policy));
+        let ledger = f.input.ledger();
+        let bytes = serde_json::to_vec(ledger).unwrap().len();
+        let bound = attempt_binding_validation_workspace(policy, bytes).unwrap();
+        let envelope = &f.request.obligations;
+        let request = f.request.intent_hash_with_policy(policy).unwrap();
+        for item in &envelope.obligations {
+            let (read, outcome) = match item {
+                Obligation::Source { target, .. } => (
+                    ReadIntent::Source {
+                        fact: target.fact.clone(),
+                        role: target.role,
+                        index: target.index,
+                    },
+                    AttemptOutcome::SourceAcquired {
+                        citation_id: "evidence-1".into(),
+                    },
+                ),
+                Obligation::Inventory { target, .. } => (
+                    ReadIntent::Inventory {
+                        context_id: target.context_id.clone(),
+                        repo: target.repo.clone(),
+                        inventory_hash: target.inventory_hash.clone(),
+                        max_bytes: MAX_QUERY_BYTES,
+                    },
+                    AttemptOutcome::InventoryAcquired { read_index: 0 },
+                ),
+            };
+            let mut record = AttemptRecord {
+                schema_version: 1,
+                attempt_id: String::new(),
+                task_id: "task".into(),
+                request_hash: request.clone(),
+                obligations_hash: envelope.fingerprint_with_policy(policy).unwrap(),
+                obligation_id: item.key().1.into(),
+                step_id: "read-step".into(),
+                read,
+                input_ledger_hash: ledger.fingerprint_with_policy(policy).unwrap(),
+                input_revision: ledger.revision,
+                outcome,
+            };
+            record.attempt_id = record.content_id().unwrap();
+            record
+                .validate_binding_with_policy(&request, envelope, "task", ledger, policy)
+                .unwrap();
+            let normalized = envelope.normalized_with_policy(policy).unwrap();
+            let concrete = std::mem::size_of_val(&record)
+                + serde_json::to_vec(&record).unwrap().len() * 3
+                + serde_json::to_vec(&normalized).unwrap().len() * 2;
+            assert!(bound >= concrete);
+            record.attempt_id = "0".repeat(64);
+            assert!(
+                record
+                    .validate_binding_with_policy(&request, envelope, "task", ledger, policy)
+                    .is_err()
+            );
+        }
+        assert!(attempt_binding_validation_workspace(policy, MAX_RECORD_BYTES).unwrap() >= bound);
+        assert!(attempt_binding_validation_workspace(policy, MAX_RECORD_BYTES + 1).is_none());
+        assert!(attempt_binding_validation_workspace(policy, usize::MAX).is_none());
+    }
+}

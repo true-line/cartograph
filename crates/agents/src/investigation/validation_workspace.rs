@@ -59,6 +59,43 @@ pub fn ledger_validation_workspace(
     Some(proof.max(validation).max(fingerprint))
 }
 
+/// Additional owners of AttemptRecord::validate_binding_with_policy. The
+/// borrowed record, ledger and envelope belong to the caller. Canonical ledger
+/// wire must already be bounded by typed_row_bytes. Host replay remains separate.
+pub fn attempt_binding_validation_workspace(
+    policy: &InvestigationPolicy,
+    typed_row_bytes: usize,
+) -> Option<usize> {
+    use super::staged_attempt::{AttemptRecord, ReadIntent};
+    if typed_row_bytes > super::MAX_RECORD_BYTES {
+        return None;
+    }
+    // The initial bounded encoding precedes record cloning. AttemptRecord has
+    // no dynamic containers: its inline variants own only string payloads.
+    // content_id retains the clone, encoded wire and domain-prefixed hash input.
+    let record_identity = sum(&[
+        std::mem::size_of::<AttemptRecord>(),
+        MAX_MANIFEST_BYTES,
+        MAX_MANIFEST_BYTES,
+        MAX_MANIFEST_BYTES,
+        b"cartograph:obligation-attempt:v1\0".len(),
+        slots::<Vec<u8>>(2)?,
+    ])?;
+    // Normalization remains live through later fingerprints. The existing
+    // envelope component includes the second normalization in fingerprinting.
+    // Inventory matching clones three strings from the byte-admitted ledger;
+    // InvestigationCoverageReadManifest::validate itself only borrows fields.
+    sum(&[
+        super::task_validation_workspace::envelope_workspace(policy)?,
+        ledger_validation_workspace(policy, typed_row_bytes)?,
+        record_identity,
+        std::mem::size_of::<ReadIntent>(),
+        typed_row_bytes,
+        192,
+        slots::<String>(3)?,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
