@@ -198,7 +198,7 @@ fn completion_replay(mcp: bool) {
             )
             .unwrap_err();
             assert!(
-                matches!(error, InvestigationStartError::Rejected { code: "refresh_required", message, .. }
+                matches!(error, InvestigationStartError::Rejected { code: "limit_exceeded", message, definitive: true }
                 if message == crate::mcp_reads::ReadError::Limit.to_string())
             );
             assert!(

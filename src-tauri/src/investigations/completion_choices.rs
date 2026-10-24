@@ -12,6 +12,30 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use tauri::Manager;
 
+/// Preserve bounded discovery failures until the coordinator assigns a wire code.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SelectionError {
+    #[error(transparent)]
+    Discovery(#[from] crate::mcp_reads::ReadError),
+    #[error("{0}")]
+    Changed(String),
+}
+
+impl From<String> for SelectionError {
+    fn from(message: String) -> Self {
+        Self::Changed(message)
+    }
+}
+
+impl SelectionError {
+    pub(super) fn code(&self) -> &'static str {
+        match self {
+            Self::Discovery(crate::mcp_reads::ReadError::Limit) => "limit_exceeded",
+            _ => "refresh_required",
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct InventoryChoice {
     repo: String,
@@ -168,7 +192,7 @@ fn current_choices<R: tauri::Runtime>(
     state: &AppState,
     scope: &InvestigationScope,
 ) -> Result<ObligationChoices, String> {
-    current_choices_with_scope(app, state, scope, None)
+    current_choices_with_scope(app, state, scope, None).map_err(|error| error.to_string())
 }
 
 fn current_choices_with_scope<R: tauri::Runtime>(
@@ -176,17 +200,17 @@ fn current_choices_with_scope<R: tauri::Runtime>(
     state: &AppState,
     scope: &InvestigationScope,
     limits: Option<crate::mcp_reads::scope::ScopeLimits>,
-) -> Result<ObligationChoices, String> {
+) -> Result<ObligationChoices, SelectionError> {
     let read_scope = || match limits {
         Some(limits) => crate::mcp_reads::scope::coverage_scope(app, state, limits)
-            .map_err(|error| error.to_string()),
-        None => crate::context::coverage_scope(app, state),
+            .map_err(SelectionError::from),
+        None => crate::context::coverage_scope(app, state).map_err(SelectionError::from),
     };
     let before = read_scope()?;
     let (graph, recorded) = state
         .graph
         .lock()
-        .map_err(|_| "Graph store is unavailable.")?
+        .map_err(|_| "Graph store is unavailable.".to_owned())?
         .read_snapshot_with_coverage_bounded(
             SnapshotReadLimits::default(),
             CoverageReadLimits::default(),
@@ -195,7 +219,7 @@ fn current_choices_with_scope<R: tauri::Runtime>(
     let stable = crate::context::stable_scope(&before, read_scope()?);
     let coverage =
         CoverageQualification::new(&stable, &recorded).map_err(|error| error.to_string())?;
-    choices(graph, coverage, scope)
+    choices(graph, coverage, scope).map_err(SelectionError::from)
 }
 
 /// Acceptance preparation reuses the production qualified selection, requiring
@@ -228,7 +252,7 @@ pub(super) fn validate_request<R: tauri::Runtime>(
     state: &AppState,
     request: &agents::investigation::StagedObligationRequest,
 ) -> Result<(), String> {
-    validate_request_with_scope(app, state, request, None)
+    validate_request_with_scope(app, state, request, None).map_err(|error| error.to_string())
 }
 
 pub(super) fn validate_request_with_scope<R: tauri::Runtime>(
@@ -236,9 +260,9 @@ pub(super) fn validate_request_with_scope<R: tauri::Runtime>(
     state: &AppState,
     request: &agents::investigation::StagedObligationRequest,
     limits: Option<crate::mcp_reads::scope::ScopeLimits>,
-) -> Result<(), String> {
+) -> Result<(), SelectionError> {
     let current = current_choices_with_scope(app, state, &request.scope, limits)?;
-    validate_selection(&current, request)
+    validate_selection(&current, request).map_err(SelectionError::from)
 }
 
 fn validate_selection(
