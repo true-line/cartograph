@@ -252,7 +252,7 @@ pub(crate) fn handler_bindings(
     names
 }
 
-fn bound_names(cx: &FileCx<'_>, target: TsNode<'_>, names: &mut BTreeSet<String>) {
+pub(crate) fn bound_names(cx: &FileCx<'_>, target: TsNode<'_>, names: &mut BTreeSet<String>) {
     match target.kind() {
         "identifier" => {
             names.insert(cx.text(&target).to_string());

@@ -2692,3 +2692,173 @@ def nested():
         );
     }
 }
+
+#[test]
+fn flask_responses_follow_repository_decorators_and_dict_builders() {
+    // #940: an auth decorator's wrapper responses (through the check it
+    // returns the result of) and the keys a helper's or a local's dict is
+    // built with are followed across files, each citing its statement.
+    let dir = tempfile::tempdir().unwrap();
+    let base = r#"
+from functools import wraps
+from flask import Blueprint, jsonify
+
+api_bp = Blueprint("api", __name__, url_prefix="/api")
+
+def authorize():
+    if missing():
+        return jsonify(error="Wrong api key"), 401
+    return None
+
+def require_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        error_return = authorize()
+        if error_return:
+            return error_return
+        if not sudo():
+            return jsonify(error="Need sudo"), 440
+        return f(*args, **kwargs)
+    return decorated
+
+def tagged(f):
+    f.tagged = True
+    return f
+"#;
+    let views = r#"
+from flask import jsonify
+from app.base import api_bp, require_auth, tagged
+from app.serial import payload, loose
+
+@api_bp.route("/me")
+@require_auth
+@tagged
+def me():
+    return jsonify(**payload(user)), 200
+
+@api_bp.route("/local")
+@limiter.limit("1/minute")
+def local():
+    ret = {"a": 1}
+    ret["b"] = 2
+    return jsonify(ret)
+
+@api_bp.route("/mutated")
+def mutated():
+    ret = {"a": 1}
+    ret.update(extra)
+    if other():
+        return jsonify(loose())
+    return jsonify(ret)
+"#;
+    let serial = r#"
+def payload(user):
+    ret = {"name": user.name}
+    if user.otp:
+        ret["mfa_key"] = sign(user)
+    return ret
+
+def loose():
+    return dict(a=1)
+"#;
+    write(dir.path(), "app/base.py", base);
+    write(dir.path(), "app/views.py", views);
+    write(dir.path(), "app/serial.py", serial);
+    write(
+        dir.path(),
+        "app/main.py",
+        "from flask import Flask\nfrom app.base import api_bp\napp = Flask(__name__)\napp.register_blueprint(api_bp)\n",
+    );
+    let sources = [
+        ("app/base.py", base),
+        ("app/views.py", views),
+        ("app/serial.py", serial),
+    ];
+    let responses = |extraction: &Extraction, path: &str| {
+        let mut responses = extraction
+            .nodes
+            .iter()
+            .find(|node| node.label == "Endpoint" && node.props["path"] == path)
+            .unwrap_or_else(|| panic!("{path}"))
+            .props["responses"]
+            .clone();
+        let prov = responses.as_object_mut().unwrap().remove("prov").unwrap();
+        let cited = prov["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|span| {
+                let (_, source) = sources
+                    .iter()
+                    .find(|(file, _)| span["path"] == *file)
+                    .unwrap();
+                let text = &source[span["byte_start"].as_u64().unwrap() as usize
+                    ..span["byte_end"].as_u64().unwrap() as usize];
+                (
+                    span["commit_sha"].as_str().unwrap().to_string(),
+                    text.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        (responses, cited)
+    };
+    let mut cache = IncrementalCache::default();
+    let (first, _) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+    let (me, cited) = responses(&first, "/api/me");
+    assert_eq!(
+        me,
+        serde_json::json!({
+            "kinds": ["json"],
+            "statuses": [200, 401, 440],
+            "keys": ["error", "mfa_key", "name"],
+            "followed": [
+                "sym:local/python-service@app/base.py#authorize",
+                "sym:local/python-service@app/base.py#require_auth",
+                "sym:local/python-service@app/serial.py#payload",
+            ],
+            "scope": "handler_body_and_followed",
+        })
+    );
+    let cited = cited.into_iter().map(|(_, text)| text).collect::<Vec<_>>();
+    assert_eq!(
+        cited,
+        [
+            r#"return jsonify(error="Wrong api key"), 401"#,
+            "return error_return",
+            r#"return jsonify(error="Need sudo"), 440"#,
+            r#"ret = {"name": user.name}"#,
+            r#"ret["mfa_key"] = sign(user)"#,
+            "return ret",
+            "return jsonify(**payload(user)), 200",
+        ]
+    );
+    let (local, cited) = responses(&first, "/api/local");
+    assert_eq!(
+        local,
+        serde_json::json!({
+            "kinds": ["json"],
+            "statuses": [200],
+            "keys": ["a", "b"],
+            "scope": "handler_body",
+        })
+    );
+    assert_eq!(cited.len(), 3);
+    let (mutated, _) = responses(&first, "/api/mutated");
+    assert_eq!(
+        mutated,
+        serde_json::json!({
+            "kinds": ["json"],
+            "statuses": [200],
+            "partial": ["response_built_elsewhere"],
+            "scope": "handler_body",
+        })
+    );
+    let next_id = SourceId {
+        repo: "local/python-service",
+        commit: "def456",
+    };
+    let (reused, stats) = extract_dir_incremental(dir.path(), &next_id, &mut cache).unwrap();
+    assert_eq!(stats.recomputed_files, 0);
+    let (_, cited) = responses(&reused, "/api/me");
+    assert!(cited.iter().all(|(commit, _)| commit == "def456"));
+}

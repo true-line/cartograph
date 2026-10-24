@@ -91,19 +91,19 @@ Helpers the handler calls are not followed.
 
 ## Responses (#721)
 
-Each Flask endpoint also records `responses`: what its own `return` statements prove. That is the response `kinds` (`json`, `html` or `redirect`), the `statuses`, and the top-level JSON `keys`, each `return` cited. Of the 248 endpoints, 243 record responses: 133 return `html` (`render_template`), 143 return `redirect`, and 66 return `json`. One handler can return several kinds. 68 are marked `partial`: 32 `response_built_elsewhere`, where a JSON body is built by a helper, and 36 `response_not_proven`, where a variable or another call is returned. Under `/api`, 22 of 56 are partial, 20 of them because a helper builds the body.
+Each Flask endpoint also records `responses`: what its own `return` statements prove. That is the response `kinds` (`json`, `html` or `redirect`), the `statuses`, and the top-level JSON `keys`, each `return` cited. Since #940 the record also follows repository auth decorators and the dicts a handler or its helper builds, and lists each function followed. Of the 248 endpoints, 243 record responses: 133 return `html` (`render_template`), 143 return `redirect`, and 68 return `json`. One handler can return several kinds. 77 follow at least one repository function, most often `@require_api_auth` and its `authorize_request` check (44 endpoints) or the dashboard's `@sudo_required` (25). 48 are marked `partial`: 12 `response_built_elsewhere`, where a JSON body is built by something not proven, and 36 `response_not_proven`, where a variable or another call is returned. Under `/api`, 8 of 56 are partial (before #940: 22).
 
 Scored against each documented endpoint's `Output:` section:
 
-| Metric | Value |
-|---|---|
-| Documented statuses recovered | **23 / 30 (76.7%)** |
-| Documented top-level keys recovered | 2 / 29 (6.9%) |
-| Recovered keys that are documented | 2 / 7 (28.6%) |
+| Metric | Value | Before #940 |
+|---|---|---|
+| Documented statuses recovered | **29 / 30 (96.7%)** | 23 / 30 (76.7%) |
+| Documented top-level keys recovered | **14 / 29 (48.3%)** | 2 / 29 (6.9%) |
+| Recovered keys that are documented | 14 / 20 (70.0%) | 2 / 7 (28.6%) |
 
-The status misses are not in the handler bodies. Six come from the auth decorators: `@require_api_auth` returns 401, and `@require_api_sudo` returns 440 or 403 ([`app/api/base.py`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/app/api/base.py)). The seventh is documentation drift: `GET /api/user/cookie_token` is documented as returning 403, but the code returns 401 ([`user.py:54`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/app/api/views/user.py#L54)).
+The decorators supply the 401, 403 and 440 statuses ([`app/api/base.py`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/app/api/base.py)). That includes the 403 documented for `GET /api/user/cookie_token`: the handler itself returns 401 there ([`user.py:54`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/app/api/views/user.py#L54)), and only `authorize_request`'s disabled-account branch returns 403. The one status still missed is `GET /api/logout`'s 200, returned through `make_response(…)`, which is not read.
 
-Keys score low because the documented success bodies are built by helpers such as `auth_payload` and `user_to_dict`, which are not followed. The handler bodies prove mostly their `error` keys, which the docs don't list. `api.md` also lists the per-alias fields of `GET /api/v2/aliases` as top-level bullets. Following decorators and dict-building helpers is #940.
+The keys now include the success bodies built by `auth_payload` (login, MFA) and the `ret` dict of `GET /api/v5/alias/options`. The remaining misses are the per-alias fields of `GET /api/v2/aliases`, which `api.md` lists as top-level bullets although they are nested under `aliases`. The undocumented keys are the `error` keys of the documented endpoints' failure returns.
 
 
 ## What else was recovered
@@ -191,4 +191,4 @@ Verified at Cartograph `d326a47e`, in `$OUT/verified-only/drift_register.md` und
 
 - Swift is unsupported; no iOS client was ingested.
 - There is no Terraform or other IaC in these repos. The topology shows only what the source proves: five observed resources (gap 3).
-- Request inputs and responses are recorded only from the handler body. Helpers and decorators are not followed (#940), and nested response fields are not recovered.
+- Request inputs are recorded only from the handler body. Responses also follow repository wrapper decorators and dict-building helpers (#940), but not `make_response(…)`, decorator factories or helpers outside the repository, and nested response fields are not recovered.

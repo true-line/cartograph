@@ -56,6 +56,8 @@ pub struct Extraction {
     pending_routes: Vec<PendingRoute>,
     mounts: Vec<Mount>,
     orm_files: Vec<sqlalchemy::OrmFile>,
+    function_facts: Vec<responses::FunctionFacts>,
+    handler_facts: Vec<responses::HandlerFacts>,
 }
 
 /// A module-level framework receiver: an application instance, or a Flask
@@ -280,6 +282,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         }
     }
     sqlalchemy::retarget(extraction, commit);
+    responses::retarget(extraction, commit);
 }
 
 fn normalize_path(path: PathBuf) -> Option<String> {
@@ -1499,6 +1502,7 @@ pub fn extract_source(
     id: &SourceId<'_>,
 ) -> Result<Extraction, ExtractError> {
     let mut out = extract_file(source, path, id)?;
+    responses::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
     Ok(out)
 }
@@ -1582,6 +1586,21 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
 
     let request = request_inputs::request_names(&bindings);
     let helpers = responses::flask_helpers(&bindings);
+    let resolver = responses::Resolver {
+        bindings: &bindings,
+        locals: &locals,
+    };
+    for (function, symbol) in &functions {
+        let top_level = function
+            .child_by_field_name("name")
+            .is_some_and(|name| locals.get(cx.text(&name)) == Some(symbol));
+        if top_level
+            && let Some(facts) =
+                responses::function_facts(&cx, *function, helpers.as_ref(), &resolver)
+        {
+            out.function_facts.push(facts);
+        }
+    }
     for (function, handler) in &functions {
         let Some(parent) = function
             .parent()
@@ -1604,13 +1623,30 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                     request_inputs::handler_inputs(&cx, *function, &request).to_props(handler)
                 })
                 .clone();
-            let responses = returned
-                .get_or_insert_with(|| {
-                    helpers.as_ref().and_then(|helpers| {
-                        responses::handler_responses(&cx, *function, helpers).to_props(handler)
-                    })
-                })
-                .clone();
+            let responses = match &returned {
+                Some(responses) => responses,
+                None => {
+                    let facts = helpers.as_ref().map(|helpers| {
+                        let mut facts =
+                            responses::handler_facts(&cx, *function, helpers, &resolver);
+                        facts
+                            .follows
+                            .extend(responses::decorator_follows(&cx, parent, &resolver));
+                        facts
+                    });
+                    let props = facts
+                        .as_ref()
+                        .and_then(|facts| facts.responses.to_props(handler));
+                    if let Some(facts) = facts.filter(|facts| !facts.follows.is_empty()) {
+                        out.handler_facts.push(responses::HandlerFacts {
+                            handler: handler.clone(),
+                            facts,
+                        });
+                    }
+                    returned.insert(props)
+                }
+            }
+            .clone();
             let receiver = cx.text(&route.receiver).to_string();
             if let Some(framework) = receivers.get(&receiver).copied() {
                 for method in methods_for(framework, &route.verb, &route.listed_methods) {
@@ -1875,6 +1911,8 @@ pub fn extract_dir_incremental_with_progress(
             out.pending_routes.extend(extraction.pending_routes);
             out.mounts.extend(extraction.mounts);
             out.orm_files.extend(extraction.orm_files);
+            out.function_facts.extend(extraction.function_facts);
+            out.handler_facts.extend(extraction.handler_facts);
             Ok(())
         },
     );
@@ -1895,6 +1933,7 @@ pub fn extract_dir_incremental_with_progress(
     }
     resolve_absolute_imports(&mut out, id.repo);
     resolve_routes(&mut out, id.repo);
+    responses::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
     alembic::extract(root, id, &mut out)?;
     let local_names = local_module_names(root)?;
