@@ -67,6 +67,28 @@ All 248 recovered endpoints are Flask. This includes the web UI, OAuth and admin
 
 No route was promoted to `Confirmed` from a receiver it couldn't prove.
 
+## Request inputs (#721)
+
+Each Flask endpoint records, as `request_inputs`, the literal names its handler body reads: `query` from `request.args`, `form` from `request.form`, and `body` from `request.get_json()` or `request.json`, read directly or through a local name such as `data = request.get_json()`. Each recorded name cites the expression that reads it, under the inputs' own `prov`. The same scorer compares those names with each documented endpoint's `Input:` bullets. Headers and path parameters are excluded, because the route path already carries the parameters.
+
+| Metric | Value |
+|---|---|
+| Matched endpoints with documented inputs | 24 |
+| Documented input names | 55 |
+| **Recall** | **55 / 55 (100%)** |
+| **Precision** | **55 / 55 (100%)** |
+
+The first scored run measured 52 / 60. Five of the misses were path parameters (`:mailbox_id` and similar) that `api.md` lists under `Input:`, so the scorer now skips them. The other three were membership tests: `GET /api/v2/aliases` reads its filters as `"pinned" in request.args` ([`alias.py:123`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/app/api/views/alias.py#L123)), and the adapter now records them as query reads.
+
+Of the 248 endpoints, 154 record inputs. 44 of those are marked `partial`: their handler reads something that isn't a literal key, so the recorded names are what the body proves, not the complete set. The reasons:
+
+- `body_read_dynamically`: 23;
+- `form_read_dynamically`: 16;
+- `query_read_dynamically`: 7;
+- `request_passed`: 4.
+
+Helpers the handler calls are not followed. Response shapes are not recovered.
+
 ## What else was recovered
 
 | Source | Producers that ran | Nodes | Edges | Coverage |
@@ -152,4 +174,4 @@ Verified at Cartograph `d326a47e`, in `$OUT/verified-only/drift_register.md` und
 
 - Swift is unsupported; no iOS client was ingested.
 - There is no Terraform or other IaC in these repos. The topology shows only what the source proves: five observed resources (gap 3).
-- Request parameters and response shapes were not scored. The scorer compares methods and paths only.
+- Response shapes are not recovered or scored. Request inputs are scored only for literal reads in the handler body (see Request inputs).

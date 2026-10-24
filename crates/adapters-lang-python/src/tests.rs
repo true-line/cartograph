@@ -2187,3 +2187,241 @@ def global_rebind():
         ]
     );
 }
+
+/// An endpoint's `request_inputs` without `prov`, and the source text each
+/// cited read spans.
+fn request_inputs_cited(
+    extraction: &Extraction,
+    source: &str,
+    method: &str,
+    path: &str,
+) -> (serde_json::Value, Vec<String>) {
+    let mut inputs = extraction
+        .nodes
+        .iter()
+        .find(|node| {
+            node.label == "Endpoint" && node.props["method"] == method && node.props["path"] == path
+        })
+        .unwrap_or_else(|| panic!("{method} {path}"))
+        .props["request_inputs"]
+        .clone();
+    let reads = inputs
+        .as_object_mut()
+        .and_then(|inputs| inputs.remove("prov"))
+        .map(|prov| {
+            assert_eq!(prov["confidence_tier"], "Confirmed");
+            prov["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|span| {
+                    let range = span["byte_start"].as_u64().unwrap() as usize
+                        ..span["byte_end"].as_u64().unwrap() as usize;
+                    source[range].to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (inputs, reads)
+}
+
+fn request_inputs(extraction: &Extraction, method: &str, path: &str) -> serde_json::Value {
+    let mut inputs = extraction
+        .nodes
+        .iter()
+        .find(|node| {
+            node.label == "Endpoint" && node.props["method"] == method && node.props["path"] == path
+        })
+        .unwrap_or_else(|| panic!("{method} {path}"))
+        .props["request_inputs"]
+        .clone();
+    if let Some(inputs) = inputs.as_object_mut() {
+        inputs.remove("prov");
+    }
+    inputs
+}
+
+#[test]
+fn flask_handlers_record_literal_request_inputs() {
+    // #721: the literal JSON body, query and form names a Flask handler reads,
+    // with the reason whenever a read is not literal.
+    let source = br#"
+from flask import Flask, request
+
+app = Flask(__name__)
+
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.get_json() or {}
+    email = data.get("email")
+    password = data["password"]
+    device = data.get("device", "unknown")
+    hostname = request.args.get("hostname")
+    page = request.args["page_id"]
+    tags = request.args.getlist("tag")
+    pinned = "pinned" in request.args
+    remember = "remember" not in data
+    return ""
+
+@app.route("/direct", methods=["POST"])
+def direct():
+    name = request.get_json(silent=True).get("name")
+    note = request.json["note"]
+    form = request.form.get("csrf")
+    both = request.values.get("q")
+    agent = request.headers.get("User-Agent")
+    return ""
+
+@app.route("/dynamic", methods=["POST"])
+def dynamic(key):
+    data = request.get_json()
+    value = data.get(key)
+    helper(data)
+    q = request.args.get(key)
+    return ""
+
+@app.route("/passed")
+def passed():
+    def inner():
+        return request.args.get("hidden")
+    return process(request)
+
+@app.route("/none")
+def nothing():
+    return ""
+"#;
+    let extraction = extract_source(source, "app.py", &id()).unwrap();
+    assert_eq!(
+        request_inputs(&extraction, "POST", "/login"),
+        serde_json::json!({
+            "body": ["device", "email", "password", "remember"],
+            "query": ["hostname", "page_id", "pinned", "tag"],
+            "scope": "handler_body",
+        })
+    );
+    assert_eq!(
+        request_inputs(&extraction, "POST", "/direct"),
+        serde_json::json!({
+            "body": ["name", "note"],
+            "query": ["q"],
+            "form": ["csrf", "q"],
+            "scope": "handler_body",
+        })
+    );
+    assert_eq!(
+        request_inputs(&extraction, "POST", "/dynamic"),
+        serde_json::json!({
+            "partial": ["body_read_dynamically", "query_read_dynamically"],
+            "scope": "handler_body",
+        })
+    );
+    // A nested function is outside the handler; passing `request` itself is
+    // a partial read.
+    assert_eq!(
+        request_inputs(&extraction, "GET", "/passed"),
+        serde_json::json!({ "partial": ["request_passed"], "scope": "handler_body" })
+    );
+    assert!(request_inputs(&extraction, "GET", "/none").is_null());
+}
+
+#[test]
+fn request_inputs_need_flask_request_and_follow_blueprint_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/base.py",
+        "from flask import Blueprint\napi_bp = Blueprint(\"api\", __name__, url_prefix=\"/api\")\n",
+    );
+    write(
+        dir.path(),
+        "app/views.py",
+        r#"
+import flask
+from app.base import api_bp
+
+@api_bp.route("/aliases", methods=["POST"])
+def create():
+    data = flask.request.get_json()
+    return data["alias_prefix"] + flask.request.args.get("hostname")
+"#,
+    );
+    write(
+        dir.path(),
+        "app/other.py",
+        r#"
+from app.base import api_bp
+from mylib import request
+
+@api_bp.route("/lookalike")
+def lookalike():
+    return request.args.get("not_flask")
+"#,
+    );
+    write(
+        dir.path(),
+        "server.py",
+        "from flask import Flask\nfrom app.base import api_bp\napp = Flask(__name__)\napp.register_blueprint(api_bp)\n",
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        request_inputs(&extraction, "POST", "/api/aliases"),
+        serde_json::json!({
+            "body": ["alias_prefix"],
+            "query": ["hostname"],
+            "scope": "handler_body",
+        })
+    );
+    assert!(request_inputs(&extraction, "GET", "/api/lookalike").is_null());
+}
+
+#[test]
+fn request_inputs_cite_reads_and_skip_writes_and_shadowed_request() {
+    // #721 review: each name cites the read expression; written or deleted
+    // keys are not reads; a parameter or local named `request` is not Flask's.
+    let source = r#"
+from flask import Flask, request
+
+app = Flask(__name__)
+
+@app.route("/save", methods=["POST"])
+def save():
+    data = request.get_json()
+    name = data["name"]
+    data["user_id"] = 1
+    data["count"] += 1
+    data["a"], other = 1, 2
+    del data["tmp"]
+    del request.args["gone"]
+    q = request.args.get("q")
+    return ""
+
+@app.route("/param/<request>")
+def param(request):
+    return request.args.get("x")
+
+@app.route("/local")
+def local():
+    request = make_request()
+    return request.args.get("y")
+"#;
+    let extraction = extract_source(source.as_bytes(), "app.py", &id()).unwrap();
+    let (inputs, reads) = request_inputs_cited(&extraction, source, "POST", "/save");
+    assert_eq!(
+        inputs,
+        serde_json::json!({
+            "body": ["count", "name"],
+            "query": ["q"],
+            "scope": "handler_body",
+        })
+    );
+    assert_eq!(
+        reads,
+        [
+            r#"data["name"]"#,
+            r#"data["count"]"#,
+            r#"request.args.get("q")"#
+        ]
+    );
+    assert!(request_inputs(&extraction, "GET", "/param/<request>").is_null());
+    assert!(request_inputs(&extraction, "GET", "/local").is_null());
+}
