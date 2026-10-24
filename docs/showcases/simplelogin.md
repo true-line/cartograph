@@ -118,7 +118,7 @@ SimpleLogin's own pytest suite is read as test arrangements: what each test requ
 | Under `/api` | 43 / 56 |
 | Unresolved test requests (Gaps) | 129 |
 
-`test_arrangements.md` lists each referenced endpoint with its number of tests and the statuses they assert, then the 167 endpoints that no test references. These are static references, not coverage. They show that a test issues a request, not that the test runs, passes or reaches a given branch. Each reference is InferredStrong and marked `client_app_assumed`, because the fixture's app is assumed to be the one serving the recovered routes. A hand-checked sample of 12 references was correct.
+`test_arrangements.md` lists each referenced endpoint with the tests that reference it, the statuses they assert and the response keys they read, then the 167 endpoints that no test references. These are static references, not coverage. They show that a test issues a request, not that the test runs, passes or reaches a given branch. Each reference is InferredStrong and marked `client_app_assumed`, because the fixture's app is assumed to be the one serving the recovered routes. A hand-checked sample of 12 references was correct.
 
 The 129 Gaps, by reason:
 

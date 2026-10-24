@@ -710,11 +710,11 @@ mod tests {
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "9a99248ff32f4abff3c4f26820573a8b5d0529afde07f279f3d14d5969a279b0",
+                "17dde84d0e4181278e66288812f63aef013c9d8d7d3f7df7aebabf46be270cfc",
             ),
             (
                 ExportMode::BestEffort,
-                "5e1fbbd960b95b3088748d868e82c223624c489f733decfc8ab2320cc8a9df49",
+                "3377b3b8d1ceaf29f667c2e4afeffe854a4d3d0d6a49cb70f67e5a3fa770a6cb",
             ),
         ] {
             let bytes = serde_json::to_vec(&compile_spec(
@@ -1491,7 +1491,7 @@ mod tests {
             }
         };
         let request = |dst: &str, statuses: serde_json::Value, tier| {
-            let mut props = serde_json::json!({ "statuses": statuses });
+            let mut props = serde_json::json!({ "statuses": statuses, "keys": ["items"] });
             props["prov"] = prov(Tier::Deterministic, tier, dst);
             Edge {
                 src: "test:local/app@tests/test_api.py#test_list".into(),
@@ -1560,7 +1560,10 @@ mod tests {
             best.content
                 .contains("| Endpoints referenced by a test | 1 of 2 |")
         );
-        assert!(best.content.contains("| GET /api/items | 1 | 200, 401 |"));
+        assert!(
+            best.content
+                .contains("| GET /api/items | tests/test_api.py#test_list | 200, 401 | items |")
+        );
         assert!(best.content.contains("- DELETE /api/items/<id>"));
         let kinds: Vec<_> = best
             .assertions
@@ -2113,11 +2116,11 @@ mod tests {
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "9b4d6b40be8f50ac78322a5ff67aa6fb174838b25518bf982d17db03c6e7ee20",
+                "f54f154700c410e318d134b435ce09237f9a333bce19b436ccad7ec3a05465d7",
             ),
             (
                 ExportMode::BestEffort,
-                "0d51e38d586638c9c4c1892435cfe8a7f439c731f8dca9f55098be14b6fef85e",
+                "21b8f0375c9416380915e4ca3ace9a470e59e4a70d8ebe9e7bb3ed24e01b3c1e",
             ),
         ] {
             let full = compile_spec(&nodes, &edges, &flows, mode, &BTreeSet::new());

@@ -661,6 +661,13 @@ pub(super) fn toolchain(
     finish(content, assertions)
 }
 
+#[derive(Default)]
+struct Reference<'a> {
+    tests: Vec<&'a str>,
+    statuses: BTreeSet<u64>,
+    keys: BTreeSet<&'a str>,
+}
+
 /// Static test-to-endpoint references (#946). A reference says a test issues
 /// a request to an endpoint; it is not evidence that the test runs or passes.
 pub(super) fn tests(
@@ -686,21 +693,27 @@ pub(super) fn tests(
         .copied()
         .filter(|e| e.label == "REQUESTS" && test_ids.contains(e.src.as_str()))
         .collect();
-    let mut linked: BTreeMap<&str, (usize, BTreeSet<u64>)> = BTreeMap::new();
+    let mut linked: BTreeMap<&str, Reference> = BTreeMap::new();
     let mut unresolved = 0;
     for edge in &requests {
         if !edge_nongap(edge) {
             unresolved += 1;
         } else if endpoint_ids.contains(edge.dst.as_str()) {
-            let (count, statuses) = linked.entry(edge.dst.as_str()).or_default();
-            *count += 1;
-            statuses.extend(
-                edge.props["statuses"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(serde_json::Value::as_u64),
+            let reference = linked.entry(edge.dst.as_str()).or_default();
+            // A test id is `test:{repo}@{path}#{qualname}`; the row names
+            // the test by its path and qualified name.
+            reference.tests.push(
+                edge.src
+                    .split_once('@')
+                    .map_or(edge.src.as_str(), |(_, t)| t),
             );
+            let values = |key| edge.props[key].as_array().into_iter().flatten();
+            reference
+                .statuses
+                .extend(values("statuses").filter_map(serde_json::Value::as_u64));
+            reference
+                .keys
+                .extend(values("keys").filter_map(serde_json::Value::as_str));
         }
     }
     let mut assertions = Assertions::new(&budget);
@@ -727,31 +740,37 @@ pub(super) fn tests(
          | Unresolved test requests (see gap_register.md) | {unresolved} |\n\
          | Endpoints referenced by a test | {} of {} |",
         test_ids.len(),
-        linked.values().map(|(count, _)| count).sum::<usize>(),
+        linked.values().map(|r| r.tests.len()).sum::<usize>(),
         linked.len(),
         endpoints.len()
     )?;
     content.push_str(
-        "\n## Referenced endpoints\n\n| Endpoint | Tests | Asserted statuses |\n|---|---|---|\n",
+        "\n## Referenced endpoints\n\n| Endpoint | Tests | Asserted statuses | Response keys read |\n|---|---|---|---|\n",
     )?;
     for node in &endpoints {
-        let Some((count, statuses)) = linked.get(node.id.as_str()) else {
+        let Some(reference) = linked.get(node.id.as_str()) else {
             continue;
         };
-        let statuses: Vec<String> = statuses.iter().map(u64::to_string).collect();
-        writeln!(
-            content,
-            "| {} | {count} | {} |",
-            Safe(NodeName(node)),
-            if statuses.is_empty() {
+        let statuses: Vec<String> = reference.statuses.iter().map(u64::to_string).collect();
+        let keys: Vec<&str> = reference.keys.iter().copied().collect();
+        let or_dash = |values: String| {
+            if values.is_empty() {
                 "—".to_owned()
             } else {
-                statuses.join(", ")
+                values
             }
+        };
+        writeln!(
+            content,
+            "| {} | {} | {} | {} |",
+            Safe(NodeName(node)),
+            Safe(Join(&reference.tests, ", ")),
+            or_dash(statuses.join(", ")),
+            Safe(or_dash(keys.join(", ")))
         )?;
     }
     if linked.is_empty() {
-        content.push_str("| — | — | No test references recovered |\n")?;
+        content.push_str("| — | — | — | No test references recovered |\n")?;
     }
     content.push_str("\n## Endpoints without a recovered test reference\n\n")?;
     let mut any = false;
@@ -793,9 +812,12 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
         set_slots::<&str>(rows)?,
         slots::<&Node>(rows)?,
         slots::<&Edge>(rows)?,
-        map_slots::<&str, (usize, BTreeSet<u64>)>(rows)?,
-        set_slots::<u64>(values)?, // asserted statuses
+        map_slots::<&str, Reference<'static>>(rows)?,
+        slots::<&str>(rows)?,       // referencing tests
+        set_slots::<u64>(values)?,  // asserted statuses
+        set_slots::<&str>(values)?, // read keys
         slots::<String>(values)?,
+        slots::<&str>(values)?,
     ])?;
     let simple = sum(&[
         slots::<&Node>(rows)?,
