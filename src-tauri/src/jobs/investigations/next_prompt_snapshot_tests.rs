@@ -231,3 +231,53 @@ fn next_prompt_snapshot_rejects_active_invocation_instead_of_using_charged_usage
         Err(InvestigationStoreError::Stale)
     ));
 }
+
+// AC-0327: acquisition includes malformed typed disclosure owners before replay
+// rejects their references; use an actual durable invocation as the starting row.
+#[test]
+fn saved_attempt_acquisition_accounts_for_prevalidation_disclosure() {
+    let mut f = Fixture::new(false);
+    f.acquire_inventory();
+    let saved = f.snapshot();
+    let mut step: PendingInvestigationStep = read_body(
+        &f.f.store.conn,
+        "investigation_invocations",
+        "step_id",
+        f.id(),
+        &saved.attempts()[0].step_id,
+    )
+    .unwrap()
+    .unwrap();
+    step.disclosure.as_mut().unwrap().queries = vec![
+        DisclosedInvestigationQuery {
+            query_index: usize::MAX,
+            representation: DisclosureRepresentation::Omitted {
+                reason: DisclosureOmissionReason::NotSelected,
+            },
+        };
+        RECORD_MAX_ARRAY_ITEMS
+    ];
+    let body = encode(&step, MAX_RECORD_BYTES).unwrap();
+    let decoded: PendingInvestigationStep =
+        decode_record(std::str::from_utf8(&body).unwrap()).unwrap();
+    assert_eq!(decoded, step);
+    assert!(
+        decoded
+            .disclosure
+            .as_ref()
+            .unwrap()
+            .validate_with_policy(saved.ledger(), &INVESTIGATION_V2_POLICY)
+            .is_err()
+    );
+    let actual = std::mem::size_of_val(&decoded)
+        + body.len()
+        + RECORD_MAX_ARRAY_ITEMS * std::mem::size_of::<DisclosedInvestigationQuery>();
+    let peak = next_prompt_attempt_acquisition_workspace().unwrap();
+    assert!(peak >= actual);
+    assert!(
+        peak >= InvestigationInputLedger::decode_workspace_bytes()
+            .unwrap()
+            .1
+    );
+    assert_eq!(f.snapshot().attempts(), saved.attempts());
+}

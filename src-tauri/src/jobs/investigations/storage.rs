@@ -1389,7 +1389,7 @@ pub(super) fn bump(
     Ok(())
 }
 
-fn body_read_sql(table: &str, key_column: &str) -> String {
+pub(super) fn body_read_sql(table: &str, key_column: &str) -> String {
     format!(
         "SELECT CASE WHEN typeof(body)='blob' AND length(body)<=262144 THEN body END, CASE WHEN typeof(body_hash)='text' AND length(CAST(body_hash AS BLOB))=64 THEN body_hash END FROM {table} WHERE task_id=?1 AND {key_column}=?2"
     )
