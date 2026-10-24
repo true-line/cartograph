@@ -617,6 +617,23 @@ fn qualified_query_counted_envelope_matches_wire_and_refusal_boundary() {
         })
         .unwrap();
     let exact = serde_json::to_vec(&expected).unwrap().len();
+    // AC-0327: couple the wrapper model to actual qualified success/refusal.
+    let qualified_request = QualifiedRequest {
+        request: request.clone(),
+        context_id: Some(context.context_id.clone()),
+    };
+    let model = crate::logical::qualified_query_workspace(
+        core_graph::SnapshotReadLimits::default(),
+        core_graph::coverage::CoverageReadLimits::default(),
+        scope.len(),
+        serde_json::to_vec(&scope).unwrap().len(),
+        serde_json::to_vec(&qualified_request).unwrap().len(),
+    )
+    .unwrap();
+    assert_eq!(context.query(qualified_request).unwrap(), expected);
+    assert!(model.response_bytes >= exact);
+    assert!(model.peak_bytes >= model.response_bytes);
+
     assert_eq!(
         context
             .query(QualifiedRequest {
