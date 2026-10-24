@@ -1371,6 +1371,16 @@ pub fn extract_dir_incremental_with_progress(
         .map(|node| node.id.clone())
         .collect::<HashSet<_>>();
     for pending in std::mem::take(&mut out.pending_calls) {
+        // `Foo(...)` on an imported repository class is a constructor call,
+        // which this adapter does not model as a call (as for a same-file
+        // class), not an unresolved function. A factory function of the same
+        // name still resolves below.
+        if pending.member.is_none()
+            && !functions_by_fqn.contains_key(&pending.fqn)
+            && matches!(types_by_fqn.get(&pending.fqn), Some(Some(_)))
+        {
+            continue;
+        }
         let resolved = match &pending.member {
             Some(member) => types_by_fqn.get(&pending.fqn).and_then(|unique| {
                 unique.as_ref().map(|declared| {

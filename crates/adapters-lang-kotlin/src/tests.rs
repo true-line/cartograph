@@ -1028,3 +1028,59 @@ class App
         "mod:com.demo.common.mixed"
     );
 }
+
+// AC-0098 (#721): constructing an imported repository class is not an
+// unresolved call (constructor calls are not modeled, as for a same-file
+// class); an ambiguous class still gaps, a factory function of the same
+// name still resolves, and an undeclared generated member still gaps.
+#[test]
+fn imported_class_constructor_calls_are_not_unresolved_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/model/Body.kt",
+        "package com.demo.model\n\ndata class LoginBody(val email: String)\n\nclass Session\n\nfun Session(): Session = TODO()\n",
+    );
+    for root in ["src/main/kotlin", "src/test/kotlin"] {
+        write(
+            dir.path(),
+            &format!("{root}/com/demo/model/Twice.kt"),
+            "package com.demo.model\n\nclass Twice\n",
+        );
+    }
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/App.kt",
+        r#"package com.demo
+
+import com.demo.model.LoginBody
+import com.demo.model.Session
+import com.demo.model.Twice
+
+fun run() {
+    LoginBody("a@b.c")
+    Session()
+    Twice()
+    LoginBody.serializer()
+}
+"#,
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+    let gaps = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap")
+        .map(|node| node.props["callee"].as_str().unwrap().to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        gaps,
+        BTreeSet::from(["Twice".to_string(), "LoginBody.serializer".to_string()])
+    );
+    edge(
+        &out.edges,
+        "sym:local/demo@src/main/kotlin/com/demo/App.kt#run",
+        "sym:local/demo@src/main/kotlin/com/demo/model/Body.kt#Session",
+        "CALLS",
+    );
+}
