@@ -1,5 +1,13 @@
 # cartograph
 
+## 0.25.0
+
+### Minor Changes
+
+- 8b528c1: Flask endpoints now record the literal query, form and JSON body names their handler reads, marked partial when a read is not literal, and the API contract scorer measures them against a documented contract.
+- 8a99694: Flask endpoint responses now follow repository auth decorators (their wrapper's 401/403 returns) and the dicts a handler or its helper builds, citing each followed statement.
+- 3038c41: Flask endpoints now record the response kinds (JSON, HTML, redirect), status codes and top-level JSON keys their handler's own returns prove, each cited, and the API contract scorer measures them against a documented contract's Output sections.
+
 ## 0.24.0
 
 ### Minor Changes
