@@ -128,7 +128,7 @@ The 129 Gaps, by reason:
 - **1** requests a path that no recovered endpoint serves (below).
 - **1** matches more than one endpoint equally (`GET /`).
 
-**The one unserved path is a test bug.** `test_cannot_create_alias_with_admin_disabled_mailbox_via_api` posts to `/api/aliases/random/new` ([`tests/api/test_alias.py:752`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/tests/api/test_alias.py#L752)), but the route is `/api/alias/random/new` ([`new_random_alias.py:21`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/app/api/views/new_random_alias.py#L21)). The request gets a 404. The test checks the mailbox only `if r.status_code == 201`, so it passes without testing what its name says.
+**The one unserved path is a test bug.** `test_cannot_create_alias_with_admin_disabled_mailbox_via_api` posts to `/api/aliases/random/new` ([`tests/api/test_alias.py:752`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/tests/api/test_alias.py#L752)), but the route is `/api/alias/random/new` ([`new_random_alias.py:21`](https://github.com/simple-login/app/blob/4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798/app/api/views/new_random_alias.py#L21)). Read from the source (the suite was not run for this showcase), Flask has no route at that path and would answer 404, and the test checks the mailbox only `if r.status_code == 201`; otherwise it asserts `r.status_code >= 400`, which a 404 satisfies. So it can pass without reaching the mailbox check its name describes.
 
 Seven client calls are in helper functions such as `login()` and are not followed.
 

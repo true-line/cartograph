@@ -3220,3 +3220,153 @@ def helper(flask_client):
         .collect::<Vec<_>>();
     assert_eq!(paths, ["tests/api/test_alias.py", "tests/conftest.py"]);
 }
+
+#[test]
+fn pytest_client_proof_respects_shadowing_and_opaque_options() {
+    // #946 review: a nearer non-client fixture shadows an outer client
+    // fixture; a test-local or parameter `url_for` / `flask` is not Flask's;
+    // `**mapping` that may enable `follow_redirects` records no expectation.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/main.py",
+        r#"
+from flask import Flask, jsonify, redirect
+app = Flask(__name__)
+
+@app.route("/known")
+def known():
+    return jsonify(ok=True)
+
+@app.route("/redirect")
+def go():
+    return redirect("/known")
+"#,
+    );
+    let client_fixture = "import pytest\nfrom app.main import app\n\n@pytest.fixture\ndef client():\n    return app.test_client()\n";
+    let fake_fixture = "import pytest\n\n@pytest.fixture\ndef client():\n    return FakeClient()\n";
+    write(dir.path(), "tests/conftest.py", client_fixture);
+    write(dir.path(), "tests/nearer/conftest.py", fake_fixture);
+    write(
+        dir.path(),
+        "tests/nearer/test_nearer.py",
+        "def test_nearer(client):\n    client.get(\"/known\")\n",
+    );
+    write(
+        dir.path(),
+        "tests/test_module.py",
+        &format!("{fake_fixture}\ndef test_module(client):\n    client.get(\"/known\")\n"),
+    );
+    write(
+        dir.path(),
+        "tests/control/test_control.py",
+        "def test_control(client):\n    client.get(\"/known\")\n",
+    );
+    write(
+        dir.path(),
+        "tests/test_url_for.py",
+        r#"
+import flask
+from flask import url_for
+
+def test_local_shadow(client):
+    url_for = lambda name: "/other"
+    client.get(url_for("known"))
+
+def test_parameter_shadow(client, url_for):
+    client.get(url_for("known"))
+
+def test_module_shadow(client, flask):
+    client.get(flask.url_for("known"))
+
+def test_qualified(client):
+    client.get(flask.url_for("known"))
+"#,
+    );
+    write(
+        dir.path(),
+        "tests/test_redirects.py",
+        r#"
+def test_literal_true(client):
+    r = client.get("/redirect", **{"follow_redirects": True})
+    assert r.status_code == 200
+
+def test_opaque(client, opts):
+    r = client.get("/redirect", **opts)
+    assert r.status_code == 200
+
+def test_explicit_false(client):
+    r = client.get("/redirect", follow_redirects=False)
+    assert r.status_code == 302
+
+def test_literal_false(client):
+    r = client.get("/redirect", **{"follow_redirects": False})
+    assert r.status_code == 302
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut requests = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "REQUESTS")
+        .map(|edge| {
+            let test = edge.src.rsplit_once('#').unwrap().1.to_string();
+            let target = if edge.dst.starts_with("ep:") {
+                edge.dst.rsplit_once('@').unwrap().1.to_string()
+            } else {
+                edge.props["reason"].as_str().unwrap().to_string()
+            };
+            (
+                test,
+                target,
+                edge.props["statuses"].clone(),
+                edge.props["follows_redirects"] == true,
+            )
+        })
+        .collect::<Vec<_>>();
+    requests.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    let row = |test: &str, target: &str, statuses: serde_json::Value, follows: bool| {
+        (test.to_string(), target.to_string(), statuses, follows)
+    };
+    let none = serde_json::Value::Null;
+    let empty = serde_json::json!([]);
+    assert_eq!(
+        requests,
+        [
+            row("test_control", "GET:/known", empty.clone(), false),
+            row(
+                "test_explicit_false",
+                "GET:/redirect",
+                serde_json::json!([302]),
+                false
+            ),
+            row(
+                "test_literal_false",
+                "GET:/redirect",
+                serde_json::json!([302]),
+                false
+            ),
+            row("test_literal_true", "GET:/redirect", empty.clone(), true),
+            row(
+                "test_local_shadow",
+                "request URL is computed",
+                none.clone(),
+                false
+            ),
+            row(
+                "test_module_shadow",
+                "request URL is computed",
+                none.clone(),
+                false
+            ),
+            row("test_opaque", "GET:/redirect", empty.clone(), true),
+            row(
+                "test_parameter_shadow",
+                "request URL is computed",
+                none,
+                false
+            ),
+            row("test_qualified", "GET:/known", empty, false),
+        ]
+    );
+}

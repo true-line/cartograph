@@ -18,7 +18,9 @@
 //!   `with ….test_client(…) as c`.
 //!
 //! A name bound more than once, or a parameter rebound in the test, proves
-//! nothing, and any other `x.get(…)` is ordinary code that is not read.
+//! nothing, and any other `x.get(…)` is ordinary code that is not read. A
+//! nearer fixture of the same name that is not proven a client shadows an
+//! outer client fixture, so its parameter proves nothing either.
 //!
 //! The request target is the first argument: a string literal is a path,
 //! matched against recovered endpoints' route templates, and Flask's
@@ -47,11 +49,14 @@ use tree_sitter::Node as TsNode;
 
 const VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
 
-/// A `@pytest.fixture` that returns or yields a Flask test client.
+/// A `@pytest.fixture` in a test file or `conftest.py`. Every fixture is
+/// kept so a nearer one that is not a client still shadows an outer client.
 #[derive(Debug, Clone)]
 pub(crate) struct ClientFixture {
     file: String,
     name: String,
+    /// Whether it returns or yields a Flask test client.
+    client: bool,
     evidence: EvidenceRef,
 }
 
@@ -124,8 +129,17 @@ fn is_fixture(callee: &str, bindings: &HashMap<String, ImportBinding>) -> bool {
     }
 }
 
-/// Whether `callee` names Flask's `url_for` through an import.
-fn is_url_for(callee: &str, bindings: &HashMap<String, ImportBinding>) -> bool {
+/// Whether `callee` names Flask's `url_for` through an import that no
+/// parameter or local of the test shadows.
+fn is_url_for(
+    callee: &str,
+    bindings: &HashMap<String, ImportBinding>,
+    shadowed: &BTreeSet<String>,
+) -> bool {
+    let root = callee.split_once('.').map_or(callee, |(base, _)| base);
+    if shadowed.contains(root) {
+        return false;
+    }
     match callee.split_once('.') {
         Some((base, "url_for")) => matches!(
             bindings.get(base),
@@ -301,6 +315,7 @@ fn request_target(
     cx: &FileCx<'_>,
     call: TsNode<'_>,
     bindings: &HashMap<String, ImportBinding>,
+    shadowed: &BTreeSet<String>,
 ) -> Target {
     let Some(first) = crate::named_arguments(call).into_iter().next() else {
         return Target::Path("/".into());
@@ -313,7 +328,7 @@ fn request_target(
     }
     if first.kind() == "call"
         && let Some(callee) = first.child_by_field_name("function")
-        && is_url_for(cx.text(&callee), bindings)
+        && is_url_for(cx.text(&callee), bindings, shadowed)
     {
         return crate::named_arguments(first)
             .into_iter()
@@ -491,12 +506,11 @@ pub(crate) fn extract(
         let Some(function) = function.filter(|f| f.kind() == "function_definition") else {
             continue;
         };
-        if let Some(name) = fixture_name(cx, function, bindings)
-            && returns_client(cx, function)
-        {
+        if let Some(name) = fixture_name(cx, function, bindings) {
             out.client_fixtures.push(ClientFixture {
                 file: cx.path.to_string(),
                 name,
+                client: returns_client(cx, function),
                 evidence: cx.evidence(&function),
             });
         }
@@ -538,12 +552,17 @@ pub(crate) fn extract(
             }
         });
         let mut clients: BTreeMap<String, Client> = BTreeMap::new();
+        // Parameters and locals shadow the file's imports, `url_for` included.
+        let mut shadowed: BTreeSet<String> = bound.keys().cloned().collect();
         if let Some(parameters) = function.child_by_field_name("parameters") {
             let mut walk = parameters.walk();
             for parameter in parameters.named_children(&mut walk) {
-                if let Some(name) = parameter_name(parameter).map(|name| cx.text(&name).to_string())
-                    && !bound.contains_key(&name)
-                {
+                let Some(name) = parameter_name(parameter).map(|name| cx.text(&name).to_string())
+                else {
+                    continue;
+                };
+                shadowed.insert(name.clone());
+                if !bound.contains_key(&name) {
                     clients.insert(name.clone(), Client::Fixture(name));
                 }
             }
@@ -617,15 +636,9 @@ pub(crate) fn extract(
                     &mut keys,
                 );
             }
-            let follows_redirects = crate::named_arguments(call).into_iter().any(|argument| {
-                argument.kind() == "keyword_argument"
-                    && argument
-                        .child_by_field_name("name")
-                        .is_some_and(|name| cx.text(&name) == "follow_redirects")
-                    && argument
-                        .child_by_field_name("value")
-                        .is_none_or(|value| cx.text(&value) != "False")
-            });
+            let follows_redirects = crate::named_arguments(call)
+                .into_iter()
+                .any(|argument| may_follow_redirects(cx, argument));
             if follows_redirects {
                 statuses.clear();
                 keys.clear();
@@ -635,13 +648,53 @@ pub(crate) fn extract(
                 file: cx.path.to_string(),
                 client,
                 verb: verb.to_ascii_uppercase(),
-                target: request_target(cx, call, bindings),
+                target: request_target(cx, call, bindings, &shadowed),
                 statuses,
                 keys,
                 follows_redirects,
                 evidence: cx.evidence(&call),
             });
         });
+    }
+}
+
+/// Whether a call argument may enable `follow_redirects`: the keyword with
+/// any value but a literal `False`, or `**mapping` unless it is a literal
+/// dict whose string keys are all known and whose `follow_redirects`, if
+/// present, is a literal `False`.
+fn may_follow_redirects(cx: &FileCx<'_>, argument: TsNode<'_>) -> bool {
+    let not_false = |value: Option<TsNode<'_>>| value.is_none_or(|v| cx.text(&v) != "False");
+    match argument.kind() {
+        "keyword_argument" => {
+            argument
+                .child_by_field_name("name")
+                .is_some_and(|name| cx.text(&name) == "follow_redirects")
+                && not_false(argument.child_by_field_name("value"))
+        }
+        "dictionary_splat" => {
+            let Some(mapping) = argument
+                .named_child(0)
+                .filter(|mapping| mapping.kind() == "dictionary")
+            else {
+                return true;
+            };
+            let mut walk = mapping.walk();
+            mapping.named_children(&mut walk).any(|entry| {
+                if entry.kind() != "pair" {
+                    return entry.kind() != "comment";
+                }
+                match entry
+                    .child_by_field_name("key")
+                    .and_then(|key| literal_string(cx, key))
+                {
+                    Some(key) => {
+                        key == "follow_redirects" && not_false(entry.child_by_field_name("value"))
+                    }
+                    None => true,
+                }
+            })
+        }
+        _ => false,
     }
 }
 
@@ -681,7 +734,8 @@ fn route_match(template: &str, path: &str) -> Option<usize> {
     Some(fixed)
 }
 
-/// The nearest client fixture named `name` visible from `file`.
+/// The nearest fixture named `name` visible from `file`, client or not; the
+/// last definition wins within a file, as pytest resolves it.
 fn visible_fixture<'f>(
     fixtures: &'f [ClientFixture],
     file: &str,
@@ -747,8 +801,8 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
     for call in calls {
         let client_evidence = match &call.client {
             Client::Fixture(name) => match visible_fixture(&fixtures, &call.file, name) {
-                Some(fixture) => fixture.evidence.clone(),
-                None => continue,
+                Some(fixture) if fixture.client => fixture.evidence.clone(),
+                _ => continue,
             },
             Client::Local(evidence) => evidence.clone(),
         };
