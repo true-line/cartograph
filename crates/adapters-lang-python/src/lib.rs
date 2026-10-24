@@ -1570,7 +1570,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             };
             let inputs = inputs
                 .get_or_insert_with(|| {
-                    request_inputs::handler_inputs(&cx, *function, &request).to_props()
+                    request_inputs::handler_inputs(&cx, *function, &request).to_props(handler)
                 })
                 .clone();
             let receiver = cx.text(&route.receiver).to_string();

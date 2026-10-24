@@ -14,10 +14,14 @@
 //! passing it to a call, iterating it, rebinding the name) adds a reason to
 //! `partial`. So does passing `request` itself. Helpers the handler calls are
 //! not followed, so the inputs never claim to be complete. `request` must be
-//! Flask's: imported from `flask`, or `flask.request` on an imported module.
+//! Flask's: imported from `flask`, or `flask.request` on an imported module,
+//! and not rebound in the handler (a parameter or local of that name).
 //! Nested function and class bodies are outside the handler and are skipped.
+//! Writing a key (`data["k"] = v`, `del data["k"]`) is not a read. Every
+//! recorded name cites the expression that reads it, under `prov`.
 
-use crate::{FileCx, ImportBinding, literal_string};
+use crate::{FileCx, ImportBinding, literal_string, prov_from};
+use core_prov::{ConfidenceTier, EvidenceRef};
 use std::collections::{BTreeSet, HashMap};
 use tree_sitter::Node as TsNode;
 
@@ -28,7 +32,12 @@ pub(crate) struct RequestInputs {
     pub body: BTreeSet<String>,
     pub form: BTreeSet<String>,
     pub partial: BTreeSet<&'static str>,
+    /// The reads behind the recorded names, deduplicated by span.
+    pub evidence: Vec<EvidenceRef>,
 }
+
+/// Evidence spans kept per handler; more set `evidence_truncated`.
+const MAX_EVIDENCE: usize = 64;
 
 impl RequestInputs {
     fn is_empty(&self) -> bool {
@@ -38,8 +47,16 @@ impl RequestInputs {
             && self.partial.is_empty()
     }
 
+    fn cite(&mut self, evidence: EvidenceRef) {
+        if !self.evidence.iter().any(|seen| {
+            (seen.byte_start, seen.byte_end) == (evidence.byte_start, evidence.byte_end)
+        }) {
+            self.evidence.push(evidence);
+        }
+    }
+
     /// The endpoint props value, or `None` when the handler reads nothing.
-    pub(crate) fn to_props(&self) -> Option<serde_json::Value> {
+    pub(crate) fn to_props(&self, handler: &str) -> Option<serde_json::Value> {
         if self.is_empty() {
             return None;
         }
@@ -57,6 +74,22 @@ impl RequestInputs {
             props.insert("partial".into(), serde_json::json!(self.partial));
         }
         props.insert("scope".into(), "handler_body".into());
+        if !self.evidence.is_empty() {
+            let mut evidence = self.evidence.clone();
+            evidence.sort_by_key(|e| (e.byte_start, e.byte_end));
+            if evidence.len() > MAX_EVIDENCE {
+                evidence.truncate(MAX_EVIDENCE);
+                props.insert("evidence_truncated".into(), true.into());
+            }
+            props.insert(
+                "prov".into(),
+                prov_from(
+                    evidence,
+                    ConfidenceTier::Confirmed,
+                    &format!("Request inputs of {handler}"),
+                ),
+            );
+        }
         Some(serde_json::Value::Object(props))
     }
 }
@@ -100,10 +133,20 @@ pub(crate) fn handler_inputs(
     let Some(body) = function.child_by_field_name("body") else {
         return inputs;
     };
+    // A handler parameter or local named like the import's root rebinds it.
+    let bound = handler_bindings(cx, function, body);
+    let request = request
+        .iter()
+        .filter(|name| !bound.contains(name.split('.').next().unwrap_or(name)))
+        .cloned()
+        .collect::<BTreeSet<_>>();
     if request.is_empty() {
         return inputs;
     }
-    let walker = Walker { cx, request };
+    let walker = Walker {
+        cx,
+        request: &request,
+    };
     // Pass 1: local names bound to the JSON body.
     let mut json_names = BTreeSet::new();
     walker.visit(body, &mut |node| {
@@ -129,6 +172,99 @@ pub(crate) fn handler_inputs(
         _ => {}
     });
     inputs
+}
+
+/// Names the handler binds itself: parameters, and assignment, `for`, `with`,
+/// `except`, `import` and `global`-free walrus targets in its own body.
+fn handler_bindings(cx: &FileCx<'_>, function: TsNode<'_>, body: TsNode<'_>) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    if let Some(parameters) = function.child_by_field_name("parameters") {
+        let mut cursor = parameters.walk();
+        for parameter in parameters.named_children(&mut cursor) {
+            let name = if parameter.kind() == "identifier" {
+                Some(parameter)
+            } else {
+                parameter
+                    .child_by_field_name("name")
+                    .or_else(|| parameter.named_child(0))
+                    .filter(|name| name.kind() == "identifier")
+            };
+            if let Some(name) = name {
+                names.insert(cx.text(&name).to_string());
+            }
+        }
+    }
+    let walker = Walker {
+        cx,
+        request: &BTreeSet::new(),
+    };
+    walker.visit(body, &mut |node| {
+        let target = match node.kind() {
+            "assignment" | "augmented_assignment" | "for_statement" => {
+                node.child_by_field_name("left")
+            }
+            "named_expression" => node.child_by_field_name("name"),
+            "as_pattern" => node.child_by_field_name("alias"),
+            "aliased_import" => node.child_by_field_name("alias"),
+            "dotted_name"
+                if node
+                    .parent()
+                    .is_some_and(|p| p.kind() == "import_statement") =>
+            {
+                node.named_child(0)
+            }
+            _ => None,
+        };
+        if let Some(target) = target {
+            bound_names(cx, target, &mut names);
+        }
+    });
+    names
+}
+
+fn bound_names(cx: &FileCx<'_>, target: TsNode<'_>, names: &mut BTreeSet<String>) {
+    match target.kind() {
+        "identifier" => {
+            names.insert(cx.text(&target).to_string());
+        }
+        "pattern_list"
+        | "tuple_pattern"
+        | "list_pattern"
+        | "as_pattern_target"
+        | "tuple"
+        | "list"
+        | "list_splat_pattern"
+        | "parenthesized_expression" => {
+            let mut cursor = target.walk();
+            for child in target.named_children(&mut cursor) {
+                bound_names(cx, child, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `node` (a subscript) is only written: an assignment or `for`
+/// target, possibly inside a destructuring pattern, or deleted.
+fn is_write_target(node: TsNode<'_>) -> bool {
+    let mut child = node;
+    while let Some(parent) = child.parent() {
+        match parent.kind() {
+            "pattern_list"
+            | "tuple_pattern"
+            | "list_pattern"
+            | "tuple"
+            | "list"
+            | "parenthesized_expression"
+            | "expression_list" => child = parent,
+            "assignment" | "for_statement" => {
+                return parent.child_by_field_name("left") == Some(child);
+            }
+            "delete_statement" => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// `x or {}` / `x or dict()`: the left operand is what is read.
@@ -192,9 +328,14 @@ impl Walker<'_, '_> {
     }
 
     /// The literal key `value` is read with: `value.get("k", …)`,
-    /// `value.getlist("k")` (collections only), `value["k"]` or `"k" in value`. `Err` when
-    /// `value` is used in any other way.
-    fn literal_read(&self, value: TsNode<'_>, getlist: bool) -> Result<String, ()> {
+    /// `value.getlist("k")` (collections only), `value["k"]` or `"k" in value`,
+    /// and the expression that reads it. `Ok(None)` when `value["k"]` is only
+    /// written; `Err` when `value` is used in any other way.
+    fn literal_read<'t>(
+        &self,
+        value: TsNode<'t>,
+        getlist: bool,
+    ) -> Result<Option<(String, TsNode<'t>)>, ()> {
         let parent = value.parent().ok_or(())?;
         match parent.kind() {
             "subscript" if parent.child_by_field_name("value") == Some(value) => {
@@ -202,7 +343,8 @@ impl Walker<'_, '_> {
                 if parent.named_child_count() != 2 {
                     return Err(());
                 }
-                literal_string(self.cx, key).ok_or(())
+                let key = literal_string(self.cx, key).ok_or(())?;
+                Ok((!is_write_target(parent)).then_some((key, parent)))
             }
             "attribute" if parent.child_by_field_name("object") == Some(value) => {
                 let method = parent
@@ -218,7 +360,7 @@ impl Walker<'_, '_> {
                     .ok_or(())?;
                 let arguments = call.child_by_field_name("arguments").ok_or(())?;
                 let first = arguments.named_child(0).ok_or(())?;
-                literal_string(self.cx, first).ok_or(())
+                Ok(Some((literal_string(self.cx, first).ok_or(())?, call)))
             }
             // `"k" in value` / `"k" not in value`.
             "comparison_operator"
@@ -229,7 +371,7 @@ impl Walker<'_, '_> {
                         .is_some_and(|op| matches!(op.kind(), "in" | "not in")) =>
             {
                 let key = parent.named_child(0).ok_or(())?;
-                literal_string(self.cx, key).ok_or(())
+                Ok(Some((literal_string(self.cx, key).ok_or(())?, parent)))
             }
             _ => Err(()),
         }
@@ -257,9 +399,11 @@ impl Walker<'_, '_> {
             return;
         }
         match self.literal_read(name, false) {
-            Ok(key) => {
+            Ok(Some((key, read))) => {
                 inputs.body.insert(key);
+                inputs.cite(self.cx.evidence(&read));
             }
+            Ok(None) => {}
             Err(()) => {
                 inputs.partial.insert("body_read_dynamically");
             }
@@ -292,15 +436,21 @@ impl Walker<'_, '_> {
             .unwrap_or("");
         if let Some((_, collection)) = COLLECTIONS.iter().find(|(name, _)| *name == attribute) {
             match (self.literal_read(parent, true), collection) {
-                (Ok(key), Collection::Query) => {
-                    inputs.query.insert(key);
-                }
-                (Ok(key), Collection::Form) => {
-                    inputs.form.insert(key);
-                }
-                (Ok(key), Collection::Values) => {
-                    inputs.query.insert(key.clone());
-                    inputs.form.insert(key);
+                (Ok(None), _) => {}
+                (Ok(Some((key, read))), collection) => {
+                    inputs.cite(self.cx.evidence(&read));
+                    match collection {
+                        Collection::Query => {
+                            inputs.query.insert(key);
+                        }
+                        Collection::Form => {
+                            inputs.form.insert(key);
+                        }
+                        Collection::Values => {
+                            inputs.query.insert(key.clone());
+                            inputs.form.insert(key);
+                        }
+                    }
                 }
                 (Err(()), Collection::Query) => {
                     inputs.partial.insert("query_read_dynamically");
@@ -342,9 +492,11 @@ impl Walker<'_, '_> {
             return;
         }
         match self.literal_read(json, false) {
-            Ok(key) => {
+            Ok(Some((key, read))) => {
                 inputs.body.insert(key);
+                inputs.cite(self.cx.evidence(&read));
             }
+            Ok(None) => {}
             Err(()) => {
                 inputs.partial.insert("body_read_dynamically");
             }

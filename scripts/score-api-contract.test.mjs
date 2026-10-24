@@ -91,6 +91,8 @@ test('documented inputs skip headers, path parameters and prose bullets', () => 
     'Input:',
     '- mailbox_id: in url',
     '- transfer_aliases_to: optional',
+    '- Authorization: header bearer token',
+    '- `X-Sudo`: Header for sudo mode',
   ].join('\n');
   const inputs = documentedInputs(markdown);
   assert.deepEqual([...inputs.get('POST /api/v3/alias/custom/new')].sort(), [

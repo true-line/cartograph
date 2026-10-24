@@ -2188,12 +2188,15 @@ def global_rebind():
     );
 }
 
-fn request_inputs<'a>(
-    extraction: &'a Extraction,
+/// An endpoint's `request_inputs` without `prov`, and the source text each
+/// cited read spans.
+fn request_inputs_cited(
+    extraction: &Extraction,
+    source: &str,
     method: &str,
     path: &str,
-) -> &'a serde_json::Value {
-    &extraction
+) -> (serde_json::Value, Vec<String>) {
+    let mut inputs = extraction
         .nodes
         .iter()
         .find(|node| {
@@ -2201,6 +2204,41 @@ fn request_inputs<'a>(
         })
         .unwrap_or_else(|| panic!("{method} {path}"))
         .props["request_inputs"]
+        .clone();
+    let reads = inputs
+        .as_object_mut()
+        .and_then(|inputs| inputs.remove("prov"))
+        .map(|prov| {
+            assert_eq!(prov["confidence_tier"], "Confirmed");
+            prov["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|span| {
+                    let range = span["byte_start"].as_u64().unwrap() as usize
+                        ..span["byte_end"].as_u64().unwrap() as usize;
+                    source[range].to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (inputs, reads)
+}
+
+fn request_inputs(extraction: &Extraction, method: &str, path: &str) -> serde_json::Value {
+    let mut inputs = extraction
+        .nodes
+        .iter()
+        .find(|node| {
+            node.label == "Endpoint" && node.props["method"] == method && node.props["path"] == path
+        })
+        .unwrap_or_else(|| panic!("{method} {path}"))
+        .props["request_inputs"]
+        .clone();
+    if let Some(inputs) = inputs.as_object_mut() {
+        inputs.remove("prov");
+    }
+    inputs
 }
 
 #[test]
@@ -2255,7 +2293,7 @@ def nothing():
     let extraction = extract_source(source, "app.py", &id()).unwrap();
     assert_eq!(
         request_inputs(&extraction, "POST", "/login"),
-        &serde_json::json!({
+        serde_json::json!({
             "body": ["device", "email", "password", "remember"],
             "query": ["hostname", "page_id", "pinned", "tag"],
             "scope": "handler_body",
@@ -2263,7 +2301,7 @@ def nothing():
     );
     assert_eq!(
         request_inputs(&extraction, "POST", "/direct"),
-        &serde_json::json!({
+        serde_json::json!({
             "body": ["name", "note"],
             "query": ["q"],
             "form": ["csrf", "q"],
@@ -2272,7 +2310,7 @@ def nothing():
     );
     assert_eq!(
         request_inputs(&extraction, "POST", "/dynamic"),
-        &serde_json::json!({
+        serde_json::json!({
             "partial": ["body_read_dynamically", "query_read_dynamically"],
             "scope": "handler_body",
         })
@@ -2281,7 +2319,7 @@ def nothing():
     // a partial read.
     assert_eq!(
         request_inputs(&extraction, "GET", "/passed"),
-        &serde_json::json!({ "partial": ["request_passed"], "scope": "handler_body" })
+        serde_json::json!({ "partial": ["request_passed"], "scope": "handler_body" })
     );
     assert!(request_inputs(&extraction, "GET", "/none").is_null());
 }
@@ -2327,11 +2365,63 @@ def lookalike():
     let extraction = extract_dir(dir.path(), &id()).unwrap();
     assert_eq!(
         request_inputs(&extraction, "POST", "/api/aliases"),
-        &serde_json::json!({
+        serde_json::json!({
             "body": ["alias_prefix"],
             "query": ["hostname"],
             "scope": "handler_body",
         })
     );
     assert!(request_inputs(&extraction, "GET", "/api/lookalike").is_null());
+}
+
+#[test]
+fn request_inputs_cite_reads_and_skip_writes_and_shadowed_request() {
+    // #721 review: each name cites the read expression; written or deleted
+    // keys are not reads; a parameter or local named `request` is not Flask's.
+    let source = r#"
+from flask import Flask, request
+
+app = Flask(__name__)
+
+@app.route("/save", methods=["POST"])
+def save():
+    data = request.get_json()
+    name = data["name"]
+    data["user_id"] = 1
+    data["count"] += 1
+    data["a"], other = 1, 2
+    del data["tmp"]
+    del request.args["gone"]
+    q = request.args.get("q")
+    return ""
+
+@app.route("/param/<request>")
+def param(request):
+    return request.args.get("x")
+
+@app.route("/local")
+def local():
+    request = make_request()
+    return request.args.get("y")
+"#;
+    let extraction = extract_source(source.as_bytes(), "app.py", &id()).unwrap();
+    let (inputs, reads) = request_inputs_cited(&extraction, source, "POST", "/save");
+    assert_eq!(
+        inputs,
+        serde_json::json!({
+            "body": ["count", "name"],
+            "query": ["q"],
+            "scope": "handler_body",
+        })
+    );
+    assert_eq!(
+        reads,
+        [
+            r#"data["name"]"#,
+            r#"data["count"]"#,
+            r#"request.args.get("q")"#
+        ]
+    );
+    assert!(request_inputs(&extraction, "GET", "/param/<request>").is_null());
+    assert!(request_inputs(&extraction, "GET", "/local").is_null());
 }

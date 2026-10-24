@@ -69,7 +69,7 @@ No route was promoted to `Confirmed` from a receiver it couldn't prove.
 
 ## Request inputs (#721)
 
-Each Flask endpoint records, as `request_inputs`, the literal names its handler body reads: `query` from `request.args`, `form` from `request.form`, and `body` from `request.get_json()` or `request.json`, read directly or through a local name such as `data = request.get_json()`. The same scorer compares those names with each documented endpoint's `Input:` bullets. Headers and path parameters are excluded, because the route path already carries the parameters.
+Each Flask endpoint records, as `request_inputs`, the literal names its handler body reads: `query` from `request.args`, `form` from `request.form`, and `body` from `request.get_json()` or `request.json`, read directly or through a local name such as `data = request.get_json()`. Each recorded name cites the expression that reads it, under the inputs' own `prov`. The same scorer compares those names with each documented endpoint's `Input:` bullets. Headers and path parameters are excluded, because the route path already carries the parameters.
 
 | Metric | Value |
 |---|---|

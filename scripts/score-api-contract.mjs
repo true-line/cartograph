@@ -68,7 +68,7 @@ export function score(documented, recovered, prefix = '') {
 // One documented input: an optional "(Optional…)" marker, then a bare or
 // backticked name ending the bullet, before ":" or before "in"/"passed"/"used"
 // prose. Headers and URL path parameters are not request inputs.
-const INPUT = /^\s*-\s+(?:\([^)]*\)\s*)?`?([A-Za-z_][A-Za-z0-9_]*)`?(?:\s*$|\s*:|\s+(?:in|passed|used)\b(.*))/u;
+const INPUT = /^\s*-\s+(?:\([^)]*\)\s*)?`?([A-Za-z_][A-Za-z0-9_]*)`?(?:\s*$|\s*:(.*)|\s+(?:in|passed|used)\b(.*))/u;
 
 /** Documented input names per canonical endpoint, from each heading's
  *  "Input:" bullets (nested ones included) up to "Output:" or a heading. */
@@ -95,7 +95,7 @@ export function documentedInputs(markdown) {
     if (/^Output:/u.test(line)) inInput = false;
     if (!inInput) continue;
     const match = line.match(INPUT);
-    if (!match || /\b(header|url)\b/u.test(match[2] ?? '') || pathParams.has(match[1])) continue;
+    if (!match || /\b(header|url)\b/iu.test(match[2] ?? match[3] ?? '') || pathParams.has(match[1])) continue;
     if (!inputs.has(key)) inputs.set(key, new Set());
     inputs.get(key).add(match[1]);
   }
