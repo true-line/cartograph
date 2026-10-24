@@ -87,6 +87,11 @@ pub(crate) use admission_journal::refusal_workspace::next_prompt_capacity_replay
 pub(crate) use admission_journal::timeline_workspace::next_prompt_timeline_workspace;
 #[cfg(unix)]
 pub(crate) use saved_call_workspace::next_prompt_saved_call_workspace;
+#[cfg(unix)]
+#[path = "investigations/saved_validation_workspace.rs"]
+mod saved_validation_workspace;
+#[cfg(unix)]
+pub(crate) use saved_validation_workspace::next_prompt_saved_validation_workspace;
 #[cfg(test)]
 #[path = "investigations/tests.rs"]
 mod tests;

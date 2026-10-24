@@ -732,6 +732,16 @@ fn admission_journal_saved_call_reopen_authenticates_nonzero_feedback_and_count(
     let store = JobStore::open(path).unwrap();
     let tx = store.conn.unchecked_transaction().unwrap();
     basis.validate_saved(&tx, &task).unwrap();
+    #[cfg(unix)]
+    {
+        // AC-0327: the real reopened call retains its step across refusal replay.
+        let core = admission_contract::load_saved_call_basis_core(&tx, &task, &basis).unwrap();
+        let step_bytes = serde_json::to_vec(&core.step).unwrap().len();
+        assert!(
+            next_prompt_saved_validation_workspace().unwrap().0
+                >= step_bytes + next_prompt_capacity_replay_workspace().unwrap().1
+        );
+    }
     let mut changed = basis.clone();
     changed.admission.capacity_refusal_count = 0;
     changed.admission.capacity_feedback = None;
