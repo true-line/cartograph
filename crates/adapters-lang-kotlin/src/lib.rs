@@ -705,9 +705,13 @@ fn resolve_repo_imports(
                 ))
                 .then_some(owner)
         });
-        let path = unique
-            .map(|unique| unique.path.as_str())
-            .or_else(|| importable_files.get(module).and_then(Option::as_deref));
+        // The combined index is authoritative where it names the target: a
+        // plain function in one file and an extension in another is a
+        // recorded ambiguity, not the plain function's file.
+        let path = match importable_files.get(module) {
+            Some(unique) => unique.as_deref(),
+            None => unique.map(|unique| unique.path.as_str()),
+        };
         if let Some(path) = path {
             edge.dst = file_id(repo, path);
             edge.props["resolution"] = "import-proven".into();

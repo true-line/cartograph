@@ -959,6 +959,17 @@ fun String.twice(): String = this
         "src/main/kotlin/com/demo/common/Other.kt",
         "package com.demo.common\n\nfun String.twice(): String = this\n",
     );
+    // A plain function in one file and an extension of that name in another.
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/common/Plain.kt",
+        "package com.demo.common\n\nfun mixed() = Unit\n",
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/common/Ext.kt",
+        "package com.demo.common\n\nfun String.mixed() = this\n",
+    );
     write(
         dir.path(),
         "src/main/kotlin/com/demo/App.kt",
@@ -971,6 +982,7 @@ import com.demo.common.format
 import com.demo.common.Theme.DARK
 import com.demo.common.twice
 import com.demo.common.missing
+import com.demo.common.mixed
 
 class App
 "#,
@@ -1010,5 +1022,9 @@ class App
     assert_eq!(
         targets["com.demo.common.missing"],
         "mod:com.demo.common.missing"
+    );
+    assert_eq!(
+        targets["com.demo.common.mixed"],
+        "mod:com.demo.common.mixed"
     );
 }
