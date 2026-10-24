@@ -508,6 +508,8 @@ fn loopback_base(base_url: &str) -> Result<Url, ProviderError> {
     let loopback = base_url.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("localhost")
             || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
                 .parse::<IpAddr>()
                 .is_ok_and(|address| address.is_loopback())
     });
@@ -520,14 +522,19 @@ fn loopback_base(base_url: &str) -> Result<Url, ProviderError> {
     Ok(base_url)
 }
 
-/// Ollama is declared Local, so its transport must never inherit either
-/// environment/system proxies or a caller-added proxy. Otherwise loopback
-/// evidence could leave the device without passing cloud consent.
+/// Local providers' transport must never inherit either environment/system
+/// proxies or a caller-added proxy, nor follow a redirect off loopback.
+/// Otherwise loopback evidence could leave the device without passing cloud
+/// consent.
 fn build_direct_loopback_client(
     builder: ClientBuilder,
     timeout: Duration,
 ) -> Result<Client, ProviderError> {
-    Ok(builder.no_proxy().timeout(timeout).build()?)
+    Ok(builder
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()?)
 }
 
 #[derive(Serialize)]

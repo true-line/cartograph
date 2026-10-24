@@ -1435,3 +1435,33 @@ fn openai_compatible_lists_models_and_declines_embeddings() {
         "openai-compatible:test-model"
     );
 }
+
+// #943 review: the non-bounded local client never follows a redirect off
+// loopback, and a bracketed IPv6 loopback base is Local.
+#[test]
+fn local_legacy_clients_never_follow_redirects_and_accept_ipv6_loopback() {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    let location = format!(
+        "http://{}/v1/chat/completions",
+        target.local_addr().unwrap()
+    );
+    let redirect = format!(
+        "HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes();
+    let request = crate::ProviderCompletionRequest {
+        payload: action().payload,
+    };
+    let (endpoint, server) = http(redirect.clone());
+    assert!(openai(&endpoint).complete(&request).is_err());
+    server.join().unwrap();
+    let (endpoint, server) = http(redirect);
+    let ollama = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+    assert!(ollama.complete(&request).is_err());
+    server.join().unwrap();
+    assert_no_request(&target);
+    for endpoint in ["http://[::1]:8000/", "http://localhost:8000"] {
+        assert!(OpenAiCompatibleProvider::new(endpoint, "m", Duration::from_secs(1)).is_ok());
+        assert!(OllamaProvider::new(endpoint, "m", Duration::from_secs(1)).is_ok());
+    }
+}
