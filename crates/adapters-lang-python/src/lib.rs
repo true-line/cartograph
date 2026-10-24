@@ -17,6 +17,7 @@ use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 mod alembic;
 pub mod observed_infra;
 mod request_inputs;
+mod responses;
 mod sqlalchemy;
 
 const EXTRACTOR_ID: &str = "t0.adapter-python";
@@ -93,6 +94,8 @@ struct PendingRoute {
     evidence: EvidenceRef,
     /// Request inputs the handler body reads (Flask), as endpoint props.
     inputs: Option<serde_json::Value>,
+    /// Responses the handler body returns (Flask), as endpoint props.
+    responses: Option<serde_json::Value>,
 }
 
 /// `parent.register_blueprint(bp, url_prefix=...)` /
@@ -1406,6 +1409,7 @@ fn resolve_routes(out: &mut Extraction, repo: &str) {
                     served.confidence,
                     mount,
                     route.inputs.as_ref(),
+                    route.responses.as_ref(),
                 );
             }
         }
@@ -1424,6 +1428,7 @@ fn push_endpoint(
     confidence: ConfidenceTier,
     mount: Option<&str>,
     inputs: Option<&serde_json::Value>,
+    responses: Option<&serde_json::Value>,
 ) {
     let endpoint = format!("ep:{repo}@{method}:{route}");
     let framework_name = match framework {
@@ -1443,6 +1448,9 @@ fn push_endpoint(
     }
     if let Some(inputs) = inputs {
         props["request_inputs"] = inputs.clone();
+    }
+    if let Some(responses) = responses {
+        props["responses"] = responses.clone();
     }
     out.nodes.push(Node {
         id: endpoint.clone(),
@@ -1552,6 +1560,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     }
 
     let request = request_inputs::request_names(&bindings);
+    let helpers = responses::flask_helpers(&bindings);
     for (function, handler) in &functions {
         let Some(parent) = function
             .parent()
@@ -1560,6 +1569,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             continue;
         };
         let mut inputs = None;
+        let mut returned = None;
         let mut walk = parent.walk();
         for decorator in parent
             .named_children(&mut walk)
@@ -1571,6 +1581,13 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             let inputs = inputs
                 .get_or_insert_with(|| {
                     request_inputs::handler_inputs(&cx, *function, &request).to_props(handler)
+                })
+                .clone();
+            let responses = returned
+                .get_or_insert_with(|| {
+                    helpers.as_ref().and_then(|helpers| {
+                        responses::handler_responses(&cx, *function, helpers).to_props(handler)
+                    })
                 })
                 .clone();
             let receiver = cx.text(&route.receiver).to_string();
@@ -1587,6 +1604,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                         ConfidenceTier::Confirmed,
                         None,
                         inputs.as_ref(),
+                        responses.as_ref(),
                     );
                 }
                 continue;
@@ -1614,6 +1632,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                     handler: handler.clone(),
                     evidence: cx.evidence(&decorator),
                     inputs,
+                    responses,
                 });
             }
         }

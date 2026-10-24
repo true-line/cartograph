@@ -176,7 +176,11 @@ pub(crate) fn handler_inputs(
 
 /// Names the handler binds itself: parameters, and assignment, `for`, `with`,
 /// `except`, `import` and `global`-free walrus targets in its own body.
-fn handler_bindings(cx: &FileCx<'_>, function: TsNode<'_>, body: TsNode<'_>) -> BTreeSet<String> {
+pub(crate) fn handler_bindings(
+    cx: &FileCx<'_>,
+    function: TsNode<'_>,
+    body: TsNode<'_>,
+) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     if let Some(parameters) = function.child_by_field_name("parameters") {
         let mut cursor = parameters.walk();
@@ -267,6 +271,22 @@ fn is_write_target(node: TsNode<'_>) -> bool {
     false
 }
 
+/// Pre-order walk of `node`, not descending into nested function, class or
+/// lambda scopes.
+pub(crate) fn visit_scope<'t>(node: TsNode<'t>, f: &mut dyn FnMut(TsNode<'t>)) {
+    f(node);
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "function_definition" | "class_definition" | "lambda"
+        ) {
+            continue;
+        }
+        visit_scope(child, f);
+    }
+}
+
 /// `x or {}` / `x or dict()`: the left operand is what is read.
 fn unwrap_or(node: TsNode<'_>) -> TsNode<'_> {
     if node.kind() == "boolean_operator"
@@ -283,19 +303,8 @@ struct Walker<'a, 'b> {
 }
 
 impl Walker<'_, '_> {
-    /// Pre-order walk of `node`, not descending into nested scopes.
     fn visit<'t>(&self, node: TsNode<'t>, f: &mut dyn FnMut(TsNode<'t>)) {
-        f(node);
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            if matches!(
-                child.kind(),
-                "function_definition" | "class_definition" | "lambda"
-            ) {
-                continue;
-            }
-            self.visit(child, f);
-        }
+        visit_scope(node, f);
     }
 
     fn is_request(&self, node: TsNode<'_>) -> bool {

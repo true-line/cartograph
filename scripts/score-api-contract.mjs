@@ -147,6 +147,108 @@ export function scoreInputs(documented, recovered) {
   };
 }
 
+// Documented statuses: "- 200: …" bullets, "Output: 200 means …", and
+// "return(s) 403" / "403 if|when|means" prose.
+const STATUS = [
+  /^\s*-\s+`?([1-5]\d\d)\b/u,
+  /^Output:\s*`?([1-5]\d\d)\b/u,
+  /\breturns?(?:ed)?\s+`?([1-5]\d\d)\b/giu,
+  /\b([1-5]\d\d)`?\s+(?:if|when|means|is returned)\b/giu,
+];
+
+/** Documented top-level response keys and statuses per canonical endpoint,
+ *  from each heading's "Output:" section up to the next heading. Only
+ *  unindented bullets name top-level keys; nested ones describe their fields. */
+export function documentedOutputs(markdown) {
+  const outputs = new Map();
+  let key = null;
+  let inOutput = false;
+  for (const line of markdown.split('\n')) {
+    const heading = line.match(/^#+\s+([A-Z]+)\s+(\/\S*)/u);
+    if (/^#/u.test(line)) {
+      key = heading && METHODS.has(heading[1]) ? canonicalEndpoint(heading[1], heading[2]) : null;
+      inOutput = false;
+      continue;
+    }
+    if (/^Output:/u.test(line)) inOutput = key !== null;
+    if (!inOutput) continue;
+    const entry = outputs.get(key) ?? { keys: new Set(), statuses: new Set() };
+    outputs.set(key, entry);
+    for (const pattern of STATUS) {
+      for (const match of pattern.global ? line.matchAll(pattern) : [line.match(pattern)].filter(Boolean))
+        entry.statuses.add(Number(match[1]));
+    }
+    const bullet = /^-\s/u.test(line) && line.match(INPUT);
+    if (bullet) entry.keys.add(bullet[1]);
+  }
+  return outputs;
+}
+
+/** Recovered response keys and statuses per canonical endpoint, and the
+ *  endpoints whose recovery is marked partial. */
+export function recoveredOutputs(nodes) {
+  const outputs = new Map();
+  const partial = new Set();
+  for (const node of nodes) {
+    const { method, path, responses } = node.props ?? {};
+    if (typeof method !== 'string' || typeof path !== 'string' || !responses) continue;
+    const key = canonicalEndpoint(method, path);
+    const entry = outputs.get(key) ?? { keys: new Set(), statuses: new Set() };
+    for (const name of responses.keys ?? []) entry.keys.add(name);
+    for (const status of responses.statuses ?? []) entry.statuses.add(status);
+    outputs.set(key, entry);
+    if ((responses.partial ?? []).length > 0) partial.add(key);
+  }
+  return { outputs, partial };
+}
+
+// Keys: recall over documented top-level keys, precision over recovered keys,
+// both on endpoints that document keys. Statuses: recall only, because docs
+// rarely list every error status a handler returns.
+export function scoreOutputs(documented, recovered) {
+  const ratio = (a, b) => (b === 0 ? null : Number((a / b).toFixed(4)));
+  const totals = { keyEndpoints: 0, keys: 0, recoveredKeys: 0, matchedKeys: 0, statusEndpoints: 0, statuses: 0, matchedStatuses: 0 };
+  const differences = [];
+  for (const [key, doc] of [...documented].sort(([a], [b]) => a.localeCompare(b))) {
+    const found = recovered.outputs.get(key) ?? { keys: new Set(), statuses: new Set() };
+    const difference = { endpoint: key, partial: recovered.partial.has(key) };
+    if (doc.keys.size > 0) {
+      totals.keyEndpoints += 1;
+      totals.keys += doc.keys.size;
+      totals.recoveredKeys += found.keys.size;
+      const missed = [...doc.keys].filter((name) => !found.keys.has(name)).sort();
+      totals.matchedKeys += doc.keys.size - missed.length;
+      const extra = [...found.keys].filter((name) => !doc.keys.has(name)).sort();
+      if (missed.length) difference.missed_keys = missed;
+      if (extra.length) difference.undocumented_keys = extra;
+    }
+    if (doc.statuses.size > 0) {
+      totals.statusEndpoints += 1;
+      totals.statuses += doc.statuses.size;
+      const missed = [...doc.statuses].filter((status) => !found.statuses.has(status)).sort();
+      totals.matchedStatuses += doc.statuses.size - missed.length;
+      if (missed.length) difference.missed_statuses = missed;
+    }
+    if (Object.keys(difference).length > 2) differences.push(difference);
+  }
+  return {
+    keys: {
+      endpoints_with_documented_keys: totals.keyEndpoints,
+      documented: totals.keys,
+      matched: totals.matchedKeys,
+      recall: ratio(totals.matchedKeys, totals.keys),
+      precision: ratio(totals.matchedKeys, totals.recoveredKeys),
+    },
+    statuses: {
+      endpoints_with_documented_statuses: totals.statusEndpoints,
+      documented: totals.statuses,
+      matched: totals.matchedStatuses,
+      recall: ratio(totals.matchedStatuses, totals.statuses),
+    },
+    differences,
+  };
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [answerKey, endpointsJson, prefix = ''] = process.argv.slice(2);
   if (!answerKey || !endpointsJson) {
@@ -163,5 +265,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     [...documentedInputs(markdown)].filter(([key]) => recovered.found.has(key)),
   );
   result.inputs = scoreInputs(inputs, recoveredInputs(nodes));
+  const outputs = new Map(
+    [...documentedOutputs(markdown)].filter(([key]) => recovered.found.has(key)),
+  );
+  result.outputs = scoreOutputs(outputs, recoveredOutputs(nodes));
   console.log(JSON.stringify(result, null, 2));
 }
