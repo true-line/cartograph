@@ -862,7 +862,9 @@ mod coverage_tests;
 #[path = "completion_tests.rs"]
 mod completion_tests;
 
-pub(in crate::investigations) use completion_tests::with_public_start_fixture;
+pub(in crate::investigations) use completion_tests::{
+    with_public_start_fixture, with_public_start_fixture_then,
+};
 
 #[path = "finding_review_integration_tests.rs"]
 mod finding_review_integration_tests;

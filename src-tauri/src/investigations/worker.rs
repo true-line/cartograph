@@ -1260,4 +1260,4 @@ fn stop<R: tauri::Runtime>(
 mod tests;
 
 #[cfg(test)]
-pub(super) use tests::with_public_start_fixture;
+pub(super) use tests::{with_public_start_fixture, with_public_start_fixture_then};

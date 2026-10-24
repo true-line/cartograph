@@ -116,31 +116,91 @@ impl Drop for Relay {
     }
 }
 
+fn endpoint(
+    endpoint: &std::path::Path,
+    app: tauri::AppHandle<tauri::test::MockRuntime>,
+    principal: Arc<std::sync::Mutex<agents::investigation::McpTaskSession>>,
+    budget: WorkBudget,
+    limits: crate::mcp_reads::worker::WorkerLimits,
+    worker_exits: Option<mpsc::Sender<tauri::async_runtime::JoinHandle<()>>>,
+) -> Activation {
+    Activation::start(
+        endpoint,
+        ActivationLimits {
+            max_connections: std::num::NonZeroUsize::new(1).unwrap(),
+            read_frame_bytes: limits.max_request_frame_bytes,
+            write_frame_bytes: limits.dispatch.max_response_bytes,
+            frame_deadline: Duration::from_secs(10),
+            session_lifetime: Duration::from_secs(60),
+        },
+        move || {
+            let (app, session, budget, worker_exits) = (
+                app.clone(),
+                principal.lock().unwrap().clone(),
+                budget.clone(),
+                worker_exits.clone(),
+            );
+            async move {
+                let mut worker = Worker::start_with_tasks(
+                    app,
+                    "task-relay".into(),
+                    spec::ExportMode::VerifiedOnly,
+                    limits,
+                    budget,
+                    Some(session),
+                )
+                .await
+                .map_err(|_| ServeError::Application)?;
+                if let Some(exits) = worker_exits {
+                    exits.send(worker.test_exit.take().unwrap()).unwrap();
+                }
+                Ok(worker)
+            }
+        },
+    )
+    .unwrap()
+}
+
 #[test]
 #[ignore = "requires explicit source-built CARTOGRAPH_TEST_MCP_RELAY"]
 fn mcp_task_relay_runs_all_operations_and_reconnects_without_reexecution() {
-    exercise_task_relay(None, false);
+    exercise_task_relay(None, false, false);
 }
 
 #[test]
 #[ignore = "requires explicit source-built CARTOGRAPH_TEST_MCP_RELAY"]
 fn mcp_task_relay_active_cancellation_preserves_definitive_outcome() {
-    exercise_task_relay(Some(llm::bounded::InvocationOutcome::NotDispatched), false);
+    exercise_task_relay(
+        Some(llm::bounded::InvocationOutcome::NotDispatched),
+        false,
+        false,
+    );
 }
 
 #[test]
 #[ignore = "requires explicit source-built CARTOGRAPH_TEST_MCP_RELAY"]
 fn mcp_task_relay_active_cancellation_preserves_unknown_without_reexecution() {
-    exercise_task_relay(Some(llm::bounded::InvocationOutcome::Unknown), false);
+    exercise_task_relay(Some(llm::bounded::InvocationOutcome::Unknown), false, false);
 }
 
 #[test]
 #[ignore = "requires explicit source-built CARTOGRAPH_TEST_MCP_RELAY"]
 fn mcp_task_relay_consent_reconnect_and_owner_decline_preserve_zero_calls() {
-    exercise_task_relay(None, true);
+    exercise_task_relay(None, true, false);
 }
 
-fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>, decline: bool) {
+#[test]
+#[ignore = "requires explicit source-built CARTOGRAPH_TEST_MCP_RELAY"]
+fn mcp_task_relay_replays_after_host_reconstruction_without_provider() {
+    // AC-0322/0324/0329: fresh host/stores, not a native process crash claim.
+    exercise_task_relay(None, false, true);
+}
+
+fn exercise_task_relay(
+    cancel_outcome: Option<llm::bounded::InvocationOutcome>,
+    decline: bool,
+    reconstruct: bool,
+) {
     // AC-0321/0323/0324/0325: actual capability handshake and Worker protocol.
     // Fixture factory grants a session; public activation and byte admission stay off.
     let provider = Arc::new(PublicProvider::new(decline));
@@ -150,7 +210,9 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>, 
         *provider.pause.lock().unwrap() = Some(paused);
     }
     let seed = Arc::new(PublicProvider::new(false));
-    worker::with_public_start_fixture(seed, false, |app, mut request, _| {
+    let run = |app: &tauri::AppHandle<tauri::test::MockRuntime>,
+               mut request: agents::investigation::obligations::StagedObligationRequest,
+               _: &std::path::Path| {
         let state = app.state::<AppState>();
         if decline {
             let mut settings = state.settings.lock().unwrap();
@@ -180,7 +242,7 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>, 
             .unwrap()
             .create_mcp_client(two_clients)
             .unwrap();
-        let grant = McpTaskActivation::granted(client, one);
+        let grant = McpTaskActivation::granted(client.clone(), one);
         // Only the host fixture changes the authenticated principal between
         // connections; neither the relay nor an RPC argument supplies it.
         let principal = Arc::new(std::sync::Mutex::new(grant.session()));
@@ -196,42 +258,17 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>, 
         });
         let observed_budget = budget.clone();
         let (worker_exits, worker_exit) = mpsc::channel();
-        let endpoint = tempfile::tempdir().unwrap();
+        let endpoint_dir = tempfile::tempdir().unwrap();
         let handle = app.clone();
         tauri::async_runtime::block_on(async {
-            let activation = Activation::start(
-                endpoint.path(),
-                ActivationLimits {
-                    max_connections: one,
-                    read_frame_bytes: limits.max_request_frame_bytes,
-                    write_frame_bytes: limits.dispatch.max_response_bytes,
-                    frame_deadline: Duration::from_secs(10),
-                    session_lifetime: Duration::from_secs(60),
-                },
-                move || {
-                    let (app, session, budget, worker_exits) = (
-                        handle.clone(),
-                        session.lock().unwrap().clone(),
-                        budget.clone(),
-                        worker_exits.clone(),
-                    );
-                    async move {
-                        let mut worker = Worker::start_with_tasks(
-                            app,
-                            "task-relay".into(),
-                            spec::ExportMode::VerifiedOnly,
-                            limits,
-                            budget,
-                            Some(session),
-                        )
-                        .await
-                        .map_err(|_| ServeError::Application)?;
-                        worker_exits.send(worker.test_exit.take().unwrap()).unwrap();
-                        Ok(worker)
-                    }
-                },
-            )
-            .unwrap();
+            let activation = endpoint(
+                endpoint_dir.path(),
+                handle,
+                session,
+                budget,
+                limits,
+                Some(worker_exits),
+            );
             let record = activation.record_path().to_owned();
             let mut relay = Relay::open(&record);
             let listed = relay.rpc("tools/list", json!({}));
@@ -470,6 +507,157 @@ fn exercise_task_relay(cancel_outcome: Option<llm::bounded::InvocationOutcome>, 
                     3
                 }
             );
+            (
+                request,
+                client,
+                id,
+                status["result"]["structuredContent"].clone(),
+                events["result"]["structuredContent"].clone(),
+                result["result"]["structuredContent"].clone(),
+            )
+        })
+    };
+    let reopen = |(request, client, id, status, events, result): (
+        agents::investigation::obligations::StagedObligationRequest,
+        agents::investigation::McpClientId,
+        String,
+        Value,
+        Value,
+        Value,
+    ),
+                  app_data: &std::path::Path| {
+        if !reconstruct {
+            return;
+        }
+        let fresh = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        fresh.manage(crate::registered_source_tests::app_state(app_data));
+        let state = fresh.state::<AppState>();
+        assert!(
+            state
+                .jobs
+                .lock()
+                .unwrap()
+                .mcp_client_exists(&client)
+                .unwrap()
+        );
+        let foreign = state
+            .jobs
+            .lock()
+            .unwrap()
+            .mcp_clients(None, std::num::NonZeroUsize::new(2).unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|saved| saved != &client)
+            .unwrap();
+        // No synthetic provider is installed in the new runtime. Replay must
+        // resolve persisted intent before provider or mutable-context lookup.
+        let one = std::num::NonZeroUsize::new(1).unwrap();
+        let grant = McpTaskActivation::granted(client, one);
+        let principal = Arc::new(std::sync::Mutex::new(grant.session()));
+        let limits = crate::mcp_reads::worker::tests::task_limits();
+        let budget = WorkBudget::new(WorkLimits {
+            max_workers: one,
+            max_reserved_bytes: limits.reserved_bytes,
+            max_cumulative_read_bytes: 1_000_000,
         });
-    });
+        let directory = tempfile::tempdir().unwrap();
+        tauri::async_runtime::block_on(async {
+            let disabled = McpTaskActivation::default();
+            let readonly = endpoint(
+                directory.path(),
+                fresh.handle().clone(),
+                Arc::new(std::sync::Mutex::new(disabled.session())),
+                budget.clone(),
+                limits,
+                None,
+            );
+            let mut denied = Relay::open(readonly.record_path());
+            assert_eq!(
+                denied.call("cartograph_task_status", json!({"task_id":id}))["error"]["code"],
+                -32602
+            );
+            denied.close();
+            readonly.disable().await.unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !budget.is_idle().unwrap() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let activation = endpoint(
+                directory.path(),
+                fresh.handle().clone(),
+                principal,
+                budget.clone(),
+                limits,
+                None,
+            );
+            let record = activation.record_path().to_owned();
+            let mut relay = Relay::open(&record);
+            let replay = relay.call("cartograph_task_start", json!({"request":request}));
+            assert_eq!(
+                replay["result"]["structuredContent"]["investigation_id"],
+                id
+            );
+            for (name, expected) in [
+                ("cartograph_task_status", status.clone()),
+                ("cartograph_task_events", events),
+                ("cartograph_task_result", result),
+                ("cartograph_task_cancel", status),
+            ] {
+                let args = if name == "cartograph_task_events" {
+                    json!({"task_id":id,"after":0})
+                } else {
+                    json!({"task_id":id})
+                };
+                assert_eq!(
+                    relay.call(name, args)["result"]["structuredContent"],
+                    expected
+                );
+            }
+            relay.close();
+            activation.disable().await.unwrap();
+            assert!(!record.exists());
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !budget.is_idle().unwrap() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let foreign_grant = McpTaskActivation::granted(foreign, one);
+            let foreign_endpoint = endpoint(
+                directory.path(),
+                fresh.handle().clone(),
+                Arc::new(std::sync::Mutex::new(foreign_grant.session())),
+                budget.clone(),
+                limits,
+                None,
+            );
+            let foreign_record = foreign_endpoint.record_path().to_owned();
+            let mut other = Relay::open(&foreign_record);
+            for name in [
+                "cartograph_task_status",
+                "cartograph_task_events",
+                "cartograph_task_result",
+                "cartograph_task_cancel",
+            ] {
+                let args = if name == "cartograph_task_events" {
+                    json!({"task_id":id,"after":0})
+                } else {
+                    json!({"task_id":id})
+                };
+                assert_eq!(other.call(name, args)["result"]["isError"], true);
+            }
+            other.close();
+            foreign_endpoint.disable().await.unwrap();
+            assert!(!foreign_record.exists());
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !budget.is_idle().unwrap() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+        });
+    };
+    worker::with_public_start_fixture_then(seed, false, run, reopen);
 }
