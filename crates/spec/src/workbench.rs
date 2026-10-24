@@ -710,11 +710,11 @@ mod tests {
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "467ccb66f44328b32ebd18200f5714c624de199fada6534f78912f2705279c92",
+                "17dde84d0e4181278e66288812f63aef013c9d8d7d3f7df7aebabf46be270cfc",
             ),
             (
                 ExportMode::BestEffort,
-                "3e8b4a6f618b7ac73d9f886f76e10c63ee2b03a8c235a901ef589c961f37558e",
+                "3377b3b8d1ceaf29f667c2e4afeffe854a4d3d0d6a49cb70f67e5a3fa770a6cb",
             ),
         ] {
             let bytes = serde_json::to_vec(&compile_spec(
@@ -726,7 +726,8 @@ mod tests {
             ))
             .unwrap();
             // Frozen native #603 (03d776d) output, with the already-integrated
-            // method column, projection stamping and artifact identity seams.
+            // method column, projection stamping and artifact identity seams,
+            // plus the test-arrangements artifact (#946).
             assert_eq!(blake3::hash(&bytes).to_hex().as_str(), expected, "{mode:?}");
         }
     }
@@ -852,6 +853,7 @@ mod tests {
                 "drift_register.md",
                 "security.md",
                 "toolchain.md",
+                "test_arrangements.md",
                 "rule-evidence.md",
                 "rule-evidence.json",
             ]
@@ -1476,6 +1478,125 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_arrangements_count_static_references_and_unreferenced_endpoints() {
+        // AC-0344 (T-0344).
+        let node = |id: &str, label: &str, props: serde_json::Value, tier| {
+            let mut props = props;
+            props["prov"] = prov(Tier::Deterministic, tier, id);
+            Node {
+                id: id.into(),
+                label: label.into(),
+                props,
+            }
+        };
+        let request = |dst: &str, statuses: serde_json::Value, tier| {
+            let mut props = serde_json::json!({ "statuses": statuses, "keys": ["items"] });
+            props["prov"] = prov(Tier::Deterministic, tier, dst);
+            Edge {
+                src: "test:local/app@tests/test_api.py#test_list".into(),
+                dst: dst.into(),
+                label: "REQUESTS".into(),
+                props,
+            }
+        };
+        let nodes = [
+            node(
+                "test:local/app@tests/test_api.py#test_list",
+                "TestCase",
+                serde_json::json!({ "name": "test_list" }),
+                ConfidenceTier::Confirmed,
+            ),
+            node(
+                "endpoint:list",
+                "Endpoint",
+                serde_json::json!({ "method": "GET", "path": "/api/items" }),
+                ConfidenceTier::Confirmed,
+            ),
+            node(
+                "endpoint:delete",
+                "Endpoint",
+                serde_json::json!({ "method": "DELETE", "path": "/api/items/<id>" }),
+                ConfidenceTier::Confirmed,
+            ),
+            node(
+                "gap:test-call:local/app@tests/test_api.py@10",
+                "Gap",
+                serde_json::json!({ "reason": "request URL is computed" }),
+                ConfidenceTier::Gap,
+            ),
+        ];
+        let edges = [
+            request(
+                "endpoint:list",
+                serde_json::json!([200, 401]),
+                ConfidenceTier::InferredStrong,
+            ),
+            request(
+                "gap:test-call:local/app@tests/test_api.py@10",
+                serde_json::Value::Null,
+                ConfidenceTier::Gap,
+            ),
+        ];
+        let artifact = |mode| {
+            compile_spec(&nodes, &edges, &[], mode, &BTreeSet::new())
+                .artifacts
+                .into_iter()
+                .find(|artifact| artifact.id == "test-arrangements")
+                .unwrap()
+        };
+        let best = artifact(ExportMode::BestEffort);
+        assert!(
+            best.content
+                .contains("it is not evidence that the test runs")
+        );
+        assert!(best.content.contains("| Recovered tests | 1 |"));
+        assert!(best.content.contains("| Test → endpoint references | 1 |"));
+        assert!(
+            best.content
+                .contains("| Unresolved test requests (see gap_register.md) | 1 |")
+        );
+        assert!(
+            best.content
+                .contains("| Endpoints referenced by a test | 1 of 2 |")
+        );
+        assert!(
+            best.content
+                .contains("| GET /api/items | tests/test_api.py#test_list | 200, 401 | items |")
+        );
+        assert!(best.content.contains("- DELETE /api/items/<id>"));
+        let kinds: Vec<_> = best
+            .assertions
+            .iter()
+            .map(|a| (a.subject_kind.as_str(), a.provenance.confidence_tier))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("REQUESTS", ConfidenceTier::InferredStrong),
+                ("Endpoint", ConfidenceTier::Confirmed),
+            ]
+        );
+        // A rejected inferred reference is suppressed, never upgraded.
+        let rejected = compile_spec(
+            &nodes,
+            &edges,
+            &[],
+            ExportMode::VerifiedOnly,
+            &BTreeSet::from([provenance(&edges[0].props, "").content_hash]),
+        )
+        .artifacts
+        .into_iter()
+        .find(|artifact| artifact.id == "test-arrangements")
+        .unwrap();
+        assert!(
+            rejected
+                .content
+                .contains("| Endpoints referenced by a test | 0 of 2 |")
+        );
+        assert!(rejected.content.contains("No test references recovered"));
+    }
+
     fn reason_gap(id: &str, reason: &str) -> Node {
         Node {
             id: id.into(),
@@ -1924,7 +2045,7 @@ mod tests {
                     .collect(),
             ] {
                 let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
-                assert_eq!(full.artifacts.len(), 14);
+                assert_eq!(full.artifacts.len(), 15);
                 for artifact in &full.artifacts {
                     let selected = compile_spec_selected(
                         &nodes,
@@ -1991,14 +2112,15 @@ mod tests {
         flows[0].hops.clear();
         // Frozen against native #603 03d776d, incorporating existing method,
         // projection and identity seams; independently compared before removal.
+        // The test-arrangements artifact (#946) extends the bundle.
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "51f2c15babae6634c3df1a18e8d9c8659d64c397e3fc0a8fe512b9354f1d915d",
+                "f54f154700c410e318d134b435ce09237f9a333bce19b436ccad7ec3a05465d7",
             ),
             (
                 ExportMode::BestEffort,
-                "2359cee5f8dfa6e2f2b488a7cd80dafd162794e7e034addcb79f282d7d2e064b",
+                "21b8f0375c9416380915e4ca3ace9a470e59e4a70d8ebe9e7bb3ed24e01b3c1e",
             ),
         ] {
             let full = compile_spec(&nodes, &edges, &flows, mode, &BTreeSet::new());

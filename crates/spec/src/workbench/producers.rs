@@ -661,6 +661,132 @@ pub(super) fn toolchain(
     finish(content, assertions)
 }
 
+#[derive(Default)]
+struct Reference<'a> {
+    tests: Vec<&'a str>,
+    statuses: BTreeSet<u64>,
+    keys: BTreeSet<&'a str>,
+}
+
+/// Static test-to-endpoint references (#946). A reference says a test issues
+/// a request to an endpoint; it is not evidence that the test runs or passes.
+pub(super) fn tests(
+    nodes: &[&Node],
+    edges: &[&Edge],
+    max: Option<usize>,
+) -> Result<Output, RenderLimit> {
+    let budget = Budget::new(max)?;
+    let test_ids: BTreeSet<&str> = nodes
+        .iter()
+        .filter(|n| n.label == "TestCase")
+        .map(|n| n.id.as_str())
+        .collect();
+    let endpoints: Vec<&Node> = nodes
+        .iter()
+        .copied()
+        .filter(|n| n.label == "Endpoint")
+        .filter(nongap)
+        .collect();
+    let endpoint_ids: BTreeSet<&str> = endpoints.iter().map(|n| n.id.as_str()).collect();
+    let requests: Vec<&Edge> = edges
+        .iter()
+        .copied()
+        .filter(|e| e.label == "REQUESTS" && test_ids.contains(e.src.as_str()))
+        .collect();
+    let mut linked: BTreeMap<&str, Reference> = BTreeMap::new();
+    let mut unresolved = 0;
+    for edge in &requests {
+        if !edge_nongap(edge) {
+            unresolved += 1;
+        } else if endpoint_ids.contains(edge.dst.as_str()) {
+            let reference = linked.entry(edge.dst.as_str()).or_default();
+            // A test id is `test:{repo}@{path}#{qualname}`; the row names
+            // the test by its path and qualified name.
+            reference.tests.push(
+                edge.src
+                    .split_once('@')
+                    .map_or(edge.src.as_str(), |(_, t)| t),
+            );
+            let values = |key| edge.props[key].as_array().into_iter().flatten();
+            reference
+                .statuses
+                .extend(values("statuses").filter_map(serde_json::Value::as_u64));
+            reference
+                .keys
+                .extend(values("keys").filter_map(serde_json::Value::as_str));
+        }
+    }
+    let mut assertions = Assertions::new(&budget);
+    for edge in requests.iter().copied().filter(edge_nongap) {
+        if endpoint_ids.contains(edge.dst.as_str()) {
+            assertions.edge(edge)?;
+        }
+    }
+    for node in endpoints
+        .iter()
+        .filter(|n| !linked.contains_key(n.id.as_str()))
+    {
+        assertions.node(node, None)?;
+    }
+    let mut content = Text::new(
+        &budget,
+        "# Test arrangements\n\nStatic references from test code to recovered endpoints. \
+         A reference means a test issues a request to the endpoint; it is not \
+         evidence that the test runs or passes.\n\n| Measure | Count |\n|---|---|\n",
+    )?;
+    writeln!(
+        content,
+        "| Recovered tests | {} |\n| Test → endpoint references | {} |\n\
+         | Unresolved test requests (see gap_register.md) | {unresolved} |\n\
+         | Endpoints referenced by a test | {} of {} |",
+        test_ids.len(),
+        linked.values().map(|r| r.tests.len()).sum::<usize>(),
+        linked.len(),
+        endpoints.len()
+    )?;
+    content.push_str(
+        "\n## Referenced endpoints\n\n| Endpoint | Tests | Asserted statuses | Response keys read |\n|---|---|---|---|\n",
+    )?;
+    for node in &endpoints {
+        let Some(reference) = linked.get(node.id.as_str()) else {
+            continue;
+        };
+        let statuses: Vec<String> = reference.statuses.iter().map(u64::to_string).collect();
+        let keys: Vec<&str> = reference.keys.iter().copied().collect();
+        let or_dash = |values: String| {
+            if values.is_empty() {
+                "—".to_owned()
+            } else {
+                values
+            }
+        };
+        writeln!(
+            content,
+            "| {} | {} | {} | {} |",
+            Safe(NodeName(node)),
+            Safe(Join(&reference.tests, ", ")),
+            or_dash(statuses.join(", ")),
+            Safe(or_dash(keys.join(", ")))
+        )?;
+    }
+    if linked.is_empty() {
+        content.push_str("| — | — | — | No test references recovered |\n")?;
+    }
+    content.push_str("\n## Endpoints without a recovered test reference\n\n")?;
+    let mut any = false;
+    for node in endpoints
+        .iter()
+        .filter(|n| !linked.contains_key(n.id.as_str()))
+    {
+        any = true;
+        writeln!(content, "- {}", Safe(NodeName(node)))?;
+    }
+    if !any {
+        content.push_str("None.\n")?;
+    }
+    finish(content, assertions)
+}
+
 /// Explicit borrowed index roles; input properties are not cloned by these
 /// vectors/maps. Topology's owned selected graph is charged by the caller.
 pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
@@ -681,6 +807,18 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
         slots::<&str>(rows)?,
         slots::<&str>(rows)?,
     ])?; // paths + one sort scratch
+    let tests = sum(&[
+        set_slots::<&str>(rows)?, // test_ids + endpoint_ids
+        set_slots::<&str>(rows)?,
+        slots::<&Node>(rows)?,
+        slots::<&Edge>(rows)?,
+        map_slots::<&str, Reference<'static>>(rows)?,
+        slots::<&str>(rows)?,       // referencing tests
+        set_slots::<u64>(values)?,  // asserted statuses
+        set_slots::<&str>(values)?, // read keys
+        slots::<String>(values)?,
+        slots::<&str>(values)?,
+    ])?;
     let simple = sum(&[
         slots::<&Node>(rows)?,
         slots::<&Edge>(rows)?,
@@ -688,5 +826,5 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
         set_slots::<&str>(rows)?, // topology backed + configured
         slots::<&str>(values)?,
     ])?;
-    Some(data.max(tools).max(simple))
+    Some(data.max(tools).max(tests).max(simple))
 }

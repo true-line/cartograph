@@ -2915,3 +2915,458 @@ def loose():
     let (_, cited) = responses(&reused, "/api/me");
     assert!(cited.iter().all(|(commit, _)| commit == "def456"));
 }
+
+#[test]
+fn pytest_flask_client_calls_link_tests_to_recovered_endpoints() {
+    // #946 (W10a): a pytest test's calls on a proven Flask test client link
+    // to the endpoints they request, by `url_for` endpoint name or by path,
+    // with the statuses asserted and keys read; anything unresolved is a Gap.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/base.py",
+        "from flask import Blueprint\napi_bp = Blueprint(\"api\", __name__, url_prefix=\"/api\")\n",
+    );
+    write(
+        dir.path(),
+        "app/views.py",
+        r#"
+from flask import jsonify
+from app.base import api_bp
+
+@api_bp.route("/aliases")
+def get_aliases():
+    return jsonify(aliases=[])
+
+@api_bp.route("/aliases/<int:alias_id>", methods=["GET", "PATCH"])
+def update_alias(alias_id):
+    return jsonify(ok=True)
+
+@api_bp.route("/aliases/<int:alias_id>", methods=["DELETE"])
+def delete_alias(alias_id):
+    return jsonify(deleted=True)
+
+@api_bp.route("/named", endpoint="custom")
+def named():
+    return jsonify(ok=True)
+"#,
+    );
+    write(
+        dir.path(),
+        "app/admin.py",
+        r#"
+from flask import Blueprint, jsonify
+admin_bp = Blueprint(name="admin", import_name=__name__)
+users_bp = Blueprint("users", __name__)
+
+@users_bp.route("/")
+def list_users():
+    return jsonify(users=[])
+
+admin_bp.register_blueprint(users_bp, url_prefix="/users")
+"#,
+    );
+    write(
+        dir.path(),
+        "app/main.py",
+        r#"
+from flask import Flask, jsonify
+from app.base import api_bp
+from app.admin import admin_bp
+app = Flask(__name__)
+app.register_blueprint(api_bp)
+app.register_blueprint(admin_bp, url_prefix="/admin")
+
+@app.route("/health")
+def health():
+    return jsonify(ok=True)
+"#,
+    );
+    write(
+        dir.path(),
+        "tests/conftest.py",
+        r#"
+import pytest
+from app.main import app
+
+@pytest.fixture
+def flask_client():
+    with app.test_client() as client:
+        yield client
+
+@pytest.fixture
+def user():
+    return make_user()
+"#,
+    );
+    write(
+        dir.path(),
+        "tests/api/test_alias.py",
+        r#"
+from flask import url_for
+
+def test_get_aliases(flask_client, user):
+    r = flask_client.get(url_for("api.get_aliases"), headers={})
+    assert r.status_code == 200
+    assert r.json["aliases"] == []
+    assert "total" in r.json
+    r = flask_client.patch(url_for("api.update_alias", alias_id=1), json={})
+    assert r.status_code == 400
+    assert r.get_json()["error"]
+    r = flask_client.delete(url_for("api.update_alias", alias_id=1))
+    assert r.status_code == 200
+
+def test_paths(flask_client, user):
+    assert flask_client.get("/api/aliases/12?x=1").status_code == 404
+    r = flask_client.get("/health", follow_redirects=True)
+    assert r.status_code == 200
+    flask_client.get(f"/api/aliases/{alias.id}")
+    flask_client.post(url_for("api.get_aliases"))
+    flask_client.get(url_for("dashboard.index"))
+    user.get("x")
+
+class TestNested:
+    def test_named(self, flask_client):
+        flask_client.get(url_for("api.custom"))
+        flask_client.get(url_for("admin.users.list_users"))
+
+def test_local_client():
+    from app.main import app
+    client = app.test_client()
+    client.get("/health")
+
+def test_rebound(flask_client):
+    flask_client = other()
+    flask_client.get("/health")
+
+def helper(flask_client):
+    flask_client.get("/health")
+"#,
+    );
+    write(
+        dir.path(),
+        "scripts/test_outside.py",
+        "def test_outside(flask_client):\n    flask_client.get(\"/health\")\n",
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let name = |path: &str| {
+        out.nodes
+            .iter()
+            .find(|node| node.label == "Endpoint" && node.props["path"] == path)
+            .unwrap_or_else(|| panic!("{path}"))
+            .props["endpoint_name"]
+            .clone()
+    };
+    assert_eq!(name("/api/aliases"), "api.get_aliases");
+    assert_eq!(name("/api/named"), "api.custom");
+    assert_eq!(name("/health"), "health");
+    assert_eq!(name("/admin/users/"), "admin.users.list_users");
+
+    let mut tests = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "TestCase")
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+    tests.sort();
+    let t = |name: &str| format!("test:local/python-service@tests/api/test_alias.py#{name}");
+    assert_eq!(
+        tests,
+        [
+            "test:local/python-service@scripts/test_outside.py#test_outside".to_string(),
+            t("TestNested.test_named"),
+            t("test_get_aliases"),
+            t("test_local_client"),
+            t("test_paths"),
+            t("test_rebound"),
+        ]
+    );
+
+    let ep = |method: &str, path: &str| format!("ep:local/python-service@{method}:{path}");
+    let mut links = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "REQUESTS" && edge.dst.starts_with("ep:"))
+        .map(|edge| {
+            assert_eq!(edge.props["link"], "client_app_assumed");
+            assert_eq!(edge.props["prov"]["confidence_tier"], "InferredStrong");
+            (
+                edge.src.clone(),
+                edge.dst.clone(),
+                edge.props["via"].clone(),
+                edge.props["statuses"].clone(),
+                edge.props["keys"].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    links.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    let json = |value: serde_json::Value| value;
+    assert_eq!(
+        links,
+        [
+            (
+                t("TestNested.test_named"),
+                ep("GET", "/admin/users/"),
+                json(serde_json::json!(["url_for"])),
+                json(serde_json::json!([])),
+                json(serde_json::json!([])),
+            ),
+            (
+                t("TestNested.test_named"),
+                ep("GET", "/api/named"),
+                json(serde_json::json!(["url_for"])),
+                json(serde_json::json!([])),
+                json(serde_json::json!([])),
+            ),
+            (
+                t("test_get_aliases"),
+                ep("DELETE", "/api/aliases/<int:alias_id>"),
+                json(serde_json::json!(["url_for"])),
+                json(serde_json::json!([200])),
+                json(serde_json::json!([])),
+            ),
+            (
+                t("test_get_aliases"),
+                ep("GET", "/api/aliases"),
+                json(serde_json::json!(["url_for"])),
+                json(serde_json::json!([200])),
+                json(serde_json::json!(["aliases", "total"])),
+            ),
+            (
+                t("test_get_aliases"),
+                ep("PATCH", "/api/aliases/<int:alias_id>"),
+                json(serde_json::json!(["url_for"])),
+                json(serde_json::json!([400])),
+                json(serde_json::json!(["error"])),
+            ),
+            (
+                t("test_local_client"),
+                ep("GET", "/health"),
+                json(serde_json::json!(["path"])),
+                json(serde_json::json!([])),
+                json(serde_json::json!([])),
+            ),
+            (
+                t("test_paths"),
+                ep("GET", "/api/aliases/<int:alias_id>"),
+                json(serde_json::json!(["path"])),
+                json(serde_json::json!([404])),
+                json(serde_json::json!([])),
+            ),
+            (
+                t("test_paths"),
+                ep("GET", "/health"),
+                json(serde_json::json!(["path"])),
+                json(serde_json::json!([])),
+                json(serde_json::json!([])),
+            ),
+        ]
+    );
+
+    let mut gaps = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "REQUESTS" && edge.dst.starts_with("gap:"))
+        .map(|edge| {
+            let gap = out.nodes.iter().find(|node| node.id == edge.dst).unwrap();
+            (
+                edge.src.clone(),
+                gap.props["request"].as_str().unwrap().to_string(),
+                gap.props["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        [
+            (
+                t("test_paths"),
+                "GET".to_string(),
+                "request URL is computed".to_string()
+            ),
+            (
+                t("test_paths"),
+                "GET url_for(dashboard.index)".to_string(),
+                "test client endpoint name is not a recovered endpoint".to_string()
+            ),
+            (
+                t("test_paths"),
+                "POST url_for(api.get_aliases)".to_string(),
+                "no recovered endpoint serves this method at the endpoint name's URL".to_string()
+            ),
+        ]
+    );
+
+    // A followed redirect's response may be another page's: no expectation.
+    let health = out
+        .edges
+        .iter()
+        .find(|edge| edge.src == t("test_paths") && edge.dst == ep("GET", "/health"))
+        .unwrap();
+    assert_eq!(health.props["follows_redirects"], true);
+
+    // Each link cites the call and the fixture that proves the client.
+    let link = out
+        .edges
+        .iter()
+        .find(|edge| edge.src == t("test_get_aliases") && edge.dst == ep("GET", "/api/aliases"))
+        .unwrap();
+    let paths = link.props["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|span| span["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(paths, ["tests/api/test_alias.py", "tests/conftest.py"]);
+}
+
+#[test]
+fn pytest_client_proof_respects_shadowing_and_opaque_options() {
+    // #946 review: a nearer non-client fixture shadows an outer client
+    // fixture; a test-local or parameter `url_for` / `flask` is not Flask's;
+    // `**mapping` that may enable `follow_redirects` records no expectation.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/main.py",
+        r#"
+from flask import Flask, jsonify, redirect
+app = Flask(__name__)
+
+@app.route("/known")
+def known():
+    return jsonify(ok=True)
+
+@app.route("/redirect")
+def go():
+    return redirect("/known")
+"#,
+    );
+    let client_fixture = "import pytest\nfrom app.main import app\n\n@pytest.fixture\ndef client():\n    return app.test_client()\n";
+    let fake_fixture = "import pytest\n\n@pytest.fixture\ndef client():\n    return FakeClient()\n";
+    write(dir.path(), "tests/conftest.py", client_fixture);
+    write(dir.path(), "tests/nearer/conftest.py", fake_fixture);
+    write(
+        dir.path(),
+        "tests/nearer/test_nearer.py",
+        "def test_nearer(client):\n    client.get(\"/known\")\n",
+    );
+    write(
+        dir.path(),
+        "tests/test_module.py",
+        &format!("{fake_fixture}\ndef test_module(client):\n    client.get(\"/known\")\n"),
+    );
+    write(
+        dir.path(),
+        "tests/control/test_control.py",
+        "def test_control(client):\n    client.get(\"/known\")\n",
+    );
+    write(
+        dir.path(),
+        "tests/test_url_for.py",
+        r#"
+import flask
+from flask import url_for
+
+def test_local_shadow(client):
+    url_for = lambda name: "/other"
+    client.get(url_for("known"))
+
+def test_parameter_shadow(client, url_for):
+    client.get(url_for("known"))
+
+def test_module_shadow(client, flask):
+    client.get(flask.url_for("known"))
+
+def test_qualified(client):
+    client.get(flask.url_for("known"))
+"#,
+    );
+    write(
+        dir.path(),
+        "tests/test_redirects.py",
+        r#"
+def test_literal_true(client):
+    r = client.get("/redirect", **{"follow_redirects": True})
+    assert r.status_code == 200
+
+def test_opaque(client, opts):
+    r = client.get("/redirect", **opts)
+    assert r.status_code == 200
+
+def test_explicit_false(client):
+    r = client.get("/redirect", follow_redirects=False)
+    assert r.status_code == 302
+
+def test_literal_false(client):
+    r = client.get("/redirect", **{"follow_redirects": False})
+    assert r.status_code == 302
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut requests = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "REQUESTS")
+        .map(|edge| {
+            let test = edge.src.rsplit_once('#').unwrap().1.to_string();
+            let target = if edge.dst.starts_with("ep:") {
+                edge.dst.rsplit_once('@').unwrap().1.to_string()
+            } else {
+                edge.props["reason"].as_str().unwrap().to_string()
+            };
+            (
+                test,
+                target,
+                edge.props["statuses"].clone(),
+                edge.props["follows_redirects"] == true,
+            )
+        })
+        .collect::<Vec<_>>();
+    requests.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    let row = |test: &str, target: &str, statuses: serde_json::Value, follows: bool| {
+        (test.to_string(), target.to_string(), statuses, follows)
+    };
+    let none = serde_json::Value::Null;
+    let empty = serde_json::json!([]);
+    assert_eq!(
+        requests,
+        [
+            row("test_control", "GET:/known", empty.clone(), false),
+            row(
+                "test_explicit_false",
+                "GET:/redirect",
+                serde_json::json!([302]),
+                false
+            ),
+            row(
+                "test_literal_false",
+                "GET:/redirect",
+                serde_json::json!([302]),
+                false
+            ),
+            row("test_literal_true", "GET:/redirect", empty.clone(), true),
+            row(
+                "test_local_shadow",
+                "request URL is computed",
+                none.clone(),
+                false
+            ),
+            row(
+                "test_module_shadow",
+                "request URL is computed",
+                none.clone(),
+                false
+            ),
+            row("test_opaque", "GET:/redirect", empty.clone(), true),
+            row(
+                "test_parameter_shadow",
+                "request URL is computed",
+                none,
+                false
+            ),
+            row("test_qualified", "GET:/known", empty, false),
+        ]
+    );
+}

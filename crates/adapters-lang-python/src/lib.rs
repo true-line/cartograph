@@ -19,6 +19,7 @@ pub mod observed_infra;
 mod request_inputs;
 mod responses;
 mod sqlalchemy;
+mod target_tests;
 
 const EXTRACTOR_ID: &str = "t0.adapter-python";
 
@@ -58,6 +59,8 @@ pub struct Extraction {
     orm_files: Vec<sqlalchemy::OrmFile>,
     function_facts: Vec<responses::FunctionFacts>,
     handler_facts: Vec<responses::HandlerFacts>,
+    client_fixtures: Vec<target_tests::ClientFixture>,
+    client_calls: Vec<target_tests::ClientCall>,
 }
 
 /// A module-level framework receiver: an application instance, or a Flask
@@ -72,6 +75,8 @@ struct ReceiverDef {
     /// a function-local assignment proves only reads in its own function.
     module_level: bool,
     prefix: Prefix,
+    /// A Flask Blueprint's name, which prefixes its endpoint names.
+    name: Prefix,
     evidence: EvidenceRef,
 }
 
@@ -93,6 +98,9 @@ struct PendingRoute {
     path: String,
     listed_methods: Vec<String>,
     handler: String,
+    /// The route's own endpoint name (`endpoint=`, else the view function's
+    /// name), when it is a literal.
+    endpoint: Option<String>,
     evidence: EvidenceRef,
     /// Request inputs the handler body reads (Flask), as endpoint props.
     inputs: Option<serde_json::Value>,
@@ -108,6 +116,8 @@ struct Mount {
     parent: MountParent,
     framework: Framework,
     prefix: Prefix,
+    /// `register_blueprint(bp, name=…)`, which replaces the Blueprint's name.
+    name: Prefix,
     evidence: EvidenceRef,
 }
 
@@ -283,6 +293,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     }
     sqlalchemy::retarget(extraction, commit);
     responses::retarget(extraction, commit);
+    target_tests::retarget(extraction, commit);
 }
 
 fn normalize_path(path: PathBuf) -> Option<String> {
@@ -533,6 +544,21 @@ fn constructor_prefix(cx: &FileCx<'_>, call: TsNode<'_>, framework: Framework) -
     match positional.get(5) {
         Some(argument) => literal_string(cx, *argument).map_or(Prefix::Unknown, Prefix::Literal),
         None => Prefix::Absent,
+    }
+}
+
+/// A Flask `Blueprint`'s name: its `name=` keyword or first positional
+/// argument.
+fn blueprint_name(cx: &FileCx<'_>, call: TsNode<'_>) -> Prefix {
+    match keyword_prefix(cx, call, "name") {
+        Prefix::Absent => {}
+        named => return named,
+    }
+    match named_arguments(call).first() {
+        Some(first) if !matches!(first.kind(), "keyword_argument" | "list_splat") => {
+            literal_string(cx, *first).map_or(Prefix::Unknown, Prefix::Literal)
+        }
+        _ => Prefix::Unknown,
     }
 }
 
@@ -902,6 +928,11 @@ fn assignment_receivers(
             } else {
                 Prefix::Absent
             },
+            name: if router && framework == Framework::Flask {
+                blueprint_name(cx, call)
+            } else {
+                Prefix::Absent
+            },
             evidence: cx.evidence(&call),
         });
     }
@@ -939,6 +970,8 @@ struct RouteDecorator<'tree> {
     verb: String,
     path: String,
     listed_methods: Vec<String>,
+    /// `endpoint=`, which replaces the view function's name.
+    endpoint: Prefix,
 }
 
 fn route_decorator<'tree>(
@@ -989,6 +1022,7 @@ fn route_decorator<'tree>(
         verb,
         path,
         listed_methods,
+        endpoint: keyword_prefix(cx, call, "endpoint"),
     })
 }
 
@@ -1186,6 +1220,10 @@ fn collect_mounts(
             parent: mount_parent(cx, object, bindings),
             framework,
             prefix: keyword_prefix(cx, call, prefix_keyword(framework)),
+            name: match framework {
+                Framework::Flask => keyword_prefix(cx, call, "name"),
+                Framework::FastApi => Prefix::Absent,
+            },
             evidence: cx.evidence(&call),
         });
     }
@@ -1205,6 +1243,9 @@ struct Served {
     confidence: ConfidenceTier,
     mount: Option<&'static str>,
     reason: &'static str,
+    /// The dotted Blueprint names before a route's own endpoint name: empty
+    /// on an application, None when a name is not a literal.
+    names: Option<String>,
 }
 
 fn tier_rank(tier: ConfidenceTier) -> u8 {
@@ -1213,6 +1254,14 @@ fn tier_rank(tier: ConfidenceTier) -> u8 {
         ConfidenceTier::InferredStrong => 2,
         ConfidenceTier::InferredWeak => 1,
         ConfidenceTier::Gap => 0,
+    }
+}
+
+/// A prefix or name written as a literal.
+fn literal(prefix: &Prefix) -> Option<&str> {
+    match prefix {
+        Prefix::Literal(value) => Some(value),
+        _ => None,
     }
 }
 
@@ -1259,6 +1308,7 @@ fn served_prefixes(
             confidence: ConfidenceTier::Confirmed,
             mount: None,
             reason: UNREADABLE_PREFIX,
+            names: Some(String::new()),
         }];
     }
     if chain.contains(key) || chain.len() >= MAX_MOUNT_DEPTH {
@@ -1268,6 +1318,7 @@ fn served_prefixes(
             confidence: ConfidenceTier::Gap,
             mount: None,
             reason: "router mount chain is cyclic or deeper than 16 mounts",
+            names: None,
         }];
     }
     let observed: Vec<&Mount> = mounts
@@ -1283,6 +1334,7 @@ fn served_prefixes(
             confidence: ConfidenceTier::InferredStrong,
             mount: Some("mount_not_observed"),
             reason: UNREADABLE_PREFIX,
+            names: literal(&def.name).map(str::to_string),
         }];
     }
     chain.push(key.clone());
@@ -1295,6 +1347,7 @@ fn served_prefixes(
             confidence,
             mount: Some(label),
             reason: UNREADABLE_PREFIX,
+            names: Some(String::new()),
         };
         let parents = match &mount.parent {
             MountParent::Def(parent)
@@ -1318,7 +1371,16 @@ fn served_prefixes(
                 "mount_receiver_unproven",
             )],
         };
+        let own_name = match &mount.name {
+            Prefix::Absent => literal(&def.name),
+            name => literal(name),
+        };
         for parent in parents {
+            let names = match (parent.names.as_deref(), own_name) {
+                (Some(""), Some(own)) => Some(own.to_string()),
+                (Some(outer), Some(own)) => Some(format!("{outer}.{own}")),
+                _ => None,
+            };
             let mut evidence = vec![def.evidence.clone(), mount.evidence.clone()];
             evidence.extend(parent.evidence);
             let prefix = concat_prefix(&parent.prefix, &own);
@@ -1337,6 +1399,7 @@ fn served_prefixes(
                 },
                 mount: Some(parent.mount.unwrap_or("mounted")),
                 reason,
+                names,
             });
         }
     }
@@ -1434,9 +1497,27 @@ fn resolve_routes(out: &mut Extraction, repo: &str) {
                         .responses
                         .as_ref()
                         .filter(|_| def.framework == Framework::Flask),
+                    endpoint_name(
+                        def.framework,
+                        served.names.as_deref(),
+                        route.endpoint.as_deref(),
+                    )
+                    .as_deref(),
                 );
             }
         }
+    }
+}
+
+/// The name Flask's `url_for` resolves a route by: the dotted Blueprint
+/// names, then the route's own endpoint name.
+fn endpoint_name(framework: Framework, names: Option<&str>, own: Option<&str>) -> Option<String> {
+    if framework != Framework::Flask {
+        return None;
+    }
+    match (names?, own?) {
+        ("", own) => Some(own.to_string()),
+        (names, own) => Some(format!("{names}.{own}")),
     }
 }
 
@@ -1453,6 +1534,7 @@ fn push_endpoint(
     mount: Option<&str>,
     inputs: Option<&serde_json::Value>,
     responses: Option<&serde_json::Value>,
+    endpoint_name: Option<&str>,
 ) {
     let endpoint = format!("ep:{repo}@{method}:{route}");
     let framework_name = match framework {
@@ -1475,6 +1557,9 @@ fn push_endpoint(
     }
     if let Some(responses) = responses {
         props["responses"] = responses.clone();
+    }
+    if let Some(name) = endpoint_name {
+        props["endpoint_name"] = name.into();
     }
     out.nodes.push(Node {
         id: endpoint.clone(),
@@ -1503,6 +1588,7 @@ pub fn extract_source(
 ) -> Result<Extraction, ExtractError> {
     let mut out = extract_file(source, path, id)?;
     responses::resolve(&mut out, id.repo);
+    target_tests::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
     Ok(out)
 }
@@ -1531,6 +1617,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     let receivers = assignment_receivers(&cx, root, &language, &bindings, &mut out);
     collect_mounts(&cx, root, &language, &bindings, &mut out);
     sqlalchemy::extract(&cx, root, &language, &bindings, &mut out);
+    target_tests::extract(&cx, root, &bindings, &mut out);
     let function_query = Query::new(
         &language,
         "(function_definition name: (identifier) @name) @function",
@@ -1647,6 +1734,12 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                 }
             }
             .clone();
+            let own_endpoint = match &route.endpoint {
+                Prefix::Absent => function
+                    .child_by_field_name("name")
+                    .map(|name| cx.text(&name).to_string()),
+                endpoint => literal(endpoint).map(str::to_string),
+            };
             let receiver = cx.text(&route.receiver).to_string();
             if let Some(framework) = receivers.get(&receiver).copied() {
                 for method in methods_for(framework, &route.verb, &route.listed_methods) {
@@ -1662,6 +1755,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                         None,
                         inputs.as_ref(),
                         responses.as_ref().filter(|_| framework == Framework::Flask),
+                        endpoint_name(framework, Some(""), own_endpoint.as_deref()).as_deref(),
                     );
                 }
                 continue;
@@ -1687,6 +1781,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                     path: route.path,
                     listed_methods: route.listed_methods,
                     handler: handler.clone(),
+                    endpoint: own_endpoint,
                     evidence: cx.evidence(&decorator),
                     inputs,
                     responses,
@@ -1913,6 +2008,8 @@ pub fn extract_dir_incremental_with_progress(
             out.orm_files.extend(extraction.orm_files);
             out.function_facts.extend(extraction.function_facts);
             out.handler_facts.extend(extraction.handler_facts);
+            out.client_fixtures.extend(extraction.client_fixtures);
+            out.client_calls.extend(extraction.client_calls);
             Ok(())
         },
     );
@@ -1934,6 +2031,7 @@ pub fn extract_dir_incremental_with_progress(
     resolve_absolute_imports(&mut out, id.repo);
     resolve_routes(&mut out, id.repo);
     responses::resolve(&mut out, id.repo);
+    target_tests::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
     alembic::extract(root, id, &mut out)?;
     let local_names = local_module_names(root)?;
