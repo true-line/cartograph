@@ -1629,6 +1629,8 @@ fn journey_candidates_cross_hilt_dispatch_as_an_assumption() {
         .map(|a| a.symbol.as_str())
         .collect();
     assert_eq!(dispatches, vec![impl_sym.as_str()]);
+}
+
 // AC-0356 (T-0356): an endpoint an anchor's flow fetches has no flow of its
 // own; its observed writes are those the flow reaches downstream of it.
 #[test]
