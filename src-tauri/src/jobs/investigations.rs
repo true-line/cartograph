@@ -99,6 +99,8 @@ pub(crate) use saved_validation_workspace::next_prompt_saved_validation_workspac
 mod result_replay_workspace;
 #[cfg(unix)]
 pub(crate) use result_replay_workspace::next_prompt_result_workspace;
+#[cfg(unix)]
+pub(crate) use staged::next_prompt_staged_workspace;
 #[cfg(test)]
 #[path = "investigations/tests.rs"]
 mod tests;

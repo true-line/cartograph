@@ -5,6 +5,12 @@ use super::*;
 use agents::investigation::{staged_attempt::*, staged_finish::*, staged_refusal::*};
 use rusqlite::Transaction;
 
+#[cfg(unix)]
+#[path = "staged_workspace.rs"]
+mod workspace;
+#[cfg(unix)]
+pub(crate) use workspace::next_prompt_staged_workspace;
+
 fn schema() -> Vec<String> {
     let mut sql=vec![
         "CREATE TABLE staged_completion_intents (task_id TEXT PRIMARY KEY NOT NULL, body BLOB NOT NULL, body_hash TEXT NOT NULL) STRICT".into(),
