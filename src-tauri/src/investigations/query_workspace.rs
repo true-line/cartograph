@@ -123,7 +123,16 @@ fn option_owners(fact_wire: usize, fact_match_peak: usize) -> Option<(usize, usi
         legacy,
         legacy_options, // collection may keep input/output vector allocations
     ])?;
-    let captured_peak = receipt.peak.max(sum(&[
+    // stored_receipt retains two admitted SQL identity strings while decoding
+    // and round-tripping the receipt. The raw receipt is included in peak.
+    let stored_peak = sum(&[
+        receipt.peak,
+        256,
+        256,
+        slots::<Option<String>>(3)?,
+        fact_wire, // graph_fact clone held by task_receipt's caller
+    ])?;
+    let captured_peak = stored_peak.max(sum(&[
         receipt.retained,
         fact_match_peak.max(captured_options),
     ])?);
@@ -218,6 +227,7 @@ fn ledger_owners(
     Some((retained, peak))
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct QueryInputs {
     pub(super) graph: SnapshotReadLimits,
     pub(super) coverage: core_graph::coverage::CoverageReadLimits,
@@ -332,6 +342,48 @@ pub(super) fn workspace(
             guards,
             slots::<super::context::PreparedContextRead>(1)?,
         ])?,
-        peak: sum(&[json_bytes(input.request_wire)?, *phases.iter().max()?])?,
+        peak: sum(&[
+            json_bytes(input.request_wire)?,
+            slots::<super::context::PreparedContextRead>(1)?,
+            *phases.iter().max()?,
+        ])?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn query_workspace_refuses_unrepresentable_admitted_owners() {
+        // AC-0327: no saturation can turn an unrepresentable component into an
+        // admissible worker reservation. This is not a total worker bound.
+        let input = QueryInputs {
+            graph: SnapshotReadLimits::default(),
+            coverage: core_graph::coverage::CoverageReadLimits::default(),
+            scoped_repos: 3,
+            scope_identity_bytes: 1024,
+            ledger_wire: 4096,
+            request_wire: 1024,
+            app_path_bytes: 4096,
+            fact_match_peak: 1024,
+        };
+        let policy = &agents::investigation::INVESTIGATION_V1_POLICY;
+        assert!(workspace(policy, input).is_some());
+        let corrupt: &[fn(&mut QueryInputs)] = &[
+            |i| i.graph.max_bytes = usize::MAX,
+            |i| i.graph.max_rows = usize::MAX,
+            |i| i.coverage.max_bytes = usize::MAX,
+            |i| i.scoped_repos = usize::MAX,
+            |i| i.scope_identity_bytes = usize::MAX,
+            |i| i.ledger_wire = usize::MAX,
+            |i| i.request_wire = usize::MAX,
+            |i| i.app_path_bytes = usize::MAX,
+            |i| i.fact_match_peak = usize::MAX,
+        ];
+        for edit in corrupt {
+            let mut invalid = input;
+            edit(&mut invalid);
+            assert!(workspace(policy, invalid).is_none());
+        }
+    }
 }
