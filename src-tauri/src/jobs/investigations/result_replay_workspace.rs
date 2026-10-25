@@ -20,8 +20,10 @@ pub(crate) fn next_prompt_result_workspace() -> Option<(usize, usize)> {
     ])?;
     let read = sum(&[
         row,
-        record_decode_scratch_bytes()?
-            .max(json_bytes(MAX_RECORD_BYTES)?.checked_mul(RECORD_MAX_DEPTH.checked_add(1)?)?),
+        // Result/step fields have at most one tagged layer. AttemptEntry's
+        // ReadIntent -> TaskFactKey is the deepest shared row path (two).
+        // Malformed JSON depth does not multiply whole Content-tree owners.
+        record_decode_scratch_bytes()?.max(json_bytes(MAX_RECORD_BYTES)?.checked_mul(2)?),
         MAX_RECORD_BYTES,
         slots::<Vec<u8>>(1)?,
         128,
