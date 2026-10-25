@@ -83,7 +83,10 @@ impl CompactInvestigationContext {
             }
             let options = envelope
                 .remove("evidence_options")
-                .and_then(|v| v.as_array().cloned())
+                .and_then(|value| match value {
+                    Value::Array(values) => Some(values),
+                    _ => None,
+                })
                 .ok_or(InvestigationError::InvalidInput)?;
             let context_value = envelope
                 .get_mut("context")
@@ -119,7 +122,10 @@ impl CompactInvestigationContext {
             }
             let facts = context
                 .remove("facts")
-                .and_then(|v| v.as_array().cloned())
+                .and_then(|value| match value {
+                    Value::Array(values) => Some(values),
+                    _ => None,
+                })
                 .ok_or(InvestigationError::InvalidInput)?;
             if context.get("snapshot_id").and_then(Value::as_str)
                 != Some(ledger.scope_snapshot_id.as_str())
