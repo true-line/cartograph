@@ -85,6 +85,7 @@ impl InvestigationInput {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        drop(prompt);
         let disclosure = self
             .seal_disclosure_with_policy(current, policy)?
             .ok_or(InvestigationError::InvalidInput)?;

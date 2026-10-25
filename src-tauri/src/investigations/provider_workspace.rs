@@ -39,13 +39,16 @@ pub(crate) fn payload_peak(policy: &InvestigationPolicy) -> Option<usize> {
     let preview = agents::investigation::InvestigationInput::context_preview_workspace_bytes(
         policy, &limits,
     )?;
+    let source_preview =
+        agents::investigation::InvestigationInput::source_preview_workspace_bytes(policy, &limits)?;
     Some(
         firewall
             .prepare_peak_bytes
             .max(authorize)
             .max(invoke)
             .max(sealing)
-            .max(preview),
+            .max(preview)
+            .max(source_preview),
     )
 }
 

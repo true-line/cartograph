@@ -578,6 +578,10 @@ impl InvestigationInput {
             commit_sha: target.source.commit_sha.clone(),
             text: String::new(),
         });
+        // AC-0327: check the source descriptor envelope before reserve growth
+        // and the final wire check, including source-preview rejection fixtures.
+        #[cfg(test)]
+        assert!(context_hub::logical::count(&prompt).unwrap() <= MAX_INPUT_BYTES + 4 * 8 * 1024);
         Self::measure_reserved_projection(
             prompt,
             contract,

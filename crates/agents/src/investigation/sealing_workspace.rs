@@ -5,6 +5,35 @@ use llm::bounded::CompletionLimits;
 use std::mem::size_of;
 
 impl InvestigationInput {
+    /// Unread-source representation certificate only: no source acquisition or
+    /// provider execution. Descriptor validation caps its wire before copying.
+    pub fn source_preview_workspace_bytes(
+        policy: &InvestigationPolicy,
+        limits: &CompletionLimits,
+    ) -> Option<usize> {
+        let descriptor: usize = 8 * 1024; // InvestigationInspectionTarget::content_id
+        // Citation origin/handle, completed-action descriptor and span metadata.
+        // Four descriptor envelopes also cover their fixed tags and ordinal ID.
+        let append = descriptor.checked_mul(4)?;
+        let projected = super::admission_input::reserve_projection_bytes(policy)?
+            .checked_add(append.checked_mul(20)?)?;
+        let (disclosure, sealing) = Self::sealing_workspace_bytes(policy, limits)?;
+        sum(&[
+            Self::context_preview_workspace_bytes(policy, limits)?,
+            sealing,
+            disclosure.checked_mul(2)?, // actual receipt and sizing-only clone
+            json_bytes(projected)?.checked_mul(2)?, // source reserve/mode clone
+            json_bytes(append)?,
+            json_bytes(MAX_MANIFEST_BYTES)?, // expected citation handles
+            json_bytes(policy.envelope_bytes())?, // expected inspection progress
+            slots::<&InvestigationCitation>(policy.limits().evidence_items)?,
+            json_bytes(MAX_INPUT_BYTES)?.checked_mul(2)?, // protected-field parses
+            MAX_DISCLOSURE_BYTES,                         // rejected sizing encoding
+            slots::<UnreadSourcePreviewBound>(2)?,
+            128,
+        ])
+    }
+
     /// Metadata-preview validation and synthetic continuation measurement.
     /// Current/candidate inputs and the original provider owners are borrowed;
     /// unread-source preview construction is a separate acquisition phase.

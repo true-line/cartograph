@@ -386,7 +386,7 @@ pub(crate) fn required_reservation(limits: WorkerLimits) -> Option<usize> {
 }
 
 /// Preparation, retained reads and modeled replay/provider component floors.
-/// Input construction and source-preview/read acquisition remain incomplete.
+/// Input construction and later source acquisition remain incomplete.
 #[cfg(unix)]
 pub(crate) fn task_phase_minimum(limits: WorkerLimits, app_path_bytes: usize) -> Option<usize> {
     let (preparation, context, execution) = task_phase_workspaces(limits, app_path_bytes)?;
@@ -657,6 +657,13 @@ pub(crate) mod tests {
                     + completion
         );
         assert!(execution >= firewall.prepare_peak_bytes);
+        assert!(
+            execution
+                >= agents::investigation::InvestigationInput::source_preview_workspace_bytes(
+                    policy, &caps,
+                )
+                .unwrap()
+        );
     }
     #[cfg(unix)]
     #[test]
