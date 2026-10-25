@@ -870,3 +870,68 @@ fn next_prompt_worker_late_inflight_cancel_retains_valid_finish_against_original
         fixture.base.base.graph_before
     );
 }
+
+// AC-0327: the detached execution handoff retains host evidence caps.
+#[test]
+fn next_prompt_worker_preserves_source_file_and_span_caps() {
+    for refused in [None, Some("file"), Some("span")] {
+        let mut scripted = NextProvider::new(false);
+        scripted.source_scenario = Some(SourceScenario::Acquired);
+        let provider = Arc::new(scripted);
+        let f = NextFixture::with_source_obligation(
+            provider.as_ref(),
+            SpecialistId::DomainAnalystV10,
+            true,
+        );
+        let target = f
+            .request
+            .obligations
+            .sources_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let file = target.captured.file.byte_len;
+        let span = target.captured.byte_end - target.captured.byte_start;
+        let mut limits = crate::mcp_reads::worker::tests::task_read_limits();
+        limits.evidence.max_file_validation_bytes =
+            std::num::NonZeroU64::new(file - u64::from(refused == Some("file"))).unwrap();
+        limits.evidence.max_span_bytes =
+            std::num::NonZeroU64::new(span - u64::from(refused == Some("span"))).unwrap();
+        run_completion_with_limits(
+            f.base.base.app.handle().clone(),
+            f.id.clone(),
+            f.request.clone(),
+            f.execution.clone(),
+            provider.clone(),
+            f.live.clone(),
+            Instant::now(),
+            Some(limits),
+        );
+        let state = f.base.base.app.state::<AppState>();
+        let jobs = state.jobs.lock().unwrap();
+        let detail = jobs
+            .investigation_owned_detail(&f.execution, &f.id)
+            .unwrap();
+        if refused.is_none() {
+            assert_eq!(
+                detail.summary.status,
+                InvestigationStatus::Completed,
+                "{:?}",
+                detail.error
+            );
+            assert_eq!(detail.usage.evidence_items, 1);
+            assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 3);
+        } else {
+            assert!(terminal(detail.summary.status));
+            assert_eq!(
+                detail.error.as_deref(),
+                Some("An investigation work or storage limit was reached.")
+            );
+            assert_eq!(detail.usage.evidence_requests, 0);
+            assert_eq!(detail.usage.captured_validation_bytes, 0);
+            assert_eq!(detail.usage.evidence_items, 0);
+            assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 2);
+        }
+    }
+}

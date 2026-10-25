@@ -189,12 +189,12 @@ fn completion_replay(mcp: bool) {
                 app.clone(),
                 Instant::now(),
                 session.as_ref(),
-                mcp.then(|| crate::mcp_reads::worker::tests::limits().scope),
+                mcp.then(crate::mcp_reads::worker::tests::task_read_limits),
                 None,
             )
         };
-        let mut refused_limits = crate::mcp_reads::worker::tests::limits().scope;
-        refused_limits.max_source_registry_bytes = std::num::NonZeroUsize::new(1).unwrap();
+        let mut refused_limits = crate::mcp_reads::worker::tests::task_read_limits();
+        refused_limits.scope.max_source_registry_bytes = std::num::NonZeroUsize::new(1).unwrap();
         if mcp {
             // AC-0327: refuse discovery before durable admission or provider lookup.
             let profiles = provider.profiles.load(Ordering::SeqCst);
@@ -555,7 +555,7 @@ fn mcp_completion_retains_reservation_until_detached_worker_exits() {
             TaskReservations::from(Arc::new(rejected_budget.try_acquire(one, 0).unwrap()));
         rejected_budget.revoke();
         let profiles = provider.profiles.load(Ordering::SeqCst);
-        let limits = crate::mcp_reads::worker::tests::limits().scope;
+        let limits = crate::mcp_reads::worker::tests::task_read_limits();
         let denied = completion_start::start_access(
             request.clone(),
             app.clone(),
@@ -727,13 +727,13 @@ fn mcp_adapter_runs_all_task_operations_and_preserves_principal_replay() {
                 &json!("request"),
                 tool,
                 args.as_object().unwrap().clone(),
-                crate::mcp_reads::worker::tests::limits().scope,
+                crate::mcp_reads::worker::tests::task_read_limits(),
                 256 * 1024,
             )
         };
         // AC-0327: source admission must retain its task-specific refusal code.
-        let mut bounded_scope = crate::mcp_reads::worker::tests::limits().scope;
-        bounded_scope.max_source_registry_bytes = one;
+        let mut bounded_scope = crate::mcp_reads::worker::tests::task_read_limits();
+        bounded_scope.scope.max_source_registry_bytes = one;
         let refused = dispatcher
             .call(
                 app,

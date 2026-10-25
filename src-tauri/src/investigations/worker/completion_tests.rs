@@ -983,9 +983,9 @@ fn completion_worker_preserves_admitted_source_limit_before_provider() {
         true,
         false,
     );
-    let mut limits = crate::mcp_reads::worker::tests::limits().scope;
-    limits.max_source_registry_bytes = std::num::NonZeroUsize::new(1).unwrap();
-    run_completion_with_scope(
+    let mut limits = crate::mcp_reads::worker::tests::task_read_limits();
+    limits.scope.max_source_registry_bytes = std::num::NonZeroUsize::new(1).unwrap();
+    run_completion_with_limits(
         fixture.base.app.handle().clone(),
         fixture.id.clone(),
         fixture.request.clone(),

@@ -7,6 +7,13 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tauri::Manager;
 
+/// Host-admitted limits retained by detached task execution; never wire input.
+#[derive(Clone, Copy)]
+pub(crate) struct TaskReadLimits {
+    pub scope: ScopeLimits,
+    pub evidence: crate::mcp_reads::dispatch::EvidenceWorkLimits,
+}
+
 pub(crate) const TOOLS: [TaskTool; 5] = [
     TaskTool::Start,
     TaskTool::Status,
@@ -38,7 +45,7 @@ impl TaskDispatcher {
         id: &Value,
         tool: TaskTool,
         arguments: Map<String, Value>,
-        scope: ScopeLimits,
+        limits: TaskReadLimits,
         cap: usize,
     ) -> Result<Value, ReadError> {
         // Refuse before decoding a domain request or touching storage. Each
@@ -57,7 +64,7 @@ impl TaskDispatcher {
                     request,
                     app.clone(),
                     &self.session,
-                    scope,
+                    limits,
                     &self.reservations,
                 )
                 .map_err(|error| match error {

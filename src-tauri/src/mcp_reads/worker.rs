@@ -204,7 +204,10 @@ impl Worker {
                                         &id,
                                         tool,
                                         arguments,
-                                        limits.scope,
+                                        mcp_dispatch::TaskReadLimits {
+                                            scope: limits.scope,
+                                            evidence: limits.evidence,
+                                        },
                                         limits.dispatch.max_response_bytes.get(),
                                     )
                                 });
@@ -539,6 +542,14 @@ pub(crate) mod tests {
     fn nz(n: usize) -> NonZeroUsize {
         NonZeroUsize::new(n).unwrap()
     }
+    pub(crate) fn task_read_limits() -> crate::investigations::mcp_dispatch::TaskReadLimits {
+        let limits = limits();
+        crate::investigations::mcp_dispatch::TaskReadLimits {
+            scope: limits.scope,
+            evidence: limits.evidence,
+        }
+    }
+
     pub(crate) fn limits() -> WorkerLimits {
         let limits = WorkerLimits {
             acquisition_mode: AcquisitionMode::Complete,

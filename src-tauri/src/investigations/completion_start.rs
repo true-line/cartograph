@@ -58,7 +58,7 @@ pub(super) fn start_access<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     started: Instant,
     session: Option<&McpTaskSession>,
-    scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
+    task_limits: Option<crate::investigations::mcp_dispatch::TaskReadLimits>,
     reservations: Option<&crate::mcp_reads::task_reservation::TaskReservations>,
 ) -> Result<InvestigationSummary, InvestigationStartError> {
     let policy = InvestigationPolicy::for_profile(&request.limit_profile)
@@ -101,7 +101,12 @@ pub(super) fn start_access<R: tauri::Runtime>(
             "This specialist version is not available.",
         ));
     }
-    let _guards = match validate_targets(&app, &state, &request, scope_limits) {
+    let _guards = match validate_targets(
+        &app,
+        &state,
+        &request,
+        task_limits.map(|limits| limits.scope),
+    ) {
         Ok(guards) => guards,
         Err(error) => {
             if let Some(prior) = existing()? {
@@ -167,8 +172,8 @@ pub(super) fn start_access<R: tauri::Runtime>(
     let worker_id = id.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _reservation = reservation;
-        match scope_limits {
-            Some(limits) => worker::run_completion_with_scope(
+        match task_limits {
+            Some(limits) => worker::run_completion_with_limits(
                 worker_app,
                 worker_id,
                 request,

@@ -410,3 +410,43 @@ mod validation_tests;
 
 #[path = "prepared_source_reservation_tests.rs"]
 mod reservation_tests;
+
+// AC-0327: admitted file/span limits refuse before charges and text access.
+#[test]
+fn prepared_source_admitted_caps_accept_exact_and_refuse_one_below() {
+    let fixture = Fixture::new();
+    let (context, target) = fixture.context();
+    let file = target.captured.file.byte_len;
+    let span = target.captured.byte_end - target.captured.byte_start;
+    assert!(file > 1 && span > 1);
+    for (file_cap, span_cap, accepted) in [
+        (file, span, true),
+        (file - 1, span, false),
+        (file, span - 1, false),
+    ] {
+        reset_reads();
+        let limits = crate::mcp_reads::dispatch::EvidenceWorkLimits {
+            max_file_validation_bytes: std::num::NonZeroU64::new(file_cap).unwrap(),
+            max_span_bytes: std::num::NonZeroU64::new(span_cap).unwrap(),
+        };
+        let prepared = context
+            .prepare_captured_source(&fixture.state, &target)
+            .unwrap()
+            .with_read_limits(Some(limits));
+        assert_eq!(read_count(), 0);
+        if accepted {
+            let mut charges = 0;
+            let candidate = prepared.unwrap().read(&context, &fixture.state, |_| {
+                charges += 1;
+                Ok(())
+            });
+            assert!(candidate.is_ok());
+            assert_eq!(charges, 1);
+            assert_eq!(read_count(), 1);
+        } else {
+            assert!(matches!(prepared, Err(HostError::LimitExceeded)));
+            assert_eq!(read_count(), 0);
+        }
+        assert!(context.evidence.is_empty());
+    }
+}
