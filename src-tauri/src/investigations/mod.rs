@@ -4,7 +4,7 @@ pub(crate) mod commands;
 pub(crate) mod completion_choices;
 mod context;
 #[cfg(unix)]
-pub(crate) use context::preparation_workspace;
+pub(crate) use context::{inventory_admission_workspace, preparation_workspace};
 mod events;
 mod evidence;
 pub(crate) mod finding_review_commands;

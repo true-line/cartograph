@@ -422,6 +422,8 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
         );
     // FrozenContext survives the whole execution loop, including saved-task
     // reads and validation. Preparation already includes its retained context.
+    // Prepared inventory remains owned during durable publication/replay.
+    let execution = crate::investigations::inventory_admission_workspace(execution)?;
     let per_task = task_execution_peak(preparation, context, execution)?;
     required_reservation(limits)?
         .checked_add(per_task.checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?)

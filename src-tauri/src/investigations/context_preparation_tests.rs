@@ -592,6 +592,26 @@ fn inventory_workspace_covers_host_preparation_and_candidate_refusal() {
         slots::<String>(1).unwrap(),
     ])
     .unwrap();
+    #[cfg(unix)]
+    {
+        let wrapper = std::mem::size_of::<PreparedContextRead>();
+        assert!(inventory_admission_workspace(0).unwrap() >= actual + wrapper);
+        let admitted = inventory_preparation_workspace(context.policy, MAX_MANIFEST_BYTES).unwrap();
+        // AC-0327: replay dominates so preparation cannot mask a missing owner.
+        let replay = admitted
+            .peak
+            .checked_add(wrapper)
+            .unwrap()
+            .checked_add(1)
+            .unwrap();
+        let expected = replay
+            .checked_add(admitted.retained)
+            .unwrap()
+            .checked_add(wrapper)
+            .unwrap();
+        assert_eq!(inventory_admission_workspace(replay), Some(expected));
+        assert!(inventory_admission_workspace(usize::MAX).is_none());
+    }
     assert!(model.retained >= actual);
     assert!(model.peak >= model.retained);
     assert!(inventory_preparation_workspace(context.policy, usize::MAX).is_none());
