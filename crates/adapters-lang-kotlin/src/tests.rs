@@ -2505,3 +2505,438 @@ fun <T> Generic(x: T) = with(x) {
         "viewModel.create(1)"
     );
 }
+
+// AC-0355 (T-0355): a Hilt `@Binds` method in a `@Module` +
+// `@InstallIn(SingletonComponent::class)` module emits `InferredStrong`
+// `CALLS` edges (`resolution: "hilt-binds"`, `assumption: "hilt_dispatch"`)
+// from each interface member to the matching member on the bound
+// implementation, failing closed on non-singleton components, missing imports,
+// qualifiers, multibindings, generic keys, missing supertype declarations,
+// duplicate bindings, and non-main source sets (W11c-3).
+#[test]
+fn hilt_binds_modules_dispatch_interface_members_to_implementations() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/java/io/x/net/Ds.kt",
+        r#"package io.x.net
+
+interface Ds {
+    fun a()
+    fun b()
+    fun c()
+}
+
+class DsImpl : Ds {
+    override fun a() {
+    }
+    override fun b() {
+    }
+}
+"#,
+    );
+    let ds_module_path = "src/main/java/io/x/di/RemoteDatasourceModule.kt";
+    let ds_module_src = r#"package io.x.di
+
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import io.x.net.Ds
+import io.x.net.DsImpl
+import javax.inject.Singleton
+
+@[Module InstallIn(SingletonComponent::class)]
+abstract class RemoteDatasourceModule {
+    @[Binds Singleton]
+    abstract fun bindDs(impl: DsImpl): Ds
+}
+"#;
+    write(dir.path(), ds_module_path, ds_module_src);
+    write(
+        dir.path(),
+        "src/main/java/io/x/repo/Repo.kt",
+        r#"package io.x.repo
+
+interface Repo {
+    fun load()
+
+    fun refresh() {
+        fun inner() {
+        }
+        inner()
+    }
+
+    companion object {
+        fun make() {
+        }
+    }
+}
+
+// `make` and `inner` share `Repo.name` symbol shapes but are not members.
+class RepoImpl : Repo {
+    override fun load() {
+    }
+
+    fun make() {
+    }
+
+    fun inner() {
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/io/x/di/RepoModule.kt",
+        r#"package io.x.di
+
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import io.x.repo.Repo
+import io.x.repo.RepoImpl
+
+@Module
+@InstallIn(SingletonComponent::class)
+abstract class RepoModule {
+    @Binds
+    abstract fun bindRepo(
+        impl: RepoImpl
+    ): Repo
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/io/x/feature/Vm.kt",
+        r#"package io.x.feature
+
+import io.x.net.Ds
+
+class Vm(private val ds: Ds) {
+    fun x() {
+        ds.a()
+    }
+}
+"#,
+    );
+
+    // Negative 1: @InstallIn(ActivityComponent::class) module.
+    write(
+        dir.path(),
+        "src/main/java/io/x/neg/ActModule.kt",
+        r#"package io.x.neg
+
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.android.components.ActivityComponent
+
+interface ActDs {
+    fun m()
+}
+
+class ActDsImpl : ActDs {
+    override fun m() {
+    }
+}
+
+@[Module InstallIn(ActivityComponent::class)]
+abstract class ActModule {
+    @Binds
+    abstract fun bind(impl: ActDsImpl): ActDs
+}
+"#,
+    );
+
+    // Negative 2: Missing `import dagger.Binds` (a local `annotation class Binds`).
+    write(
+        dir.path(),
+        "src/main/java/io/x/neg/LocalBindsModule.kt",
+        r#"package io.x.neg
+
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+
+annotation class Binds
+
+interface LocalDs {
+    fun m()
+}
+
+class LocalDsImpl : LocalDs {
+    override fun m() {
+    }
+}
+
+@[Module InstallIn(SingletonComponent::class)]
+abstract class LocalBindsModule {
+    @Binds
+    abstract fun bind(impl: LocalDsImpl): LocalDs
+}
+"#,
+    );
+
+    // Negative 3: `@Binds @Named("x")` qualified binding.
+    write(
+        dir.path(),
+        "src/main/java/io/x/neg/NamedModule.kt",
+        r#"package io.x.neg
+
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import javax.inject.Named
+
+interface NamedDs {
+    fun m()
+}
+
+class NamedDsImpl : NamedDs {
+    override fun m() {
+    }
+}
+
+@[Module InstallIn(SingletonComponent::class)]
+abstract class NamedModule {
+    @Binds
+    @Named("x")
+    abstract fun bind(impl: NamedDsImpl): NamedDs
+}
+"#,
+    );
+
+    // Negative 4: `@Binds @IntoSet`.
+    write(
+        dir.path(),
+        "src/main/java/io/x/neg/SetModule.kt",
+        r#"package io.x.neg
+
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import dagger.multibindings.IntoSet
+
+interface SetDs {
+    fun m()
+}
+
+class SetDsImpl : SetDs {
+    override fun m() {
+    }
+}
+
+@[Module InstallIn(SingletonComponent::class)]
+abstract class SetModule {
+    @Binds
+    @IntoSet
+    abstract fun bind(impl: SetDsImpl): SetDs
+}
+"#,
+    );
+
+    // Negative 5: Generic key `abstract fun bind(impl: BoxImpl<String>): Box<String>`.
+    write(
+        dir.path(),
+        "src/main/java/io/x/neg/GenericModule.kt",
+        r#"package io.x.neg
+
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+
+interface Box<T> {
+    fun m()
+}
+
+class BoxImpl<T> : Box<T> {
+    override fun m() {
+    }
+}
+
+@[Module InstallIn(SingletonComponent::class)]
+abstract class GenericModule {
+    @Binds
+    abstract fun bind(impl: BoxImpl<String>): Box<String>
+}
+"#,
+    );
+
+    // Negative 6: Impl that does not declare `: Iface`.
+    write(
+        dir.path(),
+        "src/main/java/io/x/neg/UnrelatedModule.kt",
+        r#"package io.x.neg
+
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+
+interface UnrelatedDs {
+    fun m()
+}
+
+class UnrelatedDsImpl {
+    fun m() {
+    }
+}
+
+@[Module InstallIn(SingletonComponent::class)]
+abstract class UnrelatedModule {
+    @Binds
+    abstract fun bind(impl: UnrelatedDsImpl): UnrelatedDs
+}
+"#,
+    );
+
+    // Negative 7: Two modules binding the same Iface (both edges suppressed).
+    write(
+        dir.path(),
+        "src/main/java/io/x/neg/DupTypes.kt",
+        r#"package io.x.neg
+
+interface DupDs {
+    fun m()
+}
+
+class DupDsImplA : DupDs {
+    override fun m() {
+    }
+}
+
+class DupDsImplB : DupDs {
+    override fun m() {
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/io/x/neg/DupModuleA.kt",
+        r#"package io.x.neg
+
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+
+@[Module InstallIn(SingletonComponent::class)]
+abstract class DupModuleA {
+    @Binds
+    abstract fun bindA(impl: DupDsImplA): DupDs
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/io/x/neg/DupModuleB.kt",
+        r#"package io.x.neg
+
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+
+@[Module InstallIn(SingletonComponent::class)]
+abstract class DupModuleB {
+    @Binds
+    abstract fun bindB(impl: DupDsImplB): DupDs
+}
+"#,
+    );
+
+    // Negative 8: Module under `src/test/java/...`.
+    write(
+        dir.path(),
+        "src/main/java/io/x/neg/TestTypes.kt",
+        r#"package io.x.neg
+
+interface TestDs {
+    fun m()
+}
+
+class TestDsImpl : TestDs {
+    override fun m() {
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/test/java/io/x/neg/TestModule.kt",
+        r#"package io.x.neg
+
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+
+@[Module InstallIn(SingletonComponent::class)]
+abstract class TestModule {
+    @Binds
+    abstract fun bind(impl: TestDsImpl): TestDs
+}
+"#,
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let short = |s: &str| s.rsplit_once('#').unwrap().1.to_string();
+    let mut hilt_edges: Vec<(String, String)> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "CALLS" && e.props["resolution"] == "hilt-binds")
+        .map(|e| (short(&e.src), short(&e.dst)))
+        .collect();
+    hilt_edges.sort();
+    let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+    assert_eq!(
+        hilt_edges,
+        vec![
+            pair("Ds.a", "DsImpl.a"),
+            pair("Ds.b", "DsImpl.b"),
+            pair("Repo.load", "RepoImpl.load"),
+        ]
+    );
+
+    // Inspect the exact props and provenance of the `Ds.a -> DsImpl.a` edge.
+    let ds_a = edge(
+        &out.edges,
+        "sym:local/demo@src/main/java/io/x/net/Ds.kt#Ds.a",
+        "sym:local/demo@src/main/java/io/x/net/Ds.kt#DsImpl.a",
+        "CALLS",
+    );
+    assert_eq!(ds_a.props["resolution"], "hilt-binds");
+    assert_eq!(ds_a.props["assumption"], "hilt_dispatch");
+    assert_eq!(
+        ds_a.props["binding"],
+        format!("sym:local/demo@{ds_module_path}#RemoteDatasourceModule.bindDs")
+    );
+    let prov: Provenance = serde_json::from_value(ds_a.props["prov"].clone()).unwrap();
+    assert_eq!(prov.tier, Tier::Deterministic);
+    assert_eq!(prov.confidence_tier, ConfidenceTier::InferredStrong);
+    assert_eq!(prov.evidence.len(), 1);
+    let span = &prov.evidence[0];
+    assert_eq!(span.path, ds_module_path);
+    assert_eq!(
+        &ds_module_src[span.byte_start as usize..span.byte_end as usize],
+        "@[Binds Singleton]\n    abstract fun bindDs(impl: DsImpl): Ds"
+    );
+
+    // W11c-1 interface edge `Vm.x -> Ds.a` (Confirmed) is still present.
+    let vm_call = edge(
+        &out.edges,
+        "sym:local/demo@src/main/java/io/x/feature/Vm.kt#Vm.x",
+        "sym:local/demo@src/main/java/io/x/net/Ds.kt#Ds.a",
+        "CALLS",
+    );
+    assert_eq!(vm_call.props["resolution"], "declared-type");
+    let vm_prov: Provenance = serde_json::from_value(vm_call.props["prov"].clone()).unwrap();
+    assert_eq!(vm_prov.confidence_tier, ConfidenceTier::Confirmed);
+}

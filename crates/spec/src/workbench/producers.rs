@@ -998,6 +998,11 @@ pub(super) fn journeys(
                 "\n### Assumptions\n\n| Step | Kind | Screen | Symbol | Param | Composable | Registration | Forwarded | Limitation |\n|---|---|---|---|---|---|---|---|---|\n",
             )?;
             for assumption in &candidate.assumptions {
+                // A Hilt dispatch names the interface member it crossed from.
+                let symbol_str = match &assumption.interface {
+                    Some(interface) => format!("{interface} → {}", assumption.symbol),
+                    None => assumption.symbol.clone(),
+                };
                 let param_str = assumption.param.as_deref().unwrap_or("—");
                 let composable_str = assumption.composable.as_deref().unwrap_or("—");
                 let registration_str = assumption.registration.as_ref().map_or_else(
@@ -1020,7 +1025,7 @@ pub(super) fn journeys(
                     Safe(assumption.step),
                     Safe(assumption.kind.as_str()),
                     Safe(&assumption.screen),
-                    Safe(&assumption.symbol),
+                    Safe(&symbol_str),
                     Safe(param_str),
                     Safe(composable_str),
                     Safe(&registration_str),

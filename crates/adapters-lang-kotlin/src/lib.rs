@@ -55,6 +55,8 @@ pub struct Extraction {
     retrofit_bases: Vec<adapters_fw::client::FetchBase>,
     /// Android Navigation 3 entries and back-stack navigations, resolved repo-wide.
     navigation3: navigation3::Pending,
+    /// Hilt `@Binds` declarations, resolved repo-wide at the directory join.
+    hilt_binds: Vec<hilt_binds::PendingBind>,
     pending_calls: Vec<PendingCall>,
     /// Calls on declared-type receivers (#1048), resolved at the join.
     typed_calls: Vec<TypedCall>,
@@ -126,8 +128,15 @@ struct Declared {
     /// A class or data class, whose `Name(...)` can be a constructor call.
     /// An object's or an interface's is a call to an `invoke` operator.
     constructible: bool,
+    /// An `interface` or `abstract class` declaration.
+    interface_or_abstract: bool,
     /// An `object` or `data object` declaration.
     object: bool,
+    /// Candidate-FQN lists for each direct `delegation_specifier` user type.
+    supers: Vec<Vec<String>>,
+    /// Functions declared directly in the body: not a companion's, a nested
+    /// type's, or a local function's.
+    members: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +246,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         }
     }
     extraction.navigation3.retarget(commit);
+    hilt_binds::retarget(&mut extraction.hilt_binds, commit);
 }
 
 /// Type-declaration kinds that contribute to a member's qualified name.
@@ -622,6 +632,100 @@ fn declaration_kind(cx: &FileCx<'_>, declaration: TsNode<'_>) -> &'static str {
     "class"
 }
 
+/// Whether a `class_declaration` carries the `abstract` inheritance modifier.
+pub(crate) fn is_abstract(cx: &FileCx<'_>, declaration: TsNode<'_>) -> bool {
+    if declaration.kind() != "class_declaration" {
+        return false;
+    }
+    let mut walk = declaration.walk();
+    for child in declaration.named_children(&mut walk) {
+        if child.kind() != "modifiers" {
+            continue;
+        }
+        let mut inner = child.walk();
+        for modifier in child.named_children(&mut inner) {
+            if modifier.kind() == "inheritance_modifier" && cx.text(&modifier) == "abstract" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Names of the functions declared directly in a type's body.
+fn direct_members(cx: &FileCx<'_>, declaration: TsNode<'_>) -> BTreeSet<String> {
+    let mut walk = declaration.walk();
+    let Some(body) = declaration
+        .named_children(&mut walk)
+        .find(|part| part.kind() == "class_body")
+    else {
+        return BTreeSet::new();
+    };
+    let mut walk = body.walk();
+    body.named_children(&mut walk)
+        .filter(|member| member.kind() == "function_declaration")
+        .filter_map(|function| {
+            let mut walk = function.walk();
+            function
+                .named_children(&mut walk)
+                .find(|part| part.kind() == "identifier")
+                .map(|name| cx.text(&name).to_string())
+        })
+        .collect()
+}
+
+/// Candidate-FQN lists for each direct `delegation_specifier` user type of a
+/// class or interface declaration.
+fn declaration_supers(
+    cx: &FileCx<'_>,
+    declaration: TsNode<'_>,
+    imports: &Imports,
+    package: Option<&str>,
+    local_types: &HashSet<String>,
+) -> Vec<Vec<String>> {
+    let mut supers = Vec::new();
+    let mut walk = declaration.walk();
+    for child in declaration.named_children(&mut walk) {
+        if child.kind() != "delegation_specifiers" {
+            continue;
+        }
+        let mut inner = child.walk();
+        for spec in child.named_children(&mut inner) {
+            if spec.kind() != "delegation_specifier" {
+                continue;
+            }
+            let Some(first) = spec.named_child(0) else {
+                continue;
+            };
+            let user_type = match first.kind() {
+                "user_type" => Some(first),
+                "constructor_invocation" | "explicit_delegation" => {
+                    let mut sw = first.walk();
+                    first
+                        .named_children(&mut sw)
+                        .find(|n| n.kind() == "user_type")
+                }
+                _ => None,
+            };
+            let Some(ty) = user_type.and_then(|u| receivers::declared_type(cx, u)) else {
+                continue;
+            };
+            if receivers::is_type_parameter(cx, declaration, ty.split('.').next().unwrap_or(&ty)) {
+                continue;
+            }
+            supers.push(type_candidates(
+                cx,
+                imports,
+                package,
+                local_types,
+                declaration,
+                &ty,
+            ));
+        }
+    }
+    supers
+}
+
 /// An extension function's receiver type name (`String` for
 /// `fun String.shout()`): the base identifier of the `user_type` (or the
 /// type inside a `nullable_type`) appearing before the function's name.
@@ -669,7 +773,10 @@ fn collect_importables(
             path: path.to_string(),
             qualified,
             constructible: false,
+            interface_or_abstract: false,
             object: false,
+            supers: Vec::new(),
+            members: BTreeSet::new(),
         });
     };
     let mut walk = root.walk();
@@ -851,6 +958,7 @@ pub fn extract_source(
     )
     .expect("static query");
     let mut local_types: HashSet<String> = HashSet::new();
+    let mut type_decls: Vec<(TsNode<'_>, String)> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&type_query, root, source);
     while let Some(found) = matches.next() {
@@ -888,13 +996,21 @@ pub fn extract_source(
                 "prov": cx.prov(&decl, &format!("DEFINED_IN {symbol}")),
             }),
         });
-        if let Some(package) = &package {
+        type_decls.push((decl, qualified));
+    }
+    if let Some(package) = &package {
+        for (decl, qualified) in type_decls {
+            let kind = declaration_kind(&cx, decl);
+            let abstract_class = kind == "class" && is_abstract(&cx, decl);
             out.declared_types.push(Declared {
                 fqn: format!("{package}.{qualified}"),
                 path: path.to_string(),
                 qualified,
-                constructible: matches!(declaration_kind(&cx, decl), "class" | "data class"),
+                constructible: matches!(kind, "class" | "data class"),
+                interface_or_abstract: kind == "interface" || abstract_class,
                 object: decl.kind() == "object_declaration",
+                supers: declaration_supers(&cx, decl, &imports, Some(package), &local_types),
+                members: direct_members(&cx, decl),
             });
         }
     }
@@ -991,7 +1107,10 @@ pub fn extract_source(
                 path: path.to_string(),
                 qualified: name.clone(),
                 constructible: false,
+                interface_or_abstract: false,
                 object: false,
+                supers: Vec::new(),
+                members: BTreeSet::new(),
             });
         }
         functions.push((function, symbol));
@@ -1162,6 +1281,16 @@ pub fn extract_source(
         &functions_by_start,
         &local_functions,
         &local_types,
+    );
+    out.hilt_binds = hilt_binds::extract(
+        &cx,
+        root,
+        package.as_deref(),
+        &imports,
+        &functions_by_start,
+        &local_types,
+        &local_functions,
+        &out.declared_importables,
     );
 
     // Calls: same-scope unqualified/this calls resolve locally; calls
@@ -1613,6 +1742,7 @@ pub fn extract_dir_incremental_with_progress(
             out.fetch_sites.extend(extraction.fetch_sites);
             out.retrofit_bases.extend(extraction.retrofit_bases);
             out.navigation3.extend(extraction.navigation3);
+            out.hilt_binds.extend(extraction.hilt_binds);
             Ok(())
         },
     );
@@ -1782,6 +1912,13 @@ pub fn extract_dir_incremental_with_progress(
             }
         }
     }
+    hilt_binds::complete(
+        std::mem::take(&mut out.hilt_binds),
+        id.repo,
+        &types_by_fqn,
+        &known,
+        &mut out.edges,
+    );
     navigation3::complete(
         std::mem::take(&mut out.navigation3),
         id.repo,
@@ -1839,6 +1976,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
         .map(|(extraction, _)| extraction)
 }
 
+mod hilt_binds;
 pub mod navigation3;
 mod receivers;
 mod retrofit;

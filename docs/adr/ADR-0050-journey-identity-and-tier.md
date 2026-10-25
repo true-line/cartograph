@@ -148,6 +148,17 @@ read:
      the navigation edge taken, and the client calls made there with their
      stitched endpoints. Each endpoint's server flow and its W10 test
      references are attached by reference.
+   - **Dependency injection is an assumption.** A call on an interface is a
+     T0 fact about the interface member, not about which implementation runs.
+     A Kotlin `@Binds` in a `SingletonComponent` Hilt module records an
+     InferredStrong `CALLS` hop from each interface member to the bound
+     implementation's member, citing the binding. A candidate crosses that
+     hop only as a `hilt_dispatch` assumption naming the interface member,
+     the implementation and the binding. Everything reached from there
+     inherits it, so the candidate is at most InferredWeak. A proven call to
+     the implementation dominates. Any other component, a qualifier, a
+     multibinding, a generic key or a second binding for the same interface
+     records no hop.
    - **Limits.** Paths are simple (no revisited screen) and at most six
      screens long. The search admits a fixed work budget per entry screen:
      expanded states, client calls read per screen, and retained
