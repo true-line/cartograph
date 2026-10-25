@@ -61,3 +61,47 @@ describe('assignBands — Tools/Build config File placement', () => {
     expect(bands.get('file:local/app@src/index.ts')).toBe('server');
   });
 });
+
+// #1003: Gap banding indexes incident edges instead of scanning every edge per
+// Gap, which froze the Atlas on a self-ingest graph with tens of thousands of Gaps.
+describe('assignBands — Gap neighbors', () => {
+  it('bands a Gap from its first banded neighbor in sorted edge order', () => {
+    const snapshot: AtlasSnapshot = {
+      nodes: [
+        node('gap:b', 'Gap'),
+        node('res:queue', 'Resource'),
+        node('screen:local/app@/', 'Screen'),
+        node('gap:a', 'Gap'),
+        node('gap:lonely', 'Gap'),
+      ],
+      edges: [
+        edge('screen:local/app@/', 'gap:a', 'HAS_GAP'),
+        edge('gap:a', 'res:queue', 'REFERENCES'),
+        edge('gap:b', 'gap:a', 'RELATES_TO'),
+      ],
+    };
+    const bands = assignBands(snapshot);
+    // Sorted edges: gap:a→res:queue precedes screen→gap:a.
+    expect(bands.get('gap:a')).toBe('infra');
+    // gap:b's only neighbor is gap:a, resolved earlier in id order.
+    expect(bands.get('gap:b')).toBe('infra');
+    expect(bands.get('gap:lonely')).toBe('other');
+  });
+
+  it('stays fast with tens of thousands of Gaps', () => {
+    const nodes: GraphNode[] = [];
+    const edges: GraphEdge[] = [];
+    for (let i = 0; i < 30_000; i++) {
+      nodes.push(node(`sym:local/app@f${i}`, 'Symbol'), node(`gap:${i}`, 'Gap'));
+      edges.push(edge(`sym:local/app@f${i}`, `gap:${i}`, 'HAS_GAP'));
+    }
+    // Edges no Gap touches: the old per-Gap scan walked all of these too.
+    for (let i = 0; i < 90_000; i++) {
+      edges.push(edge(`sym:local/app@f${i % 30_000}`, `sym:local/app@f${(i * 7) % 30_000}`, 'CALLS'));
+    }
+    const started = performance.now();
+    const bands = assignBands({ nodes, edges });
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(bands.get('gap:29999')).toBe('server');
+  });
+});
