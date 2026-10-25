@@ -425,6 +425,13 @@ fn task_phase_workspaces(
     let execution = provider
         .max(construction)
         .max(
+            crate::investigations::source_candidate_workspace::workspace(
+                agents::investigation::MAX_MANIFEST_BYTES,
+                agents::investigation::MAX_INSPECTION_TARGET_BYTES,
+            )?
+            .peak()?,
+        )
+        .max(
             crate::investigations::source_preparation_workspace::peak_bytes(
                 limits.evidence,
                 app_path_bytes,

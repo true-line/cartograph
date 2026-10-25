@@ -161,6 +161,12 @@ fn prepared_source_retained_currency_covers_actual_reserved_read_owners() {
     )
     .unwrap();
     assert!(retained >= payload);
+    let construction = crate::investigations::source_candidate_workspace::workspace(
+        serde_json::to_vec(&context.ledger).unwrap().len(),
+        serde_json::to_vec(&target).unwrap().len(),
+    )
+    .unwrap();
+    assert!(serde_json::to_vec(candidate.ledger()).unwrap().len() <= construction.candidate_wire);
     assert!(!candidate.prepared.selected.is_empty());
     assert!(!candidate.prepared.guards.guards.is_empty());
     assert_eq!(
