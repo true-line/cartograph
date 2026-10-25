@@ -190,6 +190,24 @@ fn prepared_source_candidate_matches_existing_read_without_publication() {
         &mut sink,
     )
     .unwrap();
+    #[cfg(unix)]
+    {
+        // AC-0327: retained captured bytes survive after their checkout is gone.
+        use context_hub::logical::{count, json_bytes, slots, sum};
+        let actual = sum(&[
+            json_bytes(count(&old.ledger).unwrap()).unwrap(),
+            slots::<InvestigationInputLedger>(1).unwrap(),
+            old.query_pages.iter().map(String::len).sum(),
+            slots::<String>(old.query_pages.len()).unwrap(),
+            count(&old.evidence).unwrap(),
+            slots::<agents::AgentEvidence>(old.evidence.len()).unwrap(),
+        ])
+        .unwrap();
+        assert!(
+            crate::investigations::preparation_workspace::retained_read_bytes(old.policy).unwrap()
+                >= actual
+        );
+    }
     assert_eq!(charges, sink.validations);
     assert_eq!(sink.publications, 1);
     assert_eq!(
