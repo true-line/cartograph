@@ -1631,3 +1631,42 @@ fn parent_history_legacy_families_reopen_after_staged_refusals() {
         }
     }
 }
+
+// AC-0327: a live legacy parent takes pending-basis validation and the second
+// invocation-row decode. Preparing/sealing this synthetic step sends no request.
+#[test]
+fn parent_history_legacy_invocation_reopens_with_pending_step() {
+    for (policy, progressive) in [
+        (&INVESTIGATION_V1_POLICY, false),
+        (&INVESTIGATION_V2_POLICY, false),
+        (&INVESTIGATION_V2_POLICY, true),
+    ] {
+        let mut f = Fixture::with_family(InvestigationProviderMode::Local, policy, progressive);
+        let (_, step) = f.step();
+        let task = {
+            let tx = f.store.conn.unchecked_transaction().unwrap();
+            let task = load_execution_task(&tx, &f.id).unwrap();
+            tx.commit().unwrap();
+            task
+        };
+        assert_eq!(task.phase, Phase::Invocation);
+        assert_eq!(task.pending.as_ref(), Some(&step));
+        let conversation = &task.detail.summary.conversation_id;
+        let history = f
+            .store
+            .investigation_next_parent_history(&f.id, conversation)
+            .unwrap()
+            .into_history();
+        let wire: serde_json::Value = serde_json::from_str(&history[0]).unwrap();
+        assert_eq!(wire["invocation_outcome_pending"], true);
+        assert!(wire["saved_result"].is_null());
+        let reopened = JobStore::open(f.directory.path().join("state.db")).unwrap();
+        assert_eq!(
+            reopened
+                .investigation_next_parent_history(&f.id, conversation)
+                .unwrap()
+                .into_history(),
+            history
+        );
+    }
+}

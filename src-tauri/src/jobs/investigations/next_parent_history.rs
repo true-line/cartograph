@@ -57,7 +57,10 @@ pub(crate) fn parent_history_acquisition_workspace() -> Option<usize> {
     let legacy_base = sum(&[
         task,
         decode,
-        next_prompt_contract_workspace()?,
+        legacy_parent_contract_workspace()?,
+        legacy_parent_pending_workspace()?.0,
+        legacy_parent_pending_workspace()?.1,
+        next_prompt_ledger_workspace()?,
         metadata,
         result,
         row,
@@ -77,6 +80,51 @@ pub(crate) fn parent_history_acquisition_workspace() -> Option<usize> {
         decode,
     ])?;
     sum(&[common, legacy_base, metadata, legacy_sweep])
+}
+
+/// Legacy validate_task_contract(false) shares definition, redaction and
+/// obligation validation with @10, but also normalizes the saved standalone
+/// inspection targets. The historical-definition regression pins the shared
+/// catalog component. Charge raw admitted-row currency for the extra target
+/// clones rather than assuming successful semantic limits before validation.
+#[cfg(unix)]
+fn legacy_parent_contract_workspace() -> Option<usize> {
+    use context_hub::logical::{json_bytes, slots, sum};
+    sum(&[
+        next_prompt_contract_workspace()?,
+        json_bytes(MAX_RECORD_BYTES)?.checked_mul(3)?,
+        MAX_RECORD_BYTES.checked_mul(2)?,
+        slots::<Vec<u8>>(2)?,
+    ])
+}
+
+/// Pending basis validation keeps its ledger and obligation sources alive
+/// across legacy metadata reconstruction. The invoked-row equality check then
+/// decodes another complete step while the task still owns its pending step.
+#[cfg(unix)]
+fn legacy_parent_pending_workspace() -> Option<(usize, usize)> {
+    use context_hub::logical::{json_bytes, slots, sum};
+    let policy = &INVESTIGATION_V2_POLICY;
+    let (ledger, _) = InvestigationInputLedger::decode_workspace_bytes()?;
+    let basis = sum(&[
+        ledger,
+        next_prompt_ledger_workspace()?,
+        agents::investigation::disclosure_validation_workspace(policy, MAX_RECORD_BYTES)?,
+        json_bytes(policy.envelope_bytes())?.checked_mul(3)?,
+        legacy_parent_contract_workspace()?,
+        next_prompt_metadata_workspace()?.2,
+    ])?;
+    let invoked = sum(&[
+        metadata_history_workspace::row_workspace()?,
+        record_decode_scratch_bytes()?
+            .max(json_bytes(MAX_RECORD_BYTES)?.checked_mul(RECORD_MAX_DEPTH.checked_add(1)?)?),
+        MAX_RECORD_BYTES,
+        slots::<Vec<u8>>(1)?,
+        128,
+        slots::<String>(3)?,
+        4096,
+    ])?;
+    Some((basis, invoked))
 }
 
 /// Shared by task creation in its writer transaction and by the worker in a

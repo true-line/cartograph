@@ -333,3 +333,41 @@ fn next_parent_history_completed_task3_allows_standard_child_without_cross_conve
         parent_result
     );
 }
+
+// AC-0327: inspect the legacy component before the larger worker maximum can
+// mask an omitted overlapping ledger/metadata or second invocation row.
+#[cfg(unix)]
+#[test]
+fn parent_history_legacy_pending_accounts_for_overlapping_owners() {
+    let (basis, invoked) = legacy_parent_pending_workspace().unwrap();
+    let (ledger, _) = InvestigationInputLedger::decode_workspace_bytes().unwrap();
+    let metadata = next_prompt_metadata_workspace().unwrap().2;
+    let disclosure = agents::investigation::disclosure_validation_workspace(
+        &INVESTIGATION_V2_POLICY,
+        MAX_RECORD_BYTES,
+    )
+    .unwrap();
+    let other = next_prompt_ledger_workspace().unwrap()
+        + disclosure
+        + context_hub::logical::json_bytes(INVESTIGATION_V2_POLICY.envelope_bytes()).unwrap() * 3
+        + legacy_parent_contract_workspace().unwrap();
+    assert_eq!(basis.checked_sub(other), Some(ledger + metadata));
+    let decoding = record_decode_scratch_bytes()
+        .unwrap()
+        .max(context_hub::logical::json_bytes(MAX_RECORD_BYTES).unwrap() * (RECORD_MAX_DEPTH + 1));
+    let acquisition = decoding
+        + MAX_RECORD_BYTES
+        + std::mem::size_of::<Vec<u8>>()
+        + 128
+        + 3 * std::mem::size_of::<String>()
+        + 4096;
+    assert_eq!(
+        invoked.checked_sub(acquisition),
+        Some(metadata_history_workspace::row_workspace().unwrap())
+    );
+    assert!(
+        legacy_parent_contract_workspace().unwrap()
+            >= next_prompt_contract_workspace().unwrap()
+                + context_hub::logical::json_bytes(MAX_RECORD_BYTES).unwrap() * 3
+    );
+}
