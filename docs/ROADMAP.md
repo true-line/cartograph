@@ -1,7 +1,7 @@
 # Roadmap — from structural recovery to lifecycle reconstruction
 
 Status: agreed in [#572](https://github.com/true-line/cartograph/issues/572);
-realigned on 2026-10-21 (section 8). Direction: [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md).
+realigned on 2026-10-21 (section 8); next phase planned 2026-10-24 (section 9). Direction: [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md).
 Vision elements V1–V9: [VISION.md](VISION.md). Baseline: `main` at `cb0e876` (v0.15.5).
 
 The decisions in section 3 were agreed between the two implementation agents
@@ -265,3 +265,57 @@ are retired unused because #691 landed under AC-0280. AC-0292 is #722, and
 ADR-0045 is reserved for the living-wiki design (#724). The next free
 identifiers are US-0042, AC-0293 and ADR-0046.
 
+
+## 9. Next: test arrangements, then journeys (2026-10-24)
+
+The SimpleLogin showcase ([`docs/showcases/simplelogin.md`](showcases/simplelogin.md))
+has landed. Its contract scores 44 of 45 documented endpoints, the clients
+link to 43 server endpoints, and the data model, schema drift, observed
+infrastructure, scheduled flows and API documentation drift are all
+recovered. Section 8 item 5 left the choice between W10 and W11 to the
+showcase. The showcase points to **W10 first**:
+
+- SimpleLogin ships 161 test files that make about 425 Flask test-client
+  calls. Most address their endpoint by name (`url_for("api.get_aliases")`)
+  and assert a status code or response key. That evidence is deterministic,
+  and it links directly to the endpoints, the Blueprints and the responses
+  (#940) that are already recovered.
+- Cartograph recovers no target tests today, so test arrangements are the
+  largest missing lifecycle artifact that source can fully prove.
+- Journeys need client navigation facts that no adapter produces yet.
+  A journey is also a rule-derived interpretation (ADR-0036 decision 3),
+  so it should build on flows that tests already qualify.
+
+| Id | Slice | Owner | Exit gate |
+|----|-------|-------|-----------|
+| W10a | Python target tests as static references: pytest test functions, fixtures and `conftest.py` scope; each Flask test-client call resolved to a recovered `Endpoint` by endpoint name (Blueprint name and handler) or by literal path through the existing route matcher; asserted status codes and response keys recorded as declared expectations; an unresolved or dynamic call, and fixture setup that is not read, stays a Gap naming the call | Claude | On SimpleLogin, `test_arrangements.md` lists for each endpoint the tests that reference it and what they assert. An endpoint with no recovered reference is a named omission. That omission is not proof that no test exists, and a reference is not proof that a test ran or which branches it reaches. Content acceptance uses an independently hand-labelled sample of tests and endpoints, not counts |
+| W10b | Test and contract drift: an asserted status or key that the recovered responses lack, and a recovered status that no test asserts, compared only where the endpoint and response scope are the same | Claude | `drift_register.md` reports both directions on SimpleLogin, cited on both sides, and an endpoint whose responses or test references are partial is reported as incomplete evidence, not as drift |
+| W10c | A second test framework as its own module, behind the W9 coverage matrix's target-test capability | Claude | Vendure's end-to-end suite links its operations to recovered resolvers, which gives #590's 41 unexecuted decision cases their test evidence or a named omission |
+| W10d | Flows qualified by test references: each flow dossier names the tests that statically reference its participants and the steps no recovered test references | Claude | SimpleLogin's 18 scheduled flows and its client-to-server flows show test references per step, never claimed as executed coverage |
+| W11 | Journeys: deterministic client navigation facts first (Android activities and Compose navigation, the extension's popup routes), then journey candidates over those facts, client calls (#737), server flows and their tests | Claude, design reviewed by Codex | One SimpleLogin journey, such as creating an alias from the extension, scored against an expected set written from SimpleLogin's public help before the run. Journey candidates are T2 rule-derived and InferredWeak, never T0 |
+
+The agentic side runs alongside this, and each part is Codex's to scope:
+
+- **#937 first.** It makes finish refusals diagnosable. Bounded correction
+  or retry is qualified separately, and the fix does not promise that a
+  model passes, reads source or recovers. #766's unfinished delivery
+  remains an existing obligation alongside the lanes below.
+- **W8a.** The read surface gains test arrangements once W10a's producer
+  contract is stable: bounded, revision-pinned reads with provenance and
+  explicit unknown and omission semantics.
+- **W6.** A product-generated work packet proposes a task from an
+  endpoint with no recovered test reference, or from a test and contract
+  drift entry. It carries the endpoint, its cited handler, its recovered
+  responses, the missing assertion and the evidence's limitations. A packet
+  is a proposal: it does not prove a missing implementation or authorize
+  its execution. This is the first end-to-end use of the north-star
+  cycle's "hand the gap to an implementer".
+
+W12, the explorable estate view, gains a tests layer from W10 and a journeys
+layer from W11. It stays planned after both.
+
+Identifiers: US-0044 and AC-0343 onward for W10. W11 takes the next story
+and an ADR for journey identity and tier, which Claude drafts before W11
+starts. ADR-0049 stays reserved for the shared extraction-cache draft under
+review, so the journey ADR takes the next number unused on `main` when it
+is drafted.
