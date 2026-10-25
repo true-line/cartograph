@@ -124,7 +124,7 @@ pub(crate) fn start_mcp<R: tauri::Runtime>(
     request: StagedObligationRequest,
     app: tauri::AppHandle<R>,
     session: &McpTaskSession,
-    scope: crate::mcp_reads::scope::ScopeLimits,
+    limits: super::mcp_dispatch::TaskReadLimits,
     reservations: &crate::mcp_reads::task_reservation::TaskReservations,
 ) -> Result<InvestigationSummary, InvestigationStartError> {
     completion_start::start_access(
@@ -132,7 +132,7 @@ pub(crate) fn start_mcp<R: tauri::Runtime>(
         app,
         Instant::now(),
         Some(session),
-        Some(scope),
+        Some(limits),
         Some(reservations),
     )
 }

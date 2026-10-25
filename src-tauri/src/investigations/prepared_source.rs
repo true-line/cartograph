@@ -20,6 +20,7 @@ pub(in crate::investigations) struct PreparedCapturedSource {
     receipt: Receipt,
     guards: EvidenceGuards,
     validation: Option<CommittedSourceValidation>,
+    read_limits: Option<crate::mcp_reads::dispatch::EvidenceWorkLimits>,
     // Attempt provenance only, never a durable charge or access permit.
     attempted_basis: Option<(String, String, String)>,
 }
@@ -171,6 +172,7 @@ impl FrozenContext {
             receipt,
             guards,
             validation: None,
+            read_limits: None,
             attempted_basis: None,
         };
         prepared.revalidate(self, state)?;
@@ -178,6 +180,28 @@ impl FrozenContext {
     }
 }
 impl PreparedCapturedSource {
+    /// Refuse from pinned metadata before reservation/validation charges or text
+    /// access. The capture store rechecks the same caps at the actual read.
+    pub(in crate::investigations) fn with_read_limits(
+        mut self,
+        limits: Option<crate::mcp_reads::dispatch::EvidenceWorkLimits>,
+    ) -> Result<Self, HostError> {
+        if let Some(limits) = limits {
+            let captured = &self.target.captured;
+            let span = captured
+                .byte_end
+                .checked_sub(captured.byte_start)
+                .ok_or(HostError::InvalidInput)?;
+            if captured.file.byte_len > limits.max_file_validation_bytes.get()
+                || span > limits.max_span_bytes.get()
+            {
+                return Err(HostError::LimitExceeded);
+            }
+        }
+        self.read_limits = limits;
+        Ok(self)
+    }
+
     fn attempted_basis_matches(&self, basis: &SourceValidationBasis<'_>) -> bool {
         self.attempted_basis
             .as_ref()
@@ -422,11 +446,18 @@ impl PreparedCapturedSource {
         TEXT_READS.with(|count| count.set(count.get() + 1));
         // AccessStarted begins here. Every task_text error is a known attempted
         // read and can never be classified ReleasedBeforeRead.
-        let text = match state.primary_sources.task_text(
-            guard,
-            &self.receipt,
-            self.target.receipt_inventory_index as usize,
-        ) {
+        let index = self.target.receipt_inventory_index as usize;
+        let read = match self.read_limits {
+            Some(limits) => state.primary_sources.task_text_bounded(
+                guard,
+                &self.receipt,
+                index,
+                limits.max_file_validation_bytes.get(),
+                limits.max_span_bytes.get(),
+            ),
+            None => state.primary_sources.task_text(guard, &self.receipt, index),
+        };
+        let text = match read {
             Ok(text) => text,
             Err(PinnedReadError::Unavailable) => {
                 return Err(self.failed(SourceReadFailureKind::ReadUnavailable));

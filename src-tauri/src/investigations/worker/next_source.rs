@@ -61,7 +61,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             active_milliseconds: self.clock.active_milliseconds(),
         };
         // This uses frozen receipt metadata only; no captured text is read here.
-        let source = context.prepare_captured_read(self.state, &fact, role, index)?;
+        let source = context
+            .prepare_captured_read(self.state, &fact, role, index)?
+            .with_read_limits(self.task_limits.map(|limits| limits.evidence))?;
         let next_ordinal = self
             .detail
             .usage

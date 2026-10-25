@@ -105,12 +105,12 @@ pub(super) fn run_completion<R: tauri::Runtime>(
     live: Arc<LiveTask>,
     started: Instant,
 ) {
-    run_completion_with_scope(app, id, request, execution, provider, live, started, None);
+    run_completion_with_limits(app, id, request, execution, provider, live, started, None);
 }
 
-/// Retain the caller's admitted discovery limits after detaching execution.
+/// Retain the caller's admitted discovery and evidence limits after detaching execution.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn run_completion_with_scope<R: tauri::Runtime>(
+pub(super) fn run_completion_with_limits<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     id: String,
     request: obligations::StagedObligationRequest,
@@ -118,7 +118,7 @@ pub(super) fn run_completion_with_scope<R: tauri::Runtime>(
     provider: Arc<dyn LlmProvider>,
     live: Arc<LiveTask>,
     started: Instant,
-    scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
+    task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
 ) {
     match FrozenContext::completion_acquisition_request(&request) {
         Ok(projected) => run_inner(
@@ -130,7 +130,7 @@ pub(super) fn run_completion_with_scope<R: tauri::Runtime>(
             provider,
             live,
             started,
-            scope_limits,
+            task_limits,
         ),
         Err(_) => {
             let state = app.state::<AppState>();
@@ -163,7 +163,7 @@ fn run_inner<R: tauri::Runtime>(
     provider: Arc<dyn LlmProvider>,
     live: Arc<LiveTask>,
     started: Instant,
-    scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
+    task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
 ) {
     let state = app.state::<AppState>();
     let _cleanup = Cleanup {
@@ -183,7 +183,7 @@ fn run_inner<R: tauri::Runtime>(
             live: &live,
             detail,
             clock: &mut clock,
-            scope_limits,
+            task_limits,
         };
         worker.execute_inner(&request, completion_request.as_ref(), provider.as_ref())
     })();
@@ -225,7 +225,7 @@ struct Worker<'a, R: tauri::Runtime> {
     live: &'a LiveTask,
     detail: InvestigationDetail,
     clock: &'a mut RunClock,
-    scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
+    task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
 }
 
 impl<R: tauri::Runtime> Worker<'_, R> {
@@ -270,14 +270,14 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         } else {
             None
         };
-        let mut context = match self.scope_limits {
+        let mut context = match self.task_limits {
             Some(limits) => FrozenContext::prepare_with_app_scope(
                 self.app,
                 self.state,
                 request,
                 &history,
                 archive_capacity,
-                Some(limits),
+                Some(limits.scope),
             ),
             None => FrozenContext::prepare_with_app(
                 self.app,
