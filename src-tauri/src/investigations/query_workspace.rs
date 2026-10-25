@@ -16,11 +16,51 @@ const SOURCE_LABEL_BYTES: usize = 256;
 const SOURCE_ASSOCIATION_BYTES: usize = 256;
 const FACT_DIGEST_BYTES: usize = 72;
 
+/// Complete storage/host selection wire before accepted-ledger comparison.
+pub(super) fn selection_wire(selected: usize) -> Option<usize> {
+    use context_hub::logical::string_wire;
+    // Bound storage-selected identities independently of the accepted ledger:
+    // an edge key may contain two 8192-byte IDs and one 256-byte label. Its
+    // association adds repo/receipt256 each and two72-byte digests; omission
+    // adds repo256. Escaping occurs before candidate-ledger refusal.
+    let row_payload = sum(&[
+        SOURCE_ID_BYTES,
+        SOURCE_ID_BYTES,
+        SOURCE_LABEL_BYTES, // selected edge key
+        SOURCE_ID_BYTES,
+        SOURCE_ID_BYTES,
+        SOURCE_LABEL_BYTES, // repeated binding key
+        SOURCE_ASSOCIATION_BYTES,
+        SOURCE_ASSOCIATION_BYTES,
+        FACT_DIGEST_BYTES,
+        FACT_DIGEST_BYTES,
+        SOURCE_ASSOCIATION_BYTES,
+    ])?;
+    let selected_envelope = agents::TaskFactSelection {
+        fact: agents::TaskFactKey::Edge {
+            source: String::new(),
+            label: String::new(),
+            destination: String::new(),
+        },
+        fact_digest: String::new(),
+        binding: Some(agents::TaskSourceAssociation {
+            repo_key: String::new(),
+            receipt_id: String::new(),
+            emitted_fact_digest: String::new(),
+        }),
+    };
+    selected.checked_mul(sum(&[
+        string_wire(row_payload)?,
+        logical::count(&selected_envelope)?,
+        1, // array separator
+    ])?)
+}
+
 /// Additional selection observation, including conversion while the storage
 /// result still owns its graph and selected rows. Schema checks are sequential.
 /// `selection_wire` must bound the complete storage and host selection DTOs,
 /// including bounded association/omission strings, not only the requested keys.
-fn selection_peak(selected: usize, selection_wire: usize) -> Option<usize> {
+pub(super) fn selection_peak(selected: usize, selection_wire: usize) -> Option<usize> {
     let graph = SnapshotReadLimits::default();
     let snapshot = logical::snapshot(graph)?;
     let keys = sum(&[selection_wire, set::<FactKey>(selected)?])?;
@@ -278,46 +318,11 @@ pub(super) fn workspace(
     input: QueryInputs,
 ) -> Option<QueryWorkspace> {
     use agents::investigation::ledger_validation_workspace;
-    use context_hub::logical::string_wire;
     let selected = policy
         .limits()
         .selected_facts
         .min(core_graph::source::MAX_SOURCE_SELECTION_KEYS);
-    // Bound storage-selected identities independently of the accepted ledger:
-    // an edge key may contain two 8192-byte IDs and one 256-byte label. Its
-    // association adds repo/receipt256 each and two72-byte digests; omission
-    // adds repo256. Escaping occurs before candidate-ledger refusal.
-    let row_payload = sum(&[
-        SOURCE_ID_BYTES,
-        SOURCE_ID_BYTES,
-        SOURCE_LABEL_BYTES, // selected edge key
-        SOURCE_ID_BYTES,
-        SOURCE_ID_BYTES,
-        SOURCE_LABEL_BYTES, // repeated binding key
-        SOURCE_ASSOCIATION_BYTES,
-        SOURCE_ASSOCIATION_BYTES,
-        FACT_DIGEST_BYTES,
-        FACT_DIGEST_BYTES,
-        SOURCE_ASSOCIATION_BYTES,
-    ])?;
-    let selected_envelope = agents::TaskFactSelection {
-        fact: agents::TaskFactKey::Edge {
-            source: String::new(),
-            label: String::new(),
-            destination: String::new(),
-        },
-        fact_digest: String::new(),
-        binding: Some(agents::TaskSourceAssociation {
-            repo_key: String::new(),
-            receipt_id: String::new(),
-            emitted_fact_digest: String::new(),
-        }),
-    };
-    let selection_wire = selected.checked_mul(sum(&[
-        string_wire(row_payload)?,
-        logical::count(&selected_envelope)?,
-        1, // array separator
-    ])?)?;
+    let selection_wire = selection_wire(selected)?;
     let page = logical::qualified_query_workspace(
         input.graph,
         input.coverage,

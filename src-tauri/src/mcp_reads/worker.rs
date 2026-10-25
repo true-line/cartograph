@@ -424,6 +424,12 @@ fn task_phase_workspaces(
     )?;
     let execution = provider
         .max(construction)
+        .max(
+            crate::investigations::source_preparation_workspace::peak_bytes(
+                limits.evidence,
+                app_path_bytes,
+            )?,
+        )
         // Source receipts/guards/outcomes are retained in context below. This
         // adds only the nested manifest and bounded object/span acquisition.
         .max(
