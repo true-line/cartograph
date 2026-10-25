@@ -120,6 +120,7 @@ fn option_owners(fact_wire: usize, fact_match_peak: usize) -> Option<(usize, usi
     ])?;
     let legacy_peak = sum(&[
         json_bytes(fact_wire)?, // cloned provenance Value during typed decode
+        json_bytes(fact_wire)?, // internally tagged ProducingMethod buffer
         legacy,
         legacy_options, // collection may keep input/output vector allocations
     ])?;
