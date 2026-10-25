@@ -474,6 +474,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             let prepared = firewall(self.state)?
                 .prepare_bounded(provider, &action, &limits)
                 .map_err(provider_failure)?;
+            // The firewall owns its prepared payload; release the original
+            // copy before disclosure sealing, consent and provider execution.
+            drop(action);
             let disclosure = input.seal_disclosure_with_policy(&prepared, policy)?;
             let step = PendingInvestigationStep {
                 step_id: step_id.clone(),
