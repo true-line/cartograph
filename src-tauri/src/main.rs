@@ -1727,6 +1727,9 @@ fn extract_tree_with_registries(
     let contract_facts = extract_repo_contracts(root, repo, commit, api_docs, &extraction.nodes);
     extraction.nodes.extend(contract_facts.nodes);
     extraction.edges.extend(contract_facts.edges);
+    let test_drift = spec::derive_test_drift(&extraction.nodes, &extraction.edges);
+    extraction.nodes.extend(test_drift.nodes);
+    extraction.edges.extend(test_drift.edges);
     // Toolchain facts (#215): config files become Tool nodes with cited
     // settings, DEFINED_IN the config File that proves them. Runs for every
     // layer selection — the toolchain is cross-cutting evidence.

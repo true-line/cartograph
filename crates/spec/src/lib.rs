@@ -24,12 +24,17 @@ pub(crate) fn spec_rule(rule: &str) -> core_prov::ProducingMethod {
     }
 }
 mod rules;
+mod test_drift;
 pub use rules::use_case::{
     AcceptanceReport, CaseResult, DecisionRow, DocumentedIntent, EXPECTED_RULES_SCHEMA,
     ExpectationLabel, ExpectationResult, ExpectedCase, ExpectedRule, ExpectedSet, ExpectedSetError,
     ExpectedSpan, OwnerCoverage, RowCondition, RowOutcome, RowRole, USE_CASE_ARTIFACT_ID,
     USE_CASE_CANDIDATE_RULE, USE_CASE_ROW_RULE, UseCaseProjection, UseCaseScope,
     check_use_case_acceptance, project_use_case,
+};
+pub use test_drift::{
+    FOLLOWS_REDIRECTS_REASON, PARTIAL_RESPONSES_REASON, TEST_DRIFT_EXTRACTOR_ID, UNASSERTED_REASON,
+    derive_test_drift,
 };
 mod security;
 pub use security::{
