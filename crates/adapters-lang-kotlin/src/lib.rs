@@ -53,6 +53,8 @@ pub struct Extraction {
     pub fetch_sites: Vec<adapters_fw::client::FetchSite>,
     /// Retrofit builder base URLs, joined to `fetch_sites` repo-wide.
     retrofit_bases: Vec<adapters_fw::client::FetchBase>,
+    /// Android Navigation 3 entries and back-stack navigations, resolved repo-wide.
+    navigation3: navigation3::Pending,
     pending_calls: Vec<PendingCall>,
     declared_types: Vec<Declared>,
     declared_functions: Vec<Declared>,
@@ -87,6 +89,8 @@ struct Declared {
     /// A class or data class, whose `Name(...)` can be a constructor call.
     /// An object's or an interface's is a call to an `invoke` operator.
     constructible: bool,
+    /// An `object` or `data object` declaration.
+    object: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +187,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         retarget_props_commit(&mut pending.gap.0.props, commit);
         retarget_props_commit(&mut pending.gap.1.props, commit);
     }
+    extraction.navigation3.retarget(commit);
 }
 
 /// Type-declaration kinds that contribute to a member's qualified name.
@@ -615,6 +620,7 @@ fn collect_importables(
             path: path.to_string(),
             qualified,
             constructible: false,
+            object: false,
         });
     };
     let mut walk = root.walk();
@@ -774,6 +780,7 @@ pub fn extract_source(
           (object_declaration name: (identifier) @name) @decl]",
     )
     .expect("static query");
+    let mut local_types: HashSet<String> = HashSet::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&type_query, root, source);
     while let Some(found) = matches.next() {
@@ -791,6 +798,7 @@ pub fn extract_source(
         let mut chain = enclosing_type_chain(&cx, decl);
         chain.push(name.clone());
         let qualified = chain.join(".");
+        local_types.insert(qualified.clone());
         let symbol = symbol_id(id.repo, path, &qualified);
         out.nodes.push(Node {
             id: symbol.clone(),
@@ -816,6 +824,7 @@ pub fn extract_source(
                 path: path.to_string(),
                 qualified,
                 constructible: matches!(declaration_kind(&cx, decl), "class" | "data class"),
+                object: decl.kind() == "object_declaration",
             });
         }
     }
@@ -901,6 +910,7 @@ pub fn extract_source(
                 path: path.to_string(),
                 qualified: name.clone(),
                 constructible: false,
+                object: false,
             });
         }
         functions.push((function, symbol));
@@ -1047,6 +1057,17 @@ pub fn extract_source(
         .extend(retrofit::sites(&cx, &functions, &imports));
     out.retrofit_bases
         .extend(retrofit::bases(&cx, root, &imports));
+
+    // Android Navigation 3 entries and back-stack navigations (AC-0351).
+    out.navigation3 = navigation3::extract(
+        &cx,
+        root,
+        package.as_deref(),
+        &imports,
+        &functions_by_start,
+        &local_functions,
+        &local_types,
+    );
 
     // Calls: same-scope unqualified/this calls resolve locally; calls
     // proven by an import (a type/object receiver, or an imported top-level
@@ -1318,6 +1339,7 @@ pub fn extract_dir_incremental_with_progress(
             out.packages.extend(extraction.packages);
             out.fetch_sites.extend(extraction.fetch_sites);
             out.retrofit_bases.extend(extraction.retrofit_bases);
+            out.navigation3.extend(extraction.navigation3);
             Ok(())
         },
     );
@@ -1429,6 +1451,15 @@ pub fn extract_dir_incremental_with_progress(
             }
         }
     }
+    navigation3::complete(
+        std::mem::take(&mut out.navigation3),
+        id.repo,
+        &types_by_fqn,
+        &functions_by_fqn,
+        &known,
+        &mut out.nodes,
+        &mut out.edges,
+    );
     resolve_repo_imports(
         &mut out.edges,
         id.repo,
@@ -1477,6 +1508,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
         .map(|(extraction, _)| extraction)
 }
 
+pub mod navigation3;
 mod retrofit;
 
 #[cfg(test)]

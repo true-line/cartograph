@@ -270,6 +270,14 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("Kotlin", CORE, Types, Supported, ""),
     cell("Kotlin", CORE, Calls, Supported, ""),
     cell("Kotlin", "spring-web", HttpEndpoints, Supported, ""),
+    cell(
+        "Kotlin",
+        "navigation3",
+        ClientRoutes,
+        Partial,
+        "callbacks passed into entries are not followed, \
+         and only same-class back-stack helpers are read",
+    ),
     cell("Kotlin", "retrofit", HttpClientCalls, Supported, ""),
     cell("Kotlin", CORE, HttpClientCalls, Unsupported, NO_JVM_CLIENT),
     cell("Kotlin", CORE, EventSites, Unsupported, NO_EVENTS),

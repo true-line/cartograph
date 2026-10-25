@@ -1,0 +1,24 @@
+{
+  "nodes": [
+    {
+      "label": "Screen",
+      "id": "screen:local/p@navigation3:com.example.UsersDestination",
+      "props": {
+        "router": "navigation3",
+        "key": "com.example.UsersDestination"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "RENDERS",
+      "src": "screen:local/p@navigation3:com.example.UsersDestination",
+      "dst": "sym:local/p@AppRoot.kt#UsersScreen"
+    },
+    {
+      "label": "NAVIGATES_TO",
+      "src": "sym:local/p@AppRoot.kt#AppViewModel.showUsers",
+      "dst": "screen:local/p@navigation3:com.example.UsersDestination"
+    }
+  ]
+}
