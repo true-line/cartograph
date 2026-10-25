@@ -7,7 +7,10 @@ use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 use std::{fmt, io::Write};
 pub fn sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 /// Integer-only RFC8785 with ASCII schema keys and ordinary JSON string escaping.
 pub fn canonical_json(value: &impl Serialize) -> Result<Vec<u8>> {

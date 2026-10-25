@@ -30,7 +30,10 @@ fn valid_vector(v: &[f32]) -> bool {
     }
 }
 fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -16,7 +16,7 @@ usearch = { workspace = true }
 
 rusqlite = { workspace = true }
 core-redact = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 

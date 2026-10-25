@@ -75,7 +75,10 @@ fn bytes(value: &impl Serialize) -> Result<Vec<u8>, String> {
     serde_json::to_vec(value).map_err(|_| "measurement serialization failed".into())
 }
 fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 
 #[derive(Clone, Copy)]

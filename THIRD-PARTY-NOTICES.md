@@ -15,7 +15,7 @@ Cartograph bundles the following Rust crates. Each is used under the terms of
 its respective license, reproduced below. This list is generated from the
 dependency lockfile by `cargo about`; do not edit by hand.
 
-- Apache License 2.0 (273 crate(s))
+- Apache License 2.0 (279 crate(s))
 - MIT License (74 crate(s))
 - Unicode License v3 (19 crate(s))
 - BSD 3-Clause "New" or "Revised" License (9 crate(s))
@@ -5051,12 +5051,18 @@ limitations under the License.
 
 Used by:
 - block-buffer 0.10.4 — https://github.com/RustCrypto/utils
+- block-buffer 0.12.1 — https://github.com/RustCrypto/utils
 - chacha20 0.10.2 — https://github.com/RustCrypto/stream-ciphers
+- const-oid 0.10.2 — https://github.com/RustCrypto/formats
 - cpufeatures 0.2.17 — https://github.com/RustCrypto/utils
 - cpufeatures 0.3.0 — https://github.com/RustCrypto/utils
 - crypto-common 0.1.7 — https://github.com/RustCrypto/traits
+- crypto-common 0.2.2 — https://github.com/RustCrypto/traits
 - digest 0.10.7 — https://github.com/RustCrypto/traits
+- digest 0.11.3 — https://github.com/RustCrypto/traits
+- hybrid-array 0.4.15 — https://github.com/RustCrypto/hybrid-array
 - sha2 0.10.9 — https://github.com/RustCrypto/hashes
+- sha2 0.11.1 — https://github.com/RustCrypto/hashes
 
 ```
                               Apache License

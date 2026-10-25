@@ -44,7 +44,10 @@ struct Proof {
     repo: String,
 }
 fn sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 fn hash(value: &str, len: usize) -> bool {
     value.len() == len

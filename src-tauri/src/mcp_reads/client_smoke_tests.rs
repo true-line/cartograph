@@ -305,7 +305,10 @@ fn mcp_scripted_stdio_client_smoke_against_isolated_app_service() {
             assert_eq!(report["scenario"]["evidence_bytes"], exact.len());
             assert_eq!(
                 report["scenario"]["evidence_sha256"],
-                format!("{:x}", Sha256::digest(exact))
+                Sha256::digest(exact)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
             );
             let candidate = &report["scenario"]["candidate"];
             let node = before

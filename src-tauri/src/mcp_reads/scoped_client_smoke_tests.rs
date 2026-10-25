@@ -108,7 +108,10 @@ fn scoped_scripted_client_partition_and_retained_span_after_checkout_removal() {
     assert_eq!(report["evidence_bytes"], exact.len());
     assert_eq!(
         report["evidence_sha256"],
-        format!("{:x}", Sha256::digest(exact))
+        Sha256::digest(exact)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     );
     assert!(!root.exists());
     assert_eq!(
