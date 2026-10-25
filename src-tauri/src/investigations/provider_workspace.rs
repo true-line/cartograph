@@ -15,8 +15,8 @@ pub(crate) fn completion_limit_values(
     Ok(values)
 }
 
-/// Includes retained preparation during authorization and both retained DTOs
-/// during transport. Borrowed caller actions remain separately accounted.
+/// Includes preparation during authorization, both DTOs during transport, and
+/// candidate preparation during sealing (including caller/sealer action clones).
 #[cfg(unix)]
 pub(crate) fn payload_peak(policy: &InvestigationPolicy) -> Option<usize> {
     let limits = CompletionLimits::new(completion_limit_values(policy).ok()?).ok()?;
@@ -33,13 +33,22 @@ pub(crate) fn payload_peak(policy: &InvestigationPolicy) -> Option<usize> {
                 .request_peak_bytes
                 .max(transport.response_peak_bytes),
         )?;
-    Some(firewall.prepare_peak_bytes.max(authorize).max(invoke))
+    let (_, sealing) =
+        agents::investigation::InvestigationInput::sealing_workspace_bytes(policy, &limits)?;
+    let sealing = firewall.prepared_bytes.checked_add(sealing)?;
+    Some(
+        firewall
+            .prepare_peak_bytes
+            .max(authorize)
+            .max(invoke)
+            .max(sealing),
+    )
 }
 
 /// Original invocation owners remain live while next_metadata prepares and
 /// seals a candidate. Charge these outside the phase maximum: payload_peak
-/// then covers the candidate firewall independently. Caller actions and
-/// disclosures, including sealing temporaries, are separate components.
+/// then covers candidate firewall/sealing independently. Also retain the outer
+/// disclosure and pending-step copy; candidate disclosure is in sealing's peak.
 #[cfg(unix)]
 pub(crate) fn continuation_retained(policy: &InvestigationPolicy) -> Option<usize> {
     let limits = CompletionLimits::new(completion_limit_values(policy).ok()?).ok()?;
@@ -48,7 +57,13 @@ pub(crate) fn continuation_retained(policy: &InvestigationPolicy) -> Option<usiz
     firewall
         .prepared_bytes
         .checked_add(firewall.authorized_bytes)?
-        .checked_add(transport.completion_bytes)
+        .checked_add(transport.completion_bytes)?
+        // The outer disclosure and pending-step copy survive into continuation.
+        .checked_add(
+            agents::investigation::InvestigationInput::sealing_workspace_bytes(policy, &limits)?
+                .0
+                .checked_mul(2)?,
+        )
 }
 
 #[cfg(test)]

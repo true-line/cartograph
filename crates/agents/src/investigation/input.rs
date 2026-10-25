@@ -833,6 +833,9 @@ mod versions;
 #[path = "input_workspace.rs"]
 mod workspace;
 
+#[path = "sealing_workspace.rs"]
+mod sealing_workspace;
+
 #[path = "input_coverage_details.rs"]
 mod coverage_details;
 
