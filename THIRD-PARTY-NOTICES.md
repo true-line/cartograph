@@ -9818,7 +9818,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## material-symbols 0.48.0
+## material-symbols 0.48.1
 
 License: Apache-2.0
 
@@ -10139,7 +10139,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## zustand 5.0.15
+## zustand 5.0.16
 
 License: MIT
 
