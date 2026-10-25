@@ -2167,6 +2167,8 @@ class Vm(private val ds: Datasource, plain: Datasource) {
     fun undeclared() { ds.toString() }
     fun looped(xs: List<Datasource>) { for (x in xs) { x.stats() } }
     fun plainHidden() { plain.stats() }
+    fun lambdaShadowed() { run { val ds = make(); ds.stats() } }
+    fun lambdaLocal() { run { val y: Datasource = make(); y.stats() } }
     class Nested { fun n() { ds.stats() } }
 }
 "#,
@@ -2206,6 +2208,7 @@ class Vm(private val ds: Datasource, plain: Datasource) {
             pair("Vm.direct", "Datasource.stats"),
             pair("Vm.generic", "Box.get"),
             pair("Vm.lambda", "Datasource.stats"),
+            pair("Vm.lambdaLocal", "Datasource.stats"),
             pair("Vm.nullable", "Datasource.stats"),
             pair("Vm.viaThis", "Datasource.stats"),
             pair("Vm.constructed", "Helper.help"),

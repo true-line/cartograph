@@ -205,6 +205,16 @@ pub(crate) fn lexical_binding(
                 }
             }
             "lambda_literal" => {
+                // A lambda's statements are its direct children.
+                let local = named_children(scope)
+                    .into_iter()
+                    .filter(|stmt| stmt.end_byte() <= use_site.start_byte())
+                    .filter(|stmt| stmt.kind() == "property_declaration")
+                    .filter_map(|stmt| property_binding(cx, stmt, name))
+                    .next_back();
+                if local.is_some() {
+                    return local;
+                }
                 let params = named_children(scope)
                     .into_iter()
                     .find(|part| part.kind() == "lambda_parameters");
