@@ -3613,3 +3613,218 @@ export class HealthResolver {
         [("GET", "/health/live"), ("QUERY", "admin.health")]
     );
 }
+
+// AC-0348 (T-0348): the GraphQL root-field reader.
+#[test]
+fn graphql_root_fields_read_one_operation_and_refuse_ambiguity() {
+    use target_tests::root_fields;
+    let (kind, fields) = root_fields(
+        "# list\nquery GetCustomers($options: CustomerListOptions = { take: 2 }) {\n  list: customers(options: $options) @include(if: true) { items { id } }\n  __typename\n  activeChannel { id }\n}\nfragment F on Customer { id }",
+    )
+    .unwrap();
+    assert_eq!(kind, "query");
+    assert_eq!(fields, ["activeChannel", "customers"]);
+    assert_eq!(
+        root_fields("mutation { createCustomer(input: { name: \"a{b\" }) { id } }").unwrap(),
+        ("mutation", vec!["createCustomer".to_string()])
+    );
+    // A shorthand query and a nested interpolation are fine.
+    assert_eq!(root_fields("{ me { \u{1} } }").unwrap().1, ["me"]);
+    for (text, reason) in [
+        (
+            "query A { a } query B { b }",
+            "GraphQL document has more than one operation",
+        ),
+        (
+            "query { ...Root }",
+            "GraphQL operation selects a fragment at its root",
+        ),
+        (
+            "query { \u{1} }",
+            "GraphQL document is interpolated at its root",
+        ),
+        (
+            "fragment F on X { id }",
+            "GraphQL document has no operation",
+        ),
+        ("query { a(", "GraphQL document is malformed"),
+    ] {
+        assert_eq!(root_fields(text).unwrap_err(), reason, "{text}");
+    }
+}
+
+// AC-0348 (T-0348).
+#[test]
+fn vitest_tests_request_graphql_operations_through_proven_clients() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "src/api/resolvers/admin/customer.resolver.ts",
+        "import { Mutation, Query, Resolver } from '@nestjs/graphql';\n@Resolver()\nexport class CustomerResolver {\n  @Query() customers() {}\n  @Mutation() createCustomer() {}\n}\n",
+    );
+    write(
+        "src/api/resolvers/shop/shop.resolver.ts",
+        "import { Query, Resolver } from '@nestjs/graphql';\n@Resolver()\nexport class ShopResolver { @Query() activeCustomer() {} }\n",
+    );
+    write(
+        "src/plugin/plugin.resolver.ts",
+        "import { Query, Resolver } from '@nestjs/graphql';\n@Resolver()\nexport class PluginResolver { @Query() pluginThing() {} }\n",
+    );
+    write(
+        "e2e/graphql/shared.ts",
+        "import { graphql } from './graphql-admin';\nexport const getCustomersDocument = graphql(`query GetCustomers { customers { items { id } } }`);\nexport const notADocument = `query { customers { id } }`;\n",
+    );
+    write(
+        "e2e/customer.e2e-spec.ts",
+        r#"import { createTestEnvironment } from '@vendure/testing';
+import { describe, it, expect } from 'vitest';
+import gql from 'graphql-tag';
+import { getCustomersDocument, notADocument, missingDocument } from './graphql/shared';
+
+const { server, adminClient, shopClient: shop } = createTestEnvironment({});
+const CREATE = gql`mutation { createCustomer(input: {}) { id } }`;
+
+describe('Customer resolver', () => {
+  it('lists customers', async () => {
+    const r = await adminClient.query(getCustomersDocument);
+    await adminClient.query(CREATE, {});
+    await shop.query(gql`query { activeCustomer { id } pluginThing unknownField }`);
+    expect(r).toBeDefined();
+  });
+  describe('nested', () => {
+    it.only('lists customers', async () => {
+      await shop.query(getCustomersDocument);
+    });
+    it('lists customers', async () => {
+      await adminClient.query(notADocument);
+      await adminClient.query(missingDocument);
+      await adminClient.query(`query { customers { id } }`);
+    });
+  });
+  it('wrapped', assertThrows(async () => {
+    await adminClient.query(getCustomersDocument);
+  }, 'message'));
+  it(`computed ${1}`, () => {});
+  it('shadowed', async () => {
+    const adminClient = { query: (_: unknown) => {} };
+    await adminClient.query(CREATE);
+  });
+});
+"#,
+    );
+    // A monorepo spec importing the factory's own source file.
+    write(
+        "testing/lib/create-test-environment.ts",
+        "export function createTestEnvironment(_: unknown) { return {}; }\n",
+    );
+    write(
+        "e2e/monorepo.e2e-spec.ts",
+        "import { createTestEnvironment } from '../testing/lib/create-test-environment';\nimport { it } from 'vitest';\nimport { getCustomersDocument } from './graphql/shared';\nconst { adminClient } = createTestEnvironment({});\nit('monorepo', async () => { await adminClient.query(getCustomersDocument); });\n",
+    );
+    let ex = extract_dir(dir.path(), &id()).unwrap();
+    assert!(ex.edges.iter().any(|e| e.label == "REQUESTS"
+        && e.src == "test:qwtm/example@e2e/monorepo.e2e-spec.ts#monorepo"
+        && e.dst == "ep:qwtm/example@graphql:admin:query:customers"));
+    let tests: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.label == "TestCase" && n.props["path"] == "e2e/customer.e2e-spec.ts")
+        .map(|n| n.id.as_str())
+        .collect();
+    let base = "test:qwtm/example@e2e/customer.e2e-spec.ts#Customer resolver";
+    assert_eq!(
+        tests,
+        [
+            format!("{base} > lists customers"),
+            format!("{base} > nested > lists customers"),
+            format!("{base} > nested > lists customers [2]"),
+            format!("{base} > wrapped"),
+            format!("{base} > shadowed"),
+        ]
+    );
+    let requests: BTreeSet<_> = ex
+        .edges
+        .iter()
+        .filter(|e| e.label == "REQUESTS" && !e.dst.starts_with("gap:") && e.src.starts_with(base))
+        .map(|e| {
+            (
+                e.src.trim_start_matches(base),
+                e.dst.as_str(),
+                e.props["prov"]["confidence_tier"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        requests,
+        BTreeSet::from([
+            (
+                " > lists customers",
+                "ep:qwtm/example@graphql:admin:query:customers",
+                "InferredStrong"
+            ),
+            (
+                " > lists customers",
+                "ep:qwtm/example@graphql:admin:mutation:createCustomer",
+                "InferredStrong"
+            ),
+            (
+                " > lists customers",
+                "ep:qwtm/example@graphql:shop:query:activeCustomer",
+                "InferredStrong"
+            ),
+            // Only a default-scoped resolver serves it: assumed, so weak.
+            (
+                " > lists customers",
+                "ep:qwtm/example@graphql:default:query:pluginThing",
+                "InferredWeak"
+            ),
+            // A callback passed through a wrapper is still the test's code.
+            (
+                " > wrapped",
+                "ep:qwtm/example@graphql:admin:query:customers",
+                "InferredStrong"
+            ),
+        ])
+    );
+    let gaps: BTreeMap<_, _> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap" && n.id.starts_with("gap:test-"))
+        .map(|n| {
+            (
+                n.props["field"].as_str().unwrap_or(""),
+                n.props["reason"].as_str().unwrap(),
+            )
+        })
+        .fold(BTreeMap::new(), |mut map, (field, reason)| {
+            *map.entry((field, reason)).or_insert(0) += 1;
+            map
+        });
+    assert_eq!(
+        gaps,
+        BTreeMap::from([
+            // The shop client's `customers` is admin-only; `unknownField` is unserved.
+            (("customers", target_tests::UNSERVED_FIELD_REASON), 1),
+            (("unknownField", target_tests::UNSERVED_FIELD_REASON), 1),
+            // A plain template, an unexported import and an untagged literal.
+            (("", target_tests::COMPUTED_DOCUMENT_REASON), 3),
+            (("", target_tests::COMPUTED_NAME_REASON), 1),
+        ])
+    );
+    // The shadowed local `adminClient` is not the test client.
+    assert!(
+        !ex.edges
+            .iter()
+            .any(|e| e.src.ends_with("> shadowed") && e.label == "REQUESTS")
+    );
+    let only = ex
+        .nodes
+        .iter()
+        .find(|n| n.id.ends_with("nested > lists customers"))
+        .unwrap();
+    assert_eq!(only.props["modifier"], "only");
+}

@@ -76,6 +76,9 @@ pub struct Extraction {
     /// facts, so classification and extraction can never disagree (the
     /// plugin-coverage pattern from #201, host-filled).
     pub eval_sites: Vec<EvalSite>,
+    /// Exported GraphQL documents and test client requests awaiting
+    /// directory-wide resolution (#968).
+    target_tests: target_tests::Pending,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -249,6 +252,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for pending in &mut extraction.pending_pulumi_edges {
         retarget_props_commit(&mut pending.props, commit);
     }
+    extraction.target_tests.retarget(commit);
 }
 
 impl Extraction {
@@ -276,6 +280,7 @@ impl Extraction {
         self.pulumi_bindings.clear();
         self.pending_pulumi_edges.clear();
         self.eval_sites.clear();
+        self.target_tests = target_tests::Pending::default();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -2011,6 +2016,21 @@ fn extract_source_recording(
         }
     }
 
+    // --- Target tests and their GraphQL requests (#968) ---------------------
+    target_tests::extract(
+        &cx,
+        root,
+        &target_tests::Proofs {
+            bindings: &bindings,
+            import_modules: &import_modules,
+            imported_names: &imported_names,
+            imported_files: &imported_types,
+        },
+        &mut out.nodes,
+        &mut out.edges,
+        &mut out.target_tests,
+    );
+
     // --- Event sites: SDK producer/consumer calls (US-0004) ------------------
     // Receiver proof mirrors the endpoint extractor: a site only matches when
     // its constructor/receiver provably comes from the SDK module — never
@@ -3098,6 +3118,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.pulumi_bindings.extend(ex.pulumi_bindings);
     out.pending_pulumi_edges.extend(ex.pending_pulumi_edges);
     out.eval_sites.extend(ex.eval_sites);
+    out.target_tests.extend(ex.target_tests);
 }
 
 /// Shared directory completion. Its live configuration inputs are deliberately
@@ -3144,6 +3165,11 @@ fn complete_directory(
             out.edges.push(pending.gap_edge);
         }
     }
+    target_tests::complete(
+        std::mem::take(&mut out.target_tests),
+        &mut out.nodes,
+        &mut out.edges,
+    );
     for pending in std::mem::take(&mut out.pending_pulumi_edges) {
         let resolve = |endpoint: PulumiEndpoint| match endpoint {
             PulumiEndpoint::Resource(id) => Some(id),
@@ -3377,6 +3403,7 @@ pub mod observed_infra;
 pub(crate) mod resolution;
 mod rule_evidence;
 mod source_expression;
+pub mod target_tests;
 pub mod vue;
 pub mod webextension;
 
