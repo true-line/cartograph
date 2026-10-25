@@ -4186,3 +4186,66 @@ fn vue_router_components_honor_an_explicit_extension() {
         )]
     );
 }
+
+#[test]
+fn vue_router_tables_follow_export_clauses_default_children_and_bindings() {
+    // AC-0349 (#990 review): a table exported through `export { a as b }`
+    // resolves, a default child (`path: ''`) is its parent's URL, and a
+    // parameter named like a module table is a computed path, not the table.
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let sfc = "<template><div/></template>\n<script>\nexport default {}\n</script>\n";
+    write("src/Settings.vue", sfc);
+    write("src/Overview.vue", sfc);
+    write(
+        "src/routes.js",
+        "const PATH = { SETTINGS: '/settings', HOME: '/home' };\n\
+         function buildRoutes(c) {\n  return [\n\
+         \x20   { path: PATH.SETTINGS, component: c.Settings, children: [{ path: '', component: c.Overview }] },\n\
+         \x20 ];\n}\n\
+         function shadowRoutes(PATH, c) {\n  return [{ path: PATH.HOME, component: c.Overview }];\n}\n\
+         export { buildRoutes as getRoutes, shadowRoutes };\n",
+    );
+    write(
+        "src/router.js",
+        "import VueRouter from 'vue-router';\nimport { getRoutes, shadowRoutes } from './routes';\n\
+         import Settings from './Settings.vue';\nimport Overview from './Overview.vue';\n\
+         new VueRouter({ routes: getRoutes({ Settings, Overview }) });\n\
+         new VueRouter({ routes: shadowRoutes({ HOME: '/elsewhere' }, { Settings, Overview }) });\n",
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let screens: BTreeSet<_> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Screen")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(screens, BTreeSet::from(["screen:qwtm/example@/settings"]));
+    let renders: BTreeSet<_> = edge_pairs(&out, "RENDERS")
+        .into_iter()
+        .filter(|(src, _)| src.starts_with("screen:"))
+        .collect();
+    assert_eq!(
+        renders,
+        BTreeSet::from([
+            (
+                "screen:qwtm/example@/settings",
+                "file:qwtm/example@src/Settings.vue"
+            ),
+            (
+                "screen:qwtm/example@/settings",
+                "file:qwtm/example@src/Overview.vue"
+            ),
+        ])
+    );
+    assert!(
+        out.nodes
+            .iter()
+            .any(|n| n.label == "Gap" && n.props["reason"] == client_routes::COMPUTED_PATH_REASON)
+    );
+}

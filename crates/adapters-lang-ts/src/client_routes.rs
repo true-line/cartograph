@@ -350,6 +350,10 @@ fn path_value(cx: &FileCx<'_>, constants: &Constants, value: TsNode<'_>) -> Opti
 }
 
 fn join(prefix: &str, path: &str) -> String {
+    // A default child (`path: ''`) is the parent's own URL.
+    if path.is_empty() {
+        return prefix.to_string();
+    }
     if path.starts_with('/') || prefix.is_empty() {
         return path.to_string();
     }
@@ -405,7 +409,13 @@ impl Reader<'_, '_, '_> {
             let Some(path) = entries.get("path") else {
                 continue;
             };
-            let path = path_value(self.cx, self.constants, *path).map(|p| join(prefix, &p));
+            // A parameter or local named like a module table is not that table.
+            let shadowed = member_root(*path)
+                .is_some_and(|root| locally_bound(self.cx, *path, self.cx.text(&root)));
+            let path = (!shadowed)
+                .then(|| path_value(self.cx, self.constants, *path))
+                .flatten()
+                .map(|p| join(prefix, &p));
             let component = entries
                 .get("component")
                 .map_or(Component::Unresolved, |c| self.component(*c));
@@ -498,9 +508,90 @@ fn exports(cx: &FileCx<'_>, root: TsNode<'_>) -> HashMap<String, String> {
             && value.kind() == "identifier"
         {
             out.insert("default".into(), cx.text(&value).to_string());
+        } else if statement.child_by_field_name("source").is_none() {
+            // `export { a as b }` of this file's own bindings.
+            let mut w = statement.walk();
+            let clauses: Vec<_> = statement
+                .named_children(&mut w)
+                .filter(|c| c.kind() == "export_clause")
+                .collect();
+            for clause in clauses {
+                let mut cw = clause.walk();
+                for specifier in clause.named_children(&mut cw) {
+                    if specifier.kind() != "export_specifier" {
+                        continue;
+                    }
+                    let Some(name) = specifier.child_by_field_name("name") else {
+                        continue;
+                    };
+                    let local = cx.text(&name).to_string();
+                    let exported = specifier
+                        .child_by_field_name("alias")
+                        .map_or_else(|| local.clone(), |a| cx.text(&a).to_string());
+                    out.insert(exported, local);
+                }
+            }
         }
     }
     out
+}
+
+/// Whether `name` is declared again inside a callable enclosing `site`, as a
+/// parameter or by any declaration in its body. Module bindings are matched
+/// by spelling, so this over-approximates (a sibling block counts) and can
+/// only refuse a match.
+pub(crate) fn locally_bound(cx: &FileCx<'_>, site: TsNode<'_>, name: &str) -> bool {
+    let mut node = site;
+    while let Some(parent) = node.parent() {
+        if callable::is_callable(parent)
+            && (parameter_names(cx, parent).iter().any(|p| p == name) || declares(cx, parent, name))
+        {
+            return true;
+        }
+        node = parent;
+    }
+    false
+}
+
+fn declares(cx: &FileCx<'_>, scope: TsNode<'_>, name: &str) -> bool {
+    let mut stack = vec![scope];
+    while let Some(node) = stack.pop() {
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+        let bound = match node.kind() {
+            "variable_declarator" => node.child_by_field_name("name"),
+            "function_declaration" | "class_declaration" if node.id() != scope.id() => {
+                node.child_by_field_name("name")
+            }
+            "catch_clause" => node.child_by_field_name("parameter"),
+            _ => None,
+        };
+        let Some(bound) = bound else {
+            continue;
+        };
+        let mut inner = vec![bound];
+        while let Some(part) = inner.pop() {
+            if matches!(
+                part.kind(),
+                "identifier" | "shorthand_property_identifier_pattern"
+            ) && cx.text(&part) == name
+            {
+                return true;
+            }
+            let mut walk = part.walk();
+            inner.extend(part.named_children(&mut walk));
+        }
+    }
+    false
+}
+
+/// The identifier a `TABLE.KEY` or `Class.FIELD.KEY` path starts from.
+pub(crate) fn member_root(node: TsNode<'_>) -> Option<TsNode<'_>> {
+    let mut node = node;
+    while node.kind() == "member_expression" {
+        node = node.child_by_field_name("object")?;
+    }
+    (node.kind() == "identifier").then_some(node)
 }
 
 /// Index the file's route-table functions and its router registrations.
@@ -777,7 +868,7 @@ pub(crate) fn complete(pending: Pending, repo: &str, nodes: &mut Vec<Node>, edge
             .find(|candidate| pending.files.contains(candidate))
     };
     let gap_id = |e: &EvidenceRef| format!("gap:route:{}@{}@{}", e.repo, e.path, e.byte_start);
-    let mut screens: BTreeMap<String, (Node, Option<Edge>)> = BTreeMap::new();
+    let mut screens: BTreeMap<String, (Node, Vec<Edge>)> = BTreeMap::new();
     let (mut gap_nodes, mut gap_edges) = (Vec::new(), Vec::new());
     for site in &pending.sites {
         let (routes, args): (Vec<Route>, &[Option<Components>]) = match &site.table {
@@ -885,24 +976,23 @@ pub(crate) fn complete(pending: Pending, repo: &str, nodes: &mut Vec<Node>, edge
                 }
             };
             // The same route from two registrations is one screen; a
-            // rendering registration wins over a redirect.
+            // rendering registration wins over a redirect. A layout and its
+            // default child (`path: ''`) both render at that URL.
             let entry = screens.entry(screen.clone()).or_insert((
                 Node {
-                    id: screen.clone(),
+                    id: screen,
                     label: "Screen".into(),
                     props: props.clone(),
                 },
-                None,
+                Vec::new(),
             ));
-            if entry.1.is_none() && renders.is_some() {
-                *entry = (
-                    Node {
-                        id: screen,
-                        label: "Screen".into(),
-                        props,
-                    },
-                    renders,
-                );
+            if let Some(renders) = renders {
+                if entry.1.is_empty() {
+                    entry.0.props = props;
+                }
+                if !entry.1.iter().any(|e| e.dst == renders.dst) {
+                    entry.1.push(renders);
+                }
             }
         }
     }
