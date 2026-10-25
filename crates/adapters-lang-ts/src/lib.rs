@@ -25,7 +25,7 @@ use adapters_fw::events::{
 use adapters_fw::{HTTP_FACTORIES, NEST};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, QueryCursor};
@@ -76,6 +76,9 @@ pub struct Extraction {
     /// facts, so classification and extraction can never disagree (the
     /// plugin-coverage pattern from #201, host-filled).
     pub eval_sites: Vec<EvalSite>,
+    /// Exported GraphQL documents and test client requests awaiting
+    /// directory-wide resolution (#968).
+    target_tests: target_tests::Pending,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -249,6 +252,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for pending in &mut extraction.pending_pulumi_edges {
         retarget_props_commit(&mut pending.props, commit);
     }
+    extraction.target_tests.retarget(commit);
 }
 
 impl Extraction {
@@ -276,6 +280,7 @@ impl Extraction {
         self.pulumi_bindings.clear();
         self.pending_pulumi_edges.clear();
         self.eval_sites.clear();
+        self.target_tests = target_tests::Pending::default();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -852,6 +857,15 @@ pub const SOURCE_EXTENSIONS: [&str; 6] = [".ts", ".tsx", ".js", ".jsx", ".mjs", 
 /// directory-wide later by `reconcile_guessed_extension` if the real file
 /// turns out to be `.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs` — the real extension
 /// isn't knowable from one file in isolation).
+/// Whether a relative specifier names no known extension, so
+/// [`resolve_relative`] guesses `.ts` for it.
+fn guesses_extension(spec: &str) -> bool {
+    !SOURCE_EXTENSIONS
+        .iter()
+        .chain(ASSET_EXTENSIONS)
+        .any(|ext| spec.ends_with(ext))
+}
+
 fn resolve_relative(from: &str, spec: &str) -> Option<String> {
     if !spec.starts_with('.') {
         return None;
@@ -868,11 +882,7 @@ fn resolve_relative(from: &str, spec: &str) -> Option<String> {
         }
     }
     let mut s = out.to_string_lossy().replace('\\', "/");
-    if !SOURCE_EXTENSIONS
-        .iter()
-        .chain(ASSET_EXTENSIONS)
-        .any(|ext| s.ends_with(ext))
-    {
+    if guesses_extension(&s) {
         s.push_str(".ts");
     }
     Some(s)
@@ -1501,6 +1511,7 @@ fn extract_source_recording(
     let mut import_modules: HashMap<String, String> = HashMap::new(); // local name -> module spec
     let mut imported_names: HashMap<String, String> = HashMap::new(); // local -> exported name
     let mut imported_types: HashMap<String, (String, String)> = HashMap::new(); // local -> (file, exported type)
+    let mut guessed_imports: HashSet<String> = HashSet::new(); // relative imports with no extension
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(q_imports, root, source);
     while let Some(m) = matches.next() {
@@ -1556,6 +1567,9 @@ fn extract_source_recording(
                             let exported_name = cx.text(&name).to_string();
                             imported_names.insert(local_name.clone(), exported_name.clone());
                             if let Some(f) = &target_file {
+                                if guesses_extension(&spec) {
+                                    guessed_imports.insert(local_name.clone());
+                                }
                                 imported
                                     .insert(local_name.clone(), sym_id(id.repo, f, &exported_name));
                                 imported_types.insert(local_name, (f.clone(), exported_name));
@@ -2010,6 +2024,22 @@ fn extract_source_recording(
             }
         }
     }
+
+    // --- Target tests and their GraphQL requests (#968) ---------------------
+    target_tests::extract(
+        &cx,
+        root,
+        &target_tests::Proofs {
+            bindings: &bindings,
+            import_modules: &import_modules,
+            imported_names: &imported_names,
+            imported_files: &imported_types,
+            guessed_imports: &guessed_imports,
+        },
+        &mut out.nodes,
+        &mut out.edges,
+        &mut out.target_tests,
+    );
 
     // --- Event sites: SDK producer/consumer calls (US-0004) ------------------
     // Receiver proof mirrors the endpoint extractor: a site only matches when
@@ -3098,6 +3128,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.pulumi_bindings.extend(ex.pulumi_bindings);
     out.pending_pulumi_edges.extend(ex.pending_pulumi_edges);
     out.eval_sites.extend(ex.eval_sites);
+    out.target_tests.extend(ex.target_tests);
 }
 
 /// Shared directory completion. Its live configuration inputs are deliberately
@@ -3144,6 +3175,11 @@ fn complete_directory(
             out.edges.push(pending.gap_edge);
         }
     }
+    target_tests::complete(
+        std::mem::take(&mut out.target_tests),
+        &mut out.nodes,
+        &mut out.edges,
+    );
     for pending in std::mem::take(&mut out.pending_pulumi_edges) {
         let resolve = |endpoint: PulumiEndpoint| match endpoint {
             PulumiEndpoint::Resource(id) => Some(id),
@@ -3377,6 +3413,7 @@ pub mod observed_infra;
 pub(crate) mod resolution;
 mod rule_evidence;
 mod source_expression;
+pub mod target_tests;
 pub mod vue;
 pub mod webextension;
 

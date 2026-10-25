@@ -3613,3 +3613,355 @@ export class HealthResolver {
         [("GET", "/health/live"), ("QUERY", "admin.health")]
     );
 }
+
+// AC-0348 (T-0348): the GraphQL root-field reader.
+#[test]
+fn graphql_root_fields_read_one_operation_and_refuse_ambiguity() {
+    use target_tests::root_fields;
+    let (kind, fields) = root_fields(
+        "# list\nquery GetCustomers($options: CustomerListOptions = { take: 2 }) {\n  list: customers(options: $options) @include(if: true) { items { id } }\n  __typename\n  activeChannel { id }\n}\nfragment F on Customer { id }",
+    )
+    .unwrap();
+    assert_eq!(kind, "query");
+    assert_eq!(fields, ["activeChannel", "customers"]);
+    assert_eq!(
+        root_fields("mutation { createCustomer(input: { name: \"a{b\" }) { id } }").unwrap(),
+        ("mutation", vec!["createCustomer".to_string()])
+    );
+    // A shorthand query and a nested interpolation are fine.
+    assert_eq!(root_fields("{ me { \u{1} } }").unwrap().1, ["me"]);
+    for (text, reason) in [
+        (
+            "query A { a } query B { b }",
+            "GraphQL document has more than one operation",
+        ),
+        (
+            "query { ...Root }",
+            "GraphQL operation selects a fragment at its root",
+        ),
+        (
+            "query { \u{1} }",
+            "GraphQL document is interpolated at its root",
+        ),
+        (
+            "fragment F on X { id }",
+            "GraphQL document has no operation",
+        ),
+        ("query { a(", "GraphQL document is malformed"),
+    ] {
+        assert_eq!(root_fields(text).unwrap_err(), reason, "{text}");
+    }
+}
+
+// AC-0348 (T-0348).
+#[test]
+fn vitest_tests_request_graphql_operations_through_proven_clients() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "src/api/resolvers/admin/customer.resolver.ts",
+        "import { Mutation, Query, Resolver } from '@nestjs/graphql';\n@Resolver()\nexport class CustomerResolver {\n  @Query() customers() {}\n  @Mutation() createCustomer() {}\n}\n",
+    );
+    write(
+        "src/api/resolvers/shop/shop.resolver.ts",
+        "import { Query, Resolver } from '@nestjs/graphql';\n@Resolver()\nexport class ShopResolver { @Query() activeCustomer() {} }\n",
+    );
+    write(
+        "src/plugin/plugin.resolver.ts",
+        "import { Query, Resolver } from '@nestjs/graphql';\n@Resolver()\nexport class PluginResolver { @Query() pluginThing() {} }\n",
+    );
+    write(
+        "e2e/graphql/shared.ts",
+        "import { graphql } from './graphql-admin';\nexport const getCustomersDocument = graphql(`query GetCustomers { customers { items { id } } }`);\nexport const notADocument = `query { customers { id } }`;\n",
+    );
+    write(
+        "e2e/customer.e2e-spec.ts",
+        r#"import { createTestEnvironment } from '@vendure/testing';
+import { describe, it, expect } from 'vitest';
+import gql from 'graphql-tag';
+import { getCustomersDocument, notADocument, missingDocument } from './graphql/shared';
+
+const { server, adminClient, shopClient: shop } = createTestEnvironment({});
+const CREATE = gql`mutation { createCustomer(input: {}) { id } }`;
+
+describe('Customer resolver', () => {
+  it('lists customers', async () => {
+    const r = await adminClient.query(getCustomersDocument);
+    await adminClient.query(CREATE, {});
+    await shop.query(gql`query { activeCustomer { id } pluginThing unknownField }`);
+    expect(r).toBeDefined();
+  });
+  describe('nested', () => {
+    it.only('lists customers', async () => {
+      await shop.query(getCustomersDocument);
+    });
+    it('lists customers', async () => {
+      await adminClient.query(notADocument);
+      await adminClient.query(missingDocument);
+      await adminClient.query(`query { customers { id } }`);
+    });
+  });
+  it('wrapped', assertThrows(async () => {
+    await adminClient.query(getCustomersDocument);
+  }, 'message'));
+  it(`computed ${1}`, () => {});
+  it('shadowed', async () => {
+    const adminClient = { query: (_: unknown) => {} };
+    await adminClient.query(CREATE);
+  });
+});
+"#,
+    );
+    // A monorepo spec importing the factory's own source file.
+    write(
+        "testing/lib/create-test-environment.ts",
+        "export function createTestEnvironment(_: unknown) { return {}; }\n",
+    );
+    write(
+        "e2e/monorepo.e2e-spec.ts",
+        "import { createTestEnvironment } from '../testing/lib/create-test-environment';\nimport { it } from 'vitest';\nimport { getCustomersDocument } from './graphql/shared';\nconst { adminClient } = createTestEnvironment({});\nit('monorepo', async () => { await adminClient.query(getCustomersDocument); });\n",
+    );
+    let ex = extract_dir(dir.path(), &id()).unwrap();
+    assert!(ex.edges.iter().any(|e| e.label == "REQUESTS"
+        && e.src == "test:qwtm/example@e2e/monorepo.e2e-spec.ts#monorepo"
+        && e.dst == "ep:qwtm/example@graphql:admin:query:customers"));
+    let tests: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.label == "TestCase" && n.props["path"] == "e2e/customer.e2e-spec.ts")
+        .map(|n| n.id.as_str())
+        .collect();
+    let base = "test:qwtm/example@e2e/customer.e2e-spec.ts#Customer resolver";
+    assert_eq!(
+        tests,
+        [
+            format!("{base} > lists customers"),
+            format!("{base} > nested > lists customers"),
+            format!("{base} > nested > lists customers [2]"),
+            format!("{base} > wrapped"),
+            format!("{base} > shadowed"),
+        ]
+    );
+    let requests: BTreeSet<_> = ex
+        .edges
+        .iter()
+        .filter(|e| e.label == "REQUESTS" && !e.dst.starts_with("gap:") && e.src.starts_with(base))
+        .map(|e| {
+            (
+                e.src.trim_start_matches(base),
+                e.dst.as_str(),
+                e.props["prov"]["confidence_tier"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        requests,
+        BTreeSet::from([
+            (
+                " > lists customers",
+                "ep:qwtm/example@graphql:admin:query:customers",
+                "InferredStrong"
+            ),
+            (
+                " > lists customers",
+                "ep:qwtm/example@graphql:admin:mutation:createCustomer",
+                "InferredStrong"
+            ),
+            (
+                " > lists customers",
+                "ep:qwtm/example@graphql:shop:query:activeCustomer",
+                "InferredStrong"
+            ),
+            // Only a default-scoped resolver serves it: assumed, so weak.
+            (
+                " > lists customers",
+                "ep:qwtm/example@graphql:default:query:pluginThing",
+                "InferredWeak"
+            ),
+            // A callback passed through a wrapper is still the test's code.
+            (
+                " > wrapped",
+                "ep:qwtm/example@graphql:admin:query:customers",
+                "InferredStrong"
+            ),
+        ])
+    );
+    let gaps: BTreeMap<_, _> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap" && n.id.starts_with("gap:test-"))
+        .map(|n| {
+            (
+                n.props["field"].as_str().unwrap_or(""),
+                n.props["reason"].as_str().unwrap(),
+            )
+        })
+        .fold(BTreeMap::new(), |mut map, (field, reason)| {
+            *map.entry((field, reason)).or_insert(0) += 1;
+            map
+        });
+    assert_eq!(
+        gaps,
+        BTreeMap::from([
+            // The shop client's `customers` is admin-only; `unknownField` is unserved.
+            (("customers", target_tests::UNSERVED_FIELD_REASON), 1),
+            (("unknownField", target_tests::UNSERVED_FIELD_REASON), 1),
+            // A plain template, an unexported import and an untagged literal.
+            (("", target_tests::COMPUTED_DOCUMENT_REASON), 3),
+            (("", target_tests::COMPUTED_NAME_REASON), 1),
+        ])
+    );
+    // The shadowed local `adminClient` is not the test client.
+    assert!(
+        !ex.edges
+            .iter()
+            .any(|e| e.src.ends_with("> shadowed") && e.label == "REQUESTS")
+    );
+    let only = ex
+        .nodes
+        .iter()
+        .find(|n| n.id.ends_with("nested > lists customers"))
+        .unwrap();
+    assert_eq!(only.props["modifier"], "only");
+}
+
+// AC-0348 (T-0348): only the test's own code is read, and an imported
+// document comes from the file the import resolves to.
+#[test]
+fn vitest_requests_skip_declared_helpers_and_resolve_the_imported_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "src/api/resolvers/admin/product.resolver.ts",
+        "import { Query, Resolver } from '@nestjs/graphql';\n@Resolver()\nexport class ProductResolver { @Query() product() {} @Query() products() {} }\n",
+    );
+    // `explicit.ts` exists but its export is not a recovered document; the
+    // directory index beside it exports a literal of the same name.
+    write(
+        "e2e/docs/explicit.ts",
+        "export const doc = buildDocument();\n",
+    );
+    write(
+        "e2e/docs/explicit/index.ts",
+        "import { graphql } from './graphql';\nexport const doc = graphql(`query { products { id } }`);\n",
+    );
+    // NodeNext: `./next.js` names the TypeScript source it is emitted from.
+    write(
+        "e2e/docs/next.ts",
+        "import { graphql } from './graphql';\nexport const doc = graphql(`query { products { id } }`);\n",
+    );
+    // `missing.ts` does not exist: its siblings are not what it names.
+    for path in ["e2e/docs/missing/index.ts", "e2e/docs/missing.tsx"] {
+        write(
+            path,
+            "import { graphql } from './graphql';\nexport const doc = graphql(`query { products { id } }`);\n",
+        );
+    }
+    write(
+        "e2e/docs/listed/index.ts",
+        "import { graphql } from './graphql';\nexport const doc = graphql(`query { products { id } }`);\n",
+    );
+    write(
+        "e2e/product.e2e-spec.ts",
+        r#"import { createTestEnvironment } from '@vendure/testing';
+import { it } from 'vitest';
+import { graphql } from './graphql';
+import { doc as explicitDoc } from './docs/explicit.ts';
+import { doc as extensionless } from './docs/explicit';
+import { doc as indexed } from './docs/listed';
+import { doc as missing } from './docs/missing.ts';
+import { doc as nodenext } from './docs/next.js';
+const { adminClient } = createTestEnvironment({});
+const PRODUCT = graphql(`query { product { id } }`);
+it('no request', async () => {
+  function unused() { adminClient.query(PRODUCT); }
+  const alsoUnused = async () => { await adminClient.query(PRODUCT); };
+  const wrapped = (() => adminClient.query(PRODUCT));
+  const typed = (async () => { await adminClient.query(PRODUCT); }) as () => Promise<void>;
+  const checked = (() => adminClient.query(PRODUCT)) satisfies () => unknown;
+});
+it('iife', async () => { await (async () => adminClient.query(PRODUCT))(); });
+it('direct', async () => {
+  await adminClient.query(PRODUCT);
+  await Promise.all([1].map(async () => adminClient.query(PRODUCT)));
+});
+it('explicit file', async () => { await adminClient.query(explicitDoc); });
+it('existing file', async () => { await adminClient.query(extensionless); });
+it('directory index', async () => { await adminClient.query(indexed); });
+it('missing explicit file', async () => { await adminClient.query(missing); });
+it('nodenext', async () => { await adminClient.query(nodenext); });
+"#,
+    );
+    let ex = extract_dir(dir.path(), &id()).unwrap();
+    let base = "test:qwtm/example@e2e/product.e2e-spec.ts#";
+    let requests = |test: &str| -> BTreeSet<&str> {
+        ex.edges
+            .iter()
+            .filter(|e| e.label == "REQUESTS" && e.src == format!("{base}{test}"))
+            .map(|e| {
+                if e.dst.starts_with("gap:") {
+                    "gap"
+                } else {
+                    e.dst.as_str()
+                }
+            })
+            .collect()
+    };
+    // An uncalled helper, declared or bound to a name, is not the test's code.
+    assert!(requests("no request").is_empty());
+    // An immediately invoked function is.
+    assert_eq!(
+        requests("iife"),
+        BTreeSet::from(["ep:qwtm/example@graphql:admin:query:product"])
+    );
+    // A direct call and a callback passed as an argument are.
+    assert_eq!(
+        requests("direct"),
+        BTreeSet::from(["ep:qwtm/example@graphql:admin:query:product"])
+    );
+    // The imported file exists and its export is not recovered: a Gap, not
+    // the directory index's same-named export.
+    assert_eq!(requests("explicit file"), BTreeSet::from(["gap"]));
+    assert_eq!(requests("existing file"), BTreeSet::from(["gap"]));
+    // An explicit `.ts` that does not exist is a Gap, never a sibling.
+    assert_eq!(requests("missing explicit file"), BTreeSet::from(["gap"]));
+    assert_eq!(
+        requests("nodenext"),
+        BTreeSet::from(["ep:qwtm/example@graphql:admin:query:products"])
+    );
+    // Each test is implemented by its own callback, a recovered Symbol.
+    let symbols: BTreeSet<&str> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Symbol")
+        .map(|n| n.id.as_str())
+        .collect();
+    for test in ex.nodes.iter().filter(|n| n.label == "TestCase") {
+        let [implemented] = ex
+            .edges
+            .iter()
+            .filter(|e| e.label == "IMPLEMENTED_BY" && e.src == test.id)
+            .collect::<Vec<_>>()[..]
+        else {
+            panic!("{} has one IMPLEMENTED_BY", test.id)
+        };
+        assert!(
+            symbols.contains(implemented.dst.as_str()),
+            "{}",
+            implemented.dst
+        );
+    }
+    // With no `listed.ts`, the import resolves to the directory index.
+    assert_eq!(
+        requests("directory index"),
+        BTreeSet::from(["ep:qwtm/example@graphql:admin:query:products"])
+    );
+}
