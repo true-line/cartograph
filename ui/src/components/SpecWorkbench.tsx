@@ -17,6 +17,7 @@ import {
   SpecDiagramCanvas,
   verifyDiagramViewIdentity,
 } from './SpecDiagramView';
+import { renderArtifactMarkdown } from '../markdownView';
 import { TierBadge, methodLabel } from './TierBadge';
 
 export interface SpecWorkbenchProps {
@@ -132,6 +133,7 @@ export function SpecWorkbench({
   onSelectEdge,
 }: SpecWorkbenchProps) {
   const [selectedId, setSelectedId] = useState('');
+  const [artifactView, setArtifactView] = useState<'rendered' | 'source'>('rendered');
   const [notes, setNotes] = useState<Record<string, string>>({});
   const decisionByHash = useMemo(
     () => new Map(decisions.map((record) => [record.assertion.provenance.content_hash, record])),
@@ -154,6 +156,12 @@ export function SpecWorkbench({
   }, [selected, isDiagramArtifact, views]);
   const hasValidDiagramView = Boolean(
     selectedDiagramView && verifyDiagramViewIdentity(selectedDiagramView, selected),
+  );
+  const selectedMarkdownContent =
+    selected && !isDiagramArtifact && selected.format === 'markdown' ? selected.content : null;
+  const renderedMarkdown = useMemo(
+    () => (selectedMarkdownContent !== null ? renderArtifactMarkdown(selectedMarkdownContent) : null),
+    [selectedMarkdownContent],
   );
 
   return (
@@ -293,20 +301,55 @@ export function SpecWorkbench({
                       </pre>
                     </details>
                   </>
-                ) : (
+                ) : isDiagramArtifact ? (
                   <>
-                    {isDiagramArtifact && (
-                      <p
-                        className="muted spec-diagram-unavailable"
-                        data-testid="diagram-view-unavailable"
-                      >
-                        {STRUCTURED_VIEW_UNAVAILABLE_NOTICE}
-                      </p>
-                    )}
+                    <p
+                      className="muted spec-diagram-unavailable"
+                      data-testid="diagram-view-unavailable"
+                    >
+                      {STRUCTURED_VIEW_UNAVAILABLE_NOTICE}
+                    </p>
                     <pre className="spec-artifact-source" data-testid="spec-artifact-source">
                       {selected.content}
                     </pre>
                   </>
+                ) : selected.format === 'markdown' ? (
+                  <>
+                    <div className="spec-artifact-view-toggle" role="group" aria-label="Artifact view">
+                      <button
+                        type="button"
+                        className={artifactView === 'rendered' ? 'active' : ''}
+                        aria-pressed={artifactView === 'rendered'}
+                        onClick={() => setArtifactView('rendered')}
+                      >
+                        Rendered
+                      </button>
+                      <button
+                        type="button"
+                        className={artifactView === 'source' ? 'active' : ''}
+                        aria-pressed={artifactView === 'source'}
+                        onClick={() => setArtifactView('source')}
+                      >
+                        Source
+                      </button>
+                    </div>
+                    {artifactView === 'rendered' ? (
+                      <div
+                        className="spec-artifact-rendered md-view"
+                        data-testid="spec-artifact-rendered"
+                      >
+                        {renderedMarkdown}
+                      </div>
+                    ) : (
+                      <pre className="spec-artifact-source" data-testid="spec-artifact-source">
+                        {selected.content}
+                      </pre>
+                    )}
+                  </>
+                ) : (
+                  <pre className="spec-artifact-source" data-testid="spec-artifact-source">
+                    {selected.content}
+                  </pre>
                 )}
                 {selected.content_truncated && (
                   <p className="muted spec-artifact-truncated-note" data-testid="spec-artifact-truncated-note">

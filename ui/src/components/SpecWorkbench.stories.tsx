@@ -273,6 +273,7 @@ export const FullArtifactSetAndInlineProvenance: Story = {
     await expect(detail.getByText(/Source observations only/)).toHaveTextContent(
       'Complete execution predicates and consumer effects are not established.',
     );
+    await userEvent.click(detail.getByRole('button', { name: 'Source' }));
     await expect(detail.getByTestId('spec-artifact-source')).toHaveTextContent(
       'Consumer effect: not established.',
     );
@@ -299,6 +300,7 @@ export const LocalConstInitializersKeepObservationAuthority: Story = {
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Source' }));
     const source = canvas.getByTestId('spec-artifact-source');
     await expect(source).toHaveTextContent('Same-callable branch condition: (allowed)');
     await expect(source).toHaveTextContent('Initializer as written; value at use and business meaning are not established.');
@@ -327,6 +329,7 @@ export const LegacyRuleDefinitionsWereNotCollected: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Source' }));
     await expect(canvas.getByTestId('spec-artifact-source')).toHaveTextContent('Local-definition evidence was not collected in this version 1 observation.');
     await expect(canvas.getByText(/Source observations only/)).toHaveTextContent('Complete execution predicates and consumer effects are not established.');
     await expect(canvas.getByText(SOURCE_RULE.summary)).toBeInTheDocument();
@@ -343,6 +346,7 @@ export const SecurityFindings: Story = {
     await expect(
       canvas.getByText('Finding: Over-broad IAM grant: admin policy → orders/*'),
     ).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole('button', { name: 'Source' }));
     const source = canvas.getByTestId('spec-artifact-source');
     await expect(source).toHaveTextContent('US-0015 / AC-0041');
     await expect(source).toHaveTextContent('US-0015 / AC-0042');
@@ -489,6 +493,7 @@ export const FoundRecoveredAndDrift: Story = {
     await expect(canvas.getByText('ADR: asynchronous fulfillment')).toBeInTheDocument();
     await expect(canvas.getByText('t0.adr-markdown')).toBeInTheDocument();
     await userEvent.click(within(nav).getByRole('button', { name: /Drift register/ }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Source' }));
     await expect(canvas.getByTestId('spec-artifact-source')).toHaveTextContent(
       'sym:handler CALLS sym:remote',
     );
@@ -527,6 +532,7 @@ export const TruncatedArtifactShowsCountedNote: Story = {
     await expect(within(gapChip).getByText('4200')).toBeInTheDocument();
 
     await userEvent.click(within(nav).getByRole('button', { name: /Gap register/ }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Source' }));
     await expect(canvas.getByTestId('spec-artifact-source')).toHaveTextContent(
       'first first first',
     );
@@ -772,6 +778,53 @@ export const RenderedViewsMatchExportedIdentityAndSelectEvidence: Story = {
     await expect(dataDiagram.getByTestId('diagram-selected-evidence')).toHaveTextContent(
       'Confirmed',
     );
+  },
+};
+
+export const MarkdownArtifactsRenderByDefault: Story = {
+  args: {
+    bundle: {
+      ...BUNDLE,
+      artifacts: BUNDLE.artifacts.map((item) =>
+        item.id === 'security-view'
+          ? {
+              ...item,
+              content:
+                '# Security findings\n\nInspect `GET /admin` exposure.\n\n| Finding | Confidence |\n|---|---|\n| Unauthenticated endpoint: GET /admin | Confirmed |\n',
+            }
+          : item,
+      ),
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const nav = canvas.getByRole('navigation', { name: 'Official spec artifacts' });
+    await userEvent.click(within(nav).getByRole('button', { name: /Security findings/ }));
+
+    const renderedBtn = canvas.getByRole('button', { name: 'Rendered' });
+    const sourceBtn = canvas.getByRole('button', { name: 'Source' });
+    await expect(renderedBtn).toHaveAttribute('aria-pressed', 'true');
+    await expect(sourceBtn).toHaveAttribute('aria-pressed', 'false');
+
+    const rendered = within(canvas.getByTestId('spec-artifact-rendered'));
+    await expect(rendered.getByRole('heading', { name: 'Security findings' })).toBeInTheDocument();
+    const table = rendered.getByRole('table');
+    await expect(table).toHaveTextContent('Unauthenticated endpoint: GET /admin');
+    await expect(table).toHaveTextContent('Confirmed');
+    await expect(rendered.getByText('GET /admin').tagName).toBe('CODE');
+
+    await userEvent.click(sourceBtn);
+    await expect(sourceBtn).toHaveAttribute('aria-pressed', 'true');
+    await expect(renderedBtn).toHaveAttribute('aria-pressed', 'false');
+    await expect(canvas.getByTestId('spec-artifact-source')).toHaveTextContent(
+      '| Finding | Confidence |',
+    );
+
+    await userEvent.click(renderedBtn);
+    await expect(renderedBtn).toHaveAttribute('aria-pressed', 'true');
+    await expect(
+      within(canvas.getByTestId('spec-artifact-rendered')).getByRole('table'),
+    ).toHaveTextContent('Unauthenticated endpoint: GET /admin');
   },
 };
 
