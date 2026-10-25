@@ -3,6 +3,7 @@
 //! These units cover named buffers and JSON/header roles, not allocator slack,
 //! SQLite caches, executor tasks, native stacks, kernel buffers or process RSS.
 //! The worker's phase minimum is composed separately in worker_bound.
+pub(crate) mod capture;
 pub(crate) mod evidence;
 pub(crate) mod receipt;
 pub(crate) mod schema;
