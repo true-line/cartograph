@@ -388,9 +388,9 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
         agents::investigation::MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
         limits.max_request_frame_bytes.get(),
     )?;
-    let provider = context.checked_add(crate::investigations::provider_workspace::payload_peak(
+    let provider = crate::investigations::provider_workspace::payload_peak(
         &agents::investigation::INVESTIGATION_V2_POLICY,
-    )?)?;
+    )?;
     let (_, decode) = crate::jobs::investigations::next_prompt_record_workspace(
         agents::investigation::MAX_RECORD_BYTES,
     )?;
@@ -398,32 +398,38 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
     // not rely on later row-lifetime optimizations in the parent branch.
     let validation =
         decode.checked_add(crate::jobs::investigations::next_prompt_contract_workspace()?)?;
-    required_reservation(limits)?.checked_add(
-        preparation
-            .max(provider)
-            .max(validation)
-            .max(crate::jobs::investigations::archive_acquisition_workspace()?)
-            .max(crate::jobs::investigations::next_prompt_ledger_workspace()?)
-            .max(crate::jobs::investigations::next_prompt_metadata_workspace()?.2)
-            .max(crate::jobs::investigations::next_prompt_saved_call_workspace()?.1)
-            .max(crate::jobs::investigations::next_prompt_timeline_workspace()?.1)
-            .max(crate::jobs::investigations::next_prompt_capacity_replay_workspace()?.1)
-            .max(crate::jobs::investigations::next_prompt_saved_validation_workspace()?.0)
-            .max(crate::jobs::investigations::next_prompt_saved_validation_workspace()?.1)
-            .max(crate::jobs::investigations::next_prompt_pending_source_workspace()?)
-            .max(crate::jobs::investigations::next_prompt_result_workspace()?.1)
-            .max(crate::jobs::investigations::next_prompt_staged_workspace()?.1)
-            .max(crate::jobs::investigations::next_prompt_task_load_workspace()?.1)
-            .max(
-                crate::jobs::investigations::next_prompt_attempt_replay_workspace()?.checked_add(
-                    agents::investigation::disclosure_validation_workspace(
-                        &agents::investigation::INVESTIGATION_V2_POLICY,
-                        agents::investigation::MAX_RECORD_BYTES,
-                    )?,
+    let execution = provider
+        .max(validation)
+        .max(crate::jobs::investigations::archive_acquisition_workspace()?)
+        .max(crate::jobs::investigations::next_prompt_ledger_workspace()?)
+        .max(crate::jobs::investigations::next_prompt_metadata_workspace()?.2)
+        .max(crate::jobs::investigations::next_prompt_saved_call_workspace()?.1)
+        .max(crate::jobs::investigations::next_prompt_timeline_workspace()?.1)
+        .max(crate::jobs::investigations::next_prompt_capacity_replay_workspace()?.1)
+        .max(crate::jobs::investigations::next_prompt_saved_validation_workspace()?.0)
+        .max(crate::jobs::investigations::next_prompt_saved_validation_workspace()?.1)
+        .max(crate::jobs::investigations::next_prompt_pending_source_workspace()?)
+        .max(crate::jobs::investigations::next_prompt_result_workspace()?.1)
+        .max(crate::jobs::investigations::next_prompt_staged_workspace()?.1)
+        .max(crate::jobs::investigations::next_prompt_task_load_workspace()?.1)
+        .max(
+            crate::jobs::investigations::next_prompt_attempt_replay_workspace()?.checked_add(
+                agents::investigation::disclosure_validation_workspace(
+                    &agents::investigation::INVESTIGATION_V2_POLICY,
+                    agents::investigation::MAX_RECORD_BYTES,
                 )?,
-            )
-            .checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?,
-    )
+            )?,
+        );
+    // FrozenContext survives the whole execution loop, including saved-task
+    // reads and validation. Preparation already includes its retained context.
+    let per_task = task_execution_peak(preparation, context, execution)?;
+    required_reservation(limits)?
+        .checked_add(per_task.checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?)
+}
+
+#[cfg(unix)]
+fn task_execution_peak(preparation: usize, context: usize, execution: usize) -> Option<usize> {
+    Some(preparation.max(context.checked_add(execution)?))
 }
 
 struct RequestCounter {
@@ -519,6 +525,16 @@ pub(crate) mod tests {
             limits
         };
         limits
+    }
+    #[cfg(unix)]
+    #[test]
+    fn task_floor_retains_context_during_saved_task_replay() {
+        // AC-0327: replay dominates in this witness; preparation cannot mask
+        // a missing retained-context owner as it can at today's default caps.
+        assert_eq!(task_execution_peak(30, 11, 50), Some(61));
+        // Preparation already includes its context and is not charged twice.
+        assert_eq!(task_execution_peak(100, 11, 50), Some(100));
+        assert_eq!(task_execution_peak(1, usize::MAX, 1), None);
     }
     #[cfg(unix)]
     #[test]
