@@ -1273,6 +1273,9 @@ fn push_typed(
         Some((first, rest)) => (first, Some(rest)),
         None => (ty, None),
     };
+    if receivers::is_type_parameter(cx, call, first) {
+        return;
+    }
     let with_rest = |base: &str| match rest {
         Some(rest) => format!("{base}.{rest}"),
         None => base.to_string(),
@@ -1299,6 +1302,10 @@ fn push_typed(
             Some(qualified) => candidates.push(prefix(&qualified)),
             None => {
                 candidates.push(prefix(ty));
+                // A dotted name may already be absolute (`com.acme.Api`).
+                if rest.is_some() && package.is_some() {
+                    candidates.push(ty.to_string());
+                }
                 candidates.extend(
                     imports
                         .wildcard_packages

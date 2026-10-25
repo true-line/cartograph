@@ -2152,7 +2152,9 @@ import io.x.net.Datasource
 
 class Box<T> { fun get(): T = TODO() }
 class Helper { fun help() {} }
-interface Thing { fun act() }
+interface Thing {
+    fun act()
+}
 
 class Vm(private val ds: Datasource, plain: Datasource) {
     private val x: Datasource = ds
@@ -2171,7 +2173,24 @@ class Vm(private val ds: Datasource, plain: Datasource) {
     fun lambdaLocal() { run { val y: Datasource = make(); y.stats() } }
     class Nested { fun n() { ds.stats() } }
 }
+
+fun qualified(a: io.x.net.ApiService) { a.other() }
 "#,
+    );
+    write(
+        dir.path(),
+        "feature/Generic.kt",
+        "package io.x.feature\n\nclass Tp {\n    fun m() {}\n}\n\nfun <Tp> typeParam(x: Tp) {\n    x.m()\n}\n\nclass Holder<Tp>(val t: Tp) {\n    fun h() {\n        t.m()\n    }\n}\n",
+    );
+    write(
+        dir.path(),
+        "feature/Local.kt",
+        "package io.x.feature\n\nimport io.x.net.Datasource\n\nfun localClass(api: Datasource) {\n    class Local {\n        fun g() {\n            api.stats()\n        }\n    }\n}\n",
+    );
+    write(
+        dir.path(),
+        "feature/Loop.kt",
+        "package io.x.feature\n\nimport io.x.net.Datasource\n\nfun loopIterable(source: Datasource) {\n    for (source in source.stats()) {\n        println(source)\n    }\n}\n",
     );
     write(
         dir.path(),
@@ -2213,6 +2232,9 @@ class Vm(private val ds: Datasource, plain: Datasource) {
             pair("Vm.viaThis", "Datasource.stats"),
             pair("Vm.constructed", "Helper.help"),
             pair("star", "ApiService.other"),
+            pair("qualified", "ApiService.other"),
+            pair("loopIterable", "Datasource.stats"),
+            pair("Local.g", "Datasource.stats"),
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>()

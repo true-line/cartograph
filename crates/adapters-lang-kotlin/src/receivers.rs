@@ -188,7 +188,13 @@ pub(crate) fn lexical_binding(
                     return found;
                 }
             }
-            "for_statement" | "catch_block" => {
+            // A loop variable is in scope only in the body, not the iterable.
+            "for_statement" | "catch_block"
+                if scope.kind() == "catch_block"
+                    || named_children(scope)
+                        .last()
+                        .is_some_and(|body| body.id() == child.id()) =>
+            {
                 for decl in named_children(scope) {
                     if matches!(decl.kind(), "variable_declaration" | "parameter")
                         && let Some(binding) = declaration_binding(cx, decl, name)
@@ -259,9 +265,14 @@ pub(crate) fn lexical_binding(
                 if let Some(binding) = class_binding(cx, scope, name, in_function) {
                     return Some(binding);
                 }
-                // Only an inner class reaches outer instance state; nested
-                // classes, objects and companions see top-level properties.
-                if !(scope.kind() == "class_declaration" && is_inner(cx, scope)) {
+                // A local class captures its enclosing function's bindings
+                // and an inner class reaches outer instance state; member
+                // nested classes, objects and companions see only the top level.
+                let local = scope
+                    .parent()
+                    .is_some_and(|parent| !matches!(parent.kind(), "class_body" | "source_file"));
+                let inner = scope.kind() == "class_declaration" && is_inner(cx, scope);
+                if !local && !inner {
                     return top_level_binding(cx, scope, name);
                 }
                 in_function = true;
@@ -303,4 +314,34 @@ pub(crate) fn this_property_binding(
         node = parent;
     }
     None
+}
+
+/// Whether `name` is a type parameter of a declaration enclosing `site`:
+/// `fun <T> f(x: T)` or `class C<T>` (W11c-1). Such a type proves no target.
+pub(crate) fn is_type_parameter(cx: &FileCx<'_>, site: TsNode<'_>, name: &str) -> bool {
+    let mut node = site;
+    while let Some(parent) = node.parent() {
+        node = parent;
+        if !matches!(
+            parent.kind(),
+            "function_declaration" | "class_declaration" | "anonymous_function"
+        ) {
+            continue;
+        }
+        let declares = named_children(parent)
+            .into_iter()
+            .filter(|part| part.kind() == "type_parameters")
+            .flat_map(named_children)
+            .filter(|param| param.kind() == "type_parameter")
+            .any(|param| {
+                named_children(param)
+                    .into_iter()
+                    .find(|part| part.kind() == "identifier")
+                    .is_some_and(|ident| cx.text(&ident) == name)
+            });
+        if declares {
+            return true;
+        }
+    }
+    false
 }
