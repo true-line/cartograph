@@ -462,6 +462,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     &self.detail.usage,
                 )?
             };
+            // Input owns its projection; saved replay rows are no longer needed
+            // during disclosure, consent or provider execution.
+            drop(next_snapshot);
             let step_id = format!("step-{}", self.detail.usage.model_invocations + 1);
             let action = input.action(format!("{}:{step_id}", self.id))?;
             let input_bytes = bounded_json(&action.payload, 128 * 1024)?.len();
