@@ -144,6 +144,12 @@ const ARTIFACTS: &[Artifact] = &[
         format: "markdown",
     },
     Artifact {
+        id: "journeys",
+        file: "journeys.md",
+        title: "Journey candidates",
+        format: "markdown",
+    },
+    Artifact {
         id: "rule-evidence",
         file: "rule-evidence.md",
         title: "Source rule evidence",
@@ -274,7 +280,7 @@ fn produce(
     edges: &[&Edge],
     flows: &[Flow],
     gaps: usize,
-    mode: ExportMode,
+    (mode, rejected): (ExportMode, &BTreeSet<String>),
     max: Option<usize>,
 ) -> Result<SpecArtifact, render::RenderLimit> {
     use producers::Output;
@@ -291,6 +297,9 @@ fn produce(
         "security-view" => producers::security(nodes, max)?,
         "toolchain" => producers::toolchain(nodes, edges, max)?,
         "test-arrangements" => producers::tests(nodes, edges, max)?,
+        // Journeys are derived after curation, so mode and rejection apply
+        // to the candidates themselves as well as to their inputs.
+        "journeys" => producers::journeys(nodes, edges, flows, (mode, rejected), max)?,
         "us-tm" | "us-tm-index" => {
             let markdown = a.id == "us-tm";
             let output = registers::matrix_selected(edges, mode, markdown, !markdown, max)
@@ -477,7 +486,7 @@ fn compile_selected(
                 &edges,
                 &projection.flows,
                 gaps,
-                mode,
+                (mode, rejected),
                 Some(remaining),
             ) {
                 Ok(artifact) => {
@@ -505,13 +514,14 @@ pub(super) fn all(
         project(nodes, edges, flows, mode, rejected, None).expect("unbounded ADR derivation");
     let nodes = filter_nodes(&projection.nodes, mode, rejected);
     let edges = filter_edges(&projection.edges, mode, rejected);
-    bundle_from_filtered(&nodes, &edges, &projection.flows, mode)
+    bundle_from_filtered(&nodes, &edges, &projection.flows, mode, rejected)
 }
 pub(crate) fn bundle_from_filtered(
     nodes: &[&Node],
     edges: &[&Edge],
     flows: &[Flow],
     mode: ExportMode,
+    rejected: &BTreeSet<String>,
 ) -> SpecBundle {
     let gap_count = count_gap_findings(nodes.iter().copied(), edges.iter().copied());
     let drift_count = nodes.iter().filter(|n| is_drift_node(n)).count();
@@ -522,7 +532,7 @@ pub(crate) fn bundle_from_filtered(
     let artifacts: Vec<_> = ARTIFACTS
         .iter()
         .map(|a| {
-            produce(a, nodes, edges, flows, gap_count, mode, None)
+            produce(a, nodes, edges, flows, gap_count, (mode, rejected), None)
                 .expect("unbounded native artifact")
         })
         .collect();

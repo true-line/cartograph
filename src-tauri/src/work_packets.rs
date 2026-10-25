@@ -367,6 +367,7 @@ fn parse_generation(
         "security-view",
         "toolchain",
         "test-arrangements",
+        "journeys",
         "rule-evidence",
         "rule-evidence-index",
     ];
