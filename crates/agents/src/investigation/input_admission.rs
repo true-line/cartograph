@@ -275,6 +275,11 @@ impl InvestigationInput {
                 policy.limits().model_invocations,
                 &Some(&feedback),
             )?;
+            #[cfg(test)]
+            assert!(
+                context_hub::logical::count(&prompt).unwrap()
+                    <= reserve_projection_bytes(policy).unwrap()
+            );
             wire::replace_prompt(&mut action.payload, &prompt, MAX_INPUT_BYTES)?;
             if protect {
                 let inspected = llm::bounded::inspect_bounded_action(profile, &action, limits)
@@ -573,6 +578,10 @@ impl InvestigationInput {
             commit_sha: target.source.commit_sha.clone(),
             text: String::new(),
         });
+        // AC-0327: check the source descriptor envelope before reserve growth
+        // and the final wire check, including source-preview rejection fixtures.
+        #[cfg(test)]
+        assert!(context_hub::logical::count(&prompt).unwrap() <= MAX_INPUT_BYTES + 4 * 8 * 1024);
         Self::measure_reserved_projection(
             prompt,
             contract,
@@ -719,6 +728,39 @@ struct CapacityFeedbackSizeEnvelope {
     schema_version: u32,
     action_hash: String,
     reason: CapacityRefusalReason,
+}
+
+// Bound the synthetic prompt BEFORE replace_prompt applies the wire cap. Each
+// original numeric/null byte can grow to at most 20 decimal digits. Count new
+// protocol fields using their actual serializers and production instructions.
+pub(super) fn reserve_projection_bytes(policy: &InvestigationPolicy) -> Option<usize> {
+    use context_hub::logical::{count, sum};
+    let metadata = serde_json::json!({
+        "completed_attempt_ids": vec!["f".repeat(64); policy.max_completed_attempts()],
+        "refusal_count": u64::MAX,
+        "last_refusal_id": "f".repeat(64),
+        "feedback": null
+    });
+    let feedback = CapacityFeedbackSizeEnvelope {
+        schema_version: 1,
+        action_hash: "f".repeat(64),
+        reason: CapacityRefusalReason::UnprovenContribution,
+    };
+    let mut progress_bytes = 0;
+    for mode in [CompletionCallMode::Choice, CompletionCallMode::FinishOnly] {
+        // Longest genuine phase; the action itself is already in the input.
+        let mut progress = serde_json::json!({
+            "last_completed_action": {"type": "read_coverage_inventory"}
+        });
+        apply_admission_progress(&mut progress, mode, u32::MAX, &Some(&feedback)).ok()?;
+        progress_bytes = progress_bytes.max(count(&progress)?);
+    }
+    sum(&[
+        MAX_INPUT_BYTES.checked_mul(20)?,
+        count(&metadata)?,
+        progress_bytes,
+        staged_finish::RefusalFeedback::max_bytes_with_policy(policy).ok()?,
+    ])
 }
 
 fn exact_admission_fields(value: &Value, names: &[&str]) -> Result<(), InvestigationError> {

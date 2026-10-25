@@ -63,6 +63,19 @@ fn admission_sealing_binds_both_roles_modes_and_explicit_null_feedback() {
                     .build(role, &usage(mode), mode, 1, feedback.as_ref())
                     .unwrap();
                 let disclosure = seal(&input);
+                // AC-0327: actual schema9 output in both modes/all feedbacks.
+                let (retained, _) = InvestigationInput::sealing_workspace_bytes(
+                    &INVESTIGATION_V2_POLICY,
+                    &CompletionLimits::default(),
+                )
+                .unwrap();
+                assert!(
+                    retained
+                        >= context_hub::logical::json_bytes(
+                            context_hub::logical::count(&disclosure).unwrap(),
+                        )
+                        .unwrap()
+                );
                 assert_eq!(disclosure.schema_version, 6);
                 assert!(
                     disclosure

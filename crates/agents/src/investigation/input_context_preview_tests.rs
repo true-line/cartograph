@@ -486,12 +486,25 @@ fn context_preview_rejects_wrong_kind_usage_source_and_metadata_binding() {
     wrong.generated_token_reservations -= 1;
     assert!(certify(&base, &candidate, ContextPreviewKind::Query, &raw, &wrong).is_err());
     for mutation in [
-        "question", "history", "proof", "metadata", "progress", "usage", "span",
+        "question",
+        "history",
+        "proof",
+        "metadata",
+        "progress",
+        "usage",
+        "span",
+        "added_field",
+        "removed_field",
     ] {
         let mut forged = candidate.clone();
         let mut prompt: Value = serde_json::from_str(&forged.payload.prompt).unwrap();
         match mutation {
             "question" => prompt["question"] = "Another question".into(),
+            // AC-0327: borrowed comparisons must preserve exact enclosing keys.
+            "added_field" => prompt["unexpected_field"] = true.into(),
+            "removed_field" => {
+                prompt.as_object_mut().unwrap().remove("question");
+            }
             "history" => prompt["prior_findings_as_t3_history"] = json!(["injected"]),
             "proof" => prompt["context_id"] = "context-v2:wrong".into(),
             "metadata" => {

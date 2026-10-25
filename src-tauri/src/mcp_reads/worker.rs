@@ -386,7 +386,7 @@ pub(crate) fn required_reservation(limits: WorkerLimits) -> Option<usize> {
 }
 
 /// Preparation, retained reads and modeled replay/provider component floors.
-/// Caller input/sealing and later read acquisition still need composition.
+/// Later source acquisition still needs composition before dispatch enablement.
 #[cfg(unix)]
 pub(crate) fn task_phase_minimum(limits: WorkerLimits, app_path_bytes: usize) -> Option<usize> {
     let (preparation, context, execution) = task_phase_workspaces(limits, app_path_bytes)?;
@@ -416,7 +416,11 @@ fn task_phase_workspaces(
     // not rely on later row-lifetime optimizations in the parent branch.
     let validation =
         decode.checked_add(crate::jobs::investigations::next_prompt_contract_workspace()?)?;
+    let construction = agents::investigation::InvestigationInput::construction_workspace_bytes(
+        &agents::investigation::INVESTIGATION_V2_POLICY,
+    )?;
     let execution = provider
+        .max(construction)
         .max(validation)
         .max(crate::jobs::investigations::archive_acquisition_workspace()?)
         .max(crate::jobs::investigations::next_prompt_ledger_workspace()?)
@@ -453,6 +457,23 @@ fn task_phase_workspaces(
     let execution = query_peak.max(query_retained.checked_add(execution)?);
     let context = context.checked_add(
         crate::investigations::preparation_workspace::retained_read_bytes(
+            &agents::investigation::INVESTIGATION_V2_POLICY,
+        )?,
+    )?;
+    // A metadata continuation retains the current input while constructing a
+    // candidate. Charge both completed inputs throughout execution; rejected
+    // construction, certificates and sealing peaks remain separate work.
+    let context = context.checked_add(
+        agents::investigation::InvestigationInput::retained_workspace_bytes(
+            &agents::investigation::INVESTIGATION_V2_POLICY,
+        )?
+        .checked_mul(2)?,
+    )?;
+    // The original invocation's preparation, authorization and response survive
+    // into next_metadata. They overlap every candidate acquisition/firewall
+    // phase, rather than disappearing when execution selects its largest peak.
+    let context = context.checked_add(
+        crate::investigations::provider_workspace::continuation_retained(
             &agents::investigation::INVESTIGATION_V2_POLICY,
         )?,
     )?;
@@ -601,6 +622,57 @@ pub(crate) mod tests {
         .unwrap();
         let (_, retained, _) = task_phase_workspaces(limits, 0).unwrap();
         assert!(retained >= initial + growth);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn task_continuation_keeps_original_provider_owners_outside_phase_maximum() {
+        // AC-0327: observe the actual retained term before a larger preparation
+        // or query peak can hide an omitted original invocation owner.
+        let limits = limits();
+        let policy = &agents::investigation::INVESTIGATION_V2_POLICY;
+        let (frozen, _) = crate::investigations::preparation_workspace::workspace_bytes(
+            limits.scope,
+            agents::investigation::MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
+            limits.max_request_frame_bytes.get(),
+        )
+        .unwrap();
+        let reads =
+            crate::investigations::preparation_workspace::retained_read_bytes(policy).unwrap();
+        let inputs = agents::investigation::InvestigationInput::retained_workspace_bytes(policy)
+            .unwrap()
+            * 2;
+        let (history, _) =
+            crate::jobs::investigations::parent_history_projection_workspace().unwrap();
+        let caps = llm::bounded::CompletionLimits::new(
+            crate::investigations::provider_workspace::completion_limit_values(policy).unwrap(),
+        )
+        .unwrap();
+        let firewall = caps.firewall_workspace_bytes().unwrap();
+        let completion = caps.transport_workspace_bytes().unwrap().completion_bytes;
+        let (_, retained, execution) = task_phase_workspaces(limits, 0).unwrap();
+        assert!(
+            retained
+                >= frozen
+                    + reads
+                    + inputs
+                    + history
+                    + firewall.prepared_bytes
+                    + firewall.authorized_bytes
+                    + completion
+        );
+        assert!(execution >= firewall.prepare_peak_bytes);
+        assert!(
+            execution
+                >= agents::investigation::InvestigationInput::construction_workspace_bytes(policy,)
+                    .unwrap()
+        );
+        assert!(
+            execution
+                >= agents::investigation::InvestigationInput::source_preview_workspace_bytes(
+                    policy, &caps,
+                )
+                .unwrap()
+        );
     }
     #[cfg(unix)]
     #[test]

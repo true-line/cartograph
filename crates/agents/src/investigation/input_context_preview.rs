@@ -144,6 +144,18 @@ impl InvestigationInput {
         validate_metadata_delta(&current, &next, &candidate.ledger, &contract, kind)?;
         validate_prompt_delta(self, candidate, &current, &next, kind)?;
 
+        // These validation projections are no longer used. Do not retain their
+        // prompts, contracts or prior ledger through nested firewall reserves.
+        drop((
+            current,
+            next,
+            contract,
+            next_contract,
+            basis,
+            progress,
+            feedback,
+        ));
+
         let action = candidate.action(action_id.into())?;
         let measurements = ContextPreviewMeasurements {
             current: llm::bounded::measure_bounded_action(
@@ -337,25 +349,30 @@ fn validate_prompt_delta(
 ) -> Result<(), InvestigationError> {
     // Compare every unchanged enclosing field, including complete history,
     // targets, question, system-facing policy and all public proof metadata.
-    let strip = |value: &Value| -> Result<Value, InvestigationError> {
-        let mut fields = value
-            .as_object()
-            .ok_or(InvestigationError::InvalidInput)?
-            .clone();
-        for name in [
-            "input_ledger_hash",
-            "compact_context",
-            "citations",
-            "consumed_budgets",
-            "turn_progress",
-            "completion_metadata",
-            "coverage_details",
-        ] {
-            fields.remove(name);
-        }
-        Ok(Value::Object(fields))
+    let changes = |name: &str| {
+        matches!(
+            name,
+            "input_ledger_hash"
+                | "compact_context"
+                | "citations"
+                | "consumed_budgets"
+                | "turn_progress"
+                | "completion_metadata"
+                | "coverage_details"
+        )
     };
-    if strip(current)? != strip(next)? {
+    let current_fields = current
+        .as_object()
+        .ok_or(InvestigationError::InvalidInput)?;
+    let next_fields = next.as_object().ok_or(InvestigationError::InvalidInput)?;
+    // Compare values and both key sets; do not silently accept added fields.
+    if current_fields
+        .iter()
+        .any(|(name, value)| !changes(name) && next_fields.get(name) != Some(value))
+        || next_fields
+            .keys()
+            .any(|name| !changes(name) && !current_fields.contains_key(name))
+    {
         return Err(InvestigationError::InvalidInput);
     }
     match kind {
