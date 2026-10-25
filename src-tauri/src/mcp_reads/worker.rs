@@ -386,7 +386,7 @@ pub(crate) fn required_reservation(limits: WorkerLimits) -> Option<usize> {
 }
 
 /// Preparation, retained reads and modeled replay/provider component floors.
-/// Input construction and later source acquisition remain incomplete.
+/// Later source acquisition still needs composition before dispatch enablement.
 #[cfg(unix)]
 pub(crate) fn task_phase_minimum(limits: WorkerLimits, app_path_bytes: usize) -> Option<usize> {
     let (preparation, context, execution) = task_phase_workspaces(limits, app_path_bytes)?;
@@ -416,7 +416,11 @@ fn task_phase_workspaces(
     // not rely on later row-lifetime optimizations in the parent branch.
     let validation =
         decode.checked_add(crate::jobs::investigations::next_prompt_contract_workspace()?)?;
+    let construction = agents::investigation::InvestigationInput::construction_workspace_bytes(
+        &agents::investigation::INVESTIGATION_V2_POLICY,
+    )?;
     let execution = provider
+        .max(construction)
         .max(validation)
         .max(crate::jobs::investigations::archive_acquisition_workspace()?)
         .max(crate::jobs::investigations::next_prompt_ledger_workspace()?)
@@ -657,6 +661,11 @@ pub(crate) mod tests {
                     + completion
         );
         assert!(execution >= firewall.prepare_peak_bytes);
+        assert!(
+            execution
+                >= agents::investigation::InvestigationInput::construction_workspace_bytes(policy,)
+                    .unwrap()
+        );
         assert!(
             execution
                 >= agents::investigation::InvestigationInput::source_preview_workspace_bytes(

@@ -353,6 +353,11 @@ impl InvestigationInput {
             prompt: String::new(),
             spans,
         };
+        #[cfg(test)]
+        assert!(
+            context_hub::logical::count(&prompt_value).unwrap()
+                <= workspace::base_prompt_wire_bytes().unwrap()
+        );
         wire::replace_prompt(&mut payload, &prompt_value, MAX_INPUT_BYTES)?;
         Ok(Self {
             ledger,
