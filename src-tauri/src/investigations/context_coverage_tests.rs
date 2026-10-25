@@ -835,3 +835,48 @@ fn qualified_preparation_workspace_covers_fixture_and_rejects_overflow() {
         preparation_workspace::workspace_bytes(scope, TEST_ARCHIVE_CAPACITY, usize::MAX,).is_none()
     );
 }
+// AC-0327: exercise the draft host bound against actual qualified preparation.
+#[test]
+fn query_workspace_covers_real_prepared_ledger_and_raw_response() {
+    use super::super::query_workspace::{self, QueryInputs};
+    for legacy in [false, true] {
+        let fixture = Fixture::new(20);
+        let frozen = if legacy {
+            let mut start = request();
+            start.specialist_id = SpecialistId::DomainAnalystV4;
+            start.schema_version = 1;
+            FrozenContext::prepare(&fixture.state, &start, &[]).unwrap()
+        } else {
+            fixture.prepare(&request()).unwrap()
+        };
+        let request = query();
+        let input = QueryInputs {
+            graph: SnapshotReadLimits::default(),
+            coverage: CoverageReadLimits::default(),
+            scoped_repos: fixture.scope.len(),
+            scope_identity_bytes: context_hub::logical::count(&fixture.scope).unwrap(),
+            ledger_wire: context_hub::logical::count(&frozen.ledger).unwrap(),
+            request_wire: context_hub::logical::count(&request).unwrap() + 128,
+            app_path_bytes: crate::sources::MAX_PATH_BYTES,
+            // This fixture has no captured bindings; actual adapter-match coverage
+            // is added when the shared helper is integrated. Zero is not a bound
+            // for captured facts and must never be used for production admission.
+            fact_match_peak: 0,
+        };
+        let bound = query_workspace::workspace(frozen.policy, input).unwrap();
+        let prepared = frozen.prepare_query(&fixture.state, request).unwrap();
+        let actual = context_hub::logical::count(&prepared.base_ledger).unwrap()
+            + context_hub::logical::count(&prepared.ledger).unwrap()
+            + prepared.raw.len();
+        assert!(bound.retained >= actual);
+        assert!(bound.peak >= bound.retained);
+        let before = frozen.ledger.clone();
+        let mut tiny = query();
+        tiny.max_bytes = 1;
+        assert!(matches!(
+            frozen.prepare_query(&fixture.state, tiny),
+            Err(HostError::LimitExceeded)
+        ));
+        assert_eq!(frozen.ledger, before);
+    }
+}

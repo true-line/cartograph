@@ -12,6 +12,9 @@ mod history;
 pub(crate) mod inspection;
 pub(crate) mod mcp_dispatch;
 pub(crate) mod provider_workspace;
+// Prototype exercised through real preparation before production admission wiring.
+#[cfg(test)]
+mod query_workspace;
 mod recovery;
 mod runtime;
 mod worker;
