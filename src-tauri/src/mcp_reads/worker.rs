@@ -444,7 +444,12 @@ fn task_phase_workspaces(
     let execution = crate::investigations::inventory_admission_workspace(execution)?;
     let (query_retained, query_peak) =
         crate::investigations::query_workspace::admitted_workspace(limits.scope, app_path_bytes)?;
-    // Query metadata and guards survive through durable publication/replay.
+    // Each next_metadata transition prepares one query OR inventory candidate;
+    // publish_admitted_metadata consumes it before another read. Legacy query /
+    // read_inventory likewise consume their candidate in publish_context_read.
+    // Prior published pages/ledger are in retained_read_bytes below, not a second
+    // prepared candidate. This nesting conservatively overlaps wrapper owners;
+    // batching unpublished reads would require symmetric peak composition.
     let execution = query_peak.max(query_retained.checked_add(execution)?);
     let context = context.checked_add(
         crate::investigations::preparation_workspace::retained_read_bytes(
