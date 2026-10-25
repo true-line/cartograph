@@ -106,11 +106,26 @@ fn auth_errors_carry_remediation() {
         git2::ErrorClass::Http,
         "too many redirects or authentication replays",
     );
-    let mapped = classify_git_error("https://github.com/acme/private", e);
+    let mapped = classify_git_error("https://github.com/acme/private", e, true);
     match mapped {
         IngestError::Auth { remediation, .. } => {
+            assert!(remediation.contains("found but refused"));
             assert!(remediation.contains("GH_TOKEN"));
             assert!(remediation.contains("gh auth login"));
+        }
+        other => panic!("expected Auth, got {other:?}"),
+    }
+    // With no credential at all, it says so and names where `gh` was
+    // looked for, rather than implying a refused login (#992).
+    let e = git2::Error::new(
+        git2::ErrorCode::Auth,
+        git2::ErrorClass::Callback,
+        "remote authentication required but no callback set",
+    );
+    match classify_git_error("https://github.com/acme/private", e, false) {
+        IngestError::Auth { remediation, .. } => {
+            assert!(remediation.starts_with("No GitHub credential was found"));
+            assert!(remediation.contains("/opt/homebrew/bin/gh"));
         }
         other => panic!("expected Auth, got {other:?}"),
     }
@@ -120,7 +135,10 @@ fn auth_errors_carry_remediation() {
         git2::ErrorClass::Repository,
         "could not find repository",
     );
-    assert!(matches!(classify_git_error("u", e), IngestError::Git(_)));
+    assert!(matches!(
+        classify_git_error("u", e, false),
+        IngestError::Git(_)
+    ));
 }
 
 // URL forms: https, ssh, shorthand, file — one identity scheme.
