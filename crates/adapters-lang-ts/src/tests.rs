@@ -3828,3 +3828,87 @@ describe('Customer resolver', () => {
         .unwrap();
     assert_eq!(only.props["modifier"], "only");
 }
+
+// AC-0348 (T-0348): only the test's own code is read, and an imported
+// document comes from the file the import resolves to.
+#[test]
+fn vitest_requests_skip_declared_helpers_and_resolve_the_imported_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "src/api/resolvers/admin/product.resolver.ts",
+        "import { Query, Resolver } from '@nestjs/graphql';\n@Resolver()\nexport class ProductResolver { @Query() product() {} @Query() products() {} }\n",
+    );
+    // `explicit.ts` exists but its export is not a recovered document; the
+    // directory index beside it exports a literal of the same name.
+    write(
+        "e2e/docs/explicit.ts",
+        "export const doc = buildDocument();\n",
+    );
+    write(
+        "e2e/docs/explicit/index.ts",
+        "import { graphql } from './graphql';\nexport const doc = graphql(`query { products { id } }`);\n",
+    );
+    write(
+        "e2e/docs/listed/index.ts",
+        "import { graphql } from './graphql';\nexport const doc = graphql(`query { products { id } }`);\n",
+    );
+    write(
+        "e2e/product.e2e-spec.ts",
+        r#"import { createTestEnvironment } from '@vendure/testing';
+import { it } from 'vitest';
+import { graphql } from './graphql';
+import { doc as explicitDoc } from './docs/explicit.ts';
+import { doc as extensionless } from './docs/explicit';
+import { doc as indexed } from './docs/listed';
+const { adminClient } = createTestEnvironment({});
+const PRODUCT = graphql(`query { product { id } }`);
+it('no request', async () => {
+  function unused() { adminClient.query(PRODUCT); }
+  const alsoUnused = async () => { await adminClient.query(PRODUCT); };
+});
+it('direct', async () => {
+  await adminClient.query(PRODUCT);
+  await Promise.all([1].map(async () => adminClient.query(PRODUCT)));
+});
+it('explicit file', async () => { await adminClient.query(explicitDoc); });
+it('existing file', async () => { await adminClient.query(extensionless); });
+it('directory index', async () => { await adminClient.query(indexed); });
+"#,
+    );
+    let ex = extract_dir(dir.path(), &id()).unwrap();
+    let base = "test:qwtm/example@e2e/product.e2e-spec.ts#";
+    let requests = |test: &str| -> BTreeSet<&str> {
+        ex.edges
+            .iter()
+            .filter(|e| e.label == "REQUESTS" && e.src == format!("{base}{test}"))
+            .map(|e| {
+                if e.dst.starts_with("gap:") {
+                    "gap"
+                } else {
+                    e.dst.as_str()
+                }
+            })
+            .collect()
+    };
+    // An uncalled helper, declared or bound to a name, is not the test's code.
+    assert!(requests("no request").is_empty());
+    // A direct call and a callback passed as an argument are.
+    assert_eq!(
+        requests("direct"),
+        BTreeSet::from(["ep:qwtm/example@graphql:admin:query:product"])
+    );
+    // The imported file exists and its export is not recovered: a Gap, not
+    // the directory index's same-named export.
+    assert_eq!(requests("explicit file"), BTreeSet::from(["gap"]));
+    assert_eq!(requests("existing file"), BTreeSet::from(["gap"]));
+    // With no `listed.ts`, the import resolves to the directory index.
+    assert_eq!(
+        requests("directory index"),
+        BTreeSet::from(["ep:qwtm/example@graphql:admin:query:products"])
+    );
+}

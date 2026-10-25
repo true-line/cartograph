@@ -14,7 +14,7 @@
 use crate::{FileCx, callable, literal_string};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use tree_sitter::Node as TsNode;
 
 /// Modules whose `describe`/`it`/`test` exports prove a test call.
@@ -82,12 +82,15 @@ pub(crate) struct PendingRequest {
 pub(crate) struct Pending {
     /// Exported document constants: `(path, name)` → document.
     pub documents: HashMap<(String, String), Document>,
+    /// Every extracted file, so an import resolves to the file that exists.
+    pub files: HashSet<String>,
     pub requests: Vec<PendingRequest>,
 }
 
 impl Pending {
     pub(crate) fn extend(&mut self, other: Pending) {
         self.documents.extend(other.documents);
+        self.files.extend(other.files);
         self.requests.extend(other.requests);
     }
 
@@ -349,6 +352,46 @@ fn calls_within<'tree>(node: TsNode<'tree>, out: &mut Vec<TsNode<'tree>>) {
     }
 }
 
+/// Whether `node` is a function the test only declares: a declaration, a
+/// method, a class, or a function bound to a name or property. A function
+/// passed as an argument is run by its callee and stays the test's code.
+fn declared_helper(node: TsNode<'_>) -> bool {
+    match node.kind() {
+        "function_declaration"
+        | "generator_function_declaration"
+        | "method_definition"
+        | "class_declaration"
+        | "class" => true,
+        "arrow_function" | "function_expression" | "function" | "generator_function" => {
+            node.parent().is_some_and(|parent| {
+                matches!(
+                    parent.kind(),
+                    "variable_declarator"
+                        | "assignment_expression"
+                        | "pair"
+                        | "public_field_definition"
+                )
+            })
+        }
+        _ => false,
+    }
+}
+
+/// The calls a test's code makes, skipping the bodies of helpers it only
+/// declares (`helper functions are not read`).
+fn test_calls_within<'tree>(node: TsNode<'tree>, out: &mut Vec<TsNode<'tree>>) {
+    let mut walk = node.walk();
+    for child in node.named_children(&mut walk) {
+        if declared_helper(child) {
+            continue;
+        }
+        if child.kind() == "call_expression" {
+            out.push(child);
+        }
+        test_calls_within(child, out);
+    }
+}
+
 /// Index the file's exported document constants and, in a test file, its
 /// tests and their proven client requests.
 pub(crate) fn extract<'tree>(
@@ -359,6 +402,7 @@ pub(crate) fn extract<'tree>(
     edges: &mut Vec<Edge>,
     pending: &mut Pending,
 ) {
+    pending.files.insert(cx.path.to_string());
     let mut walk = root.walk();
     for statement in root.named_children(&mut walk) {
         if statement.kind() != "export_statement" {
@@ -458,7 +502,7 @@ pub(crate) fn extract<'tree>(
             if argument.kind() == "call_expression" {
                 body.push(argument);
             }
-            calls_within(argument, &mut body);
+            test_calls_within(argument, &mut body);
         }
         for site in body {
             let Some(function) = site.child_by_field_name("function") else {
@@ -615,9 +659,12 @@ pub(crate) fn complete(pending: Pending, nodes: &mut Vec<Node>, edges: &mut Vec<
     for request in pending.requests {
         let document = match &request.document {
             DocumentRef::Literal(document) => Some(document.clone()),
+            // The file the import resolves to, then only its exports: a
+            // sibling candidate's same-named export is not this document.
             DocumentRef::Imported { file, name } => file_candidates(file)
                 .into_iter()
-                .find_map(|file| pending.documents.get(&(file, name.clone())).cloned()),
+                .find(|candidate| pending.files.contains(candidate))
+                .and_then(|file| pending.documents.get(&(file, name.clone())).cloned()),
         };
         let Some(document) = document else {
             push_gap(
