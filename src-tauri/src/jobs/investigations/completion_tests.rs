@@ -1555,3 +1555,41 @@ fn app_nonce_namespace_completion_recovery_ignores_foreign_tasks() {
 
 #[path = "mcp_start_completion_tests.rs"]
 mod mcp_start_completion_tests;
+
+#[test]
+fn saved_completion_witness_reuse_preserves_observation_and_rejects_tampering() {
+    // AC-0327 (#971): genuine saved states, compared with the reread path.
+    for (policy, progressive) in [
+        (&INVESTIGATION_V1_POLICY, false),
+        (&INVESTIGATION_V2_POLICY, false),
+        (&INVESTIGATION_V2_POLICY, true),
+    ] {
+        let mut fixture =
+            Fixture::with_family(InvestigationProviderMode::Local, policy, progressive);
+        for refusal_count in 0..=2 {
+            if refusal_count > 0 {
+                fixture.refuse();
+            }
+            let tx = fixture.store.conn.transaction().unwrap();
+            let mut task = load_task_base(&tx, &fixture.id).unwrap();
+            let entries = attempts(&tx, &task).unwrap();
+            let raw = raw_refusals(&tx, &task).unwrap();
+            assert_eq!(raw.len(), refusal_count);
+            let reused = observation_from_entries(&task, &entries, &raw).unwrap();
+            assert_eq!(reused, observation_detail(&tx, &task).unwrap());
+            assert_eq!(Some(&reused), task.detail.completion.as_ref());
+            validate_saved(&tx, &task).unwrap();
+            task.detail.completion.as_mut().unwrap().request_hash = "0".repeat(64);
+            assert!(matches!(
+                validate_saved(&tx, &task),
+                Err(InvestigationStoreError::Invalid)
+            ));
+            tx.rollback().unwrap();
+            let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+            assert_eq!(
+                reopened.investigation(&fixture.id).unwrap().completion,
+                Some(reused)
+            );
+        }
+    }
+}
