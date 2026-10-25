@@ -305,7 +305,16 @@ export const RenderedTopologyAndDeploymentMatchesIdentity: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByTestId('spec-diagram-canvas')).toBeInTheDocument();
+    const diagramCanvas = canvas.getByTestId('spec-diagram-canvas');
+    await expect(diagramCanvas).toBeInTheDocument();
+    // The canvas stays inside its card instead of covering the page (#1000).
+    const card = diagramCanvas.closest('.spec-diagram-view') as HTMLElement;
+    const inner = diagramCanvas.getBoundingClientRect();
+    const outer = card.getBoundingClientRect();
+    await expect(getComputedStyle(diagramCanvas).position).toBe('relative');
+    await expect(inner.left).toBeGreaterThanOrEqual(outer.left);
+    await expect(inner.right).toBeLessThanOrEqual(outer.right);
+    await expect(inner.top).toBeGreaterThanOrEqual(outer.top);
 
     const identity = canvas.getByTestId('diagram-content-identity');
     await expect(identity).toHaveAttribute('data-schema', 'cartograph.spec/topology@1');
