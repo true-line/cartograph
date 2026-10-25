@@ -94,6 +94,17 @@ pub(super) struct PreparedContextRead {
     guards: Option<EvidenceGuards>,
 }
 
+/// Inventory preparation plus the actual host publication wrapper. The frozen
+/// context and accumulated prior reads remain caller owners.
+#[cfg(unix)]
+pub(crate) fn inventory_admission_workspace(replay: usize) -> Option<usize> {
+    let model = inventory_preparation_workspace(&INVESTIGATION_V2_POLICY, MAX_MANIFEST_BYTES)?;
+    let wrapper = std::mem::size_of::<PreparedContextRead>();
+    let retained = model.retained.checked_add(wrapper)?;
+    let peak = model.peak.checked_add(wrapper)?;
+    Some(peak.max(retained.checked_add(replay)?))
+}
+
 /// Borrowed complete prospective context. The preparation and its retention
 /// guards must outlive this view; no raw response or source text is cloned.
 /// This is sizing input, not a durable publication or execution capability.
