@@ -1941,7 +1941,9 @@ fun AppRoot(viewModel: AppRootViewModel) {
     assert_eq!(
         edge_counts,
         std::collections::BTreeMap::from([
-            ("CALLS".into(), 9),
+            // Includes `viewModel.showDeviceSettingsScreen()` on the declared
+            // `viewModel: AppRootViewModel` parameter (#1048).
+            ("CALLS".into(), 10),
             ("DEFINED_IN".into(), 21),
             ("IMPORTS".into(), 7),
             ("NAVIGATES_TO".into(), 2),
@@ -2109,4 +2111,156 @@ fun Root(vm: Vm) {
         cited[1],
         "private val stack = mutableStateListOf<NavKey>(HomeKey)"
     );
+}
+
+// AC-0353 (T-0353): `x.m()` resolves to `T.m` when `x`'s nearest lexical
+// binding states its type `T` (#1048): constructor properties, parameters,
+// lambda parameters, annotated or `T(…)` locals, `this.x`, nullable and
+// generic types, through imports, the same package, or a star import. An
+// untyped nearer binding blocks outer ones; undeclared members, duplicate
+// FQNs and non-constructible `T(…)` assert nothing.
+#[test]
+fn declared_type_receivers_resolve_member_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "net/Api.kt",
+        "package io.x.net\n\ninterface ApiService {\n    suspend fun getStats(): Int\n    fun other()\n}\n",
+    );
+    write(
+        dir.path(),
+        "net/Datasource.kt",
+        r#"package io.x.net
+
+interface Datasource {
+    fun stats()
+}
+
+class DatasourceImpl @Inject constructor(private val apiService: ApiService) : Datasource {
+    override fun stats() {
+        safe { apiService.getStats() }
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "feature/Vm.kt",
+        r#"package io.x.feature
+
+import io.x.net.Datasource
+
+class Box<T> { fun get(): T = TODO() }
+class Helper { fun help() {} }
+interface Thing {
+    fun act()
+}
+
+class Vm(private val ds: Datasource, plain: Datasource) {
+    private val x: Datasource = ds
+    fun direct() { ds.stats() }
+    fun viaThis() { this.ds.stats() }
+    fun nullable(q: Datasource?) { q?.stats() }
+    fun generic(b: Box<Datasource>) { b.get() }
+    fun shadowed() { val ds = make(); ds.stats() }
+    fun lambda() { run { r: Datasource -> r.stats() } }
+    fun constructed() { val h = Helper(); h.help() }
+    fun notConstructible() { val t = Thing(); t.act() }
+    fun undeclared() { ds.toString() }
+    fun looped(xs: List<Datasource>) { for (x in xs) { x.stats() } }
+    fun plainHidden() { plain.stats() }
+    fun lambdaShadowed() { run { val ds = make(); ds.stats() } }
+    fun lambdaLocal() { run { val y: Datasource = make(); y.stats() } }
+    class Nested { fun n() { ds.stats() } }
+}
+
+fun qualified(a: io.x.net.ApiService) { a.other() }
+"#,
+    );
+    write(
+        dir.path(),
+        "feature/Generic.kt",
+        "package io.x.feature\n\nclass Tp {\n    fun m() {}\n}\n\nfun <Tp> typeParam(x: Tp) {\n    x.m()\n}\n\nclass Holder<Tp>(val t: Tp) {\n    fun h() {\n        t.m()\n    }\n}\n",
+    );
+    write(
+        dir.path(),
+        "feature/Local.kt",
+        "package io.x.feature\n\nimport io.x.net.Datasource\n\nfun localClass(api: Datasource) {\n    class Local {\n        fun g() {\n            api.stats()\n        }\n    }\n}\n",
+    );
+    write(
+        dir.path(),
+        "feature/Loop.kt",
+        "package io.x.feature\n\nimport io.x.net.Datasource\n\nfun loopIterable(source: Datasource) {\n    for (source in source.stats()) {\n        println(source)\n    }\n}\n",
+    );
+    write(
+        dir.path(),
+        "other/Star.kt",
+        "package io.x.other\n\nimport io.x.net.*\n\nfun star(a: ApiService) { a.other() }\n\nfun twin(t: io.x.dup.Twin) { t.go() }\n",
+    );
+    write(
+        dir.path(),
+        "dup/A.kt",
+        "package io.x.dup\n\nclass Twin { fun go() {} }\n",
+    );
+    write(
+        dir.path(),
+        "dup/B.kt",
+        "package io.x.dup\n\nclass Twin { fun go() {} }\n",
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut typed: Vec<(String, String)> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "CALLS" && e.props["resolution"] == "declared-type")
+        .map(|e| {
+            let short = |s: &str| s.rsplit_once('#').unwrap().1.to_string();
+            (short(&e.src), short(&e.dst))
+        })
+        .collect();
+    typed.sort();
+    let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+    assert_eq!(
+        typed,
+        vec![
+            pair("DatasourceImpl.stats", "ApiService.getStats"),
+            pair("Vm.direct", "Datasource.stats"),
+            pair("Vm.generic", "Box.get"),
+            pair("Vm.lambda", "Datasource.stats"),
+            pair("Vm.lambdaLocal", "Datasource.stats"),
+            pair("Vm.nullable", "Datasource.stats"),
+            pair("Vm.viaThis", "Datasource.stats"),
+            pair("Vm.constructed", "Helper.help"),
+            pair("star", "ApiService.other"),
+            pair("qualified", "ApiService.other"),
+            pair("loopIterable", "Datasource.stats"),
+            pair("Local.g", "Datasource.stats"),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+    );
+    let calls = edge(
+        &out.edges,
+        "sym:local/demo@net/Datasource.kt#DatasourceImpl.stats",
+        "sym:local/demo@net/Api.kt#ApiService.getStats",
+        "CALLS",
+    );
+    let prov: Provenance = serde_json::from_value(calls.props["prov"].clone()).unwrap();
+    assert_eq!(prov.tier, Tier::Deterministic);
+    assert_eq!(prov.confidence_tier, ConfidenceTier::Confirmed);
+    let span = &prov.evidence[0];
+    let text = std::fs::read_to_string(dir.path().join("net/Datasource.kt")).unwrap();
+    assert_eq!(
+        &text[span.byte_start as usize..span.byte_end as usize],
+        "apiService.getStats()"
+    );
+    // Nothing unproven turns into a Gap either.
+    assert!(!out.nodes.iter().any(|n| {
+        n.label == "Gap"
+            && n.props["callee"]
+                .as_str()
+                .is_some_and(|c| c.contains("stats") || c.contains("go"))
+    }));
 }
