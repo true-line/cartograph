@@ -25,6 +25,7 @@ mod projection;
 mod protocol;
 mod record_workspace;
 mod records;
+mod result_workspace;
 mod sealing;
 mod specialists;
 #[doc(hidden)]
@@ -59,6 +60,7 @@ pub use projection::*;
 pub use protocol::*;
 pub use record_workspace::record_decode_scratch_bytes;
 pub use records::*;
+pub use result_workspace::completion_result_validation_workspace;
 pub use specialists::*;
 pub use task_validation_workspace::next_prompt_validation_workspace;
 pub use turn::*;

@@ -39,6 +39,35 @@ fn next_prompt_finish_boundary_accepted_result7_reopens_and_rejects_family_downg
                 >= owner + coverage::archive_acquisition_workspace().unwrap()
         );
     }
+    #[cfg(unix)]
+    {
+        // AC-0327: a real completed result is reloaded through semantic replay.
+        let wire = serde_json::to_vec(&result).unwrap().len();
+        let (retained, peak) = next_prompt_result_workspace().unwrap();
+        let semantic = agents::investigation::completion_result_validation_workspace(
+            &INVESTIGATION_V2_POLICY,
+            MAX_RECORD_BYTES,
+            wire,
+        )
+        .unwrap();
+        assert!(retained >= wire && peak >= retained + semantic);
+        assert!(
+            agents::investigation::completion_result_validation_workspace(
+                &INVESTIGATION_V2_POLICY,
+                usize::MAX,
+                wire,
+            )
+            .is_none()
+        );
+        assert!(
+            agents::investigation::completion_result_validation_workspace(
+                &INVESTIGATION_V2_POLICY,
+                MAX_RECORD_BYTES,
+                MAX_RECORD_BYTES + 1,
+            )
+            .is_none()
+        );
+    }
     assert_eq!(result.schema_version, 7);
     assert!(
         result
