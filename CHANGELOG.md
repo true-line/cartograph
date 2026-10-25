@@ -1,5 +1,12 @@
 # cartograph
 
+## 0.28.0
+
+### Minor Changes
+
+- 40313f1: Flow dossiers now name, for each step, the tests that reference it directly — by requesting its endpoint or calling its function — and the steps no recovered test references. References are static, not execution coverage.
+- 640dfe4: NestJS GraphQL resolvers are recovered: each `@Query()` and `@Mutation()` method becomes a GraphQL endpoint with its field, the API it is assumed to be mounted on, and any `@Allow` permissions, so its flows can be traced like HTTP routes.
+
 ## 0.27.0
 
 ### Minor Changes
