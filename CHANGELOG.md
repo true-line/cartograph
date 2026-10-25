@@ -1,5 +1,15 @@
 # cartograph
 
+## 0.29.0
+
+### Minor Changes
+
+- 51cfad0: Vitest and Jest tests are recovered, and a test that sends a GraphQL document through a proven test client (such as Vendure's `adminClient` and `shopClient`) is linked to each resolver operation it requests, so `test_arrangements.md` shows which GraphQL operations have a static test reference.
+
+### Patch Changes
+
+- 1ddf3a5: Spec diagrams stay inside their card: the canvas no longer covers the navigation rail when the page scrolls, and a diagram with one or two nodes is no longer zoomed to fill the canvas.
+
 ## 0.28.0
 
 ### Minor Changes
