@@ -107,7 +107,9 @@ impl FrozenContext {
             .map(|selected| crate::task_evidence::graph_fact(&selected.fact))
             .collect::<Vec<_>>();
         let selected = self.select(state, &keys)?;
+        drop(keys);
         let guards = EvidenceGuards::acquire(state, &selected)?;
+        drop(selected);
         let receipt = guards.receipt(state, selection)?;
         let ordinal = receipt
             .ranges()
@@ -120,6 +122,7 @@ impl FrozenContext {
             ordinal,
         )
         .map_err(|_| HostError::InvalidInput)?;
+        drop(receipt);
         // Re-acquire the complete guard set before releasing these preliminary
         // metadata guards. Preparation rechecks the full exact frozen binding.
         let prepared = self.prepare_captured_source(state, &target)?;
@@ -159,6 +162,7 @@ impl FrozenContext {
             .map(|s| crate::task_evidence::graph_fact(&s.fact))
             .collect::<Vec<_>>();
         let selected = self.select(state, &keys)?;
+        drop(keys);
         let guards = EvidenceGuards::acquire(state, &selected)?;
         let receipt = guards.receipt(state, selection)?;
         let prepared = PreparedCapturedSource {
@@ -287,6 +291,7 @@ impl PreparedCapturedSource {
         if context.select(state, &keys)? != self.selected {
             return Err(HostError::InputChanged);
         }
+        drop(keys);
         self.guards.revalidate(state)?;
         let selected = self
             .base_ledger
