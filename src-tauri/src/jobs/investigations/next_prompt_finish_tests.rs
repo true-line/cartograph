@@ -143,7 +143,36 @@ fn next_prompt_finish_boundary_refusals_use_existing_obligations_and_two_finish_
     assert_eq!(second.citations.len(), 0);
     let saved = f.saved();
     let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
-    assert_eq!(staged::load_for_task(&tx, &saved).unwrap().len(), 2);
+    let entries = staged::load_for_task(&tx, &saved).unwrap();
+    assert_eq!(entries.len(), 2);
+    #[cfg(unix)]
+    {
+        // AC-0327 (#978): genuine two-refusal replay with retained witnesses.
+        let (retained, peak) = next_prompt_staged_workspace().unwrap();
+        let wire = serde_json::to_vec(&entries).unwrap().len();
+        let semantic = stored_refusal_validation_workspace(
+            &INVESTIGATION_V2_POLICY,
+            MAX_RECORD_BYTES,
+            MAX_RECORD_BYTES,
+        )
+        .unwrap();
+        assert!(retained >= wire + std::mem::size_of_val(&entries));
+        assert!(peak >= retained + semantic);
+        // Corruption remains rejected by the real loader, independent of sizing.
+        tx.execute_batch(
+            "SAVEPOINT corrupt_feedback; DROP TRIGGER staged_completion_feedback_no_update",
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE staged_completion_feedback SET body=?1,body_hash=?2 WHERE task_id=?3 AND sequence=2",
+            params![b"{}".as_slice(), core_prov::content_hash(b"{}"), f.base.id()],
+        )
+        .unwrap();
+        assert!(staged::load_for_task(&tx, &saved).is_err());
+        tx.execute_batch("ROLLBACK TO corrupt_feedback; RELEASE corrupt_feedback")
+            .unwrap();
+        assert_eq!(staged::load_for_task(&tx, &saved).unwrap().len(), 2);
+    }
     assert_eq!(load_ledger(&tx, &saved).unwrap().unwrap(), f.base.f.ledger);
     assert_eq!(
         admission_journal::derive_current(&tx, &saved)
