@@ -137,7 +137,8 @@ Seven client calls are in helper functions such as `login()` and are not followe
 `drift_register.md` compares what the tests expect of each referenced endpoint with what its recovered responses return. The comparison stays within the responses' recorded scope: the handler body, plus any repository functions it follows.
 
 - Of the 81 referenced endpoints, 30 are reported as **incomplete evidence**, not drift:
-  - 12 have partial responses;
+  - 10 have partial responses;
+  - 2 (`GET /auth/logout`, `GET /dashboard/setup_done`) have responses that carry no usable provenance, so the returned side cannot be cited;
   - 18 are referenced by a call that follows redirects, so the test reads another endpoint's response.
 - On the other 51, **no test asserts a status, or reads a key, that the handler does not return** (0 `asserted-not-returned`).
 - **44 endpoints return a status that no resolved test asserts** (`returned-not-asserted`, InferredWeak). That is 81 statuses in total: 403 ×28, 401 ×28, 400 ×11, 200 ×8, 302 ×5 and 422 ×1, with 35 of the 44 endpoints under `/api`. Most are the 401 and 403 branches of `@require_api_auth`, which the API tests exercise for only a few endpoints. These findings are weak because unresolved test requests and calls in helper functions are not read, so the claim is only that no recovered test reference asserts the status.

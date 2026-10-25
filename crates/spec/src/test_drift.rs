@@ -20,6 +20,10 @@ pub const PARTIAL_RESPONSES_REASON: &str =
 /// Gap reason when a referencing call follows redirects.
 pub const FOLLOWS_REDIRECTS_REASON: &str =
     "a referencing test call follows redirects, so its expectations belong to another response";
+/// Gap reason when the endpoint's recovered responses carry no valid
+/// provenance, or only Gap provenance.
+pub const UNPROVEN_RESPONSES_REASON: &str =
+    "recovered responses carry no usable provenance, so the returned side cannot be cited";
 /// Why a returned status no test asserts is only InferredWeak.
 pub const UNASSERTED_REASON: &str = "no resolved test reference asserts it; unresolved test requests and calls in helper functions are not read";
 
@@ -37,6 +41,18 @@ fn typed_provenance(value: &serde_json::Value) -> Option<Provenance> {
     serde::Deserialize::deserialize(&value["prov"])
         .ok()
         .filter(|provenance: &Provenance| provenance.validate().is_ok())
+}
+
+/// The weaker of two confidence tiers: a finding is never stronger than the
+/// evidence on either side of it.
+fn weaker(a: ConfidenceTier, b: ConfidenceTier) -> ConfidenceTier {
+    let rank = |tier| match tier {
+        ConfidenceTier::Confirmed => 0,
+        ConfidenceTier::InferredStrong => 1,
+        ConfidenceTier::InferredWeak => 2,
+        ConfidenceTier::Gap => 3,
+    };
+    if rank(a) >= rank(b) { a } else { b }
 }
 
 fn merged_evidence<'a>(provenances: impl IntoIterator<Item = &'a Provenance>) -> Vec<EvidenceRef> {
@@ -139,17 +155,29 @@ pub fn derive_test_drift(nodes: &[Node], edges: &[Edge]) -> ContractFacts {
     for (endpoint_id, expectations) in &expected {
         let endpoint = endpoints[endpoint_id];
         let responses = &endpoint.props["responses"];
-        let response_provenance = typed_provenance(responses);
+        let response_provenance = typed_provenance(responses)
+            .filter(|p| p.confidence_tier != ConfidenceTier::Gap && !p.evidence.is_empty());
+        // The floor both sides allow: the response's tier and every
+        // referencing test's tier.
+        let floor = expectations.tests.values().fold(
+            response_provenance
+                .as_ref()
+                .map_or(ConfidenceTier::Gap, |p| p.confidence_tier),
+            |floor, p| weaker(floor, p.confidence_tier),
+        );
         let evidence = merged_evidence(
             expectations
                 .tests
                 .values()
                 .chain(response_provenance.as_ref()),
         );
+        let unproven = response_provenance.is_none();
         let response_evidence = response_provenance.map(|p| p.evidence).unwrap_or_default();
         let name = endpoint_name(endpoint);
         let partial: Vec<&str> = strings(&responses["partial"]).collect();
-        let incomplete = if !partial.is_empty() {
+        let incomplete = if unproven {
+            Some(UNPROVEN_RESPONSES_REASON)
+        } else if !partial.is_empty() {
             Some(PARTIAL_RESPONSES_REASON)
         } else if expectations.follows_redirects {
             Some(FOLLOWS_REDIRECTS_REASON)
@@ -216,7 +244,8 @@ pub fn derive_test_drift(nodes: &[Node], edges: &[Edge]) -> ContractFacts {
                 continue;
             }
             let id = format!("drift:test:{endpoint_id}@{}", finding.kind);
-            let Some(prov) = rule_provenance(finding.confidence, evidence.clone(), &id) else {
+            let confidence = weaker(finding.confidence, floor);
+            let Some(prov) = rule_provenance(confidence, evidence.clone(), &id) else {
                 continue;
             };
             let mut props = serde_json::json!({
@@ -245,7 +274,7 @@ pub fn derive_test_drift(nodes: &[Node], edges: &[Edge]) -> ContractFacts {
                 &id,
                 (endpoint_id, &response_evidence),
                 expectations,
-                finding.confidence,
+                confidence,
             );
         }
     }
@@ -499,5 +528,56 @@ mod tests {
         .unwrap();
         assert!(verified.content.contains("asserted-not-returned"));
         assert!(!verified.content.contains("returned-not-asserted"));
+    }
+
+    // AC-0345 (T-0345): a finding is never stronger than either side.
+    #[test]
+    fn test_drift_keeps_the_weaker_side_and_gaps_unproven_responses() {
+        let (nodes, mut edges) = fixture();
+        // test_a, the source of 404 and `total`, is only InferredWeak.
+        edges[0].props["prov"] = prov(ConfidenceTier::InferredWeak, "tests/test_a.py");
+        let facts = derive_test_drift(&nodes, &edges);
+        let asserted = facts
+            .nodes
+            .iter()
+            .find(|n| n.id == "drift:test:ep:items@asserted-not-returned")
+            .unwrap();
+        let tier = typed_provenance(&asserted.props).unwrap().confidence_tier;
+        assert_eq!(tier, ConfidenceTier::InferredWeak);
+        assert!(
+            facts
+                .edges
+                .iter()
+                .filter(|e| e.src == asserted.id)
+                .all(|e| {
+                    typed_provenance(&e.props).unwrap().confidence_tier
+                        == ConfidenceTier::InferredWeak
+                })
+        );
+
+        // Removed, invalid or Gap response provenance: the returned side is
+        // unproven, so the endpoint is a Gap and nothing is drift.
+        for responses_prov in [
+            serde_json::Value::Null,
+            serde_json::json!({ "tier": "nonsense" }),
+            prov(ConfidenceTier::Gap, "app/items.py"),
+        ] {
+            let (mut nodes, edges) = fixture();
+            let items = nodes.iter_mut().find(|n| n.id == "ep:items").unwrap();
+            items.props["responses"]["prov"] = responses_prov;
+            let facts = derive_test_drift(&nodes, &edges);
+            assert!(
+                !facts
+                    .nodes
+                    .iter()
+                    .any(|n| n.id.starts_with("drift:test:ep:items@"))
+            );
+            let gap = facts
+                .nodes
+                .iter()
+                .find(|n| n.id == "gap:test-drift:ep:items")
+                .unwrap();
+            assert_eq!(gap.props["reason"], UNPROVEN_RESPONSES_REASON);
+        }
     }
 }
