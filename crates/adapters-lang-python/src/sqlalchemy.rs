@@ -26,6 +26,9 @@ pub(crate) struct OrmFile {
     pub(crate) proven_registries: BTreeSet<String>,
     pub(crate) proven_flask_dbs: BTreeSet<String>,
     pub(crate) proven_sessions: BTreeSet<String>,
+    /// Names bound more than once at module level (imports, `def`/`class`,
+    /// assignments): no session proof survives a rebinding.
+    pub(crate) rebound: BTreeSet<String>,
     assignments: Vec<(String, ModuleRhs)>,
     pub(crate) classes: Vec<OrmClassDecl>,
     pub(crate) functions: Vec<sqlalchemy_writes::FunctionWrites>,
@@ -827,6 +830,46 @@ fn is_inside_class_or_function(mut node: TsNode<'_>) -> bool {
     false
 }
 
+/// Names bound more than once at module level, in any order: an import, a
+/// `def`/`class`, or an assignment target (augmented ones included).
+fn module_rebound_names(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> BTreeSet<String> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for name in bindings.keys() {
+        *counts.entry(name.clone()).or_default() += 1;
+    }
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "class_definition" | "function_definition") {
+            if let Some(name) = node.child_by_field_name("name") {
+                *counts.entry(cx.text(&name).to_string()).or_default() += 1;
+            }
+            continue;
+        }
+        // A bare annotation (`Session: orm.Session`) binds nothing.
+        if (node.kind() == "augmented_assignment"
+            || node.kind() == "assignment" && node.child_by_field_name("right").is_some())
+            && let Some(left) = node.child_by_field_name("left")
+        {
+            let mut names = Vec::new();
+            sqlalchemy_writes::collect_bound_identifiers(cx, left, &mut names);
+            for name in names {
+                *counts.entry(name).or_default() += 1;
+            }
+        }
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(name, _)| name)
+        .collect()
+}
+
 /// Extract per-file SQLAlchemy base bindings and class declarations.
 pub(crate) fn extract(
     cx: &FileCx<'_>,
@@ -842,10 +885,12 @@ pub(crate) fn extract(
         proven_registries: BTreeSet::new(),
         proven_flask_dbs: BTreeSet::new(),
         proven_sessions: BTreeSet::new(),
+        rebound: BTreeSet::new(),
         assignments: Vec::new(),
         classes: Vec::new(),
         functions: Vec::new(),
     };
+    file.rebound = module_rebound_names(cx, root, bindings);
 
     for local in bindings.keys() {
         if is_declarative_base_class(local, bindings) {
@@ -890,7 +935,9 @@ pub(crate) fn extract(
         }
         module_shadowed_imports.insert(lhs.clone());
         let mut is_candidate_receiver = false;
-        if sqlalchemy_writes::is_session_factory_call(cx, rhs, bindings) {
+        if !file.rebound.contains(&lhs)
+            && sqlalchemy_writes::is_session_factory_call(cx, rhs, bindings, &file.rebound)
+        {
             file.proven_sessions.insert(lhs.clone());
             is_candidate_receiver = true;
         } else {
@@ -1553,6 +1600,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
     let mut proven_sessions: BTreeSet<(String, String)> = BTreeSet::new();
     let mut assignments: Vec<((String, String), ModuleRhs)> = Vec::new();
     let mut all_classes: Vec<OrmClassDecl> = Vec::new();
+    let mut rebound: BTreeSet<(String, String)> = BTreeSet::new();
     let mut functions_by_file: Vec<(String, Vec<sqlalchemy_writes::FunctionWrites>)> = Vec::new();
 
     for file in orm_files {
@@ -1568,6 +1616,9 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
         }
         for s in file.proven_sessions {
             proven_sessions.insert((file.path.clone(), s));
+        }
+        for name in file.rebound {
+            rebound.insert((file.path.clone(), name));
         }
         for (lhs, rhs) in file.assignments {
             assignments.push(((file.path.clone(), lhs), rhs));
@@ -1606,6 +1657,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
                 }
                 ModuleRhs::DotSession(recv) => {
                     if !proven_sessions.contains(&key)
+                        && !rebound.contains(&key)
                         && resolve_symbol(path, recv, &imports_by_file, &known_files)
                             .is_some_and(|target| proven_flask_dbs.contains(&target))
                     {
@@ -1630,7 +1682,10 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
                             proven_flask_dbs.insert(key.clone());
                             changed = true;
                         }
-                        if !proven_sessions.contains(&key) && proven_sessions.contains(&target) {
+                        if !proven_sessions.contains(&key)
+                            && !rebound.contains(&key)
+                            && proven_sessions.contains(&target)
+                        {
                             proven_sessions.insert(key);
                             changed = true;
                         }

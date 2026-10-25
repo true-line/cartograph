@@ -3668,6 +3668,202 @@ def neg_unimported():
 }
 
 #[test]
+fn sqlalchemy_writes_fail_closed_on_rebinding_decorators_and_c3_order() {
+    // AC-0357 (T-0357), #1066 (W11d): a session or factory name bound twice
+    // at module level proves nothing; a helper under any decorator besides
+    // `@classmethod` proves nothing; helper lookup follows Python's C3 order,
+    // so a diamond reaches the non-writing override. Each has a control.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/db.py",
+        r#"
+from sqlalchemy.orm import scoped_session
+
+Session = scoped_session(None)
+"#,
+    );
+    write(
+        dir.path(),
+        "app/models.py",
+        r#"
+from sqlalchemy import Column, Integer
+from sqlalchemy.orm import declarative_base
+from app.db import Session
+
+Base = declarative_base()
+
+class Root(object):
+    @classmethod
+    def create(cls, **kw):
+        Session.add(cls(**kw))
+
+class Left(Root):
+    pass
+
+class Right(Root):
+    @classmethod
+    def create(cls, **kw):
+        return None
+
+class Diamond(Left, Right, Base):
+    __tablename__ = "diamond"
+    id = Column(Integer, primary_key=True)
+
+class LeftOnly(Left, Base):
+    __tablename__ = "left_only"
+    id = Column(Integer, primary_key=True)
+
+class Deco:
+    @classmethod
+    @replace_with_noop
+    def make(cls, **kw):
+        Session.add(cls(**kw))
+
+    @replace_with_noop
+    @classmethod
+    def make2(cls, **kw):
+        Session.add(cls(**kw))
+
+    @classmethod
+    def make3(cls, **kw):
+        Session.add(cls(**kw))
+
+class Decorated(Base, Deco):
+    __tablename__ = "decorated"
+    id = Column(Integer, primary_key=True)
+"#,
+    );
+    write(
+        dir.path(),
+        "app/good.py",
+        r#"
+from sqlalchemy.orm import scoped_session
+from app.models import Decorated, Diamond, LeftOnly
+
+Session = scoped_session(None)
+Other = Session
+
+def pos_unshadowed():
+    Session.add(LeftOnly())
+
+def pos_alias():
+    Other.add(LeftOnly())
+
+def pos_inherited():
+    LeftOnly.create()
+
+def neg_diamond():
+    Diamond.create()
+
+def neg_decorated_outer():
+    Decorated.make()
+
+def neg_decorated_inner():
+    Decorated.make2()
+
+def pos_decorated():
+    Decorated.make3()
+"#,
+    );
+    write(
+        dir.path(),
+        "app/aliased.py",
+        r#"
+from sqlalchemy.orm import scoped_session
+from app.models import LeftOnly
+
+Session = fake
+Other = Session
+Session = scoped_session(None)
+
+def neg_alias_order():
+    Other.add(LeftOnly())
+
+def neg_rebound_session():
+    Session.add(LeftOnly())
+"#,
+    );
+    write(
+        dir.path(),
+        "app/twice.py",
+        r#"
+from app.db import Session
+from app.models import LeftOnly
+
+Twice = Session
+Twice = fake
+
+def neg_rebound_alias():
+    Twice.add(LeftOnly())
+"#,
+    );
+    write(
+        dir.path(),
+        "app/shadowed_factory.py",
+        r#"
+from sqlalchemy.orm import scoped_session
+from app.models import LeftOnly
+
+scoped_session = fake_factory
+Session = scoped_session(None)
+
+def neg_shadowed_factory():
+    Session.add(LeftOnly())
+"#,
+    );
+    write(
+        dir.path(),
+        "app/def_factory.py",
+        r#"
+from sqlalchemy.orm import sessionmaker
+from app.models import LeftOnly
+
+def sessionmaker():
+    return fake
+
+Session = sessionmaker()()
+
+def neg_def_factory():
+    Session.add(LeftOnly())
+"#,
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let short = |s: &str| s.rsplit_once('#').map_or(s, |(_, t)| t).to_string();
+    let entity = |s: &str| s.rsplit_once(':').unwrap().1.to_string();
+    let mut writes: Vec<(String, String, String)> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "WRITES")
+        .map(|e| {
+            (
+                short(&e.src),
+                entity(&e.dst),
+                e.props["resolution"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    writes.sort();
+    let w = |a: &str, b: &str, c: &str| (a.to_string(), b.to_string(), c.to_string());
+    assert_eq!(
+        writes,
+        vec![
+            w("pos_alias", "left_only", "session"),
+            w("pos_decorated", "decorated", "model-helper"),
+            w("pos_inherited", "left_only", "model-helper"),
+            w("pos_unshadowed", "left_only", "session"),
+        ]
+    );
+    let inherited = out
+        .edges
+        .iter()
+        .find(|e| e.label == "WRITES" && e.src.ends_with("#pos_inherited"))
+        .unwrap();
+    assert_eq!(inherited.props["via"], "Root.create");
+}
+
+#[test]
 fn sqlalchemy_writes_cover_sessionmaker_flask_db_session_and_direct_variants() {
     // #1066 (W11d): `sessionmaker(...)()`, `db.session.add(...)` on a proven
     // Flask-SQLAlchemy instance, `S.add(M(...))`, `S.delete(x)`, `S.add_all([...])`,

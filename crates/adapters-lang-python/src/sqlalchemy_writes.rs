@@ -110,11 +110,12 @@ fn is_sessionmaker_fn(callee: &str, bindings: &HashMap<String, ImportBinding>) -
 }
 
 /// Whether `rhs` is `scoped_session(...)` or `sessionmaker(...)()` with an
-/// import-proven SQLAlchemy session factory.
+/// import-proven SQLAlchemy session factory that the module never rebinds.
 pub(crate) fn is_session_factory_call(
     cx: &FileCx<'_>,
     rhs: TsNode<'_>,
     bindings: &HashMap<String, ImportBinding>,
+    rebound: &BTreeSet<String>,
 ) -> bool {
     if rhs.kind() != "call" {
         return false;
@@ -122,14 +123,17 @@ pub(crate) fn is_session_factory_call(
     let Some(function) = rhs.child_by_field_name("function") else {
         return false;
     };
+    let kept = |callee: &str| !rebound.contains(callee.split('.').next().unwrap_or(callee));
     if is_dotted_identifier(function) {
-        return is_scoped_session_fn(cx.text(&function), bindings);
+        let callee = cx.text(&function);
+        return kept(callee) && is_scoped_session_fn(callee, bindings);
     }
     if function.kind() == "call"
         && let Some(inner_fn) = function.child_by_field_name("function")
         && is_dotted_identifier(inner_fn)
     {
-        return is_sessionmaker_fn(cx.text(&inner_fn), bindings);
+        let callee = cx.text(&inner_fn);
+        return kept(callee) && is_sessionmaker_fn(callee, bindings);
     }
     false
 }
@@ -198,7 +202,11 @@ fn is_locally_bound(cx: &FileCx<'_>, function: TsNode<'_>, name: &str) -> bool {
     false
 }
 
-fn collect_bound_identifiers(cx: &FileCx<'_>, target: TsNode<'_>, out: &mut Vec<String>) {
+pub(crate) fn collect_bound_identifiers(
+    cx: &FileCx<'_>,
+    target: TsNode<'_>,
+    out: &mut Vec<String>,
+) {
     match target.kind() {
         "identifier" => out.push(cx.text(&target).to_string()),
         "attribute" | "subscript" => {}
@@ -590,20 +598,18 @@ fn has_classmethod_decorator(
     if shadowed.contains("classmethod") || bindings.contains_key("classmethod") {
         return false;
     }
+    // The builtin alone: any other decorator may replace what is installed.
     let mut walk = decorated.walk();
-    for child in decorated.named_children(&mut walk) {
-        if child.kind() != "decorator" {
-            continue;
-        }
-        let mut dwalk = child.walk();
-        if child
-            .named_children(&mut dwalk)
-            .any(|expr| expr.kind() == "identifier" && cx.text(&expr) == "classmethod")
-        {
-            return true;
-        }
-    }
-    false
+    let decorators: Vec<TsNode<'_>> = decorated
+        .named_children(&mut walk)
+        .filter(|child| child.kind() == "decorator")
+        .collect();
+    let [decorator] = decorators[..] else {
+        return false;
+    };
+    let mut dwalk = decorator.walk();
+    let exprs: Vec<TsNode<'_>> = decorator.named_children(&mut dwalk).collect();
+    matches!(exprs[..], [expr] if expr.kind() == "identifier" && cx.text(&expr) == "classmethod")
 }
 
 /// Extract defined member names and `@classmethod` write candidates from a class body.
@@ -724,107 +730,142 @@ fn is_proven_session(
     false
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What a class's bases are looked up against.
+struct MroScope<'a, 'b> {
+    classes_by_key: &'b BTreeMap<(String, String), &'a OrmClassDecl>,
+    proven_bases: &'b BTreeSet<(String, String)>,
+    proven_registries: &'b BTreeSet<(String, String)>,
+    proven_flask_dbs: &'b BTreeSet<(String, String)>,
+    imports_by_file: &'b BTreeMap<String, HashMap<String, ImportBinding>>,
+    known_files: &'b BTreeSet<String>,
+}
+
+/// One class in a method resolution order: a repo class, or a proven base
+/// that defines no helper (a declarative base, `db.Model`, `object`).
+#[derive(Clone)]
+enum MroEntry<'a> {
+    Class(&'a OrmClassDecl),
+    Opaque((String, String)),
+}
+
+impl MroEntry<'_> {
+    fn key(&self) -> &(String, String) {
+        match self {
+            MroEntry::Class(class) => &class.key,
+            MroEntry::Opaque(key) => key,
+        }
+    }
+}
+
+/// Python's C3 linearization of `class`. `None` when a base is not a repo
+/// class or a proven base (its own ancestors are unknown), on a cycle, or
+/// when the hierarchy has no consistent order.
+fn linearize<'a>(
+    class: &'a OrmClassDecl,
+    scope: &MroScope<'a, '_>,
+    stack: &mut Vec<(String, String)>,
+) -> Option<Vec<MroEntry<'a>>> {
+    if stack.contains(&class.key) {
+        return None;
+    }
+    stack.push(class.key.clone());
+    let resolve =
+        |expr: &str| resolve_symbol(&class.key.0, expr, scope.imports_by_file, scope.known_files);
+    let mut seqs: Vec<Vec<MroEntry<'a>>> = Vec::new();
+    for base in &class.bases {
+        let seq = match base {
+            BaseExpr::DeclarativeBase => {
+                vec![MroEntry::Opaque((String::new(), "DeclarativeBase".into()))]
+            }
+            BaseExpr::InlineProvenBase => vec![MroEntry::Opaque((
+                class.key.0.clone(),
+                format!("{}()", class.key.1),
+            ))],
+            BaseExpr::GenerateBase(recv) => {
+                let target = resolve(recv).filter(|t| scope.proven_registries.contains(t))?;
+                vec![MroEntry::Opaque((
+                    target.0,
+                    format!("{}.generate_base()", target.1),
+                ))]
+            }
+            BaseExpr::DotModel(recv) => match resolve(recv) {
+                Some(target) if scope.proven_flask_dbs.contains(&target) => {
+                    vec![MroEntry::Opaque((target.0, format!("{}.Model", target.1)))]
+                }
+                _ => {
+                    let target = resolve(&format!("{recv}.Model"))?;
+                    let base_class = scope.classes_by_key.get(&target).copied()?;
+                    linearize(base_class, scope, stack)?
+                }
+            },
+            BaseExpr::Symbol(sym) => {
+                let target = resolve(sym)?;
+                match scope.classes_by_key.get(&target).copied() {
+                    Some(base_class) => linearize(base_class, scope, stack)?,
+                    None if scope.proven_bases.contains(&target) => vec![MroEntry::Opaque(target)],
+                    // The builtin: an unbound `object` resolves to this file.
+                    None if sym == "object" && target == (class.key.0.clone(), sym.clone()) => {
+                        vec![MroEntry::Opaque((String::new(), "object".into()))]
+                    }
+                    None => return None,
+                }
+            }
+            BaseExpr::Unresolvable => return None,
+        };
+        seqs.push(seq);
+    }
+    seqs.push(seqs.iter().map(|seq| seq[0].clone()).collect());
+    let mut order = vec![MroEntry::Class(class)];
+    loop {
+        seqs.retain(|seq| !seq.is_empty());
+        if seqs.is_empty() {
+            break;
+        }
+        let head = seqs.iter().map(|seq| seq[0].clone()).find(|candidate| {
+            !seqs
+                .iter()
+                .any(|seq| seq[1..].iter().any(|e| e.key() == candidate.key()))
+        })?;
+        for seq in &mut seqs {
+            if seq[0].key() == head.key() {
+                seq.remove(0);
+            }
+        }
+        order.push(head);
+    }
+    stack.pop();
+    Some(order)
+}
+
+/// The first class in `class`'s C3 order that defines `method` decides: a
+/// self-model writer is an edge, anything else is none.
 fn resolve_mro_helper<'a>(
     class: &'a OrmClassDecl,
     method: &str,
-    classes_by_key: &BTreeMap<(String, String), &'a OrmClassDecl>,
+    scope: &MroScope<'a, '_>,
     self_writers: &'a BTreeMap<(String, String), BTreeMap<String, Vec<WriteOp>>>,
-    proven_bases: &BTreeSet<(String, String)>,
-    proven_registries: &BTreeSet<(String, String)>,
-    proven_flask_dbs: &BTreeSet<(String, String)>,
-    imports_by_file: &BTreeMap<String, HashMap<String, ImportBinding>>,
-    known_files: &BTreeSet<String>,
-    visited: &mut BTreeSet<(String, String)>,
 ) -> MroOutcome<'a> {
-    if !visited.insert(class.key.clone()) {
-        return MroOutcome::NotFound;
-    }
-    if class.defined_members.contains(method) {
-        if let Some(ops) = self_writers
-            .get(&class.key)
-            .and_then(|methods| methods.get(method))
-            && !ops.is_empty()
-        {
-            return MroOutcome::Writer {
-                class_name: &class.name,
-                operations: ops,
-            };
-        }
+    let Some(order) = linearize(class, scope, &mut Vec::new()) else {
         return MroOutcome::StopNoEdge;
-    }
-    for base in &class.bases {
-        match base {
-            BaseExpr::DeclarativeBase | BaseExpr::InlineProvenBase => continue,
-            BaseExpr::GenerateBase(recv) => {
-                if resolve_symbol(&class.key.0, recv, imports_by_file, known_files)
-                    .is_some_and(|target| proven_registries.contains(&target))
-                {
-                    continue;
-                }
-                return MroOutcome::StopNoEdge;
-            }
-            BaseExpr::DotModel(recv) => {
-                if resolve_symbol(&class.key.0, recv, imports_by_file, known_files)
-                    .is_some_and(|target| proven_flask_dbs.contains(&target))
-                {
-                    continue;
-                }
-                let full = format!("{recv}.Model");
-                let Some(target_key) =
-                    resolve_symbol(&class.key.0, &full, imports_by_file, known_files)
-                else {
-                    return MroOutcome::StopNoEdge;
-                };
-                let Some(base_class) = classes_by_key.get(&target_key).copied() else {
-                    return MroOutcome::StopNoEdge;
-                };
-                match resolve_mro_helper(
-                    base_class,
-                    method,
-                    classes_by_key,
-                    self_writers,
-                    proven_bases,
-                    proven_registries,
-                    proven_flask_dbs,
-                    imports_by_file,
-                    known_files,
-                    visited,
-                ) {
-                    MroOutcome::NotFound => continue,
-                    outcome => return outcome,
-                }
-            }
-            BaseExpr::Symbol(sym) => {
-                let Some(target_key) =
-                    resolve_symbol(&class.key.0, sym, imports_by_file, known_files)
-                else {
-                    return MroOutcome::StopNoEdge;
-                };
-                if let Some(base_class) = classes_by_key.get(&target_key).copied() {
-                    match resolve_mro_helper(
-                        base_class,
-                        method,
-                        classes_by_key,
-                        self_writers,
-                        proven_bases,
-                        proven_registries,
-                        proven_flask_dbs,
-                        imports_by_file,
-                        known_files,
-                        visited,
-                    ) {
-                        MroOutcome::NotFound => continue,
-                        outcome => return outcome,
-                    }
-                } else if proven_bases.contains(&target_key) {
-                    continue;
-                } else {
-                    return MroOutcome::StopNoEdge;
-                }
-            }
-            BaseExpr::Unresolvable => return MroOutcome::StopNoEdge,
+    };
+    for entry in order {
+        let MroEntry::Class(defining) = entry else {
+            continue;
+        };
+        if !defining.defined_members.contains(method) {
+            continue;
         }
+        return match self_writers
+            .get(&defining.key)
+            .and_then(|methods| methods.get(method))
+            .filter(|ops| !ops.is_empty())
+        {
+            Some(ops) => MroOutcome::Writer {
+                class_name: &defining.name,
+                operations: ops,
+            },
+            None => MroOutcome::StopNoEdge,
+        };
     }
     MroOutcome::NotFound
 }
@@ -873,6 +914,14 @@ pub(crate) fn resolve_writes(
         }
     }
 
+    let scope = MroScope {
+        classes_by_key,
+        proven_bases,
+        proven_registries,
+        proven_flask_dbs,
+        imports_by_file,
+        known_files,
+    };
     let mut resolved_by_pair: BTreeMap<(String, String), Vec<ResolvedWrite>> = BTreeMap::new();
 
     for (file_path, functions) in functions_by_file {
@@ -929,22 +978,11 @@ pub(crate) fn resolve_writes(
                         let Some(model_class) = classes_by_key.get(&model_key).copied() else {
                             continue;
                         };
-                        let mut visited = BTreeSet::new();
                         if let MroOutcome::Writer {
                             class_name,
                             operations,
-                        } = resolve_mro_helper(
-                            model_class,
-                            &method,
-                            classes_by_key,
-                            &self_writers,
-                            proven_bases,
-                            proven_registries,
-                            proven_flask_dbs,
-                            imports_by_file,
-                            known_files,
-                            &mut visited,
-                        ) {
+                        } = resolve_mro_helper(model_class, &method, &scope, &self_writers)
+                        {
                             let via = format!("{class_name}.{method}");
                             let entry = resolved_by_pair
                                 .entry((src.clone(), entity_id.clone()))

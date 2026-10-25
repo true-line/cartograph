@@ -1225,13 +1225,14 @@ fn record_writes<'a>(
     writes_by_endpoint: &mut BTreeMap<&'a str, Vec<(WriteFact, ConfidenceTier)>>,
     writes_by_symbol: &BTreeMap<&'a str, Vec<(&'a str, &'a Edge, &'a Node)>>,
     endpoint: &'a str,
-    participants: &BTreeSet<&'a str>,
+    participants: &BTreeMap<&'a str, ConfidenceTier>,
 ) {
     let entry = writes_by_endpoint.entry(endpoint).or_default();
-    for &sym_id in participants {
+    for (&sym_id, &reach) in participants {
         if let Some(writes) = writes_by_symbol.get(sym_id) {
             for &(data_id, write_edge, data_node) in writes {
                 let tier = weakest_confidence([
+                    reach,
                     edge_confidence(write_edge),
                     provenance(&data_node.props, &data_node.id).confidence_tier,
                 ]);
@@ -1352,13 +1353,14 @@ pub fn search(
             .entry(flow.trigger.as_str())
             .or_default()
             .push(flow);
-        let mut participants: BTreeSet<&str> = BTreeSet::new();
+        // The trigger's own flow: its hop tiers are the flow's to report.
+        let mut participants: BTreeMap<&str, ConfidenceTier> = BTreeMap::new();
         for hop in &flow.hops {
             if hop.provenance.confidence_tier == ConfidenceTier::Gap {
                 continue;
             }
-            participants.insert(hop.src.as_str());
-            participants.insert(hop.dst.as_str());
+            participants.insert(hop.src.as_str(), ConfidenceTier::Confirmed);
+            participants.insert(hop.dst.as_str(), ConfidenceTier::Confirmed);
         }
         record_writes(
             &mut writes_by_endpoint,
@@ -1368,12 +1370,12 @@ pub fn search(
         );
         // An endpoint an anchor's flow fetches gets no flow of its own
         // (#1066): its writes are what the flow reaches downstream of it.
-        let mut next: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        let mut next: BTreeMap<&str, Vec<(&str, ConfidenceTier)>> = BTreeMap::new();
         for hop in &flow.hops {
             if hop.provenance.confidence_tier != ConfidenceTier::Gap {
                 next.entry(hop.src.as_str())
                     .or_default()
-                    .push(hop.dst.as_str());
+                    .push((hop.dst.as_str(), hop.provenance.confidence_tier));
             }
         }
         let fetched: BTreeSet<&str> = flow
@@ -1390,11 +1392,25 @@ pub fn search(
             .map(|hop| hop.dst.as_str())
             .collect();
         for endpoint in fetched {
-            let mut downstream: BTreeSet<&str> = BTreeSet::new();
-            let mut pending = vec![endpoint];
-            while let Some(id) = pending.pop() {
-                if downstream.insert(id) {
-                    pending.extend(next.get(id).into_iter().flatten().copied());
+            // Each downstream node keeps its strongest path's weakest hop,
+            // so an attributed write carries the reach it rests on.
+            let mut downstream: BTreeMap<&str, ConfidenceTier> = BTreeMap::new();
+            let mut pending = vec![(endpoint, ConfidenceTier::Confirmed)];
+            while let Some((id, reach)) = pending.pop() {
+                if downstream
+                    .get(id)
+                    .is_some_and(|&best| rank_confidence(best) >= rank_confidence(reach))
+                {
+                    continue;
+                }
+                downstream.insert(id, reach);
+                for &(dst, tier) in next.get(id).into_iter().flatten() {
+                    let hop_reach = if rank_confidence(tier) < rank_confidence(reach) {
+                        tier
+                    } else {
+                        reach
+                    };
+                    pending.push((dst, hop_reach));
                 }
             }
             record_writes(
