@@ -2024,3 +2024,89 @@ fun Other(external: ExternalThing) = with(external) {
     // An unproven receiver type could own any name, so nothing is recorded.
     assert!(symbols("OtherKey").is_empty());
 }
+
+#[test]
+fn navigation3_callbacks_keep_defaulted_params_and_initial_screens_cite_initializers() {
+    // Kotlin defaults and parameter modifiers are siblings of `parameter`, so
+    // positions and names survive `modifier: Modifier = Modifier`.
+    let dir = tempfile::tempdir().unwrap();
+    let src = r#"package demo.root
+
+import androidx.compose.runtime.mutableStateListOf
+import androidx.navigation3.runtime.NavKey
+import androidx.navigation3.runtime.entryProvider
+
+data object HomeKey : NavKey
+
+class Vm {
+    private val stack = mutableStateListOf<NavKey>(HomeKey)
+    fun open() {}
+    fun close() {}
+}
+
+fun Screen(modifier: Modifier = Modifier, @Suppress("x") onOpen: () -> Unit = {}, onClose: () -> Unit) {
+    onOpen()
+    onClose()
+}
+
+fun Root(vm: Vm) {
+    entryProvider {
+        entry<HomeKey> {
+            Screen(Modifier, vm::open, onClose = vm::close)
+        }
+    }
+}
+"#;
+    write(dir.path(), "src/main/kotlin/demo/root/Root.kt", src);
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let file = "src/main/kotlin/demo/root/Root.kt";
+    let screen = out
+        .nodes
+        .iter()
+        .find(|n| n.id == "screen:local/demo@navigation3:demo.root.HomeKey")
+        .unwrap();
+    let records: Vec<(String, String, bool)> = screen.props["entry_callbacks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["param"].as_str().unwrap().to_string(),
+                c["symbol"].as_str().unwrap().to_string(),
+                c["read"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        records,
+        vec![
+            (
+                "onOpen".into(),
+                format!("sym:local/demo@{file}#Vm.open"),
+                true
+            ),
+            (
+                "onClose".into(),
+                format!("sym:local/demo@{file}#Vm.close"),
+                true
+            ),
+        ]
+    );
+
+    assert_eq!(screen.props["initial"], true);
+    let cited: Vec<&str> = screen.props["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            &src[e["byte_start"].as_u64().unwrap() as usize
+                ..e["byte_end"].as_u64().unwrap() as usize]
+        })
+        .collect();
+    assert_eq!(cited.len(), 2, "entry registration plus the initializer");
+    assert!(cited[0].starts_with("entry<HomeKey>"));
+    assert_eq!(
+        cited[1],
+        "private val stack = mutableStateListOf<NavKey>(HomeKey)"
+    );
+}

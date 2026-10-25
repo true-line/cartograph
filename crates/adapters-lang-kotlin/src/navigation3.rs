@@ -336,6 +336,8 @@ enum NavTarget {
 struct InitialSite {
     owner: String,
     target: NavTarget,
+    /// The back-stack property whose initializer names the key.
+    evidence: EvidenceRef,
 }
 
 #[derive(Debug, Clone)]
@@ -397,6 +399,9 @@ impl Pending {
                     cb.evidence.commit_sha = commit.into();
                 }
             }
+        }
+        for init in &mut self.initials {
+            init.evidence.commit_sha = commit.into();
         }
         for nav in &mut self.navigations {
             nav.evidence.commit_sha = commit.into();
@@ -2109,7 +2114,7 @@ pub(crate) fn extract(
                 back_stacks.insert(prop_name);
                 back_stack_prop_ids.insert(member.id());
                 if let Some(arg) = initial_arg {
-                    back_stack_initial_args.push(arg);
+                    back_stack_initial_args.push((arg, evidence(cx, *member)));
                 }
             }
         }
@@ -2247,7 +2252,7 @@ pub(crate) fn extract(
             local_functions,
         };
 
-        for arg in back_stack_initial_args {
+        for (arg, initializer) in back_stack_initial_args {
             let target = target_scope.classify(Some(arg));
             if matches!(
                 target,
@@ -2256,6 +2261,7 @@ pub(crate) fn extract(
                 pending.initials.push(InitialSite {
                     owner: class_symbol.clone(),
                     target,
+                    evidence: initializer,
                 });
             }
         }
@@ -2497,6 +2503,7 @@ pub(crate) fn complete(
     edges: &mut Vec<Edge>,
 ) {
     let mut screens: BTreeMap<String, Node> = BTreeMap::new();
+    let mut screen_entry_evidence: BTreeMap<String, EvidenceRef> = BTreeMap::new();
     let mut screen_callbacks: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
     let mut render_edges: BTreeMap<(String, String), Edge> = BTreeMap::new();
     let mut gap_nodes = Vec::new();
@@ -2521,6 +2528,9 @@ pub(crate) fn complete(
         };
         let fqn = &declared.fqn;
         let screen = format!("screen:{repo}@{ROUTER}:{fqn}");
+        screen_entry_evidence
+            .entry(screen.clone())
+            .or_insert_with(|| entry.evidence.clone());
         screens.entry(screen.clone()).or_insert_with(|| Node {
             id: screen.clone(),
             label: "Screen".into(),
@@ -2611,6 +2621,7 @@ pub(crate) fn complete(
     }
 
     let mut initial_owners_by_screen: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut initializers_by_screen: BTreeMap<String, Vec<EvidenceRef>> = BTreeMap::new();
     for init in pending.initials {
         if !known.contains(&init.owner) {
             continue;
@@ -2631,6 +2642,10 @@ pub(crate) fn complete(
         };
         let screen = format!("screen:{repo}@{ROUTER}:{fqn}");
         if screens.contains_key(&screen) {
+            initializers_by_screen
+                .entry(screen.clone())
+                .or_default()
+                .push(init.evidence);
             initial_owners_by_screen
                 .entry(screen)
                 .or_default()
@@ -2647,6 +2662,27 @@ pub(crate) fn complete(
         let Some(obj) = node.props.as_object_mut() else {
             continue;
         };
+        // The initial-destination facts rest on the initializers, so the
+        // Screen cites each one beside its entry registration.
+        let mut cited: Vec<EvidenceRef> = screen_entry_evidence
+            .get(&screen_id)
+            .cloned()
+            .into_iter()
+            .collect();
+        let mut initializers = initializers_by_screen
+            .remove(&screen_id)
+            .unwrap_or_default();
+        initializers.sort_by_key(|e| (e.path.clone(), e.byte_start, e.byte_end));
+        initializers.dedup();
+        cited.extend(initializers);
+        obj.insert(
+            "prov".into(),
+            prov(
+                cited,
+                ConfidenceTier::Confirmed,
+                &format!("Screen {screen_id}"),
+            ),
+        );
         obj.insert("initial".into(), serde_json::Value::Bool(true));
         obj.insert(
             "back_stack_owner".into(),
