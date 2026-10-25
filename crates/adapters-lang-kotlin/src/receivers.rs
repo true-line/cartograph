@@ -2,7 +2,15 @@
 //! receiver names, and the type its declaration states. Only a type written
 //! in source proves anything; an inferred binding blocks outer ones.
 use crate::FileCx;
+use std::collections::HashSet;
 use tree_sitter::Node as TsNode;
+
+/// Hilt's Compose `hiltViewModel` (W11c-2). Its result is the view model
+/// type: the type argument, or what its creation callback returns.
+pub(crate) const HILT_VIEW_MODEL: &[&str] = &[
+    "androidx.hilt.navigation.compose.hiltViewModel",
+    "androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel",
+];
 
 /// What a receiver name is bound to at a use site.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,8 +20,94 @@ pub(crate) enum Binding {
     Typed(String),
     /// Initialized by `T(…)`: proves `T` only if `T` is a constructible class.
     Constructed(String),
+    /// `hiltViewModel(…) { f: F -> f.method(…) }`: the declared return type
+    /// of `F.method`, resolved at the directory join.
+    Factory { factory: String, method: String },
     /// Bound, but with no stated type. Outer bindings are shadowed.
     Untyped,
+}
+
+/// The innermost callee identifier of a call: `f` in `f(…)`, `f<T>(…)`,
+/// `f { … }` and `f(…) { … }`.
+fn call_head<'t>(call: TsNode<'t>) -> Option<TsNode<'t>> {
+    let mut node = call;
+    while node.kind() == "call_expression" {
+        node = node.named_child(0)?;
+    }
+    (node.kind() == "identifier").then_some(node)
+}
+
+/// The type a proven `hiltViewModel` call produces. `None` when the call is
+/// not one; `Some(Untyped)` when it states no type this rule reads.
+pub(crate) fn hilt_binding(
+    cx: &FileCx<'_>,
+    call: TsNode<'_>,
+    hilt: &HashSet<String>,
+) -> Option<Binding> {
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let head = call_head(call)?;
+    if !hilt.contains(cx.text(&head)) {
+        return None;
+    }
+    let inner = head.parent()?;
+    if let Some(args) = named_children(inner)
+        .into_iter()
+        .find(|part| part.kind() == "type_arguments")
+    {
+        // `hiltViewModel<VM>()` or `hiltViewModel<VM, VMF>(…)`: VM first.
+        let ty = named_children(args)
+            .into_iter()
+            .next()
+            .and_then(|projection| named_children(projection).into_iter().find(is_type_node))
+            .and_then(|ty| declared_type(cx, ty));
+        return Some(ty.map_or(Binding::Untyped, Binding::Typed));
+    }
+    let lambda = named_children(call)
+        .into_iter()
+        .find(|part| part.kind() == "annotated_lambda")
+        .and_then(|annotated| named_children(annotated).into_iter().next())
+        .filter(|lambda| lambda.kind() == "lambda_literal");
+    let factory = lambda.and_then(|lambda| {
+        let parts = named_children(lambda);
+        let [params, body @ ..] = parts.as_slice() else {
+            return None;
+        };
+        if params.kind() != "lambda_parameters" {
+            return None;
+        }
+        let [param] = named_children(*params)[..] else {
+            return None;
+        };
+        if param.kind() != "variable_declaration" {
+            return None;
+        }
+        let param_parts = named_children(param);
+        let name = param_parts.iter().find(|p| p.kind() == "identifier")?;
+        let factory = param_parts
+            .iter()
+            .find(|p| is_type_node(p))
+            .and_then(|ty| declared_type(cx, *ty))?;
+        // The callback's value is its last expression: `f.method(…)`.
+        let last = body
+            .last()
+            .filter(|last| last.kind() == "call_expression")?;
+        let callee = last
+            .named_child(0)
+            .filter(|c| c.kind() == "navigation_expression")?;
+        let [receiver, method] = named_children(callee)[..] else {
+            return None;
+        };
+        (receiver.kind() == "identifier"
+            && cx.text(&receiver) == cx.text(name)
+            && method.kind() == "identifier")
+            .then(|| Binding::Factory {
+                factory,
+                method: cx.text(&method).to_string(),
+            })
+    });
+    Some(factory.unwrap_or(Binding::Untyped))
 }
 
 /// The type a type node states: `T`, `a.T`, `T<X>` and `T?` give their
@@ -73,7 +167,12 @@ fn declaration_binding(cx: &FileCx<'_>, decl: TsNode<'_>, name: &str) -> Option<
 
 /// A `property_declaration` binding `name`: its stated type, else a
 /// `T(…)` initializer, else untyped (delegates and other initializers).
-fn property_binding(cx: &FileCx<'_>, prop: TsNode<'_>, name: &str) -> Option<Binding> {
+fn property_binding(
+    cx: &FileCx<'_>,
+    prop: TsNode<'_>,
+    name: &str,
+    hilt: &HashSet<String>,
+) -> Option<Binding> {
     let children = named_children(prop);
     if let Some(multi) = children
         .iter()
@@ -97,6 +196,13 @@ fn property_binding(cx: &FileCx<'_>, prop: TsNode<'_>, name: &str) -> Option<Bin
     {
         return Some(Binding::Untyped);
     }
+    if let Some(binding) = children
+        .iter()
+        .filter(|child| child.kind() == "call_expression")
+        .find_map(|call| hilt_binding(cx, *call, hilt))
+    {
+        return Some(binding);
+    }
     let constructed = children
         .iter()
         .filter(|child| child.kind() == "call_expression")
@@ -117,6 +223,7 @@ fn class_binding(
     class: TsNode<'_>,
     name: &str,
     in_function: bool,
+    hilt: &HashSet<String>,
 ) -> Option<Binding> {
     for child in named_children(class) {
         match child.kind() {
@@ -143,7 +250,7 @@ fn class_binding(
             "class_body" => {
                 for member in named_children(child) {
                     if member.kind() == "property_declaration"
-                        && let Some(binding) = property_binding(cx, member, name)
+                        && let Some(binding) = property_binding(cx, member, name, hilt)
                     {
                         return Some(binding);
                     }
@@ -170,6 +277,7 @@ pub(crate) fn lexical_binding(
     cx: &FileCx<'_>,
     use_site: TsNode<'_>,
     name: &str,
+    hilt: &HashSet<String>,
 ) -> Option<Binding> {
     let mut child = use_site;
     let mut in_function = false;
@@ -182,7 +290,7 @@ pub(crate) fn lexical_binding(
                     .into_iter()
                     .filter(|stmt| stmt.end_byte() <= use_site.start_byte())
                     .filter(|stmt| stmt.kind() == "property_declaration")
-                    .filter_map(|stmt| property_binding(cx, stmt, name))
+                    .filter_map(|stmt| property_binding(cx, stmt, name, hilt))
                     .next_back();
                 if found.is_some() {
                     return found;
@@ -216,7 +324,7 @@ pub(crate) fn lexical_binding(
                     .into_iter()
                     .filter(|stmt| stmt.end_byte() <= use_site.start_byte())
                     .filter(|stmt| stmt.kind() == "property_declaration")
-                    .filter_map(|stmt| property_binding(cx, stmt, name))
+                    .filter_map(|stmt| property_binding(cx, stmt, name, hilt))
                     .next_back();
                 if local.is_some() {
                     return local;
@@ -262,7 +370,7 @@ pub(crate) fn lexical_binding(
             }
             "getter" | "setter" => in_function = true,
             "class_declaration" | "object_declaration" | "companion_object" => {
-                if let Some(binding) = class_binding(cx, scope, name, in_function) {
+                if let Some(binding) = class_binding(cx, scope, name, in_function, hilt) {
                     return Some(binding);
                 }
                 // A local class captures its enclosing function's bindings
@@ -273,11 +381,11 @@ pub(crate) fn lexical_binding(
                     .is_some_and(|parent| !matches!(parent.kind(), "class_body" | "source_file"));
                 let inner = scope.kind() == "class_declaration" && is_inner(cx, scope);
                 if !local && !inner {
-                    return top_level_binding(cx, scope, name);
+                    return top_level_binding(cx, scope, name, hilt);
                 }
                 in_function = true;
             }
-            "source_file" => return top_level_binding(cx, scope, name),
+            "source_file" => return top_level_binding(cx, scope, name, hilt),
             _ => {}
         }
         child = scope;
@@ -286,7 +394,12 @@ pub(crate) fn lexical_binding(
 }
 
 /// A top-level property of this file.
-fn top_level_binding(cx: &FileCx<'_>, from: TsNode<'_>, name: &str) -> Option<Binding> {
+fn top_level_binding(
+    cx: &FileCx<'_>,
+    from: TsNode<'_>,
+    name: &str,
+    hilt: &HashSet<String>,
+) -> Option<Binding> {
     let mut root = from;
     while let Some(parent) = root.parent() {
         root = parent;
@@ -294,7 +407,7 @@ fn top_level_binding(cx: &FileCx<'_>, from: TsNode<'_>, name: &str) -> Option<Bi
     named_children(root)
         .into_iter()
         .filter(|stmt| stmt.kind() == "property_declaration")
-        .find_map(|stmt| property_binding(cx, stmt, name))
+        .find_map(|stmt| property_binding(cx, stmt, name, hilt))
 }
 
 /// `this.name`: an instance property of the nearest enclosing class.
@@ -302,6 +415,7 @@ pub(crate) fn this_property_binding(
     cx: &FileCx<'_>,
     use_site: TsNode<'_>,
     name: &str,
+    hilt: &HashSet<String>,
 ) -> Option<Binding> {
     let mut node = use_site;
     while let Some(parent) = node.parent() {
@@ -309,7 +423,7 @@ pub(crate) fn this_property_binding(
             parent.kind(),
             "class_declaration" | "object_declaration" | "companion_object"
         ) {
-            return class_binding(cx, parent, name, true);
+            return class_binding(cx, parent, name, true, hilt);
         }
         node = parent;
     }
@@ -344,4 +458,60 @@ pub(crate) fn is_type_parameter(cx: &FileCx<'_>, site: TsNode<'_>, name: &str) -
         }
     }
     false
+}
+
+/// The receiver of the nearest enclosing `with(x) { … }` lambda: `x`'s
+/// binding, or a proven `hiltViewModel` call's type. `Some(Untyped)` when the
+/// receiver is an expression with no stated type.
+pub(crate) fn with_receiver_binding(
+    cx: &FileCx<'_>,
+    use_site: TsNode<'_>,
+    hilt: &HashSet<String>,
+) -> Option<Binding> {
+    let mut node = use_site;
+    while let Some(parent) = node.parent() {
+        node = parent;
+        if parent.kind() != "lambda_literal" {
+            continue;
+        }
+        let Some(call) = parent
+            .parent()
+            .filter(|a| a.kind() == "annotated_lambda")
+            .and_then(|a| a.parent())
+            .filter(|c| c.kind() == "call_expression")
+        else {
+            continue;
+        };
+        let Some(head) = call
+            .named_child(0)
+            .filter(|h| h.kind() == "call_expression")
+        else {
+            continue;
+        };
+        if head
+            .named_child(0)
+            .is_none_or(|callee| callee.kind() != "identifier" || cx.text(&callee) != "with")
+        {
+            continue;
+        }
+        let args: Vec<TsNode<'_>> = named_children(head)
+            .into_iter()
+            .filter(|part| part.kind() == "value_arguments")
+            .flat_map(named_children)
+            .collect();
+        let [arg] = args[..] else {
+            return Some(Binding::Untyped);
+        };
+        let Some(expr) = named_children(arg).into_iter().next_back() else {
+            return Some(Binding::Untyped);
+        };
+        return Some(match expr.kind() {
+            "identifier" => {
+                lexical_binding(cx, call, cx.text(&expr), hilt).unwrap_or(Binding::Untyped)
+            }
+            "call_expression" => hilt_binding(cx, expr, hilt).unwrap_or(Binding::Untyped),
+            _ => Binding::Untyped,
+        });
+    }
+    None
 }
