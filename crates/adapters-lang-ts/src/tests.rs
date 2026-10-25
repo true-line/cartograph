@@ -3853,6 +3853,13 @@ fn vitest_requests_skip_declared_helpers_and_resolve_the_imported_file() {
         "e2e/docs/explicit/index.ts",
         "import { graphql } from './graphql';\nexport const doc = graphql(`query { products { id } }`);\n",
     );
+    // `missing.ts` does not exist: its siblings are not what it names.
+    for path in ["e2e/docs/missing/index.ts", "e2e/docs/missing.tsx"] {
+        write(
+            path,
+            "import { graphql } from './graphql';\nexport const doc = graphql(`query { products { id } }`);\n",
+        );
+    }
     write(
         "e2e/docs/listed/index.ts",
         "import { graphql } from './graphql';\nexport const doc = graphql(`query { products { id } }`);\n",
@@ -3865,12 +3872,17 @@ import { graphql } from './graphql';
 import { doc as explicitDoc } from './docs/explicit.ts';
 import { doc as extensionless } from './docs/explicit';
 import { doc as indexed } from './docs/listed';
+import { doc as missing } from './docs/missing.ts';
 const { adminClient } = createTestEnvironment({});
 const PRODUCT = graphql(`query { product { id } }`);
 it('no request', async () => {
   function unused() { adminClient.query(PRODUCT); }
   const alsoUnused = async () => { await adminClient.query(PRODUCT); };
+  const wrapped = (() => adminClient.query(PRODUCT));
+  const typed = (async () => { await adminClient.query(PRODUCT); }) as () => Promise<void>;
+  const checked = (() => adminClient.query(PRODUCT)) satisfies () => unknown;
 });
+it('iife', async () => { await (async () => adminClient.query(PRODUCT))(); });
 it('direct', async () => {
   await adminClient.query(PRODUCT);
   await Promise.all([1].map(async () => adminClient.query(PRODUCT)));
@@ -3878,6 +3890,7 @@ it('direct', async () => {
 it('explicit file', async () => { await adminClient.query(explicitDoc); });
 it('existing file', async () => { await adminClient.query(extensionless); });
 it('directory index', async () => { await adminClient.query(indexed); });
+it('missing explicit file', async () => { await adminClient.query(missing); });
 "#,
     );
     let ex = extract_dir(dir.path(), &id()).unwrap();
@@ -3897,6 +3910,11 @@ it('directory index', async () => { await adminClient.query(indexed); });
     };
     // An uncalled helper, declared or bound to a name, is not the test's code.
     assert!(requests("no request").is_empty());
+    // An immediately invoked function is.
+    assert_eq!(
+        requests("iife"),
+        BTreeSet::from(["ep:qwtm/example@graphql:admin:query:product"])
+    );
     // A direct call and a callback passed as an argument are.
     assert_eq!(
         requests("direct"),
@@ -3906,6 +3924,8 @@ it('directory index', async () => { await adminClient.query(indexed); });
     // the directory index's same-named export.
     assert_eq!(requests("explicit file"), BTreeSet::from(["gap"]));
     assert_eq!(requests("existing file"), BTreeSet::from(["gap"]));
+    // An explicit `.ts` that does not exist is a Gap, never a sibling.
+    assert_eq!(requests("missing explicit file"), BTreeSet::from(["gap"]));
     // With no `listed.ts`, the import resolves to the directory index.
     assert_eq!(
         requests("directory index"),

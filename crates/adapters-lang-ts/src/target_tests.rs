@@ -64,7 +64,13 @@ pub(crate) struct Document {
 #[derive(Debug, Clone)]
 enum DocumentRef {
     Literal(Document),
-    Imported { file: String, name: String },
+    /// `guessed`: the specifier names no extension, so other extensions
+    /// and a directory index are candidates too.
+    Imported {
+        file: String,
+        name: String,
+        guessed: bool,
+    },
 }
 
 /// One proven client `query` call awaiting directory-wide documents.
@@ -146,6 +152,8 @@ pub(crate) struct Proofs<'a, 'tree> {
     pub imported_names: &'a HashMap<String, String>,
     /// Relative imports: local → (resolved file, exported name).
     pub imported_files: &'a HashMap<String, (String, String)>,
+    /// Relative imports whose specifier names no extension.
+    pub guessed_imports: &'a HashSet<String>,
 }
 
 impl Proofs<'_, '_> {
@@ -363,7 +371,21 @@ fn declared_helper(node: TsNode<'_>) -> bool {
         | "class_declaration"
         | "class" => true,
         "arrow_function" | "function_expression" | "function" | "generator_function" => {
-            node.parent().is_some_and(|parent| {
+            // Parentheses and type wrappers do not change who owns it.
+            let mut parent = node.parent();
+            while let Some(wrapper) = parent.filter(|p| {
+                matches!(
+                    p.kind(),
+                    "parenthesized_expression"
+                        | "as_expression"
+                        | "satisfies_expression"
+                        | "non_null_expression"
+                        | "type_assertion"
+                )
+            }) {
+                parent = wrapper.parent();
+            }
+            parent.is_some_and(|parent| {
                 matches!(
                     parent.kind(),
                     "variable_declarator"
@@ -548,6 +570,7 @@ pub(crate) fn extract<'tree>(
                         return Some(DocumentRef::Imported {
                             file: file.clone(),
                             name: name.clone(),
+                            guessed: proofs.guessed_imports.contains(local),
                         });
                     }
                     let declarator = proofs.bindings.stable_declaration(site, local)?;
@@ -660,11 +683,20 @@ pub(crate) fn complete(pending: Pending, nodes: &mut Vec<Node>, edges: &mut Vec<
         let document = match &request.document {
             DocumentRef::Literal(document) => Some(document.clone()),
             // The file the import resolves to, then only its exports: a
-            // sibling candidate's same-named export is not this document.
-            DocumentRef::Imported { file, name } => file_candidates(file)
-                .into_iter()
-                .find(|candidate| pending.files.contains(candidate))
-                .and_then(|file| pending.documents.get(&(file, name.clone())).cloned()),
+            // sibling candidate's same-named export is not this document. An
+            // explicit extension names exactly one file.
+            DocumentRef::Imported {
+                file,
+                name,
+                guessed,
+            } => (if *guessed {
+                file_candidates(file)
+            } else {
+                vec![file.clone()]
+            })
+            .into_iter()
+            .find(|candidate| pending.files.contains(candidate))
+            .and_then(|file| pending.documents.get(&(file, name.clone())).cloned()),
         };
         let Some(document) = document else {
             push_gap(

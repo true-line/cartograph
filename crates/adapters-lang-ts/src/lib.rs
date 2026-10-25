@@ -25,7 +25,7 @@ use adapters_fw::events::{
 use adapters_fw::{HTTP_FACTORIES, NEST};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, QueryCursor};
@@ -857,6 +857,15 @@ pub const SOURCE_EXTENSIONS: [&str; 6] = [".ts", ".tsx", ".js", ".jsx", ".mjs", 
 /// directory-wide later by `reconcile_guessed_extension` if the real file
 /// turns out to be `.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs` — the real extension
 /// isn't knowable from one file in isolation).
+/// Whether a relative specifier names no known extension, so
+/// [`resolve_relative`] guesses `.ts` for it.
+fn guesses_extension(spec: &str) -> bool {
+    !SOURCE_EXTENSIONS
+        .iter()
+        .chain(ASSET_EXTENSIONS)
+        .any(|ext| spec.ends_with(ext))
+}
+
 fn resolve_relative(from: &str, spec: &str) -> Option<String> {
     if !spec.starts_with('.') {
         return None;
@@ -873,11 +882,7 @@ fn resolve_relative(from: &str, spec: &str) -> Option<String> {
         }
     }
     let mut s = out.to_string_lossy().replace('\\', "/");
-    if !SOURCE_EXTENSIONS
-        .iter()
-        .chain(ASSET_EXTENSIONS)
-        .any(|ext| s.ends_with(ext))
-    {
+    if guesses_extension(&s) {
         s.push_str(".ts");
     }
     Some(s)
@@ -1506,6 +1511,7 @@ fn extract_source_recording(
     let mut import_modules: HashMap<String, String> = HashMap::new(); // local name -> module spec
     let mut imported_names: HashMap<String, String> = HashMap::new(); // local -> exported name
     let mut imported_types: HashMap<String, (String, String)> = HashMap::new(); // local -> (file, exported type)
+    let mut guessed_imports: HashSet<String> = HashSet::new(); // relative imports with no extension
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(q_imports, root, source);
     while let Some(m) = matches.next() {
@@ -1561,6 +1567,9 @@ fn extract_source_recording(
                             let exported_name = cx.text(&name).to_string();
                             imported_names.insert(local_name.clone(), exported_name.clone());
                             if let Some(f) = &target_file {
+                                if guesses_extension(&spec) {
+                                    guessed_imports.insert(local_name.clone());
+                                }
                                 imported
                                     .insert(local_name.clone(), sym_id(id.repo, f, &exported_name));
                                 imported_types.insert(local_name, (f.clone(), exported_name));
@@ -2025,6 +2034,7 @@ fn extract_source_recording(
             import_modules: &import_modules,
             imported_names: &imported_names,
             imported_files: &imported_types,
+            guessed_imports: &guessed_imports,
         },
         &mut out.nodes,
         &mut out.edges,
