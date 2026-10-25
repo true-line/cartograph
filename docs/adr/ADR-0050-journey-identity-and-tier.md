@@ -78,11 +78,25 @@ read:
      `startActivity(Intent(this, X::class.java))`.
    - **Where it comes from.** The source screen is not stored on the edge. A
      journey rule derives it from `RENDERS` and calls.
-   - **Callbacks.** For callback wiring such as Navigation 3's, a navigation
-     reached from a lambda or function reference passed to the composable
-     inside `entry<X>` (for example `onCreateAlias = ::showCreateAliasScreen`)
-     is attributed to screen X under an `entry_scoped` link, which is a
-     recorded assumption.
+   - **Callbacks are not T0 reachability.** In callback wiring such as
+     Navigation 3's, `entry<X>` passes a lambda or function reference to a
+     composable (for example `onCreateAlias = ::showCreateAliasScreen`). The
+     T0 layer records only what is proven: the registration site, and the
+     `NAVIGATES_TO` edge from the callback's Symbol. It never writes an edge
+     from screen X to the callback, because passing a callback does not prove
+     that the composable calls it, or on which event or branch.
+   - **The assumption lives in the candidate.** A journey candidate that
+     crosses from screen X to a callback passed inside `entry<X>` records an
+     `entry_callback` assumption: the registration evidence, the parameter
+     it was passed as, and the limitation "invocation not proven". The
+     candidate is then at most InferredWeak, and it says it is assumed.
+   - **Examples.** A callback passed under one parameter to two entries'
+     composables gives each entry its own assumption; neither entry owns the
+     navigation as a fact. A callback whose parameter the composable never
+     reads is not crossed, and the step is a Gap naming the unused
+     parameter. A callback forwarded to a nested composable is crossed only
+     when each forwarding is a direct pass of the same parameter, and each
+     hop is listed in the assumption.
    - **Gaps.** A computed target, a router value that is not proven, or a
      wrapper whose table entry is not literal is a Gap linked by
      `NAVIGATES_TO`, naming the site.
@@ -98,37 +112,73 @@ read:
      context menu). Follow `NAVIGATES_TO` through each screen's rendered
      code (`RENDERS`, then calls within the client repository, bounded as
      flows are).
-   - **Goal.** Stop at the first step whose code issues a state-changing
-     client call (`POST`, `PUT`, `PATCH` or `DELETE`) that #737 stitches to
-     a recovered Endpoint. Include the screen that same code navigates to
-     afterward, if any, as the result step. When the endpoint's server flow
-     has recovered data writes, a goal must reach one. Otherwise the HTTP
-     method decides, and the candidate records `goal_basis: "http_method"`.
-     For example, SimpleLogin lists aliases with `POST /api/v2/aliases`, so
-     a method-only goal can stop at a read.
+   - **Goal.** A goal is a step whose code makes a client call that #737
+     stitches to a recovered Endpoint, under one of two bases, in this order
+     of precedence:
+
+     - `goal_basis: "observed_write"`: the Endpoint's server flow reaches a
+       recovered data write. Any HTTP method qualifies.
+     - `goal_basis: "method_assumed"`: the method is `POST`, `PUT`, `PATCH`
+       or `DELETE`, and no recovered write is reached. The candidate also
+       records `write_coverage: "unknown"`, because a missing write may be
+       a write the server pass did not recover. Such a candidate is an
+       assumption, never a proven business goal.
+
+     The search stops at the first observed-write goal on a path. A
+     method-assumed step before it is recorded on the candidate but does not
+     end the path. A path with no observed write ends at its first
+     method-assumed step. SimpleLogin lists aliases with
+     `POST /api/v2/aliases`. That is the fixture for this rule: with no
+     recovered write behind it, it may only be a method-assumed goal.
+   - **Result step.** The screen reached after the goal is included only
+     when ordering is proven. The navigation must be in the same function
+     body as the goal call, after it in a straight line or in a branch on
+     that call's result (for example `if (res.status === 201)` after an
+     `await`). A navigation that is merely reachable, in another callback,
+     or before the call is not a result step. The candidate then records
+     `result: "unordered"`.
    - **Steps.** Each candidate lists its steps in order. A step is a screen,
      the navigation edge taken, and the client calls made there with their
      stitched endpoints. Each endpoint's server flow and its W10 test
      references are attached by reference.
    - **Limits.** Paths are simple (no revisited screen) and at most six
-     screens long. Each (entry screen, goal endpoint) pair gets one
-     candidate, the shortest, with ties broken by step ids. Any further
-     paths are counted, not enumerated.
+     screens long. The search admits a fixed work budget per entry screen:
+     expanded states, client calls read per screen, and retained
+     candidates. The rule version records the budget. Each (entry screen,
+     goal endpoint) pair gets one candidate, the shortest found, with ties
+     broken by step ids.
+   - **Alternatives.** Further paths are counted, not enumerated. When the
+     budget ran out, the count is a lower bound and the candidate says
+     `alternatives_complete: false`. The shortest path found is then the
+     shortest within the budget, not a proven shortest path.
    - **Recorded limits.** Truncation, a conditional step and an unresolved
      call are recorded on the candidate, never dropped.
    - **Confidence.** The candidate's confidence is no higher than its
      weakest step, stitch or attached fact.
 
-5. **Journey identity is content-addressed over its steps.**
-   - **The id.** `journey:{repo}@{rule}:{digest}`, where `digest` hashes the
-     canonical ordered step identities (screen ids, navigation evidence
-     identities and goal endpoint ids) together with the rule version.
+5. **Journey identity is the path; freshness is a separate fingerprint.**
+   - **The id.** `journey:{repo}@{rule}:{digest}`. `digest` hashes the rule
+     version and, in order, each step's screen id, the navigation taken as
+     (source Symbol id, target Screen id, kind), and the goal Endpoint id.
+     No commit SHA, byte offset or line enters it, so an unrelated re-ingest
+     keeps the id.
    - **Stability.** A re-ingest that yields the same path keeps the id. A
      different path is a different candidate, so a rejection never carries
      over to it (as with test drift findings).
-   - **Labels.** A name or goal claim attaches to the id and becomes stale
-     when the id disappears. Display labels come from facts only, for
-     example `Main → POST /api/v2/alias/custom/new → NewAliasResult`.
+   - **The support fingerprint.** Each candidate also carries
+     `support_fingerprint`. It hashes the content of everything the
+     candidate rests on: each step's navigation and client-call facts, the
+     stitches, the goal basis and its write facts, the attached flows and
+     test references, the recorded assumptions and the truncation. Unlike
+     the id, it changes when that support changes and the path does not.
+   - **Labels and acceptance.** A name, goal claim or human acceptance
+     attaches to the id and records the fingerprint it was made against.
+     It becomes stale when the id disappears. When the id survives but the
+     fingerprint changes, it is marked stale against the new support, never
+     silently carried over. Packets and reads (W8a, W6) show the same
+     revision and support qualification. Display labels come from facts
+     only, for example `Main → POST /api/v2/alias/custom/new →
+     NewAliasResult`.
 
 6. **Content acceptance uses an expected set frozen before the run.**
    - **The expected set.** For the W11 gate, the journey is "create an alias
@@ -155,7 +205,11 @@ read:
   per framework in the W9 matrix.
 - **What journeys feed.** W12's journeys layer and W6 work packets read
   candidates, never names, as facts. A packet may propose a test for a
-  journey step whose endpoint has no recovered test reference.
+  journey step whose endpoint has no recovered test reference. "No
+  recovered test reference" stays an evidence gap, not proof that no test
+  exists. Packets remain proposals, and carry the candidate's revision,
+  support fingerprint, assumptions and omissions as UI, export and MCP
+  reads do.
 - **Review.** The file stays owner-reviewed (ADR-0029). Codex reviews the
   design, as W11 states.
 - **Relations.** This extends ADR-0036 decisions 2 and 3 and supersedes
