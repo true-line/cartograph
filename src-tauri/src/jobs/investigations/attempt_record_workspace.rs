@@ -75,7 +75,12 @@ pub(crate) fn next_prompt_attempt_acquisition_workspace() -> Option<usize> {
         MAX_RECORD_BYTES,
         element.checked_mul(RECORD_MAX_VALUES)?,
     ])?;
-    let content = json_bytes(MAX_RECORD_BYTES)?.checked_mul(RECORD_MAX_DEPTH.checked_add(1)?)?;
+    // Deepest buffered tagged path: AttemptEntry.record.read (ReadIntent)
+    // -> TaskFactKey. AttemptOutcome is a sibling; disclosure fact and
+    // representation tags are siblings too. Response/event DTOs have no tags.
+    // Malformed nested JSON is one tree per typed layer, not one full copy per
+    // JSON depth. Keep the independent strict preflight scratch below (#969).
+    let content = json_bytes(MAX_RECORD_BYTES)?.checked_mul(2)?;
     let decoder = record.checked_add(record_decode_scratch_bytes()?.max(content))?;
     let (ledger, ledger_decode) = InvestigationInputLedger::decode_workspace_bytes()?;
     let (task, _) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
