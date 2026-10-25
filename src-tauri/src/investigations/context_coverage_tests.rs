@@ -887,10 +887,6 @@ fn query_workspace_covers_real_prepared_ledger_and_raw_response() {
             ledger_wire: context_hub::logical::count(&frozen.ledger).unwrap(),
             request_wire: context_hub::logical::count(&request).unwrap() + 128,
             app_path_bytes: crate::sources::MAX_PATH_BYTES,
-            // This fixture has no captured bindings; actual adapter-match coverage
-            // is added when the shared helper is integrated. Zero is not a bound
-            // for captured facts and must never be used for production admission.
-            fact_match_peak: 0,
         };
         let bound = query_workspace::workspace(frozen.policy, input).unwrap();
         let prepared = frozen.prepare_query(&fixture.state, request).unwrap();

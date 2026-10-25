@@ -237,7 +237,6 @@ pub(super) struct QueryInputs {
     pub(super) ledger_wire: usize,
     pub(super) request_wire: usize,
     pub(super) app_path_bytes: usize,
-    pub(super) fact_match_peak: usize,
 }
 
 pub(super) struct QueryWorkspace {
@@ -299,7 +298,9 @@ pub(super) fn workspace(
         set::<FactKey>(input.graph.max_rows.checked_add(selected)?)?,
     ])?;
     let (guards, guard_peak) = guard_owners(selected, selection_wire, input.app_path_bytes)?;
-    let (one_option, option_peak) = option_owners(input.graph.max_bytes, input.fact_match_peak)?;
+    let fact_match_peak =
+        adapters_lang_ts::captured::fact_match_workspace_bytes(input.graph.max_bytes)?;
+    let (one_option, option_peak) = option_owners(input.graph.max_bytes, fact_match_peak)?;
     let options = agents::investigation::MAX_QUERY_FACTS.checked_mul(one_option)?;
     let (ledger, ledger_peak) = ledger_owners(
         policy,
@@ -366,7 +367,6 @@ mod tests {
             ledger_wire: 4096,
             request_wire: 1024,
             app_path_bytes: 4096,
-            fact_match_peak: 1024,
         };
         let policy = &agents::investigation::INVESTIGATION_V1_POLICY;
         assert!(workspace(policy, input).is_some());
@@ -379,7 +379,6 @@ mod tests {
             |i| i.ledger_wire = usize::MAX,
             |i| i.request_wire = usize::MAX,
             |i| i.app_path_bytes = usize::MAX,
-            |i| i.fact_match_peak = usize::MAX,
         ];
         for edit in corrupt {
             let mut invalid = input;

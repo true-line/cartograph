@@ -551,8 +551,38 @@ fn investigation_query_pages_include_evidence_inventory_and_preserve_continuatio
     };
     let mut seen = Vec::new();
     loop {
+        // AC-0327: exercise the host owner model with real captured receipts,
+        // including replacement paging and each growing prospective ledger.
+        // Serialized output is a lower-bound check, not a measured peak/RSS.
+        use crate::investigations::query_workspace::{self, QueryInputs};
+        let base_wire = context_hub::logical::count(&context.ledger).unwrap();
+        let bound = query_workspace::workspace(
+            context.policy,
+            QueryInputs {
+                graph: core_graph::SnapshotReadLimits::default(),
+                coverage: core_graph::coverage::CoverageReadLimits::default(),
+                scoped_repos: 1, // this fixture registers one captured repository
+                scope_identity_bytes: 4096,
+                ledger_wire: base_wire,
+                request_wire: context_hub::logical::count(&query).unwrap() + 128,
+                app_path_bytes: crate::sources::MAX_PATH_BYTES,
+            },
+        )
+        .unwrap();
         context.query(&state, query.clone(), &mut sink).unwrap();
         let raw = context.query_pages.last().unwrap();
+        assert!(
+            bound.retained
+                >= base_wire + context_hub::logical::count(&context.ledger).unwrap() + raw.len()
+        );
+        assert!(bound.peak >= bound.retained);
+        assert!(
+            context
+                .ledger
+                .selected_facts
+                .iter()
+                .any(|fact| fact.binding.is_some())
+        );
         assert!(raw.len() <= query.max_bytes);
         let wrapper: Value = serde_json::from_str(raw).unwrap();
         let page: context_hub::QueryResponse =
