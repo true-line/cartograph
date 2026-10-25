@@ -190,6 +190,7 @@ impl<'a> TestReferences<'a> {
             .map(|e| (e.dst.as_str(), e))
             .collect();
         let mut by_participant: BTreeMap<&str, Vec<(&str, Vec<&Edge>)>> = BTreeMap::new();
+        let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
         for edge in edges.iter().copied().filter(|e| nongap(e)) {
             let (test, proof) = match edge.label.as_str() {
                 "REQUESTS" if tests.contains(edge.src.as_str()) => (edge.src.as_str(), vec![edge]),
@@ -199,9 +200,12 @@ impl<'a> TestReferences<'a> {
                 },
                 _ => continue,
             };
-            let references = by_participant.entry(edge.dst.as_str()).or_default();
-            if !references.iter().any(|(seen, _)| *seen == test) {
-                references.push((test, proof));
+            // The first proof of each (participant, test) is kept, in order.
+            if seen.insert((edge.dst.as_str(), test)) {
+                by_participant
+                    .entry(edge.dst.as_str())
+                    .or_default()
+                    .push((test, proof));
             }
         }
         Some(Self { by_participant })
