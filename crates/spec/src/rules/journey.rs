@@ -19,6 +19,13 @@ pub const JOURNEY_RULE: &str = "journey-candidate";
 /// Rule version for `journey-candidate@1`.
 pub const JOURNEY_RULE_VERSION: &str = "1";
 
+/// Recorded limitation for [`AssumptionKind::EntryCallback`].
+pub const ENTRY_CALLBACK_LIMITATION: &str = "invocation not proven";
+
+/// Recorded limitation for [`AssumptionKind::Startup`].
+pub const STARTUP_LIMITATION: &str =
+    "startup navigation runs at owner construction; order after the initial screen not proven";
+
 const EXTRACTOR: &str = "spec.journey";
 
 /// Search bounds for `journey-candidate@1`.
@@ -191,6 +198,71 @@ pub struct UnresolvedStepItem {
     pub gap_id: String,
 }
 
+/// Kind of assumption crossed by a journey candidate (`entry_callback` or `startup`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssumptionKind {
+    /// Callback passed inside `entry<X>` crossed as an assumed reachability step.
+    EntryCallback,
+    /// Init-phase back-stack navigation on an initial screen's owner class.
+    Startup,
+}
+
+impl AssumptionKind {
+    /// Stable serialized string representation (`"entry_callback"` or `"startup"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EntryCallback => "entry_callback",
+            Self::Startup => "startup",
+        }
+    }
+}
+
+/// One direct parameter-forwarding hop along an `entry_callbacks` chain.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ForwardHop {
+    /// Nested composable receiving the forwarded callback parameter.
+    pub composable: String,
+    /// Parameter name on the nested composable.
+    pub param: String,
+}
+
+/// An `entry_callbacks` parameter on a screen that is never read on its forwarding chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnreadCallback {
+    /// Parameter name on the entry's rendered composable.
+    pub param: String,
+    /// Entry's rendered composable name or symbol.
+    pub composable: String,
+    /// Target callback `Symbol` id passed at registration.
+    pub symbol: String,
+    /// Registration site evidence.
+    pub registration: EvidenceRef,
+}
+
+/// A recorded reachability assumption (`entry_callback` or `startup`) on a [`JourneyCandidate`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JourneyAssumption {
+    /// Whether this assumption crosses an `entry_callback` or a `startup` navigation.
+    pub kind: AssumptionKind,
+    /// Step index in `steps` whose incoming navigation, calls, or unresolved items rely on it.
+    pub step: usize,
+    /// The `Screen` node id whose closure was extended by the assumption.
+    pub screen: String,
+    /// Callback `Symbol` id (`entry_callback`) or back-stack owner class `Symbol` id (`startup`).
+    pub symbol: String,
+    /// Callback parameter name (`entry_callback` only).
+    pub param: Option<String>,
+    /// Entry composable receiving the callback (`entry_callback` only).
+    pub composable: Option<String>,
+    /// Registration site evidence (`entry_callback` only).
+    pub registration: Option<EvidenceRef>,
+    /// Direct parameter-forwarding hops in order (`entry_callback` only).
+    pub forwarded: Vec<ForwardHop>,
+    /// Explicit limitation statement for the assumption.
+    pub limitation: String,
+}
+
 /// One step (screen, incoming navigation, client calls, and unresolved edges) on a journey candidate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JourneyStep {
@@ -202,6 +274,9 @@ pub struct JourneyStep {
     pub calls: Vec<StepCall>,
     /// Unresolved calls and navigations (`Gap` targets) from this screen's closure.
     pub unresolved: Vec<UnresolvedStepItem>,
+    /// Unread `entry_callbacks` registrations (`read == false`) on this screen, in record order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread_callbacks: Vec<UnreadCallback>,
 }
 
 /// A recovered server-side data write (`Symbol` -> `DataEntity`) reached by a goal endpoint's flow.
@@ -276,8 +351,37 @@ pub struct JourneyCandidate {
     pub alternatives_complete: bool,
     /// Fact-derived display label, e.g. `Main → POST /api/v2/alias/custom/new → NewAliasResult`.
     pub label: String,
+    /// Recorded reachability assumptions (`entry_callback` and `startup`), sorted and deduplicated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<JourneyAssumption>,
     /// T2/InferredWeak provenance with `ProducingMethod::Rule { rule: "journey-candidate", version: "1" }`.
     pub provenance: Provenance,
+}
+
+/// Per-entry search diagnostics for `journey-candidate@1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntrySearchSummary {
+    /// Entry `Screen` node id.
+    pub entry: String,
+    /// Number of BFS states expanded for this entry.
+    pub expanded_states: usize,
+    /// Number of candidates retained for this entry.
+    pub candidates: usize,
+    /// First budget bound hit during search for this entry, if any.
+    pub truncated: Option<TruncationReason>,
+    /// Outgoing navigations with an assumption across expanded screens, counted once per `(screen, source, target)`.
+    pub assumed_navigations: usize,
+    /// Unread callback records on expanded screens, counted once per record.
+    pub unread_callbacks: usize,
+}
+
+/// Output of [`search`]: recovered [`JourneyCandidate`] values and per-entry search summaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JourneySearch {
+    /// Recovered journey candidates in deterministic order.
+    pub candidates: Vec<JourneyCandidate>,
+    /// Per-entry search summaries in entry `(repo, id)` order.
+    pub entries: Vec<EntrySearchSummary>,
 }
 
 fn hash_bytes(value: &impl Serialize) -> Vec<u8> {
@@ -354,6 +458,91 @@ fn parse_navigation_sites(edge: &Edge) -> Vec<NavigationSite> {
             conditional: edge_cond,
         })
         .collect()
+}
+
+fn parse_init_navigation_sites(edge: &Edge) -> Vec<NavigationSite> {
+    let edge_cond = edge.props["conditional"].as_bool().unwrap_or(false);
+    let Some(sites) = edge.props["sites"].as_array() else {
+        return Vec::new();
+    };
+    sites
+        .iter()
+        .filter(|site| site["phase"].as_str() == Some("init"))
+        .filter_map(|site| {
+            Some(NavigationSite {
+                path: site["path"].as_str()?.to_owned(),
+                byte_start: site["byte_start"].as_u64()?,
+                byte_end: site["byte_end"].as_u64()?,
+                conditional: site["conditional"].as_bool().unwrap_or(edge_cond),
+            })
+        })
+        .collect()
+}
+
+fn parse_callback_evidence(
+    raw: &serde_json::Value,
+    default_repo: &str,
+    default_sha: &str,
+) -> Option<EvidenceRef> {
+    Some(EvidenceRef {
+        repo: raw["repo"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_repo)
+            .to_owned(),
+        path: raw["path"].as_str()?.to_owned(),
+        byte_start: raw["byte_start"].as_u64()?,
+        byte_end: raw["byte_end"].as_u64()?,
+        commit_sha: raw["commit_sha"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_sha)
+            .to_owned(),
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EntryCallbackRecord {
+    param: String,
+    symbol: String,
+    composable: String,
+    registration: EvidenceRef,
+    forwarded: Vec<ForwardHop>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NavAssumption {
+    EntryCallback(EntryCallbackRecord),
+    Startup { owner: String },
+}
+
+impl NavAssumption {
+    fn to_journey_assumption(&self, step: usize, screen: &str) -> JourneyAssumption {
+        match self {
+            Self::EntryCallback(rec) => JourneyAssumption {
+                kind: AssumptionKind::EntryCallback,
+                step,
+                screen: screen.to_owned(),
+                symbol: rec.symbol.clone(),
+                param: Some(rec.param.clone()),
+                composable: Some(rec.composable.clone()),
+                registration: Some(rec.registration.clone()),
+                forwarded: rec.forwarded.clone(),
+                limitation: ENTRY_CALLBACK_LIMITATION.to_owned(),
+            },
+            Self::Startup { owner } => JourneyAssumption {
+                kind: AssumptionKind::Startup,
+                step,
+                screen: screen.to_owned(),
+                symbol: owner.clone(),
+                param: None,
+                composable: None,
+                registration: None,
+                forwarded: Vec::new(),
+                limitation: STARTUP_LIMITATION.to_owned(),
+            },
+        }
+    }
 }
 
 fn extract_method(edge: &Edge, endpoint: &Node) -> String {
@@ -436,31 +625,35 @@ struct OutgoingNav<'a> {
     source_symbol: String,
     target_screen: String,
     sites: Vec<NavigationSite>,
+    assumption: Option<NavAssumption>,
 }
 
 #[derive(Clone)]
 struct ScreenClosure<'a> {
     calls: Vec<(StepCall, &'a Edge)>,
     unresolved: Vec<UnresolvedStepItem>,
+    unread_callbacks: Vec<UnreadCallback>,
     outgoing_navs: Vec<OutgoingNav<'a>>,
+    symbol_assumptions: BTreeMap<String, NavAssumption>,
     calls_truncated: bool,
 }
 
 #[expect(clippy::too_many_arguments)]
 fn try_visit_symbol<'a>(
-    sym_id: &'a str,
+    sym_id: &str,
     repo: &str,
     by_id: &BTreeMap<&'a str, &'a Node>,
     budget: JourneyBudget,
-    visited: &mut Vec<&'a str>,
+    visited: &mut Vec<(&'a str, Option<NavAssumption>)>,
     visited_set: &mut BTreeSet<&'a str>,
     queue: &mut VecDeque<&'a str>,
     calls_truncated: &mut bool,
+    assumption: Option<NavAssumption>,
 ) {
     if visited_set.contains(sym_id) {
         return;
     }
-    let Some(sym_node) = by_id.get(sym_id).copied() else {
+    let Some((&sym_id, &sym_node)) = by_id.get_key_value(sym_id) else {
         return;
     };
     if sym_node.label != "Symbol" || is_gap_node(sym_node) || !same_repo(repo, sym_node) {
@@ -471,8 +664,45 @@ fn try_visit_symbol<'a>(
         return;
     }
     visited_set.insert(sym_id);
-    visited.push(sym_id);
+    visited.push((sym_id, assumption));
     queue.push_back(sym_id);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drain_symbol_queue<'a>(
+    repo: &str,
+    by_id: &BTreeMap<&'a str, &'a Node>,
+    edges: &[&'a Edge],
+    budget: JourneyBudget,
+    visited: &mut Vec<(&'a str, Option<NavAssumption>)>,
+    visited_set: &mut BTreeSet<&'a str>,
+    queue: &mut VecDeque<&'a str>,
+    calls_truncated: &mut bool,
+    assumption: Option<NavAssumption>,
+) {
+    while let Some(sym_id) = queue.pop_front() {
+        let mut callees: Vec<&'a str> = edges
+            .iter()
+            .copied()
+            .filter(|e| e.src == sym_id && e.label == "CALLS" && !is_gap_edge(e, by_id))
+            .map(|e| e.dst.as_str())
+            .collect();
+        callees.sort_unstable();
+        callees.dedup();
+        for callee_id in callees {
+            try_visit_symbol(
+                callee_id,
+                repo,
+                by_id,
+                budget,
+                visited,
+                visited_set,
+                queue,
+                calls_truncated,
+                assumption.clone(),
+            );
+        }
+    }
 }
 
 fn build_screen_closure<'a>(
@@ -483,7 +713,7 @@ fn build_screen_closure<'a>(
     budget: JourneyBudget,
 ) -> ScreenClosure<'a> {
     let repo = screen_repo(&screen.id);
-    let mut visited: Vec<&'a str> = Vec::new();
+    let mut visited: Vec<(&'a str, Option<NavAssumption>)> = Vec::new();
     let mut visited_set: BTreeSet<&'a str> = BTreeSet::new();
     let mut queue: VecDeque<&'a str> = VecDeque::new();
     let mut calls_truncated = false;
@@ -514,6 +744,7 @@ fn build_screen_closure<'a>(
                 &mut visited_set,
                 &mut queue,
                 &mut calls_truncated,
+                None,
             ),
             "File" => {
                 if let Some(syms) = defined_in_file.get(target.id.as_str()) {
@@ -527,6 +758,7 @@ fn build_screen_closure<'a>(
                             &mut visited_set,
                             &mut queue,
                             &mut calls_truncated,
+                            None,
                         );
                     }
                 }
@@ -535,18 +767,78 @@ fn build_screen_closure<'a>(
         }
     }
 
-    while let Some(sym_id) = queue.pop_front() {
-        let mut callees: Vec<&'a str> = edges
-            .iter()
-            .copied()
-            .filter(|e| e.src == sym_id && e.label == "CALLS" && !is_gap_edge(e, by_id))
-            .map(|e| e.dst.as_str())
-            .collect();
-        callees.sort_unstable();
-        callees.dedup();
-        for callee_id in callees {
+    drain_symbol_queue(
+        repo,
+        by_id,
+        edges,
+        budget,
+        &mut visited,
+        &mut visited_set,
+        &mut queue,
+        &mut calls_truncated,
+        None,
+    );
+
+    let screen_prov = provenance(&screen.props, &screen.id);
+    let default_repo = screen_prov
+        .evidence
+        .first()
+        .map(|e| e.repo.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(repo);
+    let default_sha = screen_prov
+        .evidence
+        .first()
+        .map(|e| e.commit_sha.as_str())
+        .unwrap_or("");
+
+    let mut unread_callbacks: Vec<UnreadCallback> = Vec::new();
+    if let Some(records) = screen.props["entry_callbacks"].as_array() {
+        for rec in records {
+            let Some(param) = rec["param"].as_str() else {
+                continue;
+            };
+            let Some(symbol) = rec["symbol"].as_str() else {
+                continue;
+            };
+            let Some(composable) = rec["composable"].as_str() else {
+                continue;
+            };
+            let Some(registration) =
+                parse_callback_evidence(&rec["evidence"], default_repo, default_sha)
+            else {
+                continue;
+            };
+            let read = rec["read"].as_bool().unwrap_or(false);
+            if !read {
+                unread_callbacks.push(UnreadCallback {
+                    param: param.to_owned(),
+                    composable: composable.to_owned(),
+                    symbol: symbol.to_owned(),
+                    registration,
+                });
+                continue;
+            }
+            let forwarded: Vec<ForwardHop> = rec["forwarded"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|hop| {
+                    Some(ForwardHop {
+                        composable: hop["composable"].as_str()?.to_owned(),
+                        param: hop["param"].as_str()?.to_owned(),
+                    })
+                })
+                .collect();
+            let assumption = Some(NavAssumption::EntryCallback(EntryCallbackRecord {
+                param: param.to_owned(),
+                symbol: symbol.to_owned(),
+                composable: composable.to_owned(),
+                registration,
+                forwarded,
+            }));
             try_visit_symbol(
-                callee_id,
+                symbol,
                 repo,
                 by_id,
                 budget,
@@ -554,6 +846,18 @@ fn build_screen_closure<'a>(
                 &mut visited_set,
                 &mut queue,
                 &mut calls_truncated,
+                assumption.clone(),
+            );
+            drain_symbol_queue(
+                repo,
+                by_id,
+                edges,
+                budget,
+                &mut visited,
+                &mut visited_set,
+                &mut queue,
+                &mut calls_truncated,
+                assumption,
             );
         }
     }
@@ -561,8 +865,14 @@ fn build_screen_closure<'a>(
     let mut calls: Vec<(StepCall, &'a Edge)> = Vec::new();
     let mut unresolved: Vec<UnresolvedStepItem> = Vec::new();
     let mut outgoing_navs: Vec<OutgoingNav<'a>> = Vec::new();
+    let mut seen_navs: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut symbol_assumptions: BTreeMap<String, NavAssumption> = BTreeMap::new();
 
-    for &sym_id in &visited {
+    for (sym_id, sym_assumption) in &visited {
+        let sym_id = *sym_id;
+        if let Some(assumption) = sym_assumption {
+            symbol_assumptions.insert(sym_id.to_owned(), assumption.clone());
+        }
         for &edge in edges {
             if edge.src != sym_id {
                 continue;
@@ -609,12 +919,15 @@ fn build_screen_closure<'a>(
                                 source: sym_id.to_owned(),
                                 gap_id: dst.id.clone(),
                             });
-                        } else if dst.label == "Screen" {
+                        } else if dst.label == "Screen"
+                            && seen_navs.insert((sym_id.to_owned(), dst.id.clone()))
+                        {
                             outgoing_navs.push(OutgoingNav {
                                 edge,
                                 source_symbol: sym_id.to_owned(),
                                 target_screen: dst.id.clone(),
                                 sites: parse_navigation_sites(edge),
+                                assumption: sym_assumption.clone(),
                             });
                         }
                     } else if edge_confidence(edge) == ConfidenceTier::Gap {
@@ -626,6 +939,56 @@ fn build_screen_closure<'a>(
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    if screen.props["initial"].as_bool() == Some(true) {
+        let owners: Vec<&str> = screen.props["initial_owners"]
+            .as_array()
+            .filter(|arr| !arr.is_empty())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .or_else(|| {
+                screen.props["back_stack_owner"]
+                    .as_str()
+                    .map(|owner| vec![owner])
+            })
+            .unwrap_or_default();
+        for owner in owners {
+            if by_id
+                .get(owner)
+                .is_some_and(|n| n.label != "Symbol" || is_gap_node(n) || !same_repo(repo, n))
+            {
+                continue;
+            }
+            for &edge in edges {
+                if edge.src != owner
+                    || edge.label != "NAVIGATES_TO"
+                    || edge_confidence(edge) == ConfidenceTier::Gap
+                {
+                    continue;
+                }
+                let Some(dst) = by_id.get(edge.dst.as_str()).copied() else {
+                    continue;
+                };
+                if dst.label != "Screen" || is_gap_node(dst) {
+                    continue;
+                }
+                let init_sites = parse_init_navigation_sites(edge);
+                if init_sites.is_empty() {
+                    continue;
+                }
+                if seen_navs.insert((owner.to_owned(), dst.id.clone())) {
+                    outgoing_navs.push(OutgoingNav {
+                        edge,
+                        source_symbol: owner.to_owned(),
+                        target_screen: dst.id.clone(),
+                        sites: init_sites,
+                        assumption: Some(NavAssumption::Startup {
+                            owner: owner.to_owned(),
+                        }),
+                    });
+                }
             }
         }
     }
@@ -655,7 +1018,9 @@ fn build_screen_closure<'a>(
     ScreenClosure {
         calls,
         unresolved,
+        unread_callbacks,
         outgoing_navs,
+        symbol_assumptions,
         calls_truncated,
     }
 }
@@ -665,6 +1030,7 @@ struct PathNode<'a> {
     screen: String,
     nav: Option<StepNavigation>,
     nav_edge: Option<&'a Edge>,
+    nav_assumption: Option<NavAssumption>,
 }
 
 fn rank_confidence(c: ConfidenceTier) -> u8 {
@@ -687,8 +1053,8 @@ fn weakest_confidence(tiers: impl IntoIterator<Item = ConfidenceTier>) -> Confid
     }
 }
 
-/// Recover bounded T2 journey candidates (`journey-candidate@1`) from path-router
-/// entry screens (`Screen` nodes with `props.route == "/"`).
+/// Recover bounded T2 journey candidates (`journey-candidate@1`) from entry
+/// screens (`Screen` nodes with `props.route == "/"` or `props.initial == true`).
 ///
 /// Output order is deterministic: sorted by entry screen repo and id, then by
 /// candidate `id` and `goal.endpoint`.
@@ -698,6 +1064,18 @@ pub fn candidates(
     flows: &[Flow],
     budget: JourneyBudget,
 ) -> Vec<JourneyCandidate> {
+    search(nodes, edges, flows, budget).candidates
+}
+
+/// Run the bounded `journey-candidate@1` search across all entry screens (`Screen`
+/// nodes with `props.route == "/"` or `props.initial == true`), returning both the
+/// recovered [`JourneyCandidate`] values and per-entry [`EntrySearchSummary`] rows.
+pub fn search(
+    nodes: &[&Node],
+    edges: &[&Edge],
+    flows: &[Flow],
+    budget: JourneyBudget,
+) -> JourneySearch {
     let by_id: BTreeMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), *n)).collect();
 
     // Map File id -> sorted Symbol ids with DEFINED_IN edges to that File.
@@ -821,19 +1199,23 @@ pub fn candidates(
         }
     }
 
-    // Entry screens: Screen nodes with props.route == "/", sorted by (repo, id).
+    // Entry screens: non-Gap Screen nodes with props.route == "/" or props.initial == true, sorted by (repo, id).
     let mut entries: Vec<&Node> = nodes
         .iter()
         .copied()
         .filter(|n| {
-            n.label == "Screen" && !is_gap_node(n) && n.props["route"].as_str() == Some("/")
+            n.label == "Screen"
+                && !is_gap_node(n)
+                && (n.props["route"].as_str() == Some("/")
+                    || n.props["initial"].as_bool() == Some(true))
         })
         .collect();
     entries.sort_by(|a, b| (screen_repo(&a.id), &a.id).cmp(&(screen_repo(&b.id), &b.id)));
 
-    let mut out = Vec::new();
+    let mut out_candidates = Vec::new();
+    let mut out_entries = Vec::new();
     for entry in entries {
-        out.extend(search_entry(
+        let (entry_candidates, summary) = search_entry(
             entry,
             &by_id,
             &closures,
@@ -842,9 +1224,14 @@ pub fn candidates(
             &flows_by_endpoint,
             test_refs.as_ref(),
             budget,
-        ));
+        );
+        out_candidates.extend(entry_candidates);
+        out_entries.push(summary);
     }
-    out
+    JourneySearch {
+        candidates: out_candidates,
+        entries: out_entries,
+    }
 }
 
 #[derive(Clone)]
@@ -908,9 +1295,26 @@ fn search_entry<'a>(
     flows_by_endpoint: &BTreeMap<&'a str, Vec<&'a Flow>>,
     test_refs: Option<&TestReferences<'a>>,
     budget: JourneyBudget,
-) -> Vec<JourneyCandidate> {
+) -> (Vec<JourneyCandidate>, EntrySearchSummary) {
     if budget.max_screens == 0 || budget.max_candidates == 0 || budget.max_expanded_states == 0 {
-        return Vec::new();
+        let truncated = if budget.max_screens == 0 {
+            Some(TruncationReason::MaxScreens)
+        } else if budget.max_expanded_states == 0 {
+            Some(TruncationReason::ExpandedStates)
+        } else {
+            Some(TruncationReason::Candidates)
+        };
+        return (
+            Vec::new(),
+            EntrySearchSummary {
+                entry: entry.id.clone(),
+                expanded_states: 0,
+                candidates: 0,
+                truncated,
+                assumed_navigations: 0,
+                unread_callbacks: 0,
+            },
+        );
     }
 
     #[derive(Clone)]
@@ -927,6 +1331,7 @@ fn search_entry<'a>(
             screen: entry.id.clone(),
             nav: None,
             nav_edge: None,
+            nav_assumption: None,
         }],
         earlier_assumed: Vec::new(),
         first_assumed_prefix: None,
@@ -934,8 +1339,10 @@ fn search_entry<'a>(
     });
 
     let mut expanded_states = 0usize;
+    let mut expanded_screens: BTreeSet<&'a str> = BTreeSet::new();
     let mut state_budget_hit = false;
     let mut screens_cut = false;
+    let mut first_truncated: Option<TruncationReason> = None;
 
     // Observed-write paths found, and assumed-only prefixes tracked by their prefix screen/nav key.
     let mut observed_candidates: Vec<RawCandidate<'a>> = Vec::new();
@@ -952,9 +1359,12 @@ fn search_entry<'a>(
             .expect("path has at least entry screen")
             .screen
             .as_str();
-        let Some(closure) = closures.get(current_screen) else {
+        let Some((&screen_key, closure)) = closures.get_key_value(current_screen) else {
             continue;
         };
+        if closure.calls_truncated && first_truncated.is_none() {
+            first_truncated = Some(TruncationReason::CallsPerScreen);
+        }
         let calls_truncated = state.calls_truncated || closure.calls_truncated;
 
         let (observed, step_assumed, first_step_assumed) =
@@ -1017,17 +1427,28 @@ fn search_entry<'a>(
                 .any(|nav| !state.path.iter().any(|p| p.screen == nav.target_screen))
         };
         if state.path.len() >= budget.max_screens {
-            screens_cut |= unvisited();
+            if unvisited() {
+                screens_cut = true;
+                if first_truncated.is_none() {
+                    first_truncated = Some(TruncationReason::MaxScreens);
+                }
+            }
             continue;
         }
 
         // Queued states are still scored for goals once the budget is spent; only
         // expansion stops, and only a state with an unvisited target marks the cut.
         if expanded_states >= budget.max_expanded_states {
-            state_budget_hit |= unvisited();
+            if unvisited() {
+                state_budget_hit = true;
+                if first_truncated.is_none() {
+                    first_truncated = Some(TruncationReason::ExpandedStates);
+                }
+            }
             continue;
         }
         expanded_states += 1;
+        expanded_screens.insert(screen_key);
 
         for nav in &closure.outgoing_navs {
             if state.path.iter().any(|p| p.screen == nav.target_screen) {
@@ -1042,6 +1463,7 @@ fn search_entry<'a>(
                     sites_taken: nav.sites.clone(),
                 }),
                 nav_edge: Some(nav.edge),
+                nav_assumption: nav.assumption.clone(),
             });
             queue.push_back(QueueState {
                 path: next_path,
@@ -1085,6 +1507,9 @@ fn search_entry<'a>(
     let candidates_truncated = ordered_goals.len() > budget.max_candidates;
     if candidates_truncated {
         ordered_goals.truncate(budget.max_candidates);
+        if first_truncated.is_none() {
+            first_truncated = Some(TruncationReason::Candidates);
+        }
     }
 
     // Either cut leaves paths unexplored; expanded states is the wider one.
@@ -1115,7 +1540,32 @@ fn search_entry<'a>(
         .collect();
 
     finalized.sort_by(|a, b| (&a.id, &a.goal.endpoint).cmp(&(&b.id, &b.goal.endpoint)));
-    finalized
+    if first_truncated.is_none() {
+        first_truncated = finalized.iter().find_map(|c| c.truncated);
+    }
+
+    let mut assumed_navigations = 0usize;
+    let mut unread_callbacks = 0usize;
+    for screen_id in expanded_screens {
+        if let Some(closure) = closures.get(screen_id) {
+            assumed_navigations += closure
+                .outgoing_navs
+                .iter()
+                .filter(|nav| nav.assumption.is_some())
+                .count();
+            unread_callbacks += closure.unread_callbacks.len();
+        }
+    }
+
+    let summary = EntrySearchSummary {
+        entry: entry.id.clone(),
+        expanded_states,
+        candidates: finalized.len(),
+        truncated: first_truncated,
+        assumed_navigations,
+        unread_callbacks,
+    };
+    (finalized, summary)
 }
 
 fn prefix_key(
@@ -1130,7 +1580,12 @@ fn prefix_key(
     (screens, navs, endpoint.to_owned())
 }
 
-fn path_order_key<'a>(path: &'a [PathNode<'_>]) -> (usize, Vec<&'a str>, Vec<(&'a str, &'a str)>) {
+/// Shortest first; among equal lengths a path resting on fewer assumed
+/// navigations wins (always zero for path routers), then step ids.
+fn path_order_key<'a>(
+    path: &'a [PathNode<'_>],
+) -> (usize, usize, Vec<&'a str>, Vec<(&'a str, &'a str)>) {
+    let assumed = path.iter().filter(|p| p.nav_assumption.is_some()).count();
     let screens: Vec<&'a str> = path.iter().map(|p| p.screen.as_str()).collect();
     let navs: Vec<(&'a str, &'a str)> = path
         .iter()
@@ -1140,7 +1595,7 @@ fn path_order_key<'a>(path: &'a [PathNode<'_>]) -> (usize, Vec<&'a str>, Vec<(&'
                 .map(|n| (n.source.as_str(), n.target.as_str()))
         })
         .collect();
-    (path.len(), screens, navs)
+    (path.len(), assumed, screens, navs)
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -1163,8 +1618,9 @@ fn finalize_candidate<'a>(
     let mut supporting_confidences: Vec<ConfidenceTier> = Vec::new();
     let mut citing_evidence: Vec<EvidenceRef> = Vec::new();
     let mut any_calls_truncated = raw.calls_truncated;
+    let mut assumptions: Vec<JourneyAssumption> = Vec::new();
 
-    for node in &raw.path {
+    for (idx, node) in raw.path.iter().enumerate() {
         if let Some(screen_node) = by_id.get(node.screen.as_str()) {
             supporting_confidences
                 .push(provenance(&screen_node.props, &screen_node.id).confidence_tier);
@@ -1176,11 +1632,26 @@ fn finalize_candidate<'a>(
         } else {
             nav_edge_props.push(None);
         }
-        let closure = closures.get(node.screen.as_str());
-        if let Some(c) = closure
-            && c.calls_truncated
+        if idx > 0
+            && let Some(assumption) = &node.nav_assumption
         {
-            any_calls_truncated = true;
+            assumptions.push(assumption.to_journey_assumption(idx, &raw.path[idx - 1].screen));
+        }
+        let closure = closures.get(node.screen.as_str());
+        if let Some(c) = closure {
+            if c.calls_truncated {
+                any_calls_truncated = true;
+            }
+            for (call, _) in &c.calls {
+                if let Some(assumption) = c.symbol_assumptions.get(&call.source) {
+                    assumptions.push(assumption.to_journey_assumption(idx, &node.screen));
+                }
+            }
+            for item in &c.unresolved {
+                if let Some(assumption) = c.symbol_assumptions.get(&item.source) {
+                    assumptions.push(assumption.to_journey_assumption(idx, &node.screen));
+                }
+            }
         }
         steps.push(JourneyStep {
             screen: node.screen.clone(),
@@ -1189,6 +1660,9 @@ fn finalize_candidate<'a>(
                 .map(|c| c.calls.iter().map(|(call, _)| call.clone()).collect())
                 .unwrap_or_default(),
             unresolved: closure.map(|c| c.unresolved.clone()).unwrap_or_default(),
+            unread_callbacks: closure
+                .map(|c| c.unread_callbacks.clone())
+                .unwrap_or_default(),
         });
     }
 
@@ -1200,7 +1674,7 @@ fn finalize_candidate<'a>(
         .clone();
 
     // Check for an ordered result step from the goal screen's closure.
-    let (result, result_step) = find_ordered_result_step(
+    let (result, result_step, result_nav_assumption) = find_ordered_result_step(
         &goal_screen_id,
         &raw.goal_call,
         &raw.path,
@@ -1212,8 +1686,30 @@ fn finalize_candidate<'a>(
         &mut any_calls_truncated,
     );
     if let Some(res_step) = &result_step {
+        let res_idx = steps.len();
+        if let Some(assumption) = &result_nav_assumption {
+            assumptions.push(assumption.to_journey_assumption(res_idx, &goal_screen_id));
+        }
+        if let Some(c) = closures.get(res_step.screen.as_str()) {
+            for (call, _) in &c.calls {
+                if let Some(assumption) = c.symbol_assumptions.get(&call.source) {
+                    assumptions.push(assumption.to_journey_assumption(res_idx, &res_step.screen));
+                }
+            }
+            for item in &c.unresolved {
+                if let Some(assumption) = c.symbol_assumptions.get(&item.source) {
+                    assumptions.push(assumption.to_journey_assumption(res_idx, &res_step.screen));
+                }
+            }
+        }
         steps.push(res_step.clone());
     }
+
+    assumptions.sort_by(|a, b| {
+        (a.step, a.kind, &a.symbol, &a.param, &a.screen)
+            .cmp(&(b.step, b.kind, &b.symbol, &b.param, &b.screen))
+    });
+    assumptions.dedup();
 
     supporting_confidences.push(edge_confidence(raw.goal_edge));
     if let Some(ep_node) = by_id.get(raw.goal_call.endpoint.as_str()) {
@@ -1301,19 +1797,36 @@ fn finalize_candidate<'a>(
     )));
     let id = format!("journey:{repo}@{JOURNEY_RULE}:{}", &id_digest[..16]);
 
-    let support_fingerprint = content_hash(&hash_bytes(&(
-        &steps,
-        &nav_edge_props,
-        &goal,
-        &raw.earlier_assumed_goals,
-        &result,
-        &flow_triggers,
-        &tests,
-        &conditional_steps,
-        &truncated,
-        alternatives,
-        alternatives_complete,
-    )));
+    let support_fingerprint = if assumptions.is_empty() {
+        content_hash(&hash_bytes(&(
+            &steps,
+            &nav_edge_props,
+            &goal,
+            &raw.earlier_assumed_goals,
+            &result,
+            &flow_triggers,
+            &tests,
+            &conditional_steps,
+            &truncated,
+            alternatives,
+            alternatives_complete,
+        )))
+    } else {
+        content_hash(&hash_bytes(&(
+            &steps,
+            &nav_edge_props,
+            &goal,
+            &raw.earlier_assumed_goals,
+            &result,
+            &flow_triggers,
+            &tests,
+            &conditional_steps,
+            &truncated,
+            alternatives,
+            alternatives_complete,
+            &assumptions,
+        )))
+    };
 
     let goal_screen_label = by_id
         .get(goal_screen_id.as_str())
@@ -1367,6 +1880,7 @@ fn finalize_candidate<'a>(
         alternatives,
         alternatives_complete,
         label,
+        assumptions,
         provenance: prov,
     }
 }
@@ -1392,12 +1906,12 @@ fn find_ordered_result_step<'a>(
     supporting_confidences: &mut Vec<ConfidenceTier>,
     citing_evidence: &mut Vec<EvidenceRef>,
     any_calls_truncated: &mut bool,
-) -> (JourneyResult, Option<JourneyStep>) {
+) -> (JourneyResult, Option<JourneyStep>, Option<NavAssumption>) {
     let Some(fetch_ev) = &goal_call.evidence else {
-        return (JourneyResult::Unordered, None);
+        return (JourneyResult::Unordered, None, None);
     };
     let Some(closure) = closures.get(goal_screen_id) else {
-        return (JourneyResult::Unordered, None);
+        return (JourneyResult::Unordered, None, None);
     };
 
     let mut candidates: Vec<(u64, &OutgoingNav<'a>, Vec<NavigationSite>)> = Vec::new();
@@ -1425,7 +1939,7 @@ fn find_ordered_result_step<'a>(
 
     candidates.sort_by(|a, b| (a.0, &a.1.target_screen).cmp(&(b.0, &b.1.target_screen)));
     let Some((_, chosen_nav, ordered_sites)) = candidates.into_iter().next() else {
-        return (JourneyResult::Unordered, None);
+        return (JourneyResult::Unordered, None, None);
     };
 
     if let Some(screen_node) = by_id.get(chosen_nav.target_screen.as_str()) {
@@ -1456,8 +1970,15 @@ fn find_ordered_result_step<'a>(
         unresolved: res_closure
             .map(|c| c.unresolved.clone())
             .unwrap_or_default(),
+        unread_callbacks: res_closure
+            .map(|c| c.unread_callbacks.clone())
+            .unwrap_or_default(),
     };
-    (JourneyResult::Ordered, Some(step))
+    (
+        JourneyResult::Ordered,
+        Some(step),
+        chosen_nav.assumption.clone(),
+    )
 }
 
 fn navigation_evidence(edge: &Edge, sites_taken: &[NavigationSite]) -> Vec<EvidenceRef> {

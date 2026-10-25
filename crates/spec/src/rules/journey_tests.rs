@@ -805,3 +805,541 @@ fn journey_candidates_keep_every_terminal_goal_report_depth_cuts_and_honor_curat
     assert!(!curated.content.contains(&baseline.label));
     assert!(curated.assertions.is_empty());
 }
+
+/// Synthetic Android Navigation 3 graph shaped like SimpleLogin Android:
+/// - `InitializationDestination` (`initial: true`, `back_stack_owner: AppRootViewModel`, no `RENDERS`).
+/// - `AppRootViewModel` has init-phase `NAVIGATES_TO` edges to `HomeDestination` and `LogInDestination` (conditional).
+/// - `HomeDestination` `RENDERS` `HomeScreen` and carries `entry_callbacks`:
+///   - `onCreateAlias` -> `AppRootViewModel.showCreateAliasScreen` (`read: true`, one forwarded hop)
+///   - `onUnread` -> `AppRootViewModel.x` (`read: false`)
+/// - `showCreateAliasScreen` `NAVIGATES_TO` `CreateAliasDestination`.
+/// - `AppRootViewModel.x` also `NAVIGATES_TO` `CreateAliasDestination` (must never be crossed because `read == false`).
+/// - `CreateAliasDestination` `RENDERS` `CreateAliasScreen`, which `CALLS` `CreateAliasViewModel.create`,
+///   which `FETCHES` `POST /api/v5/alias/custom/new` (observed write via server flow).
+fn simplelogin_android_nav3_fixture() -> (Vec<Node>, Vec<Edge>, Vec<Flow>) {
+    let repo = "simplelogin/android";
+    let srv = "simplelogin/app";
+    let root_path = "app/src/main/java/io/simplelogin/android/root/AppRoot.kt";
+    let vm_path = "app/src/main/java/io/simplelogin/android/root/AppRootViewModel.kt";
+    let home_path = "app/src/main/java/io/simplelogin/android/home/HomeScreen.kt";
+    let create_path = "app/src/main/java/io/simplelogin/android/create/CreateAliasScreen.kt";
+
+    let init_screen = "screen:simplelogin/android@navigation3:io.simplelogin.android.root.InitializationDestination";
+    let home_screen =
+        "screen:simplelogin/android@navigation3:io.simplelogin.android.root.HomeDestination";
+    let login_screen =
+        "screen:simplelogin/android@navigation3:io.simplelogin.android.root.LogInDestination";
+    let create_screen =
+        "screen:simplelogin/android@navigation3:io.simplelogin.android.root.CreateAliasDestination";
+
+    let owner_sym = format!("sym:{repo}@{vm_path}#AppRootViewModel");
+    let show_create_sym = format!("sym:{repo}@{vm_path}#AppRootViewModel.showCreateAliasScreen");
+    let unread_sym = format!("sym:{repo}@{vm_path}#AppRootViewModel.x");
+    let home_comp_sym = format!("sym:{repo}@{home_path}#HomeScreen");
+    let create_comp_sym = format!("sym:{repo}@{create_path}#CreateAliasScreen");
+    let create_call_sym = format!("sym:{repo}@{create_path}#CreateAliasViewModel.create");
+    let endpoint_id = "ep:simplelogin/app@POST:/api/v5/alias/custom/new";
+    let handler_sym = "sym:simplelogin/app@app/api/views/v5_alias.py#create_custom_alias";
+    let data_id = "data:simplelogin/app@alias";
+
+    let nodes = vec![
+        node(
+            init_screen,
+            "Screen",
+            json!({
+                "route": "navigation3:io.simplelogin.android.root.InitializationDestination",
+                "router": "navigation3",
+                "initial": true,
+                "back_stack_owner": owner_sym,
+            }),
+            vec![ev(repo, root_path, 100, 160)],
+        ),
+        node(
+            home_screen,
+            "Screen",
+            json!({
+                "route": "navigation3:io.simplelogin.android.root.HomeDestination",
+                "router": "navigation3",
+                "entry_callbacks": [
+                    {
+                        "param": "onCreateAlias",
+                        "symbol": show_create_sym,
+                        "composable": home_comp_sym,
+                        "evidence": {
+                            "path": root_path,
+                            "byte_start": 210,
+                            "byte_end": 260
+                        },
+                        "read": true,
+                        "forwarded": [
+                            {
+                                "composable": "HomeContent",
+                                "param": "onAddAlias"
+                            }
+                        ]
+                    },
+                    {
+                        "param": "onUnread",
+                        "symbol": unread_sym,
+                        "composable": home_comp_sym,
+                        "evidence": {
+                            "path": root_path,
+                            "byte_start": 265,
+                            "byte_end": 295
+                        },
+                        "read": false,
+                        "forwarded": []
+                    }
+                ]
+            }),
+            vec![ev(repo, root_path, 180, 310)],
+        ),
+        node(
+            login_screen,
+            "Screen",
+            json!({
+                "route": "navigation3:io.simplelogin.android.root.LogInDestination",
+                "router": "navigation3",
+            }),
+            vec![ev(repo, root_path, 320, 380)],
+        ),
+        node(
+            create_screen,
+            "Screen",
+            json!({
+                "route": "navigation3:io.simplelogin.android.root.CreateAliasDestination",
+                "router": "navigation3",
+            }),
+            vec![ev(repo, root_path, 400, 470)],
+        ),
+        node(
+            &owner_sym,
+            "Symbol",
+            json!({"name": "AppRootViewModel"}),
+            vec![ev(repo, vm_path, 10, 500)],
+        ),
+        node(
+            &show_create_sym,
+            "Symbol",
+            json!({"name": "showCreateAliasScreen"}),
+            vec![ev(repo, vm_path, 220, 310)],
+        ),
+        node(
+            &unread_sym,
+            "Symbol",
+            json!({"name": "x"}),
+            vec![ev(repo, vm_path, 320, 380)],
+        ),
+        node(
+            &home_comp_sym,
+            "Symbol",
+            json!({"name": "HomeScreen"}),
+            vec![ev(repo, home_path, 10, 200)],
+        ),
+        node(
+            &create_comp_sym,
+            "Symbol",
+            json!({"name": "CreateAliasScreen"}),
+            vec![ev(repo, create_path, 10, 200)],
+        ),
+        node(
+            &create_call_sym,
+            "Symbol",
+            json!({"name": "create"}),
+            vec![ev(repo, create_path, 210, 360)],
+        ),
+        node(
+            endpoint_id,
+            "Endpoint",
+            json!({
+                "method": "POST",
+                "path": "/api/v5/alias/custom/new",
+                "name": "POST /api/v5/alias/custom/new"
+            }),
+            vec![ev(srv, "app/api/views/v5_alias.py", 100, 220)],
+        ),
+        node(
+            handler_sym,
+            "Symbol",
+            json!({"name": "create_custom_alias"}),
+            vec![ev(srv, "app/api/views/v5_alias.py", 100, 220)],
+        ),
+        node(
+            data_id,
+            "DataEntity",
+            json!({"name": "Alias"}),
+            vec![ev(srv, "app/models.py", 50, 120)],
+        ),
+    ];
+
+    let edges = vec![
+        edge(
+            &owner_sym,
+            home_screen,
+            "NAVIGATES_TO",
+            json!({
+                "conditional": true,
+                "sites": [{
+                    "path": vm_path,
+                    "byte_start": 80,
+                    "byte_end": 120,
+                    "conditional": true,
+                    "via": "back_stack_add",
+                    "phase": "init"
+                }]
+            }),
+            vec![ev(repo, vm_path, 80, 120)],
+        ),
+        edge(
+            &owner_sym,
+            login_screen,
+            "NAVIGATES_TO",
+            json!({
+                "conditional": true,
+                "sites": [{
+                    "path": vm_path,
+                    "byte_start": 130,
+                    "byte_end": 170,
+                    "conditional": true,
+                    "via": "back_stack_add",
+                    "phase": "init"
+                }]
+            }),
+            vec![ev(repo, vm_path, 130, 170)],
+        ),
+        edge(
+            home_screen,
+            &home_comp_sym,
+            "RENDERS",
+            json!({}),
+            vec![ev(repo, root_path, 195, 295)],
+        ),
+        edge(
+            &show_create_sym,
+            create_screen,
+            "NAVIGATES_TO",
+            json!({
+                "conditional": false,
+                "sites": [{
+                    "path": vm_path,
+                    "byte_start": 250,
+                    "byte_end": 295,
+                    "conditional": false,
+                    "via": "back_stack_builder_helper"
+                }]
+            }),
+            vec![ev(repo, vm_path, 250, 295)],
+        ),
+        edge(
+            &unread_sym,
+            create_screen,
+            "NAVIGATES_TO",
+            json!({
+                "conditional": false,
+                "sites": [{
+                    "path": vm_path,
+                    "byte_start": 340,
+                    "byte_end": 370,
+                    "conditional": false,
+                    "via": "back_stack_add"
+                }]
+            }),
+            vec![ev(repo, vm_path, 340, 370)],
+        ),
+        edge(
+            create_screen,
+            &create_comp_sym,
+            "RENDERS",
+            json!({}),
+            vec![ev(repo, root_path, 415, 455)],
+        ),
+        edge(
+            &create_comp_sym,
+            &create_call_sym,
+            "CALLS",
+            json!({}),
+            vec![ev(repo, create_path, 90, 140)],
+        ),
+        edge(
+            &create_call_sym,
+            endpoint_id,
+            "FETCHES",
+            json!({"method": "POST"}),
+            vec![ev(repo, create_path, 260, 330)],
+        ),
+        edge(
+            handler_sym,
+            data_id,
+            "WRITES",
+            json!({}),
+            vec![ev(srv, "app/api/views/v5_alias.py", 160, 205)],
+        ),
+    ];
+
+    let hop_prov = prov(
+        vec![ev(srv, "app/api/views/v5_alias.py", 100, 220)],
+        "nav3-flow-hop",
+    );
+    let flows = vec![Flow {
+        trigger: endpoint_id.into(),
+        trigger_kind: "Endpoint".into(),
+        trigger_name: "POST /api/v5/alias/custom/new".into(),
+        hops: vec![Hop {
+            label: "HANDLES".into(),
+            src: endpoint_id.into(),
+            dst: handler_sym.into(),
+            src_name: "POST /api/v5/alias/custom/new".into(),
+            dst_name: "create_custom_alias".into(),
+            tier: "Deterministic".into(),
+            confidence: "Confirmed".into(),
+            evidence: None,
+            provenance: hop_prov,
+            gap_reason: None,
+            attempted_tiers: vec![],
+        }],
+        status: FlowStatus::Verified,
+        score: 1.0,
+        depth_limited: false,
+    }];
+
+    (nodes, edges, flows)
+}
+
+// AC-0352 (T-0352): Navigation 3 initial destinations, startup navigations,
+// entry callbacks, unread callback records, search summaries, and artifact tables.
+#[test]
+fn journey_candidates_cross_navigation3_startup_and_entry_callbacks_as_assumptions() {
+    let (nodes, edges, flows) = simplelogin_android_nav3_fixture();
+    let (node_refs, edge_refs) = refs(&nodes, &edges);
+
+    let init_screen = "screen:simplelogin/android@navigation3:io.simplelogin.android.root.InitializationDestination";
+    let home_screen =
+        "screen:simplelogin/android@navigation3:io.simplelogin.android.root.HomeDestination";
+    let create_screen =
+        "screen:simplelogin/android@navigation3:io.simplelogin.android.root.CreateAliasDestination";
+    let root_path = "app/src/main/java/io/simplelogin/android/root/AppRoot.kt";
+    let vm_path = "app/src/main/java/io/simplelogin/android/root/AppRootViewModel.kt";
+    let home_path = "app/src/main/java/io/simplelogin/android/home/HomeScreen.kt";
+
+    let owner_sym = format!("sym:simplelogin/android@{vm_path}#AppRootViewModel");
+    let show_create_sym =
+        format!("sym:simplelogin/android@{vm_path}#AppRootViewModel.showCreateAliasScreen");
+    let unread_sym = format!("sym:simplelogin/android@{vm_path}#AppRootViewModel.x");
+    let home_comp_sym = format!("sym:simplelogin/android@{home_path}#HomeScreen");
+
+    // 1. One candidate goes Initialization -> Home -> CreateAlias with an observed-write goal,
+    // startup assumption at step 1, entry_callback assumption at step 2, and InferredWeak confidence.
+    let result = search(&node_refs, &edge_refs, &flows, JourneyBudget::default());
+    assert_eq!(result.candidates.len(), 1);
+    let candidate = &result.candidates[0];
+    assert_eq!(candidate.entry, init_screen);
+    assert_eq!(candidate.goal.goal_basis, GoalBasis::ObservedWrite);
+    assert_eq!(
+        candidate.goal.endpoint,
+        "ep:simplelogin/app@POST:/api/v5/alias/custom/new"
+    );
+    let step_screens: Vec<&str> = candidate.steps.iter().map(|s| s.screen.as_str()).collect();
+    assert_eq!(step_screens, vec![init_screen, home_screen, create_screen]);
+    assert_eq!(
+        candidate.provenance.confidence_tier,
+        ConfidenceTier::InferredWeak
+    );
+    assert_eq!(
+        candidate.assumptions,
+        vec![
+            JourneyAssumption {
+                kind: AssumptionKind::Startup,
+                step: 1,
+                screen: init_screen.into(),
+                symbol: owner_sym.clone(),
+                param: None,
+                composable: None,
+                registration: None,
+                forwarded: Vec::new(),
+                limitation: STARTUP_LIMITATION.into(),
+            },
+            JourneyAssumption {
+                kind: AssumptionKind::EntryCallback,
+                step: 2,
+                screen: home_screen.into(),
+                symbol: show_create_sym.clone(),
+                param: Some("onCreateAlias".into()),
+                composable: Some(home_comp_sym.clone()),
+                registration: Some(ev("simplelogin/android", root_path, 210, 260)),
+                forwarded: vec![ForwardHop {
+                    composable: "HomeContent".into(),
+                    param: "onAddAlias".into(),
+                }],
+                limitation: ENTRY_CALLBACK_LIMITATION.into(),
+            },
+        ]
+    );
+
+    // 2. The unread record is listed on step 1 (Home) and never crossed.
+    for c in &result.candidates {
+        assert!(
+            c.steps
+                .iter()
+                .all(|s| s.navigation.as_ref().is_none_or(|n| n.source != unread_sym)),
+            "an unread callback must never be crossed"
+        );
+        assert!(c.assumptions.iter().all(|a| a.symbol != unread_sym));
+    }
+    assert!(candidate.steps[0].unread_callbacks.is_empty());
+    assert_eq!(
+        candidate.steps[1].unread_callbacks,
+        vec![UnreadCallback {
+            param: "onUnread".into(),
+            composable: home_comp_sym.clone(),
+            symbol: unread_sym.clone(),
+            registration: ev("simplelogin/android", root_path, 265, 295),
+        }]
+    );
+    assert!(candidate.steps[2].unread_callbacks.is_empty());
+    assert_eq!(candidate.alternatives, 0);
+    assert_eq!(
+        candidate.steps[2].navigation.as_ref().unwrap().source,
+        show_create_sym
+    );
+
+    // 3. Proven beats assumed: if HomeScreen itself CALLS showCreateAliasScreen,
+    // the step 2 assumption disappears and the candidate id is unchanged.
+    let mut proven_edges = edges.clone();
+    proven_edges.push(edge(
+        &home_comp_sym,
+        &show_create_sym,
+        "CALLS",
+        json!({}),
+        vec![ev("simplelogin/android", home_path, 50, 90)],
+    ));
+    let (_, proven_edge_refs) = refs(&nodes, &proven_edges);
+    let proven_cands = candidates(
+        &node_refs,
+        &proven_edge_refs,
+        &flows,
+        JourneyBudget::default(),
+    );
+    assert_eq!(proven_cands.len(), 1);
+    assert_eq!(proven_cands[0].id, candidate.id);
+    assert_eq!(
+        proven_cands[0].assumptions,
+        vec![JourneyAssumption {
+            kind: AssumptionKind::Startup,
+            step: 1,
+            screen: init_screen.into(),
+            symbol: owner_sym,
+            param: None,
+            composable: None,
+            registration: None,
+            forwarded: Vec::new(),
+            limitation: STARTUP_LIMITATION.into(),
+        }]
+    );
+
+    // 4. Fingerprint: changing the assumption data (e.g. forwarded hops) changes
+    // support_fingerprint without changing id.
+    let mut hop_nodes = nodes.clone();
+    for n in &mut hop_nodes {
+        if n.id == home_screen {
+            n.props["entry_callbacks"][0]["forwarded"] = json!([
+                {"composable": "HomeContent", "param": "onAddAlias"},
+                {"composable": "AliasFab", "param": "onClick"}
+            ]);
+        }
+    }
+    let (hop_node_refs, _) = refs(&hop_nodes, &edges);
+    let hop_cand = &candidates(&hop_node_refs, &edge_refs, &flows, JourneyBudget::default())[0];
+    assert_eq!(hop_cand.id, candidate.id);
+    assert_ne!(hop_cand.support_fingerprint, candidate.support_fingerprint);
+
+    // 5. Path routers unchanged: an existing path-router fixture yields identical
+    // candidates, ids, and fingerprints through `candidates` and `search`.
+    let (pr_nodes, pr_edges, pr_flows) = simplelogin_fixture(0);
+    let (pr_node_refs, pr_edge_refs) = refs(&pr_nodes, &pr_edges);
+    let pr_from_candidates = candidates(
+        &pr_node_refs,
+        &pr_edge_refs,
+        &pr_flows,
+        JourneyBudget::default(),
+    );
+    let pr_from_search = search(
+        &pr_node_refs,
+        &pr_edge_refs,
+        &pr_flows,
+        JourneyBudget::default(),
+    );
+    assert_eq!(pr_from_candidates, pr_from_search.candidates);
+    assert_eq!(pr_from_candidates.len(), 1);
+    assert!(pr_from_candidates[0].assumptions.is_empty());
+    assert!(
+        pr_from_candidates[0]
+            .steps
+            .iter()
+            .all(|s| s.unread_callbacks.is_empty())
+    );
+    assert_eq!(pr_from_search.entries.len(), 1);
+    assert_eq!(pr_from_search.entries[0].assumed_navigations, 0);
+    assert_eq!(pr_from_search.entries[0].unread_callbacks, 0);
+
+    // 6. Search summary for the initial entry has assumed_navigations >= 2,
+    // unread_callbacks == 1, and candidates == 1.
+    assert_eq!(result.entries.len(), 1);
+    let summary = &result.entries[0];
+    assert_eq!(summary.entry, init_screen);
+    assert!(
+        summary.assumed_navigations >= 2,
+        "expected >= 2 assumed navigations, got {}",
+        summary.assumed_navigations
+    );
+    assert_eq!(summary.assumed_navigations, 3);
+    assert_eq!(summary.unread_callbacks, 1);
+    assert_eq!(summary.candidates, 1);
+    assert_eq!(summary.truncated, None);
+
+    // 7. Artifact: best-effort contains `## Search`, `### Assumptions`, and the unread callback;
+    // verified-only output is unchanged.
+    let best_effort = compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        ExportMode::BestEffort,
+        &BTreeSet::new(),
+    )
+    .artifacts
+    .into_iter()
+    .find(|a| a.id == "journeys")
+    .expect("journeys artifact");
+    assert!(best_effort.content.contains("## Search\n"));
+    assert!(best_effort.content.contains(
+        "| Entry | Expanded | Candidates | Truncated | Assumed navigations | Unread callbacks |"
+    ));
+    assert!(best_effort.content.contains("### Assumptions\n"));
+    assert!(best_effort.content.contains(
+        "| Step | Kind | Screen | Symbol | Param | Composable | Forwarded | Limitation |"
+    ));
+    assert!(best_effort.content.contains("HomeContent.onAddAlias"));
+    assert!(
+        best_effort
+            .content
+            .contains(&format!("unread callback: onUnread ({home_comp_sym})"))
+    );
+
+    let verified_only = compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        ExportMode::VerifiedOnly,
+        &BTreeSet::new(),
+    )
+    .artifacts
+    .into_iter()
+    .find(|a| a.id == "journeys")
+    .expect("journeys artifact");
+    assert!(!verified_only.content.contains("## Search"));
+    assert!(!verified_only.content.contains("### Assumptions"));
+    assert!(
+        verified_only
+            .content
+            .contains("verified-only export withholds them")
+    );
+}
