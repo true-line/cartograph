@@ -57,7 +57,7 @@ fn selection_peak(selected: usize, selection_wire: usize) -> Option<usize> {
 
 /// Retention guards and coherent source registrations. `app_path_bytes` is a
 /// separately admitted host path owner, never inferred from client input.
-fn guard_owners(
+pub(super) fn guard_owners(
     selected: usize,
     selection_wire: usize,
     app_path_bytes: usize,

@@ -16,6 +16,8 @@ pub(crate) mod provider_workspace;
 pub(crate) mod query_workspace;
 mod recovery;
 mod runtime;
+#[cfg(unix)]
+pub(crate) mod source_retained_workspace;
 mod worker;
 
 pub(super) use events::emit_changed;

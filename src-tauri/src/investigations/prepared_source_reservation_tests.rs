@@ -106,6 +106,71 @@ fn prepared_source_host_reservation_then_charge_then_real_source_read() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn prepared_source_retained_currency_covers_actual_reserved_read_owners() {
+    // AC-0327: real captured receipt and durable charge, not fabricated DTOs.
+    let (saved, state, context, target, private) = fixture();
+    let limits = crate::mcp_reads::dispatch::EvidenceWorkLimits {
+        max_file_validation_bytes: std::num::NonZeroU64::new(target.captured.file.byte_len)
+            .unwrap(),
+        max_span_bytes: std::num::NonZeroU64::new(
+            target.captured.byte_end - target.captured.byte_start,
+        )
+        .unwrap(),
+    };
+    let prepared = context
+        .prepare_captured_read(&state, &target.fact, target.role, target.index)
+        .unwrap()
+        .with_read_limits(Some(limits))
+        .unwrap();
+    let reservation = prepared
+        .reserve(
+            &context,
+            &state,
+            saved.execution(),
+            saved.revision(),
+            &clock(),
+            &saved.admission(),
+        )
+        .unwrap();
+    let candidate =
+        match prepared.read_reserved(&context, &state, saved.execution(), &reservation.basis()) {
+            Ok(candidate) => candidate,
+            Err(error) => panic!("reserved read failed: {:?}", error.kind()),
+        };
+    let validation = candidate.validation_receipt().unwrap();
+    // Serialized fields are an independent payload lower bound, not a peak/RSS
+    // measurement. The implementation separately accounts typed/map/guard roles.
+    let payload = [
+        serde_json::to_vec(&candidate.prepared.base_ledger)
+            .unwrap()
+            .len(),
+        serde_json::to_vec(candidate.ledger()).unwrap().len(),
+        serde_json::to_vec(&target).unwrap().len(),
+        candidate.prepared.receipt.to_json().unwrap().len(),
+        serde_json::to_vec(reservation.detail()).unwrap().len(),
+        serde_json::to_vec(validation.detail()).unwrap().len(),
+        serde_json::to_vec(candidate.evidence()).unwrap().len(),
+    ]
+    .into_iter()
+    .sum::<usize>();
+    let retained = crate::investigations::source_retained_workspace::retained_bytes(
+        limits,
+        private.as_os_str().as_encoded_bytes().len(),
+    )
+    .unwrap();
+    assert!(retained >= payload);
+    assert!(!candidate.prepared.selected.is_empty());
+    assert!(!candidate.prepared.guards.guards.is_empty());
+    assert_eq!(
+        candidate.evidence().text.len() as u64,
+        limits.max_span_bytes.get()
+    );
+    assert_eq!(saved.counts(), (1, 1, target.captured.file.byte_len));
+    assert!(context.evidence.is_empty()); // candidate remains unpublished
+}
+
 #[test]
 fn prepared_source_host_reservation_stale_and_actual_cancel_never_charge_or_read() {
     for cancel in [false, true] {

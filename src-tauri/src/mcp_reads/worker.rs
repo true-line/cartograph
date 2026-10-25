@@ -480,6 +480,15 @@ fn task_phase_workspaces(
             &agents::investigation::INVESTIGATION_V2_POLICY,
         )?,
     )?;
+    // Source leases, acknowledged receipts and the actual read outcome survive
+    // nested replay and publication. Their ownership is outside the phase max;
+    // source acquisition/publication scratch still needs separate composition.
+    let context = context.checked_add(
+        crate::investigations::source_retained_workspace::retained_bytes(
+            limits.evidence,
+            app_path_bytes,
+        )?,
+    )?;
     let (history, history_projection) =
         crate::jobs::investigations::parent_history_projection_workspace()?;
     // Parent history is acquired first, then survives preparation and every
@@ -684,6 +693,19 @@ pub(crate) mod tests {
                 )
                 .unwrap()
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn task_source_retained_span_is_outside_execution_phase_maximum() {
+        // AC-0327: a larger unrelated phase must not hide retained source text.
+        let mut limits = limits();
+        limits.evidence.max_span_bytes = std::num::NonZeroU64::new(1).unwrap();
+        let small = task_phase_workspaces(limits, 16).unwrap();
+        limits.evidence.max_span_bytes = std::num::NonZeroU64::new(128).unwrap();
+        let large = task_phase_workspaces(limits, 16).unwrap();
+        assert_eq!(large.1 - small.1, 127);
+        assert_eq!(small.0, large.0);
+        assert_eq!(small.2, large.2);
     }
     #[cfg(unix)]
     #[test]
