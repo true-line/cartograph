@@ -275,7 +275,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
         "navigation3",
         ClientRoutes,
         Partial,
-        "callbacks passed into entries are not followed, \
+        "callbacks passed into entries are recorded as registrations rather than followed at T0, \
          and only same-class back-stack helpers are read",
     ),
     cell("Kotlin", "retrofit", HttpClientCalls, Supported, ""),

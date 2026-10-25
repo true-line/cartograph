@@ -1,5 +1,6 @@
-//! Android Navigation 3 screens and back-stack navigations (W11a-3, AC-0351;
-//! ADR-0050 decisions 2 and 3).
+//! Android Navigation 3 screens, initial destinations, startup navigations,
+//! and entry-callback registrations (W11a-3, W11b-2a, AC-0351; ADR-0050
+//! decisions 2, 3, and 4).
 //!
 //! An `entryProvider { … }` call, with `entryProvider` import-proven from
 //! `androidx.navigation3.runtime`, registers each `entry<X>(…) { … }` call in
@@ -7,18 +8,29 @@
 //! when `X` resolves to a type declared in this repository, or a
 //! `route-unresolved` Gap when it does not. Top-level call statements in the
 //! entry's trailing lambda that resolve to repository function Symbols become
-//! Confirmed `RENDERS` edges; callback arguments assert nothing at T0.
+//! Confirmed `RENDERS` edges. Callback arguments (`::fn`, `recv::fn`, or a
+//! single-call lambda `{ fn(…) }` / `{ recv.fn(…) }`; inside `with(recv) { … }`
+//! an unqualified name is `recv`'s member first) passed to a rendered
+//! composable `C` are recorded on the `Screen` node under `entry_callbacks`
+//! (`{param, symbol, composable, evidence, read, forwarded}`), following
+//! direct parameter forwarding up to [`CALLBACK_DEPTH`] hops (`read` is false
+//! only when no composable on the chain references the parameter); they never
+//! emit T0 call or navigation edges.
 //!
 //! In a class with a proven back-stack property (`mutableStateListOf<NavKey>(…)`,
 //! `MutableStateFlow(mutableStateListOf<NavKey>(…))`, or
-//! `rememberNavBackStack(…)`), direct `add` calls, parameter helpers and
-//! builder helpers in the same class emit InferredStrong `NAVIGATES_TO` edges
-//! (or `navigation-unresolved` Gaps when the target is computed or names a type
-//! with no recovered screen).
+//! `rememberNavBackStack(…)`), a single initial key argument `K` or `K(…)`
+//! marks the corresponding recovered `Screen` with `initial: true` and
+//! `back_stack_owner` (plus `initial_owners` when multiple classes name the
+//! same screen). Direct `add` calls, parameter helpers and builder helpers in
+//! the same class emit InferredStrong `NAVIGATES_TO` edges (or
+//! `navigation-unresolved` Gaps when the target is computed or names a type
+//! with no recovered screen); navigation sites in `init` blocks or property
+//! initializers carry `phase: "init"`.
 
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use tree_sitter::Node as TsNode;
 
 use super::{Declared, EXTRACTOR_ID, FileCx, Imports, enclosing_type_chain, symbol_id};
@@ -29,6 +41,7 @@ const COMPOSE_PACKAGE: &str = "androidx.compose.runtime";
 
 pub(crate) const ROUTER: &str = "navigation3";
 pub(crate) const ROUTER_BASIS: &str = "back_stack";
+pub(crate) const CALLBACK_DEPTH: usize = 4;
 
 /// Gap reason: an `entry<X>` key that is not a declared type in this repository.
 pub const UNDECLARED_KEY_REASON: &str = "navigation key is not a declared type";
@@ -222,9 +235,93 @@ impl RenderCall {
 }
 
 #[derive(Debug, Clone)]
+enum CallbackTarget {
+    TopLevel(RenderCall),
+    ReceiverMethod {
+        receiver_type: TypeRef,
+        method: String,
+    },
+    /// An unqualified name inside `with(recv) { … }`: a member of `recv`'s
+    /// class wins over the top-level `fallback`, as in Kotlin resolution.
+    WithReceiver {
+        receiver_type: TypeRef,
+        method: String,
+        fallback: RenderCall,
+    },
+}
+
+impl CallbackTarget {
+    fn resolve(
+        &self,
+        repo: &str,
+        types_by_fqn: &BTreeMap<String, Option<Declared>>,
+        functions_by_fqn: &BTreeMap<String, Option<Declared>>,
+        functions: &BTreeMap<String, Option<FunctionInfo>>,
+        known: &HashSet<String>,
+    ) -> Option<String> {
+        let sym = match self {
+            CallbackTarget::TopLevel(rc) => {
+                rc.resolve(repo, types_by_fqn, functions_by_fqn, known)?
+            }
+            CallbackTarget::ReceiverMethod {
+                receiver_type,
+                method,
+            } => {
+                let declared = receiver_type.resolve(types_by_fqn)?;
+                let sym = symbol_id(
+                    repo,
+                    &declared.path,
+                    &format!("{}.{method}", declared.qualified),
+                );
+                if !known.contains(&sym) {
+                    return None;
+                }
+                sym
+            }
+            CallbackTarget::WithReceiver {
+                receiver_type,
+                method,
+                fallback,
+            } => {
+                let declared = receiver_type.resolve(types_by_fqn)?;
+                let member = symbol_id(
+                    repo,
+                    &declared.path,
+                    &format!("{}.{method}", declared.qualified),
+                );
+                if known.contains(&member) {
+                    member
+                } else {
+                    fallback.resolve(repo, types_by_fqn, functions_by_fqn, known)?
+                }
+            }
+        };
+        // Overloads prove nothing (as in the helper rule): a function or method
+        // whose symbol id was declared more than once has `functions[&sym] == None`.
+        functions.get(&sym).and_then(Option::as_ref)?;
+        Some(sym)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CallbackArg {
+    name: Option<String>,
+    index: usize,
+    target: CallbackTarget,
+    evidence: EvidenceRef,
+}
+
+#[derive(Debug, Clone)]
+struct RenderSite {
+    call: RenderCall,
+    evidence: EvidenceRef,
+    callbacks: Vec<CallbackArg>,
+}
+
+#[derive(Debug, Clone)]
 struct EntrySite {
     key: Option<TypeRef>,
-    renders: Vec<(RenderCall, EvidenceRef)>,
+    renders: Vec<RenderSite>,
     evidence: EvidenceRef,
 }
 
@@ -236,33 +333,75 @@ enum NavTarget {
 }
 
 #[derive(Debug, Clone)]
+struct InitialSite {
+    owner: String,
+    target: NavTarget,
+    /// The back-stack property whose initializer names the key.
+    evidence: EvidenceRef,
+}
+
+#[derive(Debug, Clone)]
 struct NavSite {
     source: String,
     target: NavTarget,
     via: &'static str,
     conditional: bool,
+    init_phase: bool,
     evidence: EvidenceRef,
+}
+
+#[derive(Debug, Clone)]
+struct ForwardCall {
+    source_param: String,
+    target_call: RenderCall,
+    target_arg_name: Option<String>,
+    target_arg_idx: usize,
+}
+
+#[derive(Debug, Clone)]
+struct FunctionInfo {
+    params: Vec<String>,
+    /// Parameters the body references unshadowed: invoked, forwarded (to any
+    /// callee, repository or library), or otherwise read. Only a parameter the
+    /// body never mentions is unread.
+    used_params: HashSet<String>,
+    forwards: Vec<ForwardCall>,
 }
 
 /// Per-file Navigation 3 facts carried to directory completion.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Pending {
     entries: Vec<EntrySite>,
+    initials: Vec<InitialSite>,
     navigations: Vec<NavSite>,
+    functions: BTreeMap<String, Option<FunctionInfo>>,
 }
 
 impl Pending {
     pub(crate) fn extend(&mut self, other: Pending) {
         self.entries.extend(other.entries);
+        self.initials.extend(other.initials);
         self.navigations.extend(other.navigations);
+        for (sym, info) in other.functions {
+            self.functions
+                .entry(sym)
+                .and_modify(|existing| *existing = None)
+                .or_insert(info);
+        }
     }
 
     pub(crate) fn retarget(&mut self, commit: &str) {
         for entry in &mut self.entries {
             entry.evidence.commit_sha = commit.into();
-            for (_, ev) in &mut entry.renders {
-                ev.commit_sha = commit.into();
+            for render in &mut entry.renders {
+                render.evidence.commit_sha = commit.into();
+                for cb in &mut render.callbacks {
+                    cb.evidence.commit_sha = commit.into();
+                }
             }
+        }
+        for init in &mut self.initials {
+            init.evidence.commit_sha = commit.into();
         }
         for nav in &mut self.navigations {
             nav.evidence.commit_sha = commit.into();
@@ -529,7 +668,13 @@ fn collect_provider_entries(
             }
             if let Some(rc) = extract_render_call(cx, body_stmt, package, imports, local_functions)
             {
-                renders.push((rc, evidence(cx, body_stmt)));
+                let callbacks =
+                    extract_callback_args(cx, body_stmt, package, imports, local_functions);
+                renders.push(RenderSite {
+                    call: rc,
+                    evidence: evidence(cx, body_stmt),
+                    callbacks,
+                });
             }
         }
         pending.entries.push(EntrySite {
@@ -538,6 +683,459 @@ fn collect_provider_entries(
             evidence: evidence(cx, stmt),
         });
     }
+}
+
+fn extract_callback_args(
+    cx: &FileCx<'_>,
+    call: TsNode<'_>,
+    package: Option<&str>,
+    imports: &Imports,
+    local_functions: &HashSet<String>,
+) -> Vec<CallbackArg> {
+    let mut out = Vec::new();
+    let Some(args) = value_arguments(call) else {
+        return out;
+    };
+    let mut aw = args.walk();
+    for (index, varg) in args
+        .named_children(&mut aw)
+        .filter(|c| c.kind() == "value_argument")
+        .enumerate()
+    {
+        let Some((name, expr)) = value_argument_name_and_expr(cx, varg) else {
+            continue;
+        };
+        if let Some(target) = extract_callback_target(cx, expr, package, imports, local_functions) {
+            out.push(CallbackArg {
+                name,
+                index,
+                target,
+                evidence: evidence(cx, varg),
+            });
+        }
+    }
+    out
+}
+
+fn extract_callback_target(
+    cx: &FileCx<'_>,
+    expr: TsNode<'_>,
+    package: Option<&str>,
+    imports: &Imports,
+    local_functions: &HashSet<String>,
+) -> Option<CallbackTarget> {
+    let expr = unwrap_parens(expr);
+    if let Some((site, recv, name)) =
+        parse_function_reference(cx, expr).or_else(|| parse_single_call_lambda(cx, expr))
+    {
+        return match recv {
+            None => {
+                let target = extract_unqualified_callback(
+                    cx,
+                    site,
+                    &name,
+                    package,
+                    imports,
+                    local_functions,
+                )?;
+                match (
+                    enclosing_with_receiver(cx, site, package, imports, local_functions),
+                    target,
+                ) {
+                    (None, target) => Some(target),
+                    // A `with` receiver whose type is unproven could own the name.
+                    (Some(None), _) => None,
+                    (Some(Some(receiver_type)), CallbackTarget::TopLevel(fallback)) => {
+                        Some(CallbackTarget::WithReceiver {
+                            receiver_type,
+                            method: name,
+                            fallback,
+                        })
+                    }
+                    (Some(Some(_)), _) => None,
+                }
+            }
+            Some(recv_name) => {
+                let receiver_type = resolve_receiver_type(cx, site, &recv_name, package, imports)?;
+                Some(CallbackTarget::ReceiverMethod {
+                    receiver_type,
+                    method: name,
+                })
+            }
+        };
+    }
+    None
+}
+
+fn parse_function_reference<'t>(
+    cx: &FileCx<'_>,
+    expr: TsNode<'t>,
+) -> Option<(TsNode<'t>, Option<String>, String)> {
+    match expr.kind() {
+        "callable_reference" => {
+            let mut walk = expr.walk();
+            if expr.children(&mut walk).any(|c| c.kind() == "class") {
+                return None;
+            }
+            let mut nw = expr.walk();
+            let parts: Vec<_> = expr.named_children(&mut nw).collect();
+            match parts.as_slice() {
+                [ident] if ident.kind() == "identifier" => {
+                    let name = cx.text(ident);
+                    (!name.is_empty()).then(|| (*ident, None, name.to_string()))
+                }
+                [recv_node, ident] if ident.kind() == "identifier" => {
+                    let name = cx.text(ident);
+                    if name.is_empty() {
+                        return None;
+                    }
+                    if recv_node.kind() == "this_expression" {
+                        return Some((*ident, None, name.to_string()));
+                    }
+                    let recv = match recv_node.kind() {
+                        "identifier" => Some(cx.text(recv_node).to_string()),
+                        "user_type" => {
+                            plain_user_type_name(cx, *recv_node).filter(|s| !s.contains('.'))
+                        }
+                        _ => None,
+                    }?;
+                    (!recv.is_empty()).then(|| (*recv_node, Some(recv), name.to_string()))
+                }
+                _ => None,
+            }
+        }
+        "navigation_expression" => {
+            let mut walk = expr.walk();
+            let children: Vec<_> = expr.children(&mut walk).collect();
+            let [left, op, right] = children.as_slice() else {
+                return None;
+            };
+            if cx.text(op) != "::" || right.kind() != "identifier" {
+                return None;
+            }
+            let name = cx.text(right);
+            if name.is_empty() {
+                return None;
+            }
+            match left.kind() {
+                "this_expression" => Some((*right, None, name.to_string())),
+                "identifier" => {
+                    let recv = cx.text(left);
+                    (!recv.is_empty()).then(|| (*left, Some(recv.to_string()), name.to_string()))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_single_call_lambda<'t>(
+    cx: &FileCx<'_>,
+    expr: TsNode<'t>,
+) -> Option<(TsNode<'t>, Option<String>, String)> {
+    if expr.kind() != "lambda_literal" {
+        return None;
+    }
+    let mut walk = expr.walk();
+    let stmts: Vec<_> = expr
+        .named_children(&mut walk)
+        .filter(|c| {
+            !matches!(
+                c.kind(),
+                "lambda_parameters" | "line_comment" | "block_comment"
+            )
+        })
+        .collect();
+    let [call] = stmts.as_slice() else {
+        return None;
+    };
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let callee = call.named_child(0)?;
+    match callee.kind() {
+        "identifier" => {
+            let name = cx.text(&callee);
+            (!name.is_empty()).then(|| (callee, None, name.to_string()))
+        }
+        "navigation_expression" => {
+            let mut cw = callee.walk();
+            let children: Vec<_> = callee.children(&mut cw).collect();
+            let [left, op, right] = children.as_slice() else {
+                return None;
+            };
+            if cx.text(op) != "." || right.kind() != "identifier" {
+                return None;
+            }
+            let name = cx.text(right);
+            if name.is_empty() {
+                return None;
+            }
+            match left.kind() {
+                "this_expression" => Some((*right, None, name.to_string())),
+                "identifier" => {
+                    let recv = cx.text(left);
+                    (!recv.is_empty()).then(|| (*left, Some(recv.to_string()), name.to_string()))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn extract_unqualified_callback(
+    cx: &FileCx<'_>,
+    site: TsNode<'_>,
+    name: &str,
+    package: Option<&str>,
+    imports: &Imports,
+    local_functions: &HashSet<String>,
+) -> Option<CallbackTarget> {
+    if is_value_in_scope(cx, site, name) {
+        return None;
+    }
+    let chain = enclosing_type_chain(cx, site);
+    let qualified = if chain.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}.{name}", chain.join("."))
+    };
+    if local_functions.contains(&qualified) {
+        return Some(CallbackTarget::TopLevel(RenderCall::Local(symbol_id(
+            cx.id.repo, cx.path, &qualified,
+        ))));
+    }
+    if !chain.is_empty() && local_functions.contains(name) {
+        return Some(CallbackTarget::TopLevel(RenderCall::Local(symbol_id(
+            cx.id.repo, cx.path, name,
+        ))));
+    }
+    if let Some(fqn) = imports.bindings.get(name) {
+        return Some(CallbackTarget::TopLevel(RenderCall::Imported {
+            fqn: fqn.clone(),
+            member: None,
+        }));
+    }
+    Some(CallbackTarget::TopLevel(RenderCall::Unqualified {
+        package: package.map(str::to_string),
+        wildcards: imports.wildcard_packages.clone(),
+        name: name.to_string(),
+    }))
+}
+
+/// The receiver type of the innermost `with(recv) { … }` lambda enclosing
+/// `site`: `None` outside any `with`, `Some(None)` when `recv` is not a plain
+/// identifier with a declared type. `with` must not be shadowed locally.
+fn enclosing_with_receiver(
+    cx: &FileCx<'_>,
+    site: TsNode<'_>,
+    package: Option<&str>,
+    imports: &Imports,
+    local_functions: &HashSet<String>,
+) -> Option<Option<TypeRef>> {
+    let mut cur = site;
+    while let Some(parent) = cur.parent() {
+        cur = parent;
+        if parent.kind() != "lambda_literal" {
+            continue;
+        }
+        let Some(call) = parent
+            .parent()
+            .filter(|a| a.kind() == "annotated_lambda")
+            .and_then(|a| a.parent())
+            .filter(|c| c.kind() == "call_expression")
+        else {
+            continue;
+        };
+        // `with(recv) { … }` parses as a call of `with(recv)` with a trailing lambda.
+        let Some(head) = call.named_child(0) else {
+            continue;
+        };
+        let (callee, args_call) = match head.kind() {
+            "call_expression" => (head.named_child(0), head),
+            _ => (Some(head), call),
+        };
+        let Some(callee) = callee.filter(|c| c.kind() == "identifier") else {
+            continue;
+        };
+        if cx.text(&callee) != "with" {
+            continue;
+        }
+        if local_functions.contains("with") || imports.bindings.contains_key("with") {
+            return Some(None);
+        }
+        let recv = single_call_arg(args_call)
+            .map(unwrap_parens)
+            .filter(|r| r.kind() == "identifier");
+        return Some(
+            recv.and_then(|r| resolve_receiver_type(cx, call, cx.text(&r), package, imports)),
+        );
+    }
+    None
+}
+
+fn is_value_in_scope(cx: &FileCx<'_>, site: TsNode<'_>, name: &str) -> bool {
+    let mut cur = site;
+    while let Some(parent) = cur.parent() {
+        match parent.kind() {
+            "lambda_literal" => {
+                if lambda_param_names(cx, parent).iter().any(|p| p == name) {
+                    return true;
+                }
+                let mut walk = parent.walk();
+                for stmt in parent.named_children(&mut walk) {
+                    if stmt.end_byte() <= site.start_byte()
+                        && stmt.kind() == "property_declaration"
+                        && property_name(cx, stmt).as_deref() == Some(name)
+                    {
+                        return true;
+                    }
+                }
+            }
+            "block" => {
+                let mut walk = parent.walk();
+                for stmt in parent.named_children(&mut walk) {
+                    if stmt.end_byte() <= site.start_byte()
+                        && stmt.kind() == "property_declaration"
+                        && property_name(cx, stmt).as_deref() == Some(name)
+                    {
+                        return true;
+                    }
+                }
+            }
+            "function_declaration"
+                if function_parameters(cx, parent)
+                    .iter()
+                    .any(|(_, p, _)| p == name) =>
+            {
+                return true;
+            }
+            "class_declaration" | "object_declaration"
+                if class_property_and_param_names(cx, parent).contains(name) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        cur = parent;
+    }
+    false
+}
+
+fn property_declared_type(cx: &FileCx<'_>, prop: TsNode<'_>) -> Option<String> {
+    let mut walk = prop.walk();
+    let var_decl = prop
+        .named_children(&mut walk)
+        .find(|c| c.kind() == "variable_declaration")?;
+    let mut vw = var_decl.walk();
+    let user_type = var_decl
+        .named_children(&mut vw)
+        .find(|c| c.kind() == "user_type")?;
+    plain_user_type_name(cx, user_type)
+}
+
+fn class_member_declared_type(
+    cx: &FileCx<'_>,
+    class_decl: TsNode<'_>,
+    name: &str,
+) -> Option<Option<String>> {
+    let mut walk = class_decl.walk();
+    for child in class_decl.named_children(&mut walk) {
+        if child.kind() == "primary_constructor" {
+            let mut cw = child.walk();
+            for param in child.named_children(&mut cw) {
+                if param.kind() == "class_parameter" {
+                    let mut pw = param.walk();
+                    let named: Vec<_> = param.named_children(&mut pw).collect();
+                    if let Some(id_pos) = named.iter().position(|c| c.kind() == "identifier")
+                        && cx.text(&named[id_pos]) == name
+                    {
+                        let ty = named
+                            .get(id_pos + 1)
+                            .and_then(|t| plain_user_type_name(cx, *t));
+                        return Some(ty);
+                    }
+                }
+            }
+        } else if child.kind() == "class_body" {
+            let mut bw = child.walk();
+            for member in child.named_children(&mut bw) {
+                if member.kind() == "property_declaration"
+                    && property_name(cx, member).as_deref() == Some(name)
+                {
+                    return Some(property_declared_type(cx, member));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_receiver_type(
+    cx: &FileCx<'_>,
+    site: TsNode<'_>,
+    recv: &str,
+    package: Option<&str>,
+    imports: &Imports,
+) -> Option<TypeRef> {
+    let mut cur = site;
+    while let Some(parent) = cur.parent() {
+        match parent.kind() {
+            "lambda_literal" => {
+                if lambda_param_names(cx, parent).iter().any(|p| p == recv) {
+                    return None;
+                }
+                let mut walk = parent.walk();
+                for stmt in parent.named_children(&mut walk) {
+                    if stmt.end_byte() <= site.start_byte()
+                        && stmt.kind() == "property_declaration"
+                        && property_name(cx, stmt).as_deref() == Some(recv)
+                    {
+                        let ty = property_declared_type(cx, stmt)?;
+                        let chain = enclosing_type_chain(cx, stmt);
+                        return Some(TypeRef::from_name(&ty, package, imports, &chain));
+                    }
+                }
+            }
+            "block" => {
+                let mut walk = parent.walk();
+                for stmt in parent.named_children(&mut walk) {
+                    if stmt.end_byte() <= site.start_byte()
+                        && stmt.kind() == "property_declaration"
+                        && property_name(cx, stmt).as_deref() == Some(recv)
+                    {
+                        let ty = property_declared_type(cx, stmt)?;
+                        let chain = enclosing_type_chain(cx, stmt);
+                        return Some(TypeRef::from_name(&ty, package, imports, &chain));
+                    }
+                }
+            }
+            "function_declaration" => {
+                for (_, param_name, param_ty) in function_parameters(cx, parent) {
+                    if param_name == recv {
+                        let ty = plain_user_type_name(cx, param_ty)?;
+                        let chain = enclosing_type_chain(cx, parent);
+                        return Some(TypeRef::from_name(&ty, package, imports, &chain));
+                    }
+                }
+            }
+            "class_declaration" | "object_declaration" => {
+                if let Some(ty_opt) = class_member_declared_type(cx, parent, recv) {
+                    let ty = ty_opt?;
+                    let mut chain = enclosing_type_chain(cx, parent);
+                    if let Some(name_node) = parent.child_by_field_name("name") {
+                        chain.push(cx.text(&name_node).to_string());
+                    }
+                    return Some(TypeRef::from_name(&ty, package, imports, &chain));
+                }
+            }
+            _ => {}
+        }
+        cur = parent;
+    }
+    None
 }
 
 /// Parse an `entry<X>(…) { … }` statement inside an `entryProvider` lambda.
@@ -679,39 +1277,44 @@ fn property_initializer(prop: TsNode<'_>) -> Option<TsNode<'_>> {
     None
 }
 
-fn is_mutable_state_list_of_nav_key(
+fn single_call_arg<'t>(call: TsNode<'t>) -> Option<TsNode<'t>> {
+    let args = value_arguments(call)?;
+    let mut aw = args.walk();
+    let vargs: Vec<_> = args
+        .named_children(&mut aw)
+        .filter(|c| c.kind() == "value_argument")
+        .collect();
+    let [arg] = vargs.as_slice() else {
+        return None;
+    };
+    value_argument_expr(*arg)
+}
+
+fn mutable_state_list_of_nav_key<'t>(
     cx: &FileCx<'_>,
-    node: TsNode<'_>,
+    node: TsNode<'t>,
     imports: &Imports,
     local_functions: &HashSet<String>,
     local_types: &HashSet<String>,
-) -> bool {
-    let (callee_name, type_name) = match node.kind() {
+) -> Option<Option<TsNode<'t>>> {
+    let (callee_name, type_name, initial_arg) = match node.kind() {
         "call_expression" => {
-            let Some(callee) = node.named_child(0) else {
-                return false;
-            };
-            let Some(callee_name) = dotted_identifiers(cx, callee) else {
-                return false;
-            };
-            let Some(type_args) = type_arguments(node) else {
-                return false;
-            };
-            let Some(type_name) = single_type_arg_name(cx, type_args) else {
-                return false;
-            };
-            (callee_name, type_name)
+            let callee = node.named_child(0)?;
+            let callee_name = dotted_identifiers(cx, callee)?;
+            let type_args = type_arguments(node)?;
+            let type_name = single_type_arg_name(cx, type_args)?;
+            (callee_name, type_name, single_call_arg(node))
         }
         "binary_expression" => {
             let Some((callee_name, Some(type_name), right)) = split_generic_binary(cx, node) else {
-                return false;
+                return None;
             };
             if right.kind() != "parenthesized_expression" {
-                return false;
+                return None;
             }
-            (callee_name, type_name)
+            (callee_name, type_name, right.named_child(0))
         }
-        _ => return false,
+        _ => return None,
     };
     // Import-proven like every framework name: a same-package
     // `mutableStateListOf` from another file must not pass for Compose's.
@@ -725,7 +1328,7 @@ fn is_mutable_state_list_of_nav_key(
         local_functions,
     );
     if !list_ok {
-        return false;
+        return None;
     }
     proven_name(
         cx,
@@ -736,27 +1339,26 @@ fn is_mutable_state_list_of_nav_key(
         imports,
         local_types,
     )
+    .then_some(initial_arg)
 }
 
-fn is_back_stack_init(
+fn back_stack_init<'t>(
     cx: &FileCx<'_>,
-    init: TsNode<'_>,
+    init: TsNode<'t>,
     imports: &Imports,
     local_functions: &HashSet<String>,
     local_types: &HashSet<String>,
-) -> bool {
-    if is_mutable_state_list_of_nav_key(cx, init, imports, local_functions, local_types) {
-        return true;
+) -> Option<Option<TsNode<'t>>> {
+    if let Some(initial_arg) =
+        mutable_state_list_of_nav_key(cx, init, imports, local_functions, local_types)
+    {
+        return Some(initial_arg);
     }
     if init.kind() != "call_expression" {
-        return false;
+        return None;
     }
-    let Some(callee) = init.named_child(0) else {
-        return false;
-    };
-    let Some(callee_name) = dotted_identifiers(cx, callee) else {
-        return false;
-    };
+    let callee = init.named_child(0)?;
+    let callee_name = dotted_identifiers(cx, callee)?;
     if proven_name(
         cx,
         init,
@@ -766,7 +1368,7 @@ fn is_back_stack_init(
         imports,
         local_functions,
     ) {
-        return true;
+        return Some(single_call_arg(init));
     }
     if !proven_name(
         cx,
@@ -777,23 +1379,10 @@ fn is_back_stack_init(
         imports,
         local_functions,
     ) {
-        return false;
+        return None;
     }
-    let Some(args) = value_arguments(init) else {
-        return false;
-    };
-    let mut aw = args.walk();
-    let vargs: Vec<_> = args
-        .named_children(&mut aw)
-        .filter(|c| c.kind() == "value_argument")
-        .collect();
-    let [arg] = vargs.as_slice() else {
-        return false;
-    };
-    let Some(inner) = value_argument_expr(*arg) else {
-        return false;
-    };
-    is_mutable_state_list_of_nav_key(cx, inner, imports, local_functions, local_types)
+    let inner = single_call_arg(init)?;
+    mutable_state_list_of_nav_key(cx, inner, imports, local_functions, local_types)
 }
 
 fn value_argument_expr(arg: TsNode<'_>) -> Option<TsNode<'_>> {
@@ -1329,6 +1918,128 @@ fn class_property_and_param_names(cx: &FileCx<'_>, class_decl: TsNode<'_>) -> Ha
     names
 }
 
+fn extract_function_info(
+    cx: &FileCx<'_>,
+    func: TsNode<'_>,
+    package: Option<&str>,
+    imports: &Imports,
+    local_functions: &HashSet<String>,
+) -> FunctionInfo {
+    let params: Vec<String> = function_parameters(cx, func)
+        .into_iter()
+        .map(|(_, name, _)| name)
+        .collect();
+    let param_set: HashSet<&str> = params.iter().map(String::as_str).collect();
+    let mut used_params = HashSet::new();
+    let mut forwards = Vec::new();
+
+    let mut fw = func.walk();
+    let Some(body) = func
+        .named_children(&mut fw)
+        .find(|c| c.kind() == "function_body")
+    else {
+        return FunctionInfo {
+            params,
+            used_params,
+            forwards,
+        };
+    };
+    for ident in walk_identifiers(body) {
+        let name = cx.text(&ident);
+        if param_set.contains(name)
+            && is_value_reference(ident)
+            && !is_shadowed(cx, ident, body, name)
+        {
+            used_params.insert(name.to_string());
+        }
+    }
+
+    for call in walk_calls(body) {
+        if let Some(callee) = call.named_child(0)
+            && callee.kind() == "identifier"
+        {
+            let name = cx.text(&callee);
+            if param_set.contains(name) && !is_shadowed(cx, callee, body, name) {
+                continue;
+            }
+            if is_value_in_scope(cx, callee, name) {
+                continue;
+            }
+        }
+        let Some(rc) = extract_render_call(cx, call, package, imports, local_functions) else {
+            continue;
+        };
+        let Some(args) = value_arguments(call) else {
+            continue;
+        };
+        let mut aw = args.walk();
+        for (arg_idx, varg) in args
+            .named_children(&mut aw)
+            .filter(|c| c.kind() == "value_argument")
+            .enumerate()
+        {
+            let Some((arg_name, expr)) = value_argument_name_and_expr(cx, varg) else {
+                continue;
+            };
+            let expr = unwrap_parens(expr);
+            if expr.kind() == "identifier" {
+                let passed = cx.text(&expr);
+                if param_set.contains(passed) && !is_shadowed(cx, expr, body, passed) {
+                    forwards.push(ForwardCall {
+                        source_param: passed.to_string(),
+                        target_call: rc.clone(),
+                        target_arg_name: arg_name,
+                        target_arg_idx: arg_idx,
+                    });
+                }
+            }
+        }
+    }
+
+    FunctionInfo {
+        params,
+        used_params,
+        forwards,
+    }
+}
+
+/// Every identifier under `root`, not descending into nested type declarations.
+fn walk_identifiers<'t>(root: TsNode<'t>) -> Vec<TsNode<'t>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "identifier" {
+            out.push(node);
+        }
+        let mut walk = node.walk();
+        for child in node.named_children(&mut walk) {
+            if !matches!(child.kind(), "class_declaration" | "object_declaration") {
+                stack.push(child);
+            }
+        }
+    }
+    out
+}
+
+/// Whether an identifier reads a value: not a named-argument label, a member
+/// name after `.`, or the name in a declaration.
+fn is_value_reference(ident: TsNode<'_>) -> bool {
+    let Some(parent) = ident.parent() else {
+        return true;
+    };
+    match parent.kind() {
+        "value_argument" => parent.named_child_count() < 2 || parent.named_child(0) != Some(ident),
+        "navigation_expression" => parent.named_child(0) == Some(ident),
+        "variable_declaration"
+        | "parameter"
+        | "lambda_parameters"
+        | "function_declaration"
+        | "class_parameter"
+        | "type_identifier" => false,
+        _ => true,
+    }
+}
+
 /// Extract Navigation 3 entries and back-stack navigations from one file.
 pub(crate) fn extract(
     cx: &FileCx<'_>,
@@ -1359,6 +2070,17 @@ pub(crate) fn extract(
         for child in children.into_iter().rev() {
             stack.push(child);
         }
+        if decl.kind() == "function_declaration" {
+            if let Some(sym) = functions_by_start.get(&decl.start_byte()).cloned() {
+                let info = extract_function_info(cx, decl, package, imports, local_functions);
+                pending
+                    .functions
+                    .entry(sym)
+                    .and_modify(|existing| *existing = None)
+                    .or_insert(Some(info));
+            }
+            continue;
+        }
         if !matches!(decl.kind(), "class_declaration" | "object_declaration") {
             continue;
         }
@@ -1374,6 +2096,7 @@ pub(crate) fn extract(
         };
         let mut back_stacks = HashSet::new();
         let mut back_stack_prop_ids = HashSet::new();
+        let mut back_stack_initial_args = Vec::new();
         let mut cbw = class_body.walk();
         let members: Vec<_> = class_body.named_children(&mut cbw).collect();
         for member in &members {
@@ -1385,9 +2108,14 @@ pub(crate) fn extract(
             else {
                 continue;
             };
-            if is_back_stack_init(cx, init, imports, local_functions, local_types) {
+            if let Some(initial_arg) =
+                back_stack_init(cx, init, imports, local_functions, local_types)
+            {
                 back_stacks.insert(prop_name);
                 back_stack_prop_ids.insert(member.id());
+                if let Some(arg) = initial_arg {
+                    back_stack_initial_args.push((arg, evidence(cx, *member)));
+                }
             }
         }
         if back_stacks.is_empty() {
@@ -1524,9 +2252,23 @@ pub(crate) fn extract(
             local_functions,
         };
 
+        for (arg, initializer) in back_stack_initial_args {
+            let target = target_scope.classify(Some(arg));
+            if matches!(
+                target,
+                NavTarget::ObjectKey(_) | NavTarget::ConstructorKey(_)
+            ) {
+                pending.initials.push(InitialSite {
+                    owner: class_symbol.clone(),
+                    target,
+                    evidence: initializer,
+                });
+            }
+        }
+
         // Scan members for navigation sites.
         for member in &members {
-            let (source, scan_root, own_helper_param) = match member.kind() {
+            let (source, scan_root, own_helper_param, init_phase) = match member.kind() {
                 "function_declaration" => {
                     let Some(sym) = functions_by_start.get(&member.start_byte()).cloned() else {
                         continue;
@@ -1543,9 +2285,9 @@ pub(crate) fn extract(
                         .map(|n| cx.text(&n).to_string())
                         .unwrap_or_default();
                     let own_param = param_helpers.get(&fn_name).map(|(_, p)| p.clone());
-                    (sym, body, own_param)
+                    (sym, body, own_param, false)
                 }
-                "anonymous_initializer" => (class_symbol.clone(), *member, None),
+                "anonymous_initializer" => (class_symbol.clone(), *member, None, true),
                 "property_declaration" => {
                     if back_stack_prop_ids.contains(&member.id()) {
                         continue;
@@ -1553,7 +2295,7 @@ pub(crate) fn extract(
                     let Some(init) = property_initializer(*member) else {
                         continue;
                     };
-                    (class_symbol.clone(), init, None)
+                    (class_symbol.clone(), init, None, true)
                 }
                 _ => continue,
             };
@@ -1576,6 +2318,7 @@ pub(crate) fn extract(
                         target,
                         via: "direct",
                         conditional: conditional(cx, call, *member),
+                        init_phase,
                         evidence: evidence(cx, call),
                     });
                     continue;
@@ -1623,6 +2366,7 @@ pub(crate) fn extract(
                         target,
                         via: "param_helper",
                         conditional: conditional(cx, call, *member),
+                        init_phase,
                         evidence: evidence(cx, call),
                     });
                 } else if let Some((param_idx, param_name)) = builder_helpers.get(helper_name) {
@@ -1643,6 +2387,7 @@ pub(crate) fn extract(
                         target,
                         via: "builder_helper",
                         conditional: conditional(cx, call, *member),
+                        init_phase,
                         evidence: evidence(cx, call),
                     });
                 }
@@ -1651,6 +2396,100 @@ pub(crate) fn extract(
     }
 
     pending
+}
+
+fn trace_callback_chain(
+    c_sym: &str,
+    c_param: &str,
+    repo: &str,
+    types_by_fqn: &BTreeMap<String, Option<Declared>>,
+    functions_by_fqn: &BTreeMap<String, Option<Declared>>,
+    functions: &BTreeMap<String, Option<FunctionInfo>>,
+    known: &HashSet<String>,
+) -> (bool, Vec<serde_json::Value>) {
+    let mut visited: HashSet<(String, String)> = HashSet::new();
+    visited.insert((c_sym.to_string(), c_param.to_string()));
+    let mut forwarded = Vec::new();
+    let mut read = false;
+    walk_callback_chain(
+        c_sym,
+        c_param,
+        0,
+        repo,
+        types_by_fqn,
+        functions_by_fqn,
+        functions,
+        known,
+        &mut visited,
+        &mut forwarded,
+        &mut read,
+    );
+    (read, forwarded)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_callback_chain(
+    cur_sym: &str,
+    cur_param: &str,
+    depth: usize,
+    repo: &str,
+    types_by_fqn: &BTreeMap<String, Option<Declared>>,
+    functions_by_fqn: &BTreeMap<String, Option<Declared>>,
+    functions: &BTreeMap<String, Option<FunctionInfo>>,
+    known: &HashSet<String>,
+    visited: &mut HashSet<(String, String)>,
+    forwarded: &mut Vec<serde_json::Value>,
+    read: &mut bool,
+) {
+    let Some(Some(info)) = functions.get(cur_sym) else {
+        return;
+    };
+    if info.used_params.contains(cur_param) {
+        *read = true;
+    }
+    if depth >= CALLBACK_DEPTH {
+        return;
+    }
+    for fw in &info.forwards {
+        if fw.source_param != cur_param {
+            continue;
+        }
+        let Some(d_sym) = fw
+            .target_call
+            .resolve(repo, types_by_fqn, functions_by_fqn, known)
+        else {
+            continue;
+        };
+        let Some(Some(d_info)) = functions.get(&d_sym) else {
+            continue;
+        };
+        let Some(d_param) = (match &fw.target_arg_name {
+            Some(name) => Some(name.clone()),
+            None => d_info.params.get(fw.target_arg_idx).cloned(),
+        }) else {
+            continue;
+        };
+        if !visited.insert((d_sym.clone(), d_param.clone())) {
+            continue;
+        }
+        forwarded.push(serde_json::json!({
+            "composable": d_sym,
+            "param": d_param,
+        }));
+        walk_callback_chain(
+            &d_sym,
+            &d_param,
+            depth + 1,
+            repo,
+            types_by_fqn,
+            functions_by_fqn,
+            functions,
+            known,
+            visited,
+            forwarded,
+            read,
+        );
+    }
 }
 
 /// Complete Navigation 3 screen and navigation resolution across the repository.
@@ -1664,9 +2503,12 @@ pub(crate) fn complete(
     edges: &mut Vec<Edge>,
 ) {
     let mut screens: BTreeMap<String, Node> = BTreeMap::new();
+    let mut screen_entry_evidence: BTreeMap<String, EvidenceRef> = BTreeMap::new();
+    let mut screen_callbacks: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
     let mut render_edges: BTreeMap<(String, String), Edge> = BTreeMap::new();
     let mut gap_nodes = Vec::new();
     let mut gap_edges = Vec::new();
+    let functions = &pending.functions;
 
     for entry in pending.entries {
         let Some(declared) = entry.key.as_ref().and_then(|k| k.resolve(types_by_fqn)) else {
@@ -1686,6 +2528,9 @@ pub(crate) fn complete(
         };
         let fqn = &declared.fqn;
         let screen = format!("screen:{repo}@{ROUTER}:{fqn}");
+        screen_entry_evidence
+            .entry(screen.clone())
+            .or_insert_with(|| entry.evidence.clone());
         screens.entry(screen.clone()).or_insert_with(|| Node {
             id: screen.clone(),
             label: "Screen".into(),
@@ -1699,8 +2544,50 @@ pub(crate) fn complete(
                 ),
             }),
         });
-        for (render_call, render_ev) in entry.renders {
-            if let Some(dst) = render_call.resolve(repo, types_by_fqn, functions_by_fqn, known) {
+        for render in entry.renders {
+            if let Some(dst) = render
+                .call
+                .resolve(repo, types_by_fqn, functions_by_fqn, known)
+            {
+                let c_info = functions.get(&dst).and_then(Option::as_ref);
+                for cb in render.callbacks {
+                    let Some(cb_sym) =
+                        cb.target
+                            .resolve(repo, types_by_fqn, functions_by_fqn, functions, known)
+                    else {
+                        continue;
+                    };
+                    let Some(param) = (match cb.name {
+                        Some(name) => Some(name),
+                        None => c_info.and_then(|ci| ci.params.get(cb.index)).cloned(),
+                    }) else {
+                        continue;
+                    };
+                    let (read, forwarded) = trace_callback_chain(
+                        &dst,
+                        &param,
+                        repo,
+                        types_by_fqn,
+                        functions_by_fqn,
+                        functions,
+                        known,
+                    );
+                    screen_callbacks
+                        .entry(screen.clone())
+                        .or_default()
+                        .push(serde_json::json!({
+                            "param": param,
+                            "symbol": cb_sym,
+                            "composable": dst,
+                            "evidence": {
+                                "path": cb.evidence.path,
+                                "byte_start": cb.evidence.byte_start,
+                                "byte_end": cb.evidence.byte_end,
+                            },
+                            "read": read,
+                            "forwarded": forwarded,
+                        }));
+                }
                 render_edges
                     .entry((screen.clone(), dst.clone()))
                     .or_insert_with(|| Edge {
@@ -1709,7 +2596,7 @@ pub(crate) fn complete(
                         label: "RENDERS".into(),
                         props: serde_json::json!({
                             "prov": prov(
-                                vec![render_ev],
+                                vec![render.evidence],
                                 ConfidenceTier::Confirmed,
                                 &format!("RENDERS {screen} -> {dst}"),
                             ),
@@ -1719,10 +2606,99 @@ pub(crate) fn complete(
         }
     }
 
+    for (screen_id, callbacks) in screen_callbacks {
+        if callbacks.is_empty() {
+            continue;
+        }
+        if let Some(node) = screens.get_mut(&screen_id)
+            && let Some(obj) = node.props.as_object_mut()
+        {
+            obj.insert(
+                "entry_callbacks".into(),
+                serde_json::Value::Array(callbacks),
+            );
+        }
+    }
+
+    let mut initial_owners_by_screen: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut initializers_by_screen: BTreeMap<String, Vec<EvidenceRef>> = BTreeMap::new();
+    for init in pending.initials {
+        if !known.contains(&init.owner) {
+            continue;
+        }
+        let resolved_key = match &init.target {
+            NavTarget::ObjectKey(type_ref) => type_ref
+                .resolve(types_by_fqn)
+                .filter(|d| d.object)
+                .map(|d| d.fqn.clone()),
+            NavTarget::ConstructorKey(type_ref) => type_ref
+                .resolve(types_by_fqn)
+                .filter(|d| d.constructible)
+                .map(|d| d.fqn.clone()),
+            NavTarget::Computed => None,
+        };
+        let Some(fqn) = resolved_key else {
+            continue;
+        };
+        let screen = format!("screen:{repo}@{ROUTER}:{fqn}");
+        if screens.contains_key(&screen) {
+            initializers_by_screen
+                .entry(screen.clone())
+                .or_default()
+                .push(init.evidence);
+            initial_owners_by_screen
+                .entry(screen)
+                .or_default()
+                .insert(init.owner);
+        }
+    }
+    for (screen_id, owners) in initial_owners_by_screen {
+        let Some(node) = screens.get_mut(&screen_id) else {
+            continue;
+        };
+        let Some(first_owner) = owners.first().cloned() else {
+            continue;
+        };
+        let Some(obj) = node.props.as_object_mut() else {
+            continue;
+        };
+        // The initial-destination facts rest on the initializers, so the
+        // Screen cites each one beside its entry registration.
+        let mut cited: Vec<EvidenceRef> = screen_entry_evidence
+            .get(&screen_id)
+            .cloned()
+            .into_iter()
+            .collect();
+        let mut initializers = initializers_by_screen
+            .remove(&screen_id)
+            .unwrap_or_default();
+        initializers.sort_by_key(|e| (e.path.clone(), e.byte_start, e.byte_end));
+        initializers.dedup();
+        cited.extend(initializers);
+        obj.insert(
+            "prov".into(),
+            prov(
+                cited,
+                ConfidenceTier::Confirmed,
+                &format!("Screen {screen_id}"),
+            ),
+        );
+        obj.insert("initial".into(), serde_json::Value::Bool(true));
+        obj.insert(
+            "back_stack_owner".into(),
+            serde_json::Value::String(first_owner),
+        );
+        if owners.len() > 1 {
+            let all: Vec<serde_json::Value> =
+                owners.into_iter().map(serde_json::Value::String).collect();
+            obj.insert("initial_owners".into(), serde_json::Value::Array(all));
+        }
+    }
+
     #[derive(Default)]
     struct Link {
         evidence: Vec<EvidenceRef>,
-        sites: Vec<(EvidenceRef, bool, &'static str)>,
+        sites: Vec<(EvidenceRef, bool, &'static str, bool)>,
     }
     let mut links: BTreeMap<(String, String), Link> = BTreeMap::new();
 
@@ -1747,8 +2723,12 @@ pub(crate) fn complete(
                 let screen = format!("screen:{repo}@{ROUTER}:{fqn}");
                 if screens.contains_key(&screen) {
                     let link = links.entry((site.source, screen)).or_default();
-                    link.sites
-                        .push((site.evidence.clone(), site.conditional, site.via));
+                    link.sites.push((
+                        site.evidence.clone(),
+                        site.conditional,
+                        site.via,
+                        site.init_phase,
+                    ));
                     link.evidence.push(site.evidence);
                     continue;
                 }
@@ -1792,19 +2772,23 @@ pub(crate) fn complete(
         });
         link.evidence.dedup();
         let order = |e: &EvidenceRef| (e.path.clone(), e.byte_start, e.byte_end);
-        link.sites.sort_by_key(|(e, _, _)| order(e));
-        let conditional = link.sites.iter().all(|(_, conditional, _)| *conditional);
+        link.sites.sort_by_key(|(e, _, _, _)| order(e));
+        let conditional = link.sites.iter().all(|(_, conditional, _, _)| *conditional);
         let sites: Vec<_> = link
             .sites
             .iter()
-            .map(|(e, conditional, via)| {
-                serde_json::json!({
+            .map(|(e, conditional, via, init_phase)| {
+                let mut site = serde_json::json!({
                     "path": e.path,
                     "byte_start": e.byte_start,
                     "byte_end": e.byte_end,
                     "conditional": conditional,
                     "via": via,
-                })
+                });
+                if *init_phase && let Some(obj) = site.as_object_mut() {
+                    obj.insert("phase".into(), serde_json::Value::String("init".into()));
+                }
+                site
             })
             .collect();
         edges.push(Edge {
