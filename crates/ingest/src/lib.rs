@@ -70,8 +70,19 @@ pub struct ClonedRepo {
     pub path: PathBuf,
 }
 
+/// Where `gh` is commonly installed outside an app's PATH. A macOS app
+/// opened from Finder or the Dock gets launchd's PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`), not the shell's, so a Homebrew `gh`
+/// is invisible to it by name (#992).
+pub const GH_FALLBACK_PATHS: &[&str] = &[
+    "/opt/homebrew/bin/gh",
+    "/usr/local/bin/gh",
+    "/home/linuxbrew/.linuxbrew/bin/gh",
+];
+
 /// Discover a token from the v1 auth ladder: `GH_TOKEN`, `GITHUB_TOKEN`,
-/// then `gh auth token` (ADR-0009). `None` means anonymous (public repos).
+/// then `gh auth token` (ADR-0009), by name and then at
+/// [`GH_FALLBACK_PATHS`]. `None` means anonymous (public repos).
 pub fn discover_token() -> Option<String> {
     for var in ["GH_TOKEN", "GITHUB_TOKEN"] {
         if let Ok(t) = std::env::var(var)
@@ -80,17 +91,19 @@ pub fn discover_token() -> Option<String> {
             return Some(t.trim().to_string());
         }
     }
-    let mut gh = Command::new("gh");
+    std::iter::once("gh")
+        .chain(GH_FALLBACK_PATHS.iter().copied())
+        .find_map(gh_token)
+}
+
+/// `program auth token`, when it runs and prints a token.
+fn gh_token(program: &str) -> Option<String> {
+    let mut gh = Command::new(program);
     gh.args(["auth", "token"]);
     hide_console_window(&mut gh);
     let out = gh.output().ok()?;
-    if out.status.success() {
-        let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !t.is_empty() {
-            return Some(t);
-        }
-    }
-    None
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !token.is_empty()).then_some(token)
 }
 
 /// On Windows, a GUI app spawning a console program (`gh`) flashes a console
@@ -141,7 +154,7 @@ pub fn parse_repo_url(url: &str) -> Result<(String, String), IngestError> {
 
 /// Classify a git2 error: auth-shaped failures become [`IngestError::Auth`]
 /// with remediation (AC-0003); anything else passes through.
-fn classify_git_error(url: &str, e: git2::Error) -> IngestError {
+fn classify_git_error(url: &str, e: git2::Error, token_found: bool) -> IngestError {
     let msg = e.message().to_ascii_lowercase();
     let authish = matches!(
         e.class(),
@@ -155,9 +168,19 @@ fn classify_git_error(url: &str, e: git2::Error) -> IngestError {
         IngestError::Auth {
             url: url.to_string(),
             message: e.message().to_string(),
-            remediation: "Check access to the repo, then set GH_TOKEN (or GITHUB_TOKEN) \
-                          to a token with repo read scope, or run `gh auth login`."
-                .to_string(),
+            remediation: if token_found {
+                "A GitHub credential was found but refused. Check that its account can \
+                 read the repo, then set GH_TOKEN (or GITHUB_TOKEN) to a token with repo \
+                 read scope, or run `gh auth login`."
+                    .to_string()
+            } else {
+                format!(
+                    "No GitHub credential was found: GH_TOKEN and GITHUB_TOKEN are unset, \
+                     and `gh auth token` gave no token on PATH or at {}. Set GH_TOKEN (or \
+                     GITHUB_TOKEN) to a token with repo read scope, or run `gh auth login`.",
+                    GH_FALLBACK_PATHS.join(", ")
+                )
+            },
         }
     } else {
         IngestError::Git(e)
@@ -197,14 +220,14 @@ fn clone_into_new(
     let repo = match result {
         Ok(repo) => repo,
         Err(e) => {
-            return Err(classify_git_error(clone_url, e));
+            return Err(classify_git_error(clone_url, e, token.is_some()));
         }
     };
     let commit_sha = repo
         .head()
         .and_then(|h| h.peel_to_commit())
         .map(|c| c.id().to_string())
-        .map_err(|e| classify_git_error(clone_url, e))?;
+        .map_err(|e| classify_git_error(clone_url, e, token.is_some()))?;
     drop(repo);
     Ok(commit_sha)
 }
