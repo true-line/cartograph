@@ -1,5 +1,16 @@
 # cartograph
 
+## 0.33.0
+
+### Minor Changes
+
+- 048e510: Kotlin calls on an interface bound with a Hilt `@Binds` in a `SingletonComponent` module now continue to the bound implementation, so Android journeys can reach the endpoint the implementation calls. The journey records that hop as a `hilt_dispatch` assumption.
+- a4af007: Python code that writes SQLAlchemy models, directly through a proven session or through a model helper classmethod such as `Alias.create(…)`, now records `WRITES` edges to the model's data entity. Journeys whose goal endpoint is fetched from a screen now count those writes, so they can reach an observed-write goal.
+
+### Patch Changes
+
+- bb883f3: Refine MCP evidence-read admission to include temporary capture-manifest decoding and selected-file buffers before reading retained source text. Existing file/span policy ceilings are unchanged.
+
 ## 0.32.0
 
 ### Minor Changes
