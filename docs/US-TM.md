@@ -124,3 +124,4 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0044 | App-owned read-only MCP with a separate local relay (proposed; #718) |
 
 | ADR-0048 | MCP investigation authority and durable client identity (proposed; owner review required) |
+| ADR-0050 | Journey identity and tier: T0 navigation facts, T2 journey candidates (proposed; owner review required) |
