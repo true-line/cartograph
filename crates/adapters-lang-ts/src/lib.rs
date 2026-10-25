@@ -3024,6 +3024,7 @@ fn extract_source_recording(
             import_modules: &import_modules,
             imported_names: &imported_names,
             imported_files: &imported_types,
+            guessed_imports: &guessed_imports,
         },
         &mut out.client_routes,
     );

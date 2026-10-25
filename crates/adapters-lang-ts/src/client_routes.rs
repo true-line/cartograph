@@ -33,11 +33,21 @@ pub const UNRESOLVED_TABLE_REASON: &str = "route table is not a recovered array 
 /// Gap reason: a route component that does not resolve to an imported file.
 pub const UNRESOLVED_COMPONENT_REASON: &str = "route component is not a recovered import";
 
+/// A relative import as the importer resolved it.
+#[derive(Debug, Clone)]
+pub(crate) struct Import {
+    pub file: String,
+    /// The specifier named no extension, so `.ts` was guessed and the other
+    /// source extensions are candidates too. An explicit extension names only
+    /// itself and its NodeNext siblings.
+    pub guessed: bool,
+}
+
 /// Where a route's component comes from.
 #[derive(Debug, Clone)]
 enum Component {
-    /// A resolved relative import: the file as the importer resolved it.
-    File(String),
+    /// A resolved relative import.
+    File(Import),
     /// `param.key` of the table function's `index`th parameter.
     Param {
         index: usize,
@@ -63,14 +73,14 @@ struct Table {
 }
 
 /// A `const` object of imported components passed to a table function:
-/// key → resolved file.
-type Components = HashMap<String, String>;
+/// key → resolved import.
+type Components = HashMap<String, Import>;
 
 #[derive(Debug, Clone)]
 enum TableRef {
     Inline(Vec<Route>),
     Call {
-        file: String,
+        file: Import,
         export: String,
         member: Option<String>,
         /// Per argument, its components when it is such an object.
@@ -150,20 +160,30 @@ pub(crate) struct Proofs<'a, 'tree> {
     pub imported_names: &'a HashMap<String, String>,
     /// Named relative imports: local → (resolved file, exported name).
     pub imported_files: &'a HashMap<String, (String, String)>,
+    /// Named relative imports whose specifier named no extension.
+    pub guessed_imports: &'a HashSet<String>,
 }
 
 impl Proofs<'_, '_> {
-    /// `(resolved file, exported name)` of a relatively imported local.
-    fn relative(&self, cx: &FileCx<'_>, site: TsNode<'_>, local: &str) -> Option<(String, String)> {
+    /// `(resolved import, exported name)` of a relatively imported local.
+    fn relative(&self, cx: &FileCx<'_>, site: TsNode<'_>, local: &str) -> Option<(Import, String)> {
         if !self.bindings.imported(site, local) {
             return None;
         }
         if let Some((file, exported)) = self.imported_files.get(local) {
-            return Some((file.clone(), exported.clone()));
+            let guessed = self.guessed_imports.contains(local);
+            return Some((
+                Import {
+                    file: file.clone(),
+                    guessed,
+                },
+                exported.clone(),
+            ));
         }
         let spec = self.import_modules.get(local)?;
         let file = crate::resolve_relative(cx.path, spec)?;
-        Some((file, "default".into()))
+        let guessed = crate::guesses_extension(spec);
+        Some((Import { file, guessed }, "default".into()))
     }
 
     /// Whether `local` at `site` is `exported` of `vue-router`.
@@ -702,7 +722,11 @@ fn call_table(cx: &FileCx<'_>, proofs: &Proofs<'_, '_>, call: TsNode<'_>) -> Opt
 }
 
 /// Candidate paths a relative import names, in resolution order.
-fn file_candidates(file: &str) -> Vec<String> {
+fn file_candidates(import: &Import) -> Vec<String> {
+    let file = import.file.as_str();
+    if !import.guessed {
+        return crate::target_tests::explicit_candidates(file);
+    }
     let mut out = vec![file.to_string()];
     if let Some(stem) = file.strip_suffix(".ts") {
         for ext in [".tsx", ".js", ".mjs", ".cjs", ".jsx", ".vue"] {
@@ -747,8 +771,8 @@ fn push_gap(
 
 /// Resolve every router registration against the directory's route tables.
 pub(crate) fn complete(pending: Pending, repo: &str, nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
-    let resolve = |file: &str| {
-        file_candidates(file)
+    let resolve = |import: &Import| {
+        file_candidates(import)
             .into_iter()
             .find(|candidate| pending.files.contains(candidate))
     };
@@ -828,7 +852,7 @@ pub(crate) fn complete(pending: Pending, repo: &str, nodes: &mut Vec<Node>, edge
                 Some((imported, file)) => {
                     // An extensionless import found only as a `.vue` file
                     // assumes the bundler resolves that extension.
-                    let assumed = file != *imported && file.ends_with(".vue");
+                    let assumed = file != imported.file && file.ends_with(".vue");
                     let confidence = if assumed {
                         ConfidenceTier::InferredStrong
                     } else {

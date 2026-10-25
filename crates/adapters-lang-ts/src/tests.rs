@@ -4125,3 +4125,64 @@ fn vue_router_tables_become_screens_rendering_their_components() {
         ))
     );
 }
+
+#[test]
+fn vue_router_components_honor_an_explicit_extension() {
+    // AC-0349 (#989): an explicit extension names only that file and its
+    // NodeNext siblings; only an extensionless import may fall back to `.vue`.
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let sfc = "<template><div/></template>\n<script>\nexport default {}\n</script>\n";
+    write("src/Missing.vue", sfc);
+    write("src/Panels.vue", sfc);
+    write("src/Built.ts", "export default {};\n");
+    write(
+        "src/router.ts",
+        "import { createRouter } from 'vue-router';\n\
+         import Missing from './Missing.js';\nimport Built from './Built.js';\n\
+         import { Panel } from './Panels';\n\
+         createRouter({ routes: [{ path: '/missing', component: Missing }, \
+         { path: '/built', component: Built }, { path: '/panel', component: Panel }] });\n",
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let renders = |route: &str| {
+        let src = format!("screen:qwtm/example@{route}");
+        out.edges
+            .iter()
+            .filter(|e| e.label == "RENDERS" && e.src == src)
+            .map(|e| {
+                (
+                    e.dst.clone(),
+                    e.props["resolution"].as_str().map(str::to_string),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    // `./Missing.js` never guesses its way to `Missing.vue`: the screen
+    // renders an unresolved-component Gap instead.
+    let missing = renders("/missing");
+    assert_eq!(missing.len(), 1);
+    let gap = out.nodes.iter().find(|n| n.id == missing[0].0).unwrap();
+    assert_eq!(
+        gap.props["reason"],
+        client_routes::UNRESOLVED_COMPONENT_REASON
+    );
+    // `./Built.js` is the NodeNext spelling of `Built.ts`: confirmed.
+    assert_eq!(
+        renders("/built"),
+        [("file:qwtm/example@src/Built.ts".to_string(), None)]
+    );
+    // An extensionless named import may still resolve to `.vue`, assumed.
+    assert_eq!(
+        renders("/panel"),
+        [(
+            "file:qwtm/example@src/Panels.vue".to_string(),
+            Some(client_routes::VUE_EXTENSION_ASSUMED.to_string())
+        )]
+    );
+}

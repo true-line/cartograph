@@ -670,7 +670,7 @@ fn file_candidates(file: &str) -> Vec<String> {
 
 /// The files an explicit specifier may name: itself, then, for `.js` and
 /// `.jsx`, the TypeScript sources NodeNext emits them from.
-fn explicit_candidates(file: &str) -> Vec<String> {
+pub(crate) fn explicit_candidates(file: &str) -> Vec<String> {
     let mut out = vec![file.to_string()];
     for (spelled, siblings) in crate::NODENEXT_SIBLINGS {
         if let Some(stem) = file.strip_suffix(spelled) {
