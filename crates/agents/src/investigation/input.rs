@@ -272,6 +272,9 @@ impl InvestigationInput {
         }
         let compact = specialist.uses_compact_disclosure();
         let prompt_value = if compact {
+            // Compact projection reads the original query wires. The parsed
+            // pages have already supplied the privacy strings above.
+            drop(pages);
             // Select before compaction: routing a new history through the old
             // cumulative selector representation would reject a fitting new input.
             let context = match request_hash {

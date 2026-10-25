@@ -462,6 +462,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     &self.detail.usage,
                 )?
             };
+            // Input owns its projection; saved replay rows are no longer needed
+            // during disclosure, consent or provider execution.
+            drop(next_snapshot);
             let step_id = format!("step-{}", self.detail.usage.model_invocations + 1);
             let action = input.action(format!("{}:{step_id}", self.id))?;
             let input_bytes = bounded_json(&action.payload, 128 * 1024)?.len();
@@ -471,6 +474,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             let prepared = firewall(self.state)?
                 .prepare_bounded(provider, &action, &limits)
                 .map_err(provider_failure)?;
+            // The firewall owns its prepared payload; release the original
+            // copy before disclosure sealing, consent and provider execution.
+            drop(action);
             let disclosure = input.seal_disclosure_with_policy(&prepared, policy)?;
             let step = PendingInvestigationStep {
                 step_id: step_id.clone(),
