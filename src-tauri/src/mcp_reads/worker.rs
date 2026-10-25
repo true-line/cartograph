@@ -379,8 +379,8 @@ pub(crate) fn required_reservation(limits: WorkerLimits) -> Option<usize> {
     }
 }
 
-/// Preparation/provider/archive component floors only. Caller input, other store replay and
-/// later reads still need composition before public task activation is enabled.
+/// Preparation, retained reads and modeled replay/provider component floors.
+/// Caller input/sealing and later read acquisition still need composition.
 #[cfg(unix)]
 pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
     let (context, preparation) = crate::investigations::preparation_workspace::workspace_bytes(
@@ -424,6 +424,11 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
     // reads and validation. Preparation already includes its retained context.
     // Prepared inventory remains owned during durable publication/replay.
     let execution = crate::investigations::inventory_admission_workspace(execution)?;
+    let context = context.checked_add(
+        crate::investigations::preparation_workspace::retained_read_bytes(
+            &agents::investigation::INVESTIGATION_V2_POLICY,
+        )?,
+    )?;
     let per_task = task_execution_peak(preparation, context, execution)?;
     required_reservation(limits)?
         .checked_add(per_task.checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?)

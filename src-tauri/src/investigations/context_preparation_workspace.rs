@@ -121,3 +121,22 @@ pub(crate) fn workspace_bytes(
     ])?;
     Some((retained, peak))
 }
+
+/// Additional retained owners after accepted reads. The original graph/archive
+/// stays in `workspace_bytes`; preparation/acquisition temporaries are separate.
+/// Count the whole current ledger conservatively, rather than subtracting its
+/// initial fields. Query and inventory pages share one admitted byte/item budget.
+pub(crate) fn retained_read_bytes(policy: &InvestigationPolicy) -> Option<usize> {
+    let limits = policy.limits();
+    sum(&[
+        json_bytes(MAX_MANIFEST_BYTES)?,
+        slots::<InvestigationInputLedger>(1)?,
+        MAX_TOTAL_QUERY_BYTES,
+        slots::<String>(limits.tool_actions as usize)?,
+        // Each accepted evidence ID/source is copied into a validated citation;
+        // their combined owned strings cannot exceed the serialized ledger cap.
+        MAX_MANIFEST_BYTES,
+        limits.evidence_bytes,
+        slots::<AgentEvidence>(limits.evidence_items)?,
+    ])
+}

@@ -632,3 +632,37 @@ fn inventory_workspace_covers_host_preparation_and_candidate_refusal() {
     ));
     assert_eq!(context.ledger, before);
 }
+
+// AC-0327: accepted mixed reads remain resident after each publication.
+#[cfg(unix)]
+#[test]
+fn retained_context_workspace_covers_published_query_and_inventory() {
+    use context_hub::logical::{count, json_bytes, slots, sum};
+    let fixture = Fixture::new();
+    let mut context = fixture.prepare();
+    let mut sink = Sink::default();
+    for _ in 0..2 {
+        for kind in [
+            PreparedContextReadKind::Query,
+            PreparedContextReadKind::Inventory,
+        ] {
+            let prepared = fixture.candidate(&context, kind);
+            context.publish_context_read(prepared, &mut sink).unwrap();
+            let pages = context.query_pages.iter().chain(&context.inventory_details);
+            let actual = sum(&[
+                json_bytes(count(&context.ledger).unwrap()).unwrap(),
+                slots::<InvestigationInputLedger>(1).unwrap(),
+                pages.clone().map(String::len).sum(),
+                slots::<String>(pages.count()).unwrap(),
+            ])
+            .unwrap();
+            assert!(preparation_workspace::retained_read_bytes(context.policy).unwrap() >= actual);
+        }
+    }
+    assert_eq!(context.query_pages.len(), 2);
+    assert_eq!(context.inventory_details.len(), 2);
+    assert!(
+        preparation_workspace::retained_read_bytes(&INVESTIGATION_V2_POLICY).unwrap()
+            >= preparation_workspace::retained_read_bytes(&INVESTIGATION_V1_POLICY).unwrap()
+    );
+}
