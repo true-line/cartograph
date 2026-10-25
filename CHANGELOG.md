@@ -1,5 +1,11 @@
 # cartograph
 
+## 0.32.0
+
+### Minor Changes
+
+- d53d147: Kotlin screens that get their view model from Hilt's `hiltViewModel` (by type argument, or through an assisted factory callback) now resolve calls on that view model, including unqualified calls inside `with(hiltViewModel<VM>()) { … }`.
+
 ## 0.31.0
 
 ### Minor Changes
