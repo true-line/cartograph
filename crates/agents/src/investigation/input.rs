@@ -449,6 +449,7 @@ impl InvestigationInput {
         if !prepared.matches_action(&action) {
             return Err(InvestigationError::InvalidInput);
         }
+        drop(action);
         let prompt: Value = serde_json::from_str(&self.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
         let admission = if prompt["schema_version"] == 9 {
@@ -456,6 +457,8 @@ impl InvestigationInput {
         } else {
             None
         };
+        // The sealer parses both payloads; this schema-inspection tree is done.
+        drop(prompt);
         match admission {
             Some(admission) => super::sealing::seal_with_admission_policy(
                 &self.ledger,
