@@ -288,11 +288,39 @@ impl PrivateStorage {
     }
 
     fn verify(&self) -> Result<(), String> {
+        let current_app = self.reopen_app()?;
+        self.verify_directories(current_app)
+    }
+
+    #[cfg(unix)]
+    fn reopen_app(&self) -> Result<Dir, String> {
+        use std::path::Component;
+        let mut components = self.app_path.components();
+        if components.next() != Some(Component::RootDir) {
+            return Err(storage_error("application path is not canonical"));
+        }
+        let mut directory =
+            Dir::open_ambient_dir("/", cap_std::ambient_authority()).map_err(storage_error)?;
+        // Borrow the stored canonical components. A replaced ancestor must
+        // fail without resolving or retaining its potentially different path.
+        for component in components {
+            let Component::Normal(name) = component else {
+                return Err(storage_error("application path is not canonical"));
+            };
+            directory = directory.open_dir_nofollow(name).map_err(storage_error)?;
+        }
+        Ok(directory)
+    }
+
+    #[cfg(not(unix))]
+    fn reopen_app(&self) -> Result<Dir, String> {
         if dunce::canonicalize(&self.app_path).map_err(storage_error)? != self.app_path {
             return Err(storage_error("application directory changed"));
         }
-        let current_app = Dir::open_ambient_dir(&self.app_path, cap_std::ambient_authority())
-            .map_err(storage_error)?;
+        Dir::open_ambient_dir(&self.app_path, cap_std::ambient_authority()).map_err(storage_error)
+    }
+
+    fn verify_directories(&self, current_app: Dir) -> Result<(), String> {
         let current_root = self
             .app
             .open_dir_nofollow("retained-source")
@@ -2218,6 +2246,36 @@ mod tests {
         std::fs::hard_link(&outside, root.join("captures.sqlite")).unwrap();
         assert!(PrimarySourceStore::open(directory.path()).is_err());
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+    }
+
+    // AC-0153: initially supplied aliases remain supported, but a later
+    // ancestor/final symlink cannot redirect revalidation to the same inode.
+    #[cfg(unix)]
+    #[test]
+    fn primary_storage_revalidates_canonical_components_without_following_replacements() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let parent = fixture.path().join("parent");
+        let app = parent.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let alias = fixture.path().join("initial-alias");
+        symlink(&app, &alias).unwrap();
+        let store = PrimarySourceStore::open(&alias).unwrap();
+        store.storage.verify().unwrap();
+        assert_eq!(store.storage.app_path, dunce::canonicalize(&app).unwrap());
+
+        for replaced in [&app, &parent] {
+            let moved = fixture.path().join("moved");
+            std::fs::rename(replaced, &moved).unwrap();
+            symlink(&moved, replaced).unwrap();
+            assert!(store.storage.verify().is_err());
+            std::fs::remove_file(replaced).unwrap();
+            std::fs::create_dir(replaced).unwrap();
+            assert!(store.storage.verify().is_err());
+            std::fs::remove_dir(replaced).unwrap();
+            std::fs::rename(&moved, replaced).unwrap();
+            store.storage.verify().unwrap();
+        }
     }
 
     fn schema_objects(conn: &Connection) -> Vec<(String, String, String, Option<String>)> {
