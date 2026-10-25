@@ -143,6 +143,20 @@ Seven client calls are in helper functions such as `login()` and are not followe
 - On the other 51, **no test asserts a status, or reads a key, that the handler does not return** (0 `asserted-not-returned`).
 - **44 endpoints return a status that no resolved test asserts** (`returned-not-asserted`, InferredWeak). That is 81 statuses in total: 403 ×28, 401 ×28, 400 ×11, 200 ×8, 302 ×5 and 422 ×1, with 35 of the 44 endpoints under `/api`. Most are the 401 and 403 branches of `@require_api_auth`, which the API tests exercise for only a few endpoints. These findings are weak because unresolved test requests and calls in helper functions are not read, so the claim is only that no recovered test reference asserts the status.
 
+### Test references in flow dossiers (#965)
+
+Each test is also linked to its own function, so a function a test calls directly is referenced by it. Every flow in `flow_dossiers.md` now ends with a table naming, for each step, the tests that request its endpoint or call its function, and the steps no recovered test references. Like the test references above (#946), these are static references: they don't show that a test executed the step, and calls a step makes further down are not counted.
+
+| Flow trigger | Flows | With a referenced step | Steps referenced |
+|---|---|---|---|
+| Endpoint | 248 | 152 | 500 / 1,356 |
+| Schedule | 18 | 14 | 70 / 154 |
+| Command | 2 | 0 | 0 / 5 |
+| Extension context | 2 | 0 | 0 / 28 |
+| **All** | **270** | **166** | **570 / 1,543** |
+
+Of the 570 referenced steps, 81 are endpoints (the same 81 as in `test_arrangements.md`) and 489 are functions a test calls directly. Four scheduled jobs have no referenced step: deleting old monitoring records, clearing the alias and user audit logs, and deleting logs. The best-covered is the custom-domain check, with 14 of its 21 steps referenced. Source: this run's `flow_dossiers.md`; best-effort and verified-only give the same counts.
+
 ## What else was recovered
 
 | Source | Producers that ran | Nodes | Edges | Coverage |

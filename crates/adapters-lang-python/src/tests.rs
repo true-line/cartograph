@@ -3370,3 +3370,53 @@ def test_literal_false(client):
         ]
     );
 }
+
+#[test]
+fn pytest_tests_link_to_their_own_function_symbols() {
+    // #965: each TestCase is IMPLEMENTED_BY the Symbol of its own function,
+    // so the function's direct calls are the test's static references.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "tests/test_jobs.py",
+        "from app.jobs import cleanup\n\ndef test_cleanup():\n    cleanup()\n\nclass TestJobs:\n    def test_again(self):\n        cleanup()\n",
+    );
+    write(dir.path(), "app/jobs.py", "def cleanup():\n    return 1\n");
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let symbols: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Symbol")
+        .map(|n| n.id.as_str())
+        .collect();
+    let mut implemented: Vec<(&str, &str)> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "IMPLEMENTED_BY")
+        .map(|e| (e.src.as_str(), e.dst.as_str()))
+        .collect();
+    implemented.sort();
+    let at = |name: &str| format!("local/python-service@tests/test_jobs.py#{name}");
+    assert_eq!(
+        implemented,
+        [
+            (
+                format!("test:{}", at("TestJobs.test_again")).as_str(),
+                format!("sym:{}", at("TestJobs.test_again")).as_str()
+            ),
+            (
+                format!("test:{}", at("test_cleanup")).as_str(),
+                format!("sym:{}", at("test_cleanup")).as_str()
+            ),
+        ]
+    );
+    assert!(
+        implemented
+            .iter()
+            .all(|(_, symbol)| symbols.contains(symbol))
+    );
+    // The test function's direct call is an ordinary CALLS edge.
+    assert!(out.edges.iter().any(|e| e.label == "CALLS"
+        && e.src == format!("sym:{}", at("test_cleanup"))
+        && e.dst == "sym:local/python-service@app/jobs.py#cleanup"));
+}
