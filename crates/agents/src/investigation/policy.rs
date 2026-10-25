@@ -74,6 +74,11 @@ const _: () = {
         assert!(POLICIES[index].max_completed_attempts() <= MAX_STORED_COMPLETION_ATTEMPTS);
         assert!(POLICIES[index].selected_facts <= super::MAX_SELECTED_FACTS);
         assert!(POLICIES[index].evidence_items <= llm::bounded::MAX_COMPLETION_SPANS as usize);
+        // MCP retained-read admission uses V2 as the largest registered policy.
+        // Reject a new profile at compile time until that caller is updated.
+        assert!(POLICIES[index].tool_actions <= INVESTIGATION_V2_POLICY.tool_actions);
+        assert!(POLICIES[index].evidence_items <= INVESTIGATION_V2_POLICY.evidence_items);
+        assert!(POLICIES[index].evidence_bytes <= INVESTIGATION_V2_POLICY.evidence_bytes);
         index += 1;
     }
 };

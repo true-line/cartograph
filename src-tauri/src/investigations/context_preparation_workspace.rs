@@ -124,6 +124,8 @@ pub(crate) fn workspace_bytes(
 
 /// Additional retained owners after accepted reads. The original graph/archive
 /// stays in `workspace_bytes`; preparation/acquisition temporaries are separate.
+/// `InvestigationInputLedger::validate_with_policy` bounds combined query/read
+/// count; `InvestigationQueryBudget::from_ledger` sums both kinds' response bytes.
 /// Count the whole current ledger conservatively, rather than subtracting its
 /// initial fields. Query and inventory pages share one admitted byte/item budget.
 pub(crate) fn retained_read_bytes(policy: &InvestigationPolicy) -> Option<usize> {

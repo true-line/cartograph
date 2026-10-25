@@ -383,6 +383,15 @@ pub(crate) fn required_reservation(limits: WorkerLimits) -> Option<usize> {
 /// Caller input/sealing and later read acquisition still need composition.
 #[cfg(unix)]
 pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
+    let (preparation, context, execution) = task_phase_workspaces(limits)?;
+    let per_task = task_execution_peak(preparation, context, execution)?;
+    required_reservation(limits)?
+        .checked_add(per_task.checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?)
+}
+
+// Keep the actual retained term observable before phase maxima can mask it.
+#[cfg(unix)]
+fn task_phase_workspaces(limits: WorkerLimits) -> Option<(usize, usize, usize)> {
     let (context, preparation) = crate::investigations::preparation_workspace::workspace_bytes(
         limits.scope,
         agents::investigation::MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
@@ -429,9 +438,7 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
             &agents::investigation::INVESTIGATION_V2_POLICY,
         )?,
     )?;
-    let per_task = task_execution_peak(preparation, context, execution)?;
-    required_reservation(limits)?
-        .checked_add(per_task.checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?)
+    Some((preparation, context, execution))
 }
 
 #[cfg(unix)]
@@ -542,6 +549,25 @@ pub(crate) mod tests {
         // Preparation already includes its context and is not charged twice.
         assert_eq!(task_execution_peak(100, 11, 50), Some(100));
         assert_eq!(task_execution_peak(1, usize::MAX, 1), None);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn task_floor_includes_retained_read_growth() {
+        // AC-0327: inspect the production composition before preparation's
+        // larger peak can mask a missing retained owner in the final maximum.
+        let limits = limits();
+        let (initial, _) = crate::investigations::preparation_workspace::workspace_bytes(
+            limits.scope,
+            agents::investigation::MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
+            limits.max_request_frame_bytes.get(),
+        )
+        .unwrap();
+        let growth = crate::investigations::preparation_workspace::retained_read_bytes(
+            &agents::investigation::INVESTIGATION_V2_POLICY,
+        )
+        .unwrap();
+        let (_, retained, _) = task_phase_workspaces(limits).unwrap();
+        assert!(retained >= initial + growth);
     }
     #[cfg(unix)]
     #[test]
