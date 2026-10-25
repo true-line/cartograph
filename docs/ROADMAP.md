@@ -318,4 +318,4 @@ Identifiers: US-0044 and AC-0343 onward for W10. W11 takes the next story
 and an ADR for journey identity and tier, which Claude drafts before W11
 starts. ADR-0049 stays reserved for the shared extraction-cache draft under
 review, so the journey ADR takes the next number unused on `main` when it
-is drafted.
+is drafted. That is ADR-0050, drafted on 2026-10-25.
