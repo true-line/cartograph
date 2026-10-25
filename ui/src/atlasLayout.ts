@@ -162,11 +162,21 @@ export function assignBands(snapshot: AtlasSnapshot): Map<string, Band> {
   const edges = [...snapshot.edges].sort(
     (a, b) => a.src.localeCompare(b.src) || a.dst.localeCompare(b.dst) || a.label.localeCompare(b.label),
   );
+  // Incident edges per node, kept in sorted edge order. Scanning every edge
+  // per Gap froze the Atlas on large graphs (#1003).
+  const neighbors = new Map<string, string[]>();
+  const link = (from: string, to: string) => {
+    const list = neighbors.get(from);
+    if (list) list.push(to);
+    else neighbors.set(from, [to]);
+  };
+  for (const edge of edges) {
+    link(edge.src, edge.dst);
+    if (edge.dst !== edge.src) link(edge.dst, edge.src);
+  }
   for (const node of pending) {
     let resolved: Band | null = null;
-    for (const edge of edges) {
-      const neighbor = edge.src === node.id ? edge.dst : edge.dst === node.id ? edge.src : null;
-      if (!neighbor) continue;
+    for (const neighbor of neighbors.get(node.id) ?? []) {
       const band = bands.get(neighbor);
       if (band && band !== 'other') {
         resolved = band;
