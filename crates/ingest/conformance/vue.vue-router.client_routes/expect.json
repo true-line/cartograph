@@ -1,0 +1,18 @@
+{
+  "nodes": [
+    {
+      "label": "Screen",
+      "id": "screen:local/p@/users",
+      "props": {
+        "router": "vue-router"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "RENDERS",
+      "src": "screen:local/p@/users",
+      "dst": "file:local/p@Users.vue"
+    }
+  ]
+}

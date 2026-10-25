@@ -3965,3 +3965,163 @@ it('nodenext', async () => { await adminClient.query(nodenext); });
         BTreeSet::from(["ep:qwtm/example@graphql:admin:query:products"])
     );
 }
+
+#[test]
+fn vue_router_tables_become_screens_rendering_their_components() {
+    // AC-0349 (#989): SimpleLogin's extension shape. The table is a static
+    // method of an imported class, its paths come through `static PATH =
+    // PATH`, and its components come through a `const` object argument.
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "popup/Navigation.js",
+        "const PATH = { ROOT: '/', MAIN: '/main', RESULT: '/new-alias-result/' };\n\
+         class Navigation {\n  static PATH = PATH;\n\
+         \x20 static getRoutes(components) {\n    return [\n\
+         \x20     { path: Navigation.PATH.ROOT, component: components.SplashScreen },\n\
+         \x20     { path: Navigation.PATH.MAIN, component: components.Main },\n\
+         \x20     { path: Navigation.PATH.RESULT, component: components.NewAliasResult },\n\
+         \x20     { path: computePath(), component: components.Main },\n\
+         \x20     { path: '/lost', component: components.Missing },\n\
+         \x20   ];\n  }\n}\nexport default Navigation;\n",
+    );
+    for name in ["SplashScreen", "Main", "NewAliasResult"] {
+        write(
+            &format!("popup/components/{name}.vue"),
+            "<template><div/></template>\n<script>\nexport default {}\n</script>\n",
+        );
+    }
+    write(
+        "popup/App.vue",
+        "<template><router-view/></template>\n<script>\n\
+         import VueRouter from 'vue-router';\nimport Navigation from './Navigation';\n\
+         import SplashScreen from './components/SplashScreen';\n\
+         import Main from './components/Main';\n\
+         import NewAliasResult from './components/NewAliasResult.vue';\n\
+         const components = { SplashScreen, Main, NewAliasResult };\n\
+         const routes = Navigation.getRoutes(components);\n\
+         const router = new VueRouter({ mode: 'abstract', routes });\n\
+         export default { router };\n</script>\n",
+    );
+    // Not proven: a local `VueRouter` and an unrecovered table.
+    write(
+        "other/fake.js",
+        "class VueRouter {}\nnew VueRouter({ routes: [{ path: '/fake', component: X }] });\n",
+    );
+    write(
+        "other/router.ts",
+        "import { createRouter } from 'vue-router';\nimport Home from './Home.vue';\n\
+         createRouter({ routes: [{ path: '/', redirect: '/home' }, { path: '/home', component: Home, \
+         children: [{ path: 'tab', component: Home }] }] });\n\
+         createRouter({ routes: load() });\n",
+    );
+    write(
+        "other/Home.vue",
+        "<template><div/></template>\n<script>\nexport default {}\n</script>\n",
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let screens: BTreeSet<_> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Screen")
+        .map(|n| {
+            assert_eq!(n.props["router"], "vue-router");
+            n.id.as_str()
+        })
+        .collect();
+    let screen = |route: &str| format!("screen:qwtm/example@{route}");
+    let expected: BTreeSet<String> = [
+        "/",
+        "/main",
+        "/new-alias-result/",
+        "/lost",
+        "/home",
+        "/home/tab",
+    ]
+    .into_iter()
+    .map(screen)
+    .collect();
+    assert_eq!(
+        screens,
+        expected.iter().map(String::as_str).collect::<BTreeSet<_>>()
+    );
+    let renders = edge_pairs(&out, "RENDERS");
+    for (route, file) in [
+        ("/", "popup/components/SplashScreen.vue"),
+        ("/main", "popup/components/Main.vue"),
+        ("/new-alias-result/", "popup/components/NewAliasResult.vue"),
+        ("/home", "other/Home.vue"),
+        ("/home/tab", "other/Home.vue"),
+    ] {
+        let (src, dst) = (screen(route), format!("file:qwtm/example@{file}"));
+        assert!(renders.contains(&(src.as_str(), dst.as_str())), "{route}");
+    }
+    // `Main` is imported without an extension: the `.vue` file is assumed,
+    // while `NewAliasResult.vue` is named exactly.
+    let resolution = |route: &str| {
+        out.edges
+            .iter()
+            .find(|e| e.label == "RENDERS" && e.src == screen(route))
+            .map(|e| {
+                (
+                    e.props["resolution"].clone(),
+                    e.props["prov"]["confidence_tier"].clone(),
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        resolution("/main"),
+        (
+            client_routes::VUE_EXTENSION_ASSUMED.into(),
+            "InferredStrong".into()
+        )
+    );
+    assert_eq!(
+        resolution("/new-alias-result/"),
+        (serde_json::Value::Null, "Confirmed".into())
+    );
+    // `other/router.ts` redirects `/` too: the rendering route wins.
+    let root = out.nodes.iter().find(|n| n.id == screen("/")).unwrap();
+    assert!(root.props.get("redirect").is_none());
+    let gaps: Vec<_> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap" && n.props["kind"] == "route-unresolved")
+        .map(|n| n.props["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        gaps.iter()
+            .filter(|r| **r == client_routes::COMPUTED_PATH_REASON)
+            .count(),
+        1
+    );
+    assert_eq!(
+        gaps.iter()
+            .filter(|r| **r == client_routes::UNRESOLVED_COMPONENT_REASON)
+            .count(),
+        1
+    );
+    assert_eq!(
+        gaps.iter()
+            .filter(|r| **r == client_routes::UNRESOLVED_TABLE_REASON)
+            .count(),
+        1
+    );
+    assert!(
+        renders.contains(&(
+            screen("/lost").as_str(),
+            out.nodes
+                .iter()
+                .find(|n| n.props["reason"] == client_routes::UNRESOLVED_COMPONENT_REASON)
+                .unwrap()
+                .id
+                .as_str()
+        ))
+    );
+}

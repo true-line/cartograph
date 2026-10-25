@@ -79,6 +79,9 @@ pub struct Extraction {
     /// Exported GraphQL documents and test client requests awaiting
     /// directory-wide resolution (#968).
     target_tests: target_tests::Pending,
+    /// Vue Router tables and registrations (#989); routes resolve across
+    /// files at directory completion.
+    client_routes: client_routes::Pending,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -253,6 +256,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         retarget_props_commit(&mut pending.props, commit);
     }
     extraction.target_tests.retarget(commit);
+    extraction.client_routes.retarget(commit);
 }
 
 impl Extraction {
@@ -281,6 +285,7 @@ impl Extraction {
         self.pending_pulumi_edges.clear();
         self.eval_sites.clear();
         self.target_tests = target_tests::Pending::default();
+        self.client_routes = client_routes::Pending::default();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -3011,6 +3016,17 @@ fn extract_source_recording(
         }
     }
 
+    client_routes::extract(
+        &cx,
+        root,
+        &client_routes::Proofs {
+            bindings: &bindings,
+            import_modules: &import_modules,
+            imported_names: &imported_names,
+            imported_files: &imported_types,
+        },
+        &mut out.client_routes,
+    );
     rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
     Ok(out)
 }
@@ -3129,6 +3145,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.pending_pulumi_edges.extend(ex.pending_pulumi_edges);
     out.eval_sites.extend(ex.eval_sites);
     out.target_tests.extend(ex.target_tests);
+    out.client_routes.extend(ex.client_routes);
 }
 
 /// Shared directory completion. Its live configuration inputs are deliberately
@@ -3207,6 +3224,8 @@ fn complete_directory(
         });
     }
     out.pulumi_bindings.clear();
+    let routes = std::mem::take(&mut out.client_routes);
+    client_routes::complete(routes, id.repo, &mut out.nodes, &mut out.edges);
     next_pages_screens(out, id);
     // Bare-module import targets are classified against the same index:
     // external only when nothing in the repository could answer them.
@@ -3402,6 +3421,7 @@ mod bundler_alias;
 mod callable;
 pub mod captured;
 pub mod chrome_messaging;
+pub mod client_routes;
 pub mod client_table;
 pub(crate) mod const_resolution;
 pub mod declarations;
