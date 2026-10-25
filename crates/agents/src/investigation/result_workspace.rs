@@ -4,6 +4,59 @@ use super::*;
 use context_hub::logical::{json_bytes, set, slots, sum};
 use std::mem::size_of;
 
+/// Additional owners in RefusalRecord::validate_stored_basis_with_policy.
+/// Caller owns the current/previous records and ledger, decoded through the
+/// strict record preflight. `record_bytes` bounds compact wire for BOTH records.
+/// Store acquisition, assessment derivation and native/RSS costs are separate.
+pub fn stored_refusal_validation_workspace(
+    policy: &InvestigationPolicy,
+    ledger_bytes: usize,
+    record_bytes: usize,
+) -> Option<usize> {
+    if ledger_bytes > MAX_RECORD_BYTES || record_bytes > MAX_RECORD_BYTES {
+        return None;
+    }
+    let envelope = sum(&[
+        size_of::<ObligationEnvelope>(),
+        json_bytes(policy.envelope_bytes())?,
+    ])?;
+    // content_id clones before assessment-count validation. The previous
+    // record's clone can overlap reconstructed feedback. Strict preflight
+    // bounds the combined dynamic element count even for malformed records.
+    let element = size_of::<ObligationObservation>().max(size_of::<staged_finish::FeedbackEntry>());
+    let cloned = sum(&[
+        size_of::<staged_refusal::RefusalRecord>(),
+        record_bytes,
+        element.checked_mul(RECORD_MAX_VALUES)?,
+    ])?;
+    let feedback = sum(&[
+        slots::<staged_finish::FeedbackEntry>(policy.max_completion_obligations())?,
+        slots::<Vec<staged_finish::FeedbackEntry>>(1)?,
+        record_bytes, // reconstructed obligation_id/kind strings
+    ])?;
+    let wire = record_bytes
+        .max(MAX_MANIFEST_BYTES)
+        .max(policy.envelope_bytes());
+    let content_id = sum(&[
+        cloned,
+        wire.checked_mul(2)?, // encoded record plus domain-framed copy
+        b"cartograph:obligation-refusal:v1\0".len(),
+        slots::<Vec<u8>>(2)?,
+        64,
+        slots::<String>(1)?,
+    ])?;
+    sum(&[
+        envelope,
+        feedback,
+        content_id
+            .max(super::task_validation_workspace::envelope_workspace(
+                policy,
+            )?)
+            .max(ledger_validation_workspace(policy, ledger_bytes)?)
+            .max(disclosure_validation_workspace(policy, ledger_bytes)?),
+    ])
+}
+
 /// Additional logical owners of validate_completion_for_binding_with_policy.
 /// Callers must admit compact typed result/ledger wire before entry, including
 /// malformed rows. This excludes caller DTOs, native/regex memory and RSS.
