@@ -6,6 +6,48 @@ use llm::{EgressFirewall, EgressPolicy, OllamaProvider};
 use serde_json::json;
 use std::time::Duration;
 
+// AC-0265: schema acquisition rejects malformed private journals without
+// changing the canonical layout or initializing an absent namespace on read.
+#[test]
+fn staged_schema_rejects_excess_rows_and_multibyte_sql() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    assert!(validate_schema(&connection).is_err());
+    for case in ["canonical", "missing", "extra", "multibyte"] {
+        let tx = connection.transaction().unwrap();
+        initialize(&tx).unwrap();
+        match case {
+            "missing" => tx
+                .execute_batch("DROP TRIGGER staged_completion_refusals_no_update")
+                .unwrap(),
+            "extra" => {
+                for index in 0..20 {
+                    tx.execute_batch(&format!(
+                        "CREATE TABLE staged_completion_extra_{index} (value TEXT)"
+                    ))
+                    .unwrap();
+                }
+            }
+            "multibyte" => {
+                let max = schema().iter().map(String::len).max().unwrap();
+                let prefix = "CREATE TRIGGER staged_completion_refusals_no_update BEFORE UPDATE ON staged_completion_refusals BEGIN SELECT RAISE(ABORT, '";
+                let suffix = "'); END";
+                let sql = format!(
+                    "{prefix}{}{suffix}",
+                    "é".repeat(max - prefix.len() - suffix.len() - 1)
+                );
+                assert!(sql.chars().count() < max && sql.len() > max);
+                tx.execute_batch("DROP TRIGGER staged_completion_refusals_no_update")
+                    .unwrap();
+                tx.execute_batch(&sql).unwrap();
+            }
+            _ => {}
+        }
+        assert_eq!(validate_schema(&tx).is_ok(), case == "canonical");
+        tx.rollback().unwrap();
+    }
+    assert!(validate_schema(&connection).is_err());
+}
+
 struct Fixture {
     directory: tempfile::TempDir,
     store: JobStore,
