@@ -230,6 +230,11 @@ impl RetainedOutcome {
                 SourcePublicationError::Host(HostError::from(error))
             }
         })?;
+        // The candidate owns its prompt; construction-only copies need not
+        // overlap firewall preparation or durable source settlement.
+        drop(evidence);
+        drop(pages);
+        drop(inventories);
         let action = candidate
             .action(snapshot.next_action_id().into())
             .map_err(HostError::from)?;
@@ -269,6 +274,7 @@ impl RetainedOutcome {
         {
             return Err(SourcePublicationError::BoundInvariant);
         }
+        drop(disclosure);
         let measured =
             llm::bounded::measure_bounded_action(prepared.profile(), &action, prepared.limits())
                 .map_err(|error| {
@@ -293,6 +299,11 @@ impl RetainedOutcome {
         {
             return Err(SourcePublicationError::BoundInvariant);
         }
+        let saved_revision = snapshot.saved_revision();
+        // Publication rederives its saved authority. Keep the actual outcome
+        // and its guards, but release the completed preparation projections.
+        drop(action);
+        drop(snapshot);
         self.validate(context, state)?;
         clock.deadline()?;
         let mut retained_error = None;
@@ -302,7 +313,7 @@ impl RetainedOutcome {
             .map_err(|_| HostError::Operational)?
             .publish_next_prompt_source(
                 execution,
-                snapshot.saved_revision(),
+                saved_revision,
                 SourceContinuation {
                     current: input.current,
                     current_prepared: input.current_prepared,
