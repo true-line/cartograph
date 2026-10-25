@@ -896,8 +896,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .ok_or(HostError::InvalidInput)?;
             return Ok(jobs
                 .investigation_next_parent_history(parent_id, conversation)?
-                .history()
-                .to_vec());
+                .into_history());
         }
         let parent = jobs.investigation(parent_id)?;
         if request.conversation_id.as_ref() != Some(&parent.summary.conversation_id) {

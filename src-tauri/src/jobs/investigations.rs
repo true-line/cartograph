@@ -869,3 +869,5 @@ pub(crate) use source_settlement::fail_next_publication as fail_next_source_publ
 
 #[path = "investigations/next_parent_history.rs"]
 mod next_parent_history;
+#[cfg(unix)]
+pub(crate) use next_parent_history::parent_history_projection_workspace;
