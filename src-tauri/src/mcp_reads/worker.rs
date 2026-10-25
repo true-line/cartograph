@@ -397,7 +397,10 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits, app_path_bytes: usize) ->
 
 // Keep the actual retained term observable before phase maxima can mask it.
 #[cfg(unix)]
-fn task_phase_workspaces(limits: WorkerLimits, app_path_bytes: usize) -> Option<(usize, usize, usize)> {
+fn task_phase_workspaces(
+    limits: WorkerLimits,
+    app_path_bytes: usize,
+) -> Option<(usize, usize, usize)> {
     let (context, preparation) = crate::investigations::preparation_workspace::workspace_bytes(
         limits.scope,
         agents::investigation::MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
