@@ -422,9 +422,14 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
         );
     // FrozenContext survives the whole execution loop, including saved-task
     // reads and validation. Preparation already includes its retained context.
-    let per_task = preparation.max(context.checked_add(execution)?);
+    let per_task = task_execution_peak(preparation, context, execution)?;
     required_reservation(limits)?
         .checked_add(per_task.checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?)
+}
+
+#[cfg(unix)]
+fn task_execution_peak(preparation: usize, context: usize, execution: usize) -> Option<usize> {
+    Some(preparation.max(context.checked_add(execution)?))
 }
 
 struct RequestCounter {
@@ -520,6 +525,16 @@ pub(crate) mod tests {
             limits
         };
         limits
+    }
+    #[cfg(unix)]
+    #[test]
+    fn task_floor_retains_context_during_saved_task_replay() {
+        // AC-0327: replay dominates in this witness; preparation cannot mask
+        // a missing retained-context owner as it can at today's default caps.
+        assert_eq!(task_execution_peak(30, 11, 50), Some(61));
+        // Preparation already includes its context and is not charged twice.
+        assert_eq!(task_execution_peak(100, 11, 50), Some(100));
+        assert_eq!(task_execution_peak(1, usize::MAX, 1), None);
     }
     #[cfg(unix)]
     #[test]
