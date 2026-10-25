@@ -65,6 +65,11 @@ pub(crate) fn continuation_retained(policy: &InvestigationPolicy) -> Option<usiz
         .prepared_bytes
         .checked_add(firewall.authorized_bytes)?
         .checked_add(transport.completion_bytes)?
+        // next_metadata/next_source keep the separately decoded original_action
+        // through candidate preparation, sealing and durable publication.
+        .checked_add(context_hub::logical::json_bytes(
+            usize::try_from(limits.values().output_text_bytes).ok()?,
+        )?)?
         // The outer disclosure and pending-step copy survive into continuation.
         .checked_add(
             agents::investigation::InvestigationInput::sealing_workspace_bytes(policy, &limits)?
@@ -77,6 +82,35 @@ pub(crate) fn continuation_retained(policy: &InvestigationPolicy) -> Option<usiz
 mod tests {
     use super::*;
     use agents::investigation::{INVESTIGATION_V1_POLICY, INVESTIGATION_V2_POLICY};
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_continuation_retains_decoded_action_with_original_completion() {
+        // AC-0327: candidate phase maxima cannot absorb the original action.
+        let policy = &INVESTIGATION_V2_POLICY;
+        let limits = CompletionLimits::new(completion_limit_values(policy).unwrap()).unwrap();
+        let cap = usize::try_from(limits.values().output_text_bytes).unwrap();
+        let raw = format!("[{}]", vec!["[]"; (cap - 2) / 3].join(","));
+        let action: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let entries = action.as_array().unwrap();
+        assert!(raw.len() <= cap);
+        // A container-dense parsed response owns Value slots independently of
+        // completion.text. Use actual decoded entries, not the bound formula.
+        let decoded_slots =
+            std::mem::size_of_val(&action) + std::mem::size_of_val(entries.as_slice());
+        assert!(decoded_slots > raw.len());
+        let firewall = limits.firewall_workspace_bytes().unwrap();
+        let transport = limits.transport_workspace_bytes().unwrap();
+        let original = firewall.prepared_bytes
+            + firewall.authorized_bytes
+            + transport.completion_bytes
+            + 2 * agents::investigation::InvestigationInput::sealing_workspace_bytes(
+                policy, &limits,
+            )
+            .unwrap()
+            .0;
+        assert!(continuation_retained(policy).unwrap() >= original + decoded_slots);
+    }
 
     // AC-0327: the admission component and live paths use identical policy caps.
     #[test]
