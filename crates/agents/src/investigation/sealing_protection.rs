@@ -8,7 +8,18 @@ pub(in crate::investigation) fn admission_protected_fields(
 ) -> Result<(), InvestigationError> {
     let before = parse_prompt(&original.prompt)?;
     let after = parse_prompt(&redacted.prompt)?;
-    if before["schema_version"] != 9 || original.system != redacted.system {
+    admission_protected_values(&before, &after, &original.system, &redacted.system)
+}
+
+// Actual sealing already owns both preflighted trees. Borrow them instead of
+// reparsing and retaining another pair; source preview uses the wrapper above.
+pub(super) fn admission_protected_values(
+    before: &Value,
+    after: &Value,
+    original_system: &str,
+    redacted_system: &str,
+) -> Result<(), InvestigationError> {
+    if before["schema_version"] != 9 || original_system != redacted_system {
         return Err(InvestigationError::InvalidInput);
     }
     for name in [
@@ -45,8 +56,8 @@ pub(in crate::investigation) fn admission_protected_fields(
     {
         return Err(InvestigationError::InvalidInput);
     }
-    let prior = array(&before, "coverage_details")?;
-    let actual = array(&after, "coverage_details")?;
+    let prior = array(before, "coverage_details")?;
+    let actual = array(after, "coverage_details")?;
     if prior.len() != actual.len() {
         return Err(InvestigationError::InvalidInput);
     }

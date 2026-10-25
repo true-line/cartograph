@@ -42,7 +42,12 @@ pub(super) fn seal_with_admission_policy(
         return Err(InvestigationError::InvalidInput);
     }
     if let Some(state) = &admission {
-        admission_protected_fields(original, &egress.payload)?;
+        protection::admission_protected_values(
+            &before,
+            &after,
+            &original.system,
+            &egress.payload.system,
+        )?;
         let metadata = serde_json::from_value(before["completion_metadata"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
         state.validate_with_metadata(&metadata, policy)?;
