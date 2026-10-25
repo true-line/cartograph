@@ -3853,6 +3853,11 @@ fn vitest_requests_skip_declared_helpers_and_resolve_the_imported_file() {
         "e2e/docs/explicit/index.ts",
         "import { graphql } from './graphql';\nexport const doc = graphql(`query { products { id } }`);\n",
     );
+    // NodeNext: `./next.js` names the TypeScript source it is emitted from.
+    write(
+        "e2e/docs/next.ts",
+        "import { graphql } from './graphql';\nexport const doc = graphql(`query { products { id } }`);\n",
+    );
     // `missing.ts` does not exist: its siblings are not what it names.
     for path in ["e2e/docs/missing/index.ts", "e2e/docs/missing.tsx"] {
         write(
@@ -3873,6 +3878,7 @@ import { doc as explicitDoc } from './docs/explicit.ts';
 import { doc as extensionless } from './docs/explicit';
 import { doc as indexed } from './docs/listed';
 import { doc as missing } from './docs/missing.ts';
+import { doc as nodenext } from './docs/next.js';
 const { adminClient } = createTestEnvironment({});
 const PRODUCT = graphql(`query { product { id } }`);
 it('no request', async () => {
@@ -3891,6 +3897,7 @@ it('explicit file', async () => { await adminClient.query(explicitDoc); });
 it('existing file', async () => { await adminClient.query(extensionless); });
 it('directory index', async () => { await adminClient.query(indexed); });
 it('missing explicit file', async () => { await adminClient.query(missing); });
+it('nodenext', async () => { await adminClient.query(nodenext); });
 "#,
     );
     let ex = extract_dir(dir.path(), &id()).unwrap();
@@ -3926,6 +3933,32 @@ it('missing explicit file', async () => { await adminClient.query(missing); });
     assert_eq!(requests("existing file"), BTreeSet::from(["gap"]));
     // An explicit `.ts` that does not exist is a Gap, never a sibling.
     assert_eq!(requests("missing explicit file"), BTreeSet::from(["gap"]));
+    assert_eq!(
+        requests("nodenext"),
+        BTreeSet::from(["ep:qwtm/example@graphql:admin:query:products"])
+    );
+    // Each test is implemented by its own callback, a recovered Symbol.
+    let symbols: BTreeSet<&str> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Symbol")
+        .map(|n| n.id.as_str())
+        .collect();
+    for test in ex.nodes.iter().filter(|n| n.label == "TestCase") {
+        let [implemented] = ex
+            .edges
+            .iter()
+            .filter(|e| e.label == "IMPLEMENTED_BY" && e.src == test.id)
+            .collect::<Vec<_>>()[..]
+        else {
+            panic!("{} has one IMPLEMENTED_BY", test.id)
+        };
+        assert!(
+            symbols.contains(implemented.dst.as_str()),
+            "{}",
+            implemented.dst
+        );
+    }
     // With no `listed.ts`, the import resolves to the directory index.
     assert_eq!(
         requests("directory index"),

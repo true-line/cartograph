@@ -519,6 +519,19 @@ pub(crate) fn extract<'tree>(
                 "prov": prov(vec![evidence(cx, call)], ConfidenceTier::Confirmed, &format!("DEFINED_IN {test}")),
             }),
         });
+        // The test's own function, whose direct calls are the test's static
+        // references to functions (#965, AC-0346).
+        if let Some(function) = arguments.iter().find(|a| callable::is_callable(**a)) {
+            let symbol = callable::id(cx, *function);
+            edges.push(Edge {
+                src: test.clone(),
+                dst: symbol.clone(),
+                label: "IMPLEMENTED_BY".into(),
+                props: serde_json::json!({
+                    "prov": prov(vec![evidence(cx, *function)], ConfidenceTier::Confirmed, &format!("IMPLEMENTED_BY {test} -> {symbol}")),
+                }),
+            });
+        }
         let mut body = Vec::new();
         for argument in arguments {
             if argument.kind() == "call_expression" {
@@ -655,6 +668,18 @@ fn file_candidates(file: &str) -> Vec<String> {
     out
 }
 
+/// The files an explicit specifier may name: itself, then, for `.js` and
+/// `.jsx`, the TypeScript sources NodeNext emits them from.
+fn explicit_candidates(file: &str) -> Vec<String> {
+    let mut out = vec![file.to_string()];
+    for (spelled, siblings) in crate::NODENEXT_SIBLINGS {
+        if let Some(stem) = file.strip_suffix(spelled) {
+            out.extend(siblings.iter().map(|ext| format!("{stem}{ext}")));
+        }
+    }
+    out
+}
+
 /// Resolve every pending request against the directory's documents and
 /// recovered GraphQL operations.
 pub(crate) fn complete(pending: Pending, nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
@@ -692,7 +717,7 @@ pub(crate) fn complete(pending: Pending, nodes: &mut Vec<Node>, edges: &mut Vec<
             } => (if *guessed {
                 file_candidates(file)
             } else {
-                vec![file.clone()]
+                explicit_candidates(file)
             })
             .into_iter()
             .find(|candidate| pending.files.contains(candidate))
