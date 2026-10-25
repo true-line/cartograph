@@ -334,7 +334,7 @@ pub(super) fn drift(
         .filter(|n| {
             !matches!(
                 n.props["kind"].as_str(),
-                Some("contract-drift" | "schema-drift")
+                Some("contract-drift" | "schema-drift" | "test-drift")
             )
         })
         .collect();
@@ -436,7 +436,79 @@ pub(super) fn drift(
         }
     }
     schema_drift(nodes, &findings, &mut content, &mut assertions)?;
+    test_drift(nodes, &findings, &mut content)?;
     finish(content, assertions)
+}
+
+/// `## Test and contract drift` (#953): what target tests expect of an
+/// endpoint against what its recovered responses return, and the endpoints
+/// whose evidence is incomplete. Rendered once the repository has tests.
+fn test_drift(nodes: &[&Node], findings: &[&Node], content: &mut Text) -> fmt::Result {
+    if !nodes.iter().any(|n| n.label == "TestCase") {
+        return Ok(());
+    }
+    content.push_str(
+        "\n## Test and contract drift\n\nStatic comparison of the statuses tests assert and the response keys they read with what each endpoint's recovered responses return, within the responses' recorded scope.\n\n| Finding | Endpoint | Statuses | Keys | Tests | Confidence |\n|---|---|---|---|---|---|\n",
+    )?;
+    let mut rows: Vec<&Node> = findings
+        .iter()
+        .copied()
+        .filter(|n| n.props["kind"].as_str() == Some("test-drift"))
+        .collect();
+    rows.sort_by_key(|n| {
+        (
+            n.props["drift_kind"].as_str().unwrap_or(""),
+            n.props["endpoint"].as_str().unwrap_or(""),
+            n.id.as_str(),
+        )
+    });
+    let numbers = |n: &Node| -> Vec<String> {
+        n.props["statuses"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|v| v.to_string())
+            .collect()
+    };
+    let dash = |values: Vec<String>| {
+        if values.is_empty() {
+            "—".to_owned()
+        } else {
+            values.join(", ")
+        }
+    };
+    for n in &rows {
+        let keys: Vec<String> = strings(n, "keys").into_iter().map(str::to_owned).collect();
+        let tests = strings(n, "tests");
+        writeln!(
+            content,
+            "| {} | `{}` | {} | {} | {} | {:?} |",
+            Safe(n.props["drift_kind"].as_str().unwrap_or("test-drift")),
+            Safe(n.props["endpoint"].as_str().unwrap_or(&n.id)),
+            dash(numbers(n)),
+            Safe(dash(keys)),
+            tests.len(),
+            provenance(&n.props, &n.id).confidence_tier
+        )?;
+    }
+    let mut gaps: Vec<&Node> = nodes
+        .iter()
+        .copied()
+        .filter(|n| is_gap_node(n) && n.props["kind"].as_str() == Some("test-drift-gap"))
+        .collect();
+    gaps.sort_by_key(|n| (n.props["endpoint"].as_str().unwrap_or(""), n.id.as_str()));
+    for g in &gaps {
+        writeln!(
+            content,
+            "| incomplete evidence | `{}` | — | — | — | {} |",
+            Safe(g.props["endpoint"].as_str().unwrap_or(&g.id)),
+            Safe(g.props["reason"].as_str().unwrap_or("Gap"))
+        )?;
+    }
+    if rows.is_empty() && gaps.is_empty() {
+        content.push_str("| — | No test and contract drift recovered | — | — | — | — |\n")?;
+    }
+    Ok(())
 }
 
 /// `## Schema drift`: each replayed migration history, then its findings

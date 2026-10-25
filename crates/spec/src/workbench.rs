@@ -514,7 +514,7 @@ pub fn count_gap_findings<'a>(
 pub fn is_drift_edge(edge: &Edge) -> bool {
     matches!(
         edge.label.as_str(),
-        "CONFLICTS" | "DRIFTS_FROM" | "DOCUMENTED_AS" | "SERVED_AS" | "MODELED_AS"
+        "CONFLICTS" | "DRIFTS_FROM" | "DOCUMENTED_AS" | "SERVED_AS" | "MODELED_AS" | "ASSERTED_BY"
     )
 }
 
@@ -549,7 +549,7 @@ pub fn is_drift_node(node: &Node) -> bool {
     node.label == "Drift"
         || matches!(
             node.props["kind"].as_str(),
-            Some("drift" | "contract-drift" | "schema-drift")
+            Some("drift" | "contract-drift" | "schema-drift" | "test-drift")
         )
 }
 
