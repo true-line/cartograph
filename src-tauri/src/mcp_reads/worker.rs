@@ -386,7 +386,7 @@ pub(crate) fn required_reservation(limits: WorkerLimits) -> Option<usize> {
 }
 
 /// Preparation, retained reads and modeled replay/provider component floors.
-/// Input construction, preview certificates and later reads remain incomplete.
+/// Input construction and source-preview/read acquisition remain incomplete.
 #[cfg(unix)]
 pub(crate) fn task_phase_minimum(limits: WorkerLimits, app_path_bytes: usize) -> Option<usize> {
     let (preparation, context, execution) = task_phase_workspaces(limits, app_path_bytes)?;

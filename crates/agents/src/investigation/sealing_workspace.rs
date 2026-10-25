@@ -5,6 +5,44 @@ use llm::bounded::CompletionLimits;
 use std::mem::size_of;
 
 impl InvestigationInput {
+    /// Metadata-preview validation and synthetic continuation measurement.
+    /// Current/candidate inputs and the original provider owners are borrowed;
+    /// unread-source preview construction is a separate acquisition phase.
+    pub fn context_preview_workspace_bytes(
+        policy: &InvestigationPolicy,
+        limits: &CompletionLimits,
+    ) -> Option<usize> {
+        let tree = json_bytes(MAX_INPUT_BYTES)?;
+        // Two admission bases plus usage/metadata/progress comparisons. The
+        // sealing component conservatively covers each nested basis validator.
+        let validation = sum(&[
+            Self::sealing_workspace_bytes(policy, limits)?
+                .1
+                .checked_mul(2)?,
+            json_bytes(MAX_MANIFEST_BYTES)?, // cloned previous ledger in basis
+            tree.checked_mul(5)?,            // delta DTOs and old inventory context
+            json_bytes(MAX_QUERY_BYTES)?,    // admitted inventory response
+        ])?;
+        let reserved = super::admission_input::reserve_projection_bytes(policy)?;
+        let measurement = sum(&[
+            json_bytes(reserved)?.checked_mul(2)?, // reserve and per-mode clone
+            tree.checked_mul(3)?,                  // candidate/current/reserve action payloads
+            slots::<CompletionAction>(3)?,
+            3 * 128,
+            json_bytes(MAX_MANIFEST_BYTES)?.checked_mul(2)?, // contract/metadata
+            super::super::task_validation_workspace::envelope_workspace(policy)?,
+            limits.firewall_workspace_bytes()?.prepare_peak_bytes,
+            MAX_INPUT_BYTES.checked_mul(2)?, // basis canonical/domain wire
+            slots::<Vec<u8>>(2)?,
+        ])?;
+        // Verification can hold the original certificate while recomputing it.
+        sum(&[
+            validation.max(measurement),
+            slots::<ContextPreviewBound>(2)?,
+            128,
+        ])
+    }
+
     /// Additional sealing workspace for a completed private input. Includes a
     /// caller action retained by metadata continuation and the sealer's action
     /// clone. Borrowed input/prepared payloads, input construction, certificates,
