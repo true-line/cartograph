@@ -3812,6 +3812,22 @@ def neg_rebound_session():
             "Session = scoped_session(None)\ndef reset():\n    global Session\n    Session = fake\n",
         ),
         (
+            "default_walrus_session",
+            "Session = scoped_session(None)\ndef reset(x=(Session := object())):\n    pass\n",
+        ),
+        (
+            "lambda_default_walrus_session",
+            "Session = scoped_session(None)\nreset = lambda x=(Session := object()): x\n",
+        ),
+        (
+            "class_base_walrus_session",
+            "Session = scoped_session(None)\nclass Holder((Session := object)):\n    pass\n",
+        ),
+        (
+            "body_local_control",
+            "Session = scoped_session(None)\ndef local():\n    Session = 1\n    return Session\n",
+        ),
+        (
             "comprehension_control",
             "Session = scoped_session(None)\nnames = [Session for Session in []]\n",
         ),
@@ -3893,6 +3909,7 @@ def neg_def_factory():
             w("pos_decorated", "decorated", "model-helper"),
             w("pos_inherited", "left_only", "model-helper"),
             w("pos_unshadowed", "left_only", "session"),
+            w("write_body_local_control", "left_only", "session"),
             w("write_comprehension_control", "left_only", "session"),
         ]
     );

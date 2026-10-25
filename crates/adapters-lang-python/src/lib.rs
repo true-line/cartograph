@@ -687,9 +687,14 @@ fn collect_binding<'t>(
                 if named || rebinds {
                     binding.writes.push(node);
                 }
+                // Defaults, annotations and bases run here, at definition.
+                stack.extend(definition_time_parts(node));
                 continue;
             }
-            "lambda" => continue,
+            "lambda" => {
+                stack.extend(definition_time_parts(node));
+                continue;
+            }
             "global_statement" => {
                 binding.global |= mentions(cx, node, name);
                 false
@@ -752,6 +757,22 @@ fn import_binds(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
             _ if from => cx.text(&imported).trim() == name,
             _ => cx.text(&imported).split('.').next().map(str::trim) == Some(name),
         })
+}
+
+/// The parts of a `def`, `class` or `lambda` evaluated in the enclosing
+/// scope when it is defined: parameter defaults and annotations, the return
+/// annotation, and class bases. Parameter names themselves bind nothing
+/// here.
+fn definition_time_parts<'t>(node: TsNode<'t>) -> Vec<TsNode<'t>> {
+    [
+        "parameters",
+        "return_type",
+        "superclasses",
+        "type_parameters",
+    ]
+    .into_iter()
+    .filter_map(|field| node.child_by_field_name(field))
+    .collect()
 }
 
 /// Whether a `global` statement anywhere under `node` names `name`.
