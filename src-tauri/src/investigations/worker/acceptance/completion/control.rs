@@ -136,7 +136,10 @@ struct Attestation {
     review: Review,
 }
 fn sha(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 fn is_hash(value: &str, length: usize) -> bool {
     value.len() == length

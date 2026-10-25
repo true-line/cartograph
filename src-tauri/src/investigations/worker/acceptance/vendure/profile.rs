@@ -36,7 +36,13 @@ impl NativeProfile {
         )
         .map_err(|_| "invalid explicit native profile")?;
         use sha2::{Digest, Sha256};
-        Ok((profile, format!("{:x}", Sha256::digest(&bytes))))
+        Ok((
+            profile,
+            Sha256::digest(&bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+        ))
     }
 
     pub(super) fn create_fresh(&self, source: &Path) -> Result<(), String> {

@@ -33,7 +33,12 @@ impl Case {
             std::fs::write(root.join(path), source).unwrap();
             hashes.insert(
                 path.into(),
-                json!(format!("{:x}", Sha256::digest(source.as_bytes()))),
+                json!(
+                    Sha256::digest(source.as_bytes())
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                ),
             );
         }
         let manifest = base.join("input.json");
@@ -46,7 +51,7 @@ impl Case {
         std::fs::write(
             &proof,
             serde_json::to_vec(&json!({"repo":"example/control",
-            "commit_sha":"a".repeat(40),"manifest_sha256":format!("{:x}",Sha256::digest(&bytes)),
+            "commit_sha":"a".repeat(40),"manifest_sha256":Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>(),
             "files_sha256":hashes}))
             .unwrap(),
         )
