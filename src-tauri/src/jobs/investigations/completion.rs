@@ -1685,7 +1685,7 @@ pub(super) fn validate_saved(
         return validate_legacy_evidence(connection, task);
     };
     intent.validate(task)?;
-    let _attempts = attempts(connection, task)?;
+    let attempts = attempts(connection, task)?;
     let raw = raw_refusals(connection, task)?;
     let refusals = if raw.is_empty() {
         vec![]
@@ -1772,7 +1772,13 @@ pub(super) fn validate_saved(
             }
             || (host_cap && task.detail.summary.status != InvestigationStatus::Failed)
             || (refusals.len() == 2 && task.phase != Phase::Terminal)
-            || &observation_detail(connection, task)? != detail
+            || &(if connection.is_autocommit() {
+                observation_detail(connection, task)?
+            } else {
+                // The caller's snapshot and the read-only validation above keep
+                // these already authenticated witnesses unchanged (#971).
+                observation_from_entries(task, &attempts, &raw)?
+            }) != detail
         {
             return Err(InvestigationStoreError::Invalid);
         }
