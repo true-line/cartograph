@@ -104,8 +104,9 @@ struct TypedCall {
     /// An unqualified call in a `with(x) { … }` lambda: what it resolves to
     /// when `x`'s type does not declare the member.
     fallback: Option<Fallback>,
-    /// Top-level function FQNs that, if this repository declares one, shadow
-    /// `kotlin.with`: the call then takes its fallback.
+    /// Top-level FQNs that, if this repository declares one (a function, a
+    /// callable property or a type), shadow `kotlin.with`: the call then
+    /// takes its fallback.
     shadowed_by: Vec<String>,
 }
 
@@ -1688,7 +1689,7 @@ pub fn extract_dir_incremental_with_progress(
             if typed
                 .shadowed_by
                 .iter()
-                .any(|fqn| functions_by_fqn.contains_key(fqn))
+                .any(|fqn| importable_files.contains_key(fqn))
             {
                 return None;
             }

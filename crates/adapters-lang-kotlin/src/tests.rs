@@ -2271,7 +2271,8 @@ fun qualified(a: io.x.net.ApiService) { a.other() }
 // type. Inside `with(x) { m() }` a typed `x`'s member wins over the enclosing
 // file's functions, which remain the fallback when `x`'s type lacks `m` or
 // proves nothing (a type parameter). A `hiltViewModel` or `with` shadowed by
-// a same-file declaration, or a same-package `with`, types nothing.
+// a same-file declaration, or a same-package `with` function or callable
+// property, types nothing.
 #[test]
 fn hilt_view_models_type_their_bindings() {
     let dir = tempfile::tempdir().unwrap();
@@ -2409,6 +2410,28 @@ fun PackageWith(vm: LoginVm) = with(vm) {
 }
 "#,
     );
+    // A same-package callable property named `with` shadows it too.
+    write(
+        dir.path(),
+        "pkgprop/With.kt",
+        "package io.x.pkgprop\n\nimport io.x.vm.LoginVm\n\nval with: (LoginVm, () -> Unit) -> Unit = { _, block -> block() }\n",
+    );
+    write(
+        dir.path(),
+        "pkgprop/Use.kt",
+        r#"package io.x.pkgprop
+
+import io.x.vm.LoginVm
+
+fun login() {}
+
+fun PropertyWith(vm: LoginVm) {
+    with(vm) {
+        login()
+    }
+}
+"#,
+    );
     // A type parameter receiver proves nothing; the ordinary call stays.
     write(
         dir.path(),
@@ -2430,9 +2453,16 @@ fun <T> Generic(x: T) = with(x) {
         .iter()
         .filter(|e| {
             e.label == "CALLS"
-                && ["@ui/", "@fake/", "@shadow/", "@pkgwith/", "@generic/"]
-                    .iter()
-                    .any(|dir| e.src.contains(dir))
+                && [
+                    "@ui/",
+                    "@fake/",
+                    "@shadow/",
+                    "@pkgwith/",
+                    "@pkgprop/",
+                    "@generic/",
+                ]
+                .iter()
+                .any(|dir| e.src.contains(dir))
         })
         .filter(|e| !e.dst.starts_with("gap:"))
         .map(|e| (short(&e.src), short(&e.dst)))
@@ -2451,6 +2481,7 @@ fun <T> Generic(x: T) = with(x) {
         pair("Scope.LocalWith", "Scope.login"),
         pair("Scope.LocalWith", "Scope.with"),
         pair("PackageWith", "login"),
+        pair("PropertyWith", "login"),
         pair("Shadowed", "hiltViewModel"),
         pair("Login", "LoginVm.login"),
         pair("Login", "helper"),
