@@ -91,6 +91,39 @@ pub(super) fn envelope_workspace(policy: &InvestigationPolicy) -> Option<usize> 
 mod tests {
     use super::*;
 
+    // AC-0327: legacy parent validation constructs historical definitions too.
+    // Pin the definition component independently, not the much larger total.
+    #[test]
+    fn saved_family_definitions_fit_admitted_definition_workspace() {
+        let admitted = definition_workspace(SpecialistId::DomainAnalystV10)
+            .unwrap()
+            .max(definition_workspace(SpecialistId::EvidenceAuditorV10).unwrap());
+        for role in [
+            SpecialistId::DomainAnalystV1,
+            SpecialistId::EvidenceAuditorV1,
+            SpecialistId::DomainAnalyst,
+            SpecialistId::EvidenceAuditor,
+            SpecialistId::DomainAnalystV3,
+            SpecialistId::EvidenceAuditorV3,
+            SpecialistId::DomainAnalystV4,
+            SpecialistId::EvidenceAuditorV4,
+            SpecialistId::DomainAnalystV5,
+            SpecialistId::EvidenceAuditorV5,
+            SpecialistId::DomainAnalystV6,
+            SpecialistId::EvidenceAuditorV6,
+            SpecialistId::DomainAnalystV7,
+            SpecialistId::EvidenceAuditorV7,
+            SpecialistId::DomainAnalystV8,
+            SpecialistId::EvidenceAuditorV8,
+            SpecialistId::DomainAnalystV9,
+            SpecialistId::EvidenceAuditorV9,
+            SpecialistId::DomainAnalystV10,
+            SpecialistId::EvidenceAuditorV10,
+        ] {
+            assert!(definition_workspace(role).unwrap() <= admitted, "{role:?}");
+        }
+    }
+
     // AC-0327: actual compiled definitions, redaction and mixed normalization;
     // this checks component currency, not native allocation or full admission.
     #[test]

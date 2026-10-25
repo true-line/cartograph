@@ -10,6 +10,36 @@ fn completed() -> FinishFixture {
     f
 }
 #[test]
+fn parent_history_borrowed_encoding_preserves_canonical_wire_and_refuses_large_envelope() {
+    // AC-0327: compare bytes, including nested key order, with the prior shape.
+    let f = completed();
+    let parent = f.saved();
+    let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+    let result = load_result(&tx, &parent).unwrap();
+    let summary = &parent.detail.summary;
+    let prior = serde_json::json!({
+        "parent_investigation_id": f.base.id(),
+        "original_graph_snapshot_id": summary.graph_snapshot_id,
+        "original_scope": summary.scope,
+        "saved_execution_status": summary.status,
+        "cancellation_requested": summary.cancel_requested,
+        "invocation_outcome_pending": summary.invocation_pending,
+        "authority": "Prior specialist findings remain T3/InferredWeak; execution status does not establish complete knowledge.",
+        "saved_result": result,
+    });
+    assert_eq!(
+        encode_parent_history(f.base.id(), summary, &result).unwrap(),
+        encode(&prior, 16 * 1024).unwrap()
+    );
+    let mut oversized = summary.clone();
+    oversized.graph_snapshot_id = Some("x".repeat(16 * 1024));
+    assert!(matches!(
+        encode_parent_history(f.base.id(), &oversized, &result),
+        Err(InvestigationStoreError::Capacity)
+    ));
+}
+
+#[test]
 fn next_parent_history_completed_parent_starts_internal_child_with_exact_saved_context() {
     let mut f = completed();
     let parent = f.saved();
@@ -19,6 +49,23 @@ fn next_parent_history_completed_parent_starts_internal_child_with_exact_saved_c
         .store
         .investigation_next_parent_history(f.base.id(), &parent.detail.summary.conversation_id)
         .unwrap();
+    // AC-0327: transfer the genuine returned history without duplicating its
+    // retained vector/string payload at the worker boundary.
+    let pointer = history.history()[0].as_ptr();
+    let vector = history.history().as_ptr();
+    #[cfg(unix)]
+    {
+        let (retained, projection) = parent_history_projection_workspace().unwrap();
+        let actual = std::mem::size_of::<NextParentHistory>()
+            + std::mem::size_of::<String>()
+            + history.history()[0].len();
+        assert!(retained >= actual);
+        assert!(projection > retained);
+    }
+    let moved = history.into_history();
+    assert_eq!(moved[0].as_ptr(), pointer);
+    assert_eq!(moved.as_ptr(), vector);
+    let history = NextParentHistory { history: moved };
     let value: serde_json::Value = serde_json::from_str(&history.history()[0]).unwrap();
     assert_eq!(
         value["original_graph_snapshot_id"],
@@ -284,5 +331,43 @@ fn next_parent_history_completed_task3_allows_standard_child_without_cross_conve
     assert_eq!(
         reopened.investigation_result(&parent_id).unwrap().unwrap(),
         parent_result
+    );
+}
+
+// AC-0327: inspect the legacy component before the larger worker maximum can
+// mask an omitted overlapping ledger/metadata or second invocation row.
+#[cfg(unix)]
+#[test]
+fn parent_history_legacy_pending_accounts_for_overlapping_owners() {
+    let (basis, invoked) = legacy_parent_pending_workspace().unwrap();
+    let (ledger, _) = InvestigationInputLedger::decode_workspace_bytes().unwrap();
+    let metadata = next_prompt_metadata_workspace().unwrap().2;
+    let disclosure = agents::investigation::disclosure_validation_workspace(
+        &INVESTIGATION_V2_POLICY,
+        MAX_RECORD_BYTES,
+    )
+    .unwrap();
+    let other = next_prompt_ledger_workspace().unwrap()
+        + disclosure
+        + context_hub::logical::json_bytes(INVESTIGATION_V2_POLICY.envelope_bytes()).unwrap() * 3
+        + legacy_parent_contract_workspace().unwrap();
+    assert_eq!(basis.checked_sub(other), Some(ledger + metadata));
+    let decoding = record_decode_scratch_bytes()
+        .unwrap()
+        .max(context_hub::logical::json_bytes(MAX_RECORD_BYTES).unwrap() * (RECORD_MAX_DEPTH + 1));
+    let acquisition = decoding
+        + MAX_RECORD_BYTES
+        + std::mem::size_of::<Vec<u8>>()
+        + 128
+        + 3 * std::mem::size_of::<String>()
+        + 4096;
+    assert_eq!(
+        invoked.checked_sub(acquisition),
+        Some(metadata_history_workspace::row_workspace().unwrap())
+    );
+    assert!(
+        legacy_parent_contract_workspace().unwrap()
+            >= next_prompt_contract_workspace().unwrap()
+                + context_hub::logical::json_bytes(MAX_RECORD_BYTES).unwrap() * 3
     );
 }

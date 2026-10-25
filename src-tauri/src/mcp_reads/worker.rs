@@ -438,7 +438,18 @@ fn task_phase_workspaces(limits: WorkerLimits) -> Option<(usize, usize, usize)> 
             &agents::investigation::INVESTIGATION_V2_POLICY,
         )?,
     )?;
-    Some((preparation, context, execution))
+    let (history, history_projection) =
+        crate::jobs::investigations::parent_history_projection_workspace()?;
+    // Parent history is acquired first, then survives preparation and every
+    // later execution phase. Acquisition includes legacy family reloads.
+    let history_acquisition = crate::jobs::investigations::parent_history_acquisition_workspace()?;
+    Some((
+        history_acquisition
+            .max(history_projection)
+            .max(preparation.checked_add(history)?),
+        context.checked_add(history)?,
+        execution,
+    ))
 }
 
 #[cfg(unix)]
@@ -568,6 +579,33 @@ pub(crate) mod tests {
         .unwrap();
         let (_, retained, _) = task_phase_workspaces(limits).unwrap();
         assert!(retained >= initial + growth);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn task_phases_retain_parent_history_before_and_after_preparation() {
+        // AC-0327: inspect each actual phase before a larger maximum masks
+        // omission of the history that survives the entire worker loop.
+        let limits = limits();
+        let (initial, preparation) = crate::investigations::preparation_workspace::workspace_bytes(
+            limits.scope,
+            agents::investigation::MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
+            limits.max_request_frame_bytes.get(),
+        )
+        .unwrap();
+        let growth = crate::investigations::preparation_workspace::retained_read_bytes(
+            &agents::investigation::INVESTIGATION_V2_POLICY,
+        )
+        .unwrap();
+        let (history, projection) =
+            crate::jobs::investigations::parent_history_projection_workspace().unwrap();
+        let (admitted_preparation, retained, _) = task_phase_workspaces(limits).unwrap();
+        assert!(admitted_preparation >= preparation + history);
+        assert!(admitted_preparation >= projection);
+        assert!(
+            admitted_preparation
+                >= crate::jobs::investigations::parent_history_acquisition_workspace().unwrap()
+        );
+        assert!(retained >= initial + growth + history);
     }
     #[cfg(unix)]
     #[test]
