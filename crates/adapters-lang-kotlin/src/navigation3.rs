@@ -462,6 +462,9 @@ fn extract_entries(
     local_functions: &HashSet<String>,
     pending: &mut Pending,
 ) {
+    // A property of function type shadows the import as a function does.
+    let mut shadows = local_functions.clone();
+    shadows.extend(declared_properties(cx, root));
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut walk = node.walk();
@@ -485,7 +488,7 @@ fn extract_entries(
             RUNTIME_PACKAGE,
             "entryProvider",
             imports,
-            local_functions,
+            &shadows,
         ) {
             continue;
         }
@@ -622,6 +625,29 @@ fn split_generic_binary<'t>(
     Some((callee_name, dotted_identifiers(cx, type_node), right))
 }
 
+/// Every property declared in the file, keyed as `proven_name` looks up
+/// shadowing: `Outer.Inner.name` inside types, the bare name elsewhere. Locals
+/// inside functions count too, which can only refuse a proof.
+fn declared_properties(cx: &FileCx<'_>, root: TsNode<'_>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+        if node.kind() == "property_declaration"
+            && let Some(name) = property_name(cx, node)
+        {
+            let chain = enclosing_type_chain(cx, node);
+            if chain.is_empty() {
+                out.insert(name);
+            } else {
+                out.insert(format!("{}.{name}", chain.join(".")));
+            }
+        }
+    }
+    out
+}
+
 fn property_name(cx: &FileCx<'_>, prop: TsNode<'_>) -> Option<String> {
     let mut walk = prop.walk();
     let var_decl = prop
@@ -687,21 +713,17 @@ fn is_mutable_state_list_of_nav_key(
         }
         _ => return false,
     };
-    let list_ok = if callee_name == format!("{COMPOSE_PACKAGE}.mutableStateListOf") {
-        true
-    } else if callee_name == "mutableStateListOf" {
-        let chain = enclosing_type_chain(cx, node);
-        let shadowed = (!chain.is_empty()
-            && local_functions.contains(&format!("{}.mutableStateListOf", chain.join("."))))
-            || local_functions.contains("mutableStateListOf");
-        !shadowed
-            && imports
-                .bindings
-                .get("mutableStateListOf")
-                .is_none_or(|fqn| fqn == &format!("{COMPOSE_PACKAGE}.mutableStateListOf"))
-    } else {
-        false
-    };
+    // Import-proven like every framework name: a same-package
+    // `mutableStateListOf` from another file must not pass for Compose's.
+    let list_ok = proven_name(
+        cx,
+        node,
+        &callee_name,
+        COMPOSE_PACKAGE,
+        "mutableStateListOf",
+        imports,
+        local_functions,
+    );
     if !list_ok {
         return false;
     }
@@ -976,10 +998,11 @@ fn back_stack_add_arg<'t>(
         .named_children(&mut aw)
         .filter(|c| c.kind() == "value_argument")
         .collect();
-    let [varg] = vargs.as_slice() else {
+    // `add(element)` or `MutableList.add(index, element)`: the key is last.
+    let (&[varg] | &[_, varg]) = vargs.as_slice() else {
         return None;
     };
-    let arg = value_argument_expr(*varg)?;
+    let arg = value_argument_expr(varg)?;
     let callee = call.named_child(0)?;
     match callee.kind() {
         "identifier" => (cx.text(&callee) == "add"
@@ -1477,6 +1500,18 @@ pub(crate) fn extract(
                 }
             }
         }
+        // Helpers are matched at call sites by name only, so an overloaded name
+        // (`go(key: NavKey)` beside `go(route: String)`) proves nothing.
+        let mut declared: HashMap<&str, usize> = HashMap::new();
+        for member in &members {
+            if member.kind() == "function_declaration"
+                && let Some(name) = member.child_by_field_name("name")
+            {
+                *declared.entry(cx.text(&name)).or_default() += 1;
+            }
+        }
+        param_helpers.retain(|name, _| declared.get(name.as_str()) == Some(&1));
+        builder_helpers.retain(|name, _| declared.get(name.as_str()) == Some(&1));
 
         let target_scope = TargetScope {
             cx,

@@ -1521,3 +1521,132 @@ fun FakeRoot() {
         ]
     );
 }
+
+// AC-0351: an `entryProvider` property shadows the import, a same-package
+// `mutableStateListOf` proves no back stack, an overloaded helper name proves
+// no helper, and `add(index, key)` still navigates.
+#[test]
+fn navigation3_refuses_shadowed_names_and_overloads_but_reads_indexed_adds() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/demo/nav/Nav.kt",
+        r#"package demo.nav
+
+import androidx.compose.runtime.mutableStateListOf
+import androidx.navigation3.runtime.NavKey
+import androidx.navigation3.runtime.entryProvider
+
+data object HomeKey : NavKey
+data object SettingsKey : NavKey
+
+fun Root() {
+    entryProvider {
+        entry<HomeKey> {}
+        entry<SettingsKey> {}
+    }
+}
+
+class Nav {
+    private val stack = mutableStateListOf<NavKey>(HomeKey)
+
+    fun indexed() {
+        stack.add(0, SettingsKey)
+    }
+
+    fun go(key: NavKey) {
+        stack.add(key)
+    }
+
+    fun go(route: String) {}
+
+    fun viaOverload() {
+        go(SettingsKey)
+        go("settings")
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/demo/nav/Shadowed.kt",
+        r#"package demo.nav
+
+import androidx.navigation3.runtime.NavKey
+import androidx.navigation3.runtime.entryProvider
+
+data object ShadowKey : NavKey
+
+class Shadowed {
+    private val entryProvider: (() -> Unit) -> Unit = { it() }
+
+    fun Root() {
+        entryProvider {
+            entry<ShadowKey> {}
+        }
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/demo/nav/FakeStack.kt",
+        r#"package demo.nav
+
+import androidx.navigation3.runtime.NavKey
+
+class FakeStack {
+    private val stack = mutableStateListOf<NavKey>(HomeKey)
+
+    fun go() {
+        stack.add(SettingsKey)
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/demo/nav/Lists.kt",
+        r#"package demo.nav
+
+fun <T> mutableStateListOf(vararg items: T): MutableList<T> = mutableListOf(*items)
+"#,
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+
+    let mut screens: Vec<_> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Screen")
+        .map(|n| n.id.clone())
+        .collect();
+    screens.sort();
+    assert_eq!(
+        screens,
+        [
+            "screen:local/demo@navigation3:demo.nav.HomeKey",
+            "screen:local/demo@navigation3:demo.nav.SettingsKey",
+        ]
+    );
+
+    let navs: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "NAVIGATES_TO")
+        .map(|e| (e.src.clone(), e.dst.clone()))
+        .collect();
+    assert_eq!(
+        navs,
+        [(
+            "sym:local/demo@src/main/kotlin/demo/nav/Nav.kt#Nav.indexed".to_string(),
+            "screen:local/demo@navigation3:demo.nav.SettingsKey".to_string(),
+        )]
+    );
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|n| n.label == "Gap" && n.props["kind"] == "navigation-unresolved"),
+        "an overloaded helper's String call is not a computed navigation"
+    );
+}
