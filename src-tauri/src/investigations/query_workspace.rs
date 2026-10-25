@@ -10,6 +10,12 @@ use core_graph::{
     source::{FactKey, FactSourceSelection},
 };
 
+// Producer contracts are exercised at and beyond these boundaries below.
+const SOURCE_ID_BYTES: usize = 8192;
+const SOURCE_LABEL_BYTES: usize = 256;
+const SOURCE_ASSOCIATION_BYTES: usize = 256;
+const FACT_DIGEST_BYTES: usize = 72;
+
 /// Additional selection observation, including conversion while the storage
 /// result still owns its graph and selected rows. Schema checks are sequential.
 /// `selection_wire` must bound the complete storage and host selection DTOs,
@@ -31,9 +37,9 @@ fn selection_peak(selected: usize, selection_wire: usize) -> Option<usize> {
         slots::<FactSourceSelection>(selected)?,
         // Association and omission SQL cells, bounded before UTF-8 decode.
         // These observations are sequential; retain one current cell tuple.
-        256,
-        256,
-        72,
+        SOURCE_ASSOCIATION_BYTES,
+        SOURCE_ASSOCIATION_BYTES,
+        FACT_DIGEST_BYTES,
         slots::<Option<Vec<u8>>>(3)?,
         slots::<String>(3)?,
         32, // StoreRevision instance identity
@@ -89,55 +95,51 @@ fn guard_owners(
     Some((retained, acquisition))
 }
 
-/// One evidence inventory and the temporary receipt/provenance work needed to
-/// construct it. The fact-matching adapter supplies its independently checked
-/// additional peak for the SAME separately admitted full-fact wire bound.
-fn option_owners(fact_wire: usize, fact_match_peak: usize) -> Option<(usize, usize)> {
+/// Retained inventories for disjoint selected facts, plus one current decode.
+/// Their legacy payload/value totals share the frozen graph's admitted bounds;
+/// captured receipts have independent per-option limits and can mix with legacy.
+fn option_owners(fact_wire: usize, fact_values: usize, options: usize) -> Option<(usize, usize)> {
     use super::context::{EvidenceOption, EvidenceOptions};
     use adapters_lang_ts::captured::{MAX_RECEIPT_BYTES, MAX_RECEIPT_RANGES};
     use core_prov::{EvidenceRef, Provenance};
+    let values = fact_values.min(fact_wire.checked_add(1)?);
     let receipt = crate::mcp_reads::reservation::receipt::workspace_bytes()?;
-    // A legacy provenance list is decoded before validation. Its element count
-    // follows admitted fact bytes, not the captured receipt's range-count cap.
-    let legacy = sum(&[
-        fact_wire,
-        slots::<Provenance>(1)?,
-        slots::<EvidenceRef>(fact_wire.checked_add(1)?)?,
-    ])?;
-    let legacy_options = sum(&[
-        fact_wire,
-        slots::<EvidenceOption>(fact_wire.checked_add(1)?)?,
-    ])?;
     let captured_options = sum(&[
         MAX_RECEIPT_BYTES,
         MAX_RECEIPT_BYTES, // expanded v3 shared range identities
         slots::<EvidenceOption>(MAX_RECEIPT_RANGES)?,
     ])?;
     let retained = sum(&[
-        slots::<EvidenceOptions>(1)?,
-        fact_wire, // returned TaskFactKey cloned from the selected fact
-        legacy_options.max(captured_options),
+        slots::<EvidenceOptions>(options)?,
+        fact_wire, // all returned fact keys together
+        fact_wire, // all legacy evidence strings together
+        slots::<EvidenceOption>(values)?,
+        options.checked_mul(captured_options)?,
+    ])?;
+    // Before validation one legacy provenance can consume the whole graph
+    // allowance. Its input vector overlaps the output covered by retained.
+    let legacy = sum(&[
+        slots::<Provenance>(1)?,
+        fact_wire,
+        slots::<EvidenceRef>(values)?,
     ])?;
     let legacy_peak = sum(&[
-        json_bytes(fact_wire)?, // cloned provenance Value during typed decode
-        json_bytes(fact_wire)?, // internally tagged ProducingMethod buffer
+        logical::json(fact_wire, values)?, // cloned provenance Value
+        logical::json(fact_wire, values)?, // tagged ProducingMethod buffer
         legacy,
-        legacy_options, // collection may keep input/output vector allocations
     ])?;
-    // stored_receipt retains two admitted SQL identity strings while decoding
-    // and round-tripping the receipt. The raw receipt is included in peak.
     let stored_peak = sum(&[
         receipt.peak,
-        256,
-        256,
+        SOURCE_ASSOCIATION_BYTES,
+        SOURCE_ASSOCIATION_BYTES,
         slots::<Option<String>>(3)?,
         fact_wire, // graph_fact clone held by task_receipt's caller
     ])?;
     let captured_peak = stored_peak.max(sum(&[
         receipt.retained,
-        fact_match_peak.max(captured_options),
+        adapters_lang_ts::captured::fact_match_workspace(fact_wire, values)?,
     ])?);
-    Some((retained, sum(&[retained, legacy_peak.max(captured_peak)])?))
+    Some((retained, legacy_peak.max(captured_peak)))
 }
 
 /// Candidate ledger owners before its final manifest-size validation. Successful
@@ -259,9 +261,17 @@ pub(super) fn workspace(
     // association adds repo/receipt256 each and two72-byte digests; omission
     // adds repo256. Escaping occurs before candidate-ledger refusal.
     let row_payload = sum(&[
-        8192, 8192, 256, // selected edge key
-        8192, 8192, 256, // storage SourceBinding repeats its key
-        256, 256, 72, 72, 256,
+        SOURCE_ID_BYTES,
+        SOURCE_ID_BYTES,
+        SOURCE_LABEL_BYTES, // selected edge key
+        SOURCE_ID_BYTES,
+        SOURCE_ID_BYTES,
+        SOURCE_LABEL_BYTES, // repeated binding key
+        SOURCE_ASSOCIATION_BYTES,
+        SOURCE_ASSOCIATION_BYTES,
+        FACT_DIGEST_BYTES,
+        FACT_DIGEST_BYTES,
+        SOURCE_ASSOCIATION_BYTES,
     ])?;
     let selected_envelope = agents::TaskFactSelection {
         fact: agents::TaskFactKey::Edge {
@@ -298,10 +308,13 @@ pub(super) fn workspace(
         set::<FactKey>(input.graph.max_rows.checked_add(selected)?)?,
     ])?;
     let (guards, guard_peak) = guard_owners(selected, selection_wire, input.app_path_bytes)?;
-    let fact_match_peak =
-        adapters_lang_ts::captured::fact_match_workspace_bytes(input.graph.max_bytes)?;
-    let (one_option, option_peak) = option_owners(input.graph.max_bytes, fact_match_peak)?;
-    let options = agents::investigation::MAX_QUERY_FACTS.checked_mul(one_option)?;
+    // Keys are admitted before options are constructed; each page fact is
+    // unique and belongs to both the admitted graph and that selected set.
+    let option_count = selected
+        .min(agents::investigation::MAX_QUERY_FACTS)
+        .min(input.graph.max_rows);
+    let (options, option_peak) =
+        option_owners(input.graph.max_bytes, input.graph.max_values, option_count)?;
     let (ledger, ledger_peak) = ledger_owners(
         policy,
         input.ledger_wire,
@@ -355,6 +368,73 @@ pub(super) fn workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn query_option_payload_growth_is_shared_across_selected_facts() {
+        // AC-0327: adding options cannot multiply disjoint graph payloads.
+        let retained = |wire, values, count| option_owners(wire, values, count).unwrap().0;
+        let growth = |count| retained(8192, 200, count) - retained(4096, 100, count);
+        assert_eq!(growth(1), growth(32));
+        assert!(retained(8192, 200, 32) > retained(8192, 200, 1));
+        let peak = |count| option_owners(8192, 200, count).unwrap().1;
+        assert_eq!(peak(1), peak(32)); // only one inventory decodes at a time
+        assert!(option_owners(usize::MAX, 1, 1).is_none());
+        assert!(option_owners(4096, 100, usize::MAX).is_none());
+    }
+
+    #[test]
+    fn query_selection_constants_match_producer_boundaries() {
+        // AC-0327: fail if the storage producer's accepted identities grow.
+        use core_graph::{GraphPatch, Node, SqliteGraphStore, source::SourceBinding};
+        let store = SqliteGraphStore::open_in_memory().unwrap();
+        for extra in [0, 1] {
+            let node = FactKey::Node {
+                id: "n".repeat(SOURCE_ID_BYTES + extra),
+            };
+            assert_eq!(
+                store.read_source_selection_snapshot(&[node]).is_ok(),
+                extra == 0
+            );
+            let edge = FactKey::Edge {
+                source: "s".repeat(SOURCE_ID_BYTES),
+                label: "e".repeat(SOURCE_LABEL_BYTES + extra),
+                destination: "d".repeat(SOURCE_ID_BYTES),
+            };
+            assert_eq!(
+                store.read_source_selection_snapshot(&[edge]).is_ok(),
+                extra == 0
+            );
+        }
+        let node = Node {
+            id: "fixture".into(),
+            label: "Symbol".into(),
+            props: serde_json::json!({}),
+        };
+        let digest = core_graph::source::node_digest(&node).unwrap();
+        assert_eq!(digest.len(), FACT_DIGEST_BYTES);
+        for (repo_extra, receipt_extra) in [(0, 0), (1, 0), (0, 1)] {
+            let mut store = SqliteGraphStore::open_in_memory().unwrap();
+            let binding = SourceBinding {
+                fact: FactKey::from_node(&node),
+                repo_key: "r".repeat(SOURCE_ASSOCIATION_BYTES + repo_extra),
+                receipt_id: "c".repeat(SOURCE_ASSOCIATION_BYTES + receipt_extra),
+                emitted_fact_digest: digest.clone(),
+            };
+            let result = store.apply_patch_with_source_bindings_if_snapshot_matches(
+                &(vec![], vec![]),
+                &GraphPatch {
+                    upsert_nodes: vec![node.clone()],
+                    ..GraphPatch::default()
+                },
+                &binding.repo_key,
+                std::slice::from_ref(&binding),
+            );
+            assert_eq!(result.is_ok(), repo_extra == 0 && receipt_extra == 0);
+            if let Ok(applied) = result {
+                assert!(applied);
+            }
+        }
+    }
+
     #[test]
     fn query_workspace_refuses_unrepresentable_admitted_owners() {
         // AC-0327: no saturation can turn an unrepresentable component into an
