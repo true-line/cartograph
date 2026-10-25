@@ -4188,6 +4188,131 @@ fn vue_router_components_honor_an_explicit_extension() {
 }
 
 #[test]
+fn vue_navigations_link_symbols_to_screens_through_proven_wrappers() {
+    // W11a-2: SimpleLogin's shape. `Navigation.setRouter(this.$router)`
+    // proves the module's `router`; `navigateTo(path)` pushes its parameter.
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "popup/Navigation.js",
+        "let router = null;\nlet other = null;\n\
+         const PATH = { ROOT: '/', MAIN: '/main', RESULT: '/result', GONE: '/gone' };\n\
+         class Navigation {\n  static PATH = PATH;\n\
+         \x20 static getRoutes(c) { return [{ path: PATH.ROOT, component: c.Root }, \
+         { path: PATH.MAIN, component: c.Main }, { path: PATH.RESULT, component: c.Main }]; }\n\
+         \x20 static setRouter($router) { router = $router; }\n\
+         \x20 static navigateTo(path, canGoBack) { if (canGoBack) { router.push(path); } else { router.replace(path); } }\n\
+         \x20 static later(path) { setTimeout(() => router.push(path), 10); }\n\
+         \x20 static shadow(path) { [1].map((path) => router.push(path)); }\n\
+         \x20 static setOther($r) { other = $r; }\n\
+         \x20 static viaOther(path) { other.push(path); }\n\
+         }\nother = window.fake;\nexport default Navigation;\n",
+    );
+    for name in ["Root", "Main"] {
+        write(
+            &format!("popup/{name}.vue"),
+            "<template><div/></template>\n<script>\nexport default {}\n</script>\n",
+        );
+    }
+    write(
+        "popup/App.vue",
+        "<template><router-view/></template>\n<script>\n\
+         import VueRouter from 'vue-router';\nimport Navigation from './Navigation';\n\
+         import Root from './Root.vue';\nimport Main from './Main.vue';\n\
+         const router = new VueRouter({ routes: Navigation.getRoutes({ Root, Main }) });\n\
+         export default {\n  router,\n  mounted() {\n    Navigation.setRouter(this.$router);\n\
+         \x20   Navigation.setOther(this.$router);\n    Navigation.navigateTo(Navigation.PATH.ROOT);\n  },\n};\n</script>\n",
+    );
+    write(
+        "popup/Flow.vue",
+        "<template><div/></template>\n<script>\nimport Navigation from './Navigation';\n\
+         export default {\n  methods: {\n\
+         \x20   async save(res) {\n      if (res.status === 201) { Navigation.navigateTo(Navigation.PATH.RESULT); }\n      Navigation.later('/main');\n      if (res.retry) { Navigation.navigateTo(Navigation.PATH.MAIN, true); }\n    },\n\
+         \x20   go(where) { Navigation.navigateTo(where); Navigation.navigateTo(Navigation.PATH.GONE); },\n\
+         \x20   skipped() { Navigation.shadow('/main'); Navigation.viaOther('/main'); },\n\
+         \x20   direct() { this.$router.push('/main'); },\n  },\n};\n</script>\n",
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let sym = |file: &str, name: &str| {
+        out.nodes
+            .iter()
+            .find(|n| {
+                n.label == "Symbol"
+                    && n.id.starts_with(&format!("sym:qwtm/example@{file}#"))
+                    && n.id.contains(name)
+            })
+            .unwrap_or_else(|| panic!("{file} {name}"))
+            .id
+            .clone()
+    };
+    let navigations: BTreeSet<(String, String, bool)> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "NAVIGATES_TO" && e.dst.starts_with("screen:"))
+        .map(|e| {
+            assert_eq!(e.props["prov"]["confidence_tier"], "InferredStrong");
+            (e.src.clone(), e.dst.clone(), e.props["conditional"] == true)
+        })
+        .collect();
+    let screen = |route: &str| format!("screen:qwtm/example@{route}");
+    let save = sym("popup/Flow.vue", ".save@");
+    assert_eq!(
+        navigations,
+        BTreeSet::from([
+            (sym("popup/App.vue", ".mounted@"), screen("/"), false),
+            (save.clone(), screen("/result"), true),
+            // A parameter captured by a nested callback still flows.
+            (save, screen("/main"), false),
+            (sym("popup/Flow.vue", ".direct@"), screen("/main"), false),
+        ])
+    );
+    // Each call is kept on the one edge with its own flag and route.
+    let main = out
+        .edges
+        .iter()
+        .find(|e| e.label == "NAVIGATES_TO" && e.src.contains(".save@") && e.dst == screen("/main"))
+        .unwrap();
+    let sites = main.props["sites"].as_array().unwrap();
+    let flags: Vec<_> = sites
+        .iter()
+        .map(|site| (site["conditional"] == true, site["via"].as_str().unwrap()))
+        .collect();
+    assert_eq!(flags, [(false, "wrapper"), (true, "wrapper")]);
+    // A shadowed parameter, and a router variable assigned outside its
+    // setter, prove no wrapper; `skipped` navigates nowhere.
+    let skipped = sym("popup/Flow.vue", ".skipped@");
+    assert!(
+        !out.edges
+            .iter()
+            .any(|e| e.label == "NAVIGATES_TO" && e.src == skipped)
+    );
+    // A computed target and a constant naming no screen are Gaps.
+    let go = sym("popup/Flow.vue", ".go@");
+    let reasons: BTreeSet<&str> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "NAVIGATES_TO" && e.src == go)
+        .map(|e| {
+            out.nodes.iter().find(|n| n.id == e.dst).unwrap().props["reason"]
+                .as_str()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        BTreeSet::from([
+            client_navigation::COMPUTED_TARGET_REASON,
+            client_navigation::UNKNOWN_SCREEN_REASON
+        ])
+    );
+}
+
+#[test]
 fn vue_router_tables_follow_export_clauses_default_children_and_bindings() {
     // AC-0349 (#990 review): a table exported through `export { a as b }`
     // resolves, a default child (`path: ''`) is its parent's URL, and a

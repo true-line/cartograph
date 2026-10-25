@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use tree_sitter::Node as TsNode;
 
 const MODULE: &str = "vue-router";
-const ROUTER: &str = "vue-router";
+pub(crate) const ROUTER: &str = "vue-router";
 
 /// `resolution` of a `RENDERS` edge whose extensionless import was found
 /// only as a `.vue` file: the bundler's extension list is assumed.
@@ -129,7 +129,7 @@ impl Pending {
     }
 }
 
-fn evidence(cx: &FileCx<'_>, node: TsNode<'_>) -> EvidenceRef {
+pub(crate) fn evidence(cx: &FileCx<'_>, node: TsNode<'_>) -> EvidenceRef {
     EvidenceRef {
         repo: cx.id.repo.into(),
         path: cx.path.into(),
@@ -139,7 +139,11 @@ fn evidence(cx: &FileCx<'_>, node: TsNode<'_>) -> EvidenceRef {
     }
 }
 
-fn prov(evidence: Vec<EvidenceRef>, confidence: ConfidenceTier, fact: &str) -> serde_json::Value {
+pub(crate) fn prov(
+    evidence: Vec<EvidenceRef>,
+    confidence: ConfidenceTier,
+    fact: &str,
+) -> serde_json::Value {
     let provenance = Provenance::new(
         Tier::Deterministic,
         confidence,
@@ -166,7 +170,12 @@ pub(crate) struct Proofs<'a, 'tree> {
 
 impl Proofs<'_, '_> {
     /// `(resolved import, exported name)` of a relatively imported local.
-    fn relative(&self, cx: &FileCx<'_>, site: TsNode<'_>, local: &str) -> Option<(Import, String)> {
+    pub(crate) fn relative(
+        &self,
+        cx: &FileCx<'_>,
+        site: TsNode<'_>,
+        local: &str,
+    ) -> Option<(Import, String)> {
         if !self.bindings.imported(site, local) {
             return None;
         }
@@ -198,7 +207,7 @@ impl Proofs<'_, '_> {
 }
 
 /// A `const` declarator's value.
-fn const_value(declarator: TsNode<'_>) -> Option<TsNode<'_>> {
+pub(crate) fn const_value(declarator: TsNode<'_>) -> Option<TsNode<'_>> {
     let is_const = declarator
         .parent()
         .filter(|p| p.kind() == "lexical_declaration")
@@ -218,7 +227,10 @@ fn property_key(cx: &FileCx<'_>, key: TsNode<'_>) -> Option<String> {
 }
 
 /// An object literal's `key → value` entries (pairs and shorthands).
-fn object_entries<'tree>(cx: &FileCx<'_>, object: TsNode<'tree>) -> Vec<(String, TsNode<'tree>)> {
+pub(crate) fn object_entries<'tree>(
+    cx: &FileCx<'_>,
+    object: TsNode<'tree>,
+) -> Vec<(String, TsNode<'tree>)> {
     let mut walk = object.walk();
     object
         .named_children(&mut walk)
@@ -237,10 +249,10 @@ fn object_entries<'tree>(cx: &FileCx<'_>, object: TsNode<'tree>) -> Vec<(String,
 /// objects, and class static fields that name one (`static PATH = PATH`)
 /// or hold one.
 #[derive(Default)]
-struct Constants {
-    objects: HashMap<String, HashMap<String, String>>,
+pub(crate) struct Constants {
+    pub(crate) objects: HashMap<String, HashMap<String, String>>,
     /// `(class, field)` → table.
-    statics: HashMap<(String, String), HashMap<String, String>>,
+    pub(crate) statics: HashMap<(String, String), HashMap<String, String>>,
 }
 
 fn literal_object(cx: &FileCx<'_>, object: TsNode<'_>) -> HashMap<String, String> {
@@ -250,7 +262,7 @@ fn literal_object(cx: &FileCx<'_>, object: TsNode<'_>) -> HashMap<String, String
         .collect()
 }
 
-fn constants(cx: &FileCx<'_>, root: TsNode<'_>) -> Constants {
+pub(crate) fn constants(cx: &FileCx<'_>, root: TsNode<'_>) -> Constants {
     let mut out = Constants::default();
     let mut walk = root.walk();
     let statements: Vec<_> = root
@@ -325,7 +337,11 @@ fn is_static(member: TsNode<'_>) -> bool {
 
 /// A route path: a string literal, or `TABLE.KEY` / `Class.FIELD.KEY`
 /// through the file's constant tables.
-fn path_value(cx: &FileCx<'_>, constants: &Constants, value: TsNode<'_>) -> Option<String> {
+pub(crate) fn path_value(
+    cx: &FileCx<'_>,
+    constants: &Constants,
+    value: TsNode<'_>,
+) -> Option<String> {
     if let Some(text) = literal_string(cx, value) {
         return Some(text);
     }
@@ -464,7 +480,7 @@ fn returned_array(function: TsNode<'_>) -> Option<TsNode<'_>> {
     (value.kind() == "array").then_some(value)
 }
 
-fn parameter_names(cx: &FileCx<'_>, function: TsNode<'_>) -> Vec<String> {
+pub(crate) fn parameter_names(cx: &FileCx<'_>, function: TsNode<'_>) -> Vec<String> {
     let Some(parameters) = function.child_by_field_name("parameters") else {
         return Vec::new();
     };
@@ -594,22 +610,18 @@ pub(crate) fn member_root(node: TsNode<'_>) -> Option<TsNode<'_>> {
     (node.kind() == "identifier").then_some(node)
 }
 
-/// Index the file's route-table functions and its router registrations.
-pub(crate) fn extract<'tree>(
+/// The file's exported top-level functions and exported classes' static
+/// methods: `(exported owner, member, function)`.
+pub(crate) fn exported_functions<'tree>(
     cx: &FileCx<'_>,
     root: TsNode<'tree>,
-    proofs: &Proofs<'_, 'tree>,
-    pending: &mut Pending,
-) {
-    pending.files.insert(cx.path.to_string());
-    let constants = constants(cx, root);
+) -> Vec<(String, Option<String>, TsNode<'tree>)> {
     let exports = exports(cx, root);
     let local_to_export: HashMap<&str, &str> = exports
         .iter()
         .map(|(exported, local)| (local.as_str(), exported.as_str()))
         .collect();
-    // Route-table functions: top-level functions and class static methods
-    // that return one array of route objects.
+    let mut out = Vec::new();
     let mut walk = root.walk();
     for statement in root.named_children(&mut walk) {
         let declaration = if statement.kind() == "export_statement" {
@@ -619,18 +631,16 @@ pub(crate) fn extract<'tree>(
         } else {
             statement
         };
-        let mut functions: Vec<(String, Option<String>, TsNode<'tree>)> = Vec::new();
+        let Some(name) = declaration.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(export) = local_to_export.get(cx.text(&name)) else {
+            continue;
+        };
         match declaration.kind() {
-            "function_declaration" => {
-                if let Some(name) = declaration.child_by_field_name("name") {
-                    functions.push((cx.text(&name).to_string(), None, declaration));
-                }
-            }
+            "function_declaration" => out.push((export.to_string(), None, declaration)),
             "class_declaration" => {
-                let (Some(name), Some(body)) = (
-                    declaration.child_by_field_name("name"),
-                    declaration.child_by_field_name("body"),
-                ) else {
+                let Some(body) = declaration.child_by_field_name("body") else {
                     continue;
                 };
                 let mut inner = body.walk();
@@ -639,8 +649,8 @@ pub(crate) fn extract<'tree>(
                         && is_static(method)
                         && let Some(member) = method.child_by_field_name("name")
                     {
-                        functions.push((
-                            cx.text(&name).to_string(),
+                        out.push((
+                            export.to_string(),
                             Some(cx.text(&member).to_string()),
                             method,
                         ));
@@ -649,28 +659,38 @@ pub(crate) fn extract<'tree>(
             }
             _ => {}
         }
-        for (owner, member, function) in functions {
-            let Some(export) = local_to_export.get(owner.as_str()) else {
-                continue;
-            };
-            let Some(array) = returned_array(function) else {
-                continue;
-            };
-            let params = parameter_names(cx, function);
-            let reader = Reader {
-                cx,
-                proofs,
-                constants: &constants,
-                params: &params,
-            };
-            let mut routes = Vec::new();
-            reader.routes(array, "", &mut routes);
-            if !routes.is_empty() {
-                pending.tables.insert(
-                    (cx.path.to_string(), export.to_string(), member),
-                    Table { routes },
-                );
-            }
+    }
+    out
+}
+
+/// Index the file's route-table functions and its router registrations.
+pub(crate) fn extract<'tree>(
+    cx: &FileCx<'_>,
+    root: TsNode<'tree>,
+    proofs: &Proofs<'_, 'tree>,
+    pending: &mut Pending,
+) {
+    pending.files.insert(cx.path.to_string());
+    let constants = constants(cx, root);
+    // Route-table functions: exported top-level functions and class static
+    // methods that return one array of route objects.
+    for (export, member, function) in exported_functions(cx, root) {
+        let Some(array) = returned_array(function) else {
+            continue;
+        };
+        let params = parameter_names(cx, function);
+        let reader = Reader {
+            cx,
+            proofs,
+            constants: &constants,
+            params: &params,
+        };
+        let mut routes = Vec::new();
+        reader.routes(array, "", &mut routes);
+        if !routes.is_empty() {
+            pending
+                .tables
+                .insert((cx.path.to_string(), export, member), Table { routes });
         }
     }
     // Router registrations.
@@ -813,7 +833,7 @@ fn call_table(cx: &FileCx<'_>, proofs: &Proofs<'_, '_>, call: TsNode<'_>) -> Opt
 }
 
 /// Candidate paths a relative import names, in resolution order.
-fn file_candidates(import: &Import) -> Vec<String> {
+pub(crate) fn file_candidates(import: &Import) -> Vec<String> {
     let file = import.file.as_str();
     if !import.guessed {
         return crate::target_tests::explicit_candidates(file);

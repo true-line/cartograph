@@ -82,6 +82,8 @@ pub struct Extraction {
     /// Vue Router tables and registrations (#989); routes resolve across
     /// files at directory completion.
     client_routes: client_routes::Pending,
+    /// Vue Router navigations (W11a-2), resolved against the screens.
+    client_navigation: client_navigation::Pending,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -257,6 +259,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     }
     extraction.target_tests.retarget(commit);
     extraction.client_routes.retarget(commit);
+    extraction.client_navigation.retarget(commit);
 }
 
 impl Extraction {
@@ -286,6 +289,7 @@ impl Extraction {
         self.eval_sites.clear();
         self.target_tests = target_tests::Pending::default();
         self.client_routes = client_routes::Pending::default();
+        self.client_navigation = client_navigation::Pending::default();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -3016,18 +3020,15 @@ fn extract_source_recording(
         }
     }
 
-    client_routes::extract(
-        &cx,
-        root,
-        &client_routes::Proofs {
-            bindings: &bindings,
-            import_modules: &import_modules,
-            imported_names: &imported_names,
-            imported_files: &imported_types,
-            guessed_imports: &guessed_imports,
-        },
-        &mut out.client_routes,
-    );
+    let route_proofs = client_routes::Proofs {
+        bindings: &bindings,
+        import_modules: &import_modules,
+        imported_names: &imported_names,
+        imported_files: &imported_types,
+        guessed_imports: &guessed_imports,
+    };
+    client_routes::extract(&cx, root, &route_proofs, &mut out.client_routes);
+    client_navigation::extract(&cx, root, &route_proofs, &mut out.client_navigation);
     rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
     Ok(out)
 }
@@ -3147,6 +3148,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.eval_sites.extend(ex.eval_sites);
     out.target_tests.extend(ex.target_tests);
     out.client_routes.extend(ex.client_routes);
+    out.client_navigation.extend(ex.client_navigation);
 }
 
 /// Shared directory completion. Its live configuration inputs are deliberately
@@ -3226,7 +3228,10 @@ fn complete_directory(
     }
     out.pulumi_bindings.clear();
     let routes = std::mem::take(&mut out.client_routes);
+    let files = routes.files.clone();
     client_routes::complete(routes, id.repo, &mut out.nodes, &mut out.edges);
+    let navigation = std::mem::take(&mut out.client_navigation);
+    client_navigation::complete(navigation, &files, id.repo, &mut out.nodes, &mut out.edges);
     next_pages_screens(out, id);
     // Bare-module import targets are classified against the same index:
     // external only when nothing in the repository could answer them.
@@ -3422,6 +3427,7 @@ mod bundler_alias;
 mod callable;
 pub mod captured;
 pub mod chrome_messaging;
+pub mod client_navigation;
 pub mod client_routes;
 pub mod client_table;
 pub(crate) mod const_resolution;
