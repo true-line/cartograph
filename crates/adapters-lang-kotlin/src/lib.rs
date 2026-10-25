@@ -58,6 +58,9 @@ pub struct Extraction {
     pending_calls: Vec<PendingCall>,
     /// Calls on declared-type receivers (#1048), resolved at the join.
     typed_calls: Vec<TypedCall>,
+    /// Functions with a declared return type, as the FQNs that type can
+    /// denote (W11c-2: a view model factory's `create(…): VM`).
+    function_returns: Vec<(String, Vec<String>)>,
     declared_types: Vec<Declared>,
     declared_functions: Vec<Declared>,
     /// Further import targets (#721): extension functions, top-level
@@ -93,8 +96,24 @@ struct TypedCall {
     /// Bound by a `T(…)` initializer: `T` must be a constructible class and
     /// not also a top-level function.
     constructed: bool,
+    /// `Some(method)`: the receiver's type is `method`'s declared return
+    /// type on the candidate type (a `hiltViewModel` factory callback).
+    via: Option<String>,
     member: String,
     resolved_props: serde_json::Value,
+    /// An unqualified call in a `with(x) { … }` lambda: what it resolves to
+    /// when `x`'s type does not declare the member.
+    fallback: Option<Fallback>,
+    /// Top-level FQNs that, if this repository declares one (a function, a
+    /// callable property or a type), shadow `kotlin.with`: the call then
+    /// takes its fallback.
+    shadowed_by: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum Fallback {
+    Edge(Edge),
+    Pending(PendingCall),
 }
 
 /// A declaration (type/object or top-level function) and the
@@ -207,6 +226,15 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     }
     for typed in &mut extraction.typed_calls {
         retarget_props_commit(&mut typed.resolved_props, commit);
+        match &mut typed.fallback {
+            Some(Fallback::Edge(edge)) => retarget_props_commit(&mut edge.props, commit),
+            Some(Fallback::Pending(pending)) => {
+                retarget_props_commit(&mut pending.resolved_props, commit);
+                retarget_props_commit(&mut pending.gap.0.props, commit);
+                retarget_props_commit(&mut pending.gap.1.props, commit);
+            }
+            None => {}
+        }
     }
     extraction.navigation3.retarget(commit);
 }
@@ -792,6 +820,27 @@ pub fn extract_source(
     };
     out.packages.extend(package.clone());
     let imports = parse_imports(&cx, root, &language, &mut out);
+    let hilt: HashSet<String> = imports
+        .bindings
+        .iter()
+        .filter(|(_, fqn)| receivers::HILT_VIEW_MODEL.contains(&fqn.as_str()))
+        .filter(|(name, _)| !receivers::declares_name(&cx, root, name))
+        .map(|(name, _)| name.clone())
+        .collect();
+    // `with` is Kotlin's receiver-scoping `kotlin.with` unless this file
+    // declares or imports another. A same-package or star-imported
+    // repository `with` is checked at the join (`TypedCall::shadowed_by`).
+    let std_with = !receivers::declares_name(&cx, root, "with")
+        && imports
+            .bindings
+            .get("with")
+            .is_none_or(|fqn| fqn == "kotlin.with");
+    let with_shadows: Vec<String> = package
+        .iter()
+        .chain(&imports.wildcard_packages)
+        .map(|pkg| format!("{pkg}.with"))
+        .chain(package.is_none().then(|| "with".to_string()))
+        .collect();
 
     // Types: classes, interfaces, enums, data classes, objects — nested
     // chains included.
@@ -855,6 +904,7 @@ pub fn extract_source(
     let function_query = Query::new(&language, "(function_declaration name: (identifier) @name)")
         .expect("static query");
     let mut functions_by_start: HashMap<usize, String> = HashMap::new();
+    let mut returns: Vec<(String, TsNode<'_>, Option<String>)> = Vec::new();
     let mut local_functions: HashSet<String> = HashSet::new();
     let mut functions = Vec::new();
     let mut cursor = QueryCursor::new();
@@ -900,6 +950,16 @@ pub fn extract_source(
         let symbol = symbol_id(id.repo, path, &qualified);
         functions_by_start.insert(function.start_byte(), symbol.clone());
         local_functions.insert(qualified.clone());
+        let return_type = {
+            let mut walk = function.walk();
+            let parts: Vec<TsNode<'_>> = function.named_children(&mut walk).collect();
+            parts
+                .iter()
+                .position(|part| part.kind() == "function_value_parameters")
+                .and_then(|at| parts.get(at + 1).copied())
+                .and_then(|ty| receivers::declared_type(&cx, ty))
+        };
+        returns.push((symbol.clone(), function, return_type));
         let mut props = serde_json::json!({
             "name": qualified,
             "kind": "function",
@@ -935,6 +995,20 @@ pub fn extract_source(
             });
         }
         functions.push((function, symbol));
+    }
+
+    for (symbol, function, return_type) in returns {
+        if let Some(ty) = return_type {
+            let candidates = type_candidates(
+                &cx,
+                &imports,
+                package.as_deref(),
+                &local_types,
+                function,
+                &ty,
+            );
+            out.function_returns.push((symbol, candidates));
+        }
     }
 
     if let Some(package) = &package {
@@ -1139,6 +1213,14 @@ pub fn extract_source(
             _ => continue,
         };
         let receiver_is_this = receiver.is_none_or(|receiver| receiver.kind() == "this_expression");
+        // `with(x) { m() }`: x's members come before the enclosing class and
+        // top level, so a typed `x` is tried first (W11c-2).
+        let with_binding = if receiver.is_none() && std_with {
+            receivers::with_receiver_binding(&cx, call, &hilt)
+                .filter(|binding| *binding != receivers::Binding::Untyped)
+        } else {
+            None
+        };
         if receiver_is_this {
             // Unqualified or `this.` call: resolve within the enclosing
             // type chain, then (for top-level code) the file's top level.
@@ -1155,34 +1237,63 @@ pub fn extract_source(
             } else {
                 None
             };
-            if let Some(qualified) = resolved {
+            let fallback = if let Some(qualified) = resolved {
                 let dst = symbol_id(id.repo, path, &qualified);
-                if dst != src {
-                    out.edges.push(Edge {
-                        src,
+                (dst != src).then(|| {
+                    Fallback::Edge(Edge {
+                        src: src.clone(),
                         dst,
                         label: "CALLS".into(),
                         props: serde_json::json!({
                             "prov": cx.prov(&call, &format!("CALLS {qualified}")),
                         }),
-                    });
-                }
-                continue;
-            }
-            if receiver.is_some() {
-                continue;
-            }
-            // An unqualified call to an imported top-level function is
-            // import-proven the same way a type receiver is.
-            let Some(fqn) = imports.bindings.get(&name) else {
-                continue;
+                    })
+                })
+            } else if receiver.is_some() {
+                None
+            } else {
+                // An unqualified call to an imported top-level function is
+                // import-proven the same way a type receiver is.
+                imports.bindings.get(&name).map(|fqn| {
+                    Fallback::Pending(pending_call(
+                        &cx,
+                        src.clone(),
+                        call,
+                        fqn.clone(),
+                        None,
+                        name.clone(),
+                    ))
+                })
             };
-            push_pending(&cx, &mut out, src, call, fqn.clone(), None, name);
+            // A receiver type that proves nothing (a type parameter) keeps
+            // the ordinary resolution.
+            let typed = with_binding.and_then(|binding| {
+                typed_call(
+                    &cx,
+                    &imports,
+                    package.as_deref(),
+                    &local_types,
+                    src.clone(),
+                    call,
+                    binding,
+                    name,
+                )
+            });
+            match (typed, fallback) {
+                (Some(mut typed), fallback) => {
+                    typed.fallback = fallback;
+                    typed.shadowed_by = with_shadows.clone();
+                    out.typed_calls.push(typed);
+                }
+                (None, Some(Fallback::Edge(edge))) => out.edges.push(edge),
+                (None, Some(Fallback::Pending(pending))) => out.pending_calls.push(pending),
+                (None, None) => {}
+            }
             continue;
         }
         let receiver = receiver.expect("non-this receiver");
         let binding = match receiver.kind() {
-            "identifier" => receivers::lexical_binding(&cx, call, cx.text(&receiver)),
+            "identifier" => receivers::lexical_binding(&cx, call, cx.text(&receiver), &hilt),
             "navigation_expression" => {
                 let parts: Vec<TsNode<'_>> = {
                     let mut walk = receiver.walk();
@@ -1192,7 +1303,7 @@ pub fn extract_source(
                     [this, property]
                         if this.kind() == "this_expression" && property.kind() == "identifier" =>
                     {
-                        receivers::this_property_binding(&cx, call, cx.text(property))
+                        receivers::this_property_binding(&cx, call, cx.text(property), &hilt)
                     }
                     _ => continue,
                 }
@@ -1201,34 +1312,18 @@ pub fn extract_source(
         };
         match binding {
             Some(receivers::Binding::Untyped) => continue,
-            Some(receivers::Binding::Typed(ty)) => {
-                push_typed(
+            Some(binding) => {
+                let typed = typed_call(
                     &cx,
-                    &mut out,
                     &imports,
                     package.as_deref(),
                     &local_types,
                     src,
                     call,
-                    &ty,
-                    false,
+                    binding,
                     name,
                 );
-                continue;
-            }
-            Some(receivers::Binding::Constructed(ty)) => {
-                push_typed(
-                    &cx,
-                    &mut out,
-                    &imports,
-                    package.as_deref(),
-                    &local_types,
-                    src,
-                    call,
-                    &ty,
-                    true,
-                    name,
-                );
+                out.typed_calls.extend(typed);
                 continue;
             }
             None if receiver.kind() != "identifier" => continue,
@@ -1253,79 +1348,96 @@ pub fn extract_source(
     Ok(out)
 }
 
-/// Queue a declared-type receiver call (#1048) with the FQNs its type name
-/// can denote. A same-file type is tried through the enclosing type chain
-/// first, as Kotlin resolves nested names.
-#[allow(clippy::too_many_arguments)]
-fn push_typed(
+/// The FQNs a type name written at `site` can denote, in Kotlin's
+/// precedence: explicit import, a same-file type through the enclosing type
+/// chain (as nested names resolve), the same package, then star imports.
+fn type_candidates(
     cx: &FileCx<'_>,
-    out: &mut Extraction,
+    imports: &Imports,
+    package: Option<&str>,
+    local_types: &HashSet<String>,
+    site: TsNode<'_>,
+    ty: &str,
+) -> Vec<String> {
+    let (first, rest) = match ty.split_once('.') {
+        Some((first, rest)) => (first, Some(rest)),
+        None => (ty, None),
+    };
+    if let Some(fqn) = imports.bindings.get(first) {
+        return vec![match rest {
+            Some(rest) => format!("{fqn}.{rest}"),
+            None => fqn.clone(),
+        }];
+    }
+    let chain = enclosing_type_chain(cx, site);
+    let same_file = (0..=chain.len()).rev().find_map(|depth| {
+        let qualified = chain[..depth]
+            .iter()
+            .map(String::as_str)
+            .chain([ty])
+            .collect::<Vec<_>>()
+            .join(".");
+        local_types.contains(&qualified).then_some(qualified)
+    });
+    let prefix = |name: &str| match package {
+        Some(package) => format!("{package}.{name}"),
+        None => name.to_string(),
+    };
+    match same_file {
+        Some(qualified) => vec![prefix(&qualified)],
+        None => std::iter::once(prefix(ty))
+            // A dotted name may already be absolute (`com.acme.Api`).
+            .chain((rest.is_some() && package.is_some()).then(|| ty.to_string()))
+            .chain(
+                imports
+                    .wildcard_packages
+                    .iter()
+                    .map(|wildcard| format!("{wildcard}.{ty}")),
+            )
+            .collect(),
+    }
+}
+
+/// A declared-type receiver call (#1048) for the directory join. `None` for
+/// an untyped binding.
+#[allow(clippy::too_many_arguments)]
+fn typed_call(
+    cx: &FileCx<'_>,
     imports: &Imports,
     package: Option<&str>,
     local_types: &HashSet<String>,
     src: String,
     call: TsNode<'_>,
-    ty: &str,
-    constructed: bool,
+    binding: receivers::Binding,
     member: String,
-) {
-    let (first, rest) = match ty.split_once('.') {
-        Some((first, rest)) => (first, Some(rest)),
-        None => (ty, None),
+) -> Option<TypedCall> {
+    let (ty, constructed, via) = match binding {
+        receivers::Binding::Typed(ty) => (ty, false, None),
+        receivers::Binding::Constructed(ty) => (ty, true, None),
+        receivers::Binding::Factory { factory, method } => (factory, false, Some(method)),
+        receivers::Binding::Untyped => return None,
     };
-    if receivers::is_type_parameter(cx, call, first) {
-        return;
+    if receivers::is_type_parameter(cx, call, ty.split('.').next().unwrap_or(&ty)) {
+        return None;
     }
-    let with_rest = |base: &str| match rest {
-        Some(rest) => format!("{base}.{rest}"),
-        None => base.to_string(),
+    let candidates = type_candidates(cx, imports, package, local_types, call, &ty);
+    let callee = match &via {
+        Some(method) => format!("{ty}.{method}().{member}"),
+        None => format!("{ty}.{member}"),
     };
-    let mut candidates = Vec::new();
-    if let Some(fqn) = imports.bindings.get(first) {
-        candidates.push(with_rest(fqn));
-    } else {
-        let chain = enclosing_type_chain(cx, call);
-        let same_file = (0..=chain.len()).rev().find_map(|depth| {
-            let qualified = chain[..depth]
-                .iter()
-                .map(String::as_str)
-                .chain([ty])
-                .collect::<Vec<_>>()
-                .join(".");
-            local_types.contains(&qualified).then_some(qualified)
-        });
-        let prefix = |name: &str| match package {
-            Some(package) => format!("{package}.{name}"),
-            None => name.to_string(),
-        };
-        match same_file {
-            Some(qualified) => candidates.push(prefix(&qualified)),
-            None => {
-                candidates.push(prefix(ty));
-                // A dotted name may already be absolute (`com.acme.Api`).
-                if rest.is_some() && package.is_some() {
-                    candidates.push(ty.to_string());
-                }
-                candidates.extend(
-                    imports
-                        .wildcard_packages
-                        .iter()
-                        .map(|wildcard| format!("{wildcard}.{ty}")),
-                );
-            }
-        }
-    }
-    let callee = format!("{ty}.{member}");
-    out.typed_calls.push(TypedCall {
+    Some(TypedCall {
         src,
         candidates,
         constructed,
+        via,
         member,
         resolved_props: serde_json::json!({
             "resolution": "declared-type",
             "prov": cx.prov(&call, &format!("CALLS {callee}")),
         }),
-    });
+        fallback: None,
+        shadowed_by: Vec::new(),
+    })
 }
 
 /// Queue an import-proven call for the directory join, with its
@@ -1339,6 +1451,18 @@ fn push_pending(
     member: Option<String>,
     callee: String,
 ) {
+    out.pending_calls
+        .push(pending_call(cx, src, call, fqn, member, callee));
+}
+
+fn pending_call(
+    cx: &FileCx<'_>,
+    src: String,
+    call: TsNode<'_>,
+    fqn: String,
+    member: Option<String>,
+    callee: String,
+) -> PendingCall {
     let gap_id = format!("gap:call:{}@{}@{}", cx.id.repo, cx.path, call.start_byte());
     let gap_node = Node {
         id: gap_id.clone(),
@@ -1368,7 +1492,7 @@ fn push_pending(
             ),
         }),
     };
-    out.pending_calls.push(PendingCall {
+    PendingCall {
         src,
         fqn,
         member,
@@ -1377,7 +1501,7 @@ fn push_pending(
             "prov": cx.prov(&call, &format!("CALLS {callee}")),
         }),
         gap: (gap_node, gap_edge),
-    });
+    }
 }
 
 fn collect_kotlin_files(root: &Path, out: &mut Vec<String>) -> Result<(), ExtractError> {
@@ -1480,6 +1604,7 @@ pub fn extract_dir_incremental_with_progress(
             out.edges.extend(extraction.edges);
             out.pending_calls.extend(extraction.pending_calls);
             out.typed_calls.extend(extraction.typed_calls);
+            out.function_returns.extend(extraction.function_returns);
             out.declared_types.extend(extraction.declared_types);
             out.declared_functions.extend(extraction.declared_functions);
             out.declared_importables
@@ -1546,6 +1671,64 @@ pub fn extract_dir_incremental_with_progress(
         .filter(|node| node.label == "Symbol")
         .map(|node| node.id.clone())
         .collect::<HashSet<_>>();
+    // Declared-type receivers (#1048). The first candidate FQN this repo
+    // declares decides; a duplicate fails closed. A `with` call whose
+    // receiver type lacks the member falls back to its ordinary resolution.
+    let returns: HashMap<String, Vec<String>> = std::mem::take(&mut out.function_returns)
+        .into_iter()
+        .collect();
+    let resolve_type = |candidates: &[String]| {
+        candidates.iter().find_map(|fqn| {
+            types_by_fqn
+                .get(fqn)
+                .map(|unique| (fqn.clone(), unique.clone()))
+        })
+    };
+    for typed in std::mem::take(&mut out.typed_calls) {
+        let resolved = (|| {
+            if typed
+                .shadowed_by
+                .iter()
+                .any(|fqn| importable_files.contains_key(fqn))
+            {
+                return None;
+            }
+            let (fqn, declared) = resolve_type(&typed.candidates)?;
+            let declared = declared?; // ambiguous FQN: fail closed
+            if typed.constructed && (!declared.constructible || functions_by_fqn.contains_key(&fqn))
+            {
+                return None;
+            }
+            let declared = match &typed.via {
+                None => declared,
+                Some(method) => {
+                    let factory = symbol_id(
+                        id.repo,
+                        &declared.path,
+                        &format!("{}.{method}", declared.qualified),
+                    );
+                    resolve_type(returns.get(&factory)?)?.1?
+                }
+            };
+            let dst = symbol_id(
+                id.repo,
+                &declared.path,
+                &format!("{}.{}", declared.qualified, typed.member),
+            );
+            (known.contains(&dst) && dst != typed.src).then_some(dst)
+        })();
+        match (resolved, typed.fallback) {
+            (Some(dst), _) => out.edges.push(Edge {
+                src: typed.src,
+                dst,
+                label: "CALLS".into(),
+                props: typed.resolved_props,
+            }),
+            (None, Some(Fallback::Edge(edge))) => out.edges.push(edge),
+            (None, Some(Fallback::Pending(pending))) => out.pending_calls.push(pending),
+            (None, None) => {}
+        }
+    }
     for pending in std::mem::take(&mut out.pending_calls) {
         // `Foo(...)` on an imported repository class is a constructor call,
         // which this adapter does not model as a call (as for a same-file
@@ -1597,34 +1780,6 @@ pub fn extract_dir_incremental_with_progress(
                     out.edges.push(edge);
                 }
             }
-        }
-    }
-    for typed in std::mem::take(&mut out.typed_calls) {
-        let Some(declared) = typed
-            .candidates
-            .iter()
-            .find_map(|fqn| types_by_fqn.get(fqn).map(|unique| (fqn, unique)))
-        else {
-            continue;
-        };
-        let (fqn, Some(declared)) = declared else {
-            continue; // ambiguous FQN: fail closed
-        };
-        if typed.constructed && (!declared.constructible || functions_by_fqn.contains_key(fqn)) {
-            continue;
-        }
-        let dst = symbol_id(
-            id.repo,
-            &declared.path,
-            &format!("{}.{}", declared.qualified, typed.member),
-        );
-        if known.contains(&dst) && dst != typed.src {
-            out.edges.push(Edge {
-                src: typed.src,
-                dst,
-                label: "CALLS".into(),
-                props: typed.resolved_props,
-            });
         }
     }
     navigation3::complete(

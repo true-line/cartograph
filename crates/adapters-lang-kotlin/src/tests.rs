@@ -2264,3 +2264,244 @@ fun qualified(a: io.x.net.ApiService) { a.other() }
                 .is_some_and(|c| c.contains("stats") || c.contains("go"))
     }));
 }
+
+// AC-0354 (T-0354): an import-proven `hiltViewModel` call types its binding
+// (#1048 W11c-2): `hiltViewModel<VM>()` is `VM`, and
+// `hiltViewModel(…) { f: F -> f.create(…) }` is `F.create`'s declared return
+// type. Inside `with(x) { m() }` a typed `x`'s member wins over the enclosing
+// file's functions, which remain the fallback when `x`'s type lacks `m` or
+// proves nothing (a type parameter). A `hiltViewModel` or `with` shadowed by
+// a same-file declaration, or a same-package `with` function or callable
+// property, types nothing.
+#[test]
+fn hilt_view_models_type_their_bindings() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "vm/CreateVm.kt",
+        r#"package io.x.vm
+
+class CreateVm @AssistedInject constructor(@Assisted val key: String) {
+    @AssistedFactory
+    interface Factory {
+        fun create(key: String): CreateVm
+    }
+
+    fun create(body: Int) {}
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "vm/Vms.kt",
+        "package io.x.vm\n\nclass LoginVm {\n    fun login() {}\n}\n\nclass OtherVm {\n    fun go() {}\n}\n",
+    );
+    write(
+        dir.path(),
+        "ui/Screens.kt",
+        r#"package io.x.ui
+
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import io.x.vm.*
+
+fun Create(k: String) {
+    val viewModel = hiltViewModel(key = k) { factory: CreateVm.Factory ->
+        factory.create(k)
+    }
+    Button(onClick = { viewModel.create(1) })
+}
+
+fun Login() = with(hiltViewModel<LoginVm>()) {
+    login()
+    helper()
+}
+
+fun login() {}
+
+fun helper() {}
+
+fun Arg() {
+    val vm = hiltViewModel<OtherVm>()
+    vm.go()
+}
+
+fun Default(viewModel: OtherVm = hiltViewModel()) { viewModel.go() }
+
+fun WrongShape(k: String) {
+    val vm = hiltViewModel { f: CreateVm.Factory ->
+        val made = f.create(k)
+        made
+    }
+    vm.create(2)
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "fake/Fake.kt",
+        r#"package io.x.fake
+
+import io.x.vm.OtherVm
+
+fun <T> hiltViewModel(): T = TODO()
+
+fun Fake() {
+    val vm = hiltViewModel<OtherVm>()
+    vm.go()
+}
+"#,
+    );
+    // The real import, shadowed by a same-file function: no Hilt typing.
+    write(
+        dir.path(),
+        "shadow/Hilt.kt",
+        r#"package io.x.shadow
+
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import io.x.vm.LoginVm
+import io.x.vm.OtherVm
+
+fun <T> hiltViewModel(): OtherVm = OtherVm()
+
+fun Shadowed() {
+    val vm = hiltViewModel<LoginVm>()
+    vm.login()
+}
+"#,
+    );
+    // A member `with` that gives its lambda no receiver.
+    write(
+        dir.path(),
+        "shadow/With.kt",
+        r#"package io.x.shadoww
+
+import io.x.vm.LoginVm
+
+class Scope {
+    fun with(vm: LoginVm, block: () -> Unit) {
+        block()
+    }
+
+    fun login() {}
+
+    fun LocalWith(vm: LoginVm) = with(vm) {
+        login()
+    }
+}
+"#,
+    );
+    // A same-package `with` declared in another file shadows `kotlin.with`.
+    write(
+        dir.path(),
+        "pkgwith/With.kt",
+        "package io.x.pkgwith\n\nfun with(x: Any, block: () -> Unit) {\n    block()\n}\n",
+    );
+    write(
+        dir.path(),
+        "pkgwith/Use.kt",
+        r#"package io.x.pkgwith
+
+import io.x.vm.LoginVm
+
+fun login() {}
+
+fun PackageWith(vm: LoginVm) = with(vm) {
+    login()
+}
+"#,
+    );
+    // A same-package callable property named `with` shadows it too.
+    write(
+        dir.path(),
+        "pkgprop/With.kt",
+        "package io.x.pkgprop\n\nimport io.x.vm.LoginVm\n\nval with: (LoginVm, () -> Unit) -> Unit = { _, block -> block() }\n",
+    );
+    write(
+        dir.path(),
+        "pkgprop/Use.kt",
+        r#"package io.x.pkgprop
+
+import io.x.vm.LoginVm
+
+fun login() {}
+
+fun PropertyWith(vm: LoginVm) {
+    with(vm) {
+        login()
+    }
+}
+"#,
+    );
+    // A type parameter receiver proves nothing; the ordinary call stays.
+    write(
+        dir.path(),
+        "generic/Generic.kt",
+        r#"package io.x.generic
+
+fun helper() {}
+
+fun <T> Generic(x: T) = with(x) {
+    helper()
+}
+"#,
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let short = |s: &str| s.rsplit_once('#').unwrap().1.to_string();
+    let mut calls: Vec<(String, String)> = out
+        .edges
+        .iter()
+        .filter(|e| {
+            e.label == "CALLS"
+                && [
+                    "@ui/",
+                    "@fake/",
+                    "@shadow/",
+                    "@pkgwith/",
+                    "@pkgprop/",
+                    "@generic/",
+                ]
+                .iter()
+                .any(|dir| e.src.contains(dir))
+        })
+        .filter(|e| !e.dst.starts_with("gap:"))
+        .map(|e| (short(&e.src), short(&e.dst)))
+        .collect();
+    calls.sort();
+    let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+    let mut expected = vec![
+        pair("Arg", "OtherVm.go"),
+        pair("Create", "CreateVm.Factory.create"),
+        pair("Create", "CreateVm.create"),
+        pair("Default", "OtherVm.go"),
+        // The look-alike is an ordinary local call; it types nothing.
+        pair("Fake", "hiltViewModel"),
+        // Shadowed `hiltViewModel` / `with` keep their ordinary resolution.
+        pair("Generic", "helper"),
+        pair("Scope.LocalWith", "Scope.login"),
+        pair("Scope.LocalWith", "Scope.with"),
+        pair("PackageWith", "login"),
+        pair("PropertyWith", "login"),
+        pair("Shadowed", "hiltViewModel"),
+        pair("Login", "LoginVm.login"),
+        pair("Login", "helper"),
+        pair("WrongShape", "CreateVm.Factory.create"),
+    ];
+    expected.sort();
+    assert_eq!(calls, expected);
+    // The view model call carries the declared-type resolution and its span.
+    let create = edge(
+        &out.edges,
+        "sym:local/demo@ui/Screens.kt#Create",
+        "sym:local/demo@vm/CreateVm.kt#CreateVm.create",
+        "CALLS",
+    );
+    assert_eq!(create.props["resolution"], "declared-type");
+    let prov: Provenance = serde_json::from_value(create.props["prov"].clone()).unwrap();
+    let text = std::fs::read_to_string(dir.path().join("ui/Screens.kt")).unwrap();
+    let span = &prov.evidence[0];
+    assert_eq!(
+        &text[span.byte_start as usize..span.byte_end as usize],
+        "viewModel.create(1)"
+    );
+}
