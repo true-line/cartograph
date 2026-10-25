@@ -3580,4 +3580,36 @@ class Fake { @Query() thing() {} }
     )
     .unwrap();
     assert!(lookalike.nodes.iter().all(|n| n.label != "Endpoint"));
+    // A class that is both a resolver and a controller keeps its HTTP routes.
+    let hybrid = extract_source(
+        br#"
+import { Controller, Get } from '@nestjs/common';
+import { Query, Resolver } from '@nestjs/graphql';
+@Resolver()
+@Controller('health')
+export class HealthResolver {
+  @Query() health() {}
+  @Get('live') live() {}
+}
+"#,
+        "src/api/resolvers/admin/health.resolver.ts",
+        &id(),
+    )
+    .unwrap();
+    let mut methods: Vec<_> = hybrid
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Endpoint")
+        .map(|n| {
+            (
+                n.props["method"].as_str().unwrap(),
+                n.props["path"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    methods.sort();
+    assert_eq!(
+        methods,
+        [("GET", "/health/live"), ("QUERY", "admin.health")]
+    );
 }

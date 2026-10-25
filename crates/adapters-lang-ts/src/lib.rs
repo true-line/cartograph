@@ -1946,8 +1946,8 @@ fn extract_source_recording(
                 bindings.imported(site, local)
                     && imported_names.get(local).map_or(local, String::as_str) == "Allow"
             };
+            // A class may also be a controller: its HTTP routes follow.
             graphql_resolvers::operations(&cx, &mut out, body, &from_graphql, &allow);
-            continue;
         }
         let controller = leading_decorators(class_node)
             .into_iter()
