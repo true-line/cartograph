@@ -386,7 +386,7 @@ pub(crate) fn required_reservation(limits: WorkerLimits) -> Option<usize> {
 }
 
 /// Preparation, retained reads and modeled replay/provider component floors.
-/// Caller input/sealing and later read acquisition still need composition.
+/// Input construction/sealing and later read acquisition still need composition.
 #[cfg(unix)]
 pub(crate) fn task_phase_minimum(limits: WorkerLimits, app_path_bytes: usize) -> Option<usize> {
     let (preparation, context, execution) = task_phase_workspaces(limits, app_path_bytes)?;
@@ -455,6 +455,15 @@ fn task_phase_workspaces(
         crate::investigations::preparation_workspace::retained_read_bytes(
             &agents::investigation::INVESTIGATION_V2_POLICY,
         )?,
+    )?;
+    // A metadata continuation retains the current input while constructing a
+    // candidate. Charge both completed inputs throughout execution; rejected
+    // construction, certificates and sealing peaks remain separate work.
+    let context = context.checked_add(
+        agents::investigation::InvestigationInput::retained_workspace_bytes(
+            &agents::investigation::INVESTIGATION_V2_POLICY,
+        )?
+        .checked_mul(2)?,
     )?;
     let (history, history_projection) =
         crate::jobs::investigations::parent_history_projection_workspace()?;

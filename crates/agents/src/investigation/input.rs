@@ -7,6 +7,8 @@ use llm::{AnalysisTier, CompletionAction, CompletionPayload, PayloadSpan};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+const MAX_PRIVACY_STRINGS: usize = 16384;
+
 /// Prepared once per model step after coherent host acquisition. All fields are
 /// private so replacing query/source bytes requires revalidation and a new hash.
 #[derive(Clone)]
@@ -260,7 +262,7 @@ impl InvestigationInput {
                 collect_strings(&value, &mut graph_strings);
             }
         }
-        if supplied_strings.len() + graph_strings.len() > 16384
+        if supplied_strings.len() + graph_strings.len() > MAX_PRIVACY_STRINGS
             || supplied_strings
                 .iter()
                 .chain(&graph_strings)
@@ -335,7 +337,7 @@ impl InvestigationInput {
                 .map_err(|_| InvestigationError::InvalidInput)?;
             prompt_value["context_id"] = proof.context_id.clone().into();
             collect_strings(&prompt_value["coverage_qualification"], &mut graph_strings);
-            if graph_strings.len() + supplied_strings.len() > 16384
+            if graph_strings.len() + supplied_strings.len() > MAX_PRIVACY_STRINGS
                 || graph_strings
                     .iter()
                     .chain(&supplied_strings)
@@ -827,6 +829,9 @@ fn collect_strings(value: &Value, out: &mut Vec<String>) {
 
 #[path = "input_versions.rs"]
 mod versions;
+
+#[path = "input_workspace.rs"]
+mod workspace;
 
 #[path = "input_coverage_details.rs"]
 mod coverage_details;

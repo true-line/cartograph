@@ -70,6 +70,9 @@ fn coverage_detail_is_budgeted_supplied_and_disclosed_without_source_citations()
     assert!(prepare(&[]).is_err());
     assert!(prepare(&[format!("{raw} ")]).is_err());
     let input = prepare(std::slice::from_ref(&raw)).unwrap();
+    // AC-0327: retained accounting includes detail privacy owners appended
+    // after base input construction, not just the final prompt wire.
+    input.assert_retained_workspace(&INVESTIGATION_V1_POLICY);
     let action = input.action("inv:detail".into()).unwrap();
     let prompt: serde_json::Value = serde_json::from_str(&action.payload.prompt).unwrap();
     assert_eq!(prompt["coverage_details"].as_array().unwrap().len(), 1);
