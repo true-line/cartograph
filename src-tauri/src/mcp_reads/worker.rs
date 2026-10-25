@@ -465,6 +465,14 @@ fn task_phase_workspaces(
         )?
         .checked_mul(2)?,
     )?;
+    // The original invocation's preparation, authorization and response survive
+    // into next_metadata. They overlap every candidate acquisition/firewall
+    // phase, rather than disappearing when execution selects its largest peak.
+    let context = context.checked_add(
+        crate::investigations::provider_workspace::continuation_retained(
+            &agents::investigation::INVESTIGATION_V2_POLICY,
+        )?,
+    )?;
     let (history, history_projection) =
         crate::jobs::investigations::parent_history_projection_workspace()?;
     // Parent history is acquired first, then survives preparation and every
@@ -610,6 +618,45 @@ pub(crate) mod tests {
         .unwrap();
         let (_, retained, _) = task_phase_workspaces(limits, 0).unwrap();
         assert!(retained >= initial + growth);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn task_continuation_keeps_original_provider_owners_outside_phase_maximum() {
+        // AC-0327: observe the actual retained term before a larger preparation
+        // or query peak can hide an omitted original invocation owner.
+        let limits = limits();
+        let policy = &agents::investigation::INVESTIGATION_V2_POLICY;
+        let (frozen, _) = crate::investigations::preparation_workspace::workspace_bytes(
+            limits.scope,
+            agents::investigation::MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
+            limits.max_request_frame_bytes.get(),
+        )
+        .unwrap();
+        let reads =
+            crate::investigations::preparation_workspace::retained_read_bytes(policy).unwrap();
+        let inputs = agents::investigation::InvestigationInput::retained_workspace_bytes(policy)
+            .unwrap()
+            * 2;
+        let (history, _) =
+            crate::jobs::investigations::parent_history_projection_workspace().unwrap();
+        let caps = llm::bounded::CompletionLimits::new(
+            crate::investigations::provider_workspace::completion_limit_values(policy).unwrap(),
+        )
+        .unwrap();
+        let firewall = caps.firewall_workspace_bytes().unwrap();
+        let completion = caps.transport_workspace_bytes().unwrap().completion_bytes;
+        let (_, retained, execution) = task_phase_workspaces(limits, 0).unwrap();
+        assert!(
+            retained
+                >= frozen
+                    + reads
+                    + inputs
+                    + history
+                    + firewall.prepared_bytes
+                    + firewall.authorized_bytes
+                    + completion
+        );
+        assert!(execution >= firewall.prepare_peak_bytes);
     }
     #[cfg(unix)]
     #[test]

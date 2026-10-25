@@ -36,6 +36,21 @@ pub(crate) fn payload_peak(policy: &InvestigationPolicy) -> Option<usize> {
     Some(firewall.prepare_peak_bytes.max(authorize).max(invoke))
 }
 
+/// Original invocation owners remain live while next_metadata prepares and
+/// seals a candidate. Charge these outside the phase maximum: payload_peak
+/// then covers the candidate firewall independently. Caller actions and
+/// disclosures, including sealing temporaries, are separate components.
+#[cfg(unix)]
+pub(crate) fn continuation_retained(policy: &InvestigationPolicy) -> Option<usize> {
+    let limits = CompletionLimits::new(completion_limit_values(policy).ok()?).ok()?;
+    let firewall = limits.firewall_workspace_bytes()?;
+    let transport = limits.transport_workspace_bytes()?;
+    firewall
+        .prepared_bytes
+        .checked_add(firewall.authorized_bytes)?
+        .checked_add(transport.completion_bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
