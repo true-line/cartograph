@@ -400,6 +400,10 @@ mod storage_writer;
 #[cfg(test)]
 use storage_writer::persist;
 
+#[cfg(unix)]
+#[path = "source_snapshot_workspace.rs"]
+pub(super) mod snapshot_workspace;
+
 #[path = "source_continuation_snapshot.rs"]
 mod source_snapshot;
 pub(crate) use source_snapshot::{SourceContinuationOutcome, SourceContinuationSnapshotInput};

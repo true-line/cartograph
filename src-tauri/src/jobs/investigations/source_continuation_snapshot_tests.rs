@@ -36,6 +36,26 @@ fn source_continuation_snapshot_matches_real_prompt_and_settlement_without_write
         let before = encode(&fixture.f.task, MAX_RECORD_BYTES).unwrap();
         let changes = fixture.f.store.conn.total_changes();
         let projected = snapshot(&fixture, candidate.ledger(), reason.clone()).unwrap();
+        #[cfg(unix)]
+        {
+            // AC-0327: real returned DTO serialization is a retained lower bound,
+            // not a measurement of peak allocations or process RSS.
+            let (retained, _) = snapshot_workspace::workspace().unwrap();
+            let bytes = serde_json::to_vec(&(
+                projected.request(),
+                projected.base_ledger(),
+                projected.ledger(),
+                projected.detail(),
+                projected.metadata(),
+                &projected.basis().input_ledger_hash,
+                &projected.basis().previous_ledger,
+                projected.basis().completed_tool,
+                projected.next_action_id(),
+            ))
+            .unwrap()
+            .len();
+            assert!(retained >= bytes + std::mem::size_of_val(&projected));
+        }
         assert_eq!(fixture.f.store.conn.total_changes(), changes);
         let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
         let saved = load_next_prompt_task_base(&tx, &fixture.f.basis.task_id).unwrap();

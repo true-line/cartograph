@@ -470,6 +470,10 @@ fn task_phase_workspaces(
     // FrozenContext survives the whole execution loop, including saved-task
     // reads and validation. Preparation already includes its retained context.
     // Prepared inventory remains owned during durable publication/replay.
+    // The returned source snapshot survives input/firewall construction until
+    // prepared_source_publication drops it before the final revalidation.
+    let (snapshot, snapshot_peak) = crate::jobs::investigations::source_snapshot_workspace()?;
+    let execution = snapshot_peak.max(snapshot.checked_add(execution)?);
     let execution = crate::investigations::inventory_admission_workspace(execution)?;
     let (query_retained, query_peak) =
         crate::investigations::query_workspace::admitted_workspace(limits.scope, app_path_bytes)?;
