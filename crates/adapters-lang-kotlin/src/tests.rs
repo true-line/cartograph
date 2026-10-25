@@ -1136,7 +1136,13 @@ fn navigation3_entries_become_screens_and_back_stack_adds_navigate() {
         r#"package io.simplelogin.android.screens
 
 fun LoginMasterScreen() {}
-fun HomeScreen(apiKey: String, onCreateAlias: () -> Unit, onShowSettings: () -> Unit) {}
+fun HomeTopBar(onSettings: () -> Unit) {
+    onSettings()
+}
+fun HomeScreen(apiKey: String, onCreateAlias: () -> Unit, onShowSettings: () -> Unit) {
+    onCreateAlias()
+    HomeTopBar(onSettings = onShowSettings)
+}
 fun CreateAliasScreen(apiKey: String) {}
 fun AliasDetailsScreen(apiKey: String, aliasId: Long) {}
 fun AliasContactsScreen(apiKey: String, aliasId: Long) {}
@@ -1407,6 +1413,58 @@ fun FakeRoot() {
     );
 
     let vm_file = "src/main/kotlin/io/simplelogin/android/root/AppRootViewModel.kt";
+    let vm_sym = format!("sym:local/demo@{vm_file}#AppRootViewModel");
+
+    let init_screen = out
+        .nodes
+        .iter()
+        .find(|n| {
+            n.id == "screen:local/demo@navigation3:io.simplelogin.android.root.InitializationDestination"
+        })
+        .unwrap();
+    assert_eq!(init_screen.props["initial"], true);
+    assert_eq!(init_screen.props["back_stack_owner"], vm_sym);
+    assert!(init_screen.props.get("initial_owners").is_none());
+
+    let home_screen = out
+        .nodes
+        .iter()
+        .find(|n| {
+            n.id == "screen:local/demo@navigation3:io.simplelogin.android.root.HomeDestination"
+        })
+        .unwrap();
+    assert!(home_screen.props.get("initial").is_none());
+    let home_callbacks = home_screen.props["entry_callbacks"].as_array().unwrap();
+    assert_eq!(home_callbacks.len(), 2);
+    assert_eq!(home_callbacks[0]["param"], "onCreateAlias");
+    assert_eq!(
+        home_callbacks[0]["symbol"],
+        format!("sym:local/demo@{vm_file}#AppRootViewModel.showCreateAliasScreen")
+    );
+    assert_eq!(
+        home_callbacks[0]["composable"],
+        "sym:local/demo@src/main/kotlin/io/simplelogin/android/screens/Screens.kt#HomeScreen"
+    );
+    assert_eq!(home_callbacks[0]["read"], true);
+    assert_eq!(home_callbacks[0]["forwarded"], serde_json::json!([]));
+    assert_eq!(home_callbacks[1]["param"], "onShowSettings");
+    assert_eq!(
+        home_callbacks[1]["symbol"],
+        format!("sym:local/demo@{vm_file}#AppRootViewModel.showDeviceSettingsScreen")
+    );
+    assert_eq!(
+        home_callbacks[1]["composable"],
+        "sym:local/demo@src/main/kotlin/io/simplelogin/android/screens/Screens.kt#HomeScreen"
+    );
+    assert_eq!(home_callbacks[1]["read"], true);
+    assert_eq!(
+        home_callbacks[1]["forwarded"],
+        serde_json::json!([{
+            "composable": "sym:local/demo@src/main/kotlin/io/simplelogin/android/screens/Screens.kt#HomeTopBar",
+            "param": "onSettings",
+        }])
+    );
+
     let mut navs: Vec<_> = out
         .edges
         .iter()
@@ -1418,6 +1476,10 @@ fun FakeRoot() {
             let sites = e.props["sites"].as_array().unwrap();
             assert_eq!(sites.len(), 1);
             assert_eq!(sites[0]["path"], vm_file);
+            assert_eq!(
+                sites[0].get("phase").and_then(|v| v.as_str()),
+                (e.src == vm_sym).then_some("init")
+            );
             (
                 e.src.clone(),
                 e.dst.clone(),
@@ -1648,5 +1710,242 @@ fun <T> mutableStateListOf(vararg items: T): MutableList<T> = mutableListOf(*ite
             .iter()
             .any(|n| n.label == "Gap" && n.props["kind"] == "navigation-unresolved"),
         "an overloaded helper's String call is not a computed navigation"
+    );
+}
+
+// AC-0351: initial destinations across multiple owners, entry-callback
+// registrations (direct read, forwarded hops capped at CALLBACK_DEPTH, unread
+// parameter, single-call lambda, ignored computed and overloaded expressions),
+// and no T0 edges from screens to callback symbols.
+#[test]
+fn navigation3_records_initial_destinations_and_entry_callbacks() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/io/simplelogin/android/screens/Screens.kt",
+        r#"package io.simplelogin.android.screens
+
+fun HomeTopBar(onSettings: () -> Unit) {
+    onSettings()
+}
+
+fun HomeScreen(
+    apiKey: String,
+    onCreateAlias: () -> Unit,
+    onShowSettings: () -> Unit,
+    onUnread: () -> Unit,
+    onLambda: () -> Unit,
+    onComputed: () -> Unit,
+    onOverloaded: () -> Unit,
+) {
+    onCreateAlias()
+    HomeTopBar(onSettings = onShowSettings)
+    // A library callee is not followed, but passing the callback reads it.
+    IconButton(onClick = onLambda)
+}
+
+fun Hop5(cb: () -> Unit) {
+    cb()
+}
+fun Hop4(cb: () -> Unit) {
+    Hop5(cb)
+}
+fun Hop3(cb: () -> Unit) {
+    Hop4(cb)
+}
+fun Hop2(cb: () -> Unit) {
+    Hop3(cb)
+}
+fun Hop1(cb: () -> Unit) {
+    Hop2(cb)
+}
+fun CreateAliasScreen(onDone: () -> Unit) {
+    Hop1(onDone)
+}
+"#,
+    );
+    let app_root_src = r#"package io.simplelogin.android.root
+
+import androidx.compose.runtime.mutableStateListOf
+import androidx.navigation3.runtime.NavKey
+import androidx.navigation3.runtime.entryProvider
+import androidx.navigation3.runtime.rememberNavBackStack
+import io.simplelogin.android.screens.CreateAliasScreen
+import io.simplelogin.android.screens.HomeScreen
+import kotlinx.coroutines.flow.MutableStateFlow
+
+data object InitializationDestination : NavKey
+data class HomeDestination(val apiKey: String) : NavKey
+data class CreateAliasDestination(val apiKey: String) : NavKey
+data object DeviceSettingsDestination : NavKey
+
+fun pick(): () -> Unit = {}
+fun topLevelDone() {}
+
+class AppRootViewModel {
+    private val _navBackStack =
+        MutableStateFlow(mutableStateListOf<NavKey>(InitializationDestination))
+
+    fun showCreateAliasScreen() {
+        _navBackStack.value.add(CreateAliasDestination("k"))
+    }
+
+    fun showDeviceSettingsScreen() {
+        _navBackStack.value.add(DeviceSettingsDestination)
+    }
+
+    fun overloaded() {}
+    fun overloaded(flag: Boolean) {}
+}
+
+class SecondaryNavigator {
+    private val stack = rememberNavBackStack(InitializationDestination)
+    private val homeStack = mutableStateListOf<NavKey>(HomeDestination("init"))
+}
+
+fun AppRoot(viewModel: AppRootViewModel) {
+    entryProvider {
+        entry<InitializationDestination> {}
+        entry<DeviceSettingsDestination> {}
+        entry<HomeDestination> { destination ->
+            HomeScreen(
+                apiKey = destination.apiKey,
+                onCreateAlias = viewModel::showCreateAliasScreen,
+                onShowSettings = viewModel::showDeviceSettingsScreen,
+                onUnread = viewModel::showCreateAliasScreen,
+                onLambda = { viewModel.showDeviceSettingsScreen() },
+                onComputed = pick(),
+                onOverloaded = viewModel::overloaded,
+            )
+        }
+        entry<CreateAliasDestination> {
+            CreateAliasScreen(::topLevelDone)
+        }
+    }
+}
+"#;
+    write(
+        dir.path(),
+        "src/main/kotlin/io/simplelogin/android/root/AppRoot.kt",
+        app_root_src,
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let root_file = "src/main/kotlin/io/simplelogin/android/root/AppRoot.kt";
+    let screens_file = "src/main/kotlin/io/simplelogin/android/screens/Screens.kt";
+    let vm_owner = format!("sym:local/demo@{root_file}#AppRootViewModel");
+    let secondary_owner = format!("sym:local/demo@{root_file}#SecondaryNavigator");
+
+    let init_screen = out
+        .nodes
+        .iter()
+        .find(|n| {
+            n.id == "screen:local/demo@navigation3:io.simplelogin.android.root.InitializationDestination"
+        })
+        .unwrap();
+    assert_eq!(init_screen.props["initial"], true);
+    assert_eq!(init_screen.props["back_stack_owner"], vm_owner);
+    assert_eq!(
+        init_screen.props["initial_owners"],
+        serde_json::json!([vm_owner, secondary_owner])
+    );
+
+    let home_screen = out
+        .nodes
+        .iter()
+        .find(|n| {
+            n.id == "screen:local/demo@navigation3:io.simplelogin.android.root.HomeDestination"
+        })
+        .unwrap();
+    assert_eq!(home_screen.props["initial"], true);
+    assert_eq!(home_screen.props["back_stack_owner"], secondary_owner);
+    assert!(home_screen.props.get("initial_owners").is_none());
+
+    let home_callbacks = home_screen.props["entry_callbacks"].as_array().unwrap();
+    assert_eq!(
+        home_callbacks.len(),
+        4,
+        "computed and overloaded arguments must not produce callback records"
+    );
+    let home_composable = format!("sym:local/demo@{screens_file}#HomeScreen");
+    let top_bar_composable = format!("sym:local/demo@{screens_file}#HomeTopBar");
+    let show_create_sym =
+        format!("sym:local/demo@{root_file}#AppRootViewModel.showCreateAliasScreen");
+    let show_settings_sym =
+        format!("sym:local/demo@{root_file}#AppRootViewModel.showDeviceSettingsScreen");
+
+    assert_eq!(home_callbacks[0]["param"], "onCreateAlias");
+    assert_eq!(home_callbacks[0]["symbol"], show_create_sym);
+    assert_eq!(home_callbacks[0]["composable"], home_composable);
+    assert_eq!(home_callbacks[0]["read"], true);
+    assert_eq!(home_callbacks[0]["forwarded"], serde_json::json!([]));
+    let ev0 = &home_callbacks[0]["evidence"];
+    assert_eq!(ev0["path"], root_file);
+    assert_eq!(
+        &app_root_src[ev0["byte_start"].as_u64().unwrap() as usize
+            ..ev0["byte_end"].as_u64().unwrap() as usize],
+        "onCreateAlias = viewModel::showCreateAliasScreen"
+    );
+
+    assert_eq!(home_callbacks[1]["param"], "onShowSettings");
+    assert_eq!(home_callbacks[1]["symbol"], show_settings_sym);
+    assert_eq!(home_callbacks[1]["composable"], home_composable);
+    assert_eq!(home_callbacks[1]["read"], true);
+    assert_eq!(
+        home_callbacks[1]["forwarded"],
+        serde_json::json!([{"composable": top_bar_composable, "param": "onSettings"}])
+    );
+
+    assert_eq!(home_callbacks[2]["param"], "onUnread");
+    assert_eq!(home_callbacks[2]["symbol"], show_create_sym);
+    assert_eq!(home_callbacks[2]["composable"], home_composable);
+    assert_eq!(home_callbacks[2]["read"], false);
+    assert_eq!(home_callbacks[2]["forwarded"], serde_json::json!([]));
+
+    assert_eq!(home_callbacks[3]["param"], "onLambda");
+    assert_eq!(home_callbacks[3]["symbol"], show_settings_sym);
+    assert_eq!(home_callbacks[3]["composable"], home_composable);
+    assert_eq!(home_callbacks[3]["read"], true);
+    assert_eq!(home_callbacks[3]["forwarded"], serde_json::json!([]));
+
+    let create_screen = out
+        .nodes
+        .iter()
+        .find(|n| {
+            n.id == "screen:local/demo@navigation3:io.simplelogin.android.root.CreateAliasDestination"
+        })
+        .unwrap();
+    let create_callbacks = create_screen.props["entry_callbacks"].as_array().unwrap();
+    assert_eq!(create_callbacks.len(), 1);
+    assert_eq!(create_callbacks[0]["param"], "onDone");
+    assert_eq!(
+        create_callbacks[0]["symbol"],
+        format!("sym:local/demo@{root_file}#topLevelDone")
+    );
+    let forwarded = create_callbacks[0]["forwarded"].as_array().unwrap();
+    assert_eq!(forwarded.len(), navigation3::CALLBACK_DEPTH);
+    // Every hop forwards it, so it is read even though the invoking hop is past the cap.
+    assert_eq!(create_callbacks[0]["read"], true);
+
+    assert!(
+        !out.edges
+            .iter()
+            .any(|e| e.src.starts_with("screen:") && e.label != "RENDERS"),
+        "screens must never emit edges to callback symbols"
+    );
+    let mut edge_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for edge in &out.edges {
+        *edge_counts.entry(edge.label.clone()).or_default() += 1;
+    }
+    assert_eq!(
+        edge_counts,
+        std::collections::BTreeMap::from([
+            ("CALLS".into(), 9),
+            ("DEFINED_IN".into(), 21),
+            ("IMPORTS".into(), 7),
+            ("NAVIGATES_TO".into(), 2),
+            ("RENDERS".into(), 2),
+        ])
     );
 }
