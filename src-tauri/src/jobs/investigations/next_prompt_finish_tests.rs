@@ -21,6 +21,8 @@ fn next_prompt_finish_boundary_accepted_result7_reopens_and_rejects_family_downg
     assert_eq!(detail.usage.tool_actions, before.tool_actions);
     let saved = f.saved();
     let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+    #[cfg(unix)]
+    assert_task_load_workspace(&tx, &saved);
     let result = load_result(&tx, &saved).unwrap().unwrap();
     #[cfg(unix)]
     {
@@ -143,6 +145,8 @@ fn next_prompt_finish_boundary_refusals_use_existing_obligations_and_two_finish_
     assert_eq!(second.citations.len(), 0);
     let saved = f.saved();
     let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+    #[cfg(unix)]
+    assert_task_load_workspace(&tx, &saved);
     let entries = staged::load_for_task(&tx, &saved).unwrap();
     assert_eq!(entries.len(), 2);
     #[cfg(unix)]
@@ -304,4 +308,16 @@ fn task_record_workspace_covers_pending_completed_and_flattened_refusal() {
         assert!(raw.len() < MAX_RECORD_BYTES);
         assert!(agents::investigation::decode_record::<StoredTask>(&raw).is_err());
     }
+}
+
+#[cfg(unix)]
+fn assert_task_load_workspace(tx: &Connection, saved: &StoredTask) {
+    // AC-0327 (#980): real full-reader replay for completed and refused tasks.
+    let reopened = load_next_prompt_task(tx, &saved.detail.summary.investigation_id).unwrap();
+    let actual = serde_json::to_vec(&reopened).unwrap();
+    assert_eq!(actual, serde_json::to_vec(saved).unwrap());
+    let (retained, peak) = next_prompt_task_load_workspace().unwrap();
+    assert!(retained >= actual.len() + std::mem::size_of_val(&reopened));
+    let (journal, replay) = next_prompt_staged_workspace().unwrap();
+    assert!(peak >= retained + journal * 2 + replay);
 }
