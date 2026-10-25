@@ -552,7 +552,12 @@ pub fn extract_contract_facts(
     // in Gap text whenever API docs are declared.
     let mut recovered_by_key: BTreeMap<String, Vec<(&Node, String, String)>> = BTreeMap::new();
     let mut unusable_endpoints = 0usize;
-    for node in candidates.iter().filter(|n| n.label == "Endpoint") {
+    // HTTP API docs describe HTTP routes; GraphQL operations (#968) are
+    // neither matched against them nor counted as unusable.
+    for node in candidates
+        .iter()
+        .filter(|n| n.label == "Endpoint" && n.props["protocol"] != "graphql")
+    {
         let Some(method) = node.props["method"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
@@ -1402,6 +1407,36 @@ mod tests {
         assert_eq!(
             weakest_confidence([ConfidenceTier::Confirmed, ConfidenceTier::InferredWeak]),
             ConfidenceTier::InferredWeak
+        );
+    }
+
+    // AC-0347 (#968): GraphQL operations are not HTTP routes, so HTTP API
+    // docs neither match them nor report them served-undocumented.
+    #[test]
+    fn contract_drift_ignores_graphql_operations() {
+        let docs = vec![DeclaredApiDoc {
+            path: "docs/api.md".into(),
+            prefix: None,
+            contents: "#### GET /api/items\n".into(),
+        }];
+        let mut graphql = endpoint_node("acme/svc", "QUERY", "admin.customers", "r.ts");
+        graphql.props["protocol"] = "graphql".into();
+        let candidates = vec![
+            graphql,
+            endpoint_node("acme/svc", "GET", "/api/items", "app.py"),
+        ];
+        let facts = extract_contract_facts("acme/svc", "abc1234", &docs, &[], &candidates);
+        assert!(
+            !facts
+                .nodes
+                .iter()
+                .any(|n| n.props.to_string().contains("admin.customers"))
+        );
+        assert!(
+            !facts
+                .nodes
+                .iter()
+                .any(|n| n.props.to_string().contains("unusable"))
         );
     }
 

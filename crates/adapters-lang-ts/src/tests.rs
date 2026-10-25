@@ -3465,3 +3465,119 @@ new SendMessageCommand({ QueueUrl: 'q' });\n";
     let names: Vec<&str> = plain.registries.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(names, ["builtin:event-sdks.json"]);
 }
+
+// AC-0347 (T-0347).
+#[test]
+fn nest_graphql_resolvers_emit_scoped_operations_and_gap_computed_fields() {
+    let ex = extract_source(
+        br#"
+import { Args, Mutation as Mut, Query, ResolveField, Resolver } from '@nestjs/graphql';
+import { Allow } from '../../decorators/allow.decorator';
+import { Permission } from '@vendure/common';
+
+const NAME = 'dynamic';
+
+@Resolver()
+export class CustomerResolver {
+  @Query()
+  @Allow(Permission.ReadCustomer, Permission.Owner)
+  async customers(@Args() args: unknown) {}
+
+  @Query('customerByEmail')
+  @Allow(Permission.ReadCustomer, someOther)
+  byEmail() {}
+
+  @Query(() => String, { name: 'customerCount' })
+  count() {}
+
+  @Mut({ description: 'x' })
+  createCustomer() {}
+
+  @Mut(NAME)
+  computed() {}
+
+  @ResolveField()
+  orders() {}
+}
+"#,
+        "packages/core/src/api/resolvers/admin/customer.resolver.ts",
+        &id(),
+    )
+    .unwrap();
+    let endpoints: BTreeMap<_, _> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Endpoint")
+        .map(|n| (n.id.as_str(), n))
+        .collect();
+    assert_eq!(
+        endpoints.keys().copied().collect::<Vec<_>>(),
+        [
+            "ep:qwtm/example@graphql:admin:mutation:createCustomer",
+            "ep:qwtm/example@graphql:admin:query:customerByEmail",
+            "ep:qwtm/example@graphql:admin:query:customerCount",
+            "ep:qwtm/example@graphql:admin:query:customers",
+        ]
+    );
+    let customers = endpoints["ep:qwtm/example@graphql:admin:query:customers"];
+    assert_eq!(customers.props["method"], "QUERY");
+    assert_eq!(customers.props["path"], "admin.customers");
+    assert_eq!(customers.props["protocol"], "graphql");
+    assert_eq!(customers.props["scope_basis"], "resolver_directory");
+    assert_eq!(customers.props["prov"]["confidence_tier"], "InferredStrong");
+    assert_eq!(
+        customers.props["permissions"],
+        serde_json::json!(["ReadCustomer", "Owner"])
+    );
+    // A non-`Permission.X` argument records nothing rather than a subset.
+    assert!(
+        endpoints["ep:qwtm/example@graphql:admin:query:customerByEmail"].props["permissions"]
+            .is_null()
+    );
+    assert!(edge_pairs(&ex, "HANDLES").contains(&(
+        "ep:qwtm/example@graphql:admin:query:customers",
+        "sym:qwtm/example@packages/core/src/api/resolvers/admin/customer.resolver.ts#CustomerResolver.customers"
+    )));
+    let gap = ex
+        .nodes
+        .iter()
+        .find(|n| n.label == "Gap" && n.props["kind"] == "graphql-field-computed")
+        .unwrap();
+    assert_eq!(
+        gap.props["reason"],
+        graphql_resolvers::COMPUTED_FIELD_REASON
+    );
+    assert!(
+        !endpoints
+            .keys()
+            .any(|id| id.contains("orders") || id.contains("computed"))
+    );
+
+    // Outside `resolvers/<api>/` the API is `default`; a look-alike
+    // `Resolver` not imported from @nestjs/graphql proves nothing.
+    let plugin = extract_source(
+        br#"
+import { Query, Resolver } from '@nestjs/graphql';
+@Resolver()
+export class PluginResolver { @Query() pluginThing() {} }
+"#,
+        "src/plugin/plugin.resolver.ts",
+        &id(),
+    )
+    .unwrap();
+    let ep = plugin.nodes.iter().find(|n| n.label == "Endpoint").unwrap();
+    assert_eq!(ep.id, "ep:qwtm/example@graphql:default:query:pluginThing");
+    assert_eq!(ep.props["scope_basis"], "none");
+    let lookalike = extract_source(
+        br#"
+import { Query } from '@nestjs/graphql';
+function Resolver() { return (_: unknown) => {}; }
+@Resolver()
+class Fake { @Query() thing() {} }
+"#,
+        "src/api/resolvers/admin/fake.ts",
+        &id(),
+    )
+    .unwrap();
+    assert!(lookalike.nodes.iter().all(|n| n.label != "Endpoint"));
+}

@@ -1924,6 +1924,31 @@ fn extract_source_recording(
         let (Some(class_node), Some(body)) = (class_node, body) else {
             continue;
         };
+        // NestJS GraphQL resolvers (#968): proven through `@nestjs/graphql`.
+        let from_graphql = |site: TsNode<'_>, local: &str| {
+            (bindings.imported(site, local)
+                && import_modules.get(local).map(String::as_str) == Some(graphql_resolvers::MODULE))
+            .then(|| {
+                imported_names
+                    .get(local)
+                    .cloned()
+                    .unwrap_or_else(|| local.to_string())
+            })
+        };
+        let resolver = leading_decorators(class_node)
+            .into_iter()
+            .filter_map(|decorator| decorator_call(&cx, decorator))
+            .any(|(local, _, evidence)| {
+                from_graphql(evidence, &local).as_deref() == Some("Resolver")
+            });
+        if resolver {
+            let allow = |site: TsNode<'_>, local: &str| {
+                bindings.imported(site, local)
+                    && imported_names.get(local).map_or(local, String::as_str) == "Allow"
+            };
+            graphql_resolvers::operations(&cx, &mut out, body, &from_graphql, &allow);
+            continue;
+        }
         let controller = leading_decorators(class_node)
             .into_iter()
             .filter_map(|decorator| decorator_call(&cx, decorator))
@@ -3345,6 +3370,7 @@ pub mod client_table;
 pub(crate) mod const_resolution;
 pub mod declarations;
 mod grammar;
+pub mod graphql_resolvers;
 pub mod indexeddb;
 mod local_definitions;
 pub mod observed_infra;
