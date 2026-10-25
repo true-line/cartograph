@@ -24,6 +24,9 @@ pub const FOLLOWS_REDIRECTS_REASON: &str =
 /// provenance, or only Gap provenance.
 pub const UNPROVEN_RESPONSES_REASON: &str =
     "recovered responses carry no usable provenance, so the returned side cannot be cited";
+/// Gap reason when the endpoint itself carries no usable provenance.
+pub const UNPROVEN_ENDPOINT_REASON: &str =
+    "the endpoint carries no usable provenance, so neither side can be attributed to it";
 /// Why a returned status no test asserts is only InferredWeak.
 pub const UNASSERTED_REASON: &str = "no resolved test reference asserts it; unresolved test requests and calls in helper functions are not read";
 
@@ -41,6 +44,13 @@ fn typed_provenance(value: &serde_json::Value) -> Option<Provenance> {
     serde::Deserialize::deserialize(&value["prov"])
         .ok()
         .filter(|provenance: &Provenance| provenance.validate().is_ok())
+}
+
+/// Provenance that can carry a finding: valid, not a Gap, and citing
+/// evidence (`validate` checks the tier ceiling, not evidence presence).
+fn usable_provenance(value: &serde_json::Value) -> Option<Provenance> {
+    typed_provenance(value)
+        .filter(|p| p.confidence_tier != ConfidenceTier::Gap && !p.evidence.is_empty())
 }
 
 /// The weaker of two confidence tiers: a finding is never stronger than the
@@ -139,12 +149,11 @@ pub fn derive_test_drift(nodes: &[Node], edges: &[Edge]) -> ContractFacts {
         {
             continue;
         }
-        let Some(provenance) = typed_provenance(&edge.props) else {
+        // A request without usable proof contributes nothing: response
+        // evidence never stands in for the test's own.
+        let Some(provenance) = usable_provenance(&edge.props) else {
             continue;
         };
-        if provenance.confidence_tier == ConfidenceTier::Gap {
-            continue;
-        }
         let entry = expected.entry(edge.dst.as_str()).or_default();
         entry.statuses.extend(statuses(&edge.props["statuses"]));
         entry.keys.extend(strings(&edge.props["keys"]));
@@ -155,16 +164,20 @@ pub fn derive_test_drift(nodes: &[Node], edges: &[Edge]) -> ContractFacts {
     for (endpoint_id, expectations) in &expected {
         let endpoint = endpoints[endpoint_id];
         let responses = &endpoint.props["responses"];
-        let response_provenance = typed_provenance(responses)
-            .filter(|p| p.confidence_tier != ConfidenceTier::Gap && !p.evidence.is_empty());
-        // The floor both sides allow: the response's tier and every
-        // referencing test's tier.
-        let floor = expectations.tests.values().fold(
-            response_provenance
-                .as_ref()
-                .map_or(ConfidenceTier::Gap, |p| p.confidence_tier),
-            |floor, p| weaker(floor, p.confidence_tier),
-        );
+        let response_provenance = usable_provenance(responses);
+        let endpoint_provenance = usable_provenance(&endpoint.props);
+        // The floor every side allows: the endpoint's, the response's and
+        // every referencing test's tier.
+        let floor = expectations
+            .tests
+            .values()
+            .chain(endpoint_provenance.as_ref())
+            .fold(
+                response_provenance
+                    .as_ref()
+                    .map_or(ConfidenceTier::Gap, |p| p.confidence_tier),
+                |floor, p| weaker(floor, p.confidence_tier),
+            );
         let evidence = merged_evidence(
             expectations
                 .tests
@@ -175,7 +188,9 @@ pub fn derive_test_drift(nodes: &[Node], edges: &[Edge]) -> ContractFacts {
         let response_evidence = response_provenance.map(|p| p.evidence).unwrap_or_default();
         let name = endpoint_name(endpoint);
         let partial: Vec<&str> = strings(&responses["partial"]).collect();
-        let incomplete = if unproven {
+        let incomplete = if endpoint_provenance.is_none() {
+            Some(UNPROVEN_ENDPOINT_REASON)
+        } else if unproven {
             Some(UNPROVEN_RESPONSES_REASON)
         } else if !partial.is_empty() {
             Some(PARTIAL_RESPONSES_REASON)
@@ -579,5 +594,76 @@ mod tests {
                 .unwrap();
             assert_eq!(gap.props["reason"], UNPROVEN_RESPONSES_REASON);
         }
+    }
+
+    // AC-0345 (T-0345): the endpoint's own proof caps the finding, and a
+    // request without evidence contributes nothing.
+    #[test]
+    fn test_drift_needs_endpoint_proof_and_request_evidence() {
+        let finding =
+            |facts: &ContractFacts, id: &str| facts.nodes.iter().find(|n| n.id == id).cloned();
+        // A weak endpoint caps both findings and leaves verified-only.
+        let (mut nodes, edges) = fixture();
+        let items = nodes.iter_mut().find(|n| n.id == "ep:items").unwrap();
+        items.props["prov"] = prov(ConfidenceTier::InferredWeak, "app/routes.py");
+        let facts = derive_test_drift(&nodes, &edges);
+        let asserted = finding(&facts, "drift:test:ep:items@asserted-not-returned").unwrap();
+        assert_eq!(
+            typed_provenance(&asserted.props).unwrap().confidence_tier,
+            ConfidenceTier::InferredWeak
+        );
+        let (mut all_nodes, mut all_edges) = (nodes.clone(), edges.clone());
+        all_nodes.extend(facts.nodes);
+        all_edges.extend(facts.edges);
+        let verified = crate::compile_spec(
+            &all_nodes,
+            &all_edges,
+            &[],
+            crate::ExportMode::VerifiedOnly,
+            &BTreeSet::new(),
+        )
+        .artifacts
+        .into_iter()
+        .find(|a| a.file_name == "drift_register.md")
+        .unwrap();
+        assert!(!verified.content.contains("asserted-not-returned"));
+
+        // Missing or Gap endpoint proof: a Gap, never drift.
+        for endpoint_prov in [
+            serde_json::Value::Null,
+            prov(ConfidenceTier::Gap, "app/routes.py"),
+        ] {
+            let (mut nodes, edges) = fixture();
+            let items = nodes.iter_mut().find(|n| n.id == "ep:items").unwrap();
+            items.props["prov"] = endpoint_prov;
+            let facts = derive_test_drift(&nodes, &edges);
+            assert!(
+                !facts
+                    .nodes
+                    .iter()
+                    .any(|n| n.id.starts_with("drift:test:ep:items@"))
+            );
+            let gap = finding(&facts, "gap:test-drift:ep:items").unwrap();
+            assert_eq!(gap.props["reason"], UNPROVEN_ENDPOINT_REASON);
+        }
+
+        // test_a, the only source of 404 and `total`, cites no evidence: its
+        // expectations are dropped, and test_b alone asserts nothing missing.
+        let (nodes, mut edges) = fixture();
+        edges[0].props["prov"]["evidence"] = serde_json::json!([]);
+        let facts = derive_test_drift(&nodes, &edges);
+        assert!(finding(&facts, "drift:test:ep:items@asserted-not-returned").is_none());
+        let unasserted = finding(&facts, "drift:test:ep:items@returned-not-asserted").unwrap();
+        assert_eq!(unasserted.props["statuses"], serde_json::json!([401]));
+        assert_eq!(unasserted.props["tests"].as_array().unwrap().len(), 1);
+        // The fully supported fixture still yields the strong finding.
+        let (nodes, edges) = fixture();
+        assert!(
+            finding(
+                &derive_test_drift(&nodes, &edges),
+                "drift:test:ep:items@asserted-not-returned"
+            )
+            .is_some()
+        );
     }
 }
