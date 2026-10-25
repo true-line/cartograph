@@ -1630,3 +1630,73 @@ fn journey_candidates_cross_hilt_dispatch_as_an_assumption() {
         .collect();
     assert_eq!(dispatches, vec![impl_sym.as_str()]);
 }
+
+// AC-0356 (T-0356): an endpoint an anchor's flow fetches has no flow of its
+// own; its observed writes are those the flow reaches downstream of it.
+#[test]
+fn journey_goals_observe_writes_downstream_of_an_endpoint_inside_an_anchor_flow() {
+    let (mut nodes, mut edges, flows) = simplelogin_android_nav3_fixture();
+    let repo = "simplelogin/android";
+    let create_path = "app/src/main/java/io/simplelogin/android/create/CreateAliasScreen.kt";
+    let create_screen =
+        "screen:simplelogin/android@navigation3:io.simplelogin.android.root.CreateAliasDestination";
+    let create_call_sym = format!("sym:{repo}@{create_path}#CreateAliasViewModel.create");
+    let endpoint_id = "ep:simplelogin/app@POST:/api/v5/alias/custom/new";
+    let handler_sym = "sym:simplelogin/app@app/api/views/v5_alias.py#create_custom_alias";
+    let hop = |label: &str, src: &str, dst: &str| Hop {
+        label: label.into(),
+        src: src.into(),
+        dst: dst.into(),
+        src_name: src.into(),
+        dst_name: dst.into(),
+        tier: "Deterministic".into(),
+        confidence: "Confirmed".into(),
+        evidence: None,
+        provenance: prov(vec![ev(repo, create_path, 1, 2)], label),
+        gap_reason: None,
+        attempted_tiers: vec![],
+    };
+    // flowtracer shape: the screen's flow reaches the endpoint, so the
+    // endpoint gets no flow of its own.
+    let mut anchor = flows[0].clone();
+    anchor.trigger = create_screen.into();
+    anchor.trigger_kind = "Screen".into();
+    anchor.hops = vec![
+        hop("CALLS", create_screen, &create_call_sym),
+        hop("FETCHES", &create_call_sym, endpoint_id),
+        hop("HANDLES", endpoint_id, handler_sym),
+    ];
+    let anchored = vec![anchor];
+
+    let (node_refs, edge_refs) = refs(&nodes, &edges);
+    let found = candidates(&node_refs, &edge_refs, &anchored, JourneyBudget::default());
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].goal.goal_basis, GoalBasis::ObservedWrite);
+    assert_eq!(
+        found[0].goal.writes,
+        vec![WriteFact {
+            symbol: handler_sym.into(),
+            data_entity: "data:simplelogin/app@alias".into(),
+        }]
+    );
+
+    // A write upstream of the endpoint (client side) is not the endpoint's.
+    edges.retain(|e| e.label != "WRITES");
+    nodes.push(node(
+        "data:simplelogin/android@room:draft",
+        "DataEntity",
+        json!({"name": "Draft"}),
+        vec![ev(repo, create_path, 5, 9)],
+    ));
+    edges.push(edge(
+        &create_call_sym,
+        "data:simplelogin/android@room:draft",
+        "WRITES",
+        json!({}),
+        vec![ev(repo, create_path, 5, 9)],
+    ));
+    let (node_refs, edge_refs) = refs(&nodes, &edges);
+    let upstream = candidates(&node_refs, &edge_refs, &anchored, JourneyBudget::default());
+    assert_eq!(upstream.len(), 1);
+    assert_eq!(upstream[0].goal.goal_basis, GoalBasis::MethodAssumed);
+}

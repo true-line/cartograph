@@ -19,6 +19,7 @@ pub mod observed_infra;
 mod request_inputs;
 mod responses;
 mod sqlalchemy;
+mod sqlalchemy_writes;
 mod target_tests;
 
 const EXTRACTOR_ID: &str = "t0.adapter-python";
@@ -235,7 +236,7 @@ fn file_id(repo: &str, path: &str) -> String {
     format!("file:{repo}@{path}")
 }
 
-fn symbol_id(repo: &str, path: &str, name: &str) -> String {
+pub(crate) fn symbol_id(repo: &str, path: &str, name: &str) -> String {
     format!("sym:{repo}@{path}#{name}")
 }
 
@@ -563,7 +564,7 @@ fn blueprint_name(cx: &FileCx<'_>, call: TsNode<'_>) -> Prefix {
 }
 
 /// The nearest enclosing function definition of `node`.
-fn enclosing_function_node(node: TsNode<'_>) -> Option<TsNode<'_>> {
+pub(crate) fn enclosing_function_node(node: TsNode<'_>) -> Option<TsNode<'_>> {
     let mut parent = node.parent();
     while let Some(current) = parent {
         if current.kind() == "function_definition" {
@@ -634,19 +635,43 @@ fn mentions(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
 
 /// How `function`'s own scope binds `name`.
 #[derive(Default)]
-struct ScopeBinding<'t> {
+pub(crate) struct ScopeBinding<'t> {
     /// Every statement or expression that binds `name` in this scope,
     /// including a nested scope's `nonlocal` rebinding.
-    writes: Vec<TsNode<'t>>,
-    global: bool,
-    nonlocal: bool,
+    pub(crate) writes: Vec<TsNode<'t>>,
+    pub(crate) global: bool,
+    pub(crate) nonlocal: bool,
 }
 
 /// Collect `function`'s bindings of `name`. Anything that might bind it
 /// counts, so an unrecognised form fails closed rather than proving a value.
-fn scope_binding<'t>(cx: &FileCx<'_>, function: TsNode<'t>, name: &str) -> ScopeBinding<'t> {
+pub(crate) fn scope_binding<'t>(
+    cx: &FileCx<'_>,
+    function: TsNode<'t>,
+    name: &str,
+) -> ScopeBinding<'t> {
+    collect_binding(cx, function.child_by_field_name("body"), name, false)
+}
+
+/// Collect the module's bindings of `name` (`root` is the `module` node).
+/// A nested scope declaring `global name` counts as a write: it may rebind
+/// the module name whenever it runs.
+pub(crate) fn module_binding<'t>(
+    cx: &FileCx<'_>,
+    root: TsNode<'t>,
+    name: &str,
+) -> ScopeBinding<'t> {
+    collect_binding(cx, Some(root), name, true)
+}
+
+fn collect_binding<'t>(
+    cx: &FileCx<'_>,
+    start: Option<TsNode<'t>>,
+    name: &str,
+    module: bool,
+) -> ScopeBinding<'t> {
     let mut binding = ScopeBinding::default();
-    let mut stack: Vec<TsNode<'t>> = function.child_by_field_name("body").into_iter().collect();
+    let mut stack: Vec<TsNode<'t>> = start.into_iter().collect();
     while let Some(node) = stack.pop() {
         let binds = match node.kind() {
             "function_definition" | "class_definition" => {
@@ -658,13 +683,18 @@ fn scope_binding<'t>(cx: &FileCx<'_>, function: TsNode<'t>, name: &str) -> Scope
                 let mut inner = node.walk();
                 let rebinds = node
                     .children_by_field_name("body", &mut inner)
-                    .any(|body| nonlocal_in(cx, body, name));
+                    .any(|body| nonlocal_in(cx, body, name) || module && global_in(cx, body, name));
                 if named || rebinds {
                     binding.writes.push(node);
                 }
+                // Defaults, annotations and bases run here, at definition.
+                stack.extend(definition_time_parts(node));
                 continue;
             }
-            "lambda" => continue,
+            "lambda" => {
+                stack.extend(definition_time_parts(node));
+                continue;
+            }
             "global_statement" => {
                 binding.global |= mentions(cx, node, name);
                 false
@@ -727,6 +757,32 @@ fn import_binds(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
             _ if from => cx.text(&imported).trim() == name,
             _ => cx.text(&imported).split('.').next().map(str::trim) == Some(name),
         })
+}
+
+/// The parts of a `def`, `class` or `lambda` evaluated in the enclosing
+/// scope when it is defined: parameter defaults and annotations, the return
+/// annotation, and class bases. Parameter names themselves bind nothing
+/// here.
+fn definition_time_parts<'t>(node: TsNode<'t>) -> Vec<TsNode<'t>> {
+    [
+        "parameters",
+        "return_type",
+        "superclasses",
+        "type_parameters",
+    ]
+    .into_iter()
+    .filter_map(|field| node.child_by_field_name(field))
+    .collect()
+}
+
+/// Whether a `global` statement anywhere under `node` names `name`.
+fn global_in(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+    if node.kind() == "global_statement" {
+        return mentions(cx, node, name);
+    }
+    let mut walk = node.walk();
+    node.named_children(&mut walk)
+        .any(|child| global_in(cx, child, name))
 }
 
 /// Whether a `nonlocal` statement anywhere under `node` names `name`.
@@ -939,7 +995,7 @@ fn assignment_receivers(
     receivers
 }
 
-fn qualified_function_name(cx: &FileCx<'_>, function: TsNode<'_>) -> Option<String> {
+pub(crate) fn qualified_function_name(cx: &FileCx<'_>, function: TsNode<'_>) -> Option<String> {
     let name = function.child_by_field_name("name")?;
     let mut names = vec![cx.text(&name).to_string()];
     let mut parent = function.parent();

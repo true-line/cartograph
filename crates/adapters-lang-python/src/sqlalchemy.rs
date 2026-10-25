@@ -10,6 +10,7 @@
 use super::{
     BTreeMap, BTreeSet, ConfidenceTier, Edge, EvidenceRef, Extraction, FileCx, HashMap,
     ImportBinding, Node, TsNode, literal_string, module_file, named_arguments, prov_from,
+    sqlalchemy_writes,
 };
 use std::path::{Path, PathBuf};
 use streaming_iterator::StreamingIterator;
@@ -19,13 +20,18 @@ use tree_sitter::{Query, QueryCursor};
 /// across the directory once every file is known.
 #[derive(Debug, Clone)]
 pub(crate) struct OrmFile {
-    path: String,
-    imports: HashMap<String, ImportBinding>,
-    proven_bases: BTreeSet<String>,
-    proven_registries: BTreeSet<String>,
-    proven_flask_dbs: BTreeSet<String>,
+    pub(crate) path: String,
+    pub(crate) imports: HashMap<String, ImportBinding>,
+    pub(crate) proven_bases: BTreeSet<String>,
+    pub(crate) proven_registries: BTreeSet<String>,
+    pub(crate) proven_flask_dbs: BTreeSet<String>,
+    pub(crate) proven_sessions: BTreeSet<String>,
+    /// Names bound more than once at module level (imports, `def`/`class`,
+    /// assignments): no session proof survives a rebinding.
+    pub(crate) rebound: BTreeSet<String>,
     assignments: Vec<(String, ModuleRhs)>,
-    classes: Vec<OrmClassDecl>,
+    pub(crate) classes: Vec<OrmClassDecl>,
+    pub(crate) functions: Vec<sqlalchemy_writes::FunctionWrites>,
 }
 
 /// Module-level assignment RHS that may establish a proven base after
@@ -36,13 +42,15 @@ enum ModuleRhs {
     GenerateBase(String),
     /// `Base = <recv>.Model` where `<recv>` is a `SQLAlchemy(...)` instance.
     DotModel(String),
-    /// `Base = <other>` aliasing another proven base.
+    /// `Session = <recv>.session` where `<recv>` is a `SQLAlchemy(...)` instance.
+    DotSession(String),
+    /// `Base = <other>` aliasing another proven base, registry, db, or session.
     Alias(String),
 }
 
 /// Superclass expression in a `class Name(...):` declaration.
 #[derive(Debug, Clone)]
-enum BaseExpr {
+pub(crate) enum BaseExpr {
     /// Direct `DeclarativeBase` from `sqlalchemy.orm` / `sqlalchemy.ext.declarative`.
     DeclarativeBase,
     /// Inline `declarative_base()` or `registry().generate_base()`.
@@ -53,6 +61,8 @@ enum BaseExpr {
     DotModel(String),
     /// Identifier or attribute naming a base or mixin class (`Base`, `ModelMixin`, `mod.Base`).
     Symbol(String),
+    /// Any base expression that cannot be resolved to a symbol or proven inline base.
+    Unresolvable,
 }
 
 /// A class's `__tablename__` declaration in its body.
@@ -195,10 +205,10 @@ enum Parent {
 /// A Python class declaration with its candidate ORM bases, table name,
 /// schema, columns, foreign keys, and relationships.
 #[derive(Debug, Clone)]
-struct OrmClassDecl {
-    key: (String, String),
-    name: String,
-    bases: Vec<BaseExpr>,
+pub(crate) struct OrmClassDecl {
+    pub(crate) key: (String, String),
+    pub(crate) name: String,
+    pub(crate) bases: Vec<BaseExpr>,
     tablename: TableName,
     schema: Option<String>,
     is_abstract: bool,
@@ -206,6 +216,8 @@ struct OrmClassDecl {
     columns: Vec<ColumnDecl>,
     foreign_keys: Vec<ForeignKeyDecl>,
     relationships: Vec<RelationshipDecl>,
+    pub(crate) defined_members: BTreeSet<String>,
+    pub(crate) classmethods: BTreeMap<String, Vec<sqlalchemy_writes::ClassMethodWrite>>,
     evidence: EvidenceRef,
 }
 
@@ -223,12 +235,13 @@ pub(crate) fn retarget(extraction: &mut Extraction, commit: &str) {
                 rel.evidence.commit_sha = commit.into();
             }
         }
+        sqlalchemy_writes::retarget_file(file, commit);
     }
 }
 
 /// Resolve an identifier or dotted attribute (`expr`) against a file's import
 /// bindings into `(canonical_module, exported_symbol)`.
-fn resolve_imported_symbol(
+pub(crate) fn resolve_imported_symbol(
     expr: &str,
     bindings: &HashMap<String, ImportBinding>,
 ) -> Option<(String, String)> {
@@ -363,7 +376,7 @@ fn is_sqlalchemy_type_name(name: &str) -> bool {
     )
 }
 
-fn call_arguments(call: TsNode<'_>) -> Vec<TsNode<'_>> {
+pub(crate) fn call_arguments(call: TsNode<'_>) -> Vec<TsNode<'_>> {
     named_arguments(call)
         .into_iter()
         .filter(|node| node.kind() != "comment")
@@ -404,7 +417,7 @@ fn sqlalchemy_type(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
 
 /// Whether `node` is an `identifier` or a dotted chain of `attribute` accesses
 /// rooted at an `identifier`.
-fn is_dotted_identifier(node: TsNode<'_>) -> bool {
+pub(crate) fn is_dotted_identifier(node: TsNode<'_>) -> bool {
     match node.kind() {
         "identifier" => true,
         "attribute" => {
@@ -817,6 +830,40 @@ fn is_inside_class_or_function(mut node: TsNode<'_>) -> bool {
     false
 }
 
+/// The names, among module-level assignment targets and imports, that the
+/// module binds more than once in any form (`for`, `with`/`except` aliases,
+/// walrus, `del`, imports, `def`/`class`, a nested `global`; see
+/// `module_binding`). A bare annotation binds nothing.
+fn module_rebound_names(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> BTreeSet<String> {
+    let mut names: BTreeSet<String> = bindings.keys().cloned().collect();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if matches!(
+            node.kind(),
+            "function_definition" | "class_definition" | "lambda"
+        ) {
+            continue;
+        }
+        if node.kind() == "assignment"
+            && let Some(left) = node.child_by_field_name("left")
+        {
+            let mut bound = Vec::new();
+            sqlalchemy_writes::collect_bound_identifiers(cx, left, &mut bound);
+            names.extend(bound);
+        }
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+    }
+    names
+        .into_iter()
+        .filter(|name| crate::module_binding(cx, root, name).writes.len() > 1)
+        .collect()
+}
+
 /// Extract per-file SQLAlchemy base bindings and class declarations.
 pub(crate) fn extract(
     cx: &FileCx<'_>,
@@ -831,9 +878,13 @@ pub(crate) fn extract(
         proven_bases: BTreeSet::new(),
         proven_registries: BTreeSet::new(),
         proven_flask_dbs: BTreeSet::new(),
+        proven_sessions: BTreeSet::new(),
+        rebound: BTreeSet::new(),
         assignments: Vec::new(),
         classes: Vec::new(),
+        functions: Vec::new(),
     };
+    file.rebound = module_rebound_names(cx, root, bindings);
 
     for local in bindings.keys() {
         if is_declarative_base_class(local, bindings) {
@@ -878,6 +929,14 @@ pub(crate) fn extract(
         }
         module_shadowed_imports.insert(lhs.clone());
         let mut is_candidate_receiver = false;
+        if !file.rebound.contains(&lhs)
+            && sqlalchemy_writes::is_session_factory_call(cx, rhs, bindings, &file.rebound)
+        {
+            file.proven_sessions.insert(lhs.clone());
+            is_candidate_receiver = true;
+        } else {
+            file.proven_sessions.remove(&lhs);
+        }
         match rhs.kind() {
             "call" => {
                 let Some(function) = rhs.child_by_field_name("function") else {
@@ -921,6 +980,10 @@ pub(crate) fn extract(
                 if let Some(recv) = text.strip_suffix(".Model") {
                     file.assignments
                         .push((lhs.clone(), ModuleRhs::DotModel(recv.to_string())));
+                } else if let Some(recv) = text.strip_suffix(".session") {
+                    file.assignments
+                        .push((lhs.clone(), ModuleRhs::DotSession(recv.to_string())));
+                    is_candidate_receiver = true;
                 } else {
                     file.assignments
                         .push((lhs.clone(), ModuleRhs::Alias(text.to_string())));
@@ -962,6 +1025,7 @@ pub(crate) fn extract(
                     bases.push(BaseExpr::DeclarativeBase);
                 } else if base.kind() == "call" {
                     let Some(function) = base.child_by_field_name("function") else {
+                        bases.push(BaseExpr::Unresolvable);
                         continue;
                     };
                     let callee = cx.text(&function);
@@ -972,6 +1036,7 @@ pub(crate) fn extract(
                             function.child_by_field_name("object"),
                             function.child_by_field_name("attribute"),
                         ) else {
+                            bases.push(BaseExpr::Unresolvable);
                             continue;
                         };
                         if cx.text(&attr) == "generate_base" {
@@ -980,18 +1045,29 @@ pub(crate) fn extract(
                                     && is_registry_fn(cx.text(&inner_fn), bindings)
                                 {
                                     bases.push(BaseExpr::InlineProvenBase);
+                                } else {
+                                    bases.push(BaseExpr::Unresolvable);
                                 }
-                            } else if matches!(obj.kind(), "identifier" | "attribute") {
+                            } else if is_dotted_identifier(obj) {
                                 bases.push(BaseExpr::GenerateBase(cx.text(&obj).to_string()));
+                            } else {
+                                bases.push(BaseExpr::Unresolvable);
                             }
+                        } else {
+                            bases.push(BaseExpr::Unresolvable);
                         }
+                    } else {
+                        bases.push(BaseExpr::Unresolvable);
                     }
                 } else if base.kind() == "attribute"
+                    && is_dotted_identifier(base)
                     && let Some(recv) = text.strip_suffix(".Model")
                 {
                     bases.push(BaseExpr::DotModel(recv.to_string()));
-                } else if matches!(base.kind(), "identifier" | "attribute") {
+                } else if is_dotted_identifier(base) {
                     bases.push(BaseExpr::Symbol(text.to_string()));
+                } else {
+                    bases.push(BaseExpr::Unresolvable);
                 }
             }
         }
@@ -1139,6 +1215,9 @@ pub(crate) fn extract(
             }
         }
 
+        let (defined_members, classmethods) =
+            sqlalchemy_writes::extract_class_methods(cx, class, &module_shadowed_imports, bindings);
+
         file.classes.push(OrmClassDecl {
             key: (cx.path.to_string(), name.clone()),
             name,
@@ -1150,15 +1229,24 @@ pub(crate) fn extract(
             columns,
             foreign_keys,
             relationships,
+            defined_members,
+            classmethods,
             evidence: cx.evidence(&class),
         });
     }
 
+    sqlalchemy_writes::extract_functions(cx, root, language, &mut file);
+    file.imports
+        .retain(|name, _| !module_shadowed_imports.contains(name));
+
     if !file.proven_bases.is_empty()
         || !file.proven_registries.is_empty()
         || !file.proven_flask_dbs.is_empty()
+        || !file.proven_sessions.is_empty()
         || !file.assignments.is_empty()
         || !file.classes.is_empty()
+        || !file.functions.is_empty()
+        || !file.imports.is_empty()
     {
         out.orm_files.push(file);
     }
@@ -1203,7 +1291,7 @@ fn module_candidate_files(
 
 /// Resolve `(file_path, expr)` across `imports_by_file` to its canonical
 /// `(defining_file, symbol_name)`.
-fn resolve_symbol(
+pub(crate) fn resolve_symbol(
     file: &str,
     expr: &str,
     imports_by_file: &BTreeMap<String, HashMap<String, ImportBinding>>,
@@ -1503,8 +1591,11 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
     let mut proven_bases: BTreeSet<(String, String)> = BTreeSet::new();
     let mut proven_registries: BTreeSet<(String, String)> = BTreeSet::new();
     let mut proven_flask_dbs: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut proven_sessions: BTreeSet<(String, String)> = BTreeSet::new();
     let mut assignments: Vec<((String, String), ModuleRhs)> = Vec::new();
     let mut all_classes: Vec<OrmClassDecl> = Vec::new();
+    let mut rebound: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut functions_by_file: Vec<(String, Vec<sqlalchemy_writes::FunctionWrites>)> = Vec::new();
 
     for file in orm_files {
         known_files.insert(file.path.clone());
@@ -1517,15 +1608,24 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
         for db in file.proven_flask_dbs {
             proven_flask_dbs.insert((file.path.clone(), db));
         }
+        for s in file.proven_sessions {
+            proven_sessions.insert((file.path.clone(), s));
+        }
+        for name in file.rebound {
+            rebound.insert((file.path.clone(), name));
+        }
         for (lhs, rhs) in file.assignments {
             assignments.push(((file.path.clone(), lhs), rhs));
+        }
+        if !file.functions.is_empty() {
+            functions_by_file.push((file.path.clone(), file.functions));
         }
         imports_by_file.insert(file.path, file.imports);
         all_classes.extend(file.classes);
     }
 
     // Fixed-point propagation of proven registries, Flask-SQLAlchemy instances,
-    // base aliases, and model subclasses across files.
+    // sessions, base aliases, and model subclasses across files.
     loop {
         let mut changed = false;
         for ((path, lhs), rhs) in &assignments {
@@ -1549,6 +1649,16 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
                         changed = true;
                     }
                 }
+                ModuleRhs::DotSession(recv) => {
+                    if !proven_sessions.contains(&key)
+                        && !rebound.contains(&key)
+                        && resolve_symbol(path, recv, &imports_by_file, &known_files)
+                            .is_some_and(|target| proven_flask_dbs.contains(&target))
+                    {
+                        proven_sessions.insert(key);
+                        changed = true;
+                    }
+                }
                 ModuleRhs::Alias(other) => {
                     if let Some(target) =
                         resolve_symbol(path, other, &imports_by_file, &known_files)
@@ -1563,7 +1673,14 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
                             changed = true;
                         }
                         if !proven_flask_dbs.contains(&key) && proven_flask_dbs.contains(&target) {
-                            proven_flask_dbs.insert(key);
+                            proven_flask_dbs.insert(key.clone());
+                            changed = true;
+                        }
+                        if !proven_sessions.contains(&key)
+                            && !rebound.contains(&key)
+                            && proven_sessions.contains(&target)
+                        {
+                            proven_sessions.insert(key);
                             changed = true;
                         }
                     }
@@ -1588,6 +1705,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
                     resolve_symbol(&class.key.0, sym, &imports_by_file, &known_files)
                         .is_some_and(|target| proven_bases.contains(&target))
                 }
+                BaseExpr::Unresolvable => false,
             });
             if is_proven {
                 proven_bases.insert(class.key.clone());
@@ -2176,4 +2294,18 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
             }),
         });
     }
+
+    sqlalchemy_writes::resolve_writes(
+        out,
+        repo,
+        functions_by_file,
+        &classes_by_key,
+        &by_class_key,
+        &proven_bases,
+        &proven_registries,
+        &proven_flask_dbs,
+        &proven_sessions,
+        &imports_by_file,
+        &known_files,
+    );
 }
