@@ -26,6 +26,10 @@ pub const ENTRY_CALLBACK_LIMITATION: &str = "invocation not proven";
 pub const STARTUP_LIMITATION: &str =
     "startup navigation runs at owner construction; order after the initial screen not proven";
 
+/// Recorded limitation for [`AssumptionKind::HiltDispatch`].
+pub const HILT_DISPATCH_LIMITATION: &str =
+    "implementation bound by a Hilt @Binds; the runtime component and overrides not proven";
+
 const EXTRACTOR: &str = "spec.journey";
 
 /// Search bounds for `journey-candidate@1`.
@@ -198,7 +202,8 @@ pub struct UnresolvedStepItem {
     pub gap_id: String,
 }
 
-/// Kind of assumption crossed by a journey candidate (`entry_callback` or `startup`).
+/// Kind of assumption crossed by a journey candidate (`entry_callback`,
+/// `startup` or `hilt_dispatch`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssumptionKind {
@@ -206,14 +211,18 @@ pub enum AssumptionKind {
     EntryCallback,
     /// Init-phase back-stack navigation on an initial screen's owner class.
     Startup,
+    /// Interface member crossed to the implementation a Hilt `@Binds` binds.
+    HiltDispatch,
 }
 
 impl AssumptionKind {
-    /// Stable serialized string representation (`"entry_callback"` or `"startup"`).
+    /// Stable serialized string representation (`"entry_callback"`,
+    /// `"startup"` or `"hilt_dispatch"`).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::EntryCallback => "entry_callback",
             Self::Startup => "startup",
+            Self::HiltDispatch => "hilt_dispatch",
         }
     }
 }
@@ -240,7 +249,8 @@ pub struct UnreadCallback {
     pub registration: EvidenceRef,
 }
 
-/// A recorded reachability assumption (`entry_callback` or `startup`) on a [`JourneyCandidate`].
+/// A recorded reachability assumption (`entry_callback`, `startup` or
+/// `hilt_dispatch`) on a [`JourneyCandidate`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JourneyAssumption {
     /// Whether this assumption crosses an `entry_callback` or a `startup` navigation.
@@ -249,13 +259,18 @@ pub struct JourneyAssumption {
     pub step: usize,
     /// The `Screen` node id whose closure was extended by the assumption.
     pub screen: String,
-    /// Callback `Symbol` id (`entry_callback`) or back-stack owner class `Symbol` id (`startup`).
+    /// Callback `Symbol` id (`entry_callback`), back-stack owner class
+    /// `Symbol` id (`startup`) or bound implementation member (`hilt_dispatch`).
     pub symbol: String,
+    /// Interface member dispatched from (`hilt_dispatch` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
     /// Callback parameter name (`entry_callback` only).
     pub param: Option<String>,
     /// Entry composable receiving the callback (`entry_callback` only).
     pub composable: Option<String>,
-    /// Registration site evidence (`entry_callback` only).
+    /// Registration site evidence: the `entry<X>` registration
+    /// (`entry_callback`) or the `@Binds` declaration (`hilt_dispatch`).
     pub registration: Option<EvidenceRef>,
     /// Direct parameter-forwarding hops in order (`entry_callback` only).
     pub forwarded: Vec<ForwardHop>,
@@ -400,6 +415,34 @@ fn edge_confidence(edge: &Edge) -> ConfidenceTier {
     .confidence_tier
 }
 
+/// A Kotlin `@Binds` hop from an interface member to its bound
+/// implementation (W11c-3): crossed only as a `hilt_dispatch` assumption.
+fn is_dispatch_edge(edge: &Edge) -> bool {
+    edge.label == "CALLS" && edge.props["resolution"].as_str() == Some("hilt-binds")
+}
+
+/// A proven call: crossed by every closure without an assumption.
+fn is_proven_call(edge: &Edge, by_id: &BTreeMap<&str, &Node>) -> bool {
+    edge.label == "CALLS" && !is_dispatch_edge(edge) && !is_gap_edge(edge, by_id)
+}
+
+/// The `hilt_dispatch` assumption a dispatch edge records, citing the
+/// `@Binds` declaration its provenance names.
+fn dispatch_assumption(edge: &Edge) -> Option<NavAssumption> {
+    let binding = provenance(
+        &edge.props,
+        &format!("{} {} {}", edge.src, edge.label, edge.dst),
+    )
+    .evidence
+    .into_iter()
+    .next()?;
+    Some(NavAssumption::HiltDispatch {
+        interface: edge.src.clone(),
+        implementation: edge.dst.clone(),
+        binding,
+    })
+}
+
 fn is_gap_edge(edge: &Edge, by_id: &BTreeMap<&str, &Node>) -> bool {
     edge_confidence(edge) == ConfidenceTier::Gap
         || by_id.get(edge.dst.as_str()).is_some_and(|n| is_gap_node(n))
@@ -513,7 +556,14 @@ struct EntryCallbackRecord {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum NavAssumption {
     EntryCallback(EntryCallbackRecord),
-    Startup { owner: String },
+    Startup {
+        owner: String,
+    },
+    HiltDispatch {
+        interface: String,
+        implementation: String,
+        binding: EvidenceRef,
+    },
 }
 
 impl NavAssumption {
@@ -524,6 +574,7 @@ impl NavAssumption {
                 step,
                 screen: screen.to_owned(),
                 symbol: rec.symbol.clone(),
+                interface: None,
                 param: Some(rec.param.clone()),
                 composable: Some(rec.composable.clone()),
                 registration: Some(rec.registration.clone()),
@@ -535,11 +586,28 @@ impl NavAssumption {
                 step,
                 screen: screen.to_owned(),
                 symbol: owner.clone(),
+                interface: None,
                 param: None,
                 composable: None,
                 registration: None,
                 forwarded: Vec::new(),
                 limitation: STARTUP_LIMITATION.to_owned(),
+            },
+            Self::HiltDispatch {
+                interface,
+                implementation,
+                binding,
+            } => JourneyAssumption {
+                kind: AssumptionKind::HiltDispatch,
+                step,
+                screen: screen.to_owned(),
+                symbol: implementation.clone(),
+                interface: Some(interface.clone()),
+                param: None,
+                composable: None,
+                registration: Some(binding.clone()),
+                forwarded: Vec::new(),
+                limitation: HILT_DISPATCH_LIMITATION.to_owned(),
             },
         }
     }
@@ -685,7 +753,7 @@ fn drain_symbol_queue<'a>(
         let mut callees: Vec<&'a str> = edges
             .iter()
             .copied()
-            .filter(|e| e.src == sym_id && e.label == "CALLS" && !is_gap_edge(e, by_id))
+            .filter(|e| e.src == sym_id && is_proven_call(e, by_id))
             .map(|e| e.dst.as_str())
             .collect();
         callees.sort_unstable();
@@ -875,12 +943,80 @@ fn build_screen_closure<'a>(
                 let mut callees: Vec<&'a str> = edges
                     .iter()
                     .copied()
-                    .filter(|e| e.src == sym && e.label == "CALLS" && !is_gap_edge(e, by_id))
+                    .filter(|e| e.src == sym && is_proven_call(e, by_id))
                     .map(|e| e.dst.as_str())
                     .collect();
                 callees.sort_unstable();
                 callees.dedup();
                 pending.extend(callees);
+            }
+        }
+    }
+
+    // Hilt dispatch (W11c-3): an interface member reaches its bound
+    // implementation only as an assumption. What that reaches inherits it,
+    // with any assumption already on the interface member, and a nested
+    // dispatch adds its own. Proven code still dominates.
+    let starts: Vec<&'a str> = visited.iter().map(|(sym, _)| *sym).collect();
+    for start in starts {
+        let inherited = symbol_assumptions.get(start).cloned().unwrap_or_default();
+        let mut hops: Vec<&'a Edge> = edges
+            .iter()
+            .copied()
+            .filter(|e| e.src == start && is_dispatch_edge(e) && !is_gap_edge(e, by_id))
+            .collect();
+        hops.sort_unstable_by(|a, b| a.dst.cmp(&b.dst));
+        for hop in hops {
+            let Some(assumption) = dispatch_assumption(hop) else {
+                continue;
+            };
+            let mut carried = inherited.clone();
+            carried.push(assumption);
+            let mut reach: BTreeSet<&'a str> = BTreeSet::new();
+            let mut pending: VecDeque<(&'a str, Vec<NavAssumption>)> =
+                VecDeque::from([(hop.dst.as_str(), carried)]);
+            while let Some((sym, carried)) = pending.pop_front() {
+                if proven.contains(sym) || reach.contains(sym) {
+                    continue;
+                }
+                try_visit_symbol(
+                    sym,
+                    repo,
+                    by_id,
+                    budget,
+                    &mut visited,
+                    &mut visited_set,
+                    &mut queue,
+                    &mut calls_truncated,
+                    carried.first().cloned(),
+                );
+                queue.clear();
+                if !visited_set.contains(sym) {
+                    continue;
+                }
+                reach.insert(sym);
+                let recorded = symbol_assumptions.entry(sym.to_owned()).or_default();
+                for a in &carried {
+                    if !recorded.contains(a) {
+                        recorded.push(a.clone());
+                    }
+                }
+                let mut next: Vec<&'a Edge> = edges
+                    .iter()
+                    .copied()
+                    .filter(|e| e.src == sym && e.label == "CALLS" && !is_gap_edge(e, by_id))
+                    .collect();
+                next.sort_unstable_by(|a, b| a.dst.cmp(&b.dst));
+                for edge in next {
+                    let mut carried = carried.clone();
+                    if is_dispatch_edge(edge) {
+                        let Some(nested) = dispatch_assumption(edge) else {
+                            continue;
+                        };
+                        carried.push(nested);
+                    }
+                    pending.push_back((edge.dst.as_str(), carried));
+                }
             }
         }
     }
@@ -1660,7 +1796,10 @@ fn finalize_candidate<'a>(
         {
             let prev = &raw.path[idx - 1].screen;
             let all = match (assumption, &node.nav) {
-                (NavAssumption::EntryCallback(_), Some(nav)) => closures
+                (
+                    NavAssumption::EntryCallback(_) | NavAssumption::HiltDispatch { .. },
+                    Some(nav),
+                ) => closures
                     .get(prev.as_str())
                     .and_then(|c| c.symbol_assumptions.get(&nav.source))
                     .cloned()

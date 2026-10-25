@@ -1152,6 +1152,7 @@ fn journey_candidates_cross_navigation3_startup_and_entry_callbacks_as_assumptio
                 step: 1,
                 screen: init_screen.into(),
                 symbol: owner_sym.clone(),
+                interface: None,
                 param: None,
                 composable: None,
                 registration: None,
@@ -1163,6 +1164,7 @@ fn journey_candidates_cross_navigation3_startup_and_entry_callbacks_as_assumptio
                 step: 2,
                 screen: home_screen.into(),
                 symbol: show_create_sym.clone(),
+                interface: None,
                 param: Some("onCreateAlias".into()),
                 composable: Some(home_comp_sym.clone()),
                 registration: Some(ev("simplelogin/android", root_path, 210, 260)),
@@ -1237,6 +1239,7 @@ fn journey_candidates_cross_navigation3_startup_and_entry_callbacks_as_assumptio
             step: 1,
             screen: init_screen.into(),
             symbol: owner_sym,
+            interface: None,
             param: None,
             composable: None,
             registration: None,
@@ -1403,4 +1406,149 @@ fn journey_candidates_cross_navigation3_startup_and_entry_callbacks_as_assumptio
             .content
             .contains("verified-only export withholds them")
     );
+}
+
+// AC-0355 (T-0355): a Hilt `@Binds` hop from an interface member to its bound
+// implementation is crossed only as a `hilt_dispatch` assumption; proven code
+// dominates and nothing is reached without the binding.
+#[test]
+fn journey_candidates_cross_hilt_dispatch_as_an_assumption() {
+    let repo = "simplelogin/android";
+    let create_path = "app/src/main/java/io/simplelogin/android/create/CreateAliasScreen.kt";
+    let ds_path = "core/network/src/main/java/io/simplelogin/core/network/datasource/Creation.kt";
+    let module_path = "core/network/src/main/java/io/simplelogin/core/network/Module.kt";
+    let create_screen =
+        "screen:simplelogin/android@navigation3:io.simplelogin.android.root.CreateAliasDestination";
+    let create_call_sym = format!("sym:{repo}@{create_path}#CreateAliasViewModel.create");
+    let iface_sym = format!("sym:{repo}@{ds_path}#CreationRemoteDatasource.create");
+    let impl_sym = format!("sym:{repo}@{ds_path}#CreationRemoteDatasourceImpl.create");
+    let endpoint_id = "ep:simplelogin/app@POST:/api/v5/alias/custom/new";
+    let binding = ev(repo, module_path, 400, 480);
+
+    // The view model calls the interface; only the implementation fetches.
+    let (mut nodes, base_edges, flows) = simplelogin_android_nav3_fixture();
+    for (id, name, start) in [(&iface_sym, "create", 10), (&impl_sym, "create", 100)] {
+        nodes.push(node(
+            id,
+            "Symbol",
+            json!({ "name": name }),
+            vec![ev(repo, ds_path, start, start + 60)],
+        ));
+    }
+    let mut edges: Vec<Edge> = base_edges
+        .into_iter()
+        .filter(|e| !(e.src == create_call_sym && e.label == "FETCHES"))
+        .collect();
+    edges.push(edge(
+        &create_call_sym,
+        &iface_sym,
+        "CALLS",
+        json!({"resolution": "declared-type"}),
+        vec![ev(repo, create_path, 230, 260)],
+    ));
+    edges.push(edge(
+        &impl_sym,
+        endpoint_id,
+        "FETCHES",
+        json!({"method": "POST"}),
+        vec![ev(repo, ds_path, 120, 150)],
+    ));
+    let without_binding = edges.clone();
+    let dispatch_prov = Provenance::new(
+        Tier::Deterministic,
+        ConfidenceTier::InferredStrong,
+        vec![binding.clone()],
+        "test.fixture",
+        b"hilt",
+    )
+    .unwrap();
+    edges.push(Edge {
+        src: iface_sym.clone(),
+        dst: impl_sym.clone(),
+        label: "CALLS".into(),
+        props: json!({
+            "resolution": "hilt-binds",
+            "assumption": "hilt_dispatch",
+            "prov": dispatch_prov,
+        }),
+    });
+
+    // 1. The goal is reached through the binding, recorded on the step whose
+    // call relies on it, and cited.
+    let (node_refs, edge_refs) = refs(&nodes, &edges);
+    let result = search(&node_refs, &edge_refs, &flows, JourneyBudget::default());
+    assert_eq!(result.candidates.len(), 1);
+    let candidate = &result.candidates[0];
+    assert_eq!(candidate.goal.endpoint, endpoint_id);
+    assert_eq!(candidate.steps[2].screen, create_screen);
+    assert_eq!(candidate.steps[2].calls[0].source, impl_sym);
+    let hilt: Vec<&JourneyAssumption> = candidate
+        .assumptions
+        .iter()
+        .filter(|a| a.kind == AssumptionKind::HiltDispatch)
+        .collect();
+    assert_eq!(
+        hilt,
+        vec![&JourneyAssumption {
+            kind: AssumptionKind::HiltDispatch,
+            step: 2,
+            screen: create_screen.into(),
+            symbol: impl_sym.clone(),
+            interface: Some(iface_sym.clone()),
+            param: None,
+            composable: None,
+            registration: Some(binding.clone()),
+            forwarded: Vec::new(),
+            limitation: HILT_DISPATCH_LIMITATION.into(),
+        }]
+    );
+    assert!(candidate.provenance.evidence.contains(&binding));
+    assert_eq!(
+        candidate.provenance.confidence_tier,
+        ConfidenceTier::InferredWeak
+    );
+
+    // 2. Without the binding the implementation is unreachable: no goal.
+    let (_, unbound_refs) = refs(&nodes, &without_binding);
+    assert!(candidates(&node_refs, &unbound_refs, &flows, JourneyBudget::default()).is_empty());
+
+    // 3. Proven beats assumed: a direct call to the implementation removes
+    // the hilt_dispatch assumption without changing the candidate id.
+    let mut proven = edges.clone();
+    proven.push(edge(
+        &create_call_sym,
+        &impl_sym,
+        "CALLS",
+        json!({}),
+        vec![ev(repo, create_path, 270, 300)],
+    ));
+    let (_, proven_refs) = refs(&nodes, &proven);
+    let proven_cands = candidates(&node_refs, &proven_refs, &flows, JourneyBudget::default());
+    assert_eq!(proven_cands.len(), 1);
+    assert_eq!(proven_cands[0].id, candidate.id);
+    assert!(
+        proven_cands[0]
+            .assumptions
+            .iter()
+            .all(|a| a.kind != AssumptionKind::HiltDispatch)
+    );
+
+    // 4. The artifact row names the interface it crossed from.
+    let artifact = compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        ExportMode::BestEffort,
+        &BTreeSet::new(),
+    )
+    .artifacts
+    .into_iter()
+    .find(|a| a.id == "journeys")
+    .expect("journeys artifact");
+    assert!(
+        artifact
+            .content
+            .contains(&format!("`{iface_sym} → {impl_sym}`"))
+    );
+    assert!(artifact.content.contains("`hilt_dispatch`"));
 }
