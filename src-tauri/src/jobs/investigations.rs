@@ -91,6 +91,8 @@ pub(crate) use saved_call_workspace::next_prompt_saved_call_workspace;
 #[path = "investigations/saved_validation_workspace.rs"]
 mod saved_validation_workspace;
 #[cfg(unix)]
+pub(crate) use read_reservations::workspace::next_prompt_pending_source_workspace;
+#[cfg(unix)]
 pub(crate) use saved_validation_workspace::next_prompt_saved_validation_workspace;
 #[cfg(test)]
 #[path = "investigations/tests.rs"]

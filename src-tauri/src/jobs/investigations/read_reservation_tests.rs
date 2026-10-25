@@ -148,6 +148,13 @@ fn read_reservation_rows_rollback_reopen_and_reject_duplicate_replacement() {
         assert!(load(&tx, "task:1", "step:1").unwrap().is_none());
         tx.commit().unwrap();
     }
+    #[cfg(unix)]
+    {
+        // AC-0327: all three real immutable records can be retained together.
+        let bytes = serde_json::to_vec(&(&r, &charge, &acquired)).unwrap().len();
+        let (retained, peak) = workspace::next_prompt_read_reservation_workspace().unwrap();
+        assert!(retained >= bytes && peak >= retained);
+    }
     let body = encode(&r, MAX_MANIFEST_BYTES).unwrap();
     {
         let tx = conn.transaction().unwrap();
@@ -391,6 +398,30 @@ fn read_reservation_corrupt_rows_are_bounded_and_never_release_unvalidated_claim
         pending_storage_claims(&tx, None),
         Err(InvestigationStoreError::Invalid)
     );
+    // AC-0327: nested malformed Content in either tagged path still fails
+    // closed; JSON nesting does not introduce recursive typed enum layers.
+    for pointer in ["/binding/original_read/fact/id", "/source/fact/id"] {
+        let mut value = serde_json::to_value(&r).unwrap();
+        let mut nested = json!("not an id");
+        for _ in 0..48 {
+            nested = json!([nested]);
+        }
+        *value.pointer_mut(pointer).unwrap() = nested;
+        let malformed = serde_json::to_vec(&value).unwrap();
+        assert!(malformed.len() < MAX_MANIFEST_BYTES);
+        replace_body(
+            &tx,
+            TABLES[0],
+            "task:1",
+            "step:1",
+            &malformed,
+            &content_hash(&malformed),
+        );
+        assert_eq!(
+            load(&tx, "task:1", "step:1"),
+            Err(InvestigationStoreError::Invalid)
+        );
+    }
     let mut value = serde_json::to_value(&r).unwrap();
     value["foreign"] = json!(true);
     let foreign = serde_json::to_vec(&value).unwrap();

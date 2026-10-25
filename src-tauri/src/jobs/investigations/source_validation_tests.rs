@@ -50,6 +50,17 @@ fn source_validation_charge_commits_exact_witness_usage_and_reopens() {
     let task = load_next_prompt_task_base(&tx, &f.basis.task_id).unwrap();
     assert_eq!(task.detail, *receipt.detail());
     assert_eq!(task.phase, Phase::Reservation);
+    #[cfg(unix)]
+    {
+        // AC-0327: actual reopened charged reservation remains live in replay.
+        let retained = validate_saved_pending(&tx, &task).unwrap();
+        let bytes = serde_json::to_vec(&retained.reservation).unwrap().len()
+            + serde_json::to_vec(&retained.charge).unwrap().len();
+        assert!(
+            next_prompt_pending_source_workspace().unwrap()
+                >= bytes + next_prompt_saved_validation_workspace().unwrap().0
+        );
+    }
 }
 
 // AC-0287: same descriptor/context is insufficient when task, invocation or
