@@ -1551,4 +1551,82 @@ fn journey_candidates_cross_hilt_dispatch_as_an_assumption() {
             .contains(&format!("`{iface_sym} → {impl_sym}`"))
     );
     assert!(artifact.content.contains("`hilt_dispatch`"));
+
+    // 5. A nested dispatch is not required when an ordinary route reaches
+    // the same implementation: `impl` calls interface `B.go` (bound to
+    // `BImpl.go`) and also `Helper.run`, which calls `BImpl.go` directly.
+    // `B.go` sorts first, so its dispatch route is queued before the helper's.
+    let b_iface = format!("sym:{repo}@{ds_path}#B.go");
+    let b_impl = format!("sym:{repo}@{ds_path}#BImpl.go");
+    let helper = format!("sym:{repo}@{ds_path}#Helper.run");
+    let mut nested_nodes = nodes.clone();
+    for (id, name, start) in [
+        (&b_iface, "go", 200),
+        (&b_impl, "go", 300),
+        (&helper, "run", 400),
+    ] {
+        nested_nodes.push(node(
+            id,
+            "Symbol",
+            json!({ "name": name }),
+            vec![ev(repo, ds_path, start, start + 60)],
+        ));
+    }
+    let mut nested: Vec<Edge> = edges
+        .iter()
+        .filter(|e| !(e.src == impl_sym && e.label == "FETCHES"))
+        .cloned()
+        .collect();
+    for (src, dst) in [
+        (&impl_sym, &b_iface),
+        (&impl_sym, &helper),
+        (&helper, &b_impl),
+    ] {
+        nested.push(edge(
+            src,
+            dst,
+            "CALLS",
+            json!({}),
+            vec![ev(repo, ds_path, 500, 520)],
+        ));
+    }
+    nested.push(Edge {
+        src: b_iface.clone(),
+        dst: b_impl.clone(),
+        label: "CALLS".into(),
+        props: json!({
+            "resolution": "hilt-binds",
+            "assumption": "hilt_dispatch",
+            "prov": Provenance::new(
+                Tier::Deterministic,
+                ConfidenceTier::InferredStrong,
+                vec![ev(repo, module_path, 600, 680)],
+                "test.fixture",
+                b"hilt-b",
+            )
+            .unwrap(),
+        }),
+    });
+    nested.push(edge(
+        &b_impl,
+        endpoint_id,
+        "FETCHES",
+        json!({"method": "POST"}),
+        vec![ev(repo, ds_path, 320, 350)],
+    ));
+    let (nested_node_refs, nested_refs) = refs(&nested_nodes, &nested);
+    let nested_cands = candidates(
+        &nested_node_refs,
+        &nested_refs,
+        &flows,
+        JourneyBudget::default(),
+    );
+    assert_eq!(nested_cands.len(), 1);
+    let dispatches: Vec<&str> = nested_cands[0]
+        .assumptions
+        .iter()
+        .filter(|a| a.kind == AssumptionKind::HiltDispatch)
+        .map(|a| a.symbol.as_str())
+        .collect();
+    assert_eq!(dispatches, vec![impl_sym.as_str()]);
 }

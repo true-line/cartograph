@@ -134,6 +134,9 @@ struct Declared {
     object: bool,
     /// Candidate-FQN lists for each direct `delegation_specifier` user type.
     supers: Vec<Vec<String>>,
+    /// Functions declared directly in the body: not a companion's, a nested
+    /// type's, or a local function's.
+    members: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -649,6 +652,28 @@ pub(crate) fn is_abstract(cx: &FileCx<'_>, declaration: TsNode<'_>) -> bool {
     false
 }
 
+/// Names of the functions declared directly in a type's body.
+fn direct_members(cx: &FileCx<'_>, declaration: TsNode<'_>) -> BTreeSet<String> {
+    let mut walk = declaration.walk();
+    let Some(body) = declaration
+        .named_children(&mut walk)
+        .find(|part| part.kind() == "class_body")
+    else {
+        return BTreeSet::new();
+    };
+    let mut walk = body.walk();
+    body.named_children(&mut walk)
+        .filter(|member| member.kind() == "function_declaration")
+        .filter_map(|function| {
+            let mut walk = function.walk();
+            function
+                .named_children(&mut walk)
+                .find(|part| part.kind() == "identifier")
+                .map(|name| cx.text(&name).to_string())
+        })
+        .collect()
+}
+
 /// Candidate-FQN lists for each direct `delegation_specifier` user type of a
 /// class or interface declaration.
 fn declaration_supers(
@@ -751,6 +776,7 @@ fn collect_importables(
             interface_or_abstract: false,
             object: false,
             supers: Vec::new(),
+            members: BTreeSet::new(),
         });
     };
     let mut walk = root.walk();
@@ -984,6 +1010,7 @@ pub fn extract_source(
                 interface_or_abstract: kind == "interface" || abstract_class,
                 object: decl.kind() == "object_declaration",
                 supers: declaration_supers(&cx, decl, &imports, Some(package), &local_types),
+                members: direct_members(&cx, decl),
             });
         }
     }
@@ -1083,6 +1110,7 @@ pub fn extract_source(
                 interface_or_abstract: false,
                 object: false,
                 supers: Vec::new(),
+                members: BTreeSet::new(),
             });
         }
         functions.push((function, symbol));

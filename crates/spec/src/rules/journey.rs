@@ -972,50 +972,58 @@ fn build_screen_closure<'a>(
             };
             let mut carried = inherited.clone();
             carried.push(assumption);
+            // Level by level: a dispatch's ordinary-call closure is complete
+            // before any nested dispatch starts, so a symbol keeps the
+            // fewest assumptions any route reaches it with.
             let mut reach: BTreeSet<&'a str> = BTreeSet::new();
-            let mut pending: VecDeque<(&'a str, Vec<NavAssumption>)> =
+            let mut levels: VecDeque<(&'a str, Vec<NavAssumption>)> =
                 VecDeque::from([(hop.dst.as_str(), carried)]);
-            while let Some((sym, carried)) = pending.pop_front() {
-                if proven.contains(sym) || reach.contains(sym) {
-                    continue;
-                }
-                try_visit_symbol(
-                    sym,
-                    repo,
-                    by_id,
-                    budget,
-                    &mut visited,
-                    &mut visited_set,
-                    &mut queue,
-                    &mut calls_truncated,
-                    carried.first().cloned(),
-                );
-                queue.clear();
-                if !visited_set.contains(sym) {
-                    continue;
-                }
-                reach.insert(sym);
-                let recorded = symbol_assumptions.entry(sym.to_owned()).or_default();
-                for a in &carried {
-                    if !recorded.contains(a) {
-                        recorded.push(a.clone());
+            while let Some((root, carried)) = levels.pop_front() {
+                let mut pending: VecDeque<&'a str> = VecDeque::from([root]);
+                while let Some(sym) = pending.pop_front() {
+                    if proven.contains(sym) || reach.contains(sym) {
+                        continue;
                     }
-                }
-                let mut next: Vec<&'a Edge> = edges
-                    .iter()
-                    .copied()
-                    .filter(|e| e.src == sym && e.label == "CALLS" && !is_gap_edge(e, by_id))
-                    .collect();
-                next.sort_unstable_by(|a, b| a.dst.cmp(&b.dst));
-                for edge in next {
-                    let mut carried = carried.clone();
-                    if is_dispatch_edge(edge) {
+                    try_visit_symbol(
+                        sym,
+                        repo,
+                        by_id,
+                        budget,
+                        &mut visited,
+                        &mut visited_set,
+                        &mut queue,
+                        &mut calls_truncated,
+                        carried.first().cloned(),
+                    );
+                    queue.clear();
+                    if !visited_set.contains(sym) {
+                        continue;
+                    }
+                    reach.insert(sym);
+                    let recorded = symbol_assumptions.entry(sym.to_owned()).or_default();
+                    for a in &carried {
+                        if !recorded.contains(a) {
+                            recorded.push(a.clone());
+                        }
+                    }
+                    let mut next: Vec<&'a Edge> = edges
+                        .iter()
+                        .copied()
+                        .filter(|e| e.src == sym && e.label == "CALLS" && !is_gap_edge(e, by_id))
+                        .collect();
+                    next.sort_unstable_by(|a, b| a.dst.cmp(&b.dst));
+                    for edge in next {
+                        if !is_dispatch_edge(edge) {
+                            pending.push_back(edge.dst.as_str());
+                            continue;
+                        }
                         let Some(nested) = dispatch_assumption(edge) else {
                             continue;
                         };
-                        carried.push(nested);
+                        let mut deeper = carried.clone();
+                        deeper.push(nested);
+                        levels.push_back((edge.dst.as_str(), deeper));
                     }
-                    pending.push_back((edge.dst.as_str(), carried));
                 }
             }
         }

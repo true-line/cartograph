@@ -13,7 +13,7 @@
 
 use core_graph::Edge;
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tree_sitter::Node as TsNode;
 
 use super::{
@@ -565,17 +565,9 @@ pub(crate) fn complete(
         let Some((iface, impl_decl, bind)) = slot else {
             continue;
         };
-        let iface_prefix = symbol_id(repo, &iface.path, &format!("{}.", iface.qualified));
-        let mut members: BTreeSet<&str> = BTreeSet::new();
-        for sym in known {
-            if let Some(m) = sym.strip_prefix(&iface_prefix)
-                && !m.is_empty()
-                && !m.contains('.')
-            {
-                members.insert(m);
-            }
-        }
-        for m in members {
+        // Only members both declare directly: a companion's or a local
+        // function shares the `Iface.name` symbol shape but is never bound.
+        for m in iface.members.intersection(&impl_decl.members) {
             let src = symbol_id(repo, &iface.path, &format!("{}.{m}", iface.qualified));
             let dst = symbol_id(
                 repo,

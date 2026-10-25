@@ -2560,10 +2560,28 @@ abstract class RemoteDatasourceModule {
 
 interface Repo {
     fun load()
+
+    fun refresh() {
+        fun inner() {
+        }
+        inner()
+    }
+
+    companion object {
+        fun make() {
+        }
+    }
 }
 
+// `make` and `inner` share `Repo.name` symbol shapes but are not members.
 class RepoImpl : Repo {
     override fun load() {
+    }
+
+    fun make() {
+    }
+
+    fun inner() {
     }
 }
 "#,
