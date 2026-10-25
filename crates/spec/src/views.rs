@@ -241,8 +241,13 @@ pub fn compile_spec_with_views(
         .expect("unbounded ADR derivation");
     let filtered_nodes = filter_nodes(&projection.nodes, mode, rejected_hashes);
     let filtered_edges = filter_edges(&projection.edges, mode, rejected_hashes);
-    let bundle =
-        selected::bundle_from_filtered(&filtered_nodes, &filtered_edges, &projection.flows, mode);
+    let bundle = selected::bundle_from_filtered(
+        &filtered_nodes,
+        &filtered_edges,
+        &projection.flows,
+        mode,
+        rejected_hashes,
+    );
 
     let artifact_for = |id: &str| -> &SpecArtifact {
         bundle

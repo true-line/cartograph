@@ -886,15 +886,19 @@ pub(super) fn journeys(
     nodes: &[&Node],
     edges: &[&Edge],
     flows: &[Flow],
+    (mode, rejected): (ExportMode, &BTreeSet<String>),
     max: Option<usize>,
 ) -> Result<Output, RenderLimit> {
     let budget = Budget::new(max)?;
-    let candidates = crate::rules::journey::candidates(
+    let candidates: Vec<_> = crate::rules::journey::candidates(
         nodes,
         edges,
         flows,
         crate::rules::journey::JourneyBudget::default(),
-    );
+    )
+    .into_iter()
+    .filter(|c| super::included(&c.provenance, mode, rejected))
+    .collect();
     let mut assertions = Assertions::new(&budget);
     for candidate in &candidates {
         assertions.journey(candidate)?;
@@ -902,9 +906,13 @@ pub(super) fn journeys(
     let mut content = Text::new(&budget, "# Journey candidates\n\n")?;
     if candidates.is_empty() {
         content.push_str(
-            "Interpretation: rule journey-candidate@1, InferredWeak, never a confirmed business journey\n\n\
-             No journey candidates recovered.\n",
+            "Interpretation: rule journey-candidate@1, InferredWeak, never a confirmed business journey\n\n",
         )?;
+        content.push_str(if mode == ExportMode::BestEffort {
+            "No journey candidates recovered.\n"
+        } else {
+            "Journey candidates are InferredWeak, so a verified-only export withholds them.\n"
+        })?;
         return finish(content, assertions);
     }
     for (i, candidate) in candidates.iter().enumerate() {

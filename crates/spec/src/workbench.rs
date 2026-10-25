@@ -710,7 +710,7 @@ mod tests {
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "cdc8b5e7f97b57ae2e6b50dc6cefc94973b9e1cb2162ef379e7c51dcd178cc4d",
+                "e7b9e97a6d38150eb6d28276f527554b0908e180ca6ebe120d6f089c524cd7af",
             ),
             (
                 ExportMode::BestEffort,
@@ -727,7 +727,8 @@ mod tests {
             .unwrap();
             // Frozen native #603 (03d776d) output, with the already-integrated
             // method column, projection stamping and artifact identity seams,
-            // plus the test-arrangements (#946) and journeys artifacts.
+            // plus the test-arrangements (#946) and journeys artifacts; verified-only
+            // journeys state that they withhold InferredWeak candidates.
             assert_eq!(blake3::hash(&bytes).to_hex().as_str(), expected, "{mode:?}");
         }
     }
@@ -2284,11 +2285,12 @@ mod tests {
         flows[0].hops.clear();
         // Frozen against native #603 03d776d, incorporating existing method,
         // projection and identity seams; independently compared before removal.
-        // The test-arrangements (#946) and journeys artifacts extend the bundle.
+        // The test-arrangements (#946) and journeys artifacts extend the bundle;
+        // verified-only journeys state that they withhold InferredWeak candidates.
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "0e49e9613b4efbec3b02886168de48e44c135179c9a42b985a1d4f998e5334f7",
+                "91a0a3018e0875a671e49e270a881f10050bad35d1d4621c3aa4a051e4bf6045",
             ),
             (
                 ExportMode::BestEffort,

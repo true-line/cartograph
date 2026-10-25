@@ -699,3 +699,109 @@ fn journey_candidates_enforce_ordering_cycle_budget_and_identity_contracts() {
     let renamed = &candidates(&ren_n_refs, &ren_e_refs, &flows, JourneyBudget::default())[0];
     assert_ne!(renamed.id, baseline.id);
 }
+
+// AC-0352 (T-0352, #1022 review): every observed goal on the terminal step is
+// a candidate; a `max_screens` cutoff is reported; export mode and Workbench
+// rejection apply to the derived candidates.
+#[test]
+fn journey_candidates_keep_every_terminal_goal_report_depth_cuts_and_honor_curation() {
+    let (mut nodes, mut edges, mut flows) = simplelogin_fixture(0);
+    let srv = "simplelogin/app";
+    let delete = "ep:simplelogin/app@DELETE:/api/aliases/:id";
+    let handler = "sym:simplelogin/app@app/api/views/alias.py#delete_alias";
+    nodes.push(node(
+        delete,
+        "Endpoint",
+        json!({"method": "DELETE", "path": "/api/aliases/:id"}),
+        vec![ev(srv, "app/api/views/alias.py", 400, 480)],
+    ));
+    nodes.push(node(
+        handler,
+        "Symbol",
+        json!({"name": "delete_alias"}),
+        vec![ev(srv, "app/api/views/alias.py", 400, 480)],
+    ));
+    edges.push(edge(
+        "sym:simplelogin/extension@src/popup/components/Main.vue#Main",
+        delete,
+        "FETCHES",
+        json!({"method": "DELETE"}),
+        vec![ev(
+            "simplelogin/extension",
+            "src/popup/components/Main.vue",
+            420,
+            470,
+        )],
+    ));
+    edges.push(edge(
+        handler,
+        "data:simplelogin/app@alias",
+        "WRITES",
+        json!({}),
+        vec![ev(srv, "app/api/views/alias.py", 430, 470)],
+    ));
+    let mut second = flows[0].clone();
+    second.trigger = delete.into();
+    second.hops[0].src = delete.into();
+    second.hops[0].dst = handler.into();
+    flows.push(second);
+    let (node_refs, edge_refs) = refs(&nodes, &edges);
+
+    let found = candidates(&node_refs, &edge_refs, &flows, JourneyBudget::default());
+    let goals: Vec<&str> = found.iter().map(|c| c.goal.endpoint.as_str()).collect();
+    assert_eq!(goals.len(), 2);
+    assert!(goals.contains(&delete));
+    assert!(goals.contains(&"ep:simplelogin/app@POST:/api/v2/alias/custom/new"));
+    for c in &found {
+        assert_eq!(c.goal.goal_basis, GoalBasis::ObservedWrite);
+        // The list call precedes both writes in `Main`.
+        assert_eq!(c.earlier_assumed_goals.len(), 1);
+    }
+
+    // `/main` at `max_screens: 2` still navigates to `/new-alias-result/`.
+    let (base_nodes, base_edges, base_flows) = simplelogin_fixture(0);
+    let list_only: Vec<Edge> = base_edges
+        .iter()
+        .filter(|e| {
+            !(e.label == "FETCHES" && e.dst == "ep:simplelogin/app@POST:/api/v2/alias/custom/new")
+        })
+        .cloned()
+        .collect();
+    let (base_refs, list_refs) = refs(&base_nodes, &list_only);
+    let shallow = JourneyBudget {
+        max_screens: 2,
+        ..JourneyBudget::default()
+    };
+    let cut = &candidates(&base_refs, &list_refs, &base_flows, shallow)[0];
+    assert_eq!(cut.truncated, Some(TruncationReason::MaxScreens));
+    assert!(!cut.alternatives_complete);
+
+    // Verified-only withholds the InferredWeak candidates; a rejected
+    // candidate's content hash removes it from a best-effort export.
+    let (_, base_edge_refs) = refs(&base_nodes, &base_edges);
+    let baseline = &candidates(
+        &base_refs,
+        &base_edge_refs,
+        &base_flows,
+        JourneyBudget::default(),
+    )[0];
+    let journeys = |mode, rejected: &BTreeSet<String>| {
+        compile_spec(&base_nodes, &base_edges, &base_flows, mode, rejected)
+            .artifacts
+            .into_iter()
+            .find(|a| a.id == "journeys")
+            .unwrap()
+    };
+    let verified = journeys(ExportMode::VerifiedOnly, &BTreeSet::new());
+    assert!(!verified.content.contains(&baseline.label));
+    assert!(
+        verified
+            .content
+            .contains("verified-only export withholds them")
+    );
+    assert!(verified.assertions.is_empty());
+    let rejected = BTreeSet::from([baseline.provenance.content_hash.clone()]);
+    let curated = journeys(ExportMode::BestEffort, &rejected);
+    assert!(!curated.content.contains(&baseline.label));
+    assert!(curated.assertions.is_empty());
+}

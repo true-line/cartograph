@@ -107,6 +107,8 @@ pub enum TruncationReason {
     ExpandedStates,
     /// Retained candidates for the entry hit `max_candidates`.
     Candidates,
+    /// A path at `max_screens` still had an unvisited outgoing navigation.
+    MaxScreens,
 }
 
 impl TruncationReason {
@@ -116,6 +118,7 @@ impl TruncationReason {
             Self::CallsPerScreen => "calls_per_screen",
             Self::ExpandedStates => "expanded_states",
             Self::Candidates => "candidates",
+            Self::MaxScreens => "max_screens",
         }
     }
 }
@@ -857,33 +860,33 @@ struct RawCandidate<'a> {
 
 type ObservedGoal<'a> = (StepCall, &'a Edge, Vec<(WriteFact, ConfidenceTier)>);
 
+/// A step's goals in fetch order: every observed-write call, each with the
+/// method-assumed calls before it; all method-assumed calls; and the first.
+#[expect(clippy::type_complexity)]
 fn step_goal_classification<'a>(
     screen_id: &str,
     closure: &ScreenClosure<'a>,
     writes_by_endpoint: &BTreeMap<&str, Vec<(WriteFact, ConfidenceTier)>>,
 ) -> (
-    Option<ObservedGoal<'a>>,
+    Vec<(ObservedGoal<'a>, Vec<AssumedGoal>)>,
     Vec<AssumedGoal>,
     Option<(StepCall, &'a Edge)>,
 ) {
-    let mut first_observed: Option<ObservedGoal<'a>> = None;
-    let mut assumed_before_observed: Vec<AssumedGoal> = Vec::new();
+    let mut observed: Vec<(ObservedGoal<'a>, Vec<AssumedGoal>)> = Vec::new();
+    let mut assumed: Vec<AssumedGoal> = Vec::new();
     let mut first_assumed: Option<(StepCall, &'a Edge)> = None;
 
     for (call, edge) in &closure.calls {
-        let observed = writes_by_endpoint
+        let writes = writes_by_endpoint
             .get(call.endpoint.as_str())
             .filter(|w| !w.is_empty());
-        if let Some(writes) = observed {
-            if first_observed.is_none() {
-                first_observed = Some((call.clone(), *edge, writes.clone()));
-            }
-            break;
+        if let Some(writes) = writes {
+            observed.push(((call.clone(), *edge, writes.clone()), assumed.clone()));
         } else if is_assumed_write_method(&call.method) {
             if first_assumed.is_none() {
                 first_assumed = Some((call.clone(), *edge));
             }
-            assumed_before_observed.push(AssumedGoal {
+            assumed.push(AssumedGoal {
                 screen: screen_id.to_owned(),
                 endpoint: call.endpoint.clone(),
                 method: call.method.clone(),
@@ -892,7 +895,7 @@ fn step_goal_classification<'a>(
             });
         }
     }
-    (first_observed, assumed_before_observed, first_assumed)
+    (observed, assumed, first_assumed)
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -932,6 +935,7 @@ fn search_entry<'a>(
 
     let mut expanded_states = 0usize;
     let mut state_budget_hit = false;
+    let mut screens_cut = false;
 
     // Observed-write paths found, and assumed-only prefixes tracked by their prefix screen/nav key.
     let mut observed_candidates: Vec<RawCandidate<'a>> = Vec::new();
@@ -956,24 +960,28 @@ fn search_entry<'a>(
         let (observed, step_assumed, first_step_assumed) =
             step_goal_classification(current_screen, closure, writes_by_endpoint);
 
-        if let Some((goal_call, goal_edge, writes)) = observed {
-            let mut earlier = state.earlier_assumed.clone();
-            earlier.extend(step_assumed);
+        // The first step with an observed write ends the path, with one
+        // candidate per observed goal it fetches.
+        if !observed.is_empty() {
             if let Some((prefix_path, assumed_call, _, _)) = &state.first_assumed_prefix {
                 let key = prefix_key(prefix_path, &assumed_call.endpoint);
                 if let Some(entry) = assumed_prefixes.get_mut(&key) {
                     entry.1 = true; // A descendant reached an observed write.
                 }
             }
-            observed_candidates.push(RawCandidate {
-                path: state.path,
-                goal_call,
-                goal_edge,
-                goal_basis: GoalBasis::ObservedWrite,
-                writes,
-                earlier_assumed_goals: earlier,
-                calls_truncated,
-            });
+            for ((goal_call, goal_edge, writes), before) in observed {
+                let mut earlier = state.earlier_assumed.clone();
+                earlier.extend(before);
+                observed_candidates.push(RawCandidate {
+                    path: state.path.clone(),
+                    goal_call,
+                    goal_edge,
+                    goal_basis: GoalBasis::ObservedWrite,
+                    writes,
+                    earlier_assumed_goals: earlier,
+                    calls_truncated,
+                });
+            }
             continue;
         }
 
@@ -1002,20 +1010,21 @@ fn search_entry<'a>(
             }),
         };
 
+        let unvisited = || {
+            closure
+                .outgoing_navs
+                .iter()
+                .any(|nav| !state.path.iter().any(|p| p.screen == nav.target_screen))
+        };
         if state.path.len() >= budget.max_screens {
+            screens_cut |= unvisited();
             continue;
         }
 
         // Queued states are still scored for goals once the budget is spent; only
         // expansion stops, and only a state with an unvisited target marks the cut.
         if expanded_states >= budget.max_expanded_states {
-            if closure
-                .outgoing_navs
-                .iter()
-                .any(|nav| !state.path.iter().any(|p| p.screen == nav.target_screen))
-            {
-                state_budget_hit = true;
-            }
+            state_budget_hit |= unvisited();
             continue;
         }
         expanded_states += 1;
@@ -1078,6 +1087,14 @@ fn search_entry<'a>(
         ordered_goals.truncate(budget.max_candidates);
     }
 
+    // Either cut leaves paths unexplored; expanded states is the wider one.
+    let search_cut = if state_budget_hit {
+        Some(TruncationReason::ExpandedStates)
+    } else if screens_cut {
+        Some(TruncationReason::MaxScreens)
+    } else {
+        None
+    };
     let mut finalized: Vec<JourneyCandidate> = ordered_goals
         .into_iter()
         .map(|(raw, alternatives)| {
@@ -1085,7 +1102,7 @@ fn search_entry<'a>(
                 entry,
                 raw,
                 alternatives,
-                state_budget_hit,
+                search_cut,
                 candidates_truncated,
                 by_id,
                 closures,
@@ -1131,7 +1148,7 @@ fn finalize_candidate<'a>(
     entry: &'a Node,
     raw: RawCandidate<'a>,
     alternatives: usize,
-    state_budget_hit: bool,
+    search_cut: Option<TruncationReason>,
     candidates_truncated: bool,
     by_id: &BTreeMap<&'a str, &'a Node>,
     closures: &BTreeMap<&'a str, ScreenClosure<'a>>,
@@ -1223,12 +1240,11 @@ fn finalize_candidate<'a>(
         Some(TruncationReason::CallsPerScreen)
     } else if candidates_truncated {
         Some(TruncationReason::Candidates)
-    } else if state_budget_hit {
-        Some(TruncationReason::ExpandedStates)
     } else {
-        None
+        search_cut
     };
-    let alternatives_complete = !state_budget_hit && !any_calls_truncated && !candidates_truncated;
+    let alternatives_complete =
+        search_cut.is_none() && !any_calls_truncated && !candidates_truncated;
 
     let endpoint_flows = flows_by_endpoint
         .get(raw.goal_call.endpoint.as_str())
