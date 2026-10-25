@@ -23,10 +23,18 @@ function findClosingBold(text: string, start: number): number {
   return -1;
 }
 
-function matchLink(
-  text: string,
-  start: number,
-): { label: string; url: string; end: number } | 'exhausted' | null {
+type LinkMatch =
+  | { kind: 'link'; label: string; url: string; end: number }
+  | { kind: 'fail'; until: number }
+  | { kind: 'none' }
+  | { kind: 'exhausted' };
+
+/** `[label](target)` at `start`. The target is scanned once, to the first
+ *  `)` or the first character after its whitespace-free run. A target that
+ *  fails at `until` proves every later target starting before `until` fails
+ *  the same way, so callers pass it back as `failUntil` and untrusted text
+ *  stays linear (#993 review). */
+function matchLink(text: string, start: number, failUntil: number): LinkMatch {
   let j = start + 1;
   while (j < text.length) {
     const ch = text[j];
@@ -42,7 +50,7 @@ function matchLink(
       }
     }
     if (ch === '[') {
-      return null;
+      return { kind: 'none' };
     }
     if (ch === ']') {
       break;
@@ -50,18 +58,27 @@ function matchLink(
     j += 1;
   }
   if (j >= text.length || text[j] !== ']' || text[j + 1] !== '(') {
-    return null;
+    return { kind: 'none' };
   }
-  const closeParen = text.indexOf(')', j + 2);
-  if (closeParen === -1) {
-    return 'exhausted';
+  const targetStart = j + 2;
+  if (targetStart < failUntil) {
+    return { kind: 'fail', until: failUntil };
+  }
+  const isSpace = (ch: string) => /\s/u.test(ch);
+  let k = targetStart;
+  while (k < text.length && isSpace(text[k])) k += 1;
+  const urlStart = k;
+  while (k < text.length && text[k] !== ')' && !isSpace(text[k])) k += 1;
+  const urlEnd = k;
+  while (k < text.length && isSpace(text[k])) k += 1;
+  if (k >= text.length) {
+    return { kind: 'exhausted' };
   }
   const label = text.slice(start + 1, j);
-  const url = text.slice(j + 2, closeParen).trim();
-  if (!label || !url || /\s/u.test(url)) {
-    return null;
+  if (text[k] !== ')' || urlEnd === urlStart || !label) {
+    return { kind: 'fail', until: k };
   }
-  return { label, url, end: closeParen + 1 };
+  return { kind: 'link', label, url: text.slice(urlStart, urlEnd), end: k + 1 };
 }
 
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
@@ -80,6 +97,7 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
   // rescanning: untrusted artifacts must stay linear, not quadratic.
   let boldOpen = true;
   let linkOpen = true;
+  let linkFailUntil = -1;
   let i = 0;
   while (i < text.length) {
     const ch = text[i];
@@ -117,9 +135,10 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
     }
 
     if (linkOpen && ch === '[') {
-      const link = matchLink(text, i);
-      if (link === 'exhausted') linkOpen = false;
-      if (link && link !== 'exhausted') {
+      const link = matchLink(text, i, linkFailUntil);
+      if (link.kind === 'exhausted') linkOpen = false;
+      if (link.kind === 'fail') linkFailUntil = link.until;
+      if (link.kind === 'link') {
         flushBuffer();
         const key = `${keyPrefix}:l:${tokenIndex++}`;
         nodes.push(

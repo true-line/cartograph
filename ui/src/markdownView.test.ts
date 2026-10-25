@@ -191,4 +191,21 @@ describe('renderArtifactMarkdown (#993)', () => {
     expect(html.startsWith('<p>**lone [a]( [a](')).toBe(true);
     expect(html).not.toContain('md-link-target');
   });
+
+  it('stays linear when many invalid targets share one late closing parenthesis', () => {
+    // #1070 review: each opener used to rescan to the same final `)`.
+    for (const input of [`${'[a]( '.repeat(40000)})`, `${'[a](x '.repeat(40000)})`, `${'[a](x[b](y'.repeat(20000)} z)`]) {
+      const html = toHtml(input);
+      // Only the last opener can pair with the final `)` (as with trimming).
+      expect(html.startsWith('<p>[a](')).toBe(true);
+      expect(html.split('md-link-target').length - 1).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('still renders valid links next to rejected targets', () => {
+    const html = toHtml('[bad](x y) then [docs]( https://example.test/a(b) ) and [ok](/p)');
+    expect(html).toContain('[bad](x y) then docs <code class="md-link-target">https://example.test/a(b</code>');
+    expect(html).toContain('ok <code class="md-link-target">/p</code>');
+    expect(html).not.toContain('<a');
+  });
 });
