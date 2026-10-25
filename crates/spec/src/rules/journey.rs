@@ -634,7 +634,9 @@ struct ScreenClosure<'a> {
     unresolved: Vec<UnresolvedStepItem>,
     unread_callbacks: Vec<UnreadCallback>,
     outgoing_navs: Vec<OutgoingNav<'a>>,
-    symbol_assumptions: BTreeMap<String, NavAssumption>,
+    /// Every read registration whose callback reaches a Symbol that proven
+    /// code does not, in record order.
+    symbol_assumptions: BTreeMap<String, Vec<NavAssumption>>,
     calls_truncated: bool,
 }
 
@@ -678,7 +680,6 @@ fn drain_symbol_queue<'a>(
     visited_set: &mut BTreeSet<&'a str>,
     queue: &mut VecDeque<&'a str>,
     calls_truncated: &mut bool,
-    assumption: Option<NavAssumption>,
 ) {
     while let Some(sym_id) = queue.pop_front() {
         let mut callees: Vec<&'a str> = edges
@@ -699,7 +700,7 @@ fn drain_symbol_queue<'a>(
                 visited_set,
                 queue,
                 calls_truncated,
-                assumption.clone(),
+                None,
             );
         }
     }
@@ -776,7 +777,6 @@ fn build_screen_closure<'a>(
         &mut visited_set,
         &mut queue,
         &mut calls_truncated,
-        None,
     );
 
     let screen_prov = provenance(&screen.props, &screen.id);
@@ -792,6 +792,9 @@ fn build_screen_closure<'a>(
         .map(|e| e.commit_sha.as_str())
         .unwrap_or("");
 
+    // Proven code dominates: a Symbol it reaches never carries an assumption.
+    let proven: BTreeSet<&'a str> = visited_set.clone();
+    let mut symbol_assumptions: BTreeMap<String, Vec<NavAssumption>> = BTreeMap::new();
     let mut unread_callbacks: Vec<UnreadCallback> = Vec::new();
     if let Some(records) = screen.props["entry_callbacks"].as_array() {
         for rec in records {
@@ -830,35 +833,55 @@ fn build_screen_closure<'a>(
                     })
                 })
                 .collect();
-            let assumption = Some(NavAssumption::EntryCallback(EntryCallbackRecord {
+            let assumption = NavAssumption::EntryCallback(EntryCallbackRecord {
                 param: param.to_owned(),
                 symbol: symbol.to_owned(),
                 composable: composable.to_owned(),
                 registration,
                 forwarded,
-            }));
-            try_visit_symbol(
-                symbol,
-                repo,
-                by_id,
-                budget,
-                &mut visited,
-                &mut visited_set,
-                &mut queue,
-                &mut calls_truncated,
-                assumption.clone(),
-            );
-            drain_symbol_queue(
-                repo,
-                by_id,
-                edges,
-                budget,
-                &mut visited,
-                &mut visited_set,
-                &mut queue,
-                &mut calls_truncated,
-                assumption,
-            );
+            });
+            // Each registration keeps its own reach, so two registrations of
+            // one callback (or converging callees) both support what they reach.
+            let mut reach: BTreeSet<&'a str> = BTreeSet::new();
+            let mut pending: VecDeque<&str> = VecDeque::from([symbol]);
+            while let Some(sym) = pending.pop_front() {
+                if proven.contains(sym) || reach.contains(sym) {
+                    continue;
+                }
+                try_visit_symbol(
+                    sym,
+                    repo,
+                    by_id,
+                    budget,
+                    &mut visited,
+                    &mut visited_set,
+                    &mut queue,
+                    &mut calls_truncated,
+                    Some(assumption.clone()),
+                );
+                queue.clear();
+                // Only Symbols admitted under the shared budget are followed.
+                let Some((&sym, _)) = by_id.get_key_value(sym) else {
+                    continue;
+                };
+                if !visited_set.contains(sym) {
+                    continue;
+                }
+                reach.insert(sym);
+                symbol_assumptions
+                    .entry(sym.to_owned())
+                    .or_default()
+                    .push(assumption.clone());
+                let mut callees: Vec<&'a str> = edges
+                    .iter()
+                    .copied()
+                    .filter(|e| e.src == sym && e.label == "CALLS" && !is_gap_edge(e, by_id))
+                    .map(|e| e.dst.as_str())
+                    .collect();
+                callees.sort_unstable();
+                callees.dedup();
+                pending.extend(callees);
+            }
         }
     }
 
@@ -866,13 +889,13 @@ fn build_screen_closure<'a>(
     let mut unresolved: Vec<UnresolvedStepItem> = Vec::new();
     let mut outgoing_navs: Vec<OutgoingNav<'a>> = Vec::new();
     let mut seen_navs: BTreeSet<(String, String)> = BTreeSet::new();
-    let mut symbol_assumptions: BTreeMap<String, NavAssumption> = BTreeMap::new();
 
-    for (sym_id, sym_assumption) in &visited {
+    for (sym_id, _) in &visited {
         let sym_id = *sym_id;
-        if let Some(assumption) = sym_assumption {
-            symbol_assumptions.insert(sym_id.to_owned(), assumption.clone());
-        }
+        let sym_assumption = symbol_assumptions
+            .get(sym_id)
+            .and_then(|all| all.first())
+            .cloned();
         for &edge in edges {
             if edge.src != sym_id {
                 continue;
@@ -1635,7 +1658,18 @@ fn finalize_candidate<'a>(
         if idx > 0
             && let Some(assumption) = &node.nav_assumption
         {
-            assumptions.push(assumption.to_journey_assumption(idx, &raw.path[idx - 1].screen));
+            let prev = &raw.path[idx - 1].screen;
+            let all = match (assumption, &node.nav) {
+                (NavAssumption::EntryCallback(_), Some(nav)) => closures
+                    .get(prev.as_str())
+                    .and_then(|c| c.symbol_assumptions.get(&nav.source))
+                    .cloned()
+                    .unwrap_or_else(|| vec![assumption.clone()]),
+                _ => vec![assumption.clone()],
+            };
+            for a in &all {
+                assumptions.push(a.to_journey_assumption(idx, prev));
+            }
         }
         let closure = closures.get(node.screen.as_str());
         if let Some(c) = closure {
@@ -1643,13 +1677,13 @@ fn finalize_candidate<'a>(
                 any_calls_truncated = true;
             }
             for (call, _) in &c.calls {
-                if let Some(assumption) = c.symbol_assumptions.get(&call.source) {
-                    assumptions.push(assumption.to_journey_assumption(idx, &node.screen));
+                for a in c.symbol_assumptions.get(&call.source).into_iter().flatten() {
+                    assumptions.push(a.to_journey_assumption(idx, &node.screen));
                 }
             }
             for item in &c.unresolved {
-                if let Some(assumption) = c.symbol_assumptions.get(&item.source) {
-                    assumptions.push(assumption.to_journey_assumption(idx, &node.screen));
+                for a in c.symbol_assumptions.get(&item.source).into_iter().flatten() {
+                    assumptions.push(a.to_journey_assumption(idx, &node.screen));
                 }
             }
         }
@@ -1692,24 +1726,50 @@ fn finalize_candidate<'a>(
         }
         if let Some(c) = closures.get(res_step.screen.as_str()) {
             for (call, _) in &c.calls {
-                if let Some(assumption) = c.symbol_assumptions.get(&call.source) {
-                    assumptions.push(assumption.to_journey_assumption(res_idx, &res_step.screen));
+                for a in c.symbol_assumptions.get(&call.source).into_iter().flatten() {
+                    assumptions.push(a.to_journey_assumption(res_idx, &res_step.screen));
                 }
             }
             for item in &c.unresolved {
-                if let Some(assumption) = c.symbol_assumptions.get(&item.source) {
-                    assumptions.push(assumption.to_journey_assumption(res_idx, &res_step.screen));
+                for a in c.symbol_assumptions.get(&item.source).into_iter().flatten() {
+                    assumptions.push(a.to_journey_assumption(res_idx, &res_step.screen));
                 }
             }
         }
         steps.push(res_step.clone());
     }
 
+    let registration_key = |a: &JourneyAssumption| {
+        a.registration
+            .as_ref()
+            .map(|r| (r.path.clone(), r.byte_start, r.byte_end))
+    };
     assumptions.sort_by(|a, b| {
-        (a.step, a.kind, &a.symbol, &a.param, &a.screen)
-            .cmp(&(b.step, b.kind, &b.symbol, &b.param, &b.screen))
+        (
+            a.step,
+            a.kind,
+            &a.symbol,
+            &a.param,
+            &a.screen,
+            &a.composable,
+        )
+            .cmp(&(
+                b.step,
+                b.kind,
+                &b.symbol,
+                &b.param,
+                &b.screen,
+                &b.composable,
+            ))
+            .then_with(|| registration_key(a).cmp(&registration_key(b)))
     });
     assumptions.dedup();
+    // A registration is the only evidence tying a screen to its callback.
+    for registration in assumptions.iter().filter_map(|a| a.registration.as_ref()) {
+        if !citing_evidence.contains(registration) {
+            citing_evidence.push(registration.clone());
+        }
+    }
 
     supporting_confidences.push(edge_confidence(raw.goal_edge));
     if let Some(ep_node) = by_id.get(raw.goal_call.endpoint.as_str()) {

@@ -995,11 +995,15 @@ pub(super) fn journeys(
         }
         if !candidate.assumptions.is_empty() {
             content.push_str(
-                "\n### Assumptions\n\n| Step | Kind | Screen | Symbol | Param | Composable | Forwarded | Limitation |\n|---|---|---|---|---|---|---|---|\n",
+                "\n### Assumptions\n\n| Step | Kind | Screen | Symbol | Param | Composable | Registration | Forwarded | Limitation |\n|---|---|---|---|---|---|---|---|---|\n",
             )?;
             for assumption in &candidate.assumptions {
                 let param_str = assumption.param.as_deref().unwrap_or("—");
                 let composable_str = assumption.composable.as_deref().unwrap_or("—");
+                let registration_str = assumption.registration.as_ref().map_or_else(
+                    || "—".to_owned(),
+                    |r| format!("{}:{}-{}", r.path, r.byte_start, r.byte_end),
+                );
                 let forwarded_str = if assumption.forwarded.is_empty() {
                     "—".to_owned()
                 } else {
@@ -1012,13 +1016,14 @@ pub(super) fn journeys(
                 };
                 writeln!(
                     content,
-                    "| {} | `{}` | `{}` | `{}` | {} | {} | {} | {} |",
+                    "| {} | `{}` | `{}` | `{}` | {} | {} | {} | {} | {} |",
                     Safe(assumption.step),
                     Safe(assumption.kind.as_str()),
                     Safe(&assumption.screen),
                     Safe(&assumption.symbol),
                     Safe(param_str),
                     Safe(composable_str),
+                    Safe(&registration_str),
                     Safe(&forwarded_str),
                     Safe(&assumption.limitation)
                 )?;

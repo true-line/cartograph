@@ -1175,6 +1175,15 @@ fn journey_candidates_cross_navigation3_startup_and_entry_callbacks_as_assumptio
         ]
     );
 
+    // The registration is the evidence tying Home to its callback, so the
+    // candidate cites it.
+    assert!(candidate.provenance.evidence.contains(&ev(
+        "simplelogin/android",
+        root_path,
+        210,
+        260
+    )));
+
     // 2. The unread record is listed on step 1 (Home) and never crossed.
     for c in &result.candidates {
         assert!(
@@ -1252,6 +1261,53 @@ fn journey_candidates_cross_navigation3_startup_and_entry_callbacks_as_assumptio
     assert_eq!(hop_cand.id, candidate.id);
     assert_ne!(hop_cand.support_fingerprint, candidate.support_fingerprint);
 
+    // 4b. A second read registration of the same callback (another parameter
+    // passing showCreateAliasScreen) supports the same step: both are listed
+    // and cited, the path and id are unchanged.
+    let mut twin_nodes = nodes.clone();
+    for n in &mut twin_nodes {
+        if n.id == home_screen {
+            n.props["entry_callbacks"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({
+                    "param": "onFab",
+                    "symbol": show_create_sym,
+                    "composable": home_comp_sym,
+                    "evidence": {"path": root_path, "byte_start": 300, "byte_end": 330},
+                    "read": true,
+                    "forwarded": []
+                }));
+        }
+    }
+    let (twin_node_refs, _) = refs(&twin_nodes, &edges);
+    let twin = &candidates(
+        &twin_node_refs,
+        &edge_refs,
+        &flows,
+        JourneyBudget::default(),
+    )[0];
+    assert_eq!(twin.id, candidate.id);
+    let twin_params: Vec<(usize, Option<&str>)> = twin
+        .assumptions
+        .iter()
+        .filter(|a| a.kind == AssumptionKind::EntryCallback)
+        .map(|a| (a.step, a.param.as_deref()))
+        .collect();
+    assert_eq!(
+        twin_params,
+        vec![(2, Some("onCreateAlias")), (2, Some("onFab"))]
+    );
+    for span in [(210, 260), (300, 330)] {
+        assert!(twin.provenance.evidence.contains(&ev(
+            "simplelogin/android",
+            root_path,
+            span.0,
+            span.1
+        )));
+    }
+    assert_ne!(twin.support_fingerprint, candidate.support_fingerprint);
+
     // 5. Path routers unchanged: an existing path-router fixture yields identical
     // candidates, ids, and fingerprints through `candidates` and `search`.
     let (pr_nodes, pr_edges, pr_flows) = simplelogin_fixture(0);
@@ -1315,9 +1371,14 @@ fn journey_candidates_cross_navigation3_startup_and_entry_callbacks_as_assumptio
     ));
     assert!(best_effort.content.contains("### Assumptions\n"));
     assert!(best_effort.content.contains(
-        "| Step | Kind | Screen | Symbol | Param | Composable | Forwarded | Limitation |"
+        "| Step | Kind | Screen | Symbol | Param | Composable | Registration | Forwarded | Limitation |"
     ));
     assert!(best_effort.content.contains("HomeContent.onAddAlias"));
+    assert!(
+        best_effort
+            .content
+            .contains(&format!("| {root_path}:210-260 |"))
+    );
     assert!(
         best_effort
             .content
