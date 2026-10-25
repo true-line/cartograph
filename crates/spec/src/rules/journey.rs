@@ -1220,6 +1220,35 @@ fn weakest_confidence(tiers: impl IntoIterator<Item = ConfidenceTier>) -> Confid
     }
 }
 
+/// Observed writes of `participants`, recorded on `endpoint`.
+fn record_writes<'a>(
+    writes_by_endpoint: &mut BTreeMap<&'a str, Vec<(WriteFact, ConfidenceTier)>>,
+    writes_by_symbol: &BTreeMap<&'a str, Vec<(&'a str, &'a Edge, &'a Node)>>,
+    endpoint: &'a str,
+    participants: &BTreeSet<&'a str>,
+) {
+    let entry = writes_by_endpoint.entry(endpoint).or_default();
+    for &sym_id in participants {
+        if let Some(writes) = writes_by_symbol.get(sym_id) {
+            for &(data_id, write_edge, data_node) in writes {
+                let tier = weakest_confidence([
+                    edge_confidence(write_edge),
+                    provenance(&data_node.props, &data_node.id).confidence_tier,
+                ]);
+                entry.push((
+                    WriteFact {
+                        symbol: sym_id.to_owned(),
+                        data_entity: data_id.to_owned(),
+                    },
+                    tier,
+                ));
+            }
+        }
+    }
+    entry.sort_by(|a, b| a.0.cmp(&b.0));
+    entry.dedup_by(|a, b| a.0 == b.0);
+}
+
 /// Recover bounded T2 journey candidates (`journey-candidate@1`) from entry
 /// screens (`Screen` nodes with `props.route == "/"` or `props.initial == true`).
 ///
@@ -1331,26 +1360,50 @@ pub fn search(
             participants.insert(hop.src.as_str());
             participants.insert(hop.dst.as_str());
         }
-        let entry = writes_by_endpoint.entry(flow.trigger.as_str()).or_default();
-        for sym_id in participants {
-            if let Some(writes) = writes_by_symbol.get(sym_id) {
-                for &(data_id, write_edge, data_node) in writes {
-                    let tier = weakest_confidence([
-                        edge_confidence(write_edge),
-                        provenance(&data_node.props, &data_node.id).confidence_tier,
-                    ]);
-                    entry.push((
-                        WriteFact {
-                            symbol: sym_id.to_owned(),
-                            data_entity: data_id.to_owned(),
-                        },
-                        tier,
-                    ));
-                }
+        record_writes(
+            &mut writes_by_endpoint,
+            &writes_by_symbol,
+            flow.trigger.as_str(),
+            &participants,
+        );
+        // An endpoint an anchor's flow fetches gets no flow of its own
+        // (#1066): its writes are what the flow reaches downstream of it.
+        let mut next: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for hop in &flow.hops {
+            if hop.provenance.confidence_tier != ConfidenceTier::Gap {
+                next.entry(hop.src.as_str())
+                    .or_default()
+                    .push(hop.dst.as_str());
             }
         }
-        entry.sort_by(|a, b| a.0.cmp(&b.0));
-        entry.dedup_by(|a, b| a.0 == b.0);
+        let fetched: BTreeSet<&str> = flow
+            .hops
+            .iter()
+            .filter(|hop| {
+                hop.label == "FETCHES"
+                    && hop.provenance.confidence_tier != ConfidenceTier::Gap
+                    && hop.dst != flow.trigger
+                    && by_id
+                        .get(hop.dst.as_str())
+                        .is_some_and(|n| n.label == "Endpoint")
+            })
+            .map(|hop| hop.dst.as_str())
+            .collect();
+        for endpoint in fetched {
+            let mut downstream: BTreeSet<&str> = BTreeSet::new();
+            let mut pending = vec![endpoint];
+            while let Some(id) = pending.pop() {
+                if downstream.insert(id) {
+                    pending.extend(next.get(id).into_iter().flatten().copied());
+                }
+            }
+            record_writes(
+                &mut writes_by_endpoint,
+                &writes_by_symbol,
+                endpoint,
+                &downstream,
+            );
+        }
     }
 
     let test_refs = TestReferences::new(nodes, edges, |e| !is_gap_edge(e, &by_id));

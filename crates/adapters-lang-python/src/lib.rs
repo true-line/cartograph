@@ -19,6 +19,7 @@ pub mod observed_infra;
 mod request_inputs;
 mod responses;
 mod sqlalchemy;
+mod sqlalchemy_writes;
 mod target_tests;
 
 const EXTRACTOR_ID: &str = "t0.adapter-python";
@@ -235,7 +236,7 @@ fn file_id(repo: &str, path: &str) -> String {
     format!("file:{repo}@{path}")
 }
 
-fn symbol_id(repo: &str, path: &str, name: &str) -> String {
+pub(crate) fn symbol_id(repo: &str, path: &str, name: &str) -> String {
     format!("sym:{repo}@{path}#{name}")
 }
 
@@ -563,7 +564,7 @@ fn blueprint_name(cx: &FileCx<'_>, call: TsNode<'_>) -> Prefix {
 }
 
 /// The nearest enclosing function definition of `node`.
-fn enclosing_function_node(node: TsNode<'_>) -> Option<TsNode<'_>> {
+pub(crate) fn enclosing_function_node(node: TsNode<'_>) -> Option<TsNode<'_>> {
     let mut parent = node.parent();
     while let Some(current) = parent {
         if current.kind() == "function_definition" {
@@ -634,17 +635,21 @@ fn mentions(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
 
 /// How `function`'s own scope binds `name`.
 #[derive(Default)]
-struct ScopeBinding<'t> {
+pub(crate) struct ScopeBinding<'t> {
     /// Every statement or expression that binds `name` in this scope,
     /// including a nested scope's `nonlocal` rebinding.
-    writes: Vec<TsNode<'t>>,
-    global: bool,
-    nonlocal: bool,
+    pub(crate) writes: Vec<TsNode<'t>>,
+    pub(crate) global: bool,
+    pub(crate) nonlocal: bool,
 }
 
 /// Collect `function`'s bindings of `name`. Anything that might bind it
 /// counts, so an unrecognised form fails closed rather than proving a value.
-fn scope_binding<'t>(cx: &FileCx<'_>, function: TsNode<'t>, name: &str) -> ScopeBinding<'t> {
+pub(crate) fn scope_binding<'t>(
+    cx: &FileCx<'_>,
+    function: TsNode<'t>,
+    name: &str,
+) -> ScopeBinding<'t> {
     let mut binding = ScopeBinding::default();
     let mut stack: Vec<TsNode<'t>> = function.child_by_field_name("body").into_iter().collect();
     while let Some(node) = stack.pop() {
@@ -939,7 +944,7 @@ fn assignment_receivers(
     receivers
 }
 
-fn qualified_function_name(cx: &FileCx<'_>, function: TsNode<'_>) -> Option<String> {
+pub(crate) fn qualified_function_name(cx: &FileCx<'_>, function: TsNode<'_>) -> Option<String> {
     let name = function.child_by_field_name("name")?;
     let mut names = vec![cx.text(&name).to_string()];
     let mut parent = function.parent();

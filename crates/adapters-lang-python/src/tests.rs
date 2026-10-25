@@ -3420,3 +3420,342 @@ fn pytest_tests_link_to_their_own_function_symbols() {
         && e.src == format!("sym:{}", at("test_cleanup"))
         && e.dst == "sym:local/python-service@app/jobs.py#cleanup"));
 }
+
+#[test]
+fn sqlalchemy_direct_session_and_model_helper_writes_emit_writes_edges() {
+    // AC-0357 (T-0357), #1066 (W11d): direct session writes (Confirmed, resolution "session")
+    // and @classmethod model-helper writes (InferredStrong, resolution
+    // "model-helper", via "<Class>.<method>") emit WRITES edges from the
+    // enclosing function Symbol to the recovered SQLAlchemy DataEntity.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/db.py",
+        r#"
+import sqlalchemy
+from sqlalchemy.orm import scoped_session
+from sqlalchemy.orm import sessionmaker
+
+Session = scoped_session(sessionmaker(bind=engine))
+Session: sqlalchemy.orm.Session
+"#,
+    );
+    write(
+        dir.path(),
+        "app/models.py",
+        r#"
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import declarative_base
+import third_party
+from app.db import Session
+
+Base = declarative_base()
+
+class ModelMixin:
+    @classmethod
+    def create(cls, **kw):
+        r = cls(**kw)
+        Session.add(r)
+        return r
+
+    @classmethod
+    def delete(cls, obj_id, commit=False):
+        Session.query(cls).filter(cls.id == obj_id).delete()
+
+    @classmethod
+    def get_or_create(cls, **kw):
+        r = cls.get_by(**kw)
+        if not r:
+            r = cls(**kw)
+            Session.add(r)
+        return r
+
+    @classmethod
+    def build(cls, **kw):
+        return cls(**kw)
+
+    @classmethod
+    def log(cls, **kw):
+        Session.add(AliasMailbox(**kw))
+
+class Alias(Base, ModelMixin):
+    __tablename__ = "alias"
+    id = Column(Integer, primary_key=True)
+    email = Column(String(128), nullable=False)
+
+class AliasMailbox(Base, ModelMixin):
+    __tablename__ = "alias_mailbox"
+    id = Column(Integer, primary_key=True)
+
+class User(Base, ModelMixin):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+
+    @classmethod
+    def create(cls, **kw):
+        return super().create(**kw)
+
+class NotModel(ModelMixin):
+    pass
+
+class BlockedModel(Base, third_party.Mixin, ModelMixin):
+    __tablename__ = "blocked"
+    id = Column(Integer, primary_key=True)
+"#,
+    );
+    write(
+        dir.path(),
+        "app/views.py",
+        r#"
+import app.models as models
+from app.db import Session
+from app.models import Alias, AliasMailbox, BlockedModel, NotModel, User
+
+def new_alias():
+    Alias.create(email="a@b.c")
+
+def rm(i):
+    Alias.delete(i)
+
+def direct():
+    a = Alias(email=1)
+    Session.add(a)
+
+def q():
+    Session.query(AliasMailbox).filter(AliasMailbox.id == 1).delete()
+
+def both():
+    Alias.create()
+    Session.query(Alias).filter().delete()
+
+def goc():
+    Alias.get_or_create(email=1)
+
+def neg_override():
+    User.create(email="u@b.c")
+
+def neg_local_session():
+    Session = make_session()
+    a = Alias(email=1)
+    Session.add(a)
+
+def neg_param_session(Session):
+    a = Alias(email=1)
+    Session.add(a)
+
+def neg_not_model():
+    NotModel.create()
+
+def neg_build():
+    Alias.build(email="a@b.c")
+
+def neg_getattr():
+    getattr(models, "Alias").create()
+
+def neg_split_caller():
+    x = Alias()
+    neg_split_callee(x)
+
+def neg_split_callee(x):
+    Session.add(x)
+
+def neg_unresolvable_base():
+    BlockedModel.create()
+
+def neg_other_model():
+    # The helper writes another model, never `cls`.
+    Alias.log()
+
+def neg_instance_call():
+    a = Alias(email=1)
+    a.create()
+"#,
+    );
+    write(
+        dir.path(),
+        "app/unimported_session.py",
+        r#"
+from app.models import Alias
+
+def neg_unimported():
+    a = Alias(email=1)
+    Session.add(a)
+"#,
+    );
+
+    let mut cache = IncrementalCache::default();
+    let (extraction, _) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+
+    let writes: BTreeMap<(&str, &str), &Edge> = extraction
+        .edges
+        .iter()
+        .filter(|e| e.label == "WRITES")
+        .map(|e| ((e.src.as_str(), e.dst.as_str()), e))
+        .collect();
+
+    let sym = |name: &str| format!("sym:local/python-service@app/views.py#{name}");
+    let alias_entity = "data:local/python-service@sqlalchemy:alias";
+    let mailbox_entity = "data:local/python-service@sqlalchemy:alias_mailbox";
+
+    // `ModelMixin.log` itself writes alias_mailbox directly; its callers
+    // (`neg_other_model`) get nothing, since it never writes `cls`.
+    assert!(writes.contains_key(&(
+        "sym:local/python-service@app/models.py#ModelMixin.log",
+        "data:local/python-service@sqlalchemy:alias_mailbox"
+    )));
+    assert_eq!(
+        writes.len(),
+        7,
+        "unexpected WRITES edges: {:?}",
+        writes.keys().collect::<Vec<_>>()
+    );
+
+    let e_new = writes[&(sym("new_alias").as_str(), alias_entity)];
+    assert_eq!(e_new.props["operation"], "insert");
+    assert_eq!(e_new.props["resolution"], "model-helper");
+    assert_eq!(e_new.props["via"], "ModelMixin.create");
+    assert_eq!(e_new.props["prov"]["confidence_tier"], "InferredStrong");
+
+    let e_rm = writes[&(sym("rm").as_str(), alias_entity)];
+    assert_eq!(e_rm.props["operation"], "delete");
+    assert_eq!(e_rm.props["resolution"], "model-helper");
+    assert_eq!(e_rm.props["via"], "ModelMixin.delete");
+    assert_eq!(e_rm.props["prov"]["confidence_tier"], "InferredStrong");
+
+    let e_direct = writes[&(sym("direct").as_str(), alias_entity)];
+    assert_eq!(e_direct.props["operation"], "insert");
+    assert_eq!(e_direct.props["resolution"], "session");
+    assert!(e_direct.props.get("via").is_none());
+    assert_eq!(e_direct.props["prov"]["confidence_tier"], "Confirmed");
+
+    let e_q = writes[&(sym("q").as_str(), mailbox_entity)];
+    assert_eq!(e_q.props["operation"], "delete");
+    assert_eq!(e_q.props["resolution"], "session");
+    assert!(e_q.props.get("via").is_none());
+    assert_eq!(e_q.props["prov"]["confidence_tier"], "Confirmed");
+
+    let e_both = writes[&(sym("both").as_str(), alias_entity)];
+    assert_eq!(e_both.props["operation"], "insert");
+    assert_eq!(
+        e_both.props["operations"],
+        serde_json::json!(["delete", "insert"])
+    );
+    assert_eq!(e_both.props["resolution"], "session");
+    assert_eq!(e_both.props["prov"]["confidence_tier"], "Confirmed");
+    let both_ev = &e_both.props["prov"]["evidence"][0];
+    let views_src = std::fs::read_to_string(dir.path().join("app/views.py")).unwrap();
+    let cited = &views_src[both_ev["byte_start"].as_u64().unwrap() as usize
+        ..both_ev["byte_end"].as_u64().unwrap() as usize];
+    // A Confirmed edge cites the session write that confirms it.
+    assert_eq!(cited, "Session.query(Alias).filter().delete()");
+
+    let e_goc = writes[&(sym("goc").as_str(), alias_entity)];
+    assert_eq!(e_goc.props["operation"], "insert");
+    assert_eq!(e_goc.props["resolution"], "model-helper");
+    assert_eq!(e_goc.props["via"], "ModelMixin.get_or_create");
+    assert_eq!(e_goc.props["prov"]["confidence_tier"], "InferredStrong");
+
+    // Incremental cache reuse retargets commit SHAs on WRITES edges.
+    let next_id = SourceId {
+        repo: "local/python-service",
+        commit: "def456",
+    };
+    let (reused, stats) = extract_dir_incremental(dir.path(), &next_id, &mut cache).unwrap();
+    assert_eq!(stats.recomputed_files, 0);
+    for edge in reused.edges.iter().filter(|e| e.label == "WRITES") {
+        assert_eq!(edge.props["prov"]["evidence"][0]["commit_sha"], "def456");
+    }
+}
+
+#[test]
+fn sqlalchemy_writes_cover_sessionmaker_flask_db_session_and_direct_variants() {
+    // #1066 (W11d): `sessionmaker(...)()`, `db.session.add(...)` on a proven
+    // Flask-SQLAlchemy instance, `S.add(M(...))`, `S.delete(x)`, `S.add_all([...])`,
+    // and `S.query(M)...update(...)` emit Confirmed WRITES edges, while cyclic
+    // or shadowed bases/sessions fail closed.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/ext.py",
+        r#"
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.orm.session import sessionmaker
+
+db = SQLAlchemy()
+DirectSession = sessionmaker(bind=engine)()
+"#,
+    );
+    write(
+        dir.path(),
+        "app/models.py",
+        r#"
+from sqlalchemy import Column, Integer
+from app.ext import db, DirectSession
+
+class CycleA(CycleB):
+    pass
+
+class CycleB(CycleA):
+    pass
+
+class Item(db.Model, CycleA):
+    __tablename__ = "items"
+    id = Column(Integer, primary_key=True)
+
+class Audit(db.Model):
+    __tablename__ = "audits"
+    id = Column(Integer, primary_key=True)
+"#,
+    );
+    write(
+        dir.path(),
+        "app/service.py",
+        r#"
+from app.ext import db, DirectSession
+from app.models import Audit, Item
+
+def inline_add():
+    db.session.add(Item())
+
+def delete_bound():
+    item = Item()
+    DirectSession.delete(item)
+
+def query_update():
+    DirectSession.query(Item).filter(Item.id == 1).update({"id": 2})
+
+def batch_add():
+    db.session.add_all([Item(), Audit()])
+
+def cyclic_helper():
+    Item.missing_helper()
+"#,
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut writes: Vec<(String, String, String)> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "WRITES")
+        .map(|e| {
+            assert_eq!(e.props["resolution"], "session");
+            assert_eq!(e.props["prov"]["confidence_tier"], "Confirmed");
+            (
+                e.src.rsplit_once('#').unwrap().1.to_string(),
+                e.dst.rsplit_once(':').unwrap().1.to_string(),
+                e.props["operation"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    writes.sort();
+    assert_eq!(
+        writes,
+        vec![
+            ("batch_add".into(), "audits".into(), "insert".into()),
+            ("batch_add".into(), "items".into(), "insert".into()),
+            ("delete_bound".into(), "items".into(), "delete".into()),
+            ("inline_add".into(), "items".into(), "insert".into()),
+            ("query_update".into(), "items".into(), "update".into()),
+        ]
+    );
+}
