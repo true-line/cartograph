@@ -1,5 +1,21 @@
 # cartograph
 
+## 0.30.0
+
+### Minor Changes
+
+- 4b60083: Recover bounded T2 journey candidates (`journey-candidate@1`) from path-router screens, navigations, client calls, and server flows, and emit `journeys.md` in compiled spec bundles.
+- 089d186: Journey candidates now start from Android Navigation 3 initial destinations. Startup navigations and callbacks passed into screen entries are followed only as recorded assumptions, each with its limitation and the source span where the callback is registered; callbacks a screen never uses are listed on the step. `journeys.md` adds a per-entry search summary.
+- fe3b69b: Record initial destinations, startup navigation phases, and entry-callback registrations for Android Navigation 3 screens in Kotlin repositories.
+- f4c3667: Recover Android Navigation 3 `entryProvider` screens and back-stack `NAVIGATES_TO` edges in the Kotlin adapter.
+- b62479c: Vue Router navigations now link the code that performs them to the screen they open, including navigations through a project's own navigation helper. A navigation inside a condition is marked as conditional, and targets that cannot be read from source are reported as gaps.
+- d02c0db: Vue Router route tables now become screens, each rendering its component file, including tables built by an imported helper from a constant path table and a components object. Routes that cannot be read from source are reported as gaps.
+
+### Patch Changes
+
+- 508a8e9: The Atlas opens on large graphs instead of freezing the app: banding Gap nodes no longer scans every edge once per Gap.
+- 11cf97b: The desktop app opened from Finder or the Dock now finds a Homebrew-installed GitHub CLI login, so private repositories clone without setting GH_TOKEN. When no credential is found at all, the error now says so and lists where it looked.
+
 ## 0.29.0
 
 ### Minor Changes
