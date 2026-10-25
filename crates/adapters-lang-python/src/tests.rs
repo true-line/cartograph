@@ -3784,6 +3784,46 @@ def neg_rebound_session():
     Session.add(LeftOnly())
 "#,
     );
+    // Any binding form counts: loop, `with`/`except` aliases, walrus, and a
+    // nested `global`. A comprehension target is its own scope.
+    for (file, body) in [
+        (
+            "loop_factory",
+            "for scoped_session in [fake_factory]:\n    pass\nSession = scoped_session(None)\n",
+        ),
+        (
+            "loop_session",
+            "Session = scoped_session(None)\nfor Session in [fake]:\n    pass\n",
+        ),
+        (
+            "with_session",
+            "Session = scoped_session(None)\nwith fake() as Session:\n    pass\n",
+        ),
+        (
+            "except_session",
+            "Session = scoped_session(None)\ntry:\n    pass\nexcept Exception as Session:\n    pass\n",
+        ),
+        (
+            "walrus_session",
+            "Session = scoped_session(None)\nif (Session := fake):\n    pass\n",
+        ),
+        (
+            "global_session",
+            "Session = scoped_session(None)\ndef reset():\n    global Session\n    Session = fake\n",
+        ),
+        (
+            "comprehension_control",
+            "Session = scoped_session(None)\nnames = [Session for Session in []]\n",
+        ),
+    ] {
+        write(
+            dir.path(),
+            &format!("app/{file}.py"),
+            &format!(
+                "from sqlalchemy.orm import scoped_session\nfrom app.models import LeftOnly\n\n{body}\ndef write_{file}():\n    Session.add(LeftOnly())\n"
+            ),
+        );
+    }
     write(
         dir.path(),
         "app/twice.py",
@@ -3853,6 +3893,7 @@ def neg_def_factory():
             w("pos_decorated", "decorated", "model-helper"),
             w("pos_inherited", "left_only", "model-helper"),
             w("pos_unshadowed", "left_only", "session"),
+            w("write_comprehension_control", "left_only", "session"),
         ]
     );
     let inherited = out

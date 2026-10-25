@@ -830,43 +830,37 @@ fn is_inside_class_or_function(mut node: TsNode<'_>) -> bool {
     false
 }
 
-/// Names bound more than once at module level, in any order: an import, a
-/// `def`/`class`, or an assignment target (augmented ones included).
+/// The names, among module-level assignment targets and imports, that the
+/// module binds more than once in any form (`for`, `with`/`except` aliases,
+/// walrus, `del`, imports, `def`/`class`, a nested `global`; see
+/// `module_binding`). A bare annotation binds nothing.
 fn module_rebound_names(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
     bindings: &HashMap<String, ImportBinding>,
 ) -> BTreeSet<String> {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for name in bindings.keys() {
-        *counts.entry(name.clone()).or_default() += 1;
-    }
+    let mut names: BTreeSet<String> = bindings.keys().cloned().collect();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if matches!(node.kind(), "class_definition" | "function_definition") {
-            if let Some(name) = node.child_by_field_name("name") {
-                *counts.entry(cx.text(&name).to_string()).or_default() += 1;
-            }
+        if matches!(
+            node.kind(),
+            "function_definition" | "class_definition" | "lambda"
+        ) {
             continue;
         }
-        // A bare annotation (`Session: orm.Session`) binds nothing.
-        if (node.kind() == "augmented_assignment"
-            || node.kind() == "assignment" && node.child_by_field_name("right").is_some())
+        if node.kind() == "assignment"
             && let Some(left) = node.child_by_field_name("left")
         {
-            let mut names = Vec::new();
-            sqlalchemy_writes::collect_bound_identifiers(cx, left, &mut names);
-            for name in names {
-                *counts.entry(name).or_default() += 1;
-            }
+            let mut bound = Vec::new();
+            sqlalchemy_writes::collect_bound_identifiers(cx, left, &mut bound);
+            names.extend(bound);
         }
         let mut walk = node.walk();
         stack.extend(node.named_children(&mut walk));
     }
-    counts
+    names
         .into_iter()
-        .filter(|(_, count)| *count > 1)
-        .map(|(name, _)| name)
+        .filter(|name| crate::module_binding(cx, root, name).writes.len() > 1)
         .collect()
 }
 

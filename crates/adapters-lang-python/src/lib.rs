@@ -650,8 +650,28 @@ pub(crate) fn scope_binding<'t>(
     function: TsNode<'t>,
     name: &str,
 ) -> ScopeBinding<'t> {
+    collect_binding(cx, function.child_by_field_name("body"), name, false)
+}
+
+/// Collect the module's bindings of `name` (`root` is the `module` node).
+/// A nested scope declaring `global name` counts as a write: it may rebind
+/// the module name whenever it runs.
+pub(crate) fn module_binding<'t>(
+    cx: &FileCx<'_>,
+    root: TsNode<'t>,
+    name: &str,
+) -> ScopeBinding<'t> {
+    collect_binding(cx, Some(root), name, true)
+}
+
+fn collect_binding<'t>(
+    cx: &FileCx<'_>,
+    start: Option<TsNode<'t>>,
+    name: &str,
+    module: bool,
+) -> ScopeBinding<'t> {
     let mut binding = ScopeBinding::default();
-    let mut stack: Vec<TsNode<'t>> = function.child_by_field_name("body").into_iter().collect();
+    let mut stack: Vec<TsNode<'t>> = start.into_iter().collect();
     while let Some(node) = stack.pop() {
         let binds = match node.kind() {
             "function_definition" | "class_definition" => {
@@ -663,7 +683,7 @@ pub(crate) fn scope_binding<'t>(
                 let mut inner = node.walk();
                 let rebinds = node
                     .children_by_field_name("body", &mut inner)
-                    .any(|body| nonlocal_in(cx, body, name));
+                    .any(|body| nonlocal_in(cx, body, name) || module && global_in(cx, body, name));
                 if named || rebinds {
                     binding.writes.push(node);
                 }
@@ -732,6 +752,16 @@ fn import_binds(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
             _ if from => cx.text(&imported).trim() == name,
             _ => cx.text(&imported).split('.').next().map(str::trim) == Some(name),
         })
+}
+
+/// Whether a `global` statement anywhere under `node` names `name`.
+fn global_in(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+    if node.kind() == "global_statement" {
+        return mentions(cx, node, name);
+    }
+    let mut walk = node.walk();
+    node.named_children(&mut walk)
+        .any(|child| global_in(cx, child, name))
 }
 
 /// Whether a `nonlocal` statement anywhere under `node` names `name`.
