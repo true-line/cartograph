@@ -1120,3 +1120,533 @@ fun run() {
         "CALLS",
     );
 }
+
+// AC-0351 (T-0351): import-proven Android Navigation 3 `entryProvider`
+// entries become key-based `Screen` nodes with Confirmed `RENDERS` edges to
+// resolved composable functions (ignoring callback arguments and failing
+// closed on undeclared keys), and back-stack `add` calls — direct, parameter
+// helper, and builder helper — become InferredStrong `NAVIGATES_TO` edges or
+// explicit `navigation-unresolved` Gaps.
+#[test]
+fn navigation3_entries_become_screens_and_back_stack_adds_navigate() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/io/simplelogin/android/screens/Screens.kt",
+        r#"package io.simplelogin.android.screens
+
+fun LoginMasterScreen() {}
+fun HomeScreen(apiKey: String, onCreateAlias: () -> Unit, onShowSettings: () -> Unit) {}
+fun CreateAliasScreen(apiKey: String) {}
+fun AliasDetailsScreen(apiKey: String, aliasId: Long) {}
+fun AliasContactsScreen(apiKey: String, aliasId: Long) {}
+fun DeviceSettingsScreen() {}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/io/simplelogin/android/root/AppRoot.kt",
+        r#"package io.simplelogin.android.root
+
+import androidx.navigation3.runtime.NavKey
+import androidx.navigation3.runtime.entryProvider
+import androidx.navigation3.ui.NavDisplay
+import io.simplelogin.android.screens.AliasContactsScreen
+import io.simplelogin.android.screens.AliasDetailsScreen
+import io.simplelogin.android.screens.CreateAliasScreen
+import io.simplelogin.android.screens.DeviceSettingsScreen
+import io.simplelogin.android.screens.HomeScreen
+import io.simplelogin.android.screens.LoginMasterScreen
+
+fun AppRoot(viewModel: AppRootViewModel) {
+    NavDisplay(
+        backStack = viewModel.navBackStack,
+        onBack = viewModel::popBackStack,
+        entryProvider = entryProvider {
+            entry<InitializationDestination> {}
+            entry<LogInDestination> {
+                LoginMasterScreen()
+            }
+            entry<HomeDestination>(metadata = listPane()) { destination ->
+                HomeScreen(
+                    apiKey = destination.apiKey,
+                    onCreateAlias = viewModel::showCreateAliasScreen,
+                    onShowSettings = viewModel::showDeviceSettingsScreen,
+                )
+            }
+            entry<CreateAliasDestination>(dialogMetadata) { destination ->
+                CreateAliasScreen(apiKey = destination.apiKey)
+            }
+            entry<AliasDetailsDestination> { destination ->
+                AliasDetailsScreen(apiKey = destination.apiKey, aliasId = destination.aliasId)
+            }
+            entry<AliasContactsDestination> { destination ->
+                AliasContactsScreen(apiKey = destination.apiKey, aliasId = destination.aliasId)
+            }
+            entry<DeviceSettingsDestination> {
+                DeviceSettingsScreen()
+            }
+            entry<MissingDestination> {
+                DeviceSettingsScreen()
+            }
+        },
+    )
+}
+
+data object InitializationDestination : NavKey
+data object LogInDestination : NavKey
+data class HomeDestination(val apiKey: String) : NavKey
+data class CreateAliasDestination(val apiKey: String) : NavKey
+data class AliasDetailsDestination(val apiKey: String, val aliasId: Long) : NavKey
+data class AliasContactsDestination(val apiKey: String, val aliasId: Long) : NavKey
+data object DeviceSettingsDestination : NavKey
+data object UnregisteredDestination : NavKey
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/io/simplelogin/android/root/AppRootViewModel.kt",
+        r#"package io.simplelogin.android.root
+
+import androidx.compose.runtime.mutableStateListOf
+import androidx.navigation3.runtime.NavKey
+import kotlinx.coroutines.flow.MutableStateFlow
+
+class ApiKey(val value: String)
+class StartupState(val isReady: Boolean, val apiKey: ApiKey?)
+
+class AppRootViewModel {
+    private val _navBackStack =
+        MutableStateFlow(mutableStateListOf<NavKey>(InitializationDestination))
+
+    init {
+        val state: StartupState = StartupState(true, null)
+        _navBackStack.value.apply {
+            clear()
+            if (!state.isReady) {
+                add(InitializationDestination)
+                return@apply
+            }
+            state.apiKey?.let { apiKey ->
+                add(HomeDestination(apiKey.value))
+            } ?: add(LogInDestination)
+        }
+    }
+
+    fun popBackStack() {
+        if (_navBackStack.value.size > 1) {
+            _navBackStack.value.removeAt(_navBackStack.value.lastIndex)
+        }
+    }
+
+    fun showDeviceSettingsScreen() {
+        _navBackStack.value.add(DeviceSettingsDestination)
+    }
+
+    fun viewAliasDetails(aliasId: Long) = withApiKey { apiKey ->
+        if (aliasId > 0) {
+            _navBackStack.value.add(AliasDetailsDestination(apiKey.value, aliasId))
+        }
+    }
+
+    fun viewAliasContacts(aliasId: Long) = withApiKey { apiKey ->
+        if (aliasId > 0) {
+            uniquelyAddDestination(AliasContactsDestination(apiKey.value, aliasId))
+        }
+    }
+
+    fun showCreateAliasScreen() = addToBackStackWithApiKey { apiKey ->
+        CreateAliasDestination(apiKey.value)
+    }
+
+    fun showTaggedSettings() = addTagged("drawer") { DeviceSettingsDestination }
+
+    fun jumpDynamic(pickHome: Boolean) {
+        val someVar: NavKey = if (pickHome) HomeDestination("k") else LogInDestination
+        _navBackStack.value.add(someVar)
+    }
+
+    fun jumpUnregistered() {
+        _navBackStack.value.add(UnregisteredDestination)
+    }
+
+    private fun withApiKey(block: (ApiKey) -> Unit) {}
+
+    private fun addToBackStackWithApiKey(onCreateDestination: (ApiKey) -> NavKey) =
+        withApiKey { apiKey ->
+            val destination = onCreateDestination(apiKey)
+            _navBackStack.value.add(destination)
+        }
+
+    // A builder helper with a leading argument: `h(x) { … }` nests its calls.
+    private fun addTagged(tag: String, build: () -> NavKey) {
+        _navBackStack.value.add(build())
+    }
+
+    private fun uniquelyAddDestination(destination: NavKey) {
+        _navBackStack.value.apply {
+            removeIf { it::class == destination::class }
+            add(destination)
+        }
+    }
+}
+"#,
+    );
+    // A local fake `entryProvider` without the Navigation 3 import proves nothing.
+    write(
+        dir.path(),
+        "src/main/kotlin/io/simplelogin/android/fake/FakeNav.kt",
+        r#"package io.simplelogin.android.fake
+
+import io.simplelogin.android.root.DeviceSettingsDestination
+import io.simplelogin.android.screens.DeviceSettingsScreen
+
+class NavDisplay
+fun entryProvider(block: () -> Unit) = block()
+fun <T> entry(block: () -> Unit) = block()
+
+fun FakeRoot() {
+    entryProvider {
+        entry<DeviceSettingsDestination> {
+            DeviceSettingsScreen()
+        }
+        entry<NoSuchFakeKey> {}
+    }
+}
+"#,
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+
+    let mut screens: Vec<_> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Screen")
+        .map(|n| {
+            let prov = &n.props["prov"];
+            assert_eq!(prov["confidence_tier"], "Confirmed");
+            assert_eq!(n.props["router"], "navigation3");
+            (n.id.clone(), n.props["key"].as_str().unwrap().to_string())
+        })
+        .collect();
+    screens.sort();
+    assert_eq!(
+        screens,
+        [
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.AliasContactsDestination".into(),
+                "io.simplelogin.android.root.AliasContactsDestination".into(),
+            ),
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.AliasDetailsDestination".into(),
+                "io.simplelogin.android.root.AliasDetailsDestination".into(),
+            ),
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.CreateAliasDestination".into(),
+                "io.simplelogin.android.root.CreateAliasDestination".into(),
+            ),
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.DeviceSettingsDestination".into(),
+                "io.simplelogin.android.root.DeviceSettingsDestination".into(),
+            ),
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.HomeDestination".into(),
+                "io.simplelogin.android.root.HomeDestination".into(),
+            ),
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.InitializationDestination".into(),
+                "io.simplelogin.android.root.InitializationDestination".into(),
+            ),
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.LogInDestination".into(),
+                "io.simplelogin.android.root.LogInDestination".into(),
+            ),
+        ]
+    );
+
+    let mut renders: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "RENDERS")
+        .map(|e| {
+            assert_eq!(e.props["prov"]["confidence_tier"], "Confirmed");
+            (e.src.clone(), e.dst.clone())
+        })
+        .collect();
+    renders.sort();
+    // `InitializationDestination` has an empty entry body and emits no RENDERS;
+    // callback references like `viewModel::showCreateAliasScreen` emit no edges.
+    assert_eq!(
+        renders,
+        [
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.AliasContactsDestination".into(),
+                "sym:local/demo@src/main/kotlin/io/simplelogin/android/screens/Screens.kt#AliasContactsScreen".into(),
+            ),
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.AliasDetailsDestination".into(),
+                "sym:local/demo@src/main/kotlin/io/simplelogin/android/screens/Screens.kt#AliasDetailsScreen".into(),
+            ),
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.CreateAliasDestination".into(),
+                "sym:local/demo@src/main/kotlin/io/simplelogin/android/screens/Screens.kt#CreateAliasScreen".into(),
+            ),
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.DeviceSettingsDestination".into(),
+                "sym:local/demo@src/main/kotlin/io/simplelogin/android/screens/Screens.kt#DeviceSettingsScreen".into(),
+            ),
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.HomeDestination".into(),
+                "sym:local/demo@src/main/kotlin/io/simplelogin/android/screens/Screens.kt#HomeScreen".into(),
+            ),
+            (
+                "screen:local/demo@navigation3:io.simplelogin.android.root.LogInDestination".into(),
+                "sym:local/demo@src/main/kotlin/io/simplelogin/android/screens/Screens.kt#LoginMasterScreen".into(),
+            ),
+        ]
+    );
+
+    let vm_file = "src/main/kotlin/io/simplelogin/android/root/AppRootViewModel.kt";
+    let mut navs: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "NAVIGATES_TO" && e.dst.starts_with("screen:"))
+        .map(|e| {
+            assert_eq!(e.props["prov"]["confidence_tier"], "InferredStrong");
+            assert_eq!(e.props["router"], "navigation3");
+            assert_eq!(e.props["router_basis"], "back_stack");
+            let sites = e.props["sites"].as_array().unwrap();
+            assert_eq!(sites.len(), 1);
+            assert_eq!(sites[0]["path"], vm_file);
+            (
+                e.src.clone(),
+                e.dst.clone(),
+                e.props["conditional"].as_bool().unwrap(),
+                sites[0]["via"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    navs.sort();
+    assert_eq!(
+        navs,
+        [
+            (
+                format!("sym:local/demo@{vm_file}#AppRootViewModel"),
+                "screen:local/demo@navigation3:io.simplelogin.android.root.HomeDestination".into(),
+                true,
+                "direct".into(),
+            ),
+            (
+                format!("sym:local/demo@{vm_file}#AppRootViewModel"),
+                "screen:local/demo@navigation3:io.simplelogin.android.root.InitializationDestination".into(),
+                true,
+                "direct".into(),
+            ),
+            (
+                format!("sym:local/demo@{vm_file}#AppRootViewModel"),
+                "screen:local/demo@navigation3:io.simplelogin.android.root.LogInDestination".into(),
+                true,
+                "direct".into(),
+            ),
+            (
+                format!("sym:local/demo@{vm_file}#AppRootViewModel.showCreateAliasScreen"),
+                "screen:local/demo@navigation3:io.simplelogin.android.root.CreateAliasDestination".into(),
+                false,
+                "builder_helper".into(),
+            ),
+            (
+                format!("sym:local/demo@{vm_file}#AppRootViewModel.showDeviceSettingsScreen"),
+                "screen:local/demo@navigation3:io.simplelogin.android.root.DeviceSettingsDestination".into(),
+                false,
+                "direct".into(),
+            ),
+            (
+                format!("sym:local/demo@{vm_file}#AppRootViewModel.showTaggedSettings"),
+                "screen:local/demo@navigation3:io.simplelogin.android.root.DeviceSettingsDestination".into(),
+                false,
+                "builder_helper".into(),
+            ),
+            (
+                format!("sym:local/demo@{vm_file}#AppRootViewModel.viewAliasContacts"),
+                "screen:local/demo@navigation3:io.simplelogin.android.root.AliasContactsDestination".into(),
+                true,
+                "param_helper".into(),
+            ),
+            (
+                format!("sym:local/demo@{vm_file}#AppRootViewModel.viewAliasDetails"),
+                "screen:local/demo@navigation3:io.simplelogin.android.root.AliasDetailsDestination".into(),
+                true,
+                "direct".into(),
+            ),
+        ]
+    );
+
+    let mut gaps: Vec<_> = out
+        .nodes
+        .iter()
+        .filter(|n| {
+            n.label == "Gap"
+                && matches!(
+                    n.props["kind"].as_str(),
+                    Some("route-unresolved" | "navigation-unresolved")
+                )
+        })
+        .map(|n| {
+            (
+                n.props["kind"].as_str().unwrap().to_string(),
+                n.props["reason"].as_str().unwrap().to_string(),
+                n.props["target"].as_str().map(str::to_string),
+            )
+        })
+        .collect();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        [
+            (
+                "navigation-unresolved".into(),
+                navigation3::COMPUTED_TARGET_REASON.into(),
+                None,
+            ),
+            (
+                "navigation-unresolved".into(),
+                navigation3::UNKNOWN_SCREEN_REASON.into(),
+                Some("io.simplelogin.android.root.UnregisteredDestination".into()),
+            ),
+            (
+                "route-unresolved".into(),
+                navigation3::UNDECLARED_KEY_REASON.into(),
+                None,
+            ),
+        ]
+    );
+}
+
+// AC-0351: an `entryProvider` property shadows the import, a same-package
+// `mutableStateListOf` proves no back stack, an overloaded helper name proves
+// no helper, and `add(index, key)` still navigates.
+#[test]
+fn navigation3_refuses_shadowed_names_and_overloads_but_reads_indexed_adds() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/demo/nav/Nav.kt",
+        r#"package demo.nav
+
+import androidx.compose.runtime.mutableStateListOf
+import androidx.navigation3.runtime.NavKey
+import androidx.navigation3.runtime.entryProvider
+
+data object HomeKey : NavKey
+data object SettingsKey : NavKey
+
+fun Root() {
+    entryProvider {
+        entry<HomeKey> {}
+        entry<SettingsKey> {}
+    }
+}
+
+class Nav {
+    private val stack = mutableStateListOf<NavKey>(HomeKey)
+
+    fun indexed() {
+        stack.add(0, SettingsKey)
+    }
+
+    fun go(key: NavKey) {
+        stack.add(key)
+    }
+
+    fun go(route: String) {}
+
+    fun viaOverload() {
+        go(SettingsKey)
+        go("settings")
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/demo/nav/Shadowed.kt",
+        r#"package demo.nav
+
+import androidx.navigation3.runtime.NavKey
+import androidx.navigation3.runtime.entryProvider
+
+data object ShadowKey : NavKey
+
+class Shadowed {
+    private val entryProvider: (() -> Unit) -> Unit = { it() }
+
+    fun Root() {
+        entryProvider {
+            entry<ShadowKey> {}
+        }
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/demo/nav/FakeStack.kt",
+        r#"package demo.nav
+
+import androidx.navigation3.runtime.NavKey
+
+class FakeStack {
+    private val stack = mutableStateListOf<NavKey>(HomeKey)
+
+    fun go() {
+        stack.add(SettingsKey)
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/demo/nav/Lists.kt",
+        r#"package demo.nav
+
+fun <T> mutableStateListOf(vararg items: T): MutableList<T> = mutableListOf(*items)
+"#,
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+
+    let mut screens: Vec<_> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Screen")
+        .map(|n| n.id.clone())
+        .collect();
+    screens.sort();
+    assert_eq!(
+        screens,
+        [
+            "screen:local/demo@navigation3:demo.nav.HomeKey",
+            "screen:local/demo@navigation3:demo.nav.SettingsKey",
+        ]
+    );
+
+    let navs: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "NAVIGATES_TO")
+        .map(|e| (e.src.clone(), e.dst.clone()))
+        .collect();
+    assert_eq!(
+        navs,
+        [(
+            "sym:local/demo@src/main/kotlin/demo/nav/Nav.kt#Nav.indexed".to_string(),
+            "screen:local/demo@navigation3:demo.nav.SettingsKey".to_string(),
+        )]
+    );
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|n| n.label == "Gap" && n.props["kind"] == "navigation-unresolved"),
+        "an overloaded helper's String call is not a computed navigation"
+    );
+}
