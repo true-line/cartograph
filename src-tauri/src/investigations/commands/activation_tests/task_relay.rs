@@ -247,7 +247,7 @@ fn exercise_task_relay(
         // connections; neither the relay nor an RPC argument supplies it.
         let principal = Arc::new(std::sync::Mutex::new(grant.session()));
         let session = principal.clone();
-        let limits = crate::mcp_reads::worker::tests::task_limits();
+        let limits = crate::mcp_reads::worker::tests::task_limits(&state);
         let budget = WorkBudget::new(WorkLimits {
             max_workers: if decline { two_clients } else { one },
             max_reserved_bytes: std::num::NonZeroUsize::new(
@@ -556,7 +556,7 @@ fn exercise_task_relay(
         let one = std::num::NonZeroUsize::new(1).unwrap();
         let grant = McpTaskActivation::granted(client, one);
         let principal = Arc::new(std::sync::Mutex::new(grant.session()));
-        let limits = crate::mcp_reads::worker::tests::task_limits();
+        let limits = crate::mcp_reads::worker::tests::task_limits(&state);
         let budget = WorkBudget::new(WorkLimits {
             max_workers: one,
             max_reserved_bytes: limits.reserved_bytes,

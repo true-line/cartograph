@@ -82,7 +82,7 @@ fn guard_owners(
     let retained = sum(&[sources, guards, references])?;
     let acquisition = sum(&[
         retained,
-        app_path_bytes, // canonical path returned by PrivateStorage::verify
+        app_path_bytes, // conservative path scratch; Unix revalidation borrows components
         slots::<std::path::PathBuf>(1)?,
         selected.checked_mul(source_id)?,
         set::<String>(selected)?,
@@ -230,6 +230,33 @@ fn ledger_owners(
     Some((retained, peak))
 }
 
+/// Same acquisition limits as FrozenContext preparation, independent of the
+/// connection's read-page limits. Public task activation remains separate.
+#[cfg(unix)]
+pub(crate) fn admitted_workspace(
+    scope: crate::mcp_reads::scope::ScopeLimits,
+    app_path_bytes: usize,
+) -> Option<(usize, usize)> {
+    use agents::investigation::*;
+    let result = workspace(
+        &INVESTIGATION_V2_POLICY,
+        QueryInputs {
+            graph: SnapshotReadLimits::default(),
+            coverage: super::context::coverage_preparation_limits(
+                MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
+            )
+            .ok()?,
+            scoped_repos: scope.max_sources.get(),
+            scope_identity_bytes: scope.max_source_registry_bytes.get(),
+            ledger_wire: MAX_MANIFEST_BYTES,
+            // Queries are decoded from a bounded action before host preparation.
+            request_wire: MAX_ACTION_BYTES,
+            app_path_bytes,
+        },
+    )?;
+    Some((result.retained, result.peak))
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct QueryInputs {
     pub(super) graph: SnapshotReadLimits,
@@ -368,6 +395,37 @@ pub(super) fn workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn query_admission_uses_host_limits_and_refuses_path_overflow() {
+        // AC-0327: admit host query owners before acquiring a task permit.
+        use agents::investigation::*;
+        let scope = crate::mcp_reads::worker::tests::limits().scope;
+        let small = admitted_workspace(scope, 16).unwrap();
+        let large = admitted_workspace(scope, 4096).unwrap();
+        assert!(large.0 > small.0);
+        assert!(large.1 >= small.1);
+        assert!(admitted_workspace(scope, usize::MAX).is_none());
+        // Boundary selector verifies the action-wire currency used by admission.
+        let query = InvestigationQuery {
+            scope: InvestigationScope::Neighborhood {
+                anchor: "\u{0001}".repeat(1024),
+                hops: 3,
+            },
+            kind: Some(InvestigationFactKind::Node),
+            labels: vec!["\u{0001}".repeat(128); 16],
+            max_facts: MAX_QUERY_FACTS,
+            max_bytes: MAX_QUERY_BYTES,
+            cursor: Some(InvestigationQueryCursor {
+                snapshot_id: "x".repeat(128),
+                selection_id: "x".repeat(128),
+                offset: 50_000,
+            }),
+        };
+        query.validate().unwrap();
+        assert!(logical::count(&query).unwrap() <= MAX_ACTION_BYTES);
+    }
+
     #[test]
     fn query_option_payload_growth_is_shared_across_selected_facts() {
         // AC-0327: adding options cannot multiply disjoint graph payloads.
