@@ -26,10 +26,11 @@ pub(crate) fn spec_rule(rule: &str) -> core_prov::ProducingMethod {
 mod rules;
 mod test_drift;
 pub use rules::journey::{
-    self, AssumedGoal, GoalBasis, JOURNEY_RULE, JOURNEY_RULE_VERSION, JourneyBudget,
-    JourneyCandidate, JourneyGoal, JourneyResult, JourneyStep, NavigationSite, StepCall,
-    StepNavigation, TruncationReason, UnresolvedKind, UnresolvedStepItem, WriteFact,
-    candidates as journey_candidates,
+    self, AssumedGoal, AssumptionKind, ENTRY_CALLBACK_LIMITATION, EntrySearchSummary, ForwardHop,
+    GoalBasis, JOURNEY_RULE, JOURNEY_RULE_VERSION, JourneyAssumption, JourneyBudget,
+    JourneyCandidate, JourneyGoal, JourneyResult, JourneySearch, JourneyStep, NavigationSite,
+    STARTUP_LIMITATION, StepCall, StepNavigation, TruncationReason, UnreadCallback, UnresolvedKind,
+    UnresolvedStepItem, WriteFact, candidates as journey_candidates, search as journey_search,
 };
 pub use rules::use_case::{
     AcceptanceReport, CaseResult, DecisionRow, DocumentedIntent, EXPECTED_RULES_SCHEMA,

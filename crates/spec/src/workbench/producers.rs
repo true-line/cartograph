@@ -881,7 +881,7 @@ pub(super) fn tests(
     finish(content, assertions)
 }
 
-/// Bounded path-router journey candidates (`journey-candidate@1`).
+/// Bounded path-router and key-router journey candidates (`journey-candidate@1`).
 pub(super) fn journeys(
     nodes: &[&Node],
     edges: &[&Edge],
@@ -890,20 +890,41 @@ pub(super) fn journeys(
     max: Option<usize>,
 ) -> Result<Output, RenderLimit> {
     let budget = Budget::new(max)?;
-    let candidates: Vec<_> = crate::rules::journey::candidates(
+    let search = crate::rules::journey::search(
         nodes,
         edges,
         flows,
         crate::rules::journey::JourneyBudget::default(),
-    )
-    .into_iter()
-    .filter(|c| super::included(&c.provenance, mode, rejected))
-    .collect();
+    );
+    let candidates: Vec<_> = search
+        .candidates
+        .into_iter()
+        .filter(|c| super::included(&c.provenance, mode, rejected))
+        .collect();
     let mut assertions = Assertions::new(&budget);
     for candidate in &candidates {
         assertions.journey(candidate)?;
     }
     let mut content = Text::new(&budget, "# Journey candidates\n\n")?;
+    if mode == ExportMode::BestEffort && !search.entries.is_empty() {
+        content.push_str(
+            "## Search\n\n| Entry | Expanded | Candidates | Truncated | Assumed navigations | Unread callbacks |\n|---|---|---|---|---|---|\n",
+        )?;
+        for entry in &search.entries {
+            let trunc_str = entry.truncated.map_or("none", |t| t.as_str());
+            writeln!(
+                content,
+                "| `{}` | {} | {} | `{}` | {} | {} |",
+                Safe(&entry.entry),
+                Safe(entry.expanded_states),
+                Safe(entry.candidates),
+                Safe(trunc_str),
+                Safe(entry.assumed_navigations),
+                Safe(entry.unread_callbacks)
+            )?;
+        }
+        content.push_str("\n")?;
+    }
     if candidates.is_empty() {
         content.push_str(
             "Interpretation: rule journey-candidate@1, InferredWeak, never a confirmed business journey\n\n",
@@ -948,14 +969,20 @@ pub(super) fn journeys(
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            let unresolved_str = if step.unresolved.is_empty() {
+            let mut unresolved_items: Vec<String> = step
+                .unresolved
+                .iter()
+                .map(|u| format!("{}: {} → {}", u.kind.as_str(), u.source, u.gap_id))
+                .collect();
+            unresolved_items.extend(
+                step.unread_callbacks
+                    .iter()
+                    .map(|u| format!("unread callback: {} ({})", u.param, u.composable)),
+            );
+            let unresolved_str = if unresolved_items.is_empty() {
                 "—".to_owned()
             } else {
-                step.unresolved
-                    .iter()
-                    .map(|u| format!("{}: {} → {}", u.kind.as_str(), u.source, u.gap_id))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                unresolved_items.join(", ")
             };
             writeln!(
                 content,
@@ -965,6 +992,42 @@ pub(super) fn journeys(
                 Safe(&calls_str),
                 Safe(&unresolved_str)
             )?;
+        }
+        if !candidate.assumptions.is_empty() {
+            content.push_str(
+                "\n### Assumptions\n\n| Step | Kind | Screen | Symbol | Param | Composable | Registration | Forwarded | Limitation |\n|---|---|---|---|---|---|---|---|---|\n",
+            )?;
+            for assumption in &candidate.assumptions {
+                let param_str = assumption.param.as_deref().unwrap_or("—");
+                let composable_str = assumption.composable.as_deref().unwrap_or("—");
+                let registration_str = assumption.registration.as_ref().map_or_else(
+                    || "—".to_owned(),
+                    |r| format!("{}:{}-{}", r.path, r.byte_start, r.byte_end),
+                );
+                let forwarded_str = if assumption.forwarded.is_empty() {
+                    "—".to_owned()
+                } else {
+                    assumption
+                        .forwarded
+                        .iter()
+                        .map(|h| format!("{}.{}", h.composable, h.param))
+                        .collect::<Vec<_>>()
+                        .join(" → ")
+                };
+                writeln!(
+                    content,
+                    "| {} | `{}` | `{}` | `{}` | {} | {} | {} | {} | {} |",
+                    Safe(assumption.step),
+                    Safe(assumption.kind.as_str()),
+                    Safe(&assumption.screen),
+                    Safe(&assumption.symbol),
+                    Safe(param_str),
+                    Safe(composable_str),
+                    Safe(&registration_str),
+                    Safe(&forwarded_str),
+                    Safe(&assumption.limitation)
+                )?;
+            }
         }
         let writes_str = if candidate.goal.writes.is_empty() {
             "—".to_owned()
