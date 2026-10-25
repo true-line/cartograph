@@ -264,7 +264,8 @@ fn materialize(
         message,
         timestamp(connection)?,
     )?);
-    let prior = completion::attempts(connection, before)?;
+    // Only the validated count survives; observation reloads its own prefix.
+    let prior_count = completion::attempts(connection, before)?.len();
     let records = match attempt_outcome {
         Some(ref outcome) => completion::derive_attempt_records(
             &task,
@@ -273,7 +274,7 @@ fn materialize(
             &saved.reservation.binding.original_read,
             outcome,
             ledger.as_ref(),
-            prior.len(),
+            prior_count,
         )?,
         None => vec![],
     };
@@ -288,7 +289,7 @@ fn materialize(
         disposition,
         events,
         ledger: if acquired { ledger } else { None },
-        attempt_offset: prior.len(),
+        attempt_offset: prior_count,
         attempts,
         additional_bytes: 0,
         counts: SettlementCounts::default(),

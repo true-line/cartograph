@@ -151,6 +151,7 @@ impl JobStore {
             .map(|entry| entry.record.clone())
             .collect::<Vec<_>>();
         let metadata = continuation_metadata(&core.metadata, &suffix)?;
+        drop(suffix); // Metadata owns its result before the saved history reload.
         let mode = metadata.next_call_mode_with_policy(&projected.task.detail.usage, policy)?;
         let mut entries = completion::attempts(&tx, &task)?;
         let prior_len = entries.len();
