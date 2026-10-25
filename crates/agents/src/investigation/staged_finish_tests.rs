@@ -578,6 +578,49 @@ fn staged_refusal_cap_requires_terminal_and_cannot_prepare_next_input() {
             .unwrap(),
         RefusalDisposition::TerminalRequired
     );
+    // AC-0265: account actual first/second refusal clones and framing, and
+    // malformed assessment rows before semantic count rejection (#976).
+    let mut malformed = second.clone();
+    malformed.assessment =
+        vec![first.assessment[0].clone(); INVESTIGATION_V1_POLICY.max_completion_obligations() + 1];
+    malformed.refusal_id = malformed.content_id().unwrap();
+    let ledger_bytes = serde_json::to_vec(ledger).unwrap().len();
+    for record in [&first, &second, &malformed] {
+        let wire = serde_json::to_string(record).unwrap();
+        let decoded: RefusalRecord = decode_record(&wire).unwrap();
+        let bound = stored_refusal_validation_workspace(
+            &INVESTIGATION_V1_POLICY,
+            ledger_bytes,
+            wire.len().max(serde_json::to_vec(&first).unwrap().len()),
+        )
+        .unwrap();
+        let clone = decoded.clone();
+        let actual = std::mem::size_of_val(&clone)
+            + clone.assessment.capacity() * std::mem::size_of::<ObligationObservation>()
+            + clone.feedback.unmet.capacity() * std::mem::size_of::<FeedbackEntry>()
+            + wire.len() * 3
+            + b"cartograph:obligation-refusal:v1\0".len();
+        assert!(bound >= actual);
+    }
+    assert!(
+        malformed
+            .validate(
+                &fixture.request,
+                ledger,
+                &fixture.disclosure,
+                &finish,
+                Some(&first)
+            )
+            .is_err()
+    );
+    assert!(
+        stored_refusal_validation_workspace(&INVESTIGATION_V1_POLICY, MAX_RECORD_BYTES + 1, 0)
+            .is_none()
+    );
+    assert!(
+        stored_refusal_validation_workspace(&INVESTIGATION_V1_POLICY, ledger_bytes, usize::MAX)
+            .is_none()
+    );
     let mut third = second.clone();
     third.refusal_count = 3;
     third.previous_refusal = Some(second.refusal_id.clone());
