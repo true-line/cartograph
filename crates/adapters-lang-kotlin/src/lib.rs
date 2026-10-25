@@ -104,6 +104,9 @@ struct TypedCall {
     /// An unqualified call in a `with(x) { … }` lambda: what it resolves to
     /// when `x`'s type does not declare the member.
     fallback: Option<Fallback>,
+    /// Top-level function FQNs that, if this repository declares one, shadow
+    /// `kotlin.with`: the call then takes its fallback.
+    shadowed_by: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -820,7 +823,22 @@ pub fn extract_source(
         .bindings
         .iter()
         .filter(|(_, fqn)| receivers::HILT_VIEW_MODEL.contains(&fqn.as_str()))
+        .filter(|(name, _)| !receivers::declares_name(&cx, root, name))
         .map(|(name, _)| name.clone())
+        .collect();
+    // `with` is Kotlin's receiver-scoping `kotlin.with` unless this file
+    // declares or imports another. A same-package or star-imported
+    // repository `with` is checked at the join (`TypedCall::shadowed_by`).
+    let std_with = !receivers::declares_name(&cx, root, "with")
+        && imports
+            .bindings
+            .get("with")
+            .is_none_or(|fqn| fqn == "kotlin.with");
+    let with_shadows: Vec<String> = package
+        .iter()
+        .chain(&imports.wildcard_packages)
+        .map(|pkg| format!("{pkg}.with"))
+        .chain(package.is_none().then(|| "with".to_string()))
         .collect();
 
     // Types: classes, interfaces, enums, data classes, objects — nested
@@ -1196,7 +1214,7 @@ pub fn extract_source(
         let receiver_is_this = receiver.is_none_or(|receiver| receiver.kind() == "this_expression");
         // `with(x) { m() }`: x's members come before the enclosing class and
         // top level, so a typed `x` is tried first (W11c-2).
-        let with_binding = if receiver.is_none() {
+        let with_binding = if receiver.is_none() && std_with {
             receivers::with_receiver_binding(&cx, call, &hilt)
                 .filter(|binding| *binding != receivers::Binding::Untyped)
         } else {
@@ -1246,28 +1264,29 @@ pub fn extract_source(
                     ))
                 })
             };
-            match with_binding {
-                Some(binding) => {
-                    let typed = typed_call(
-                        &cx,
-                        &imports,
-                        package.as_deref(),
-                        &local_types,
-                        src,
-                        call,
-                        binding,
-                        name,
-                    );
-                    out.typed_calls.extend(typed.map(|mut typed| {
-                        typed.fallback = fallback;
-                        typed
-                    }));
+            // A receiver type that proves nothing (a type parameter) keeps
+            // the ordinary resolution.
+            let typed = with_binding.and_then(|binding| {
+                typed_call(
+                    &cx,
+                    &imports,
+                    package.as_deref(),
+                    &local_types,
+                    src.clone(),
+                    call,
+                    binding,
+                    name,
+                )
+            });
+            match (typed, fallback) {
+                (Some(mut typed), fallback) => {
+                    typed.fallback = fallback;
+                    typed.shadowed_by = with_shadows.clone();
+                    out.typed_calls.push(typed);
                 }
-                None => match fallback {
-                    Some(Fallback::Edge(edge)) => out.edges.push(edge),
-                    Some(Fallback::Pending(pending)) => out.pending_calls.push(pending),
-                    None => {}
-                },
+                (None, Some(Fallback::Edge(edge))) => out.edges.push(edge),
+                (None, Some(Fallback::Pending(pending))) => out.pending_calls.push(pending),
+                (None, None) => {}
             }
             continue;
         }
@@ -1416,6 +1435,7 @@ fn typed_call(
             "prov": cx.prov(&call, &format!("CALLS {callee}")),
         }),
         fallback: None,
+        shadowed_by: Vec::new(),
     })
 }
 
@@ -1665,6 +1685,13 @@ pub fn extract_dir_incremental_with_progress(
     };
     for typed in std::mem::take(&mut out.typed_calls) {
         let resolved = (|| {
+            if typed
+                .shadowed_by
+                .iter()
+                .any(|fqn| functions_by_fqn.contains_key(fqn))
+            {
+                return None;
+            }
             let (fqn, declared) = resolve_type(&typed.candidates)?;
             let declared = declared?; // ambiguous FQN: fail closed
             if typed.constructed && (!declared.constructible || functions_by_fqn.contains_key(&fqn))

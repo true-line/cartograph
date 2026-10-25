@@ -430,6 +430,32 @@ pub(crate) fn this_property_binding(
     None
 }
 
+/// Whether this file declares `name` anywhere: a function, type, property,
+/// or parameter. Any of them can shadow an imported or default-imported
+/// callable, so a rule relying on that callable's identity fails closed.
+pub(crate) fn declares_name(cx: &FileCx<'_>, root: TsNode<'_>, name: &str) -> bool {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if matches!(
+            node.kind(),
+            "function_declaration"
+                | "class_declaration"
+                | "object_declaration"
+                | "class_parameter"
+                | "parameter"
+                | "variable_declaration"
+        ) && named_children(node)
+            .into_iter()
+            .find(|part| part.kind() == "identifier")
+            .is_some_and(|ident| cx.text(&ident) == name)
+        {
+            return true;
+        }
+        stack.extend(named_children(node));
+    }
+    false
+}
+
 /// Whether `name` is a type parameter of a declaration enclosing `site`:
 /// `fun <T> f(x: T)` or `class C<T>` (W11c-1). Such a type proves no target.
 pub(crate) fn is_type_parameter(cx: &FileCx<'_>, site: TsNode<'_>, name: &str) -> bool {

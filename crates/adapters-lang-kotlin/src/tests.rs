@@ -2269,7 +2269,9 @@ fun qualified(a: io.x.net.ApiService) { a.other() }
 // (#1048 W11c-2): `hiltViewModel<VM>()` is `VM`, and
 // `hiltViewModel(…) { f: F -> f.create(…) }` is `F.create`'s declared return
 // type. Inside `with(x) { m() }` a typed `x`'s member wins over the enclosing
-// file's functions, which remain the fallback when `x`'s type lacks `m`.
+// file's functions, which remain the fallback when `x`'s type lacks `m` or
+// proves nothing (a type parameter). A `hiltViewModel` or `with` shadowed by
+// a same-file declaration, or a same-package `with`, types nothing.
 #[test]
 fn hilt_view_models_type_their_bindings() {
     let dir = tempfile::tempdir().unwrap();
@@ -2348,13 +2350,90 @@ fun Fake() {
 }
 "#,
     );
+    // The real import, shadowed by a same-file function: no Hilt typing.
+    write(
+        dir.path(),
+        "shadow/Hilt.kt",
+        r#"package io.x.shadow
+
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import io.x.vm.LoginVm
+import io.x.vm.OtherVm
+
+fun <T> hiltViewModel(): OtherVm = OtherVm()
+
+fun Shadowed() {
+    val vm = hiltViewModel<LoginVm>()
+    vm.login()
+}
+"#,
+    );
+    // A member `with` that gives its lambda no receiver.
+    write(
+        dir.path(),
+        "shadow/With.kt",
+        r#"package io.x.shadoww
+
+import io.x.vm.LoginVm
+
+class Scope {
+    fun with(vm: LoginVm, block: () -> Unit) {
+        block()
+    }
+
+    fun login() {}
+
+    fun LocalWith(vm: LoginVm) = with(vm) {
+        login()
+    }
+}
+"#,
+    );
+    // A same-package `with` declared in another file shadows `kotlin.with`.
+    write(
+        dir.path(),
+        "pkgwith/With.kt",
+        "package io.x.pkgwith\n\nfun with(x: Any, block: () -> Unit) {\n    block()\n}\n",
+    );
+    write(
+        dir.path(),
+        "pkgwith/Use.kt",
+        r#"package io.x.pkgwith
+
+import io.x.vm.LoginVm
+
+fun login() {}
+
+fun PackageWith(vm: LoginVm) = with(vm) {
+    login()
+}
+"#,
+    );
+    // A type parameter receiver proves nothing; the ordinary call stays.
+    write(
+        dir.path(),
+        "generic/Generic.kt",
+        r#"package io.x.generic
+
+fun helper() {}
+
+fun <T> Generic(x: T) = with(x) {
+    helper()
+}
+"#,
+    );
 
     let out = extract_dir(dir.path(), &id()).unwrap();
     let short = |s: &str| s.rsplit_once('#').unwrap().1.to_string();
     let mut calls: Vec<(String, String)> = out
         .edges
         .iter()
-        .filter(|e| e.label == "CALLS" && (e.src.contains("@ui/") || e.src.contains("@fake/")))
+        .filter(|e| {
+            e.label == "CALLS"
+                && ["@ui/", "@fake/", "@shadow/", "@pkgwith/", "@generic/"]
+                    .iter()
+                    .any(|dir| e.src.contains(dir))
+        })
         .filter(|e| !e.dst.starts_with("gap:"))
         .map(|e| (short(&e.src), short(&e.dst)))
         .collect();
@@ -2367,6 +2446,12 @@ fun Fake() {
         pair("Default", "OtherVm.go"),
         // The look-alike is an ordinary local call; it types nothing.
         pair("Fake", "hiltViewModel"),
+        // Shadowed `hiltViewModel` / `with` keep their ordinary resolution.
+        pair("Generic", "helper"),
+        pair("Scope.LocalWith", "Scope.login"),
+        pair("Scope.LocalWith", "Scope.with"),
+        pair("PackageWith", "login"),
+        pair("Shadowed", "hiltViewModel"),
         pair("Login", "LoginVm.login"),
         pair("Login", "helper"),
         pair("WrongShape", "CreateVm.Factory.create"),
