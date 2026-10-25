@@ -104,6 +104,58 @@ fn exact_step_attempt_helper_preserves_committed_ids_bytes_and_caller_rollback()
                     attempt_schema_workspace().unwrap() >= usize::try_from(schema_bytes).unwrap()
                 );
             }
+            // AC-0327 (#969): exercise the actual bounded record decoder at
+            // both buffered tags, without changing immutable production rows.
+            tx.execute_batch("CREATE TEMP TABLE decoder_fixture (task_id TEXT, sequence INTEGER, body BLOB, body_hash TEXT)").unwrap();
+            let original = serde_json::to_value(&entries[0]).unwrap();
+            for pointer in ["/record/read/context_id", "/record/read/fact/id"] {
+                let mut value = original.clone();
+                if pointer.ends_with("fact/id") {
+                    value["record"]["read"] = serde_json::json!({
+                        "kind": "source", "fact": {"kind": "node", "id": "node:1"},
+                        "role": "provenance", "index": 0
+                    });
+                }
+                // Decode-only control: the source variant need not match the
+                // stored inventory binding; attempts() validates that separately.
+                let control: AttemptEntry = serde_json::from_value(value.clone()).unwrap();
+                for malformed in [false, true] {
+                    let mut candidate = value.clone();
+                    if malformed {
+                        let mut nested = serde_json::json!("not a string");
+                        for _ in 0..48 {
+                            nested = serde_json::json!([nested]);
+                        }
+                        *candidate.pointer_mut(pointer).unwrap() = nested;
+                    }
+                    let body = if malformed {
+                        serde_json::to_vec(&candidate).unwrap()
+                    } else {
+                        serde_json::to_vec(&control).unwrap()
+                    };
+                    tx.execute("DELETE FROM decoder_fixture", []).unwrap();
+                    tx.execute(
+                        "INSERT INTO decoder_fixture VALUES (?1,1,?2,?3)",
+                        params![fixture.id, body, core_prov::content_hash(&body)],
+                    )
+                    .unwrap();
+                    let decoded = read_body::<AttemptEntry>(
+                        &tx,
+                        "decoder_fixture",
+                        "sequence",
+                        &fixture.id,
+                        &1,
+                    );
+                    if malformed {
+                        assert!(matches!(decoded, Err(InvestigationStoreError::Invalid)));
+                    } else {
+                        assert_eq!(
+                            serde_json::to_value(decoded.unwrap().unwrap()).unwrap(),
+                            serde_json::to_value(&control).unwrap()
+                        );
+                    }
+                }
+            }
             let bytes = attempt_bytes(&tx, &fixture.id);
             assert_eq!(bytes.1, core_prov::content_hash(&bytes.0));
             let record = entries[0].record.clone();
