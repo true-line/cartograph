@@ -4176,6 +4176,10 @@ details.investigation-section { display: block; }
 }
 
 .spec-diagram-canvas {
+  /* Shares .atlas-cytoscape for focus styling but must stay in its card (#1000). */
+  position: relative;
+  inset: auto;
+  overflow: hidden;
   min-height: 240px;
   height: 260px;
   border: 1px solid var(--border);

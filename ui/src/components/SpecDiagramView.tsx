@@ -473,6 +473,8 @@ export function SpecDiagramCanvas({
       elements,
       style: DIAGRAM_STYLE,
       layout: { name: 'preset', fit: true, padding: 28 },
+      // Fitting one or two nodes would otherwise zoom them to fill the canvas.
+      maxZoom: 1.5,
       autoungrabify: true,
     });
     cy.on('tap', 'node', (event) => {
