@@ -1610,15 +1610,29 @@ mod tests {
             src_name: "sym:helper".into(),
             ..flow_hop(ConfidenceTier::Confirmed, "sym:deep")
         };
-        let flows = vec![Flow {
-            trigger: "ep:orders".into(),
+        let zero_hop = |id: &str, name: &str| Flow {
+            trigger: id.into(),
             trigger_kind: "Endpoint".into(),
-            trigger_name: "POST /orders".into(),
-            hops: vec![handles, calls, deeper],
+            trigger_name: name.into(),
+            hops: Vec::new(),
             status: FlowStatus::Verified,
             score: 1.0,
             depth_limited: false,
-        }];
+        };
+        let flows = vec![
+            Flow {
+                trigger: "ep:orders".into(),
+                trigger_kind: "Endpoint".into(),
+                trigger_name: "POST /orders".into(),
+                hops: vec![handles, calls, deeper],
+                status: FlowStatus::Verified,
+                score: 1.0,
+                depth_limited: false,
+            },
+            // Zero-hop triggers are still participants a test may reference.
+            zero_hop("ep:lonely", "GET /lonely"),
+            zero_hop("ep:unreferenced", "GET /unreferenced"),
+        ];
         let test = |n: usize| format!("test:local/shop@tests/test_orders.py#test_{n}");
         let mut nodes = vec![node(
             "ep:orders",
@@ -1658,6 +1672,37 @@ mod tests {
             Tier::Deterministic,
             ConfidenceTier::InferredStrong,
         ));
+        edges.push(edge(
+            &test(2),
+            "ep:lonely",
+            "REQUESTS",
+            Tier::Deterministic,
+            ConfidenceTier::InferredStrong,
+        ));
+        // A test whose association to its function is only a Gap, and a
+        // function no test is associated with, attribute no call to a test.
+        nodes.push(node(
+            &test(7),
+            "TestCase",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        ));
+        edges.push(edge(
+            &test(7),
+            "sym:test_7",
+            "IMPLEMENTED_BY",
+            Tier::Deterministic,
+            ConfidenceTier::Gap,
+        ));
+        for symbol in ["sym:test_7", "sym:unassociated"] {
+            edges.push(edge(
+                symbol,
+                "sym:deep",
+                "CALLS",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ));
+        }
         // An unresolved request and a call from a non-test function prove nothing.
         edges.push(edge(
             &test(1),
@@ -1691,12 +1736,23 @@ mod tests {
         assert!(content.contains("| sym:a | — no recovered test reference |"));
         assert!(content.contains("| sym:deep | — no recovered test reference |"));
         assert!(content.contains("tests/test_orders.py#test_4, and 2 more |"));
-        let cited = dossier
-            .assertions
-            .iter()
-            .filter(|a| matches!(a.subject_kind.as_str(), "REQUESTS" | "CALLS"))
-            .count();
-        assert_eq!(cited, 8);
+        assert!(!content.contains("test_7"));
+        assert!(content.contains("**Test references (static).** 1 of 1 participants"));
+        assert!(content.contains("| GET /lonely | tests/test_orders.py#test_2 |"));
+        assert!(content.contains("**Test references (static).** 0 of 1 participants"));
+        assert!(content.contains("| GET /unreferenced | — no recovered test reference |"));
+        // Each reference cites every edge proving it: requests, and each
+        // attributed call with its test's association.
+        let cited = |kind: &str| {
+            dossier
+                .assertions
+                .iter()
+                .filter(|a| a.subject_kind == kind)
+                .count()
+        };
+        assert_eq!(cited("REQUESTS"), 2);
+        assert_eq!(cited("CALLS"), 7);
+        assert_eq!(cited("IMPLEMENTED_BY"), 7);
         // Without recovered tests the dossier is unchanged.
         let plain = compile_spec(
             &nodes[..1],

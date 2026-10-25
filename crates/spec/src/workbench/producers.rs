@@ -82,12 +82,18 @@ pub(super) fn flow(
     }
     let tests = diagrams::TestReferences::new(nodes, edges, |e| edge_nongap(&e));
     if let Some(tests) = &tests {
-        // Each rendered reference cites its own REQUESTS or CALLS edge, once.
+        // Each rendered reference cites every edge proving it, once.
         let mut cited = BTreeSet::new();
         for flow in flows {
-            for hop in &flow.hops {
-                for id in [hop.src.as_str(), hop.dst.as_str()] {
-                    for (_, edge) in tests.by_participant.get(id).into_iter().flatten() {
+            // A zero-hop flow's trigger is its only participant.
+            let ids = std::iter::once(flow.trigger.as_str()).chain(
+                flow.hops
+                    .iter()
+                    .flat_map(|h| [h.src.as_str(), h.dst.as_str()]),
+            );
+            for id in ids {
+                for (_, proof) in tests.by_participant.get(id).into_iter().flatten() {
+                    for edge in proof {
                         if cited.insert(edge_identity(edge)) {
                             assertions.edge(edge)?;
                         }

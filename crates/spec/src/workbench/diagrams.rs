@@ -160,8 +160,10 @@ const SHOWN_TESTS: usize = 5;
 /// Static test references per flow participant (#965): a test requests an
 /// Endpoint (`REQUESTS`) or its own function calls a function directly
 /// (`CALLS` from the test's `IMPLEMENTED_BY` symbol). Never transitive.
+/// Each reference keeps every edge that proves it: the `REQUESTS`, or the
+/// `IMPLEMENTED_BY` association and the `CALLS`.
 pub(crate) struct TestReferences<'a> {
-    pub by_participant: BTreeMap<&'a str, Vec<(&'a str, &'a Edge)>>,
+    pub by_participant: BTreeMap<&'a str, Vec<(&'a str, Vec<&'a Edge>)>>,
 }
 
 impl<'a> TestReferences<'a> {
@@ -180,24 +182,26 @@ impl<'a> TestReferences<'a> {
         if tests.is_empty() {
             return None;
         }
-        let implemented: BTreeMap<&str, &str> = edges
+        // Only a proven association attributes a function's calls to a test.
+        let implemented: BTreeMap<&str, &Edge> = edges
             .iter()
-            .filter(|e| e.label == "IMPLEMENTED_BY" && tests.contains(e.src.as_str()))
-            .map(|e| (e.dst.as_str(), e.src.as_str()))
+            .copied()
+            .filter(|e| e.label == "IMPLEMENTED_BY" && tests.contains(e.src.as_str()) && nongap(e))
+            .map(|e| (e.dst.as_str(), e))
             .collect();
-        let mut by_participant: BTreeMap<&str, Vec<(&str, &Edge)>> = BTreeMap::new();
+        let mut by_participant: BTreeMap<&str, Vec<(&str, Vec<&Edge>)>> = BTreeMap::new();
         for edge in edges.iter().copied().filter(|e| nongap(e)) {
-            let test = match edge.label.as_str() {
-                "REQUESTS" if tests.contains(edge.src.as_str()) => edge.src.as_str(),
+            let (test, proof) = match edge.label.as_str() {
+                "REQUESTS" if tests.contains(edge.src.as_str()) => (edge.src.as_str(), vec![edge]),
                 "CALLS" => match implemented.get(edge.src.as_str()) {
-                    Some(test) => test,
+                    Some(association) => (association.src.as_str(), vec![*association, edge]),
                     None => continue,
                 },
                 _ => continue,
             };
             let references = by_participant.entry(edge.dst.as_str()).or_default();
             if !references.iter().any(|(seen, _)| *seen == test) {
-                references.push((test, edge));
+                references.push((test, proof));
             }
         }
         Some(Self { by_participant })
@@ -233,6 +237,10 @@ pub(crate) fn flows_with_tests(
         }
         if flow.hops.is_empty() {
             out.write_str("\nNo hops resolved from this trigger.\n")?;
+            // The trigger alone is still a participant a test may reference.
+            if let Some(tests) = tests {
+                test_table(out, &[(&flow.trigger, &flow.trigger_name)], tests)?;
+            }
             continue;
         }
         let mut participants: Vec<(&str, &str)> = Vec::new();
@@ -290,36 +298,45 @@ pub(crate) fn flows_with_tests(
                 hop.provenance.content_hash
             )?;
         }
-        let Some(tests) = tests else {
-            continue;
-        };
-        let referenced = participants
-            .iter()
-            .filter(|(id, _)| tests.by_participant.contains_key(id))
-            .count();
-        writeln!(
-            out,
-            "\n**Test references (static).** {referenced} of {} participants are referenced directly by a recovered test: an endpoint it requests or a function it calls. A reference is not an execution, and reach through further calls is not counted.\n\n| Participant | Tests |\n|---|---|",
-            participants.len()
-        )?;
-        for (id, name) in &participants {
-            write!(out, "| {} | ", Safe(Replace(name, &[('\n', " ")])))?;
-            match tests.by_participant.get(id) {
-                None => out.write_str("— no recovered test reference")?,
-                Some(references) => {
-                    for (i, (test, _)) in references.iter().take(SHOWN_TESTS).enumerate() {
-                        if i > 0 {
-                            out.write_str(", ")?;
-                        }
-                        write!(out, "{}", Safe(test_name(test)))?;
+        if let Some(tests) = tests {
+            test_table(out, &participants, tests)?;
+        }
+    }
+    Ok(())
+}
+
+/// The static test reference table for one flow's participants (#965).
+fn test_table(
+    out: &mut impl fmt::Write,
+    participants: &[(&str, &str)],
+    tests: &TestReferences<'_>,
+) -> fmt::Result {
+    let referenced = participants
+        .iter()
+        .filter(|(id, _)| tests.by_participant.contains_key(id))
+        .count();
+    writeln!(
+        out,
+        "\n**Test references (static).** {referenced} of {} participants are referenced directly by a recovered test: an endpoint it requests or a function it calls. A reference is not an execution, and reach through further calls is not counted.\n\n| Participant | Tests |\n|---|---|",
+        participants.len()
+    )?;
+    for (id, name) in participants {
+        write!(out, "| {} | ", Safe(Replace(name, &[('\n', " ")])))?;
+        match tests.by_participant.get(id) {
+            None => out.write_str("— no recovered test reference")?,
+            Some(references) => {
+                for (i, (test, _)) in references.iter().take(SHOWN_TESTS).enumerate() {
+                    if i > 0 {
+                        out.write_str(", ")?;
                     }
-                    if references.len() > SHOWN_TESTS {
-                        write!(out, ", and {} more", references.len() - SHOWN_TESTS)?;
-                    }
+                    write!(out, "{}", Safe(test_name(test)))?;
+                }
+                if references.len() > SHOWN_TESTS {
+                    write!(out, ", and {} more", references.len() - SHOWN_TESTS)?;
                 }
             }
-            out.write_str(" |\n")?;
         }
+        out.write_str(" |\n")?;
     }
     Ok(())
 }
@@ -341,8 +358,9 @@ pub(super) fn logical_index_bytes(bytes: usize, rows: usize, hops: usize) -> Opt
         slots::<Line<'_>>(rows)?,                     // lines + stable sort
         slots::<(&str, &str)>(hops.checked_mul(2)?)?, // two participants per hop
         set_slots::<&str>(rows)?,                     // test references: tests
-        map_slots::<&str, &str>(rows)?,               // implemented symbols
-        map_slots::<&str, Vec<(&str, &Edge)>>(rows)?, // by participant
-        slots::<(&str, &Edge)>(rows)?,
+        map_slots::<&str, &Edge>(rows)?,              // implemented symbols
+        map_slots::<&str, Vec<(&str, Vec<&Edge>)>>(rows)?, // by participant
+        slots::<(&str, Vec<&Edge>)>(rows)?,
+        slots::<&Edge>(rows.checked_mul(2)?)?, // association + call proofs
     ])
 }
