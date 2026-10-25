@@ -424,6 +424,15 @@ fn task_phase_workspaces(
     )?;
     let execution = provider
         .max(construction)
+        // Source receipts/guards/outcomes are retained in context below. This
+        // adds only the nested manifest and bounded object/span acquisition.
+        .max(
+            super::reservation::capture::workspace(
+                limits.evidence,
+                agents::investigation::MAX_INSPECTION_TARGET_BYTES,
+            )?
+            .peak(),
+        )
         .max(validation)
         .max(crate::jobs::investigations::archive_acquisition_workspace()?)
         .max(crate::jobs::investigations::next_prompt_ledger_workspace()?)

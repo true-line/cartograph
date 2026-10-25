@@ -14,17 +14,7 @@ pub(crate) fn evidence_peak_bytes(
     freshness_bytes: usize,
     limits: EvidenceWorkLimits,
 ) -> Option<usize> {
-    let manifest = usize::try_from(source_capture::MAX_MANIFEST_BYTES).ok()?;
     let receipt = MAX_RECEIPT_BYTES;
-    // Decoding precedes manifest/range validation. A malformed input can contain
-    // more entries than MAX_FILES/MAX_RECEIPT_RANGES, but each entry consumes at
-    // least one raw byte. Strings after JSON unescaping consume <= input bytes.
-    let manifest_typed = sum(&[
-        manifest,
-        size_of::<source_capture::CaptureManifest>(),
-        slots::<source_capture::FileEntry>(manifest.checked_add(1)?)?,
-    ])?;
-    let manifest_parse = sum(&[manifest, manifest_typed, manifest])?; // raw/DTO/canonical
     let receipt_workspace = super::receipt::workspace_bytes()?;
     let receipt_typed = receipt_workspace.retained;
     let receipt_parse = receipt_workspace.peak;
@@ -86,13 +76,7 @@ pub(crate) fn evidence_peak_bytes(
         omission,
         super::schema::workspace_bytes()?,
     ])?;
-    let object = usize::try_from(
-        limits
-            .max_file_validation_bytes
-            .get()
-            .min(source_capture::MAX_FILE_BYTES),
-    )
-    .ok()?;
+    let capture = super::capture::workspace(limits, target_payload)?;
     let span = usize::try_from(
         limits
             .max_span_bytes
@@ -100,16 +84,6 @@ pub(crate) fn evidence_peak_bytes(
             .min(source_capture::MAX_SPAN_BYTES),
     )
     .ok()?;
-    // read_span owns the typed manifest and selected object when it creates the
-    // span Vec. UTF-8 conversion moves that Vec into String. Final response
-    // serialization holds the String and its escaped wire at the same time.
-    let captured_read = sum(&[
-        manifest_typed,
-        object,
-        span,
-        size_of::<source_capture::CaptureFileRef>(),
-        target_payload,
-    ])?;
     let response_wire = sum(&[target_wire, string_wire(span)?, receipt_wire])?;
     // On capture absence the original validated receipt remains borrowed while
     // receipt_status performs its own mandatory stored-receipt validation.
@@ -119,8 +93,7 @@ pub(crate) fn evidence_peak_bytes(
         receipt_status_peak,
         freshness_bytes,
         receipt_parse,
-        sum(&[receipt_typed, manifest_parse])?,
-        sum(&[receipt_typed, captured_read])?,
+        sum(&[receipt_typed, capture.peak()])?,
         sum(&[receipt_typed, span, response_wire])?,
     ]
     .into_iter()
