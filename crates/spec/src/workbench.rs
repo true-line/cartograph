@@ -1597,6 +1597,121 @@ mod tests {
         assert!(rejected.content.contains("No test references recovered"));
     }
 
+    #[test]
+    fn flow_dossiers_name_static_test_references_per_participant() {
+        // AC-0346 (T-0346).
+        let mut handles = flow_hop(ConfidenceTier::Confirmed, "sym:a");
+        handles.label = "HANDLES".into();
+        handles.src = "ep:orders".into();
+        handles.src_name = "POST /orders".into();
+        let calls = flow_hop(ConfidenceTier::Confirmed, "sym:helper");
+        let deeper = Hop {
+            src: "sym:helper".into(),
+            src_name: "sym:helper".into(),
+            ..flow_hop(ConfidenceTier::Confirmed, "sym:deep")
+        };
+        let flows = vec![Flow {
+            trigger: "ep:orders".into(),
+            trigger_kind: "Endpoint".into(),
+            trigger_name: "POST /orders".into(),
+            hops: vec![handles, calls, deeper],
+            status: FlowStatus::Verified,
+            score: 1.0,
+            depth_limited: false,
+        }];
+        let test = |n: usize| format!("test:local/shop@tests/test_orders.py#test_{n}");
+        let mut nodes = vec![node(
+            "ep:orders",
+            "Endpoint",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        )];
+        let mut edges = Vec::new();
+        for n in 0..7 {
+            nodes.push(node(
+                &test(n),
+                "TestCase",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ));
+            let symbol = format!("sym:test_{n}");
+            edges.push(edge(
+                &test(n),
+                &symbol,
+                "IMPLEMENTED_BY",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ));
+            // Seven tests call the helper directly; one also requests the endpoint.
+            edges.push(edge(
+                &symbol,
+                "sym:helper",
+                "CALLS",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ));
+        }
+        edges.push(edge(
+            &test(0),
+            "ep:orders",
+            "REQUESTS",
+            Tier::Deterministic,
+            ConfidenceTier::InferredStrong,
+        ));
+        // An unresolved request and a call from a non-test function prove nothing.
+        edges.push(edge(
+            &test(1),
+            "sym:a",
+            "REQUESTS",
+            Tier::Deterministic,
+            ConfidenceTier::Gap,
+        ));
+        edges.push(edge(
+            "sym:other",
+            "sym:deep",
+            "CALLS",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        ));
+        let dossier = compile_spec(
+            &nodes,
+            &edges,
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        )
+        .artifacts
+        .into_iter()
+        .find(|artifact| artifact.id == "flow-dossiers")
+        .unwrap();
+        let content = &dossier.content;
+        assert!(content.contains("**Test references (static).** 2 of 4 participants"));
+        assert!(content.contains("A reference is not an execution"));
+        assert!(content.contains("| POST /orders | tests/test_orders.py#test_0 |"));
+        assert!(content.contains("| sym:a | — no recovered test reference |"));
+        assert!(content.contains("| sym:deep | — no recovered test reference |"));
+        assert!(content.contains("tests/test_orders.py#test_4, and 2 more |"));
+        let cited = dossier
+            .assertions
+            .iter()
+            .filter(|a| matches!(a.subject_kind.as_str(), "REQUESTS" | "CALLS"))
+            .count();
+        assert_eq!(cited, 8);
+        // Without recovered tests the dossier is unchanged.
+        let plain = compile_spec(
+            &nodes[..1],
+            &[],
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        )
+        .artifacts
+        .into_iter()
+        .find(|artifact| artifact.id == "flow-dossiers")
+        .unwrap();
+        assert!(!plain.content.contains("Test references"));
+    }
+
     fn reason_gap(id: &str, reason: &str) -> Node {
         Node {
             id: id.into(),

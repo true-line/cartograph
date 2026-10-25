@@ -542,6 +542,17 @@ pub(crate) fn extract(
                 "prov": cx.prov(&function, &format!("DEFINED_IN {test}")),
             }),
         });
+        // The test's own function, whose direct calls are the test's static
+        // references to functions (#965).
+        let symbol = crate::symbol_id(cx.id.repo, cx.path, &name);
+        out.edges.push(Edge {
+            src: test.clone(),
+            dst: symbol.clone(),
+            label: "IMPLEMENTED_BY".into(),
+            props: serde_json::json!({
+                "prov": cx.prov(&function, &format!("IMPLEMENTED_BY {test} -> {symbol}")),
+            }),
+        });
         let mut bound: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         binding_sites(cx, body, &mut |site, names| {
             for name in names {

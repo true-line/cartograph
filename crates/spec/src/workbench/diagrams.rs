@@ -154,7 +154,70 @@ pub(crate) fn configuring_files<'a>(
         .collect()
 }
 
+/// Tests shown per participant before the rest are counted.
+const SHOWN_TESTS: usize = 5;
+
+/// Static test references per flow participant (#965): a test requests an
+/// Endpoint (`REQUESTS`) or its own function calls a function directly
+/// (`CALLS` from the test's `IMPLEMENTED_BY` symbol). Never transitive.
+pub(crate) struct TestReferences<'a> {
+    pub by_participant: BTreeMap<&'a str, Vec<(&'a str, &'a Edge)>>,
+}
+
+impl<'a> TestReferences<'a> {
+    /// `None` when the repository has no recovered tests, so its dossiers
+    /// render exactly as before.
+    pub(crate) fn new(
+        nodes: &[&'a Node],
+        edges: &[&'a Edge],
+        nongap: impl Fn(&Edge) -> bool,
+    ) -> Option<Self> {
+        let tests: BTreeSet<&str> = nodes
+            .iter()
+            .filter(|n| n.label == "TestCase")
+            .map(|n| n.id.as_str())
+            .collect();
+        if tests.is_empty() {
+            return None;
+        }
+        let implemented: BTreeMap<&str, &str> = edges
+            .iter()
+            .filter(|e| e.label == "IMPLEMENTED_BY" && tests.contains(e.src.as_str()))
+            .map(|e| (e.dst.as_str(), e.src.as_str()))
+            .collect();
+        let mut by_participant: BTreeMap<&str, Vec<(&str, &Edge)>> = BTreeMap::new();
+        for edge in edges.iter().copied().filter(|e| nongap(e)) {
+            let test = match edge.label.as_str() {
+                "REQUESTS" if tests.contains(edge.src.as_str()) => edge.src.as_str(),
+                "CALLS" => match implemented.get(edge.src.as_str()) {
+                    Some(test) => test,
+                    None => continue,
+                },
+                _ => continue,
+            };
+            let references = by_participant.entry(edge.dst.as_str()).or_default();
+            if !references.iter().any(|(seen, _)| *seen == test) {
+                references.push((test, edge));
+            }
+        }
+        Some(Self { by_participant })
+    }
+}
+
+/// A test named by its path and qualified name.
+fn test_name(id: &str) -> &str {
+    id.split_once('@').map_or(id, |(_, rest)| rest)
+}
+
 pub(crate) fn flows(out: &mut impl fmt::Write, flows: &[Flow]) -> fmt::Result {
+    flows_with_tests(out, flows, None)
+}
+
+pub(crate) fn flows_with_tests(
+    out: &mut impl fmt::Write,
+    flows: &[Flow],
+    tests: Option<&TestReferences<'_>>,
+) -> fmt::Result {
     out.write_str("# Flow dossier\n")?;
     for flow in flows {
         writeln!(
@@ -227,6 +290,36 @@ pub(crate) fn flows(out: &mut impl fmt::Write, flows: &[Flow]) -> fmt::Result {
                 hop.provenance.content_hash
             )?;
         }
+        let Some(tests) = tests else {
+            continue;
+        };
+        let referenced = participants
+            .iter()
+            .filter(|(id, _)| tests.by_participant.contains_key(id))
+            .count();
+        writeln!(
+            out,
+            "\n**Test references (static).** {referenced} of {} participants are referenced directly by a recovered test: an endpoint it requests or a function it calls. A reference is not an execution, and reach through further calls is not counted.\n\n| Participant | Tests |\n|---|---|",
+            participants.len()
+        )?;
+        for (id, name) in &participants {
+            write!(out, "| {} | ", Safe(Replace(name, &[('\n', " ")])))?;
+            match tests.by_participant.get(id) {
+                None => out.write_str("— no recovered test reference")?,
+                Some(references) => {
+                    for (i, (test, _)) in references.iter().take(SHOWN_TESTS).enumerate() {
+                        if i > 0 {
+                            out.write_str(", ")?;
+                        }
+                        write!(out, "{}", Safe(test_name(test)))?;
+                    }
+                    if references.len() > SHOWN_TESTS {
+                        write!(out, ", and {} more", references.len() - SHOWN_TESTS)?;
+                    }
+                }
+            }
+            out.write_str(" |\n")?;
+        }
     }
     Ok(())
 }
@@ -247,5 +340,9 @@ pub(super) fn logical_index_bytes(bytes: usize, rows: usize, hops: usize) -> Opt
         slots::<Line<'_>>(rows)?,
         slots::<Line<'_>>(rows)?,                     // lines + stable sort
         slots::<(&str, &str)>(hops.checked_mul(2)?)?, // two participants per hop
+        set_slots::<&str>(rows)?,                     // test references: tests
+        map_slots::<&str, &str>(rows)?,               // implemented symbols
+        map_slots::<&str, Vec<(&str, &Edge)>>(rows)?, // by participant
+        slots::<(&str, &Edge)>(rows)?,
     ])
 }
