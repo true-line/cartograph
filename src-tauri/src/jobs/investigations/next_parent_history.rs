@@ -39,6 +39,46 @@ pub(crate) fn parent_history_projection_workspace() -> Option<(usize, usize)> {
     Some((retained, projection))
 }
 
+/// Family-aware acquisition before parent-envelope construction. The @10
+/// reader covers shared row/ledger/result and completion-witness ownership;
+/// legacy routing additionally reloads a base task in staged::load, reconstructs
+/// metadata from raw attempts/refusals, or sweeps invocation IDs without intent.
+#[cfg(unix)]
+pub(crate) fn parent_history_acquisition_workspace() -> Option<usize> {
+    use context_hub::logical::{slots, sum};
+    let (task, decode) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
+    let (_, common) = next_prompt_task_load_workspace()?;
+    let metadata = next_prompt_metadata_workspace()?.2;
+    let result = next_prompt_result_workspace()?.1;
+    let row = metadata_history_workspace::row_workspace()?;
+    // Legacy staged::load owns a second task while loading its journal. The
+    // base reader does not call completion::validate_saved recursively. Its
+    // pending/result checks may reconstruct metadata and read another row.
+    let legacy_base = sum(&[
+        task,
+        decode,
+        next_prompt_contract_workspace()?,
+        metadata,
+        result,
+        row,
+    ])?;
+    let calls = usize::try_from(INVESTIGATION_V2_POLICY.limits().model_invocations).ok()?;
+    let keys = calls.checked_add(1)?;
+    // validate_legacy_evidence first retains bounded keys, then reads one
+    // invocation at a time. Use the admitted row decoder even for malformed
+    // steps, not successful disclosure limits. Schema validation is additive.
+    let legacy_sweep = sum(&[
+        task,
+        storage::archive_schema_workspace()?,
+        slots::<String>(keys)?,
+        slots::<Vec<String>>(1)?,
+        keys.checked_mul(128)?,
+        row,
+        decode,
+    ])?;
+    sum(&[common, legacy_base, metadata, legacy_sweep])
+}
+
 /// Shared by task creation in its writer transaction and by the worker in a
 /// readonly snapshot. Public requests use the same saved-family validation.
 pub(super) fn load(

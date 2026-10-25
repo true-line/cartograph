@@ -1593,3 +1593,41 @@ fn saved_completion_witness_reuse_preserves_observation_and_rejects_tampering() 
         }
     }
 }
+
+// AC-0327: real legacy parents exercise staged::load's nested base reader,
+// including refusals, rather than assuming an @10 fixture covers that branch.
+#[test]
+fn parent_history_legacy_families_reopen_after_staged_refusals() {
+    for (policy, progressive) in [
+        (&INVESTIGATION_V1_POLICY, false),
+        (&INVESTIGATION_V2_POLICY, false),
+        (&INVESTIGATION_V2_POLICY, true),
+    ] {
+        let mut f = Fixture::with_family(InvestigationProviderMode::Local, policy, progressive);
+        for count in 0..=2 {
+            if count > 0 {
+                f.refuse();
+            }
+            let parent = f.store.investigation(&f.id).unwrap();
+            let history = f
+                .store
+                .investigation_next_parent_history(&f.id, &parent.summary.conversation_id)
+                .unwrap()
+                .into_history();
+            let wire: serde_json::Value = serde_json::from_str(&history[0]).unwrap();
+            assert_eq!(
+                wire["saved_execution_status"],
+                serde_json::to_value(parent.summary.status).unwrap()
+            );
+            assert!(wire["saved_result"].is_null());
+            let reopened = JobStore::open(f.directory.path().join("state.db")).unwrap();
+            assert_eq!(
+                reopened
+                    .investigation_next_parent_history(&f.id, &parent.summary.conversation_id)
+                    .unwrap()
+                    .into_history(),
+                history
+            );
+        }
+    }
+}

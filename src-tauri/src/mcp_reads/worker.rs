@@ -440,10 +440,13 @@ fn task_phase_workspaces(limits: WorkerLimits) -> Option<(usize, usize, usize)> 
     )?;
     let (history, history_projection) =
         crate::jobs::investigations::parent_history_projection_workspace()?;
-    // Parent history is built first, then survives preparation and every later
-    // execution phase. Family-specific loader acquisition remains separate.
+    // Parent history is acquired first, then survives preparation and every
+    // later execution phase. Acquisition includes legacy family reloads.
+    let history_acquisition = crate::jobs::investigations::parent_history_acquisition_workspace()?;
     Some((
-        history_projection.max(preparation.checked_add(history)?),
+        history_acquisition
+            .max(history_projection)
+            .max(preparation.checked_add(history)?),
         context.checked_add(history)?,
         execution,
     ))
@@ -598,6 +601,10 @@ pub(crate) mod tests {
         let (admitted_preparation, retained, _) = task_phase_workspaces(limits).unwrap();
         assert!(admitted_preparation >= preparation + history);
         assert!(admitted_preparation >= projection);
+        assert!(
+            admitted_preparation
+                >= crate::jobs::investigations::parent_history_acquisition_workspace().unwrap()
+        );
         assert!(retained >= initial + growth + history);
     }
     #[cfg(unix)]
