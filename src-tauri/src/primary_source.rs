@@ -1187,6 +1187,12 @@ pub(crate) struct PrimarySourceStore {
 }
 
 impl PrimarySourceStore {
+    /// Bytes cloned into each retention guard; read without allocating a path.
+    #[cfg(unix)]
+    pub(crate) fn retained_app_path_bytes(&self) -> usize {
+        self.storage.app_path.as_os_str().as_encoded_bytes().len()
+    }
+
     pub(crate) fn open(app_data: &Path) -> Result<Self, String> {
         let storage = PrivateStorage::open(app_data)?;
         let captures = CaptureStore::open(&storage.path("captures.sqlite"), StoreLimits::default())

@@ -835,3 +835,109 @@ fn qualified_preparation_workspace_covers_fixture_and_rejects_overflow() {
         preparation_workspace::workspace_bytes(scope, TEST_ARCHIVE_CAPACITY, usize::MAX,).is_none()
     );
 }
+// AC-0327: exercise the draft host bound against actual qualified preparation.
+#[test]
+fn query_workspace_covers_real_prepared_ledger_and_raw_response() {
+    use super::super::query_workspace::{self, QueryInputs};
+    use core_graph::GraphStore;
+    use core_prov::{ConfidenceTier, EvidenceRef, ProducingMethod, Provenance, Tier};
+    for legacy in [false, true] {
+        let fixture = Fixture::new(20);
+        let evidence_path = "quoted\"/λ/source.ts".repeat(8);
+        let provenance = Provenance::new(
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+            (0..4)
+                .map(|index| EvidenceRef {
+                    repo: fixture.scope[0].repo_key.clone(),
+                    path: evidence_path.clone(),
+                    byte_start: index,
+                    byte_end: index + 1,
+                    commit_sha: "workdir".into(),
+                })
+                .collect(),
+            "fixture",
+            b"fixture",
+        )
+        .unwrap()
+        .with_method(ProducingMethod::Rule {
+            rule: "query-fixture".into(),
+            version: "1".into(),
+        });
+        {
+            let mut graph = fixture.state.graph.lock().unwrap();
+            let mut node = graph.get_node("mod:0").unwrap().unwrap();
+            node.props["prov"] = serde_json::to_value(provenance).unwrap();
+            graph.put_node(&node).unwrap();
+        }
+        let frozen = if legacy {
+            let mut start = request();
+            start.specialist_id = SpecialistId::DomainAnalystV4;
+            start.schema_version = 1;
+            FrozenContext::prepare(&fixture.state, &start, &[]).unwrap()
+        } else {
+            fixture.prepare(&request()).unwrap()
+        };
+        let request = query();
+        let input = QueryInputs {
+            graph: SnapshotReadLimits::default(),
+            coverage: CoverageReadLimits::default(),
+            scoped_repos: fixture.scope.len(),
+            scope_identity_bytes: context_hub::logical::count(&fixture.scope).unwrap(),
+            ledger_wire: context_hub::logical::count(&frozen.ledger).unwrap(),
+            request_wire: context_hub::logical::count(&request).unwrap() + 128,
+            app_path_bytes: crate::sources::MAX_PATH_BYTES,
+        };
+        let bound = query_workspace::workspace(frozen.policy, input).unwrap();
+        let prepared = frozen.prepare_query(&fixture.state, request).unwrap();
+        let actual = context_hub::logical::count(&prepared.base_ledger).unwrap()
+            + context_hub::logical::count(&prepared.ledger).unwrap()
+            + prepared.raw.len();
+        assert!(bound.retained >= actual);
+        assert!(bound.peak >= bound.retained);
+        let response: Value = serde_json::from_str(&prepared.raw).unwrap();
+        let ranges = response["evidence_options"][0]["ranges"]
+            .as_array()
+            .unwrap();
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(ranges[0]["source"]["path"], evidence_path);
+        // The core's one-fact page fits; its added evidence inventory pushes the
+        // host response past the exact byte boundary, with no smaller page left.
+        let mut single = query();
+        single.max_facts = 1;
+        let one = frozen
+            .prepare_query(&fixture.state, single.clone())
+            .unwrap();
+        single.max_bytes = one.raw.len() - 1;
+        let core_request = QueryRequest {
+            max_facts: 1,
+            max_bytes: single.max_bytes,
+            ..Default::default()
+        };
+        match &frozen.qualified {
+            Some(qualified) => {
+                qualified
+                    .query(QualifiedRequest {
+                        request: core_request,
+                        context_id: Some(qualified.context_id().into()),
+                    })
+                    .unwrap();
+            }
+            None => {
+                frozen.snapshot.query(core_request).unwrap();
+            }
+        }
+        assert!(matches!(
+            frozen.prepare_query(&fixture.state, single),
+            Err(HostError::LimitExceeded)
+        ));
+        let before = frozen.ledger.clone();
+        let mut tiny = query();
+        tiny.max_bytes = 1;
+        assert!(matches!(
+            frozen.prepare_query(&fixture.state, tiny),
+            Err(HostError::LimitExceeded)
+        ));
+        assert_eq!(frozen.ledger, before);
+    }
+}

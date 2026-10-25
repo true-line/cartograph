@@ -95,10 +95,16 @@ impl Worker {
             if tasks
                 .as_ref()
                 .is_some_and(|session| session.with_grant(|_, _| ()).is_ok())
-                && limits.reserved_bytes.get()
-                    < task_phase_minimum(limits).ok_or(ReadError::Limit)?
             {
-                return Err(ReadError::Limit);
+                let path_bytes = app
+                    .state::<crate::AppState>()
+                    .primary_sources
+                    .retained_app_path_bytes();
+                if limits.reserved_bytes.get()
+                    < task_phase_minimum(limits, path_bytes).ok_or(ReadError::Limit)?
+                {
+                    return Err(ReadError::Limit);
+                }
             }
         }
         let permit = budget
@@ -382,8 +388,8 @@ pub(crate) fn required_reservation(limits: WorkerLimits) -> Option<usize> {
 /// Preparation, retained reads and modeled replay/provider component floors.
 /// Caller input/sealing and later read acquisition still need composition.
 #[cfg(unix)]
-pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
-    let (preparation, context, execution) = task_phase_workspaces(limits)?;
+pub(crate) fn task_phase_minimum(limits: WorkerLimits, app_path_bytes: usize) -> Option<usize> {
+    let (preparation, context, execution) = task_phase_workspaces(limits, app_path_bytes)?;
     let per_task = task_execution_peak(preparation, context, execution)?;
     required_reservation(limits)?
         .checked_add(per_task.checked_mul(crate::jobs::investigations::MAX_LIVE_TASKS)?)
@@ -391,7 +397,10 @@ pub(crate) fn task_phase_minimum(limits: WorkerLimits) -> Option<usize> {
 
 // Keep the actual retained term observable before phase maxima can mask it.
 #[cfg(unix)]
-fn task_phase_workspaces(limits: WorkerLimits) -> Option<(usize, usize, usize)> {
+fn task_phase_workspaces(
+    limits: WorkerLimits,
+    app_path_bytes: usize,
+) -> Option<(usize, usize, usize)> {
     let (context, preparation) = crate::investigations::preparation_workspace::workspace_bytes(
         limits.scope,
         agents::investigation::MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES,
@@ -433,6 +442,15 @@ fn task_phase_workspaces(limits: WorkerLimits) -> Option<(usize, usize, usize)> 
     // reads and validation. Preparation already includes its retained context.
     // Prepared inventory remains owned during durable publication/replay.
     let execution = crate::investigations::inventory_admission_workspace(execution)?;
+    let (query_retained, query_peak) =
+        crate::investigations::query_workspace::admitted_workspace(limits.scope, app_path_bytes)?;
+    // Each next_metadata transition prepares one query OR inventory candidate;
+    // publish_admitted_metadata consumes it before another read. Legacy query /
+    // read_inventory likewise consume their candidate in publish_context_read.
+    // Prior published pages/ledger are in retained_read_bytes below, not a second
+    // prepared candidate. This nesting conservatively overlaps wrapper owners;
+    // batching unpublished reads would require symmetric peak composition.
+    let execution = query_peak.max(query_retained.checked_add(execution)?);
     let context = context.checked_add(
         crate::investigations::preparation_workspace::retained_read_bytes(
             &agents::investigation::INVESTIGATION_V2_POLICY,
@@ -541,12 +559,16 @@ pub(crate) mod tests {
         };
         limits
     }
-    pub(crate) fn task_limits() -> WorkerLimits {
+    pub(crate) fn task_limits(_state: &crate::AppState) -> WorkerLimits {
         let limits = limits();
         #[cfg(unix)]
         let limits = {
             let mut limits = limits;
-            limits.reserved_bytes = nz(task_phase_minimum(limits).unwrap());
+            limits.reserved_bytes = nz(task_phase_minimum(
+                limits,
+                _state.primary_sources.retained_app_path_bytes(),
+            )
+            .unwrap());
             limits
         };
         limits
@@ -577,7 +599,7 @@ pub(crate) mod tests {
             &agents::investigation::INVESTIGATION_V2_POLICY,
         )
         .unwrap();
-        let (_, retained, _) = task_phase_workspaces(limits).unwrap();
+        let (_, retained, _) = task_phase_workspaces(limits, 0).unwrap();
         assert!(retained >= initial + growth);
     }
     #[cfg(unix)]
@@ -598,7 +620,7 @@ pub(crate) mod tests {
         .unwrap();
         let (history, projection) =
             crate::jobs::investigations::parent_history_projection_workspace().unwrap();
-        let (admitted_preparation, retained, _) = task_phase_workspaces(limits).unwrap();
+        let (admitted_preparation, retained, _) = task_phase_workspaces(limits, 0).unwrap();
         assert!(admitted_preparation >= preparation + history);
         assert!(admitted_preparation >= projection);
         assert!(

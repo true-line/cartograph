@@ -138,7 +138,7 @@ fn authenticated_task_tools_share_lifecycle_and_revocation_precedes_store_access
         McpClientId::from_host_bytes([9; 16]),
         NonZeroUsize::new(4).unwrap(),
     );
-    let limits = tests::task_limits();
+    let limits = tests::task_limits(&app.state::<crate::AppState>());
     let budget = WorkBudget::new(WorkLimits {
         max_workers: NonZeroUsize::new(1).unwrap(),
         max_reserved_bytes: limits.reserved_bytes,

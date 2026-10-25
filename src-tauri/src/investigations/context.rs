@@ -181,7 +181,9 @@ pub(super) struct EvidenceOption {
 const ARCHIVE_ENVELOPE_BYTES: usize =
     b"{\"schema_version\":1,\"proof\":null,\"inventories\":[]}".len() - b"null".len();
 
-fn coverage_preparation_limits(archive_capacity: usize) -> Result<CoverageReadLimits, HostError> {
+pub(super) fn coverage_preparation_limits(
+    archive_capacity: usize,
+) -> Result<CoverageReadLimits, HostError> {
     let max_bytes = archive_capacity
         .min(MAX_INVESTIGATION_COVERAGE_ARCHIVE_BYTES)
         .checked_sub(MAX_MANIFEST_BYTES + ARCHIVE_ENVELOPE_BYTES)

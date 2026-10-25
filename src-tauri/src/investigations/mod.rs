@@ -12,6 +12,8 @@ mod history;
 pub(crate) mod inspection;
 pub(crate) mod mcp_dispatch;
 pub(crate) mod provider_workspace;
+#[cfg(any(unix, test))]
+pub(crate) mod query_workspace;
 mod recovery;
 mod runtime;
 mod worker;
