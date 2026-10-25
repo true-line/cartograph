@@ -104,6 +104,13 @@ read:
      `conditional: true`. The condition is not interpreted as a business
      rule. Back navigation (`router.back()`, `removeLast`) is recorded as
      `kind: "back"`, not as an edge to a guessed screen.
+   - **One edge, every site.** The store keeps one edge per (source,
+     target, label) (SPEC-00 §5), so one Symbol's several navigations to
+     one Screen are one `NAVIGATES_TO` edge. The edge lists each call in
+     `sites`, in source order, with that site's evidence and its own
+     `conditional`. The edge's `conditional` is true only when every site
+     is conditional. A journey step names the site it took, so no
+     occurrence is lost.
 
 4. **A journey candidate is one bounded, goal-bearing path.** Rule
    `journey-candidate@1`:
@@ -217,21 +224,19 @@ read:
 
 ## Alternatives
 
-1. **Journeys from server flows alone:** rejected. A server flow starts at
-   an endpoint or schedule. Without client navigation, it cannot say what
-   the user did to reach it, and that is what the journey artifact is for.
-2. **Model-proposed journeys first, checked against the code afterward:**
-   rejected by ADR-0036 decision 1. The navigation facts are deterministic
-   and available, so interpretation waits for them.
-3. **Journeys as T0 facts:** rejected. Choosing a path and calling it a
-   journey is an interpretation, even when every step is a fact.
-4. **Every path through the screen graph:** rejected. Even SimpleLogin's
-   small graphs grow combinatorially once back edges and conditionals
-   exist. One shortest candidate per entry and goal, with the remainder
-   counted, keeps the artifact reviewable.
-5. **Ids from journey names, or from the entry and goal pair:** rejected.
-   Names are claims. An entry and goal id would let a curation of one path
-   silently apply to a different path to the same goal.
-6. **Naming journeys from UI strings (button labels):** deferred. Labels
-   may be recorded later as evidence on a step, but a name stays a separate
-   claim.
+1. **Journeys from server flows alone, or proposed by a model first:**
+   rejected. A server flow starts at an endpoint or schedule, so it cannot
+   say what the user did to reach it, and that is what the journey artifact
+   is for. Proposing journeys before the deterministic navigation facts
+   exist reverses ADR-0036 decision 1.
+2. **Journeys as T0 facts, or every path through the screen graph:**
+   rejected. Choosing a path and calling it a journey is an interpretation,
+   even when every step is a fact. Enumerating every path grows
+   combinatorially once back edges and conditionals exist. One bounded
+   shortest candidate per entry and goal, with the rest counted, keeps the
+   artifact reviewable.
+3. **Ids from journey names, from the entry and goal pair, or from UI
+   strings:** rejected. Names are claims. An entry and goal id would let a
+   curation of one path silently apply to a different path to the same
+   goal. UI strings such as button labels may later be recorded as evidence
+   on a step, but a name stays a separate claim.
