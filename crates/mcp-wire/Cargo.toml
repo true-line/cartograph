@@ -12,5 +12,5 @@ workspace = true
 [dependencies]
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-getrandom = "0.3.4"
+getrandom = "0.4.3"
 subtle = "2.6.1"

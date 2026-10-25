@@ -2935,7 +2935,7 @@ dependencies = [
 name = "mcp-wire"
 version = "0.30.0"
 dependencies = [
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "serde_json",
  "subtle",
  "thiserror 2.0.21",
