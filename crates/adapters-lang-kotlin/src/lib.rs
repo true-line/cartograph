@@ -56,6 +56,8 @@ pub struct Extraction {
     /// Android Navigation 3 entries and back-stack navigations, resolved repo-wide.
     navigation3: navigation3::Pending,
     pending_calls: Vec<PendingCall>,
+    /// Calls on declared-type receivers (#1048), resolved at the join.
+    typed_calls: Vec<TypedCall>,
     declared_types: Vec<Declared>,
     declared_functions: Vec<Declared>,
     /// Further import targets (#721): extension functions, top-level
@@ -77,6 +79,22 @@ struct PendingCall {
     member: Option<String>,
     resolved_props: serde_json::Value,
     gap: (Node, Edge),
+}
+
+/// `x.m(…)` where `x`'s declaration states its type (#1048). `candidates`
+/// are the FQNs that type name can denote, in Kotlin's precedence order
+/// (explicit import, same package, star imports); the first one this repo
+/// declares decides. An unproven type or member asserts nothing: it may be
+/// inherited, an extension, or a library type.
+#[derive(Debug, Clone)]
+struct TypedCall {
+    src: String,
+    candidates: Vec<String>,
+    /// Bound by a `T(…)` initializer: `T` must be a constructible class and
+    /// not also a top-level function.
+    constructed: bool,
+    member: String,
+    resolved_props: serde_json::Value,
 }
 
 /// A declaration (type/object or top-level function) and the
@@ -186,6 +204,9 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         retarget_props_commit(&mut pending.resolved_props, commit);
         retarget_props_commit(&mut pending.gap.0.props, commit);
         retarget_props_commit(&mut pending.gap.1.props, commit);
+    }
+    for typed in &mut extraction.typed_calls {
+        retarget_props_commit(&mut typed.resolved_props, commit);
     }
     extraction.navigation3.retarget(commit);
 }
@@ -1073,8 +1094,9 @@ pub fn extract_source(
     // proven by an import (a type/object receiver, or an imported top-level
     // function) resolve repo-wide at the directory join, failing closed to
     // an explicit Gap when the project-local target cannot be proven. A
-    // receiver that is not an import binding (a local, a property, a call
-    // result) is unproven and asserts nothing at T0.
+    // receiver whose lexical binding states its type resolves through that
+    // type (#1048); any other receiver (an inferred local, a call result)
+    // is unproven and asserts nothing at T0.
     let call_query = Query::new(&language, "(call_expression) @call").expect("static query");
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&call_query, root, source);
@@ -1159,8 +1181,58 @@ pub fn extract_source(
             continue;
         }
         let receiver = receiver.expect("non-this receiver");
-        if receiver.kind() != "identifier" {
-            continue;
+        let binding = match receiver.kind() {
+            "identifier" => receivers::lexical_binding(&cx, call, cx.text(&receiver)),
+            "navigation_expression" => {
+                let parts: Vec<TsNode<'_>> = {
+                    let mut walk = receiver.walk();
+                    receiver.named_children(&mut walk).collect()
+                };
+                match parts.as_slice() {
+                    [this, property]
+                        if this.kind() == "this_expression" && property.kind() == "identifier" =>
+                    {
+                        receivers::this_property_binding(&cx, call, cx.text(property))
+                    }
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        };
+        match binding {
+            Some(receivers::Binding::Untyped) => continue,
+            Some(receivers::Binding::Typed(ty)) => {
+                push_typed(
+                    &cx,
+                    &mut out,
+                    &imports,
+                    package.as_deref(),
+                    &local_types,
+                    src,
+                    call,
+                    &ty,
+                    false,
+                    name,
+                );
+                continue;
+            }
+            Some(receivers::Binding::Constructed(ty)) => {
+                push_typed(
+                    &cx,
+                    &mut out,
+                    &imports,
+                    package.as_deref(),
+                    &local_types,
+                    src,
+                    call,
+                    &ty,
+                    true,
+                    name,
+                );
+                continue;
+            }
+            None if receiver.kind() != "identifier" => continue,
+            None => {}
         }
         let receiver_text = cx.text(&receiver).to_string();
         let Some(fqn) = imports.bindings.get(&receiver_text) else {
@@ -1179,6 +1251,74 @@ pub fn extract_source(
     }
 
     Ok(out)
+}
+
+/// Queue a declared-type receiver call (#1048) with the FQNs its type name
+/// can denote. A same-file type is tried through the enclosing type chain
+/// first, as Kotlin resolves nested names.
+#[allow(clippy::too_many_arguments)]
+fn push_typed(
+    cx: &FileCx<'_>,
+    out: &mut Extraction,
+    imports: &Imports,
+    package: Option<&str>,
+    local_types: &HashSet<String>,
+    src: String,
+    call: TsNode<'_>,
+    ty: &str,
+    constructed: bool,
+    member: String,
+) {
+    let (first, rest) = match ty.split_once('.') {
+        Some((first, rest)) => (first, Some(rest)),
+        None => (ty, None),
+    };
+    let with_rest = |base: &str| match rest {
+        Some(rest) => format!("{base}.{rest}"),
+        None => base.to_string(),
+    };
+    let mut candidates = Vec::new();
+    if let Some(fqn) = imports.bindings.get(first) {
+        candidates.push(with_rest(fqn));
+    } else {
+        let chain = enclosing_type_chain(cx, call);
+        let same_file = (0..=chain.len()).rev().find_map(|depth| {
+            let qualified = chain[..depth]
+                .iter()
+                .map(String::as_str)
+                .chain([ty])
+                .collect::<Vec<_>>()
+                .join(".");
+            local_types.contains(&qualified).then_some(qualified)
+        });
+        let prefix = |name: &str| match package {
+            Some(package) => format!("{package}.{name}"),
+            None => name.to_string(),
+        };
+        match same_file {
+            Some(qualified) => candidates.push(prefix(&qualified)),
+            None => {
+                candidates.push(prefix(ty));
+                candidates.extend(
+                    imports
+                        .wildcard_packages
+                        .iter()
+                        .map(|wildcard| format!("{wildcard}.{ty}")),
+                );
+            }
+        }
+    }
+    let callee = format!("{ty}.{member}");
+    out.typed_calls.push(TypedCall {
+        src,
+        candidates,
+        constructed,
+        member,
+        resolved_props: serde_json::json!({
+            "resolution": "declared-type",
+            "prov": cx.prov(&call, &format!("CALLS {callee}")),
+        }),
+    });
 }
 
 /// Queue an import-proven call for the directory join, with its
@@ -1332,6 +1472,7 @@ pub fn extract_dir_incremental_with_progress(
             out.nodes.extend(extraction.nodes);
             out.edges.extend(extraction.edges);
             out.pending_calls.extend(extraction.pending_calls);
+            out.typed_calls.extend(extraction.typed_calls);
             out.declared_types.extend(extraction.declared_types);
             out.declared_functions.extend(extraction.declared_functions);
             out.declared_importables
@@ -1451,6 +1592,34 @@ pub fn extract_dir_incremental_with_progress(
             }
         }
     }
+    for typed in std::mem::take(&mut out.typed_calls) {
+        let Some(declared) = typed
+            .candidates
+            .iter()
+            .find_map(|fqn| types_by_fqn.get(fqn).map(|unique| (fqn, unique)))
+        else {
+            continue;
+        };
+        let (fqn, Some(declared)) = declared else {
+            continue; // ambiguous FQN: fail closed
+        };
+        if typed.constructed && (!declared.constructible || functions_by_fqn.contains_key(fqn)) {
+            continue;
+        }
+        let dst = symbol_id(
+            id.repo,
+            &declared.path,
+            &format!("{}.{}", declared.qualified, typed.member),
+        );
+        if known.contains(&dst) && dst != typed.src {
+            out.edges.push(Edge {
+                src: typed.src,
+                dst,
+                label: "CALLS".into(),
+                props: typed.resolved_props,
+            });
+        }
+    }
     navigation3::complete(
         std::mem::take(&mut out.navigation3),
         id.repo,
@@ -1509,6 +1678,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 }
 
 pub mod navigation3;
+mod receivers;
 mod retrofit;
 
 #[cfg(test)]
