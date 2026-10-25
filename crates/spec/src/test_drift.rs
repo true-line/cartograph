@@ -80,21 +80,28 @@ fn merged_evidence<'a>(provenances: impl IntoIterator<Item = &'a Provenance>) ->
     map.into_values().collect()
 }
 
+/// Provenance over `content`, the fact's canonical identity and content, so
+/// a changed finding never inherits a curation keyed by its old hash.
 fn rule_provenance(
     confidence: ConfidenceTier,
     evidence: Vec<EvidenceRef>,
-    identity: &str,
+    content: &[u8],
 ) -> Option<serde_json::Value> {
     let provenance = Provenance::new(
         Tier::Deterministic,
         confidence,
         evidence,
         TEST_DRIFT_EXTRACTOR_ID,
-        identity.as_bytes(),
+        content,
     )
     .ok()?
     .with_method(crate::spec_rule(TEST_DRIFT_EXTRACTOR_ID));
     serde_json::to_value(provenance).ok()
+}
+
+/// The canonical bytes of a fact's id and its props (before `prov`).
+fn content(id: &str, props: &serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&(id, props)).expect("drift content serializes")
 }
 
 fn strings(value: &serde_json::Value) -> impl Iterator<Item = &str> {
@@ -201,20 +208,22 @@ pub fn derive_test_drift(nodes: &[Node], edges: &[Edge]) -> ContractFacts {
         };
         if let Some(reason) = incomplete {
             let id = format!("gap:test-drift:{endpoint_id}");
-            let Some(prov) = rule_provenance(ConfidenceTier::Gap, evidence, &id) else {
+            let mut props = serde_json::json!({
+                "kind": "test-drift-gap",
+                "endpoint": name,
+                "reason": reason,
+                "partial": partial,
+                "attempted_tiers": ["T0"],
+            });
+            let Some(prov) = rule_provenance(ConfidenceTier::Gap, evidence, &content(&id, &props))
+            else {
                 continue;
             };
+            props["prov"] = prov;
             facts.nodes.push(Node {
                 id: id.clone(),
                 label: "Gap".into(),
-                props: serde_json::json!({
-                    "kind": "test-drift-gap",
-                    "endpoint": name,
-                    "reason": reason,
-                    "partial": partial,
-                    "attempted_tiers": ["T0"],
-                    "prov": prov,
-                }),
+                props,
             });
             push_edges(
                 &mut facts,
@@ -260,9 +269,6 @@ pub fn derive_test_drift(nodes: &[Node], edges: &[Edge]) -> ContractFacts {
             }
             let id = format!("drift:test:{endpoint_id}@{}", finding.kind);
             let confidence = weaker(finding.confidence, floor);
-            let Some(prov) = rule_provenance(confidence, evidence.clone(), &id) else {
-                continue;
-            };
             let mut props = serde_json::json!({
                 "kind": "test-drift",
                 "drift_kind": finding.kind,
@@ -274,11 +280,15 @@ pub fn derive_test_drift(nodes: &[Node], edges: &[Edge]) -> ContractFacts {
                 "returned_statuses": returned,
                 "scope": responses["scope"],
                 "tests": expectations.tests.keys().collect::<Vec<_>>(),
-                "prov": prov,
             });
             if let Some(reason) = finding.reason {
                 props["reason"] = reason.into();
             }
+            let Some(prov) = rule_provenance(confidence, evidence.clone(), &content(&id, &props))
+            else {
+                continue;
+            };
+            props["prov"] = prov;
             facts.nodes.push(Node {
                 id: id.clone(),
                 label: "Drift".into(),
@@ -306,7 +316,8 @@ fn push_edges(
     confidence: ConfidenceTier,
 ) {
     let mut push = |dst: &str, label: &str, evidence: Vec<EvidenceRef>| {
-        if let Some(prov) = rule_provenance(confidence, evidence, &format!("{src} {label} {dst}")) {
+        let identity = format!("{src} {label} {dst}");
+        if let Some(prov) = rule_provenance(confidence, evidence, identity.as_bytes()) {
             facts.edges.push(Edge {
                 src: src.into(),
                 dst: dst.into(),
@@ -594,6 +605,32 @@ mod tests {
                 .unwrap();
             assert_eq!(gap.props["reason"], UNPROVEN_RESPONSES_REASON);
         }
+    }
+
+    // AC-0345 (T-0345): a curation keyed by a finding's hash never carries
+    // over to a materially different finding with the same id.
+    #[test]
+    fn test_drift_hashes_finding_content() {
+        let hash = |nodes: &[Node], edges: &[Edge], id: &str| {
+            let facts = derive_test_drift(nodes, edges);
+            let node = facts.nodes.iter().find(|n| n.id == id).unwrap();
+            typed_provenance(&node.props).unwrap().content_hash
+        };
+        let asserted = "drift:test:ep:items@asserted-not-returned";
+        let gap = "gap:test-drift:ep:partial";
+        let (nodes, edges) = fixture();
+        let (before, gap_before) = (hash(&nodes, &edges, asserted), hash(&nodes, &edges, gap));
+        assert_eq!(hash(&nodes, &edges, asserted), before);
+        let (mut nodes, mut edges) = fixture();
+        edges[0].props["statuses"] = serde_json::json!([200, 410]);
+        nodes
+            .iter_mut()
+            .find(|n| n.id == "ep:partial")
+            .unwrap()
+            .props["responses"]["partial"] =
+            serde_json::json!(["response_not_proven", "dynamic_status"]);
+        assert_ne!(hash(&nodes, &edges, asserted), before);
+        assert_ne!(hash(&nodes, &edges, gap), gap_before);
     }
 
     // AC-0345 (T-0345): the endpoint's own proof caps the finding, and a
