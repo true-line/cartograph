@@ -13,9 +13,9 @@
 - **Actor:** Engineer
 - **As a** engineer **I want** to add 1..N GitHub repos and declare which repos form one system **so that** the engine treats them as a single analyzable whole.
 - **Priority:** Must · **Status:** Done
-- **AC-0001** Given valid GitHub App/PAT auth, when I add a repo URL, then it is cloned read-only and listed with commit SHA.
+- **AC-0001** Given valid GitHub App/PAT auth, when I add a repo URL, then it is cloned read-only and listed with commit SHA. The token comes from the auth ladder (ADR-0009): `GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token`. `gh` is found on `PATH` or, for a desktop app launched from Finder or a launcher with a minimal `PATH`, at the standard Homebrew and Linuxbrew install paths. No token means anonymous, so only public repos can be cloned.
 - **AC-0002** Given a multi-repo set, when I edit `cartograph.system.toml`, then declared layer hints and channel identities are applied at ingest.
-- **AC-0003** Given an unauthorized repo, when I add it, then I get a clear auth-failure with remediation and no partial clone.
+- **AC-0003** Given an unauthorized repo, when I add it, then I get a clear auth-failure with remediation and no partial clone. The remediation says whether a credential was found and refused (check its repo access) or none was found (sign in with `gh auth login` or set `GH_TOKEN`).
 - **AC-0049** Given any completed ingest, when its summary is shown, then TypeScript and Terraform each report source-file, node, and edge counts including explicit zeros.
 - **AC-0050** Given a non-empty graph, when I request a clear and confirm the warning, then all graph facts are removed while durable job history remains intact.
 - **AC-0076** Given accumulated terminal jobs, when I clear finished jobs and confirm the warning, then done/failed/cancelled rows are removed while queued/running/resumable interrupted jobs and all graph facts remain intact (an ended investigation's interrupted row is cleared per AC-0202).
