@@ -1949,3 +1949,78 @@ fun AppRoot(viewModel: AppRootViewModel) {
         ])
     );
 }
+
+#[test]
+fn navigation3_entry_callbacks_resolve_through_with_receivers() {
+    // SimpleLogin's `AppRoot(...) = with(viewModel) { … }`: an unqualified
+    // reference is a receiver member first, then a top-level function.
+    let dir = tempfile::tempdir().unwrap();
+    let src = r#"package demo.root
+
+import androidx.navigation3.runtime.NavKey
+import androidx.navigation3.runtime.entryProvider
+
+data object HomeKey : NavKey
+data object OtherKey : NavKey
+
+class Vm {
+    fun open() {}
+    fun close() {}
+}
+
+fun close() {}
+fun topOnly() {}
+
+fun Screen(onOpen: () -> Unit, onClose: () -> Unit, onTop: () -> Unit) {
+    onOpen()
+    onClose()
+    onTop()
+}
+
+fun Root(vm: Vm) = with(vm) {
+    entryProvider {
+        entry<HomeKey> {
+            Screen(onOpen = ::open, onClose = { close() }, onTop = ::topOnly)
+        }
+    }
+}
+
+fun Other(external: ExternalThing) = with(external) {
+    entryProvider {
+        entry<OtherKey> {
+            Screen(onOpen = ::open, onClose = ::close, onTop = ::topOnly)
+        }
+    }
+}
+"#;
+    write(dir.path(), "src/main/kotlin/demo/root/Root.kt", src);
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let file = "src/main/kotlin/demo/root/Root.kt";
+    let screen = |key: &str| {
+        out.nodes
+            .iter()
+            .find(|n| n.id == format!("screen:local/demo@navigation3:demo.root.{key}"))
+            .unwrap()
+    };
+    let symbols = |key: &str| -> Vec<String> {
+        screen(key).props["entry_callbacks"]
+            .as_array()
+            .map(|cbs| {
+                cbs.iter()
+                    .map(|c| c["symbol"].as_str().unwrap().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        symbols("HomeKey"),
+        vec![
+            format!("sym:local/demo@{file}#Vm.open"),
+            // The member shadows the same-named top-level `close`.
+            format!("sym:local/demo@{file}#Vm.close"),
+            format!("sym:local/demo@{file}#topOnly"),
+        ]
+    );
+    // An unproven receiver type could own any name, so nothing is recorded.
+    assert!(symbols("OtherKey").is_empty());
+}

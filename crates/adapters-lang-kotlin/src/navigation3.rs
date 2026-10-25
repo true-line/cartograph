@@ -9,7 +9,8 @@
 //! `route-unresolved` Gap when it does not. Top-level call statements in the
 //! entry's trailing lambda that resolve to repository function Symbols become
 //! Confirmed `RENDERS` edges. Callback arguments (`::fn`, `recv::fn`, or a
-//! single-call lambda `{ fn(…) }` / `{ recv.fn(…) }`) passed to a rendered
+//! single-call lambda `{ fn(…) }` / `{ recv.fn(…) }`; inside `with(recv) { … }`
+//! an unqualified name is `recv`'s member first) passed to a rendered
 //! composable `C` are recorded on the `Screen` node under `entry_callbacks`
 //! (`{param, symbol, composable, evidence, read, forwarded}`), following
 //! direct parameter forwarding up to [`CALLBACK_DEPTH`] hops (`read` is false
@@ -240,6 +241,13 @@ enum CallbackTarget {
         receiver_type: TypeRef,
         method: String,
     },
+    /// An unqualified name inside `with(recv) { … }`: a member of `recv`'s
+    /// class wins over the top-level `fallback`, as in Kotlin resolution.
+    WithReceiver {
+        receiver_type: TypeRef,
+        method: String,
+        fallback: RenderCall,
+    },
 }
 
 impl CallbackTarget {
@@ -269,6 +277,23 @@ impl CallbackTarget {
                     return None;
                 }
                 sym
+            }
+            CallbackTarget::WithReceiver {
+                receiver_type,
+                method,
+                fallback,
+            } => {
+                let declared = receiver_type.resolve(types_by_fqn)?;
+                let member = symbol_id(
+                    repo,
+                    &declared.path,
+                    &format!("{}.{method}", declared.qualified),
+                );
+                if known.contains(&member) {
+                    member
+                } else {
+                    fallback.resolve(repo, types_by_fqn, functions_by_fqn, known)?
+                }
             }
         };
         // Overloads prove nothing (as in the helper rule): a function or method
@@ -700,7 +725,30 @@ fn extract_callback_target(
     {
         return match recv {
             None => {
-                extract_unqualified_callback(cx, site, &name, package, imports, local_functions)
+                let target = extract_unqualified_callback(
+                    cx,
+                    site,
+                    &name,
+                    package,
+                    imports,
+                    local_functions,
+                )?;
+                match (
+                    enclosing_with_receiver(cx, site, package, imports, local_functions),
+                    target,
+                ) {
+                    (None, target) => Some(target),
+                    // A `with` receiver whose type is unproven could own the name.
+                    (Some(None), _) => None,
+                    (Some(Some(receiver_type)), CallbackTarget::TopLevel(fallback)) => {
+                        Some(CallbackTarget::WithReceiver {
+                            receiver_type,
+                            method: name,
+                            fallback,
+                        })
+                    }
+                    (Some(Some(_)), _) => None,
+                }
             }
             Some(recv_name) => {
                 let receiver_type = resolve_receiver_type(cx, site, &recv_name, package, imports)?;
@@ -870,6 +918,57 @@ fn extract_unqualified_callback(
         wildcards: imports.wildcard_packages.clone(),
         name: name.to_string(),
     }))
+}
+
+/// The receiver type of the innermost `with(recv) { … }` lambda enclosing
+/// `site`: `None` outside any `with`, `Some(None)` when `recv` is not a plain
+/// identifier with a declared type. `with` must not be shadowed locally.
+fn enclosing_with_receiver(
+    cx: &FileCx<'_>,
+    site: TsNode<'_>,
+    package: Option<&str>,
+    imports: &Imports,
+    local_functions: &HashSet<String>,
+) -> Option<Option<TypeRef>> {
+    let mut cur = site;
+    while let Some(parent) = cur.parent() {
+        cur = parent;
+        if parent.kind() != "lambda_literal" {
+            continue;
+        }
+        let Some(call) = parent
+            .parent()
+            .filter(|a| a.kind() == "annotated_lambda")
+            .and_then(|a| a.parent())
+            .filter(|c| c.kind() == "call_expression")
+        else {
+            continue;
+        };
+        // `with(recv) { … }` parses as a call of `with(recv)` with a trailing lambda.
+        let Some(head) = call.named_child(0) else {
+            continue;
+        };
+        let (callee, args_call) = match head.kind() {
+            "call_expression" => (head.named_child(0), head),
+            _ => (Some(head), call),
+        };
+        let Some(callee) = callee.filter(|c| c.kind() == "identifier") else {
+            continue;
+        };
+        if cx.text(&callee) != "with" {
+            continue;
+        }
+        if local_functions.contains("with") || imports.bindings.contains_key("with") {
+            return Some(None);
+        }
+        let recv = single_call_arg(args_call)
+            .map(unwrap_parens)
+            .filter(|r| r.kind() == "identifier");
+        return Some(
+            recv.and_then(|r| resolve_receiver_type(cx, call, cx.text(&r), package, imports)),
+        );
+    }
+    None
 }
 
 fn is_value_in_scope(cx: &FileCx<'_>, site: TsNode<'_>, name: &str) -> bool {
