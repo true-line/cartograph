@@ -35,11 +35,19 @@ pub(super) fn initialize(tx: &Transaction<'_>) -> Result<(), InvestigationStoreE
     validate_schema(tx)
 }
 fn validate_schema(connection: &Connection) -> Result<(), InvestigationStoreError> {
-    let mut actual = connection
-        .prepare("SELECT sql FROM sqlite_schema WHERE name GLOB 'staged_completion_*'")?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
     let mut expected = schema();
+    let max_bytes = expected.iter().map(String::len).max().unwrap_or(0);
+    // Reject unexpected SQL before owning its text. One extra bounded row
+    // distinguishes an oversized namespace from the exact canonical layout.
+    let mut actual = connection
+        .prepare("SELECT CASE WHEN typeof(sql)='text' AND length(CAST(sql AS BLOB))<=?1 THEN sql END FROM sqlite_schema WHERE name GLOB 'staged_completion_*' LIMIT ?2")?
+        .query_map(params![max_bytes as i64, expected.len() as i64 + 1], |row| {
+            row.get::<_, Option<String>>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or(InvestigationStoreError::Invalid)?;
     actual.sort();
     expected.sort();
     if actual != expected {
