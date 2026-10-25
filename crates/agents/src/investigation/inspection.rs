@@ -5,6 +5,9 @@ use core_prov::EvidenceRef;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Existing complete inspection-target wire ceiling, shared with host admission.
+pub const MAX_INSPECTION_TARGET_BYTES: usize = 8 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvestigationInspectionTarget {
@@ -23,12 +26,12 @@ pub struct InvestigationInspectionTarget {
 }
 impl InvestigationInspectionTarget {
     pub fn content_id(&self) -> Result<String, InvestigationError> {
-        bounded_bytes(self, 8 * 1024)?;
+        bounded_bytes(self, MAX_INSPECTION_TARGET_BYTES)?;
         let mut target = self.clone();
         target.target_id.clear();
         Ok(crate::source_basis::domain_hash(
             b"cartograph:inspection-target:v1\0",
-            &bounded_bytes(&target, 8 * 1024)?,
+            &bounded_bytes(&target, MAX_INSPECTION_TARGET_BYTES)?,
         ))
     }
     pub fn validate(&self) -> Result<(), InvestigationError> {
