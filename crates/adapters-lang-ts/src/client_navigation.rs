@@ -21,7 +21,7 @@
 
 use crate::client_routes::{
     self, Constants, Import, Proofs, constants, evidence, exported_functions, file_candidates,
-    parameter_names, path_value, prov,
+    locally_bound, member_root, parameter_names, path_value, prov,
 };
 use crate::{FileCx, callable};
 use core_graph::{Edge, Node};
@@ -188,6 +188,10 @@ fn target(cx: &FileCx<'_>, proofs: &Proofs<'_, '_>, local: &Constants, arg: TsNo
     if this_router(cx, arg) {
         return Target::Router;
     }
+    // A parameter or local named like a module table is not that table.
+    if member_root(arg).is_some_and(|root| locally_bound(cx, arg, cx.text(&root))) {
+        return Target::Other;
+    }
     if let Some(path) = path_value(cx, local, arg) {
         return Target::Path(path);
     }
@@ -223,6 +227,7 @@ pub(crate) fn extract<'tree>(
     let local = constants(cx, root);
     // Module-level `let`/`var` bindings, and how often each is assigned.
     let mut module_vars = HashSet::new();
+    let mut initialized: HashMap<String, usize> = HashMap::new();
     let mut walk = root.walk();
     for statement in root.named_children(&mut walk) {
         if matches!(
@@ -235,13 +240,21 @@ pub(crate) fn extract<'tree>(
             let mut inner = statement.walk();
             for declarator in statement.named_children(&mut inner) {
                 if let Some(name) = declarator.child_by_field_name("name") {
-                    module_vars.insert(cx.text(&name).to_string());
+                    let name = cx.text(&name).to_string();
+                    // `let router = other` competes with any setter.
+                    if declarator
+                        .child_by_field_name("value")
+                        .is_some_and(|v| !matches!(v.kind(), "null" | "undefined"))
+                    {
+                        *initialized.entry(name.clone()).or_default() += 1;
+                    }
+                    module_vars.insert(name);
                 }
             }
         }
     }
     let nodes = callable::walk(root);
-    let mut assignments: HashMap<String, usize> = HashMap::new();
+    let mut assignments: HashMap<String, usize> = initialized;
     for node in &nodes {
         if matches!(
             node.kind(),
@@ -268,6 +281,7 @@ pub(crate) fn extract<'tree>(
                 )
                 && left.kind() == "identifier"
                 && module_vars.contains(cx.text(&left))
+                && !locally_bound(cx, node, cx.text(&left))
                 && right.kind() == "identifier"
                 && let Some(param) = params.iter().position(|p| p == cx.text(&right))
                 && !shadowed(cx, node, function, cx.text(&right))
@@ -282,6 +296,7 @@ pub(crate) fn extract<'tree>(
                 && matches!(method.as_str(), "push" | "replace")
                 && receiver.kind() == "identifier"
                 && module_vars.contains(cx.text(&receiver))
+                && !locally_bound(cx, node, cx.text(&receiver))
                 && let Some(arg) = args.first().filter(|a| a.kind() == "identifier")
                 && let Some(param) = params.iter().position(|p| p == cx.text(arg))
                 && !shadowed(cx, node, function, cx.text(arg))

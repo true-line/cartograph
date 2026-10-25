@@ -4374,3 +4374,93 @@ fn vue_router_tables_follow_export_clauses_default_children_and_bindings() {
             .any(|n| n.label == "Gap" && n.props["reason"] == client_routes::COMPUTED_PATH_REASON)
     );
 }
+
+#[test]
+fn vue_navigations_refuse_locally_shadowed_bindings() {
+    // AC-0350 (#997 review): a local `router`, a module router with its own
+    // initializer, and a parameter named like a constant table prove nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "popup/Navigation.js",
+        "let router = null;\nlet preset = window.fake;\n\
+         const PATH = { ROOT: '/', MAIN: '/main' };\n\
+         class Navigation {\n\
+         \x20 static getRoutes(c) { return [{ path: PATH.ROOT, component: c.Root }, \
+         { path: PATH.MAIN, component: c.Main }]; }\n\
+         \x20 static setRouter($router) { router = $router; }\n\
+         \x20 static setPreset($r) { preset = $r; }\n\
+         \x20 static go(path) { router.push(path); }\n\
+         \x20 static local(path) { const router = window.other; router.push(path); }\n\
+         \x20 static viaPreset(path) { preset.push(path); }\n\
+         }\nexport default Navigation;\n",
+    );
+    for name in ["Root", "Main"] {
+        write(
+            &format!("popup/{name}.vue"),
+            "<template><div/></template>\n<script>\nexport default {}\n</script>\n",
+        );
+    }
+    write(
+        "popup/App.vue",
+        "<template><router-view/></template>\n<script>\n\
+         import VueRouter from 'vue-router';\nimport Navigation from './Navigation';\n\
+         import Root from './Root.vue';\nimport Main from './Main.vue';\n\
+         const router = new VueRouter({ routes: Navigation.getRoutes({ Root, Main }) });\n\
+         export default {\n  router,\n  mounted() {\n    Navigation.setRouter(this.$router);\n\
+         \x20   Navigation.setPreset(this.$router);\n  },\n};\n</script>\n",
+    );
+    write(
+        "popup/Flow.vue",
+        "<template><div/></template>\n<script>\nimport Navigation from './Navigation';\n\
+         const PATH = { MAIN: '/main' };\n\
+         export default {\n  methods: {\n\
+         \x20   ok() { Navigation.go('/main'); },\n\
+         \x20   tableOk() { this.$router.push(PATH.MAIN); },\n\
+         \x20   tableParam(PATH) { this.$router.push(PATH.MAIN); },\n\
+         \x20   shadowLocal() { Navigation.local('/main'); },\n\
+         \x20   preset() { Navigation.viaPreset('/main'); },\n  },\n};\n</script>\n",
+    );
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let sym = |name: &str| {
+        out.nodes
+            .iter()
+            .find(|n| {
+                n.label == "Symbol"
+                    && n.id.starts_with("sym:qwtm/example@popup/Flow.vue#")
+                    && n.id.contains(name)
+            })
+            .unwrap_or_else(|| panic!("{name}"))
+            .id
+            .clone()
+    };
+    let navigations: BTreeSet<(String, String)> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "NAVIGATES_TO")
+        .map(|e| {
+            let dst = match out.nodes.iter().find(|n| n.id == e.dst) {
+                Some(n) if n.label == "Gap" => n.props["reason"].as_str().unwrap().to_string(),
+                _ => e.dst.clone(),
+            };
+            (e.src.clone(), dst)
+        })
+        .collect();
+    let main = "screen:qwtm/example@/main".to_string();
+    assert_eq!(
+        navigations,
+        BTreeSet::from([
+            (sym(".ok@"), main.clone()),
+            (sym(".tableOk@"), main),
+            (
+                sym(".tableParam@"),
+                client_navigation::COMPUTED_TARGET_REASON.to_string()
+            ),
+        ])
+    );
+}
