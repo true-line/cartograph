@@ -88,20 +88,35 @@ describe('assignBands — Gap neighbors', () => {
     expect(bands.get('gap:lonely')).toBe('other');
   });
 
-  it('stays fast with tens of thousands of Gaps', () => {
-    const nodes: GraphNode[] = [];
-    const edges: GraphEdge[] = [];
-    for (let i = 0; i < 30_000; i++) {
-      nodes.push(node(`sym:local/app@f${i}`, 'Symbol'), node(`gap:${i}`, 'Gap'));
-      edges.push(edge(`sym:local/app@f${i}`, `gap:${i}`, 'HAS_GAP'));
-    }
-    // Edges no Gap touches: the old per-Gap scan walked all of these too.
-    for (let i = 0; i < 90_000; i++) {
-      edges.push(edge(`sym:local/app@f${i % 30_000}`, `sym:local/app@f${(i * 7) % 30_000}`, 'CALLS'));
-    }
-    const started = performance.now();
-    const bands = assignBands({ nodes, edges });
-    expect(performance.now() - started).toBeLessThan(1_000);
-    expect(bands.get('gap:29999')).toBe('server');
+  // Scaling, not wall-clock: ten times the Gaps and edges must cost far less
+  // than the hundredfold a per-Gap edge scan takes. Best of three runs damps
+  // scheduler and GC noise on a busy runner.
+  it('scales linearly with tens of thousands of Gaps', () => {
+    const graph = (gaps: number) => {
+      const nodes: GraphNode[] = [];
+      const edges: GraphEdge[] = [];
+      for (let i = 0; i < gaps; i++) {
+        nodes.push(node(`sym:local/app@f${i}`, 'Symbol'), node(`gap:${i}`, 'Gap'));
+        edges.push(edge(`sym:local/app@f${i}`, `gap:${i}`, 'HAS_GAP'));
+      }
+      // Edges no Gap touches: the old per-Gap scan walked all of these too.
+      for (let i = 0; i < gaps * 3; i++) {
+        edges.push(edge(`sym:local/app@f${i % gaps}`, `sym:local/app@f${(i * 7) % gaps}`, 'CALLS'));
+      }
+      return { nodes, edges };
+    };
+    const best = (snapshot: AtlasSnapshot) => {
+      let fastest = Infinity;
+      for (let run = 0; run < 3; run++) {
+        const started = performance.now();
+        assignBands(snapshot);
+        fastest = Math.min(fastest, performance.now() - started);
+      }
+      return fastest;
+    };
+    const small = graph(3_000);
+    const large = graph(30_000);
+    expect(assignBands(large).get('gap:29999')).toBe('server');
+    expect(best(large) / Math.max(best(small), 1)).toBeLessThan(30);
   });
 });
