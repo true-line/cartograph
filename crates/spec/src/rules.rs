@@ -15,6 +15,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+pub mod journey;
 mod render;
 pub(crate) mod use_case;
 use render::{

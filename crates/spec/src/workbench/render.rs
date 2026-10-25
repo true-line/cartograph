@@ -379,6 +379,24 @@ impl Assertions {
             (None, omission.as_ref()),
         )
     }
+    pub(super) fn journey(
+        &mut self,
+        candidate: &crate::rules::journey::JourneyCandidate,
+    ) -> Result<(), RenderLimit> {
+        self.add(
+            &candidate.id,
+            &candidate.id,
+            "JourneyCandidate",
+            &format_args!(
+                "Journey candidate: {} (basis {}, result {})",
+                candidate.label,
+                candidate.goal.goal_basis.as_str(),
+                candidate.result.as_str()
+            ),
+            candidate.provenance.clone(),
+            (None, None),
+        )
+    }
 }
 pub(super) fn inline(out: &mut impl fmt::Write, assertions: &[SpecAssertion]) -> fmt::Result {
     out.write_str("\n## Assertions and inline provenance\n\n")?;

@@ -710,11 +710,11 @@ mod tests {
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "17dde84d0e4181278e66288812f63aef013c9d8d7d3f7df7aebabf46be270cfc",
+                "cdc8b5e7f97b57ae2e6b50dc6cefc94973b9e1cb2162ef379e7c51dcd178cc4d",
             ),
             (
                 ExportMode::BestEffort,
-                "3377b3b8d1ceaf29f667c2e4afeffe854a4d3d0d6a49cb70f67e5a3fa770a6cb",
+                "cd0775f3b3a39ca5fc327b7c2d22e180a7281190930bb019bb702798691c240f",
             ),
         ] {
             let bytes = serde_json::to_vec(&compile_spec(
@@ -727,7 +727,7 @@ mod tests {
             .unwrap();
             // Frozen native #603 (03d776d) output, with the already-integrated
             // method column, projection stamping and artifact identity seams,
-            // plus the test-arrangements artifact (#946).
+            // plus the test-arrangements (#946) and journeys artifacts.
             assert_eq!(blake3::hash(&bytes).to_hex().as_str(), expected, "{mode:?}");
         }
     }
@@ -854,6 +854,7 @@ mod tests {
                 "security.md",
                 "toolchain.md",
                 "test_arrangements.md",
+                "journeys.md",
                 "rule-evidence.md",
                 "rule-evidence.json",
             ]
@@ -2216,7 +2217,7 @@ mod tests {
                     .collect(),
             ] {
                 let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
-                assert_eq!(full.artifacts.len(), 15);
+                assert_eq!(full.artifacts.len(), 16);
                 for artifact in &full.artifacts {
                     let selected = compile_spec_selected(
                         &nodes,
@@ -2283,15 +2284,15 @@ mod tests {
         flows[0].hops.clear();
         // Frozen against native #603 03d776d, incorporating existing method,
         // projection and identity seams; independently compared before removal.
-        // The test-arrangements artifact (#946) extends the bundle.
+        // The test-arrangements (#946) and journeys artifacts extend the bundle.
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "f54f154700c410e318d134b435ce09237f9a333bce19b436ccad7ec3a05465d7",
+                "0e49e9613b4efbec3b02886168de48e44c135179c9a42b985a1d4f998e5334f7",
             ),
             (
                 ExportMode::BestEffort,
-                "21b8f0375c9416380915e4ca3ace9a470e59e4a70d8ebe9e7bb3ed24e01b3c1e",
+                "75e1dfa7cde4953048cd08555c6efbb136f3a590ef71d489506817287e5c34b1",
             ),
         ] {
             let full = compile_spec(&nodes, &edges, &flows, mode, &BTreeSet::new());

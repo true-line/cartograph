@@ -144,6 +144,12 @@ const ARTIFACTS: &[Artifact] = &[
         format: "markdown",
     },
     Artifact {
+        id: "journeys",
+        file: "journeys.md",
+        title: "Journey candidates",
+        format: "markdown",
+    },
+    Artifact {
         id: "rule-evidence",
         file: "rule-evidence.md",
         title: "Source rule evidence",
@@ -291,6 +297,7 @@ fn produce(
         "security-view" => producers::security(nodes, max)?,
         "toolchain" => producers::toolchain(nodes, edges, max)?,
         "test-arrangements" => producers::tests(nodes, edges, max)?,
+        "journeys" => producers::journeys(nodes, edges, flows, max)?,
         "us-tm" | "us-tm-index" => {
             let markdown = a.id == "us-tm";
             let output = registers::matrix_selected(edges, mode, markdown, !markdown, max)

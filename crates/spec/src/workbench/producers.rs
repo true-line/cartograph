@@ -881,6 +881,170 @@ pub(super) fn tests(
     finish(content, assertions)
 }
 
+/// Bounded path-router journey candidates (`journey-candidate@1`).
+pub(super) fn journeys(
+    nodes: &[&Node],
+    edges: &[&Edge],
+    flows: &[Flow],
+    max: Option<usize>,
+) -> Result<Output, RenderLimit> {
+    let budget = Budget::new(max)?;
+    let candidates = crate::rules::journey::candidates(
+        nodes,
+        edges,
+        flows,
+        crate::rules::journey::JourneyBudget::default(),
+    );
+    let mut assertions = Assertions::new(&budget);
+    for candidate in &candidates {
+        assertions.journey(candidate)?;
+    }
+    let mut content = Text::new(&budget, "# Journey candidates\n\n")?;
+    if candidates.is_empty() {
+        content.push_str(
+            "Interpretation: rule journey-candidate@1, InferredWeak, never a confirmed business journey\n\n\
+             No journey candidates recovered.\n",
+        )?;
+        return finish(content, assertions);
+    }
+    for (i, candidate) in candidates.iter().enumerate() {
+        if i > 0 {
+            content.push_str("\n")?;
+        }
+        writeln!(content, "## {}\n", Safe(&candidate.label))?;
+        writeln!(
+            content,
+            "- Id: `{}`\n- Support fingerprint: `{}`\n- Entry: `{}`\n\
+             - Interpretation: rule journey-candidate@1, InferredWeak, never a confirmed business journey\n",
+            Safe(&candidate.id),
+            Safe(&candidate.support_fingerprint),
+            Safe(&candidate.entry)
+        )?;
+        content.push_str("### Steps\n\n| # | Screen | Navigation | Client calls | Unresolved |\n|---|---|---|---|---|\n")?;
+        for (idx, step) in candidate.steps.iter().enumerate() {
+            let nav_str = match &step.navigation {
+                None => "—".to_owned(),
+                Some(nav) => format!(
+                    "{} → {} ({} site(s))",
+                    nav.source,
+                    nav.target,
+                    nav.sites_taken.len()
+                ),
+            };
+            let calls_str = if step.calls.is_empty() {
+                "—".to_owned()
+            } else {
+                step.calls
+                    .iter()
+                    .map(|c| format!("{} {}", c.method, c.endpoint))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let unresolved_str = if step.unresolved.is_empty() {
+                "—".to_owned()
+            } else {
+                step.unresolved
+                    .iter()
+                    .map(|u| format!("{}: {} → {}", u.kind.as_str(), u.source, u.gap_id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            writeln!(
+                content,
+                "| {idx} | `{}` | {} | {} | {} |",
+                Safe(&step.screen),
+                Safe(&nav_str),
+                Safe(&calls_str),
+                Safe(&unresolved_str)
+            )?;
+        }
+        let writes_str = if candidate.goal.writes.is_empty() {
+            "—".to_owned()
+        } else {
+            candidate
+                .goal
+                .writes
+                .iter()
+                .map(|w| format!("{} → {}", w.symbol, w.data_entity))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let result_str = match &candidate.result_step {
+            Some(res) => format!("{} (`{}`)", candidate.result.as_str(), res.screen),
+            None => candidate.result.as_str().to_owned(),
+        };
+        writeln!(
+            content,
+            "\n### Goal and result\n\n\
+             - Endpoint: `{}` ({})\n\
+             - Goal basis: `{}`\n\
+             - Write coverage: `{}`\n\
+             - Writes: {}\n\
+             - Result: {}\n",
+            Safe(&candidate.goal.endpoint),
+            Safe(&candidate.goal.method),
+            candidate.goal.goal_basis.as_str(),
+            candidate
+                .goal
+                .write_coverage
+                .as_deref()
+                .unwrap_or("observed"),
+            Safe(&writes_str),
+            Safe(&result_str)
+        )?;
+        let flows_str = if candidate.flows.is_empty() {
+            "—".to_owned()
+        } else {
+            candidate.flows.join(", ")
+        };
+        let tests_str = if candidate.tests.is_empty() {
+            "—".to_owned()
+        } else {
+            candidate.tests.join(", ")
+        };
+        writeln!(
+            content,
+            "### Flows and tests\n\n- Flows: {}\n- Tests: {}\n",
+            Safe(&flows_str),
+            Safe(&tests_str)
+        )?;
+        let assumed_str = if candidate.earlier_assumed_goals.is_empty() {
+            "—".to_owned()
+        } else {
+            candidate
+                .earlier_assumed_goals
+                .iter()
+                .map(|g| format!("{} {} ({})", g.method, g.endpoint, g.write_coverage))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let cond_str = if candidate.conditional_steps.is_empty() {
+            "—".to_owned()
+        } else {
+            candidate
+                .conditional_steps
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let trunc_str = candidate.truncated.map_or("none", |t| t.as_str());
+        writeln!(
+            content,
+            "### Assumptions, truncation and alternatives\n\n\
+             - Earlier assumed goals: {}\n\
+             - Conditional steps: {}\n\
+             - Truncated: `{trunc_str}`\n\
+             - Alternatives: {} (complete: {})",
+            Safe(&assumed_str),
+            Safe(&cond_str),
+            candidate.alternatives,
+            candidate.alternatives_complete
+        )?;
+    }
+    finish(content, assertions)
+}
+
 /// Explicit borrowed index roles; input properties are not cloned by these
 /// vectors/maps. Topology's owned selected graph is charged by the caller.
 pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
