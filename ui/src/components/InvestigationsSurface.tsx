@@ -2,7 +2,7 @@ import { isCompletionSpecialist, isExpandedSpecialist } from '../investigationFa
 import { useRef, useState } from 'react';
 import type { InvestigationState } from '../investigationStore';
 import type { GraphNode } from '../store';
-import type { InvestigationProviderMode, InvestigationScope, InvestigationStatus, InvestigationSummary, SpecialistId } from '../investigationTypes';
+import type { InvestigationProviderMode, InvestigationScope, InvestigationStatus, SpecialistActivityItem, SpecialistId } from '../investigationTypes';
 import { InvestigationActivity } from './InvestigationActivity';
 import { InvestigationFindings } from './InvestigationFindings';
 import { EgressConsentDialog } from './EgressConsentDialog';
@@ -49,7 +49,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
   const locked = state.starting || state.pendingStart !== null;
   const requirements = state.draftInspectionRequirements;
   const activityIncomplete = activity.status === 'incomplete' || Boolean(state.catalog && activity.tasks.some((task) =>
-    !state.catalog?.specialists.some((specialist) => specialist.id === task.specialist_id)));
+    !state.catalog?.specialists.some((specialist) => specialist.id === task.summary.specialist_id)));
   const completionVersion = isCompletionSpecialist(specialistId);
   const profile = state.composer.limitProfile ?? 'investigation-v1';
   const policy = investigationPolicy(state.catalog, profile, specialistId);
@@ -340,10 +340,10 @@ function SpecialistTaskActivity({ specialistId, activity, complete }: {
   complete: boolean;
 }) {
   if (activity.refreshing) {
-    const tasks = activity.tasks.filter((task) => task.specialist_id === specialistId);
+    const tasks = activity.tasks.filter((task) => task.summary.specialist_id === specialistId);
     if (tasks.length === 0) return <span className="muted">Checking for active tasks…</span>;
     return <span className="muted">
-      {tasks.map(activityStatusLabel).join(', ')} · {complete ? 'refreshing activity' : 'activity incomplete · refreshing'}
+      {tasks.map(activityRowLabel).join(', ')} · {complete ? 'refreshing activity' : 'activity incomplete · refreshing'}
     </span>;
   }
   if (activity.status === 'idle' || activity.status === 'loading') {
@@ -352,12 +352,12 @@ function SpecialistTaskActivity({ specialistId, activity, complete }: {
   if (activity.status === 'preview') return <span className="muted">Activity shown in desktop app</span>;
   if (activity.status === 'error') return <span className="error-text">Activity unknown</span>;
 
-  const tasks = activity.tasks.filter((task) => task.specialist_id === specialistId);
+  const tasks = activity.tasks.filter((task) => task.summary.specialist_id === specialistId);
   if (!complete) return <span className="muted">
-    {tasks.length > 0 ? `${tasks.map(activityStatusLabel).join(', ')} · activity incomplete` : 'Activity incomplete; no idle status inferred'}
+    {tasks.length > 0 ? `${tasks.map(activityRowLabel).join(', ')} · activity incomplete` : 'Activity incomplete; no idle status inferred'}
   </span>;
   return <span className="muted">
-    {tasks.length === 0 ? 'No active tasks' : tasks.map(activityStatusLabel).join(', ')}
+    {tasks.length === 0 ? 'No active tasks' : tasks.map(activityRowLabel).join(', ')}
   </span>;
 }
 
@@ -365,6 +365,8 @@ const ACTIVITY_STATUS_LABELS = {
   queued: 'Queued', preparing: 'Preparing context', running: 'Running', awaiting_consent: 'Awaiting cloud consent',
 } as const;
 
-function activityStatusLabel(task: InvestigationSummary) {
-  return `${ACTIVITY_STATUS_LABELS[task.status as keyof typeof ACTIVITY_STATUS_LABELS] ?? 'Unrecognized status'}${task.cancel_requested ? ' · Cancellation requested' : ''}`;
+function activityRowLabel(task: SpecialistActivityItem) {
+  const summary = task.summary;
+  const status = `${ACTIVITY_STATUS_LABELS[summary.status as keyof typeof ACTIVITY_STATUS_LABELS] ?? 'Unrecognized status'}${summary.cancel_requested ? ' · Cancellation requested' : ''}`;
+  return `${status} · Saved provider: ${task.saved_provider.mode} / ${task.saved_provider.provider_id} · ${task.saved_provider.model}`;
 }

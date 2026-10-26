@@ -1440,6 +1440,157 @@ fn investigation_active_history_cursor_binds_selection_and_refreshes_current_sta
 }
 
 #[test]
+fn investigation_specialist_activity_projects_saved_provider_within_existing_bounds() {
+    // AC-0381: activity attribution comes from each validated saved task.
+    let mut fixture = Fixture::new();
+    let cases = [
+        (
+            InvestigationProviderMode::Local,
+            "saved-local-provider",
+            "saved-local-model",
+        ),
+        (
+            InvestigationProviderMode::Cloud,
+            "saved-cloud-provider",
+            "saved-cloud-model",
+        ),
+    ];
+    let mut ids = Vec::new();
+    for (index, (mode, provider_id, model)) in cases.into_iter().enumerate() {
+        let mut saved = provider(mode);
+        saved.provider_id = provider_id.into();
+        saved.model = model.into();
+        let summary = fixture
+            .store
+            .start_investigation(
+                &request(&format!("saved-provider:{index}"), mode),
+                Some(&saved),
+            )
+            .unwrap()
+            .detail
+            .summary;
+        ids.push((summary.investigation_id, mode, provider_id, model));
+    }
+
+    let page = fixture.store.specialist_task_activity(None).unwrap();
+    assert_eq!(page.items.len(), 2);
+    for (id, mode, provider_id, model) in ids {
+        let item = page
+            .items
+            .iter()
+            .find(|item| item.summary.investigation_id == id)
+            .unwrap();
+        assert_eq!(item.summary.provider_mode, mode);
+        assert_eq!(item.saved_provider.mode, mode);
+        assert_eq!(item.saved_provider.provider_id, provider_id);
+        assert_eq!(item.saved_provider.model, model);
+    }
+    let wire = serde_json::to_string(&page).unwrap();
+    assert!(!wire.contains("127.0.0.1"));
+    assert!(!wire.contains("provider.invalid"));
+    let json = serde_json::to_value(&page).unwrap();
+    for item in json["items"].as_array().unwrap() {
+        let provider = item["saved_provider"].as_object().unwrap();
+        assert!(provider.contains_key("mode"));
+        assert!(provider.contains_key("provider_id"));
+        assert!(provider.contains_key("model"));
+        assert!(!provider.contains_key("endpoint"));
+        assert!(!provider.contains_key("deployment"));
+    }
+    assert!(wire.len() <= 256 * 1024);
+}
+
+#[test]
+fn investigation_specialist_activity_reuses_active_selection_order_and_rejects_invalid_cursor() {
+    // AC-0381: the projection uses the existing bounded active selection.
+    let mut fixture = Fixture::new();
+    for index in 0..2 {
+        fixture
+            .store
+            .start_investigation(
+                &request(
+                    &format!("provider-cursor:{index}"),
+                    InvestigationProviderMode::Local,
+                ),
+                Some(&provider(InvestigationProviderMode::Local)),
+            )
+            .unwrap();
+    }
+
+    let expected = fixture
+        .store
+        .investigation_history_selection(None, true, None)
+        .unwrap();
+    let first = fixture.store.specialist_task_activity(None).unwrap();
+    assert_eq!(first.items.len(), expected.items.len());
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|item| item.summary.investigation_id.as_str())
+            .collect::<Vec<_>>(),
+        expected
+            .items
+            .iter()
+            .map(|item| item.investigation_id.as_str())
+            .collect::<Vec<_>>(),
+    );
+    assert!(first.next_cursor.is_none());
+    assert!(
+        fixture
+            .store
+            .specialist_task_activity(Some("not-a-cursor"))
+            .is_err()
+    );
+}
+
+#[test]
+fn investigation_specialist_activity_rejects_malformed_and_oversized_identity() {
+    // AC-0381: invalid saved mode bindings and over-budget projected items fail closed.
+    let mut malformed_fixture = Fixture::new();
+    let (malformed_id, _) =
+        malformed_fixture.start("provider-mode-mismatch", InvestigationProviderMode::Local);
+    let mut malformed = load_task(&malformed_fixture.store.conn, &malformed_id).unwrap();
+    malformed.detail.summary.provider_mode = InvestigationProviderMode::Cloud;
+    let bytes = storage::encode(&malformed, MAX_RECORD_BYTES).unwrap();
+    let record_hash = core_prov::content_hash(&bytes);
+    malformed_fixture
+        .store
+        .conn
+        .execute(
+            "UPDATE investigation_tasks SET record=?1,record_hash=?2 WHERE id=?3",
+            rusqlite::params![bytes, record_hash, malformed_id],
+        )
+        .unwrap();
+    assert!(matches!(
+        malformed_fixture.store.specialist_task_activity(None),
+        Err(InvestigationStoreError::Invalid),
+    ));
+
+    let mut oversized_fixture = Fixture::new();
+    let mut oversized_provider = provider(InvestigationProviderMode::Local);
+    oversized_provider.provider_id = "p".repeat(2048);
+    oversized_provider.model = "m".repeat(2048);
+    oversized_fixture
+        .store
+        .start_investigation(
+            &request("provider-item-too-large", InvestigationProviderMode::Local),
+            Some(&oversized_provider),
+        )
+        .unwrap();
+    assert!(
+        oversized_fixture
+            .store
+            .investigation_history(None, None)
+            .is_ok()
+    );
+    assert!(matches!(
+        oversized_fixture.store.specialist_task_activity(None),
+        Err(InvestigationStoreError::Capacity),
+    ));
+}
+
+#[test]
 fn investigation_active_history_keeps_cancellation_requested_until_terminal() {
     // AC-0372: cancellation is a request while an invocation remains owned.
     let mut fixture = Fixture::new();

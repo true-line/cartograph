@@ -42,6 +42,7 @@ mod mcp_start;
 pub(crate) mod metadata_host_fixture;
 #[path = "investigations/reads.rs"]
 mod reads;
+pub(crate) use reads::SpecialistActivityPage;
 // Internal admission foundation; no historical runtime initializes these tables.
 #[path = "investigations/read_reservations.rs"]
 mod read_reservations;

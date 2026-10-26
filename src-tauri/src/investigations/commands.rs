@@ -297,6 +297,22 @@ pub(crate) async fn list_investigations(
 }
 
 #[tauri::command]
+pub(crate) async fn list_specialist_task_activity(
+    cursor: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<crate::jobs::investigations::SpecialistActivityPage, String> {
+    crate::off_ui_thread(move || {
+        app.state::<AppState>()
+            .jobs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .specialist_task_activity(cursor.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
 pub(crate) async fn get_investigation(
     investigation_id: String,
     app: tauri::AppHandle,

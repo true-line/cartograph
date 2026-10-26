@@ -14,6 +14,32 @@ struct HistoryCursor {
     before: i64,
 }
 
+/// App-only activity attribution projected from the validated saved task.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SavedActivityProvider {
+    pub(crate) mode: InvestigationProviderMode,
+    pub(crate) provider_id: String,
+    pub(crate) model: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SpecialistActivityItem {
+    pub(crate) summary: InvestigationSummary,
+    pub(crate) saved_provider: SavedActivityProvider,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SpecialistActivityPage {
+    pub(crate) items: Vec<SpecialistActivityItem>,
+    pub(crate) next_cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HistoryProjectionPage<T> {
+    items: Vec<T>,
+    next_cursor: Option<String>,
+}
+
 impl JobStore {
     pub(crate) fn investigation_history(
         &self,
@@ -62,6 +88,31 @@ impl JobStore {
         self.investigation_history_filtered(None, query.as_deref(), active_only, cursor)
     }
 
+    pub(crate) fn specialist_task_activity(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<SpecialistActivityPage, InvestigationStoreError> {
+        let page = self.investigation_history_projected(None, None, true, cursor, |task| {
+            let provider = task.detail.provider;
+            let summary = task.detail.summary;
+            if provider.mode != summary.provider_mode {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            Ok(SpecialistActivityItem {
+                summary,
+                saved_provider: SavedActivityProvider {
+                    mode: provider.mode,
+                    provider_id: provider.provider_id,
+                    model: provider.model,
+                },
+            })
+        })?;
+        Ok(SpecialistActivityPage {
+            items: page.items,
+            next_cursor: page.next_cursor,
+        })
+    }
+
     fn investigation_history_filtered(
         &self,
         conversation_id: Option<&str>,
@@ -69,6 +120,27 @@ impl JobStore {
         active_only: bool,
         cursor: Option<&str>,
     ) -> Result<InvestigationPage, InvestigationStoreError> {
+        let page = self.investigation_history_projected(
+            conversation_id,
+            query,
+            active_only,
+            cursor,
+            |task| Ok(task.detail.summary),
+        )?;
+        Ok(InvestigationPage {
+            items: page.items,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    fn investigation_history_projected<T: Serialize>(
+        &self,
+        conversation_id: Option<&str>,
+        query: Option<&[u8]>,
+        active_only: bool,
+        cursor: Option<&str>,
+        project: impl Fn(StoredTask) -> Result<T, InvestigationStoreError>,
+    ) -> Result<HistoryProjectionPage<T>, InvestigationStoreError> {
         if conversation_id.is_some_and(|id| !id_valid(id)) {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -156,14 +228,15 @@ impl JobStore {
                 more = true;
                 break;
             }
-            let size = encode(&task.detail.summary, 4096)?.len() + 1;
+            let item = project(task)?;
+            let size = encode(&item, 4096)?.len() + 1;
             if items.len() == 50 || size > remaining {
                 more = true;
                 break;
             }
             remaining -= size;
             before = ordinal;
-            items.push(task.detail.summary);
+            items.push(item);
         }
         let next_cursor = if more {
             Some(
@@ -179,7 +252,7 @@ impl JobStore {
         } else {
             None
         };
-        let page = InvestigationPage { items, next_cursor };
+        let page = HistoryProjectionPage { items, next_cursor };
         encode(&page, 256 * 1024)?;
         tx.commit()?;
         Ok(page)

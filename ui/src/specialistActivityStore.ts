@@ -1,18 +1,29 @@
 import { create } from 'zustand';
 import { investigationIsInActiveHistory, validSummary, INVESTIGATION_PAGE_LIMIT } from './investigationStore';
 import { inTauri, invokeOr } from './tauri';
-import type { InvestigationPage, InvestigationSummary } from './investigationTypes';
+import type { SpecialistActivityItem, SpecialistActivityPage } from './investigationTypes';
 
 export type SpecialistActivityStatus = 'idle' | 'loading' | 'ready' | 'incomplete' | 'preview' | 'error';
 
 export interface SpecialistActivityState {
   status: SpecialistActivityStatus;
-  tasks: InvestigationSummary[];
+  tasks: SpecialistActivityItem[];
   error: string | null;
   refreshing: boolean;
   setVisible: (visible: boolean) => void;
   refresh: () => Promise<void>;
   invalidate: () => void;
+}
+
+function validActivityItem(value: SpecialistActivityItem | null): value is SpecialistActivityItem {
+  if (!value || !validSummary(value.summary) || !investigationIsInActiveHistory(value.summary) ||
+      typeof value.summary.cancel_requested !== 'boolean') return false;
+  const provider = value.saved_provider;
+  if (!provider || typeof provider !== 'object' ||
+      Object.keys(provider).sort().join(',') !== 'mode,model,provider_id' ||
+      (provider.mode !== 'local' && provider.mode !== 'cloud') || provider.mode !== value.summary.provider_mode) return false;
+  return [provider.provider_id, provider.model].every((item) =>
+    typeof item === 'string' && item.length > 0 && !item.includes('\0') && new TextEncoder().encode(item).length <= 2048);
 }
 
 export function createSpecialistActivityStore() {
@@ -44,11 +55,10 @@ export function createSpecialistActivityStore() {
             if (!inTauri()) {
               observation = { status: 'preview', tasks: [], error: null };
             } else {
-              const page = await invokeOr<InvestigationPage | null>('list_investigations', null, { activeOnly: true });
+              const page = await invokeOr<SpecialistActivityPage | null>('list_specialist_task_activity', null, { cursor: null });
               if (!page || !Array.isArray(page.items) || page.items.length > INVESTIGATION_PAGE_LIMIT ||
                   (page.next_cursor !== null && typeof page.next_cursor !== 'string') ||
-                  page.items.some((item) => !validSummary(item) ||
-                    !investigationIsInActiveHistory(item) || typeof item.cancel_requested !== 'boolean')) {
+                  page.items.some((item) => !validActivityItem(item))) {
                 throw new Error('Invalid active investigation page.');
               }
               observation = { status: page.next_cursor === null ? 'ready' : 'incomplete', tasks: page.items, error: null };

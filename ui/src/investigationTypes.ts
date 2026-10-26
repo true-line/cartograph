@@ -241,6 +241,23 @@ export interface InvestigationPage {
   next_cursor: string | null;
 }
 
+/** Saved provider attribution for the app-only active specialist activity view. */
+export interface SavedActivityProvider {
+  mode: InvestigationProviderMode;
+  provider_id: string;
+  model: string;
+}
+
+export interface SpecialistActivityItem {
+  summary: InvestigationSummary;
+  saved_provider: SavedActivityProvider;
+}
+
+export interface SpecialistActivityPage {
+  items: SpecialistActivityItem[];
+  next_cursor: string | null;
+}
+
 export type InvestigationEventKind = 'created' | 'preparation_started' |
   'context_prepared' | 'model_started' | 'model_completed' | 'action_admitted' |
   'tool_started' | 'tool_completed' | 'consent_required' | 'consent_approved' |
