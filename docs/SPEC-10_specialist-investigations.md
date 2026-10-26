@@ -937,3 +937,31 @@ fixtures, separate competing connections, migration fault points and deferred UI
 responses; literal DTO fixtures alone are insufficient. Existing golden bytes and
 prompt fingerprints remain unchanged. T-0293–0296 currently map only to UNEXECUTED
 procedures; replace/supplement mappings with real tests as implementation lands.
+
+## Durable dispatch chat records (#1115; AC-0375)
+
+A newly admitted task has one durable, separately identified dispatch chat. Its
+first immutable message contains only the question already redacted and saved
+in the task record. Identical nonce replay resolves the existing chat; it never
+creates another chat or user message. Conflicting or rolled-back admission
+creates no chat rows. This is persisted archival identity, not assistant prose,
+a general reply surface, or model memory.
+
+A validated result adds one typed assistant result-card reference, atomically
+with the result in both ordinary `ActionAdmitted` and next-prompt finish
+transactions. The reference binds the exact task and immutable result ID/hash;
+it does not duplicate the result body. A test-only bounded validator checks it
+against the saved task and result, including existing result/citation
+validation. A future app read surface must use those same saved identities,
+never current catalog defaults; this slice adds no public chat reader. No success card is recorded for failed,
+interrupted, refused, or outcome-unknown work. Historical tasks predating the
+chat schema remain readable and are not backfilled from questions, events or
+results.
+
+The schema migration is transactional and preserves existing task/result
+bytes. Chat/message rows are immutable, retained when a chat is closed or
+finished jobs are cleared, and charged within the unchanged task/global
+capacity ceilings and terminal reserve. Persisted chats do not become model
+input automatically. Reply streaming, generated assistant text, UI/IPC
+presentation, chat search, deletion/forget policy and memory admission remain
+separate work.

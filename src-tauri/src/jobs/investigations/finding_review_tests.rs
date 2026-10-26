@@ -769,7 +769,7 @@ fn finding_review_precoverage_upgrade_preserves_completed_history() {
         Some(result.clone())
     );
     let versions: (i64,i64) = fixture.store.conn.query_row("SELECT (SELECT version FROM investigation_meta),(SELECT version FROM investigation_coverage_meta)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
-    assert_eq!(versions, (3, 1));
+    assert_eq!(versions, (4, 1));
     let pending = fixture
         .store
         .investigation_finding_reviews(&id, &result.result_id)

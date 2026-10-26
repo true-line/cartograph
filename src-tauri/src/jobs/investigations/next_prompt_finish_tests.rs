@@ -1,5 +1,6 @@
 //! AC-0287: actual complete-response decisions from genuine production starts.
 use super::*;
+use crate::jobs::investigations::chat::StoredChatMessage;
 #[path = "next_prompt_finish_fixture.rs"]
 pub(super) mod fixture;
 use fixture::Fixture;
@@ -14,6 +15,13 @@ fn next_prompt_finish_boundary_accepted_result7_reopens_and_rejects_family_downg
     let before = f.base.f.task.detail.usage.clone();
     let detail = f.publish().unwrap();
     assert_eq!(detail.summary.status, InvestigationStatus::Completed);
+    let chat = chat::read_for_task(&f.base.f.store.conn, f.base.id()).unwrap();
+    assert_eq!(chat.messages.len(), 2);
+    assert!(matches!(
+        &chat.messages[1].message,
+        StoredChatMessage::ResultReference { task_id, result_id, .. }
+            if task_id == f.base.id() && result_id == &f.base.f.store.investigation_result(f.base.id()).unwrap().unwrap().result_id
+    ));
     assert_eq!(
         detail.summary.completion_outcome,
         Some(InvestigationCompletionOutcome::InsufficientEvidence)
@@ -120,6 +128,58 @@ fn next_prompt_finish_boundary_accepted_result7_reopens_and_rejects_family_downg
     let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
     let tx = reopened.conn.unchecked_transaction().unwrap();
     assert!(load_next_prompt_task(&tx, f.base.id()).is_err());
+}
+
+#[test]
+fn chat_result_reference_rejects_cross_task_identity_on_read() {
+    let mut f = Fixture::new(true);
+    f.begin();
+    f.publish().unwrap();
+    let id = f.base.id().to_owned();
+    let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
+    let result = reopened.investigation_result(&id).unwrap().unwrap();
+    let tx = reopened.conn.unchecked_transaction().unwrap();
+    let message_id: String = tx
+        .query_row(
+            "SELECT id FROM investigation_chat_messages WHERE task_id=?1 AND ordinal=1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let result_hash: String = tx
+        .query_row(
+            "SELECT body_hash FROM investigation_results WHERE task_id=?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let trigger: String = tx
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='investigation_chat_messages_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    tx.execute_batch("DROP TRIGGER investigation_chat_messages_no_update")
+        .unwrap();
+    let body = encode(
+        &StoredChatMessage::ResultReference {
+            task_id: "investigation:foreign-task".into(),
+            result_id: result.result_id,
+            result_hash,
+        },
+        chat::MAX_RESULT_REFERENCE_BYTES,
+    )
+    .unwrap();
+    tx.execute(
+        "UPDATE investigation_chat_messages SET body=?1,body_hash=?2 WHERE id=?3",
+        params![body, core_prov::content_hash(&body), message_id],
+    )
+    .unwrap();
+    tx.execute_batch(&trigger).unwrap();
+    tx.commit().unwrap();
+    assert!(chat::read_for_task(&reopened.conn, &id).is_err());
+    assert!(reopened.investigation_result(&id).unwrap().is_some());
 }
 
 #[test]
@@ -258,6 +318,13 @@ fn next_prompt_finish_boundary_final_write_rollback_and_lost_ack_are_exact() {
         FAIL_BEFORE_FINISH_COMMIT.with(|flag| flag.set(true));
         assert_eq!(f.publish(), Err(InvestigationStoreError::Capacity));
         assert_eq!(f.rows(), before);
+        assert_eq!(
+            chat::read_for_task(&f.base.f.store.conn, f.base.id())
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
         LOSE_FINISH_ACK.with(|flag| flag.set(true));
         assert_eq!(f.publish(), Err(InvestigationStoreError::Storage));
         let saved = f.saved();
@@ -270,6 +337,13 @@ fn next_prompt_finish_boundary_final_write_rollback_and_lost_ack_are_exact() {
             }
         );
         assert_eq!(saved.detail.summary.has_result, acquired);
+        assert_eq!(
+            chat::read_for_task(&f.base.f.store.conn, f.base.id())
+                .unwrap()
+                .messages
+                .len(),
+            if acquired { 2 } else { 1 }
+        );
         let after = f.rows();
         assert_eq!(f.publish(), Err(InvestigationStoreError::Stale));
         assert_eq!(f.rows(), after);

@@ -1,7 +1,11 @@
+use super::chat::StoredChatMessage;
 use super::*;
 use crate::job_execution::JobExecutionLocks;
 use crate::jobs::ClaimMode;
 use agents::{TaskFactKey, TaskFactSelection, TaskSourceAssociation};
+
+#[path = "chat_tests.rs"]
+mod chat_tests;
 
 struct Fixture {
     directory: tempfile::TempDir,
@@ -271,6 +275,27 @@ fn investigation_start_deduplicates_concurrently_before_availability_and_capacit
     );
     assert_ne!(first.created, second.created);
     assert_eq!(fixture.store.list().unwrap().len(), 1);
+    assert_eq!(
+        fixture
+            .store
+            .conn
+            .query_row("SELECT count(*) FROM investigation_chats", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM investigation_chat_messages",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
     fixture
         .store
         .start_investigation(
@@ -381,6 +406,46 @@ fn investigation_cancelled_finish_survives_job_cleanup_restart_and_original_basi
     assert!(fixture.store.get(started.summary.job_id).is_err());
     let result = finish(&id, &ledger);
     let current = fixture.store.investigation(&id).unwrap();
+    assert_eq!(
+        storage::stored_bytes(&fixture.store.conn, Some(&id)).unwrap()
+            - storage::actual_stored_bytes(&fixture.store.conn, Some(&id)).unwrap(),
+        chat::RESULT_REFERENCE_SLOT_BYTES
+    );
+    chat::fail_after_result_reference_insert_once();
+    assert_eq!(
+        fixture.store.advance_investigation(
+            &execution,
+            current.summary.revision,
+            InvestigationTransition::ActionAdmitted {
+                response: response("step:1", 600_123),
+                tool: None,
+                result: Some(Box::new(result.clone())),
+            },
+        ),
+        Err(InvestigationStoreError::Storage)
+    );
+    assert!(!fixture.store.investigation(&id).unwrap().summary.has_result);
+    assert_eq!(
+        fixture
+            .store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM investigation_results WHERE task_id=?1",
+                [&id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "result and chat reference share one rollback boundary"
+    );
+    assert_eq!(
+        chat::read_for_task(&fixture.store.conn, &id)
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+    let current = fixture.store.investigation(&id).unwrap();
     let completed = fixture
         .store
         .advance_investigation(
@@ -394,10 +459,29 @@ fn investigation_cancelled_finish_survives_job_cleanup_restart_and_original_basi
         )
         .unwrap();
     assert_eq!(completed.summary.status, InvestigationStatus::Completed);
+    assert_eq!(
+        storage::stored_bytes(&fixture.store.conn, Some(&id)).unwrap(),
+        storage::actual_stored_bytes(&fixture.store.conn, Some(&id)).unwrap(),
+        "committed result reference replaces the held slot"
+    );
     assert!(completed.summary.cancel_requested && completed.summary.has_result);
     assert_eq!(completed.usage.active_milliseconds, 600_123);
-    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    let mut reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
     assert_eq!(reopened.investigation_result(&id).unwrap(), Some(result));
+    let transcript = chat::read_for_task(&reopened.conn, &id).unwrap();
+    assert_eq!(transcript.messages.len(), 2);
+    assert_eq!(transcript.messages[0].ordinal, 0);
+    assert_eq!(transcript.messages[1].ordinal, 1);
+    assert!(matches!(
+        &transcript.messages[1].message,
+        StoredChatMessage::ResultReference { task_id, result_id, .. }
+            if task_id == &id && result_id == &reopened.investigation_result(&id).unwrap().unwrap().result_id
+    ));
+    reopened.clear_finished().unwrap();
+    assert_eq!(
+        chat::read_for_task(&reopened.conn, &id).unwrap(),
+        transcript
+    );
     assert_eq!(reopened.investigation_ledger(&id).unwrap(), Some(ledger));
     assert!(reopened.list().unwrap().is_empty());
     let serialized = serde_json::to_string(&reopened.investigation(&id).unwrap()).unwrap();
@@ -425,6 +509,118 @@ fn investigation_cancelled_finish_survives_job_cleanup_restart_and_original_basi
                 .is_err()
         );
     }
+}
+
+// AC-0375: an in-flight task from v3 remains finishable after migration without
+// fabricating a chat for history that predates the new storage contract.
+#[test]
+fn legacy_v3_inflight_investigation_finishes_without_chat_backfill() {
+    let mut fixture = Fixture::new();
+    let (id, execution) = fixture.start("legacy-chat-finish", InvestigationProviderMode::Local);
+    let ledger = fixture.prepare(&id, &execution, false);
+    let started = begin(&mut fixture, &id, &execution, step(&ledger, 1));
+    storage::version_three_fixture(&fixture.store.conn);
+    fixture.store = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(
+        fixture.store.investigation(&id).unwrap().summary.revision,
+        started.summary.revision
+    );
+    let result = finish(&id, &ledger);
+    let current = fixture.store.investigation(&id).unwrap();
+    fixture
+        .store
+        .advance_investigation(
+            &execution,
+            current.summary.revision,
+            InvestigationTransition::ActionAdmitted {
+                response: response("step:1", 7),
+                tool: None,
+                result: Some(Box::new(result.clone())),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.store.investigation_result(&id).unwrap(),
+        Some(result)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM investigation_chats WHERE task_id=?1",
+                [&id],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+// AC-0375: v3 tasks and immutable bodies survive the additive chat migration;
+// historical tasks do not receive fabricated chat or message rows.
+#[test]
+fn durable_chat_v3_migration_preserves_task_bytes_without_backfill() {
+    let mut fixture = Fixture::new();
+    let id = fixture
+        .store
+        .start_investigation(
+            &request("chat-v3-legacy", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap()
+        .detail
+        .summary
+        .investigation_id;
+    storage::version_three_fixture(&fixture.store.conn);
+    let original: (Vec<u8>, String) = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT record,record_hash FROM investigation_tasks WHERE id=?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    fixture.store = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    let migrated: (Vec<u8>, String) = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT record,record_hash FROM investigation_tasks WHERE id=?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(migrated, original);
+    assert_eq!(
+        fixture
+            .store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM investigation_chats WHERE task_id=?1",
+                [&id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture
+            .store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM investigation_chat_messages WHERE task_id=?1",
+                [&id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture.store.investigation(&id).unwrap().summary.status,
+        InvestigationStatus::Queued
+    );
 }
 
 #[test]
