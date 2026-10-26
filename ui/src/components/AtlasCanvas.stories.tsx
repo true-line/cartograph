@@ -220,7 +220,7 @@ export const ClientKeepsExtensionRelationships: Story = {
   args: { snapshot: extensionFixture },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole('button', { name: 'Client' }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Client code' }));
     // GRANTS and HANDLES are labelled cloud/server, but both of their
     // endpoints are client-native, so they stay with the Client layer.
     await waitFor(() => expect(canvas.getByRole('status')).toHaveTextContent('4 nodes · 2 edges'));
@@ -411,9 +411,9 @@ export const BandedLayoutIsDeterministic: Story = {
     await expect(positions(b)).toEqual(positions(a));
     await expect(a.bands.map((band) => band.label)).toEqual([
       'Infrastructure',
-      'Server',
+      'Server code',
       'Events',
-      'Client',
+      'Client code',
     ]);
   },
 };
@@ -498,7 +498,7 @@ export const ToolsBandExcludesPlaceholders: Story = {
     await expect(bands.get(unresolvedPlaceholderModule.id)).toBe('server');
 
     const scene = buildAtlasScene(snapshot, new Set());
-    await expect(scene.bands.map((band) => band.label).sort()).toEqual(['Server', 'Tools/Build']);
+    await expect(scene.bands.map((band) => band.label).sort()).toEqual(['Server code', 'Tools/Build']);
     await expect(scene.nodes.some((node) => node.id === externalPlaceholderModule.id)).toBe(false);
     await expect(scene.nodes.some((node) => node.id === unresolvedPlaceholderModule.id)).toBe(true);
   },
@@ -557,6 +557,46 @@ export const ClustersCollapseAtScale: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Collapse clusters' }));
     await waitFor(() =>
       expect(canvas.getByRole('status')).toHaveTextContent('2 of 2 clusters collapsed'),
+    );
+  },
+};
+
+// 500 directories × 2 symbols in one repository: 500 clusters (#1079).
+const ESTATE_NODES: GraphNode[] = Array.from({ length: 1000 }, (_, index) => {
+  const dir = `d${String(Math.floor(index / 2)).padStart(3, '0')}`;
+  return {
+    id: `sym:local/estate@${dir}/m.ts#f${index % 2}`,
+    label: 'Symbol',
+    props: { name: `f${index % 2}`, prov: prov('Confirmed', `${dir}/m.ts`) },
+  };
+});
+
+export const EstateScaleOpensToGroups: Story = {
+  // AC-0366 (#1079): 500 clusters open as fewer than GROUP_BUDGET range
+  // groups; a group drills in to its clusters (siblings step aside) and
+  // folds back from the trail.
+  args: {
+    snapshot: { nodes: ESTATE_NODES, edges: [] },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('status')).toHaveTextContent(
+      '1000 nodes · 0 edges · 500 of 500 clusters collapsed · 9 groups',
+    );
+    await expect(canvas.getByRole('button', { name: 'Server code' })).toBeInTheDocument();
+
+    const groups = within(canvas.getByLabelText('Collapsed groups'));
+    await userEvent.click(groups.getByRole('button', { name: /Server code · local\/estate · d000 … d055 · 56 clusters/ }));
+    await waitFor(() => expect(canvas.queryByLabelText('Collapsed groups')).not.toBeInTheDocument());
+    await expect(canvas.getByRole('status')).toHaveTextContent('500 of 500 clusters collapsed');
+    await expect(canvas.getByRole('status')).not.toHaveTextContent('groups');
+    const clusters = within(canvas.getByLabelText('Collapsed clusters'));
+    await expect(clusters.getByRole('button', { name: /local\/estate · d000 · 2/ })).toBeInTheDocument();
+
+    const trail = within(canvas.getByLabelText('Open groups'));
+    await userEvent.click(trail.getByRole('button', { name: /local\/estate · d000 … d055/ }));
+    await waitFor(() =>
+      expect(canvas.getByRole('status')).toHaveTextContent('500 of 500 clusters collapsed · 9 groups'),
     );
   },
 };

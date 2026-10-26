@@ -9,6 +9,11 @@ import type { AtlasSnapshot, GraphEdge, GraphNode } from './store';
  * always yields the same scene, regardless of input order. Past a size
  * threshold the initial scene renders collapsed clusters that expand on
  * demand, so reading a large graph never requires manual arrangement.
+ * At estate scale (#1079) a band with more than {@link GROUP_BUDGET}
+ * clusters folds them into groups — repository, then contiguous ranges of
+ * the sorted cluster keys — so no band ever opens to more than that many
+ * tiles; tiles wrap into a grid rather than one long strip, and edges
+ * aggregate between the nearest visible groups.
  * A Confirmed external/internal boundary placeholder
  * (`core-graph::placeholder::mint`, `props.placeholder === true` with
  * `props.boundary` `external`/`internal`) is excluded from bands entirely —
@@ -32,15 +37,23 @@ export const BAND_ORDER: readonly Band[] = [
 export const BAND_LABELS: Record<Band, string> = {
   infra: 'Infrastructure',
   cloud: 'Cloud',
-  server: 'Server',
+  // "Server" alone reads as machines on a system view (#1079): these bands
+  // hold recovered server-side and client-side code.
+  server: 'Server code',
   events: 'Events',
-  client: 'Client',
+  client: 'Client code',
   tools: 'Tools/Build',
   other: 'Unclassified',
 };
 
 /** Collapse clusters by default above this many nodes (AC-0081). */
 export const CLUSTER_THRESHOLD = 200;
+
+/** Never open a band (or a group) to more than this many tiles (#1079). */
+export const GROUP_BUDGET = 60;
+
+/** Collapsed tiles per grid row before a band wraps (#1079). */
+export const GRID_COLUMNS = 12;
 
 /**
  * A Confirmed external/internal boundary placeholder
@@ -246,6 +259,136 @@ export interface AtlasCluster {
   members: string[];
 }
 
+/**
+ * A synthetic fold of clusters (#1079): a repository, or a contiguous range
+ * of sorted cluster keys. Stable id `group:{band}:{key}`; purely derived
+ * from cluster keys, so it adds no facts.
+ */
+export interface AtlasGroup {
+  id: string;
+  band: Band;
+  key: string;
+  /** Direct children, in display order. */
+  children: AtlasUnit[];
+  /** Every cluster under this group, at any depth. */
+  clusters: AtlasCluster[];
+  /** Total member nodes under this group. */
+  size: number;
+}
+
+export type AtlasUnit = { group: AtlasGroup } | { cluster: AtlasCluster };
+
+function unitKey(unit: AtlasUnit): string {
+  return 'group' in unit ? unit.group.key : unit.cluster.key;
+}
+
+function unitClusters(unit: AtlasUnit): AtlasCluster[] {
+  return 'group' in unit ? unit.group.clusters : [unit.cluster];
+}
+
+function groupOf(band: Band, key: string, children: AtlasUnit[]): AtlasUnit {
+  const clusters = children.flatMap(unitClusters);
+  return {
+    group: {
+      id: `group:${band}:${key}`,
+      band,
+      key,
+      children,
+      clusters,
+      size: clusters.reduce((total, cluster) => total + cluster.members.length, 0),
+    },
+  };
+}
+
+/**
+ * Fold sorted units into at most {@link GROUP_BUDGET} contiguous ranges of
+ * at most that many units each, recursing until the top level fits.
+ * `scope` keeps range ids distinct between parents.
+ */
+function foldRanges(band: Band, scope: string, units: AtlasUnit[]): AtlasUnit[] {
+  if (units.length <= GROUP_BUDGET) return units;
+  const count = Math.ceil(units.length / GROUP_BUDGET);
+  const size = Math.ceil(units.length / count);
+  const ranges: AtlasUnit[] = [];
+  for (let start = 0; start < units.length; start += size) {
+    const chunk = units.slice(start, start + size);
+    const first = unitKey(chunk[0]);
+    const last = unitKey(chunk[chunk.length - 1]);
+    // `repo · a … repo · z` reads as `repo · a … z`.
+    const repo = first.slice(0, first.indexOf(' · ') + 3);
+    const label = `${first} … ${repo.length > 3 && last.startsWith(repo) ? last.slice(repo.length) : last}`;
+    ranges.push(groupOf(band, scope ? `${scope} / ${label}` : label, chunk));
+  }
+  return foldRanges(band, scope, ranges);
+}
+
+/** How many range levels {@link foldRanges} nests `count` units under. */
+function foldDepth(count: number): number {
+  return count <= GROUP_BUDGET ? 0 : 1 + foldDepth(Math.ceil(count / GROUP_BUDGET));
+}
+
+/** The repository part of a cluster key (`repo · segment`), else the key. */
+function repoOf(cluster: AtlasCluster): string {
+  const split = cluster.key.indexOf(' · ');
+  return split < 0 ? cluster.key : cluster.key.slice(0, split);
+}
+
+/**
+ * A band's top-level units (#1079). Up to {@link GROUP_BUDGET} clusters show
+ * as themselves. Beyond that they fold by repository when that separates
+ * them, and each fold (and the repository list) folds again into ranges, so
+ * every level fits the budget.
+ */
+export function bandUnits(band: Band, clusters: AtlasCluster[]): AtlasUnit[] {
+  const leaves: AtlasUnit[] = clusters.map((cluster) => ({ cluster }));
+  if (leaves.length <= GROUP_BUDGET) return leaves;
+  const byRepo = new Map<string, AtlasCluster[]>();
+  for (const cluster of clusters) {
+    const repo = repoOf(cluster);
+    const members = byRepo.get(repo);
+    if (members) members.push(cluster);
+    else byRepo.set(repo, [cluster]);
+  }
+  // One repository (or one cluster per repository) separates nothing, and a
+  // repository fold deeper than two group levels costs more clicks than flat
+  // ranges over every cluster.
+  const deepest = Math.max(...[...byRepo.values()].map((members) => foldDepth(members.length)));
+  if (
+    byRepo.size === 1 ||
+    byRepo.size === clusters.length ||
+    foldDepth(byRepo.size) + 1 + deepest > Math.max(2, foldDepth(clusters.length))
+  ) {
+    return foldRanges(band, '', leaves);
+  }
+  const repos: AtlasUnit[] = [...byRepo.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([repo, members]) =>
+      members.length === 1
+        ? { cluster: members[0] }
+        : groupOf(band, repo, foldRanges(band, repo, members.map((cluster) => ({ cluster })))),
+    );
+  return foldRanges(band, '', repos);
+}
+
+/**
+ * The expanded set after tapping an aggregated edge: cluster endpoints open,
+ * and at most one group endpoint (the source first), because a level shows
+ * one open group and a second one would wait invisibly to take over when
+ * the first folds back.
+ */
+export function expandAcross(open: ReadonlySet<string>, source: string, target: string): Set<string> {
+  const next = new Set(open);
+  let focused = false;
+  for (const endpoint of [source, target]) {
+    if (endpoint.startsWith('cluster:')) next.add(endpoint);
+    else if (endpoint.startsWith('group:') && !focused) {
+      next.add(endpoint);
+      focused = true;
+    }
+  }
+  return next;
+}
+
 export interface ScenePosition {
   x: number;
   y: number;
@@ -257,6 +400,8 @@ export interface SceneNode {
   band: Band;
   /** Present for synthetic collapsed-cluster nodes. */
   cluster?: AtlasCluster;
+  /** Present for synthetic collapsed-group nodes (#1079). */
+  group?: AtlasGroup;
   /** Present for real graph nodes. */
   node?: GraphNode;
   position: ScenePosition;
@@ -277,6 +422,14 @@ export interface AtlasScene {
   edges: SceneEdge[];
   clusters: AtlasCluster[];
   collapsed: AtlasCluster[];
+  /** Every group on the focused path, open or not (#1079). */
+  groups: AtlasGroup[];
+  /** Groups shown as a collapsed tile. */
+  collapsedGroups: AtlasGroup[];
+  /** Groups the viewer opened, outermost first — the drill-down trail. */
+  openGroups: AtlasGroup[];
+  /** Clusters set aside beside an open group (off canvas, edges dropped). */
+  unfocused: AtlasCluster[];
   bands: Array<{ band: Band; label: string; count: number }>;
   /** True when the snapshot is small enough to open fully expanded. */
   autoExpanded: boolean;
@@ -286,6 +439,7 @@ const NODE_DX = 96;
 const NODE_DY = 84;
 const CLUSTER_GAP = 72;
 const BAND_GAP = 140;
+const ROW_WIDTH = GRID_COLUMNS * (NODE_DX + CLUSTER_GAP);
 
 /**
  * Build the deterministic banded scene. `expanded` holds cluster ids the
@@ -317,6 +471,14 @@ export function buildAtlasScene(snapshot: AtlasSnapshot, expanded: ReadonlySet<s
   const nodeById = new Map(visibleNodes.map((node) => [node.id, node]));
   const sceneNodes: SceneNode[] = [];
   const collapsed: AtlasCluster[] = [];
+  const groups: AtlasGroup[] = [];
+  const collapsedGroups: AtlasGroup[] = [];
+  const openGroups: AtlasGroup[] = [];
+  // The outermost closed group hiding each cluster: edges re-target it.
+  const hiddenBy = new Map<string, AtlasGroup>();
+  // Clusters beside an open group: opening drills in, so they leave the
+  // canvas (and its edges) until the group folds back.
+  const unfocused: AtlasCluster[] = [];
 
   let y = 0;
   const bandCounts = new Map<Band, number>();
@@ -327,11 +489,50 @@ export function buildAtlasScene(snapshot: AtlasSnapshot, expanded: ReadonlySet<s
       band,
       bandClusters.reduce((total, cluster) => total + cluster.members.length, 0),
     );
+    // Row-wrapped placement: a block that would pass the row width starts
+    // a new row below the tallest block of the current one (#1079).
     let x = 0;
-    let bandHeight = NODE_DY;
-    for (const cluster of bandClusters) {
+    let rowTop = y;
+    let rowHeight = NODE_DY;
+    const place = (width: number, height: number): ScenePosition => {
+      if (x > 0 && x + width > ROW_WIDTH) {
+        rowTop += rowHeight + CLUSTER_GAP;
+        x = 0;
+        rowHeight = NODE_DY;
+      }
+      const at = { x, y: rowTop };
+      x += width + CLUSTER_GAP;
+      rowHeight = Math.max(rowHeight, height);
+      return at;
+    };
+    const visit = (unit: AtlasUnit, hidden: AtlasGroup | null) => {
+      if ('group' in unit) {
+        const group = unit.group;
+        groups.push(group);
+        const open = !hidden && expanded.has(group.id);
+        if (!hidden && !open) {
+          collapsedGroups.push(group);
+          sceneNodes.push({
+            id: group.id,
+            label: `${group.key} · ${group.clusters.length} clusters · ${group.size} nodes`,
+            band,
+            group,
+            position: place(NODE_DX, NODE_DY),
+          });
+        }
+        if (open) openGroups.push(group);
+        visitLevel(group.children, hidden ?? (open ? null : group));
+        return;
+      }
+      const cluster = unit.cluster;
+      if (hidden) {
+        hiddenBy.set(cluster.id, hidden);
+        return;
+      }
       if (isOpen(cluster)) {
         const cols = Math.max(1, Math.ceil(Math.sqrt(cluster.members.length)));
+        const rows = Math.ceil(cluster.members.length / cols);
+        const at = place(cols * NODE_DX, rows * NODE_DY);
         cluster.members.forEach((memberId, index) => {
           const member = nodeById.get(memberId);
           if (!member) return;
@@ -341,14 +542,11 @@ export function buildAtlasScene(snapshot: AtlasSnapshot, expanded: ReadonlySet<s
             band,
             node: member,
             position: {
-              x: x + (index % cols) * NODE_DX,
-              y: y + Math.floor(index / cols) * NODE_DY,
+              x: at.x + (index % cols) * NODE_DX,
+              y: at.y + Math.floor(index / cols) * NODE_DY,
             },
           });
         });
-        const rows = Math.ceil(cluster.members.length / cols);
-        bandHeight = Math.max(bandHeight, rows * NODE_DY);
-        x += cols * NODE_DX + CLUSTER_GAP;
       } else {
         collapsed.push(cluster);
         sceneNodes.push({
@@ -356,12 +554,29 @@ export function buildAtlasScene(snapshot: AtlasSnapshot, expanded: ReadonlySet<s
           label: `${cluster.key} · ${cluster.members.length}`,
           band,
           cluster,
-          position: { x, y },
+          position: place(NODE_DX, NODE_DY),
         });
-        x += NODE_DX + CLUSTER_GAP;
       }
-    }
-    y += bandHeight + BAND_GAP;
+    };
+    // At each level an open group is the focus: its siblings step aside so
+    // the level still shows at most GROUP_BUDGET tiles.
+    const visitLevel = (units: AtlasUnit[], hidden: AtlasGroup | null) => {
+      const focus = hidden
+        ? undefined
+        : units.find((unit) => 'group' in unit && expanded.has(unit.group.id));
+      for (const unit of units) {
+        if (focus && unit !== focus) {
+          unfocused.push(...('group' in unit ? unit.group.clusters : [unit.cluster]));
+        } else {
+          visit(unit, hidden);
+        }
+      }
+    };
+    const units: AtlasUnit[] = autoExpanded
+      ? bandClusters.map((cluster) => ({ cluster }))
+      : bandUnits(band, bandClusters);
+    visitLevel(units, null);
+    y = rowTop + rowHeight + BAND_GAP;
   }
 
   // Edges: endpoints re-target their collapsed cluster; edges internal to a
@@ -370,9 +585,12 @@ export function buildAtlasScene(snapshot: AtlasSnapshot, expanded: ReadonlySet<s
   for (const cluster of clusters) {
     for (const member of cluster.members) clusterOf.set(member, cluster);
   }
+  const outOfFocus = new Set(unfocused.map((cluster) => cluster.id));
   const endpointFor = (id: string): string | null => {
     const cluster = clusterOf.get(id);
-    if (!cluster) return null;
+    if (!cluster || outOfFocus.has(cluster.id)) return null;
+    const hidden = hiddenBy.get(cluster.id);
+    if (hidden) return hidden.id;
     return isOpen(cluster) ? id : cluster.id;
   };
   const real: SceneEdge[] = [];
@@ -399,6 +617,10 @@ export function buildAtlasScene(snapshot: AtlasSnapshot, expanded: ReadonlySet<s
     edges: [...real, ...aggregated.values()],
     clusters,
     collapsed,
+    groups,
+    collapsedGroups,
+    openGroups,
+    unfocused,
     bands: BAND_ORDER.filter((band) => bandCounts.has(band)).map((band) => ({
       band,
       label: BAND_LABELS[band],

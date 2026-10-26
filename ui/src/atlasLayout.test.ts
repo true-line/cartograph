@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assignBands } from './atlasLayout';
+import { assignBands, buildAtlasScene, expandAcross, GROUP_BUDGET, type AtlasScene } from './atlasLayout';
 import type { AtlasSnapshot, GraphEdge, GraphNode } from './store';
 
 function node(id: string, label: string, props: GraphNode['props'] = {}): GraphNode {
@@ -147,5 +147,156 @@ describe('assignBands — service-worker code and browser storage', () => {
       edges: [],
     };
     expect(assignBands(snapshot).get('file:r@sw.config.js')).toBe('tools');
+  });
+});
+
+// AC-0366 (#1079): at estate scale a band folds its clusters into groups
+// (repository, then sorted key ranges) so no level opens to more than
+// GROUP_BUDGET tiles, edges aggregate between the nearest visible groups,
+// and every cluster is reachable in at most three clicks.
+describe('buildAtlasScene — estate-scale grouping', () => {
+  // `repos` repositories × `perRepo` clusters, two Symbols per cluster, and
+  // one CALLS edge from each cluster into the next repository's cluster.
+  function estate(repos: number, perRepo: number): AtlasSnapshot {
+    const nodes: GraphNode[] = [];
+    const edges: GraphEdge[] = [];
+    for (let r = 0; r < repos; r += 1) {
+      for (let c = 0; c < perRepo; c += 1) {
+        const dir = `d${String(c).padStart(3, '0')}`;
+        for (const fn of ['a', 'b']) {
+          nodes.push(node(`sym:local/r${r}@${dir}/m.ts#${fn}`, 'Symbol'));
+        }
+        const next = (r + 1) % repos;
+        edges.push(edge(`sym:local/r${r}@${dir}/m.ts#a`, `sym:local/r${next}@${dir}/m.ts#b`, 'CALLS'));
+      }
+    }
+    return { nodes, edges };
+  }
+  const tiles = (scene: AtlasScene) => scene.nodes.filter((item) => item.cluster || item.group);
+
+  // Breadth-first over clicks: each click opens one visible group or cluster.
+  function clicksToReach(snapshot: AtlasSnapshot, clusterId: string): number {
+    let frontier: Set<string>[] = [new Set()];
+    for (let clicks = 0; clicks <= 4; clicks += 1) {
+      const next: Set<string>[] = [];
+      for (const open of frontier) {
+        const scene = buildAtlasScene(snapshot, open);
+        const tile = scene.nodes.find((item) => item.id === clusterId);
+        if (tile) return clicks + 1;
+        for (const group of scene.collapsedGroups) {
+          if (group.clusters.some((cluster) => cluster.id === clusterId)) {
+            next.push(new Set([...open, group.id]));
+          }
+        }
+      }
+      frontier = next;
+    }
+    return Infinity;
+  }
+
+  it('opens one 500-cluster repository as at most GROUP_BUDGET range tiles', () => {
+    const snapshot = estate(1, 500);
+    const scene = buildAtlasScene(snapshot, new Set());
+    expect(scene.clusters).toHaveLength(500);
+    expect(tiles(scene).length).toBeLessThanOrEqual(GROUP_BUDGET);
+    expect(scene.collapsedGroups.length).toBeGreaterThan(1);
+    expect(scene.collapsedGroups.every((group) => group.children.length <= GROUP_BUDGET)).toBe(true);
+    expect(scene.collapsedGroups.reduce((n, group) => n + group.clusters.length, 0)).toBe(500);
+    expect(scene.collapsedGroups[0].key).toBe('local/r0 · d000 … d055');
+  });
+
+  it('folds many repositories by repository, then by range inside each', () => {
+    const snapshot = estate(12, 90);
+    const scene = buildAtlasScene(snapshot, new Set());
+    expect(tiles(scene).map((item) => item.label)).toContain('local/r0 · 90 clusters · 180 nodes');
+    expect(tiles(scene).length).toBeLessThanOrEqual(GROUP_BUDGET);
+    const repo = scene.collapsedGroups.find((group) => group.key === 'local/r0');
+    const opened = buildAtlasScene(snapshot, new Set([repo!.id]));
+    expect(opened.openGroups.map((group) => group.id)).toEqual([repo!.id]);
+    const inside = tiles(opened).filter((item) => item.group && item.id.startsWith('group:server:local/r0 / '));
+    expect(inside).toHaveLength(2);
+  });
+
+  it('reaches every cluster in at most three clicks', () => {
+    for (const [snapshot, stride] of [
+      [estate(1, 500), 37],
+      [estate(12, 90), 37],
+      // Both dimensions past the budget: ranges, not repository → range nests.
+      [estate(61, 90), 1373],
+    ] as const) {
+      const scene = buildAtlasScene(snapshot, new Set());
+      const sample = scene.clusters.filter((_, index) => index % stride === 0);
+      for (const cluster of sample) {
+        expect(clicksToReach(snapshot, cluster.id)).toBeLessThanOrEqual(3);
+      }
+    }
+  });
+
+  it('keeps every opened level within GROUP_BUDGET tiles', () => {
+    for (const snapshot of [estate(1, 500), estate(61, 90)]) {
+      let open = new Set<string>();
+      let scene = buildAtlasScene(snapshot, open);
+      expect(tiles(scene).length).toBeLessThanOrEqual(GROUP_BUDGET);
+      while (scene.collapsedGroups.length > 0) {
+        open = new Set([...open, scene.collapsedGroups[0].id]);
+        scene = buildAtlasScene(snapshot, open);
+        expect(tiles(scene).length).toBeLessThanOrEqual(GROUP_BUDGET);
+        expect(scene.unfocused.length).toBeGreaterThan(0);
+      }
+      expect(scene.openGroups.length).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it('opens one group from an aggregated edge and folds back to the overview', () => {
+    const snapshot = estate(12, 90);
+    const overview = buildAtlasScene(snapshot, new Set());
+    const between = overview.edges.find(
+      (item) => item.source === 'group:server:local/r0' && item.target === 'group:server:local/r1',
+    )!;
+    const open = expandAcross(new Set(), between.source, between.target);
+    expect([...open]).toEqual(['group:server:local/r0']);
+    const focused = buildAtlasScene(snapshot, open);
+    expect(focused.openGroups.map((group) => group.id)).toEqual(['group:server:local/r0']);
+    // Folding the focus back (the trail drops it and its descendants)
+    // returns to the overview, not to a latent sibling.
+    const folded = focused.openGroups[0].id;
+    const back = buildAtlasScene(
+      snapshot,
+      new Set([...open].filter((id) => id !== folded && !id.startsWith(`${folded} / `))),
+    );
+    expect(back.openGroups).toEqual([]);
+    expect(tiles(back).map((item) => item.id)).toEqual(tiles(overview).map((item) => item.id));
+    expect([...expandAcross(new Set(), 'cluster:a', 'group:b')]).toEqual(['cluster:a', 'group:b']);
+  });
+
+  it('aggregates edges between the nearest visible groups', () => {
+    const snapshot = estate(12, 90);
+    const scene = buildAtlasScene(snapshot, new Set());
+    expect(scene.edges.every((item) => item.edge === undefined)).toBe(true);
+    const between = scene.edges.find(
+      (item) => item.source === 'group:server:local/r0' && item.target === 'group:server:local/r1',
+    );
+    expect(between?.count).toBe(90);
+    expect(scene.edges.length).toBeLessThanOrEqual(GROUP_BUDGET * 2);
+  });
+
+  it('wraps tiles into a grid instead of one strip, deterministically', () => {
+    const snapshot = estate(1, 500);
+    const scene = buildAtlasScene(snapshot, new Set());
+    const shuffled = buildAtlasScene(
+      { nodes: [...snapshot.nodes].reverse(), edges: [...snapshot.edges].reverse() },
+      new Set(),
+    );
+    const at = (s: AtlasScene) => s.nodes.map((item) => `${item.id}@${item.position.x},${item.position.y}`);
+    expect(at(shuffled)).toEqual(at(scene));
+    const range = scene.collapsedGroups[0];
+    const opened = buildAtlasScene(snapshot, new Set([range.id]));
+    const rows = new Set(tiles(opened).map((item) => item.position.y));
+    expect(rows.size).toBeGreaterThan(1);
+  });
+
+  it('keeps small graphs ungrouped', () => {
+    const scene = buildAtlasScene(estate(1, 40), new Set());
+    expect(scene.groups).toEqual([]);
   });
 });
