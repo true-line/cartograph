@@ -37,7 +37,8 @@
 //! An imported guard or `ProxyFix` name counts only when neither the module
 //! nor any function or class scope enclosing its use rebinds it.
 //! A framework guard reassigned on its module anywhere in the repository
-//! (`flask_login.login_required = …`, or `setattr` with a literal name) is
+//! (`flask_login.login_required = …`, or `setattr` on its module, where a
+//! name that is not a literal string may be any of that module's guards) is
 //! never a guard: the reason is `framework_guard_reassigned:<name>`.
 //! `ProxyFix` is known non-auth only when it wraps the assigned attribute
 //! itself (`app.wsgi_app = ProxyFix(app.wsgi_app, …)`); the assignment is
@@ -489,28 +490,41 @@ fn patched_guard(
     framework_guard(&import_dotted(cx, left, bindings)?)
 }
 
-/// A framework guard replaced by `setattr(<module>, "<name>", …)` with a
-/// string-literal name.
-fn setattr_guard(
+/// Framework guards a `setattr(<module>, <name>, …)` may replace: the named
+/// one for a literal name, and every guard of that module when the name is
+/// not a literal.
+fn setattr_guards(
     cx: &FileCx<'_>,
     call: TsNode<'_>,
     callee: TsNode<'_>,
     bindings: &HashMap<String, ImportBinding>,
-) -> Option<String> {
+) -> Vec<String> {
     if callee.kind() != "identifier" || cx.text(&callee) != "setattr" {
-        return None;
+        return Vec::new();
     }
-    let arguments = named(call.child_by_field_name("arguments")?)
+    let Some(arguments) = call.child_by_field_name("arguments") else {
+        return Vec::new();
+    };
+    let arguments = named(arguments)
         .into_iter()
         .filter(|argument| argument.kind() != "comment")
+        .map(unparenthesize)
         .collect::<Vec<_>>();
-    let (object, name) = (unparenthesize(*arguments.first()?), *arguments.get(1)?);
-    if name.kind() != "string" {
-        return None;
+    let (Some(object), Some(name)) = (arguments.first(), arguments.get(1)) else {
+        return Vec::new();
+    };
+    let Some(module) = import_dotted(cx, *object, bindings) else {
+        return Vec::new();
+    };
+    match crate::literal_string(cx, *name) {
+        Some(member) => framework_guard(&format!("{module}.{member}"))
+            .into_iter()
+            .collect(),
+        None => ["login_required", "fresh_login_required", "jwt_required"]
+            .into_iter()
+            .filter_map(|member| framework_guard(&format!("{module}.{member}")))
+            .collect(),
     }
-    let member = cx.text(&name).trim_matches(|c| c == '"' || c == '\'');
-    let module = import_dotted(cx, object, bindings)?;
-    framework_guard(&format!("{module}.{member}"))
 }
 
 /// Collect this file's handler, function-effect, hook and `wsgi_app`
@@ -575,8 +589,9 @@ pub(crate) fn collect(
             let Some(callee) = node.child_by_field_name("function") else {
                 return;
             };
-            if let Some(guard) = setattr_guard(cx, node, callee, bindings) {
-                out.patched_guards.push(guard);
+            let patched = setattr_guards(cx, node, callee, bindings);
+            if !patched.is_empty() {
+                out.patched_guards.extend(patched);
                 return;
             }
             if !is_hook_attribute(cx, callee) {

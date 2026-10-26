@@ -4562,6 +4562,33 @@ def token():
         auth["reasons"],
         serde_json::json!(["framework_guard_reassigned:flask_jwt_extended.jwt_required"])
     );
+    for (patch, reason) in [
+        (
+            "setattr(flask_login, (\"login_required\"), lambda f: f)",
+            "framework_guard_reassigned:flask_login.login_required",
+        ),
+        (
+            "setattr(flask_login, u\"login_required\", lambda f: f)",
+            "framework_guard_reassigned:flask_login.login_required",
+        ),
+        (
+            "setattr(flask_login, NAME, lambda f: f)",
+            "framework_guard_reassigned:flask_login.login_required",
+        ),
+        ("setattr(flask_login, \"other\", 1)", ""),
+    ] {
+        let source = format!(
+            "import flask_login\nfrom flask import Flask\n\napp = Flask(__name__)\n{patch}\n\n@app.route(\"/p\")\n@flask_login.login_required\ndef p():\n    return \"p\"\n"
+        );
+        let extraction = extract_source(source.as_bytes(), "app.py", &id()).unwrap();
+        let auth = auth_at(&extraction, "/p");
+        if reason.is_empty() {
+            assert_eq!(auth["state"], "required", "{patch}");
+        } else {
+            assert_eq!(auth["state"], "unknown", "{patch}");
+            assert_eq!(auth["reasons"], serde_json::json!([reason]), "{patch}");
+        }
+    }
 }
 
 #[test]
