@@ -4993,3 +4993,61 @@ fn display_names_are_absent_without_a_method_call_argument() {
             .all(|node| node.props.get("display_name").is_none())
     );
 }
+
+#[test]
+fn worker_proofs_reused_at_a_new_commit_match_a_fresh_extraction() {
+    // AC-0365 (#1078): a cache filled at commit A and reused at commit B
+    // cites B in registration and self-listener proofs, and hashes them as
+    // a fresh extraction at B does.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("web")).unwrap();
+    for (path, text) in [
+        (
+            "web/app.js",
+            "navigator.serviceWorker.register('/worker.js');\n",
+        ),
+        ("web/worker.js", "function boot() {}\n"),
+        (
+            "web/sw.js",
+            "self.addEventListener('install', function onInstall() {});\n",
+        ),
+    ] {
+        std::fs::write(dir.path().join(path), text).unwrap();
+    }
+    let at = |commit| SourceId {
+        repo: "qwtm/example",
+        commit,
+    };
+    let mut cache = IncrementalCache::default();
+    extract_dir_incremental(dir.path(), &at("aaaa"), &mut cache).unwrap();
+    let (reused, stats) = extract_dir_incremental(dir.path(), &at("bbbb"), &mut cache).unwrap();
+    assert_eq!(stats.recomputed_files, 0, "the second run reuses the cache");
+    let fresh = extract_dir(dir.path(), &at("bbbb")).unwrap();
+    let facts = |out: &Extraction| {
+        let mut facts: Vec<String> = out
+            .nodes
+            .iter()
+            .map(|n| format!("{} {}", n.id, n.props))
+            .chain(
+                out.edges
+                    .iter()
+                    .map(|e| format!("{} {} {} {}", e.src, e.label, e.dst, e.props)),
+            )
+            .collect();
+        facts.sort();
+        facts
+    };
+    assert_eq!(facts(&reused), facts(&fresh));
+    for id in [
+        "file:qwtm/example@web/worker.js",
+        "file:qwtm/example@web/sw.js",
+    ] {
+        let node = reused.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(node.props["runtime"], "service-worker", "{id}");
+        let evidence = node.props["prov"]["evidence"].as_array().unwrap();
+        assert!(
+            evidence.iter().all(|e| e["commit_sha"] == "bbbb"),
+            "{id}: {evidence:?}"
+        );
+    }
+}

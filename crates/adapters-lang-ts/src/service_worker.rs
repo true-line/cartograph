@@ -8,7 +8,7 @@
 //! `runtime: "service-worker"` prop on the File node and on every Symbol or
 //! Component defined in it, so the Atlas can place browser code on the
 //! client side instead of under Server. The proving call's span joins each
-//! marked node's evidence and content hash.
+//! marked node's evidence and its commit-free span joins the content hash.
 //!
 //! Anonymous callables keep their `anon@<byte>` ids; `display_name` only
 //! gives them a label derived from the call they are passed to.
@@ -51,6 +51,13 @@ fn plain_string(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
 pub(crate) struct Registration {
     literal: String,
     evidence: Value,
+}
+
+impl Registration {
+    /// Cite `commit`, as a cache reuse at a new commit retargets every fact.
+    pub(crate) fn retarget(&mut self, commit: &str) {
+        self.evidence["commit_sha"] = serde_json::json!(commit);
+    }
 }
 
 /// One evidence span for `call`, in the adapter's provenance shape.
@@ -204,7 +211,19 @@ pub(crate) fn mark(files: &BTreeMap<String, Vec<Value>>, nodes: &mut [Node], edg
             }
         }
         if let Some(hash) = prov["content_hash"].as_str() {
-            let cited = serde_json::to_string(&proof).expect("evidence serializes");
+            // The commit stays out of the hash, as in the base hash, so a
+            // cache reuse at another commit hashes like a fresh extraction.
+            let spans: Vec<Value> = proof
+                .iter()
+                .cloned()
+                .map(|mut item| {
+                    if let Some(item) = item.as_object_mut() {
+                        item.remove("commit_sha");
+                    }
+                    item
+                })
+                .collect();
+            let cited = serde_json::to_string(&spans).expect("evidence serializes");
             prov["content_hash"] = serde_json::json!(core_prov::content_hash(
                 format!("{hash} runtime {RUNTIME} {cited}").as_bytes()
             ));

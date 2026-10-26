@@ -263,6 +263,9 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     extraction.target_tests.retarget(commit);
     extraction.client_routes.retarget(commit);
     extraction.client_navigation.retarget(commit);
+    for registration in &mut extraction.service_worker_registrations {
+        registration.retarget(commit);
+    }
 }
 
 impl Extraction {
