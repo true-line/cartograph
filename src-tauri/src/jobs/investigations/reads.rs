@@ -14,6 +14,106 @@ struct HistoryCursor {
     before: i64,
 }
 
+/// App-only activity attribution projected from the validated saved task.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SavedActivityProvider {
+    pub(crate) mode: InvestigationProviderMode,
+    pub(crate) provider_id: String,
+    pub(crate) model: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SpecialistActivityItem {
+    pub(crate) summary: InvestigationSummary,
+    pub(crate) saved_provider: SavedActivityProvider,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SpecialistActivityPage {
+    pub(crate) items: Vec<SpecialistActivityItem>,
+    pub(crate) next_cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SavedActivityProviderProjection<'a> {
+    mode: InvestigationProviderMode,
+    provider_id: &'a str,
+    model: &'a str,
+}
+
+#[derive(Serialize)]
+struct SpecialistActivityProjection<'a> {
+    summary: &'a InvestigationSummary,
+    saved_provider: SavedActivityProviderProjection<'a>,
+}
+
+pub(super) fn encode_specialist_activity_item(
+    summary: &InvestigationSummary,
+    provider: &InvestigationProvider,
+) -> Result<Vec<u8>, InvestigationStoreError> {
+    if provider.mode != summary.provider_mode {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    encode(
+        &SpecialistActivityProjection {
+            summary,
+            saved_provider: SavedActivityProviderProjection {
+                mode: provider.mode,
+                provider_id: &provider.provider_id,
+                model: &provider.model,
+            },
+        },
+        4096,
+    )
+}
+
+/// Reject a new task unless its activity identity and a maximum valid mutable
+/// summary still fit the existing 4 KiB per-item projection bound.
+pub(super) fn specialist_activity_admission_bytes(
+    task: &StoredTask,
+) -> Result<Vec<u8>, InvestigationStoreError> {
+    let mut summary = task.detail.summary.clone();
+    // Reserve the largest individually valid wire values. The combined sizing
+    // envelope is intentionally conservative; it need not be a reachable state.
+    summary.status = InvestigationStatus::AwaitingConsent;
+    summary.revision = i64::MAX as u64;
+    // JSON `false` occupies five bytes; `true` occupies four.
+    summary.cancel_requested = false;
+    summary.invocation_pending = false;
+    summary.actions.can_cancel = false;
+    summary.actions.can_follow_up = true;
+    summary.graph_snapshot_id = Some(format!("context-v1:{}", "f".repeat(64)));
+    summary.last_event_sequence = journal_event_limit(task)?;
+    summary.has_result = false;
+    if task.detail.inspection_requirements.is_some() {
+        summary.inspection_status = Some(InvestigationInspectionStatus::NotAssessed);
+        let max_requirements = InvestigationPolicy::for_limits(&task.detail.limits)
+            .ok_or(InvestigationStoreError::Invalid)?
+            .max_completion_obligations();
+        summary.inspection_requirement_count = Some(max_requirements);
+    }
+    if task.completion_intent.is_some() {
+        summary.completion_outcome = Some(InvestigationCompletionOutcome::InsufficientEvidence);
+        summary.obligation_status = Some(CompletionStatus::NotAssessed);
+    }
+    // Host-generated timestamps use a fixed 20-byte UTC form. Keep admission
+    // tied to that emitted form rather than the looser legacy read validator.
+    summary.updated_at = "9".repeat(20);
+    encode_specialist_activity_item(&summary, &task.detail.provider)
+}
+
+pub(super) fn validate_specialist_activity_admission(
+    task: &StoredTask,
+) -> Result<(), InvestigationStoreError> {
+    specialist_activity_admission_bytes(task).map(|_| ())
+}
+
+#[derive(Serialize)]
+struct HistoryProjectionPage<T> {
+    items: Vec<T>,
+    next_cursor: Option<String>,
+}
+
 impl JobStore {
     pub(crate) fn investigation_history(
         &self,
@@ -62,6 +162,31 @@ impl JobStore {
         self.investigation_history_filtered(None, query.as_deref(), active_only, cursor)
     }
 
+    pub(crate) fn specialist_task_activity(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<SpecialistActivityPage, InvestigationStoreError> {
+        let page = self.investigation_history_projected(None, None, true, cursor, |task| {
+            let provider = task.detail.provider;
+            let summary = task.detail.summary;
+            if provider.mode != summary.provider_mode {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            Ok(SpecialistActivityItem {
+                summary,
+                saved_provider: SavedActivityProvider {
+                    mode: provider.mode,
+                    provider_id: provider.provider_id,
+                    model: provider.model,
+                },
+            })
+        })?;
+        Ok(SpecialistActivityPage {
+            items: page.items,
+            next_cursor: page.next_cursor,
+        })
+    }
+
     fn investigation_history_filtered(
         &self,
         conversation_id: Option<&str>,
@@ -69,6 +194,27 @@ impl JobStore {
         active_only: bool,
         cursor: Option<&str>,
     ) -> Result<InvestigationPage, InvestigationStoreError> {
+        let page = self.investigation_history_projected(
+            conversation_id,
+            query,
+            active_only,
+            cursor,
+            |task| Ok(task.detail.summary),
+        )?;
+        Ok(InvestigationPage {
+            items: page.items,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    fn investigation_history_projected<T: Serialize>(
+        &self,
+        conversation_id: Option<&str>,
+        query: Option<&[u8]>,
+        active_only: bool,
+        cursor: Option<&str>,
+        project: impl Fn(StoredTask) -> Result<T, InvestigationStoreError>,
+    ) -> Result<HistoryProjectionPage<T>, InvestigationStoreError> {
         if conversation_id.is_some_and(|id| !id_valid(id)) {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -156,14 +302,15 @@ impl JobStore {
                 more = true;
                 break;
             }
-            let size = encode(&task.detail.summary, 4096)?.len() + 1;
+            let item = project(task)?;
+            let size = encode(&item, 4096)?.len() + 1;
             if items.len() == 50 || size > remaining {
                 more = true;
                 break;
             }
             remaining -= size;
             before = ordinal;
-            items.push(task.detail.summary);
+            items.push(item);
         }
         let next_cursor = if more {
             Some(
@@ -179,7 +326,7 @@ impl JobStore {
         } else {
             None
         };
-        let page = InvestigationPage { items, next_cursor };
+        let page = HistoryProjectionPage { items, next_cursor };
         encode(&page, 256 * 1024)?;
         tx.commit()?;
         Ok(page)

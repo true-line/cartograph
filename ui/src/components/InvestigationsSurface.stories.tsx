@@ -176,18 +176,22 @@ export const ActiveInvestigations: Story = {
 };
 
 export const SpecialistTaskActivity: Story = {
-  // AC-0379: the roster uses exact specialist versions and reports durable task states.
+  // AC-0381: activity shows saved provider identity, not current catalog values.
   beforeEach: () => {
     const active = [
-      investigationDetail('domain-running-activity', { specialist_id: 'domain-analyst@3', status: 'running', has_result: false }),
+      investigationDetail('domain-running-activity', { specialist_id: 'domain-analyst@3', status: 'running', has_result: false,
+        provider: { ...investigationCatalog.providers[0], provider_id: 'saved-local-provider', model: 'saved-local-model' } }),
       investigationDetail('auditor-consent-activity', { specialist_id: 'evidence-auditor@3', status: 'awaiting_consent',
-        cancel_requested: true, has_result: false }),
+        cancel_requested: true, has_result: false, provider_mode: 'cloud',
+        provider: { ...investigationCatalog.providers[1], provider_id: 'saved-cloud-provider', model: 'saved-cloud-model' } }),
       investigationDetail('old-domain-activity', { specialist_id: 'domain-analyst@2', status: 'queued', has_result: false }),
     ];
     mockIPC((command, args) => {
-      if (command === 'list_investigations') {
-        expect(args).toEqual({ activeOnly: true });
-        return { items: active, next_cursor: null };
+      if (command === 'list_specialist_task_activity') {
+        expect(args).toEqual({ cursor: null });
+        return { items: active.map((summary) => ({ summary, saved_provider: {
+          mode: summary.provider.mode, provider_id: summary.provider.provider_id, model: summary.provider.model,
+        } })), next_cursor: null };
       }
       return null;
     });
@@ -209,8 +213,10 @@ export const SpecialistTaskActivity: Story = {
     expect(auditor).not.toBeNull();
     await expect(domain).toHaveTextContent('Running');
     await expect(domain).not.toHaveTextContent('Queued');
+    await expect(domain).toHaveTextContent('Saved provider: local / saved-local-provider · saved-local-model');
     await expect(auditor).toHaveTextContent('Awaiting cloud consent');
     await expect(auditor).toHaveTextContent('Cancellation requested');
+    await expect(auditor).toHaveTextContent('Saved provider: cloud / saved-cloud-provider · saved-cloud-model');
     await expect(canvas.findByText(/active task list is incomplete/i)).resolves.toBeVisible();
     expect(useInvestigationStore.getState().history).toEqual([]);
     expect(useInvestigationStore.getState().selectedId).toBeNull();
@@ -220,7 +226,12 @@ export const SpecialistTaskActivity: Story = {
     await expect(within(domain!).findByText('Checking for active tasks…')).resolves.toBeVisible();
     expect(canvas.queryByText('No active tasks')).toBeNull();
     useSpecialistActivityStore.setState({ status: 'ready', tasks, error: null, refreshing: true });
-    await expect(canvas.findByText('Running · activity incomplete · refreshing')).resolves.toBeVisible();
+    await waitFor(() => {
+      const refreshedDomain = canvas.getByText(/domain-analyst@3/).closest('label');
+      expect(refreshedDomain).not.toBeNull();
+      expect(refreshedDomain).toHaveTextContent('Running');
+      expect(refreshedDomain).toHaveTextContent('activity incomplete · refreshing');
+    });
   },
 };
 

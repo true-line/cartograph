@@ -5947,6 +5947,7 @@ fn main() {
             investigations::commands::investigation_specialists,
             investigations::commands::start_investigation,
             investigations::commands::list_investigations,
+            investigations::commands::list_specialist_task_activity,
             investigations::commands::get_investigation,
             investigations::commands::investigation_events,
             investigations::commands::investigation_result,
