@@ -28,6 +28,7 @@ const ORDER = [
   'jobs',
   'investigations',
   'settings',
+  'quick-investigation',
 ];
 
 export const HELP_TOPICS: HelpTopic[] = Object.entries(RAW)

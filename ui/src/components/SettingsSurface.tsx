@@ -36,6 +36,8 @@ export interface SettingsSurfaceProps {
   parallelism?: IngestParallelism | null;
   /** Persist a new setting: 0 = Auto, otherwise a fixed worker count. */
   onParallelismChange?: (setting: number) => void;
+  quickDispatchFallbackEnabled?: boolean;
+  onQuickDispatchFallbackChange?: (enabled: boolean) => void;
 }
 
 /** "Ingest parallelism" (#236): Auto or a fixed worker count. Workers only
@@ -251,6 +253,8 @@ export function SettingsSurface({
   onRevokeConsent,
   parallelism = null,
   onParallelismChange,
+  quickDispatchFallbackEnabled = true,
+  onQuickDispatchFallbackChange,
 }: SettingsSurfaceProps) {
   return (
     <section className="settings-surface" aria-label="Settings">
@@ -273,6 +277,13 @@ export function SettingsSurface({
       </p>
 
       {error && <p className="error-text">{error}</p>}
+
+      <h3 className="settings-section-title">Quick investigation shortcut</h3>
+      <label className="tier-card">
+        <input type="checkbox" checked={quickDispatchFallbackEnabled} onChange={(event) => onQuickDispatchFallbackChange?.(event.target.checked)} />
+        <span>Enable Cmd+J fallback for quick investigation</span>
+      </label>
+      <p className="muted">Cmd+Space always opens quick investigation. Cmd+J can be disabled here if another app uses it.</p>
 
       <h3 className="settings-section-title">Recovery tiers</h3>
       <ul className="tier-cards">
