@@ -837,3 +837,7 @@ fn mcp_adapter_runs_all_task_operations_and_preserves_principal_replay() {
 #[cfg(unix)]
 #[path = "activation_tests/task_relay.rs"]
 mod task_relay;
+
+#[cfg(unix)]
+#[path = "activation_tests/service_relay.rs"]
+mod service_relay;

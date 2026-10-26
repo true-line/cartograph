@@ -12,14 +12,14 @@ use std::{
     sync::mpsc,
 };
 
-struct Relay {
+pub(super) struct Relay {
     child: Child,
     replies: mpsc::Receiver<Value>,
     reader: Option<std::thread::JoinHandle<()>>,
     id: usize,
 }
 impl Relay {
-    fn open(record: &std::path::Path) -> Self {
+    pub(super) fn open(record: &std::path::Path) -> Self {
         let binary = std::path::PathBuf::from(
             std::env::var_os("CARTOGRAPH_TEST_MCP_RELAY")
                 .expect("explicit source-built relay required"),
@@ -76,17 +76,17 @@ impl Relay {
         input.write_all(b"\n").unwrap();
         input.flush().unwrap();
     }
-    fn rpc(&mut self, method: &str, params: Value) -> Value {
+    pub(super) fn rpc(&mut self, method: &str, params: Value) -> Value {
         self.id += 1;
         self.write(json!({"jsonrpc":"2.0","id":self.id,"method":method,"params":params}));
         let reply = self.replies.recv_timeout(Duration::from_secs(15)).unwrap();
         assert_eq!(reply["id"], self.id);
         reply
     }
-    fn call(&mut self, name: &str, args: Value) -> Value {
+    pub(super) fn call(&mut self, name: &str, args: Value) -> Value {
         self.rpc("tools/call", json!({"name":name,"arguments":args}))
     }
-    fn close(mut self) {
+    pub(super) fn close(mut self) {
         self.child.stdin.take();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
