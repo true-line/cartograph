@@ -2542,6 +2542,7 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-yaml",
  "url",
+ "work-packets",
 ]
 
 [[package]]

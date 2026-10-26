@@ -18,6 +18,8 @@ core-prov = { workspace = true }
 source-walk = { workspace = true }
 core-redact = { workspace = true }
 adapters-fw = { workspace = true }
+# The W6 work packet an uncovered adapter cell is handed off as (#1072).
+work-packets = { workspace = true }
 toml = "1.1"
 # Span-preserving YAML for declared schedule files (#770).
 tree-sitter = "0.27"
