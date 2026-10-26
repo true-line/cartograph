@@ -1,0 +1,537 @@
+{
+  "edges": [
+    {
+      "dst": "res:local/p@observed:auth0:tenant.eu.auth0.com",
+      "label": "USES",
+      "props": {
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "04ebe05fa9ce1a9ec26336973b657da9b63ea73dd410673517818f22d82d53c8",
+          "evidence": [
+            {
+              "byte_end": 362,
+              "byte_start": 295,
+              "commit_sha": "abc123",
+              "path": "src/clients.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "registry": "builtin:observed-clients.json"
+      },
+      "src": "file:local/p@src/clients.ts"
+    },
+    {
+      "dst": "res:local/p@observed:aws-s3",
+      "label": "USES",
+      "props": {
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "7a163fb4825fc0d5ea20a9744e3e694f489dadc604b3dd8f7f548539273cb1a2",
+          "evidence": [
+            {
+              "byte_end": 199,
+              "byte_start": 162,
+              "commit_sha": "abc123",
+              "path": "src/clients.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "registry": "builtin:observed-clients.json"
+      },
+      "src": "file:local/p@src/clients.ts"
+    },
+    {
+      "dst": "gap:observed:local/p@src/api.ts@452",
+      "label": "USES",
+      "props": {
+        "client": "axios",
+        "prov": {
+          "confidence_tier": "Gap",
+          "content_hash": "2a65057b638ec866ccf4572138dbb19243612010a0d61ce676c1b6c8db0a2ef8",
+          "evidence": [
+            {
+              "byte_end": 469,
+              "byte_start": 452,
+              "commit_sha": "abc123",
+              "path": "src/api.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "reason": "runtime-computed http-api identity",
+        "registry": "builtin:observed-clients.json"
+      },
+      "src": "sym:local/p@src/api.ts#follow"
+    },
+    {
+      "dst": "res:local/p@observed:http-api:https://api.example.com",
+      "label": "USES",
+      "props": {
+        "client": "fetch",
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "531c985e396166a99307199c213082fa14d30e6a179f1d3a314f36711f2b2b2e",
+          "evidence": [
+            {
+              "byte_end": 207,
+              "byte_start": 180,
+              "commit_sha": "abc123",
+              "path": "src/api.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        }
+      },
+      "src": "sym:local/p@src/api.ts#getItem"
+    },
+    {
+      "dst": "res:local/p@observed:http-api:env:VITE_HEALTH_URL",
+      "label": "USES",
+      "props": {
+        "client": "fetch",
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "de65d35dabf3652faeb109a6dc2ff666f83914d987339e739e34ad051938a1c8",
+          "evidence": [
+            {
+              "byte_end": 397,
+              "byte_start": 347,
+              "commit_sha": "abc123",
+              "path": "src/api.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        }
+      },
+      "src": "sym:local/p@src/api.ts#health"
+    },
+    {
+      "dst": "res:local/p@observed:http-api:https://api.example.com",
+      "label": "USES",
+      "props": {
+        "client": "fetch",
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "26a1d46242eb24e88ca6ec3ddcd37a75e834d815e22005294fe639eb994b52f4",
+          "evidence": [
+            {
+              "byte_end": 128,
+              "byte_start": 107,
+              "commit_sha": "abc123",
+              "path": "src/api.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        }
+      },
+      "src": "sym:local/p@src/api.ts#listItems"
+    },
+    {
+      "dst": "res:local/p@observed:http-api:https://search.example.com",
+      "label": "USES",
+      "props": {
+        "client": "axios",
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "d791e0a1345e0a596515305768ed2571730e39dd8ff8d7a01163ec0f9e86cbe3",
+          "evidence": [
+            {
+              "byte_end": 306,
+              "byte_start": 257,
+              "commit_sha": "abc123",
+              "path": "src/api.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "registry": "builtin:observed-clients.json"
+      },
+      "src": "sym:local/p@src/api.ts#search"
+    },
+    {
+      "dst": "gap:observed:local/p@src/clients.ts@250",
+      "label": "USES",
+      "props": {
+        "prov": {
+          "confidence_tier": "Gap",
+          "content_hash": "ccf8d63f54d534ec7de2c769a94de156754c789bd97e645d94783411643bc0da",
+          "evidence": [
+            {
+              "byte_end": 270,
+              "byte_start": 250,
+              "commit_sha": "abc123",
+              "path": "src/clients.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "reason": "runtime-computed mongodb identity",
+        "registry": "builtin:observed-clients.json"
+      },
+      "src": "sym:local/p@src/clients.ts#connect"
+    },
+    {
+      "dst": "res:local/p@observed:mongodb",
+      "label": "USES",
+      "props": {
+        "gap": "gap:observed:local/p@src/clients.ts@250",
+        "instance_unresolved": true,
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "5e72955f7b6a004bbcf6186e16f48529903551f79086f57bc8d4e7031f2da991",
+          "evidence": [
+            {
+              "byte_end": 270,
+              "byte_start": 250,
+              "commit_sha": "abc123",
+              "path": "src/clients.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "registry": "builtin:observed-clients.json"
+      },
+      "src": "sym:local/p@src/clients.ts#connect"
+    },
+    {
+      "dst": "res:local/p@observed:indexeddb:inventory",
+      "label": "USES",
+      "props": {
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "5c432341fca3f74cd3cb7854e3a7cdca7135bbff7352cdd9ae0dde81c3c87ca0",
+          "evidence": [
+            {
+              "byte_end": 73,
+              "byte_start": 43,
+              "commit_sha": "abc123",
+              "path": "src/storage.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        }
+      },
+      "src": "sym:local/p@src/storage.ts#openInventory"
+    },
+    {
+      "dst": "res:local/p@observed:web-storage:localStorage",
+      "label": "USES",
+      "props": {
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "c4a5ee380148838e91972861852c5f3021e4ec28ab079cfe537ff106c13347f5",
+          "evidence": [
+            {
+              "byte_end": 143,
+              "byte_start": 123,
+              "commit_sha": "abc123",
+              "path": "src/storage.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        }
+      },
+      "src": "sym:local/p@src/storage.ts#rememberTab"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "gap:observed:local/p@src/api.ts@452",
+      "label": "Gap",
+      "props": {
+        "attempted_tiers": [
+          "T0"
+        ],
+        "kind": "http-api",
+        "prov": {
+          "confidence_tier": "Gap",
+          "content_hash": "d69fac5054cb989c783f490fe24acd42fb2d47557a442f5375f7ccaa6f204bde",
+          "evidence": [
+            {
+              "byte_end": 469,
+              "byte_start": 452,
+              "commit_sha": "abc123",
+              "path": "src/api.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "provider": "http-api",
+        "raw": "target",
+        "reason": "runtime-computed http-api identity"
+      }
+    },
+    {
+      "id": "gap:observed:local/p@src/clients.ts@250",
+      "label": "Gap",
+      "props": {
+        "attempted_tiers": [
+          "T0"
+        ],
+        "kind": "sdk-client",
+        "prov": {
+          "confidence_tier": "Gap",
+          "content_hash": "4412d83ce4ddae8b3fa48168a053350ae74131a8a75fea2dc4b2e20f8823e5c0",
+          "evidence": [
+            {
+              "byte_end": 270,
+              "byte_start": 250,
+              "commit_sha": "abc123",
+              "path": "src/clients.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "provider": "mongodb",
+        "raw": "uri",
+        "reason": "runtime-computed mongodb identity"
+      }
+    },
+    {
+      "id": "res:local/p@observed:auth0:tenant.eu.auth0.com",
+      "label": "Resource",
+      "props": {
+        "identity": "tenant.eu.auth0.com",
+        "kind": "auth-provider",
+        "logical_id": "observed:auth0:tenant.eu.auth0.com",
+        "module": "@auth0/auth0-spa-js",
+        "observed": true,
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "7a8f192ccb0ff2bb55c67ae7d914a3a35054ef97ec86ce17ce3f9db779492a04",
+          "evidence": [
+            {
+              "byte_end": 362,
+              "byte_start": 295,
+              "commit_sha": "abc123",
+              "path": "src/clients.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "provider": "auth0",
+        "type": "auth0"
+      }
+    },
+    {
+      "id": "res:local/p@observed:aws-s3",
+      "label": "Resource",
+      "props": {
+        "kind": "sdk-client",
+        "logical_id": "observed:aws-s3",
+        "module": "@aws-sdk/client-s3",
+        "observed": true,
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "741840bc65a054e84a8c01fc920cff15b1af3aa998f0f7403a60a35bf3011125",
+          "evidence": [
+            {
+              "byte_end": 199,
+              "byte_start": 162,
+              "commit_sha": "abc123",
+              "path": "src/clients.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "provider": "aws-s3",
+        "type": "aws-s3"
+      }
+    },
+    {
+      "id": "res:local/p@observed:http-api:env:VITE_HEALTH_URL",
+      "label": "Resource",
+      "props": {
+        "env_key": "VITE_HEALTH_URL",
+        "kind": "http-api",
+        "logical_id": "observed:http-api:env:VITE_HEALTH_URL",
+        "observed": true,
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "a8c1b8ba03a7bf8b76399161c2966773995afcca4e3129d1b2e5573117e9baa4",
+          "evidence": [
+            {
+              "byte_end": 397,
+              "byte_start": 347,
+              "commit_sha": "abc123",
+              "path": "src/api.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "provider": "http-api",
+        "type": "http-api"
+      }
+    },
+    {
+      "id": "res:local/p@observed:http-api:https://api.example.com",
+      "label": "Resource",
+      "props": {
+        "identity": "https://api.example.com",
+        "kind": "http-api",
+        "logical_id": "observed:http-api:https://api.example.com",
+        "observed": true,
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "2142047a9bbcb77f1d349583fe51b09cf4e67e6c508ccbef611e4a5c41436cf0",
+          "evidence": [
+            {
+              "byte_end": 128,
+              "byte_start": 107,
+              "commit_sha": "abc123",
+              "path": "src/api.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "provider": "http-api",
+        "type": "http-api"
+      }
+    },
+    {
+      "id": "res:local/p@observed:http-api:https://search.example.com",
+      "label": "Resource",
+      "props": {
+        "identity": "https://search.example.com",
+        "kind": "http-api",
+        "logical_id": "observed:http-api:https://search.example.com",
+        "observed": true,
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "0cd870c8782a613455b8480a8686ac89d9288819755934302a532658f68ce174",
+          "evidence": [
+            {
+              "byte_end": 306,
+              "byte_start": 257,
+              "commit_sha": "abc123",
+              "path": "src/api.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "provider": "http-api",
+        "type": "http-api"
+      }
+    },
+    {
+      "id": "res:local/p@observed:indexeddb:inventory",
+      "label": "Resource",
+      "props": {
+        "identity": "inventory",
+        "kind": "browser-storage",
+        "logical_id": "observed:indexeddb:inventory",
+        "observed": true,
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "9eadbfedafa91c5f8c12efa20453bdb5e867d8481f333f1adefbc96aa3ee94b3",
+          "evidence": [
+            {
+              "byte_end": 73,
+              "byte_start": 43,
+              "commit_sha": "abc123",
+              "path": "src/storage.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "provider": "indexeddb",
+        "type": "indexeddb"
+      }
+    },
+    {
+      "id": "res:local/p@observed:mongodb",
+      "label": "Resource",
+      "props": {
+        "instance_unresolved": true,
+        "kind": "sdk-client",
+        "logical_id": "observed:mongodb",
+        "module": "mongodb",
+        "observed": true,
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "94d59de28a6cdcc9597ff2a938b74ffb36172d7eea3c95dff82b734e6cd37a08",
+          "evidence": [
+            {
+              "byte_end": 270,
+              "byte_start": 250,
+              "commit_sha": "abc123",
+              "path": "src/clients.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "provider": "mongodb",
+        "type": "mongodb"
+      }
+    },
+    {
+      "id": "res:local/p@observed:web-storage:localStorage",
+      "label": "Resource",
+      "props": {
+        "identity": "localStorage",
+        "kind": "browser-storage",
+        "logical_id": "observed:web-storage:localStorage",
+        "observed": true,
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "bee0548425d9bc10c58fd3693e4fb31dbd59947557e7ee9f3234b087a973d377",
+          "evidence": [
+            {
+              "byte_end": 143,
+              "byte_start": 123,
+              "commit_sha": "abc123",
+              "path": "src/storage.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "provider": "web-storage",
+        "type": "web-storage"
+      }
+    }
+  ]
+}
