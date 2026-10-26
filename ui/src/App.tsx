@@ -36,6 +36,8 @@ import { InvestigationsSurface } from './components/InvestigationsSurface';
 import { investigationIsActive, useInvestigationStore } from './investigationStore';
 import { useSpecialistActivityStore } from './specialistActivityStore';
 import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
+import { SavedResultNotices } from './components/SavedResultNotices';
+import { useSavedResultNoticeStore } from './savedResultNoticeStore';
 import { readQuickDispatchFallback, writeQuickDispatchFallback } from './quickDispatchPreference';
 import type { InvestigationChanged } from './investigationTypes';
 import type { Job, PreflightProgress, SpecArtifact, SpecAssertion, SpecBundle } from './store';
@@ -258,6 +260,7 @@ export default function App() {
         const stop = await listen<InvestigationChanged>('investigation://changed', (event) => {
           useInvestigationStore.getState().invalidate(event.payload);
           useSpecialistActivityStore.getState().invalidate();
+          useSavedResultNoticeStore.getState().observe(event.payload);
         });
         if (disposed) stop(); else unlisten = () => { stop(); stopReviews(); };
       } catch { /* Browser previews have no event bridge. */ }
@@ -823,6 +826,10 @@ export default function App() {
         onNavigate={navigate}
       />
       <InvestigationQuickDispatch fallbackEnabled={quickDispatchFallbackEnabled} openRequest={quickDispatchOpenRequest} onNavigate={navigate} />
+      <SavedResultNotices view={view} onOpenTask={(taskId) => {
+        navigate('investigations');
+        void useInvestigationStore.getState().open(taskId);
+      }} />
       <LegendPopover open={legendOpen} onClose={() => setLegendOpen(false)} />
       {selected && (
         <div className="evidence-area">

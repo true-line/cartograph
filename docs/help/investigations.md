@@ -34,3 +34,10 @@ exact for that bounded observation. A continuation page or unmatched specialist
 version is labeled as a partial lower bound; it does not claim the full runtime
 queue. During refresh the summary is last observed, and an error hides counts
 along with stale task rows.
+
+When a specialist result is saved while its transcript is not open, the app may
+show a **Saved result ready** notice. Open it to load that exact investigation.
+Dismissing the toast keeps it in the session-only **New results** list; the
+notice is consumed only after the matching saved result and transcript are
+visible. This checks persisted task-bound result references only. It does not
+recover unread state after restart or create assistant messages.
