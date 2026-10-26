@@ -3077,6 +3077,7 @@ fn plugin_coverage(plugins: &[ActivePlugin]) -> Vec<ingest::preflight::PluginCov
         .iter()
         .map(|plugin| ingest::preflight::PluginCoverage {
             plugin_id: plugin.plugin_id.clone(),
+            version: plugin.content_hash.clone(),
             extensions: plugin.extensions.clone(),
             cells: plugin.cells.clone(),
             languages: plugin.languages.clone(),
