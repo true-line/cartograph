@@ -17,7 +17,7 @@ for f in sorted(root.glob("tests/**/*.py")):
         seg = ast.get_source_segment(src, node) or ""
         if "flask_client." not in seg:
             continue
-        key = f"{f.relative_to(root)}::{name}"
+        key = f"{f.relative_to(root).as_posix()}::{name}"
         rows.append((hashlib.sha256(key.encode()).hexdigest(), key, node.lineno))
 rows.sort()
 print(len(rows), "candidate tests")

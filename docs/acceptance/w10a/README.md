@@ -13,8 +13,9 @@ imports or runs SimpleLogin code (`python3 -I select.py <app checkout>`). A
 pytest test is a `test*` function at module level or a `test*` method of a
 `Test*` class, in `test_*.py` or `*_test.py`. Of the 330 tests whose source
 contains `flask_client.`, it takes the 20 with the lowest sha256 of
-`<path>::<qualified name>`. All 26 `flask_client.<verb>(…)` calls in those
-tests are labelled; `session_transaction()` is not a request.
+`<path>::<qualified name>`, with the path in POSIX form. All 26
+`flask_client.<verb>(…)` calls in those tests are labelled;
+`session_transaction()` is not a request.
 
 Each call records:
 
@@ -25,20 +26,19 @@ Each call records:
   - `link`: a `REQUESTS` edge to the truth Endpoint.
   - `link:follows_redirects`: the same, marked `follows_redirects`, with no
     expectations.
-  - `gap:<reason>`: a Gap naming the call.
-  - `link_or_gap:multiple_urls`: one view registered under three rules.
-    Either outcome is accepted, and the call is scored on its own line, not
-    in the totals.
+  - `gap:<reason>`: a Gap naming the call. `gap:multiple_urls` is one view
+    registered under three rules: AC-0343 makes an endpoint name that builds
+    more than one URL a Gap, even though the handler is unambiguous.
 - **statuses / keys**: what the test asserts about this call's response.
   Statuses are `status_code == N` assertions. Keys are `json[…]` and
   `get_json()[…]` reads and `"k" in r.json`, up to the next binding of the
   response name. An `if` condition, `>=`, `in [..]` or whole-body equality
   asserts nothing here; the notes mark each such case.
 
-The sample contains 19 `link` calls (3 of them `follows_redirects`), 6 `gap`
-calls and 1 `link_or_gap`. It also contains SimpleLogin's own test bug: line
-751 of `tests/api/test_alias.py` posts to `/api/aliases/random/new`, which no
-route serves.
+The sample contains 19 `link` calls (3 of them `follows_redirects`) and 7
+`gap` calls. It also contains SimpleLogin's own test bug: line 751 of
+`tests/api/test_alias.py` posts to `/api/aliases/random/new`, which no route
+serves.
 
 ## Scoring
 
