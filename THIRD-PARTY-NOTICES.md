@@ -15,8 +15,8 @@ Cartograph bundles the following Rust crates. Each is used under the terms of
 its respective license, reproduced below. This list is generated from the
 dependency lockfile by `cargo about`; do not edit by hand.
 
-- Apache License 2.0 (277 crate(s))
-- MIT License (75 crate(s))
+- Apache License 2.0 (272 crate(s))
+- MIT License (74 crate(s))
 - Unicode License v3 (19 crate(s))
 - BSD 3-Clause "New" or "Revised" License (9 crate(s))
 - Mozilla Public License 2.0 (5 crate(s))
@@ -694,7 +694,6 @@ Used by:
 - regalloc2 0.15.2 — https://github.com/bytecodealliance/regalloc2
 - target-lexicon 0.13.5 — https://github.com/bytecodealliance/target-lexicon
 - wasmtime-environ 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-cache 49.0.4 — https://github.com/bytecodealliance/wasmtime
 - wasmtime-internal-cranelift 49.0.4 — https://github.com/bytecodealliance/wasmtime
 - wasmtime-internal-fiber 49.0.4 — https://github.com/bytecodealliance/wasmtime
 - wasmtime-internal-unwinder 49.0.4 — https://github.com/bytecodealliance/wasmtime
@@ -6317,8 +6316,6 @@ Used by:
 - cranelift-bitset 0.136.4 — https://github.com/bytecodealliance/wasmtime
 - cxx 1.0.197 — https://github.com/dtolnay/cxx
 - cxxbridge-macro 1.0.197 — https://github.com/dtolnay/cxx
-- directories-next 2.0.0 — https://github.com/xdg-rs/dirs/tree/master/directories
-- dirs-sys-next 0.1.2 — https://github.com/xdg-rs/dirs/tree/master/dirs-sys
 - dirs-sys 0.5.0 — https://github.com/dirs-dev/dirs-sys-rs
 - dirs 7.0.0 — https://codeberg.org/dirs/dirs-rs
 - dispatch2 0.3.1 — https://github.com/madsmtm/objc2
@@ -6391,8 +6388,6 @@ Used by:
 - wasmtime-wasi-io 49.0.4 — https://github.com/bytecodealliance/wasmtime
 - wast 35.0.2 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wast
 - witx 0.9.1 — https://github.com/WebAssembly/WASI
-- zstd-safe 7.2.4 — https://github.com/gyscos/zstd-rs
-- zstd-sys 2.0.16+zstd.1.5.7 — https://github.com/gyscos/zstd-rs
 
 ```
 Apache License
@@ -8000,23 +7995,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-```
-
-## MIT License
-
-Used by:
-- zstd 0.13.3 — https://github.com/gyscos/zstd-rs
-
-```
-The MIT License (MIT)
-Copyright (c) 2016 Alexandre Bury
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
