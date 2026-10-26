@@ -445,11 +445,14 @@ export const pool = new Pool({ connectionString: "postgres://own.example" });
         .map(|n| n.id.as_str())
         .collect();
     // The innermost binding wins: the nested `require` proves `Pool` past
-    // the outer parameter of the same name.
+    // the outer parameter of the same name. The two Gap sites still prove
+    // their providers, with the instance unresolved (AC-0376).
     assert_eq!(
         resources,
         [
+            "res:local/p@observed:indexeddb",
             "res:local/p@observed:indexeddb:orders",
+            "res:local/p@observed:mongodb",
             "res:local/p@observed:postgres",
         ]
     );

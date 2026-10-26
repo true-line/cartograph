@@ -151,7 +151,22 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
     let mut resources: BTreeMap<String, Node> = BTreeMap::new();
-    for site in sites {
+    // A site whose instance is unresolved still proves its provider: after
+    // its Gap, it is placed again without an identity, naming the Gap (#1116).
+    let mut queue: std::collections::VecDeque<(std::borrow::Cow<ObservedSite>, Option<String>)> =
+        sites
+            .iter()
+            .map(|site| (std::borrow::Cow::Borrowed(site), None))
+            .collect();
+    let mut deferred = Vec::new();
+    // Provider resources some site proves without any identity: those carry
+    // no `instance_unresolved` marker, whichever site created them.
+    let mut identity_less = std::collections::BTreeSet::new();
+    while let Some((site, unresolved)) = queue.pop_front().or_else(|| {
+        queue.extend(deferred.drain(..));
+        queue.pop_front()
+    }) {
+        let site = site.as_ref();
         let http = site.family == ObservedFamily::HttpApi;
         // An HTTP call with no URL, or a relative one, is the caller's own
         // origin or a base set elsewhere: it names no other resource.
@@ -218,6 +233,9 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                     None => format!("observed:{}", provider),
                 };
                 let resource_id = format!("res:{repo}@{logical_id}");
+                if instance.is_none() && unresolved.is_none() {
+                    identity_less.insert(resource_id.clone());
+                }
                 let resource = || {
                     let mut props = serde_json::json!({
                         "type": provider,
@@ -232,6 +250,9 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                     });
                     for marker in &site.identity_assumptions {
                         props[*marker] = serde_json::json!(true);
+                    }
+                    if unresolved.is_some() {
+                        props["instance_unresolved"] = serde_json::json!(true);
                     }
                     if let Some(module) = site.module.as_ref().filter(|_| !http) {
                         props["module"] = serde_json::json!(module);
@@ -282,6 +303,10 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                 for marker in &site.identity_assumptions {
                     edge_props.insert((*marker).into(), serde_json::json!(true));
                 }
+                if let Some(gap) = &unresolved {
+                    edge_props.insert("instance_unresolved".into(), serde_json::json!(true));
+                    edge_props.insert("gap".into(), serde_json::json!(gap));
+                }
                 edge_props.insert(
                     "prov".into(),
                     prov_value(
@@ -331,11 +356,30 @@ pub fn assemble(source: &ObservedSource, sites: &[ObservedSite]) -> (Vec<Node>, 
                 );
                 edges.push(Edge {
                     src,
-                    dst: gap_id,
+                    dst: gap_id.clone(),
                     label: "USES".into(),
                     props: serde_json::Value::Object(edge_props),
                 });
+                // The client call proves the provider even though the
+                // instance is unknown. HTTP is excluded: a computed URL
+                // names no origin, and the client-call pass records it.
+                if !http {
+                    deferred.push((
+                        std::borrow::Cow::Owned(ObservedSite {
+                            identity: None,
+                            identity_source: None,
+                            identity_assumptions: Vec::new(),
+                            ..site.clone()
+                        }),
+                        Some(gap_id),
+                    ));
+                }
             }
+        }
+    }
+    for id in &identity_less {
+        if let Some(props) = resources.get_mut(id).and_then(|n| n.props.as_object_mut()) {
+            props.remove("instance_unresolved");
         }
     }
     nodes.extend(resources.into_values());
