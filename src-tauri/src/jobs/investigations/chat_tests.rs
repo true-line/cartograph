@@ -1,3 +1,4 @@
+use super::super::chat::StoredChatAuthor;
 use super::*;
 use crate::jobs::investigations::chat::StoredChatMessage;
 
@@ -59,6 +60,190 @@ fn dispatch_chat_replay_is_unique_and_question_is_redacted_across_reopen() {
     assert_eq!(
         chat::read_for_task(&fixture.store.conn, &id).unwrap(),
         transcript
+    );
+}
+
+// AC-0377: the app-facing read returns only saved, validated attribution and
+// identifies the pending question as user-authored.
+#[test]
+fn investigation_chat_read_returns_saved_pending_identity_and_legacy_absence() {
+    let mut fixture = Fixture::new();
+    let started = fixture
+        .store
+        .start_investigation(
+            &request("chat-read-pending", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap();
+    let id = started.detail.summary.investigation_id.clone();
+    let transcript = fixture.store.investigation_chat(&id).unwrap().unwrap();
+    assert_eq!(transcript.task_id, id);
+    assert_eq!(transcript.messages.len(), 1);
+    assert_eq!(transcript.messages[0].ordinal, 0);
+    assert_eq!(transcript.messages[0].author, StoredChatAuthor::User);
+    assert_eq!(
+        transcript.producer.specialist_id,
+        started.detail.specialist.id
+    );
+    assert_eq!(
+        transcript.producer.specialist_version,
+        started.detail.specialist.version
+    );
+    assert_eq!(
+        transcript.producer.prompt_fingerprint,
+        started.detail.specialist.prompt_fingerprint
+    );
+    assert_eq!(transcript.producer.tier, started.detail.specialist.tier);
+    assert_eq!(
+        transcript.producer.confidence_tier,
+        started.detail.specialist.confidence_tier
+    );
+    assert_eq!(
+        transcript.producer.provider_mode,
+        started.detail.provider.mode
+    );
+    assert_eq!(
+        transcript.producer.provider_id,
+        started.detail.provider.provider_id
+    );
+    assert_eq!(transcript.producer.model, started.detail.provider.model);
+    assert_eq!(
+        transcript.producer.protocol_version,
+        started.detail.provider.protocol_version
+    );
+
+    fixture.store.cancel_investigation(&id).unwrap();
+    fixture.store.clear_finished().unwrap();
+    fixture.store = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(
+        fixture.store.investigation_chat(&id).unwrap(),
+        Some(transcript)
+    );
+    assert_eq!(
+        fixture.store.investigation_chat("investigation:missing"),
+        Err(InvestigationStoreError::Missing),
+        "unknown task is an error, distinct from a legacy task without chat"
+    );
+}
+
+// AC-0377: completed chat reads retain stable IDs and bind the specialist
+// message to the exact result already admitted for this task.
+#[test]
+fn investigation_chat_read_reopens_completed_task_with_bound_result_reference() {
+    let mut fixture = Fixture::new();
+    let (id, execution) = fixture.start("chat-read-completed", InvestigationProviderMode::Local);
+    let ledger = fixture.prepare(&id, &execution, false);
+    begin(&mut fixture, &id, &execution, step(&ledger, 1));
+    let result = finish(&id, &ledger);
+    let current = fixture.store.investigation(&id).unwrap();
+    fixture
+        .store
+        .advance_investigation(
+            &execution,
+            current.summary.revision,
+            InvestigationTransition::ActionAdmitted {
+                response: response("step:1", 100),
+                tool: None,
+                result: Some(Box::new(result.clone())),
+            },
+        )
+        .unwrap();
+
+    let mut reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    let transcript = reopened.investigation_chat(&id).unwrap().unwrap();
+    assert_eq!(transcript.messages.len(), 2);
+    assert_eq!(transcript.messages[0].author, StoredChatAuthor::User);
+    assert_eq!(transcript.messages[1].author, StoredChatAuthor::Specialist);
+    let saved_hash: String = reopened
+        .conn
+        .query_row(
+            "SELECT body_hash FROM investigation_results WHERE task_id=?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(matches!(
+        &transcript.messages[1].message,
+        StoredChatMessage::ResultReference { task_id, result_id, result_hash }
+            if task_id == &id
+                && result_id == &result.result_id
+                && result_hash == &saved_hash
+    ));
+    assert_eq!(transcript.messages[0].ordinal, 0);
+    assert_eq!(transcript.messages[1].ordinal, 1);
+    assert!(!transcript.messages[0].id.is_empty());
+    assert!(!transcript.messages[1].id.is_empty());
+    reopened.clear_finished().unwrap();
+    assert_eq!(reopened.investigation_chat(&id).unwrap(), Some(transcript));
+}
+
+#[test]
+fn investigation_chat_public_read_fails_closed_on_hash_and_size_corruption() {
+    let mut fixture = Fixture::new();
+    let started = fixture
+        .store
+        .start_investigation(
+            &request("chat-read-corrupt", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap();
+    let id = started.detail.summary.investigation_id;
+    let message_id: String = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT id FROM investigation_chat_messages WHERE task_id=?1 AND ordinal=0",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let trigger: String = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='investigation_chat_messages_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    fixture
+        .store
+        .conn
+        .execute_batch("DROP TRIGGER investigation_chat_messages_no_update")
+        .unwrap();
+    fixture
+        .store
+        .conn
+        .execute(
+            "UPDATE investigation_chat_messages SET body_hash=?1 WHERE id=?2",
+            params!["0".repeat(64), message_id],
+        )
+        .unwrap();
+    fixture.store.conn.execute_batch(&trigger).unwrap();
+    assert_eq!(
+        fixture.store.investigation_chat(&id),
+        Err(InvestigationStoreError::Invalid),
+        "the app reader rejects a bounded body with a mismatched digest"
+    );
+    let oversized = vec![b'x'; chat::MAX_USER_MESSAGE_BYTES + 1];
+    fixture
+        .store
+        .conn
+        .execute_batch("DROP TRIGGER investigation_chat_messages_no_update")
+        .unwrap();
+    fixture
+        .store
+        .conn
+        .execute(
+            "UPDATE investigation_chat_messages SET body=?1,body_hash=?2 WHERE id=?3",
+            params![&oversized, core_prov::content_hash(&oversized), message_id],
+        )
+        .unwrap();
+    fixture.store.conn.execute_batch(&trigger).unwrap();
+    assert_eq!(
+        fixture.store.investigation_chat(&id),
+        Err(InvestigationStoreError::Invalid),
+        "the app reader rejects a row beyond the message byte cap"
     );
 }
 

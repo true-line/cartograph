@@ -14,6 +14,7 @@ mod admission_journal;
 mod admission_transition;
 #[path = "investigations/chat.rs"]
 mod chat;
+pub(crate) use chat::StoredChatTranscript;
 #[path = "investigations/completion.rs"]
 mod completion;
 pub(crate) use completion::NextPromptFinish;
@@ -744,6 +745,19 @@ impl JobStore {
         id: &str,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
         self.investigation_access(id, None)
+    }
+
+    /// Read the bounded archival chat and its saved producer identity from one
+    /// validated SQLite snapshot. Legacy tasks without chat return `None`.
+    pub(crate) fn investigation_chat(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredChatTranscript>, InvestigationStoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let transcript = chat::read_from_snapshot(&tx, id)?;
+        tx.commit()?;
+        Ok(transcript)
     }
 
     pub(crate) fn investigation_access(

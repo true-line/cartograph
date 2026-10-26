@@ -345,6 +345,22 @@ pub(crate) async fn investigation_result(
     .await
 }
 
+#[tauri::command]
+pub(crate) async fn get_investigation_chat(
+    investigation_id: String,
+    app: tauri::AppHandle,
+) -> Result<Option<crate::jobs::investigations::StoredChatTranscript>, String> {
+    crate::off_ui_thread(move || {
+        app.state::<AppState>()
+            .jobs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .investigation_chat(&investigation_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
 fn pending(state: &AppState, id: &str) -> Result<Option<InvestigationConsent>, String> {
     let Some(live) = state.investigations.get(id).map_err(|e| e.to_string())? else {
         // A different or restarted process cannot reconstruct the raw preview.

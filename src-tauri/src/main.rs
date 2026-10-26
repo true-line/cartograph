@@ -5950,6 +5950,7 @@ fn main() {
             investigations::commands::get_investigation,
             investigations::commands::investigation_events,
             investigations::commands::investigation_result,
+            investigations::commands::get_investigation_chat,
             investigations::finding_review_commands::get_investigation_finding_reviews,
             investigations::finding_review_commands::review_investigation_finding,
             investigations::commands::investigation_consent,

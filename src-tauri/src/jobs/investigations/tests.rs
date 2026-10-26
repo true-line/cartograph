@@ -583,6 +583,7 @@ fn durable_chat_v3_migration_preserves_task_bytes_without_backfill() {
         )
         .unwrap();
     fixture.store = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(fixture.store.investigation_chat(&id).unwrap(), None);
     let migrated: (Vec<u8>, String) = fixture
         .store
         .conn
