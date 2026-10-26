@@ -334,6 +334,21 @@ impl SpecialistId {
                 } else {
                     discovery
                 };
+                // The Spec Writer host admits only proposed_design findings.
+                // Keep COMMON immutable for every historical role generation.
+                let common = if self == Self::SpecWriterV1 {
+                    common
+                        .replace(
+                            r#"{"type":"finish","findings":[{"claim_kind":"inferred_interpretation","title":"Short title","statement":"A concise interpretation in your own words.","citation_ids":["an admitted citation ID"],"limitations":["The scope or uncertainty that limits this finding."]}],"knowledge_completeness":"partial","limitations":["Remaining coverage limitations."]}"#,
+                            r#"{"type":"finish","findings":[{"claim_kind":"proposed_design","title":"Short proposal","statement":"A bounded proposal grounded in admitted evidence.","citation_ids":["an admitted citation ID"],"limitations":["The scope or uncertainty that limits this proposal."]}],"knowledge_completeness":"partial","limitations":["Remaining coverage limitations."]}"#,
+                        )
+                        .replace(
+                            "Claim kinds are implemented_behavior, documented_intent, inferred_interpretation and proposed_design.",
+                            "The only valid claim kind is proposed_design.",
+                        )
+                } else {
+                    common
+                };
                 let common = common.replace(r#"{"type":"finish","findings"# , r#"{"schema_version":1,"outcome":"supported","action":{"type":"finish","findings"#).replace(r#"["Remaining coverage limitations."]}"#, r#"["Remaining coverage limitations."]}}"#);
                 let admission = if self.uses_next_prompt_admission() {
                     NEXT_PROMPT_ADMISSION_V10
@@ -513,6 +528,31 @@ mod policy_tests {
         assert!(!role.uses_next_prompt_admission());
         let prompt = role.prompt();
         assert!(prompt.contains(r#""schema_version":1,"outcome":"supported""#));
+        let finish_example = prompt
+            .lines()
+            .find(|line| {
+                line.starts_with(
+                    r#"{"schema_version":1,"outcome":"supported","action":{"type":"finish""#,
+                )
+            })
+            .expect("Spec Writer prompt includes its wrapped finish example");
+        let finish_example: serde_json::Value = serde_json::from_str(finish_example).unwrap();
+        assert_eq!(
+            finish_example["action"]["findings"][0]["claim_kind"],
+            "proposed_design"
+        );
+        assert!(
+            finish_example["action"]["findings"][0]["statement"]
+                .as_str()
+                .unwrap()
+                .contains("bounded proposal")
+        );
+        assert!(prompt.contains("The only valid claim kind is proposed_design."));
+        assert!(!prompt.contains("Claim kinds are implemented_behavior"));
+        assert!(!prompt.contains(r#""claim_kind":"inferred_interpretation""#));
+        let legacy_prompt = SpecialistId::DomainAnalystV7.prompt();
+        assert!(legacy_prompt.contains("Claim kinds are implemented_behavior, documented_intent, inferred_interpretation and proposed_design."));
+        assert!(legacy_prompt.contains(r#""claim_kind":"inferred_interpretation""#));
         for section in [
             "goals",
             "scope",
