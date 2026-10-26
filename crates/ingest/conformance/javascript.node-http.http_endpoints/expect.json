@@ -1,0 +1,20 @@
+{
+  "nodes": [
+    {
+      "label": "Endpoint",
+      "id": "ep:local/p@POST:/v0/vouch",
+      "props": {
+        "method": "POST",
+        "path": "/v0/vouch",
+        "framework": "node-http"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "HANDLES",
+      "src": "ep:local/p@POST:/v0/vouch",
+      "dst": "sym:local/p@server.mjs#anon@55"
+    }
+  ]
+}

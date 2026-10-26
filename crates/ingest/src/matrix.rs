@@ -160,6 +160,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("TypeScript", CORE, Imports, Supported, ""),
     cell("TypeScript", CORE, Calls, Supported, ""),
     cell("TypeScript", "express", HttpEndpoints, Supported, ""),
+    cell("TypeScript", "node-http", HttpEndpoints, Supported, ""),
     cell("TypeScript", "next", ClientRoutes, Supported, ""),
     cell(
         "TypeScript",
@@ -208,6 +209,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
         Partial,
         "ES module imports only; CommonJS require(\"express\") is not recognized",
     ),
+    cell("JavaScript", "node-http", HttpEndpoints, Supported, ""),
     cell("JavaScript", "next", ClientRoutes, Supported, ""),
     cell("JavaScript", "react-router", ClientRoutes, Supported, ""),
     cell("JavaScript", "vue-router", ClientRoutes, Supported, ""),

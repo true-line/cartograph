@@ -4464,3 +4464,236 @@ fn vue_navigations_refuse_locally_shadowed_bindings() {
         ])
     );
 }
+
+// --- Raw Node http.createServer routes (#1077) --------------------------------
+
+const NODE_HTTP_DAEMON: &str = r#"
+import { createServer } from 'node:http';
+createServer((req, res) => {
+  const url = new URL(req.url, 'http://127.0.0.1');
+  if (url.pathname === '/ui' || url.pathname.startsWith('/ui/')) { return; }
+  if (req.method === 'POST' && url.pathname === '/v0/vouch') { return; }
+  if (req.method === 'POST' && /^\/v0\/soul\/revisions\/(approve|reject|adopt|edit)$/.exec(url.pathname)) { return; }
+  if (['GET /v0/binding', 'POST /v0/credential'].includes(`${req.method} ${url.pathname}`)) { return; }
+  if (url.pathname === '/health') { return; }
+  const name = ownerRouteName(req.method, url.pathname);
+});
+"#;
+
+fn node_http_endpoints(ex: &Extraction) -> Vec<(String, String)> {
+    ex.nodes
+        .iter()
+        .filter(|n| n.label == "Endpoint" && n.props["framework"] == "node-http")
+        .map(|n| {
+            (
+                n.props["method"].as_str().unwrap().to_string(),
+                n.props["path"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+    list.iter()
+        .map(|(m, p)| (m.to_string(), p.to_string()))
+        .collect()
+}
+
+#[test]
+fn node_http_recovers_every_predicate_form_in_source_order() {
+    let ex = extract_source(NODE_HTTP_DAEMON.as_bytes(), "agent-daemon.mjs", &id()).unwrap();
+    assert_eq!(
+        node_http_endpoints(&ex),
+        pairs(&[
+            ("ALL", "/ui"),
+            ("ALL", "/ui/*"),
+            ("POST", "/v0/vouch"),
+            ("POST", "/v0/soul/revisions/approve"),
+            ("POST", "/v0/soul/revisions/reject"),
+            ("POST", "/v0/soul/revisions/adopt"),
+            ("POST", "/v0/soul/revisions/edit"),
+            ("GET", "/v0/binding"),
+            ("POST", "/v0/credential"),
+            ("ALL", "/health"),
+        ])
+    );
+}
+
+#[test]
+fn node_http_endpoint_shape_mirrors_express() {
+    let ex = extract_source(NODE_HTTP_DAEMON.as_bytes(), "agent-daemon.mjs", &id()).unwrap();
+    let vouch = ex
+        .nodes
+        .iter()
+        .find(|n| n.id == "ep:qwtm/example@POST:/v0/vouch")
+        .expect("vouch endpoint");
+    assert_eq!(vouch.label, "Endpoint");
+    assert_eq!(vouch.props["framework"], "node-http");
+    // The citation spans the method guard and the path comparison.
+    let source = NODE_HTTP_DAEMON;
+    let ev = &vouch.props["prov"]["evidence"][0];
+    let (start, end) = (
+        ev["byte_start"].as_u64().unwrap() as usize,
+        ev["byte_end"].as_u64().unwrap() as usize,
+    );
+    assert_eq!(&source[start..end], "req.method === 'POST'");
+    let prefix = ex
+        .nodes
+        .iter()
+        .find(|n| n.id == "ep:qwtm/example@ALL:/ui/*")
+        .unwrap();
+    assert_eq!(prefix.props["match"], "prefix");
+    let handles = edge_pairs(&ex, "HANDLES");
+    assert!(
+        handles
+            .iter()
+            .any(|(src, dst)| *src == "ep:qwtm/example@POST:/v0/vouch"
+                && dst.starts_with("sym:qwtm/example@agent-daemon.mjs#anon@"))
+    );
+}
+
+#[test]
+fn node_http_computed_route_is_a_cited_gap() {
+    let ex = extract_source(NODE_HTTP_DAEMON.as_bytes(), "agent-daemon.mjs", &id()).unwrap();
+    let gaps: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap" && n.props["kind"] == "node-http-route-computed")
+        .collect();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].props["reason"], "computed node:http route");
+    let ev = &gaps[0].props["prov"]["evidence"][0];
+    let (start, end) = (
+        ev["byte_start"].as_u64().unwrap() as usize,
+        ev["byte_end"].as_u64().unwrap() as usize,
+    );
+    assert_eq!(
+        &NODE_HTTP_DAEMON[start..end],
+        "ownerRouteName(req.method, url.pathname)"
+    );
+    assert!(
+        edge_pairs(&ex, "DEPENDS_ON")
+            .iter()
+            .any(|(_, dst)| *dst == gaps[0].id)
+    );
+}
+
+#[test]
+fn node_http_other_regex_is_a_gap_not_endpoints() {
+    let src = r#"
+import http from 'http';
+http.createServer(function (req, res) {
+  if (/^\/v0\/items\/\d+$/.test(req.url)) { return; }
+});
+"#;
+    let ex = extract_source(src.as_bytes(), "s.js", &id()).unwrap();
+    assert!(node_http_endpoints(&ex).is_empty());
+    let gap = ex
+        .nodes
+        .iter()
+        .find(|n| n.props["kind"] == "node-http-route-computed")
+        .expect("gap");
+    assert_eq!(
+        gap.props["reason"],
+        "node:http route regex is not a literal alternation"
+    );
+}
+
+#[test]
+fn node_http_req_url_and_same_file_handler_and_require() {
+    let src = r#"
+const { createServer } = require('node:https');
+function handle(req, res) {
+  if (req.url === '/ping') { res.end(); }
+}
+createServer({}, handle);
+"#;
+    let ex = extract_source(src.as_bytes(), "s.cjs", &id()).unwrap();
+    assert_eq!(node_http_endpoints(&ex), pairs(&[("ALL", "/ping")]));
+    assert!(
+        edge_pairs(&ex, "HANDLES")
+            .contains(&("ep:qwtm/example@ALL:/ping", "sym:qwtm/example@s.cjs#handle"))
+    );
+    let ns = r#"
+const http = require('http');
+http.createServer((req, res) => { req.url === '/a' && res.end(); });
+"#;
+    let ex = extract_source(ns.as_bytes(), "n.js", &id()).unwrap();
+    assert_eq!(node_http_endpoints(&ex), pairs(&[("ALL", "/a")]));
+}
+
+#[test]
+fn node_http_namespace_import_and_ternary_in_ts() {
+    let src = r#"
+import * as http from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  const { pathname } = new URL(req.url!, "http://x");
+  const p = new URL(req.url!, "http://x").pathname;
+  const kind = p === "/a" ? 1 : 2;
+  if (req.method === "GET" && p.startsWith("/files/")) {}
+});
+"#;
+    let ex = extract_source(src.as_bytes(), "s.ts", &id()).unwrap();
+    assert_eq!(
+        node_http_endpoints(&ex),
+        pairs(&[("ALL", "/a"), ("GET", "/files/*")])
+    );
+}
+
+#[test]
+fn node_http_unproven_create_server_yields_nothing() {
+    let local = r#"
+function createServer(h) { return h; }
+createServer((req, res) => { if (req.url === '/x') {} });
+"#;
+    let ex = extract_source(local.as_bytes(), "a.mjs", &id()).unwrap();
+    assert!(node_http_endpoints(&ex).is_empty());
+    let other = r#"
+import { createServer } from 'some-lib';
+createServer((req, res) => { if (req.url === '/x') {} });
+"#;
+    let ex = extract_source(other.as_bytes(), "b.mjs", &id()).unwrap();
+    assert!(node_http_endpoints(&ex).is_empty());
+    let shadowed = r#"
+import { createServer } from 'node:http';
+function f(createServer) { createServer((req, res) => { if (req.url === '/x') {} }); }
+"#;
+    let ex = extract_source(shadowed.as_bytes(), "c.mjs", &id()).unwrap();
+    assert!(node_http_endpoints(&ex).is_empty());
+}
+
+#[test]
+fn node_http_extraction_is_deterministic() {
+    let a = extract_source(NODE_HTTP_DAEMON.as_bytes(), "agent-daemon.mjs", &id()).unwrap();
+    let b = extract_source(NODE_HTTP_DAEMON.as_bytes(), "agent-daemon.mjs", &id()).unwrap();
+    let ids = |ex: &Extraction| -> Vec<String> { ex.nodes.iter().map(|n| n.id.clone()).collect() };
+    assert_eq!(ids(&a), ids(&b));
+    assert_eq!(
+        serde_json::to_string(&a.nodes.iter().map(|n| &n.props).collect::<Vec<_>>()).unwrap(),
+        serde_json::to_string(&b.nodes.iter().map(|n| &n.props).collect::<Vec<_>>()).unwrap()
+    );
+}
+
+#[test]
+fn node_http_enclosing_method_guard_scopes_inner_routes() {
+    let src = r#"
+import http from 'node:http';
+http.createServer((req, res) => {
+  const url = new URL(req.url, 'http://x');
+  if (req.method === 'POST') {
+    if (url.pathname === '/a') {}
+    if (req.method === 'GET' && url.pathname === '/never') {}
+  }
+  if (url.pathname === '/b') {}
+});
+"#;
+    let ex = extract_source(src.as_bytes(), "s.mjs", &id()).unwrap();
+    assert_eq!(
+        node_http_endpoints(&ex),
+        vec![
+            ("POST".to_string(), "/a".to_string()),
+            ("ALL".to_string(), "/b".to_string()),
+        ]
+    );
+}

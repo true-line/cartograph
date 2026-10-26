@@ -139,14 +139,14 @@ pub const INSTALLED_ADAPTERS: &[AdapterInfo] = &[
         id: "t0.adapter-ts",
         language: "TypeScript",
         extensions: &["ts", "tsx"],
-        covers: "imports, call graph, Express endpoints, Next/React Router screens, \
+        covers: "imports, call graph, Express and node:http endpoints, Next/React Router screens, \
                  chrome messaging channels, IndexedDB",
     },
     AdapterInfo {
         id: "t0.adapter-ts",
         language: "JavaScript",
         extensions: &["js", "jsx", "mjs", "cjs"],
-        covers: "imports, call graph, Express endpoints, Next/React Router screens, \
+        covers: "imports, call graph, Express and node:http endpoints, Next/React Router screens, \
                  chrome messaging channels, IndexedDB — the TypeScript \
                  crate's own grammar parses plain JS/JSX directly",
     },
