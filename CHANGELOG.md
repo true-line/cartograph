@@ -1,5 +1,28 @@
 # cartograph
 
+## 0.38.0
+
+### Minor Changes
+
+- 483e9d3: Show persisted active investigations in a dedicated history view (#1107).
+- a4c8ffd: Navigate persisted follow-up investigation tasks by conversation, with task-specific saved findings.
+- 2214466: Draft adapter work packets from a recovered repo's coverage inventory (#1101).
+- 3fadf7d: Persist bounded dispatch chat identities, redacted questions, and immutable result references for specialist investigations (#1115).
+- 7d791ca: Add a cited Gap Triager specialist for proposing bounded next investigation steps from recorded gaps.
+- 2623282: Observed infrastructure now shows a client whose instance is computed at runtime, such as an SMTP server chosen from configuration, as its provider in the topology. The instance stays a recorded Gap (#1116).
+- 6887d69: Show persisted investigation questions and saved specialist result references in the selected investigation view (#1121).
+- 0687c4c: Expose validated, bounded persisted investigation chat and saved producer identity to the app host (#1119).
+- 675d35b: Preflight shows the adapter lookup for each unsupported or partial cell: which adapter covers it, which plugin declares it without a passed gate, or that none does.
+- 91d51e7: Allow quick dispatch to start Standard completion specialists with explicitly selected recorded inventories, enforce the advertised selection count, and refresh choices only after stale-context rejection.
+- 2722627: Add keyboard quick dispatch for supported saved investigations.
+- 9bca7e0: Show the saved provider and model for each active specialist task, and reject new tasks whose saved attribution cannot fit the existing bounded activity projection before committing task rows.
+- 711d82b: Show bounded active task status beside each exact versioned specialist choice (#1123).
+- 733ca58: Add the versioned, cited Spec Writer investigation specialist.
+
+### Patch Changes
+
+- f549f61: Coalesce investigation conversation refreshes and refresh explicitly loaded older pages when their rows change, without discarding page order or cursor state.
+
 ## 0.37.0
 
 ### Minor Changes
