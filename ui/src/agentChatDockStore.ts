@@ -22,7 +22,12 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
   let unsubscribe: (() => void) | undefined;
   let reading = false;
   let requestedGeneration = 0;
-  const stop = () => { ++intent; unsubscribe?.(); unsubscribe = undefined; };
+  let loadingOwner: AbortController | undefined;
+  const stop = (releaseLoading = false) => {
+    ++intent; unsubscribe?.(); unsubscribe = undefined;
+    // Release UI ownership only; the physical read still occupies its slot.
+    if (releaseLoading) loadingOwner?.abort();
+  };
   return create<DockState>((set, get) => {
     const run = () => {
       const taskId = get().pendingTask;
@@ -33,6 +38,8 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
       reading = true;
       const request = intent;
       const generation = coordinator.getState().selectionGeneration + 1;
+      const owner = new AbortController();
+      loadingOwner = owner;
       const observe = () => {
         if (!connected || intent !== request) return;
         const state = coordinator.getState();
@@ -55,13 +62,14 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         unsubscribe?.(); unsubscribe = undefined;
       };
       unsubscribe = coordinator.subscribe(observe);
-      void coordinator.getState().open(taskId, { awaitChat: true }).then(observe).catch(() => {
+      void coordinator.getState().open(taskId, { awaitChat: true, loadingSignal: owner.signal }).then(observe).catch(() => {
         if (connected && intent === request) {
           unsubscribe?.(); unsubscribe = undefined;
           set({ pendingTask: null, error: 'Saved chat unavailable. Try opening it again.' });
         }
       }).finally(() => {
         reading = false;
+        if (loadingOwner === owner) loadingOwner = undefined;
         // A single replaceable intent, rather than a promise chain per click.
         if (intent !== request) run();
       });
@@ -73,7 +81,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         const selected = get().focusedTask ?? (!adoptedInitialSelection ? coordinator.getState().selectedId : null);
         adoptedInitialSelection = true;
         if (selected) get().open(selected);
-        return () => { connected = false; stop(); set({ pendingTask: null }); };
+        return () => { connected = false; stop(true); set({ pendingTask: null }); };
       },
       open: (taskId) => {
         if (!connected || get().pendingTask === taskId) return;
@@ -83,7 +91,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         run();
       },
       close: (taskId) => {
-        if (get().pendingTask === taskId || get().focusedTask === taskId) stop();
+        if (get().pendingTask === taskId || get().focusedTask === taskId) stop(true);
         set((state) => ({ docks: state.docks.filter((dock) => dock.chat.task_id !== taskId),
           pendingTask: state.pendingTask === taskId ? null : state.pendingTask,
           focusedTask: state.focusedTask === taskId ? null : state.focusedTask,

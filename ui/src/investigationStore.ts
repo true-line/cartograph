@@ -324,8 +324,8 @@ export interface InvestigationState {
   openConversation: (conversationId: string) => Promise<void>;
   loadConversation: (more?: boolean) => Promise<void>;
   closeConversation: () => void;
-  open: (id: string, options?: { awaitChat?: boolean }) => Promise<void>;
-  refreshSelected: (options?: { awaitChat?: boolean }) => Promise<void>;
+  open: (id: string, options?: { awaitChat?: boolean; loadingSignal?: AbortSignal }) => Promise<void>;
+  refreshSelected: (options?: { awaitChat?: boolean; loadingSignal?: AbortSignal }) => Promise<void>;
   invalidate: (message: InvestigationChanged) => void;
   showConsent: () => void;
   hideConsent: () => void;
@@ -930,6 +930,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       return request ? startRequest(request) : null;
     },
     open: async (id, options) => {
+      if (options?.loadingSignal?.aborted) return;
       const beforeOpen = get();
       const selectedSummary = (beforeOpen.detail?.investigation_id === id ? beforeOpen.detail : null) ?? beforeOpen.history.find((item) => item.investigation_id === id) ??
         beforeOpen.conversationItems.find((item) => item.investigation_id === id);
@@ -958,11 +959,24 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     },
 
     refreshSelected: async (options) => {
+      if (options?.loadingSignal?.aborted) return;
       const { selectedId: id, selectionGeneration, events: previousEvents } = get();
       if (!id) return;
       const request = ++detailRequest;
-      const current = () => get().selectedId === id && get().selectionGeneration === selectionGeneration && request === detailRequest;
+      const ownsSelection = () => get().selectedId === id && get().selectionGeneration === selectionGeneration && request === detailRequest;
+      const current = () => ownsSelection() && !options?.loadingSignal?.aborted;
+      const releaseLoading = () => {
+        if (ownsSelection()) set({ loading: false, chat: null, chatStatus: 'error',
+          chatError: 'Chat loading stopped when its pane closed. Refresh to load the saved transcript.' });
+      };
       set({ loading: true, error: null, chatStatus: 'loading', chatError: null });
+      // The signal releases UI ownership, never the underlying IPC/read slot.
+      options?.loadingSignal?.addEventListener('abort', releaseLoading, { once: true });
+      if (options?.loadingSignal?.aborted) {
+        releaseLoading();
+        options.loadingSignal.removeEventListener('abort', releaseLoading);
+        return;
+      }
       let transcriptSettled: Promise<unknown> | undefined;
       try {
         const chatObservation = invokeOr<InvestigationChat | null | undefined>('get_investigation_chat', undefined,
@@ -1113,6 +1127,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           await transcriptSettled;
           if (current()) set({ loading: false });
         }
+        options?.loadingSignal?.removeEventListener('abort', releaseLoading);
       }
     },
 

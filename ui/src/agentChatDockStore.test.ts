@@ -3,7 +3,7 @@ import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { create } from 'zustand';
 import { createAgentChatDockStore } from './agentChatDockStore';
 import { useInvestigationStore, type InvestigationState } from './investigationStore';
-import { investigationDetail, investigationEvents } from './investigationFixtures';
+import { investigationCatalog, investigationConsent, investigationDetail, investigationEvents } from './investigationFixtures';
 import type { InvestigationChat } from './investigationTypes';
 
 function chat(id: string): InvestigationChat {
@@ -34,6 +34,31 @@ function harness(selectedId: string | null = null) {
   const open = async (id: string) => { dock.getState().open(id); await tick(); finish(id); await tick(); };
   return { coordinator, dock, calls, leave, finish, open,
     hold: () => { hold = true; }, release: () => { hold = false; release?.(); } };
+}
+
+function delayedCloudChats() {
+  vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+  useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  const pending: { id: string; resolve: (value: InvestigationChat) => void }[] = [];
+  mockIPC((command, payload) => {
+    const { investigationId: id = '', afterSequence = 0 } = (payload ?? {}) as { investigationId?: string; afterSequence?: number };
+    if (command === 'get_investigation') return investigationDetail(id, { has_result: false,
+      status: 'awaiting_consent', revision: 4, last_event_sequence: 4, provider_mode: 'cloud', provider: investigationCatalog.providers[1] });
+    if (command === 'investigation_consent') return investigationConsent(id);
+    if (command === 'investigation_events') return { investigation_id: id,
+      items: investigationEvents(id).slice(0, 4).filter((event) => event.sequence > afterSequence), next_sequence: 4, has_more: false };
+    if (command === 'get_investigation_chat') return new Promise<InvestigationChat>((resolve) => pending.push({ id, resolve }));
+    return null;
+  });
+  const resolve = (index: number) => {
+    const saved = chat(pending[index].id);
+    saved.producer = { ...saved.producer, provider_mode: 'cloud', provider_id: 'azure-openai', model: 'fixture-cloud-model' };
+    pending[index].resolve(saved);
+  };
+  return { pending, resolve, cleanup: () => {
+    pending.forEach((_, index) => resolve(index)); clearMocks(); vi.unstubAllGlobals();
+    useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  } };
 }
 
 // AC-0389: snapshots are admitted only after the coordinator validates the chat.
@@ -159,6 +184,54 @@ describe('saved task chat docks', () => {
       clearMocks(); vi.unstubAllGlobals();
       useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
     }
+  });
+
+  it.each(['close', 'leave'] as const)('releases UI loading on %s while retaining the physical docking read slot', async (action) => {
+    const transport = delayedCloudChats();
+    const dock = createAgentChatDockStore(); const leave = dock.getState().connect();
+    try {
+      dock.getState().open('a');
+      await vi.waitFor(() => expect(useInvestigationStore.getState().consent?.investigation_id).toBe('a'));
+      expect(useInvestigationStore.getState().loading).toBe(true);
+      if (action === 'close') dock.getState().close('a'); else leave();
+      expect(useInvestigationStore.getState().loading).toBe(false);
+      useInvestigationStore.getState().showConsent();
+      expect(useInvestigationStore.getState().consentOpen).toBe(true);
+      useInvestigationStore.getState().hideConsent();
+      // A queued/reconnected dock cannot replace the unresolved physical read.
+      const reconnect = action === 'leave' ? dock.getState().connect() : () => {};
+      dock.getState().open('queued'); await tick();
+      expect(transport.pending.map((read) => read.id)).toEqual(['a']);
+      dock.getState().close('queued'); reconnect();
+      // Ordinary Investigations refresh remains usable while old chat I/O stalls.
+      await useInvestigationStore.getState().refreshSelected();
+      expect(transport.pending.map((read) => read.id)).toEqual(['a', 'a']);
+      expect(useInvestigationStore.getState().loading).toBe(false);
+      transport.resolve(0); await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(dock.getState().docks).toEqual([]);
+      expect(useInvestigationStore.getState().chatStatus).toBe('loading');
+      transport.resolve(1);
+      await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
+    } finally { leave(); transport.cleanup(); }
+  });
+
+  it('does not let aborted old ownership or late cleanup clear a newer read loading state', async () => {
+    const transport = delayedCloudChats(); const owner = new AbortController();
+    try {
+      const oldRead = useInvestigationStore.getState().open('a', { awaitChat: true, loadingSignal: owner.signal });
+      await vi.waitFor(() => expect(useInvestigationStore.getState().detail?.investigation_id).toBe('a'));
+      const newRead = useInvestigationStore.getState().open('b', { awaitChat: true });
+      await vi.waitFor(() => expect(useInvestigationStore.getState().detail?.investigation_id).toBe('b'));
+      owner.abort(); expect(useInvestigationStore.getState().loading).toBe(true);
+      transport.resolve(0); await oldRead;
+      expect(useInvestigationStore.getState().loading).toBe(true);
+      expect(useInvestigationStore.getState().selectedId).toBe('b');
+      transport.resolve(1); await newRead;
+      expect(useInvestigationStore.getState().loading).toBe(false);
+      await useInvestigationStore.getState().open('ignored', { awaitChat: true, loadingSignal: owner.signal });
+      expect(useInvestigationStore.getState().selectedId).toBe('b');
+      expect(transport.pending).toHaveLength(2);
+    } finally { transport.cleanup(); }
   });
 
   it('reconnects after effect cleanup and retains snapshots without implying live updates', async () => {
