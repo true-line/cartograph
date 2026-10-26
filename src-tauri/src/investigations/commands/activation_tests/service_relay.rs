@@ -249,6 +249,17 @@ fn exercise(cancel: Option<llm::bounded::InvocationOutcome>, decline: bool) {
                 assert!(!record.exists());
                 assert!(service.owner_status().unwrap()["task_grant"].is_null());
                 let mut readonly = Relay::open(&rotated);
+                let listed = readonly.rpc("tools/list", json!({}));
+                assert!(
+                    listed["result"]["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|tool| !tool["name"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("cartograph_task_"))
+                );
                 for name in [
                     "cartograph_task_start",
                     "cartograph_task_status",
@@ -256,7 +267,14 @@ fn exercise(cancel: Option<llm::bounded::InvocationOutcome>, decline: bool) {
                     "cartograph_task_result",
                     "cartograph_task_cancel",
                 ] {
-                    assert_eq!(readonly.call(name, json!({}))["error"]["code"], -32602);
+                    let args = if name == "cartograph_task_start" {
+                        json!({"request":request})
+                    } else if name == "cartograph_task_events" {
+                        json!({"task_id":id,"after":0})
+                    } else {
+                        json!({"task_id":id})
+                    };
+                    assert_eq!(readonly.call(name, args)["error"]["code"], -32602);
                 }
                 readonly.close();
                 stop(&service).await;
