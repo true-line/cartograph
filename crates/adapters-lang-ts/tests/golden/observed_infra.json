@@ -214,6 +214,50 @@
       "src": "sym:local/p@src/clients.ts#connect"
     },
     {
+      "dst": "res:local/p@observed:webextension-storage:sync",
+      "label": "USES",
+      "props": {
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "e07d101139d782ee417d168814d16d2125c39d5366c957a4ae241589624a3e56",
+          "evidence": [
+            {
+              "byte_end": 197,
+              "byte_start": 177,
+              "commit_sha": "abc123",
+              "path": "src/extension.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        }
+      },
+      "src": "sym:local/p@src/extension.ts#loadPrefs"
+    },
+    {
+      "dst": "res:local/p@observed:webextension-storage:local",
+      "label": "USES",
+      "props": {
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "7f9df86a124faf48efea8043df69ee729e11d8ce040180e7d32316abfbbaff26",
+          "evidence": [
+            {
+              "byte_end": 118,
+              "byte_start": 98,
+              "commit_sha": "abc123",
+              "path": "src/extension.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        }
+      },
+      "src": "sym:local/p@src/extension.ts#saveDraft"
+    },
+    {
       "dst": "res:local/p@observed:indexeddb:inventory",
       "label": "USES",
       "props": {
@@ -531,6 +575,61 @@
         },
         "provider": "web-storage",
         "type": "web-storage"
+      }
+    },
+    {
+      "id": "res:local/p@observed:webextension-storage:local",
+      "label": "Resource",
+      "props": {
+        "identity": "local",
+        "kind": "browser-storage",
+        "logical_id": "observed:webextension-storage:local",
+        "observed": true,
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "28b9a85d55a9ad959d933642308d5cf65c2f70647ec16a2fb93885a5fa7ad21c",
+          "evidence": [
+            {
+              "byte_end": 118,
+              "byte_start": 98,
+              "commit_sha": "abc123",
+              "path": "src/extension.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "provider": "webextension-storage",
+        "type": "webextension-storage"
+      }
+    },
+    {
+      "id": "res:local/p@observed:webextension-storage:sync",
+      "label": "Resource",
+      "props": {
+        "identity": "sync",
+        "kind": "browser-storage",
+        "logical_id": "observed:webextension-storage:sync",
+        "module": "webextension-polyfill",
+        "observed": true,
+        "prov": {
+          "confidence_tier": "Confirmed",
+          "content_hash": "a42cdec8efa4aee251de27a4eaa71a5884b8cf50ce60090c76e330bbde3d50de",
+          "evidence": [
+            {
+              "byte_end": 197,
+              "byte_start": 177,
+              "commit_sha": "abc123",
+              "path": "src/extension.ts",
+              "repo": "local/p"
+            }
+          ],
+          "extractor_id": "t0.observed-infra",
+          "tier": "Deterministic"
+        },
+        "provider": "webextension-storage",
+        "type": "webextension-storage"
       }
     }
   ]

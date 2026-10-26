@@ -814,10 +814,10 @@ browser.storage.onChanged.addListener(() => {});
 }
 
 // AC-0316, AC-0317: a checked-in fixture repo with one site per rule family
-// (browser storage, http-api per origin, an env-led origin, an SDK client,
-// an auth provider, computed identities) recovers to exactly the golden
-// nodes and edges, citing the fixture's own bytes. `UPDATE_GOLDEN=1`
-// rewrites the golden. (T-0316, T-0317)
+// (browser and WebExtension storage, http-api per origin, an env-led origin,
+// an SDK client, an auth provider, computed identities) recovers to exactly
+// the golden nodes and edges, citing the fixture's own bytes.
+// `UPDATE_GOLDEN=1` rewrites the golden. (T-0316, T-0317)
 #[test]
 fn observed_infra_fixture_matches_its_golden() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
