@@ -361,6 +361,19 @@ Initial hard ceiling profile (the host may narrow it, never silently enlarge it)
 | Frozen canonical graph / combined node and edge rows | 32 MiB / 50,000 |
 | Graph JSON depth / cumulative JSON values | 32 / 1,000,000 |
 
+Saved-history search (AC-0368) is a read-only filter over the complete retained
+investigation summary set, not just rows already loaded by the UI. It matches
+literal substrings in the saved question and specialist ID with ASCII-only case
+folding; leading and trailing ASCII whitespace is trimmed, and the raw query is
+bounded by the existing question byte limit before trimming.
+Search results retain descending ordinal order and the existing 50-item,
+4-KiB-summary and 256-KiB-page limits. A search cursor binds the normalized term
+and the initial ordinal high-water mark using a fixed-size query digest;
+nonmatching rows are scanned without skipping the first unreturned matching
+row. Unfiltered v1 cursors retain their existing representation. Only summary
+metadata is searchable; activity events and findings are separate records, not
+chat messages. No legacy summary is rewritten or upgraded by searching.
+
 **Explicit opt-in policy (ADR-0040, AC-0281).** The table above remains the
 immutable default `investigation-v1`. The separately selected `investigation-v2`
 contract uses request generation 5, envelope generation 2 and @8 specialists.
@@ -501,6 +514,8 @@ No raw source is stored to make restart/resume convenient.
 Add an Investigations workspace subview, a Workspace entry, and a palette route
 without changing the eight existing rail shortcut assignments. Jobs link to the
 investigation and use coordinator-supported actions instead of generic retry.
+The saved-investigation list supports bounded search over all retained questions and specialist IDs, including older versions, without loading every page into the UI first. Search is ASCII-case-insensitive literal substring matching; clearing it restores the ordinary list. It does not search activity text or findings.
+
 Show specialist/provider identity, question, scope/revision, real ordered events,
 consumed limits, consent state and durable findings/history. Keep this orchestration
 in a dedicated UI store with task ID/request-generation/revision guards. Fetch

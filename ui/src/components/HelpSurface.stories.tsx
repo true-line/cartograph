@@ -32,7 +32,7 @@ export const TocCoversEverySurfaceOffline: Story = {
     ]) {
       await expect(toc.getByRole('button', { name: title })).toBeInTheDocument();
     }
-    await expect(HELP_TOPICS).toHaveLength(10);
+    await expect(HELP_TOPICS).toHaveLength(11);
 
     // The active topic renders as structured content, not raw markdown.
     await expect(

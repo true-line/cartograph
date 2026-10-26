@@ -26,6 +26,7 @@ const ORDER = [
   'gaps',
   'prov',
   'jobs',
+  'investigations',
   'settings',
 ];
 

@@ -6,6 +6,8 @@ struct HistoryCursor {
     version: u32,
     namespace: String,
     conversation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    search_hash: Option<String>,
     high: i64,
     before: i64,
 }
@@ -16,9 +18,44 @@ impl JobStore {
         conversation_id: Option<&str>,
         cursor: Option<&str>,
     ) -> Result<InvestigationPage, InvestigationStoreError> {
+        self.investigation_history_filtered(conversation_id, None, cursor)
+    }
+
+    pub(crate) fn search_investigation_history(
+        &self,
+        query: &str,
+        cursor: Option<&str>,
+    ) -> Result<InvestigationPage, InvestigationStoreError> {
+        if query.len() > agents::investigation::MAX_QUESTION_BYTES {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let query = query.trim_matches(|character: char| {
+            matches!(
+                character,
+                '\t' | '\n' | '\u{000b}' | '\u{000c}' | '\r' | ' '
+            )
+        });
+        let query = if query.is_empty() {
+            None
+        } else {
+            let mut normalized = query.as_bytes().to_vec();
+            normalized.make_ascii_lowercase();
+            Some(normalized)
+        };
+        self.investigation_history_filtered(None, query.as_deref(), cursor)
+    }
+
+    fn investigation_history_filtered(
+        &self,
+        conversation_id: Option<&str>,
+        query: Option<&[u8]>,
+        cursor: Option<&str>,
+    ) -> Result<InvestigationPage, InvestigationStoreError> {
         if conversation_id.is_some_and(|id| !id_valid(id)) {
             return Err(InvestigationStoreError::Invalid);
         }
+        let search_hash = query.map(core_prov::content_hash);
+        let cursor_version = if search_hash.is_some() { 2 } else { 1 };
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let selection = match cursor {
@@ -27,9 +64,10 @@ impl JobStore {
                     return Err(InvestigationStoreError::Invalid);
                 }
                 let cursor: HistoryCursor = decode_record(cursor)?;
-                if cursor.version != 1
+                if cursor.version != cursor_version
                     || cursor.namespace != self.namespace.value
                     || cursor.conversation.as_deref() != conversation_id
+                    || cursor.search_hash != search_hash
                     || cursor.high < 0
                     || cursor.before <= 0
                     || cursor.before > cursor.high
@@ -45,9 +83,10 @@ impl JobStore {
                     |r| r.get(0),
                 )?;
                 HistoryCursor {
-                    version: 1,
+                    version: cursor_version,
                     namespace: self.namespace.value.clone(),
                     conversation: conversation_id.map(str::to_owned),
+                    search_hash: search_hash.clone(),
                     high,
                     before: high
                         .checked_add(1)
@@ -55,9 +94,13 @@ impl JobStore {
                 }
             }
         };
-        let rows=tx.prepare("SELECT ordinal,CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE ordinal<=?1 AND ordinal<?2 AND (?3 IS NULL OR conversation_id=?3) ORDER BY ordinal DESC LIMIT 51")?
-            .query_map(params![selection.high,selection.before,conversation_id],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<String>>(1)?)))?
+        let candidate_limit = if query.is_some() { MAX_TASKS + 1 } else { 51 };
+        let rows=tx.prepare("SELECT ordinal,CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE ordinal<=?1 AND ordinal<?2 AND (?3 IS NULL OR conversation_id=?3) ORDER BY ordinal DESC LIMIT ?4")?
+            .query_map(params![selection.high,selection.before,conversation_id,i64::try_from(candidate_limit).map_err(|_| InvestigationStoreError::Capacity)?],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<String>>(1)?)))?
             .collect::<Result<Vec<_>,_>>()?;
+        if query.is_some() && rows.len() > MAX_TASKS {
+            return Err(InvestigationStoreError::Capacity);
+        }
         let mut items = Vec::new();
         let mut remaining = 256 * 1024 - 4096;
         let mut before = selection.before;
@@ -68,6 +111,18 @@ impl JobStore {
                 return Err(InvestigationStoreError::Invalid);
             }
             let task = load_execution_task(&tx, &id)?;
+            if let Some(query) = query {
+                if !history_summary_matches(&task.detail.summary, query)? {
+                    if items.len() < 50 {
+                        before = ordinal;
+                    }
+                    continue;
+                }
+                if items.len() == 50 {
+                    more = true;
+                    break;
+                }
+            }
             let size = encode(&task.detail.summary, 4096)?.len() + 1;
             if items.len() == 50 || size > remaining {
                 more = true;
@@ -347,6 +402,31 @@ impl JobStore {
         tx.commit()?;
         Ok(references)
     }
+}
+
+fn history_summary_matches(
+    summary: &agents::investigation::InvestigationSummary,
+    query: &[u8],
+) -> Result<bool, InvestigationStoreError> {
+    let specialist = serde_json::to_value(summary.specialist_id)
+        .map_err(|_| InvestigationStoreError::Invalid)?;
+    let specialist = specialist
+        .as_str()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    Ok(
+        ascii_case_insensitive_contains(summary.question.as_bytes(), query)
+            || ascii_case_insensitive_contains(specialist.as_bytes(), query),
+    )
+}
+
+fn ascii_case_insensitive_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack.windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(needle)
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        })
 }
 
 #[cfg(test)]

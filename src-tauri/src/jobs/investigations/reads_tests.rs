@@ -132,6 +132,31 @@ fn investigation_reads_next_ready_and_invocation_coexist_with_legacy_history() {
                 .iter()
                 .any(|row| row.investigation_id == id && row.schema_version == 7)
         );
+        let legacy_search = f
+            .base
+            .f
+            .store
+            .search_investigation_history("which evidence is available", None)
+            .unwrap();
+        assert!(
+            legacy_search
+                .items
+                .iter()
+                .any(|row| row.investigation_id == legacy && row.schema_version == 1)
+        );
+        let current_question = f.base.f.task.detail.summary.question.clone();
+        let current_search = f
+            .base
+            .f
+            .store
+            .search_investigation_history(&current_question, None)
+            .unwrap();
+        assert!(
+            current_search
+                .items
+                .iter()
+                .any(|row| row.investigation_id == id && row.schema_version == 7)
+        );
         assert!(
             f.base
                 .f

@@ -1,5 +1,5 @@
 import { isCompletionSpecialist, isExpandedSpecialist } from '../investigationFamilies';
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import type { InvestigationState } from '../investigationStore';
 import type { GraphNode } from '../store';
 import type { InvestigationProviderMode, InvestigationScope, InvestigationStatus, SpecialistId } from '../investigationTypes';
@@ -25,6 +25,7 @@ export interface InvestigationsSurfaceProps {
 
 /** Props/callbacks only: the coordinator and dedicated store own task lifecycle. */
 export function InvestigationsSurface({ state, anchors, canStart }: InvestigationsSurfaceProps) {
+  const [historySearchText, setHistorySearchText] = useState(state.historySearch);
   const { specialistId, providerMode, question, scopeType, anchor, hops, parent } = state.composer;
   const setSpecialistId = (specialistId: SpecialistId) => state.updateComposer({ specialistId });
   const setProviderMode = (providerMode: InvestigationProviderMode) => state.updateComposer({ providerMode });
@@ -198,9 +199,25 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
     <div className="investigation-layout">
       <aside className="investigation-history" aria-label="Investigation history">
         <h3>Saved investigations</h3><p className="muted">Questions, activity and findings survive restart and job cleanup.</p>
+        <form aria-label="Search saved investigations" onSubmit={(event) => {
+          event.preventDefault();
+          void state.searchHistory(historySearchText);
+        }}>
+          <label>Search saved questions or specialist IDs
+            <input type="search" value={historySearchText} onChange={(event) => setHistorySearchText(event.target.value)} />
+          </label>
+          <button type="submit" className="secondary-button">Search history</button>
+          {(historySearchText || state.historySearch) && <button type="button" className="secondary-button" onClick={() => {
+            setHistorySearchText('');
+            void state.searchHistory('');
+          }}>Clear search</button>}
+        </form>
         {state.historyLoading && <p role="status">Loading history…</p>}
         {state.historyError && <p role="alert" className="error-text">{state.historyError}</p>}
-        {!state.historyLoading && state.history.length === 0 && <p className="muted">No saved investigations loaded.</p>}
+        {!state.historyLoading && state.history.length === 0 && <p className="muted">
+          {/^[\t\n\v\f\r ]+$/.test(state.historySearch) || !state.historySearch
+            ? 'No saved investigations loaded.' : 'No saved investigations match this search.'}
+        </p>}
         <ul>{state.history.map((item) => <li key={item.investigation_id}>
           <button type="button" className={`investigation-history-item${item.investigation_id === state.selectedId ? ' selected' : ''}`}
             aria-pressed={item.investigation_id === state.selectedId} onClick={() => void state.open(item.investigation_id)}>

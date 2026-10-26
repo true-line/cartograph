@@ -964,6 +964,152 @@ fn investigation_history_is_bounded_stable_and_idempotent_after_full_admission()
 }
 
 #[test]
+fn investigation_history_search_finds_persisted_legacy_rows_beyond_first_page() {
+    // AC-0368: search traverses retained summaries outside the loaded first page
+    // and returns the exact saved family instead of upgrading legacy history.
+    let mut fixture = Fixture::new();
+    let mut oldest_id = String::new();
+    for index in 0..60 {
+        let mut requested = request(
+            &format!("search-history:{index}"),
+            InvestigationProviderMode::Local,
+        );
+        requested.question = if index == 0 {
+            "Needle in an older saved question".into()
+        } else {
+            format!("Unrelated saved question {index}")
+        };
+        if index == 0 {
+            requested.specialist_id = SpecialistId::EvidenceAuditorV1;
+        }
+        let detail = fixture
+            .store
+            .start_investigation(
+                &requested,
+                Some(&provider(InvestigationProviderMode::Local)),
+            )
+            .unwrap()
+            .detail;
+        if index == 0 {
+            oldest_id = detail.summary.investigation_id.clone();
+        }
+        fixture
+            .store
+            .cancel_investigation(&detail.summary.investigation_id)
+            .unwrap();
+    }
+
+    let ordinary = fixture.store.investigation_history(None, None).unwrap();
+    assert_eq!(ordinary.items.len(), 50);
+    assert!(
+        !ordinary
+            .items
+            .iter()
+            .any(|item| item.investigation_id == oldest_id)
+    );
+    let found = fixture
+        .store
+        .search_investigation_history("  nEeDlE  ", None)
+        .unwrap();
+    assert_eq!(found.items.len(), 1);
+    assert_eq!(found.items[0].investigation_id, oldest_id);
+    assert_eq!(found.items[0].schema_version, 1);
+    assert_eq!(found.items[0].question, "Needle in an older saved question");
+    assert!(found.next_cursor.is_none());
+    let vertical_tab = fixture
+        .store
+        .search_investigation_history("\u{000b}Needle\u{000b}", None)
+        .unwrap();
+    assert_eq!(vertical_tab.items[0].investigation_id, oldest_id);
+    let role = fixture
+        .store
+        .search_investigation_history("EVIDENCE-AUDITOR@1", None)
+        .unwrap();
+    assert_eq!(role.items.len(), 1);
+    assert_eq!(role.items[0].investigation_id, oldest_id);
+    assert!(
+        fixture
+            .store
+            .search_investigation_history("\"", None)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .store
+            .search_investigation_history("\\", None)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(matches!(
+        fixture.store.search_investigation_history(
+            &" ".repeat(agents::investigation::MAX_QUESTION_BYTES + 1),
+            None
+        ),
+        Err(InvestigationStoreError::Invalid)
+    ));
+}
+
+#[test]
+fn investigation_history_search_cursor_binds_term_and_fixed_high_water() {
+    // AC-0368: search continuation is query-bound and never picks up newer rows.
+    let mut fixture = Fixture::new();
+    for index in 0..51 {
+        let mut requested = request(
+            &format!("search-page:{index}"),
+            InvestigationProviderMode::Local,
+        );
+        requested.question = format!("Needle saved question {index}");
+        let detail = fixture
+            .store
+            .start_investigation(
+                &requested,
+                Some(&provider(InvestigationProviderMode::Local)),
+            )
+            .unwrap()
+            .detail;
+        fixture
+            .store
+            .cancel_investigation(&detail.summary.investigation_id)
+            .unwrap();
+    }
+    let first = fixture
+        .store
+        .search_investigation_history("needle", None)
+        .unwrap();
+    assert_eq!(first.items.len(), 50);
+    let cursor = first.next_cursor.unwrap();
+
+    let mut newer = request("search-newer", InvestigationProviderMode::Local);
+    newer.question = "Needle added after the search snapshot".into();
+    let newer_id = fixture
+        .store
+        .start_investigation(&newer, Some(&provider(InvestigationProviderMode::Local)))
+        .unwrap()
+        .detail
+        .summary
+        .investigation_id;
+    fixture.store.cancel_investigation(&newer_id).unwrap();
+
+    assert_eq!(
+        fixture
+            .store
+            .search_investigation_history("different", Some(&cursor))
+            .unwrap_err(),
+        InvestigationStoreError::Invalid
+    );
+    let second = fixture
+        .store
+        .search_investigation_history("NEEDLE", Some(&cursor))
+        .unwrap();
+    assert_eq!(second.items.len(), 1);
+    assert_ne!(second.items[0].investigation_id, newer_id);
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
 fn investigation_strict_storage_rejects_oversize_records_and_partial_schemas() {
     // AC-0188: SQL rejects oversized bodies before retrieving them; private
     // schema migration never CREATE-repairs a partial or future owned schema.
