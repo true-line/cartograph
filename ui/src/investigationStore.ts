@@ -324,8 +324,8 @@ export interface InvestigationState {
   openConversation: (conversationId: string) => Promise<void>;
   loadConversation: (more?: boolean) => Promise<void>;
   closeConversation: () => void;
-  open: (id: string) => Promise<void>;
-  refreshSelected: () => Promise<void>;
+  open: (id: string, options?: { awaitChat?: boolean }) => Promise<void>;
+  refreshSelected: (options?: { awaitChat?: boolean }) => Promise<void>;
   invalidate: (message: InvestigationChanged) => void;
   showConsent: () => void;
   hideConsent: () => void;
@@ -929,7 +929,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       const request = get().pendingStart;
       return request ? startRequest(request) : null;
     },
-    open: async (id) => {
+    open: async (id, options) => {
       const beforeOpen = get();
       const selectedSummary = (beforeOpen.detail?.investigation_id === id ? beforeOpen.detail : null) ?? beforeOpen.history.find((item) => item.investigation_id === id) ??
         beforeOpen.conversationItems.find((item) => item.investigation_id === id);
@@ -954,21 +954,23 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         loading: false, error: null, actionBusy: false, actionError: null,
         citationId: null, citationRead: null, citationLoading: false, citationError: null }));
       set({ inspectionLocation: null, inspectionLocationTargetId: null, inspectionLocationLoading: false, inspectionLocationError: null });
-      await get().refreshSelected();
+      await get().refreshSelected(options);
     },
 
-    refreshSelected: async () => {
+    refreshSelected: async (options) => {
       const { selectedId: id, selectionGeneration, events: previousEvents } = get();
       if (!id) return;
       const request = ++detailRequest;
       const current = () => get().selectedId === id && get().selectionGeneration === selectionGeneration && request === detailRequest;
       set({ loading: true, error: null, chatStatus: 'loading', chatError: null });
+      let transcriptSettled: Promise<unknown> | undefined;
       try {
         const chatObservation = invokeOr<InvestigationChat | null | undefined>('get_investigation_chat', undefined,
           { investigationId: id }).then(
           (value) => ({ kind: 'value' as const, value }),
           () => ({ kind: 'error' as const }),
         );
+        transcriptSettled = chatObservation;
         const [detail, result, consent] = await Promise.all([
           invokeOr<InvestigationDetail | null>('get_investigation', null, { investigationId: id }),
           invokeOr<InvestigationResult | null>('investigation_result', null, { investigationId: id }),
@@ -1039,7 +1041,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         if (!current()) return;
         const saved = get().detail;
         if (saved && saved.revision > detail.revision) {
-          set({ loading: false, chat: null, chatStatus: 'error',
+          set({ loading: options?.awaitChat === true, chat: null, chatStatus: 'error',
             chatError: 'The transcript observation was older than this task. Refresh to load a consistent version.' });
           return;
         }
@@ -1066,10 +1068,10 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           conversationPinned: state.conversationId === detail.conversation_id ? detail : state.conversationPinned,
           consentOpen: state.consentOpen && state.consent?.step_id === consent?.step_id &&
             state.consent?.preview.payload_hash === consent?.preview.payload_hash,
-          loading: false, error: null }));
+          loading: options?.awaitChat === true, error: null }));
         if (current()) void get().refreshReviews();
 
-        void chatObservation.then((chatRead) => {
+        transcriptSettled = chatObservation.then((chatRead) => {
           if (!current()) return;
           if (get().detail && get().detail!.revision > detail.revision) {
             set({ chat: null, chatStatus: 'error',
@@ -1100,10 +1102,17 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
             chatError: 'The saved transcript could not be read. Refresh the selected investigation to try again.' });
         });
       } catch {
-        if (current()) set({ loading: false, chat: null, chatStatus: 'error',
+        if (current()) set({ loading: options?.awaitChat === true, chat: null, chatStatus: 'error',
           chatError: 'The transcript is unavailable until this investigation refreshes consistently.', consent: null, consentOpen: false,
           reviewError: 'Saved investigation binding could not be refreshed. Refresh before reviewing; historical findings remain visible.',
           error: 'The investigation could not be refreshed consistently. Saved findings and activity remain visible; refresh to reconnect.' });
+      } finally {
+        // Docking owns one physical chat read through settlement, even if detail
+        // failed or selection changed. Ordinary findings remain nonblocking.
+        if (options?.awaitChat) {
+          await transcriptSettled;
+          if (current()) set({ loading: false });
+        }
       }
     },
 

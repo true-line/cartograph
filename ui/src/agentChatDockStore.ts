@@ -55,7 +55,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         unsubscribe?.(); unsubscribe = undefined;
       };
       unsubscribe = coordinator.subscribe(observe);
-      void coordinator.getState().open(taskId).then(observe).catch(() => {
+      void coordinator.getState().open(taskId, { awaitChat: true }).then(observe).catch(() => {
         if (connected && intent === request) {
           unsubscribe?.(); unsubscribe = undefined;
           set({ pendingTask: null, error: 'Saved chat unavailable. Try opening it again.' });
