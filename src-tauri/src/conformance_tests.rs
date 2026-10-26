@@ -180,3 +180,24 @@ fn vacuous_or_malformed_expectations_are_refused() {
         assert!(validate_expect(&bad).is_err(), "accepted {bad}");
     }
 }
+
+#[test]
+fn a_client_only_rust_repository_still_yields_its_reqwest_calls() {
+    // AC-0367 (#1093 review): reqwest calls are client facts, so a manifest
+    // selecting only the client layer still runs the Rust pass.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../crates/ingest/conformance/rust.reqwest.http_client_calls/src");
+    let (x, _) = crate::extract_tree_with_summary(
+        &dir,
+        REPO,
+        "workdir",
+        &["client".to_string()],
+        &BTreeMap::new(),
+        None,
+        None,
+        &[],
+    )
+    .unwrap();
+    let methods: Vec<&str> = x.fetch_sites.iter().map(|s| s.method.as_str()).collect();
+    assert_eq!(methods, ["GET", "DELETE", "POST"]);
+}

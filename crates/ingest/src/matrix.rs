@@ -258,6 +258,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("Rust", CORE, Calls, Supported, ""),
     cell("Rust", "axum", HttpEndpoints, Supported, ""),
     cell("Rust", "actix-web", HttpEndpoints, Supported, ""),
+    cell("Rust", "reqwest", HttpClientCalls, Supported, ""),
     cell("Java", CORE, Types, Supported, ""),
     cell("Java", CORE, Imports, Supported, ""),
     cell("Java", CORE, Calls, Supported, ""),

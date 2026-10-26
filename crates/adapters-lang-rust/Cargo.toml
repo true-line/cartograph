@@ -7,6 +7,7 @@ publish.workspace = true
 license-file.workspace = true
 
 [dependencies]
+adapters-fw = { workspace = true }
 core-graph = { workspace = true }
 core-prov = { workspace = true }
 source-walk = { workspace = true }

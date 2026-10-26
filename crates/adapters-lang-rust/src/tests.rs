@@ -1352,3 +1352,183 @@ pub fn app() -> Router {
         ]
     );
 }
+
+// AC-0367: reqwest client calls proven through `use` / qualified paths and
+// a proven Client receiver become fetch sites; literal URLs as written,
+// anything else computed.
+fn reqwest_sites(lib: &str) -> Vec<(String, String, String)> {
+    reqwest_sites_with(lib, &[])
+}
+
+fn reqwest_sites_with(lib: &str, extra: &[(&str, &str)]) -> Vec<(String, String, String)> {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    write(dir.path(), "src/lib.rs", lib);
+    for (path, text) in extra {
+        write(dir.path(), path, text);
+    }
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    x.fetch_sites
+        .iter()
+        .map(|site| {
+            let url = match &site.url {
+                adapters_fw::events::IdentityExpr::Literal(url) => format!("lit {url}"),
+                adapters_fw::events::IdentityExpr::Computed(text) => format!("computed {text}"),
+                adapters_fw::events::IdentityExpr::EnvRef(key) => format!("env {key}"),
+            };
+            let owner = site.symbol.clone().unwrap_or_default();
+            let owner = owner.rsplit('#').next().unwrap().to_string();
+            (site.method.clone(), url, owner)
+        })
+        .collect()
+}
+
+fn site(method: &str, url: &str, owner: &str) -> (String, String, String) {
+    (method.into(), url.into(), owner.into())
+}
+
+#[test]
+fn reqwest_calls_on_proven_clients_become_fetch_sites() {
+    let sites = reqwest_sites(
+        r#"
+use reqwest::{Client, Method};
+use std::sync::Arc;
+
+pub struct Api { http: Client, base: String }
+
+pub async fn free() { reqwest::get("https://api.example.com/health").await; }
+pub fn blocking() { reqwest::blocking::get("http://localhost/ping"); }
+pub async fn chained() { Client::new().post("/users").send().await; }
+pub async fn built() -> Result<(), reqwest::Error> {
+    let client = reqwest::Client::builder().timeout(T).build()?;
+    client.put("/users/1").send().await?;
+    Ok(())
+}
+pub async fn param(client: &Client, id: u32) {
+    client.delete(format!("/users/{id}")).send().await;
+}
+pub async fn shared(client: Arc<Client>) { client.request(Method::PATCH, "/users").send().await; }
+impl Api {
+    pub async fn me(&self) { self.http.get("/me").send().await; }
+}
+"#,
+    );
+    assert_eq!(
+        sites,
+        vec![
+            site("GET", "lit https://api.example.com/health", "free"),
+            site("GET", "lit http://localhost/ping", "blocking"),
+            site("POST", "lit /users", "chained"),
+            site("PUT", "lit /users/1", "built"),
+            site("DELETE", "computed format!(\"/users/{id}\")", "param"),
+            site("PATCH", "lit /users", "shared"),
+            site("GET", "lit /me", "Api.me"),
+        ]
+    );
+}
+
+#[test]
+fn reqwest_lookalikes_and_unproven_receivers_yield_nothing() {
+    let sites = reqwest_sites(
+        r#"
+mod net { pub struct Client; impl Client { pub fn new() -> Self { Client } pub fn get(&self, _: &str) {} } }
+use net::Client;
+pub struct A { http: reqwest::Client }
+pub struct B { http: Client }
+
+pub fn local_client() { Client::new().get("/not-reqwest"); }
+pub fn rebound(other: Client) {
+    let client = reqwest::Client::new();
+    let client = other;
+    client.get("/rebound");
+}
+pub fn untyped(client: Thing) { client.get("/untyped"); }
+pub fn map(m: std::collections::HashMap<u8, u8>) { m.get(&1); }
+pub fn shadowed_get(get: fn(&str)) { get("/shadowed"); }
+impl B { pub fn lookalike_field(&self) { self.http.get("/b-field"); } }
+pub fn closure() { let f = |client: Client| client.get("/closure"); }
+"#,
+    );
+    assert!(sites.is_empty(), "{sites:?}");
+}
+
+#[test]
+fn reqwest_proof_rejects_local_wrappers_and_foreign_impl_fields() {
+    // AC-0367 (#1093 review): a generic parameter named `Client` shadows the
+    // import, a local `Arc` is not std's, and `self.http`
+    // in `impl other::FakeApi` is not proven by another struct's Client
+    // field; std::sync::Arc and the struct's own impl stay proven.
+    let sites = reqwest_sites_with(
+        r#"
+mod other;
+mod local {
+    use reqwest::Client;
+    pub struct Arc<T>(T);
+    impl<T> Arc<T> { pub fn get(&self, _: &str) {} }
+    pub fn run(client: Arc<Client>) { client.get("/local-arc"); }
+}
+mod generic {
+    use reqwest::Client;
+    pub struct S;
+    pub fn f<Client: Fake>(client: &Client) { client.get("/generic"); }
+    impl<Client: Fake> S { pub fn g(c: Client) { c.get("/generic-impl"); } }
+}
+pub struct Carrier { pub http: reqwest::Client }
+impl other::FakeApi { pub fn f(&self) { self.http.get("/not-http"); } }
+impl Carrier { pub fn real(&self) { self.http.get("/carrier"); } }
+pub fn std_arc(client: std::sync::Arc<reqwest::Client>) { client.get("/std-arc"); }
+"#,
+        &[(
+            "src/other.rs",
+            "pub struct Fake; impl Fake { pub fn get(&self, _: &str) {} }
+pub struct FakeApi { pub http: Fake }
+",
+        )],
+    );
+    assert_eq!(
+        sites,
+        vec![
+            site("GET", "lit /carrier", "Carrier.real"),
+            site("GET", "lit /std-arc", "std_arc"),
+        ]
+    );
+}
+
+#[test]
+fn reqwest_proof_rejects_generic_constructors_and_block_local_structs() {
+    // AC-0367 (#1093 re-review): `Client::new()` under a generic parameter
+    // named `Client` is not reqwest's, and a block-local `Api` with a Client
+    // field proves nothing about a module-level `Api`; a module-level
+    // struct's genuine Client field and a real constructor stay proven.
+    let sites = reqwest_sites_with(
+        r#"
+mod generic {
+    use reqwest::Client;
+    pub trait Fake: Sized { fn new() -> Self; fn get(&self, _: &str); }
+    pub fn run<Client: Fake>() { Client::new().get("/not-http"); }
+    pub fn real() { Client::new().get("/real"); }
+}
+mod collide {
+    fn declarations() { struct Api { http: reqwest::Client } }
+    struct Fake;
+    impl Fake { fn get(&self, _: &str) {} }
+    struct Api { http: Fake }
+    impl Api { fn run(&self) { self.http.get("/not-http"); } }
+}
+pub struct Carrier { pub http: reqwest::Client }
+impl Carrier { pub fn real(&self) { self.http.get("/carrier"); } }
+"#,
+        &[],
+    );
+    assert_eq!(
+        sites,
+        vec![
+            site("GET", "lit /real", "generic::real"),
+            site("GET", "lit /carrier", "Carrier.real"),
+        ]
+    );
+}
