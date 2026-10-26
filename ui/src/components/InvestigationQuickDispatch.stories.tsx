@@ -1,13 +1,17 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fireEvent, fn, userEvent, waitFor, within } from 'storybook/test';
-import { investigationCatalog, investigationDetail } from '../investigationFixtures';
+import { investigationCatalog, investigationDetail, investigationEvents } from '../investigationFixtures';
+import { completionCatalog, completionChoices, inventoryObligation, gapTriagerDetail, gapTriagerResult } from '../completionFixtures';
 import { useInvestigationStore } from '../investigationStore';
 import { InvestigationQuickDispatch } from './InvestigationQuickDispatch';
 
 let retriedNonce: string | undefined;
 let finishCatalogLoad: (() => void) | undefined;
 let finishStart: (() => void) | undefined;
+let completionRequests: Array<Record<string, unknown>> = [];
+let pendingChoiceResolvers: Array<(value: typeof completionChoices) => void> = [];
+let refreshedCompletionChoices: typeof completionChoices;
 const pressMeta = (key: string, code: string) => fireEvent.keyDown(window, { key, code, metaKey: true, bubbles: true });
 
 const meta = {
@@ -46,7 +50,7 @@ export const KeyboardAndDispatchLifecycle: Story = {
     await expect(useInvestigationStore.getState().start).toHaveBeenCalledWith({
       specialist_id: 'domain-analyst@3', question: 'Explain the recovered behavior.',
       scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1',
-    });
+    }, { preserveComposer: true });
     await expect(args.onNavigate).toHaveBeenCalledWith('investigations');
     await expect(canvas.queryByRole('dialog', { name: 'Quick investigation dispatch' })).not.toBeInTheDocument();
     await expect(launcher).toHaveFocus();
@@ -211,5 +215,158 @@ export const UnavailableProviderDoesNotFallback: Story = {
     await expect(canvas.getByLabelText('Provider')).toHaveValue('local');
     await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled();
     await expect(useInvestigationStore.getState().start).not.toHaveBeenCalled();
+  },
+};
+
+export const CompletionDispatchUsesOnlyLocalRecordedChoices: Story = {
+  beforeEach: () => {
+    const initial = useInvestigationStore.getInitialState();
+    const accepted = gapTriagerDetail('quick-completion-confirmed');
+    completionRequests = [];
+    mockIPC((command, payload) => {
+      if (command === 'investigation_obligation_choices') return completionChoices;
+      if (command === 'start_investigation') {
+        completionRequests.push(structuredClone((payload as { request: Record<string, unknown> }).request));
+        if (completionRequests.length === 1) throw new Error('Uncertain start acknowledgement');
+        return accepted;
+      }
+      if (command === 'get_investigation') return accepted;
+      if (command === 'investigation_result') return gapTriagerResult(accepted.investigation_id);
+      if (command === 'get_investigation_chat' || command === 'investigation_consent') return null;
+      if (command === 'investigation_events') { const items = investigationEvents(accepted.investigation_id);
+        return { investigation_id: accepted.investigation_id, items, next_sequence: items.length, has_more: false }; }
+      return null;
+    });
+    useInvestigationStore.setState({ ...initial, catalog: completionCatalog, pendingStart: null, starting: false,
+      composer: { ...initial.composer, question: 'Preserve the full composer question.', parent: {
+        conversation_id: 'full-composer-conversation', parent_id: 'full-composer-parent' } },
+      draftObligations: [{ ...inventoryObligation, obligation_id: 'full-composer-obligation' }],
+      start: initial.start, retryStart: initial.retryStart }, true);
+    return () => { clearMocks(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); };
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    pressMeta(' ', 'Space');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'gap-triager@1');
+    await canvas.findByText('acme/api');
+    await expect(canvas.queryByText('example/stale')).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole('button', { name: 'Require inventory acme/api' }));
+    await expect(canvas.getByRole('button', { name: 'Remove inventory acme/api' })).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.type(canvas.getByLabelText('Question'), 'Draft a cited proposal.');
+    await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeEnabled();
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(canvas.getByText(/outcome is uncertain/)).toBeVisible();
+    const close = canvas.getByRole('button', { name: 'Close quick investigation' });
+    await userEvent.click(close);
+    pressMeta(' ', 'Space');
+    await expect(canvas.getByRole('button', { name: 'Retry same request' })).toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: 'Retry same request' }));
+    await waitFor(() => expect(useInvestigationStore.getState().selectedId).toBe('quick-completion-confirmed'));
+    const state = useInvestigationStore.getState();
+    expect(completionRequests).toHaveLength(2);
+    expect(completionRequests[1]).toEqual(completionRequests[0]);
+    expect(completionRequests[0]).toMatchObject({ schema_version: 4, specialist_id: 'gap-triager@1',
+      obligations: { schema_version: 1, obligations: [inventoryObligation] },
+      expected_graph_revision: completionChoices.graph_snapshot_id, expected_context_id: completionChoices.context_id,
+      conversation_id: null, parent_id: null, question: 'Draft a cited proposal.' });
+    expect(completionRequests[0]).not.toHaveProperty('preserveComposer');
+    expect(completionRequests[0]).not.toHaveProperty('completionChoices');
+    await expect(state.composer.question).toBe('Preserve the full composer question.');
+    await expect(state.composer.parent).toEqual({ conversation_id: 'full-composer-conversation', parent_id: 'full-composer-parent' });
+    await expect(state.draftObligations[0].obligation_id).toBe('full-composer-obligation');
+    await expect(args.onNavigate).toHaveBeenCalledWith('investigations');
+  },
+};
+
+export const CompletionChoicesDiscardOlderScopeResponse: Story = {
+  beforeEach: () => {
+    const initial = useInvestigationStore.getInitialState();
+    pendingChoiceResolvers = [];
+    mockIPC((command) => {
+      if (command === 'investigation_obligation_choices') return new Promise<typeof completionChoices>((resolve) => pendingChoiceResolvers.push(resolve));
+      return null;
+    });
+    useInvestigationStore.setState({ ...initial, catalog: completionCatalog }, true);
+    return () => { clearMocks(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); };
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    pressMeta(' ', 'Space');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'spec-writer@1');
+    await waitFor(() => expect(pendingChoiceResolvers).toHaveLength(1));
+    useInvestigationStore.getState().updateComposer({ scopeType: 'neighborhood', anchor: 'rule:new-scope', hops: 1 });
+    await waitFor(() => expect(pendingChoiceResolvers).toHaveLength(2));
+    const newer = structuredClone(completionChoices);
+    newer.context_id = `context-v2:${'9'.repeat(64)}`;
+    newer.inventories[0].repo = 'acme/new-scope';
+    newer.inventories[0].obligation!.target.context_id = newer.context_id;
+    newer.inventories[0].obligation!.target.repo = 'acme/new-scope';
+    newer.inventories[0].obligation!.target.inventory_hash = '8'.repeat(64);
+    pendingChoiceResolvers[1](newer);
+    await canvas.findByText('acme/new-scope');
+    pendingChoiceResolvers[0](completionChoices);
+    await Promise.resolve();
+    await waitFor(() => expect(canvas.getByText('acme/new-scope')).toBeVisible());
+    await expect(canvas.queryByText('acme/api')).not.toBeInTheDocument();
+    await expect(canvas.getByText(/Scope: Fact neighborhood · rule:new-scope · 1 hop/)).toBeVisible();
+  },
+};
+
+export const DefinitiveContextRefreshRequiresNewSelection: Story = {
+  beforeEach: () => {
+    const initial = useInvestigationStore.getInitialState();
+    const accepted = gapTriagerDetail('quick-refreshed-completion');
+    refreshedCompletionChoices = structuredClone(completionChoices);
+    refreshedCompletionChoices.context_id = `context-v2:${'9'.repeat(64)}`;
+    refreshedCompletionChoices.inventories[0].repo = 'acme/refreshed';
+    refreshedCompletionChoices.inventories[0].obligation = { kind: 'inventory', obligation_id: 'f'.repeat(64), target: {
+      context_id: refreshedCompletionChoices.context_id, repo: 'acme/refreshed', inventory_hash: '8'.repeat(64) } };
+    completionRequests = [];
+    let choicesRead = 0;
+    mockIPC((command, payload) => {
+      if (command === 'investigation_obligation_choices') return choicesRead++ === 0 ? completionChoices : refreshedCompletionChoices;
+      if (command === 'start_investigation') {
+        completionRequests.push(structuredClone((payload as { request: Record<string, unknown> }).request));
+        if (completionRequests.length === 1) throw { code: 'refresh_required', definitive: true };
+        return accepted;
+      }
+      if (command === 'get_investigation') return accepted;
+      if (command === 'investigation_result') return gapTriagerResult(accepted.investigation_id);
+      if (command === 'get_investigation_chat' || command === 'investigation_consent') return null;
+      if (command === 'investigation_events') { const items = investigationEvents(accepted.investigation_id);
+        return { investigation_id: accepted.investigation_id, items, next_sequence: items.length, has_more: false }; }
+      return null;
+    });
+    useInvestigationStore.setState({ ...initial, catalog: completionCatalog }, true);
+    return () => { clearMocks(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); };
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    pressMeta(' ', 'Space');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'gap-triager@1');
+    await canvas.findByText('acme/api');
+    await userEvent.click(canvas.getByRole('button', { name: 'Require inventory acme/api' }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Recommend the next verification.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(await canvas.findByRole('alert')).toHaveTextContent('Refresh choices');
+    await canvas.findByText('acme/refreshed');
+    await expect(canvas.getByRole('button', { name: 'Require inventory acme/refreshed' })).toHaveAttribute('aria-pressed', 'false');
+    await expect(canvas.queryByRole('button', { name: 'Require inventory acme/api' })).not.toBeInTheDocument();
+    await userEvent.click(canvas.getByRole('button', { name: 'Require inventory acme/refreshed' }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await waitFor(() => expect(completionRequests).toHaveLength(2));
+    expect(completionRequests[0]).toMatchObject({ expected_context_id: completionChoices.context_id,
+      obligations: { obligations: [inventoryObligation] } });
+    expect(completionRequests[1]).toMatchObject({ expected_context_id: refreshedCompletionChoices.context_id,
+      obligations: { obligations: [refreshedCompletionChoices.inventories[0].obligation] } });
+  },
+};
+
+export const CompletionRolesRequireHostCatalogSupport: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    pressMeta(' ', 'Space');
+    await expect(canvas.queryByRole('option', { name: /spec-writer@1/ })).not.toBeInTheDocument();
+    await expect(canvas.queryByRole('option', { name: /gap-triager@1/ })).not.toBeInTheDocument();
   },
 };
