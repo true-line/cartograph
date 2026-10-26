@@ -812,3 +812,34 @@ browser.storage.onChanged.addListener(() => {});
         );
     }
 }
+
+// AC-0316, AC-0317: a checked-in fixture repo with one site per rule family
+// (browser and WebExtension storage, http-api per origin, an env-led origin,
+// an SDK client, an auth provider, computed identities) recovers to exactly
+// the golden nodes and edges, citing the fixture's own bytes.
+// `UPDATE_GOLDEN=1` rewrites the golden. (T-0316, T-0317)
+#[test]
+fn observed_infra_fixture_matches_its_golden() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ex = extract_dir(
+        &manifest.join("tests/fixtures/observed-infra"),
+        &id(),
+        Registries::builtin(),
+    )
+    .unwrap();
+    let mut nodes = ex.nodes.clone();
+    nodes.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut edges = ex.edges.clone();
+    edges.sort_by(|a, b| (&a.src, &a.dst, &a.label).cmp(&(&b.src, &b.dst, &b.label)));
+    let actual =
+        serde_json::to_string_pretty(&serde_json::json!({ "nodes": nodes, "edges": edges }))
+            .unwrap()
+            + "\n";
+    let golden = manifest.join("tests/golden/observed_infra.json");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::create_dir_all(golden.parent().unwrap()).unwrap();
+        std::fs::write(&golden, &actual).unwrap();
+    }
+    let expected = std::fs::read_to_string(&golden).expect("golden file is checked in");
+    assert_eq!(actual, expected);
+}
