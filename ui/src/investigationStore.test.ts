@@ -102,6 +102,357 @@ describe('durable investigation observations (AC-0190)', () => {
     }))).toEqual([{ id: terminal.investigation_id, status: 'completed', revision: 9 }]);
   });
 
+  it('coalesces a conversation event burst and publishes the in-flight page before one trailing refresh (AC-0374)', async () => {
+    const initial = investigationDetail('busy-turn', { conversation_id: 'busy-conversation', revision: 1,
+      status: 'running', has_result: false });
+    const firstResponse = investigationDetail('busy-turn', { conversation_id: 'busy-conversation', revision: 2,
+      status: 'running', has_result: false, last_event_sequence: 2 });
+    const trailingResponse = investigationDetail('busy-turn', { conversation_id: 'busy-conversation', revision: 4,
+      status: 'completed', has_result: true, last_event_sequence: 4 });
+    const firstPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const trailingPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const calls: unknown[] = [];
+    mockIPC((command, args) => {
+      if (command !== 'list_investigation_conversation') throw new Error(`Unexpected ${command}`);
+      calls.push(args);
+      return calls.length === 1 ? firstPage.promise : trailingPage.promise;
+    });
+    useInvestigationStore.setState({ conversationId: initial.conversation_id, conversationItems: [initial], conversationPagePrefixCount: 1,
+      history: [initial], historyLoading: true });
+
+    const loading = useInvestigationStore.getState().loadConversation();
+    for (const sequence of [2, 3, 4]) useInvestigationStore.getState().invalidate({
+      investigation_id: initial.investigation_id, revision: sequence, last_event_sequence: sequence,
+    });
+    expect(calls).toHaveLength(1);
+
+    firstPage.resolve({ items: [firstResponse], next_cursor: null });
+    await loading;
+    expect(useInvestigationStore.getState().conversationItems[0]).toMatchObject({ revision: 2, status: 'running' });
+    expect(calls).toHaveLength(2);
+    expect(useInvestigationStore.getState().conversationLoading).toBe(true);
+
+    trailingPage.resolve({ items: [trailingResponse], next_cursor: null });
+    await vi.waitFor(() => expect(useInvestigationStore.getState().conversationLoading).toBe(false));
+    expect(useInvestigationStore.getState().conversationItems[0]).toMatchObject({ revision: 4, status: 'completed' });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('runs one trailing refresh after a failed request and does not retry again without a new event (AC-0374)', async () => {
+    const turn = investigationDetail('failure-turn', { conversation_id: 'failure-conversation', status: 'running', has_result: false });
+    const firstPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const trailingPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const calls: unknown[] = [];
+    mockIPC((command, args) => {
+      if (command !== 'list_investigation_conversation') throw new Error(`Unexpected ${command}`);
+      calls.push(args);
+      return calls.length === 1 ? firstPage.promise : trailingPage.promise;
+    });
+    useInvestigationStore.setState({ conversationId: turn.conversation_id, conversationItems: [turn], conversationPagePrefixCount: 1,
+      history: [turn], historyLoading: true });
+
+    const loading = useInvestigationStore.getState().loadConversation();
+    useInvestigationStore.getState().invalidate({ investigation_id: turn.investigation_id, revision: 1, last_event_sequence: 1 });
+    firstPage.reject(new Error('temporary failure'));
+    await loading;
+    expect(calls).toHaveLength(2);
+    expect(useInvestigationStore.getState().conversationLoading).toBe(true);
+
+    trailingPage.reject(new Error('still unavailable'));
+    await vi.waitFor(() => expect(useInvestigationStore.getState().conversationLoading).toBe(false));
+    expect(useInvestigationStore.getState().conversationError).toContain('could not be loaded');
+    expect(calls).toHaveLength(2);
+  });
+
+  it('clears a pending event refresh on same-conversation reopen and suppresses the older response (AC-0374)', async () => {
+    const turn = investigationDetail('reopen-turn', { conversation_id: 'reopen-conversation', revision: 1,
+      status: 'running', has_result: false });
+    const obsoletePage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const reopenedPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const currentPage = investigationDetail('reopen-turn', { conversation_id: 'reopen-conversation', revision: 3,
+      status: 'completed', has_result: true });
+    const trailingPage = investigationDetail('reopen-turn', { conversation_id: 'reopen-conversation', revision: 4,
+      status: 'completed', has_result: true });
+    let calls = 0;
+    mockIPC((command) => {
+      if (command !== 'list_investigation_conversation') throw new Error(`Unexpected ${command}`);
+      calls += 1;
+      if (calls === 1) return obsoletePage.promise;
+      if (calls === 2) return reopenedPage.promise;
+      return { items: [trailingPage], next_cursor: null };
+    });
+    useInvestigationStore.setState({ conversationId: turn.conversation_id, conversationItems: [turn], conversationPagePrefixCount: 1,
+      history: [turn], historyLoading: true });
+
+    const oldLoad = useInvestigationStore.getState().loadConversation();
+    useInvestigationStore.getState().invalidate({ investigation_id: turn.investigation_id, revision: 2, last_event_sequence: 2 });
+    const reopened = useInvestigationStore.getState().openConversation(turn.conversation_id);
+    expect(useInvestigationStore.getState().conversationPagePrefixCount).toBe(1);
+    useInvestigationStore.getState().invalidate({ investigation_id: turn.investigation_id, revision: 3, last_event_sequence: 3 });
+    obsoletePage.resolve({ items: [turn], next_cursor: null });
+    await oldLoad;
+    expect(calls).toBe(2);
+
+    reopenedPage.resolve({ items: [currentPage], next_cursor: null });
+    await reopened;
+    await vi.waitFor(() => expect(useInvestigationStore.getState().conversationLoading).toBe(false));
+
+    expect(calls).toBe(3);
+    expect(useInvestigationStore.getState().conversationItems[0]).toMatchObject({ revision: 4, status: 'completed' });
+  });
+
+  it('clears a pending event refresh on close without applying or restarting the stale request (AC-0374)', async () => {
+    const turn = investigationDetail('closed-turn', { conversation_id: 'closed-conversation', status: 'running', has_result: false });
+    const pending = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    let calls = 0;
+    mockIPC((command) => {
+      if (command !== 'list_investigation_conversation') throw new Error(`Unexpected ${command}`);
+      calls += 1;
+      return pending.promise;
+    });
+    useInvestigationStore.setState({ conversationId: turn.conversation_id, conversationItems: [turn], conversationPagePrefixCount: 1,
+      history: [turn], historyLoading: true });
+
+    const loading = useInvestigationStore.getState().loadConversation();
+    useInvestigationStore.getState().invalidate({ investigation_id: turn.investigation_id, revision: 1, last_event_sequence: 1 });
+    useInvestigationStore.getState().closeConversation();
+    pending.resolve({ items: [turn], next_cursor: null });
+    await loading;
+
+    expect(calls).toBe(1);
+    expect(useInvestigationStore.getState().conversationId).toBeNull();
+    expect(useInvestigationStore.getState().conversationItems).toEqual([]);
+    expect(useInvestigationStore.getState().conversationPagePrefixCount).toBe(0);
+  });
+
+  it('preserves loaded older turns and adopts the refreshed cursor after a continuation (AC-0374)', async () => {
+    const first = investigationDetail('page-first', { conversation_id: 'paged-conversation' });
+    const second = investigationDetail('page-second', { conversation_id: 'paged-conversation', parent_id: first.investigation_id });
+    const newest = investigationDetail('page-newest', { conversation_id: 'paged-conversation', parent_id: first.investigation_id });
+    const third = investigationDetail('page-third', { conversation_id: 'paged-conversation', parent_id: first.investigation_id });
+    const continuation = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const refreshedFirstPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const calls: Record<string, unknown>[] = [];
+    mockIPC((command, args) => {
+      if (command !== 'list_investigation_conversation') throw new Error(`Unexpected ${command}`);
+      calls.push(args ?? {});
+      if (calls.length === 1) return continuation.promise;
+      if (calls.length === 2) return refreshedFirstPage.promise;
+      return { items: [second, third], next_cursor: null };
+    });
+    useInvestigationStore.setState({ conversationId: first.conversation_id, conversationItems: [first], conversationPagePrefixCount: 1,
+      conversationCursor: 'older-page-2', history: [first], historyLoading: true });
+
+    const loadingOlder = useInvestigationStore.getState().loadConversation(true);
+    useInvestigationStore.getState().invalidate({ investigation_id: first.investigation_id, revision: 1, last_event_sequence: 1 });
+    continuation.resolve({ items: [second], next_cursor: 'older-page-3' });
+    await loadingOlder;
+    expect(useInvestigationStore.getState().conversationItems.map((item) => item.investigation_id))
+      .toEqual([first.investigation_id, second.investigation_id]);
+    expect(useInvestigationStore.getState().conversationPageBookmarks)
+      .toContainEqual({ cursor: 'older-page-2', ids: [second.investigation_id] });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual({ conversationId: first.conversation_id, cursor: 'older-page-2' });
+    expect(calls[1]).toEqual({ conversationId: first.conversation_id });
+
+    refreshedFirstPage.resolve({ items: [newest, first], next_cursor: 'fresh-first-page-cursor' });
+    await vi.waitFor(() => expect(useInvestigationStore.getState().conversationLoading).toBe(false));
+    expect(useInvestigationStore.getState().conversationItems.map((item) => item.investigation_id))
+      .toEqual([newest.investigation_id, first.investigation_id, second.investigation_id]);
+    expect(useInvestigationStore.getState().conversationCursor).toBe('fresh-first-page-cursor');
+
+    await useInvestigationStore.getState().loadConversation(true);
+    expect(calls[2]).toEqual({ conversationId: first.conversation_id, cursor: 'fresh-first-page-cursor' });
+    expect(useInvestigationStore.getState().conversationItems.map((item) => item.investigation_id))
+      .toEqual([newest.investigation_id, first.investigation_id, second.investigation_id, third.investigation_id]);
+    expect(useInvestigationStore.getState().conversationPagePrefixCount).toBe(4);
+    expect(useInvestigationStore.getState().conversationCursor).toBeNull();
+  });
+
+  it('keeps cached older turns while replacing an exhausted cursor with the refreshed first-page cursor (AC-0374)', async () => {
+    const first = investigationDetail('exhausted-first', { conversation_id: 'exhausted-conversation' });
+    const older = investigationDetail('exhausted-older', { conversation_id: 'exhausted-conversation' });
+    const newest = investigationDetail('exhausted-newest', { conversation_id: 'exhausted-conversation' });
+    const middle = investigationDetail('exhausted-middle', { conversation_id: 'exhausted-conversation' });
+    const calls: Record<string, unknown>[] = [];
+    mockIPC((command, args) => {
+      if (command !== 'list_investigation_conversation') throw new Error(`Unexpected ${command}`);
+      calls.push(args ?? {});
+      if (calls.length <= 2) return { items: [newest, first], next_cursor: 'refreshed-cursor' };
+      return { items: [middle], next_cursor: null };
+    });
+    useInvestigationStore.setState({ conversationId: first.conversation_id, conversationItems: [first, older],
+      conversationPagePrefixCount: 2, conversationCursor: null, history: [first, older], historyLoading: true });
+
+    const loading = useInvestigationStore.getState().loadConversation();
+    useInvestigationStore.getState().invalidate({ investigation_id: first.investigation_id, revision: 2, last_event_sequence: 2 });
+    await loading;
+    await vi.waitFor(() => expect(useInvestigationStore.getState().conversationLoading).toBe(false));
+    expect(calls).toHaveLength(2);
+    expect(useInvestigationStore.getState().conversationItems.map((item) => item.investigation_id))
+      .toEqual([newest.investigation_id, first.investigation_id, older.investigation_id]);
+    expect(useInvestigationStore.getState().conversationCursor).toBe('refreshed-cursor');
+
+    await useInvestigationStore.getState().loadConversation(true);
+    expect(calls[2]).toEqual({ conversationId: first.conversation_id, cursor: 'refreshed-cursor' });
+    expect(useInvestigationStore.getState().conversationItems.map((item) => item.investigation_id))
+      .toEqual([newest.investigation_id, first.investigation_id, middle.investigation_id, older.investigation_id]);
+    expect(useInvestigationStore.getState().conversationPagePrefixCount).toBe(3);
+    expect(useInvestigationStore.getState().conversationCursor).toBeNull();
+  });
+
+  it('publishes a refreshed older page and coalesces later invalidations into one trailing page read (AC-0374)', async () => {
+    const first = investigationDetail('dirty-first', { conversation_id: 'dirty-conversation' });
+    const older = investigationDetail('dirty-older', { conversation_id: first.conversation_id, revision: 1, status: 'running', has_result: false });
+    const refreshed = investigationDetail('dirty-older', { conversation_id: first.conversation_id, revision: 2, status: 'running', has_result: false });
+    const trailing = investigationDetail('dirty-older', { conversation_id: first.conversation_id, revision: 3, status: 'completed', has_result: true });
+    const firstPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const trailingPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const calls: unknown[] = [];
+    mockIPC((command, args) => {
+      if (command !== 'list_investigation_conversation') throw new Error(`Unexpected ${command}`);
+      calls.push(args);
+      return calls.length === 1 ? firstPage.promise : trailingPage.promise;
+    });
+    useInvestigationStore.setState({ conversationId: first.conversation_id, conversationItems: [first, older],
+      conversationPagePrefixCount: 1, conversationPageBookmarks: [{ cursor: 'older-page-cursor', ids: [older.investigation_id] }],
+      conversationCursor: 'next-page-cursor', historyLoading: true });
+
+    useInvestigationStore.getState().invalidate({ investigation_id: older.investigation_id, revision: 2, last_event_sequence: 2 });
+    useInvestigationStore.getState().invalidate({ investigation_id: older.investigation_id, revision: 3, last_event_sequence: 3 });
+    expect(calls).toHaveLength(1);
+    firstPage.resolve({ items: [refreshed], next_cursor: null });
+    await vi.waitFor(() => expect(useInvestigationStore.getState().conversationItems[1]).toMatchObject({ revision: 2, status: 'running' }));
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    expect(useInvestigationStore.getState().conversationItems[1]).toMatchObject({ revision: 2, status: 'running' });
+    trailingPage.resolve({ items: [trailing], next_cursor: null });
+    await vi.waitFor(() => expect(useInvestigationStore.getState().conversationItems[1]).toMatchObject({ revision: 3, status: 'completed' }));
+
+    expect(calls).toEqual([
+      { conversationId: first.conversation_id, cursor: 'older-page-cursor' },
+      { conversationId: first.conversation_id, cursor: 'older-page-cursor' },
+    ]);
+    expect(useInvestigationStore.getState().conversationItems.map((item) => item.investigation_id))
+      .toEqual([first.investigation_id, older.investigation_id]);
+    expect(useInvestigationStore.getState().conversationPagePrefixCount).toBe(1);
+    expect(useInvestigationStore.getState().conversationCursor).toBe('next-page-cursor');
+    expect(useInvestigationStore.getState().conversationDirtyPages).toEqual([]);
+  });
+
+  it('keeps a failed older-page refresh dirty and retries it on manual refresh (AC-0374)', async () => {
+    const first = investigationDetail('retry-first', { conversation_id: 'retry-conversation' });
+    const older = investigationDetail('retry-older', { conversation_id: first.conversation_id, revision: 1, status: 'running', has_result: false });
+    const refreshed = investigationDetail('retry-older', { conversation_id: first.conversation_id, revision: 2, status: 'completed', has_result: true });
+    const calls: unknown[] = [];
+    mockIPC((command, args) => {
+      if (command !== 'list_investigation_conversation') throw new Error(`Unexpected ${command}`);
+      calls.push(args);
+      if (calls.length === 1) throw new Error('temporary page failure');
+      if (args?.cursor === 'older-page-cursor') return { items: [refreshed], next_cursor: null };
+      return { items: [first], next_cursor: 'fresh-page-cursor' };
+    });
+    useInvestigationStore.setState({ conversationId: first.conversation_id, conversationItems: [first, older],
+      conversationPagePrefixCount: 1, conversationPageBookmarks: [{ cursor: 'older-page-cursor', ids: [older.investigation_id] }],
+      conversationCursor: 'older-page-cursor', historyLoading: true });
+
+    useInvestigationStore.getState().invalidate({ investigation_id: older.investigation_id, revision: 2, last_event_sequence: 2 });
+    await vi.waitFor(() => expect(useInvestigationStore.getState().conversationLoading).toBe(false));
+    expect(useInvestigationStore.getState().conversationDirtyPages).toEqual(['older-page-cursor']);
+    expect(calls).toHaveLength(1);
+
+    await useInvestigationStore.getState().loadConversation();
+    expect(useInvestigationStore.getState().conversationItems[1]).toMatchObject({ revision: 2, status: 'completed' });
+    expect(useInvestigationStore.getState().conversationDirtyPages).toEqual([]);
+    expect(calls).toEqual([
+      { conversationId: first.conversation_id, cursor: 'older-page-cursor' },
+      { conversationId: first.conversation_id },
+      { conversationId: first.conversation_id, cursor: 'older-page-cursor' },
+    ]);
+  });
+
+  it('stops a dirty-page pass at the first failure without hiding it behind later pages (AC-0374)', async () => {
+    const first = investigationDetail('dirty-failure-first', { conversation_id: 'dirty-failure-conversation' });
+    const olderA = investigationDetail('dirty-failure-a', { conversation_id: first.conversation_id });
+    const olderB = investigationDetail('dirty-failure-b', { conversation_id: first.conversation_id });
+    const calls: unknown[] = [];
+    mockIPC((command, args) => {
+      if (command !== 'list_investigation_conversation') throw new Error(`Unexpected ${command}`);
+      calls.push(args);
+      throw new Error('older page unavailable');
+    });
+    useInvestigationStore.setState({ conversationId: first.conversation_id, conversationItems: [first, olderA, olderB],
+      conversationPagePrefixCount: 1, conversationPageBookmarks: [
+        { cursor: 'older-a-cursor', ids: [olderA.investigation_id] },
+        { cursor: 'older-b-cursor', ids: [olderB.investigation_id] },
+      ], conversationDirtyPages: ['older-a-cursor', 'older-b-cursor'], historyLoading: true });
+
+    useInvestigationStore.getState().invalidate({ investigation_id: olderA.investigation_id, revision: 1, last_event_sequence: 1 });
+    await vi.waitFor(() => expect(useInvestigationStore.getState().conversationLoading).toBe(false));
+
+    expect(calls).toEqual([{ conversationId: first.conversation_id, cursor: 'older-a-cursor' }]);
+    expect(useInvestigationStore.getState().conversationDirtyPages).toEqual(['older-a-cursor', 'older-b-cursor']);
+    expect(useInvestigationStore.getState().conversationError).toContain('could not be refreshed');
+  });
+
+  it('preserves a failed first-page error instead of flushing dirty pages afterward (AC-0374)', async () => {
+    const first = investigationDetail('first-page-failure', { conversation_id: 'first-page-failure-conversation' });
+    const older = investigationDetail('first-page-failure-older', { conversation_id: first.conversation_id });
+    const calls: unknown[] = [];
+    mockIPC((command, args) => {
+      if (command !== 'list_investigation_conversation') throw new Error(`Unexpected ${command}`);
+      calls.push(args);
+      if (args?.cursor === undefined) throw new Error('first page unavailable');
+      return { items: [older], next_cursor: null };
+    });
+    useInvestigationStore.setState({ conversationId: first.conversation_id, conversationItems: [first, older],
+      conversationPagePrefixCount: 1, conversationPageBookmarks: [{ cursor: 'older-page-cursor', ids: [older.investigation_id] }],
+      conversationDirtyPages: ['older-page-cursor'], historyLoading: true });
+
+    await useInvestigationStore.getState().loadConversation();
+
+    expect(calls).toEqual([{ conversationId: first.conversation_id }]);
+    expect(useInvestigationStore.getState().conversationDirtyPages).toEqual(['older-page-cursor']);
+    expect(useInvestigationStore.getState().conversationError).toContain('could not be loaded');
+  });
+
+  it('requeues a bookmarked page when a same-conversation reopen invalidates its response (AC-0374)', async () => {
+    const first = investigationDetail('reopen-page-first', { conversation_id: 'reopen-page-conversation' });
+    const older = investigationDetail('reopen-page-older', { conversation_id: first.conversation_id, revision: 1, status: 'running', has_result: false });
+    const stale = investigationDetail('reopen-page-older', { conversation_id: first.conversation_id, revision: 2, status: 'running', has_result: false });
+    const fresh = investigationDetail('reopen-page-older', { conversation_id: first.conversation_id, revision: 3, status: 'completed', has_result: true });
+    const obsoletePage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const reopenedFirstPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const calls: unknown[] = [];
+    mockIPC((command, args) => {
+      if (command !== 'list_investigation_conversation') throw new Error(`Unexpected ${command}`);
+      calls.push(args);
+      if (calls.length === 1) return obsoletePage.promise;
+      if (calls.length === 2) return reopenedFirstPage.promise;
+      return { items: [fresh], next_cursor: null };
+    });
+    useInvestigationStore.setState({ conversationId: first.conversation_id, conversationItems: [first, older],
+      conversationPagePrefixCount: 1, conversationPageBookmarks: [{ cursor: 'older-page-cursor', ids: [older.investigation_id] }],
+      conversationCursor: 'older-page-cursor', historyLoading: true });
+
+    useInvestigationStore.getState().invalidate({ investigation_id: older.investigation_id, revision: 2, last_event_sequence: 2 });
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    const reopening = useInvestigationStore.getState().openConversation(first.conversation_id);
+    reopenedFirstPage.resolve({ items: [first], next_cursor: 'next-page-cursor' });
+    await reopening;
+    expect(calls).toHaveLength(2);
+    obsoletePage.resolve({ items: [stale], next_cursor: null });
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+    await vi.waitFor(() => expect(useInvestigationStore.getState().conversationItems[1]).toMatchObject({ revision: 3, status: 'completed' }));
+
+    expect(calls).toEqual([
+      { conversationId: first.conversation_id, cursor: 'older-page-cursor' },
+      { conversationId: first.conversation_id },
+      { conversationId: first.conversation_id, cursor: 'older-page-cursor' },
+    ]);
+    expect(useInvestigationStore.getState().conversationItems.map((item) => item.investigation_id))
+      .toEqual([first.investigation_id, older.investigation_id]);
+  });
+
   it('opens a parent outside the loaded page, binds its citation, then clears on a foreign conversation (AC-0374)', async () => {
     const child = investigationDetail('selected-child', { conversation_id: 'conversation-pinned', parent_id: 'selected-parent' });
     const parent = investigationDetail('selected-parent', { conversation_id: 'conversation-pinned' });

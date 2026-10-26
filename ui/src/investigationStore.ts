@@ -190,6 +190,28 @@ function mergeHistory(existing: InvestigationSummary[], incoming: InvestigationS
   return [...byId.values()];
 }
 
+function mergeConversationPage(existing: InvestigationSummary[], incoming: InvestigationSummary[], prefixCount: number) {
+  // The verified prefix follows the current server cursor; cached older rows stay behind it.
+  const prefix = existing.slice(0, Math.min(prefixCount, existing.length));
+  const tail = existing.slice(prefix.length);
+  const prefixIds = new Set(prefix.map((item) => item.investigation_id));
+  const incomingIds = new Set(incoming.map((item) => item.investigation_id));
+  const seen = new Set(prefixIds);
+  const pageRows = incoming.filter((item) => {
+    if (seen.has(item.investigation_id)) return false;
+    seen.add(item.investigation_id);
+    return true;
+  });
+  const updatedPrefix = prefix.map((item) => {
+    const fresh = incoming.find((candidate) => candidate.investigation_id === item.investigation_id);
+    return fresh && fresh.revision >= item.revision ? fresh : item;
+  });
+  const retainedTail = tail.filter((item) => !incomingIds.has(item.investigation_id));
+  return [...updatedPrefix, ...pageRows, ...retainedTail];
+}
+
+type ConversationPageBookmark = { cursor: string; ids: string[] };
+
 function normalizedHistorySearch(query: string) {
   return query.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, '')
     .replace(/[A-Z]/g, (letter) => letter.toLowerCase());
@@ -238,6 +260,9 @@ export interface InvestigationState {
   historyError: string | null;
   conversationId: string | null;
   conversationItems: InvestigationSummary[];
+  conversationPagePrefixCount: number;
+  conversationPageBookmarks: ConversationPageBookmark[];
+  conversationDirtyPages: string[];
   conversationPinned: InvestigationSummary | null;
   conversationCursor: string | null;
   conversationLoading: boolean;
@@ -309,6 +334,9 @@ let reviewRequest = 0;
 let catalogRequest = 0;
 let historyRequest = 0;
 let conversationRequest = 0;
+let conversationRefreshPending: number | null = null;
+let conversationRefreshFirstPagePending = false;
+let conversationDirtyInFlight: { conversationId: string; cursor: string; request: number } | null = null;
 let detailRequest = 0;
 let citationRequest = 0;
 let actionRequest = 0;
@@ -316,6 +344,90 @@ let locationRequest = 0;
 let choicesRequest = 0;
 
 export const useInvestigationStore = create<InvestigationState>((set, get) => {
+  const refreshDirtyConversationPages = async (conversationId: string) => {
+    if (conversationDirtyInFlight?.conversationId === conversationId) return;
+    const dirtyCursors = [...get().conversationDirtyPages];
+    for (const cursor of dirtyCursors) {
+      if (get().conversationId !== conversationId || get().conversationLoading ||
+          conversationDirtyInFlight?.conversationId === conversationId) return;
+      const bookmark = get().conversationPageBookmarks.find((page) => page.cursor === cursor);
+      set((state) => ({ conversationDirtyPages: state.conversationDirtyPages.filter((page) => page !== cursor) }));
+      if (!bookmark) continue;
+      const current = get();
+      if (current.conversationId !== conversationId || current.conversationLoading) {
+        set((state) => ({ conversationDirtyPages: state.conversationDirtyPages.includes(cursor)
+          ? state.conversationDirtyPages : [...state.conversationDirtyPages, cursor] }));
+        return;
+      }
+      const request = ++conversationRequest;
+      const isCurrent = () => request === conversationRequest && get().conversationId === conversationId;
+      conversationDirtyInFlight = { conversationId, cursor, request };
+      let failed = false;
+      set({ conversationLoading: true, conversationError: null });
+      try {
+        const page = await invokeOr<InvestigationPage | null>('list_investigation_conversation', null,
+          { conversationId, cursor });
+        if (!page || !Array.isArray(page.items) || page.items.length > 50 ||
+            page.items.some((item) => !validSummary(item) || item.conversation_id !== conversationId) ||
+            (page.next_cursor !== null && typeof page.next_cursor !== 'string') ||
+            page.items.length !== bookmark.ids.length ||
+            page.items.some((item, index) => item.investigation_id !== bookmark.ids[index])) {
+          throw new Error('Invalid refreshed conversation page.');
+        }
+        if (!isCurrent()) return;
+        set((state) => ({ conversationItems: state.conversationItems.map((item) => {
+          const fresh = page.items.find((candidate) => candidate.investigation_id === item.investigation_id);
+          if (!fresh) return item;
+          const known = [...state.history, ...state.conversationItems,
+            ...(state.detail ? [state.detail] : []), ...(state.conversationPinned ? [state.conversationPinned] : [])]
+            .filter((candidate) => candidate.investigation_id === item.investigation_id)
+            .reduce((newer, candidate) => candidate.revision > newer.revision ? candidate : newer, fresh);
+          return known.revision >= item.revision ? known : item;
+        }), conversationError: null }));
+      } catch {
+        failed = true;
+        if (isCurrent()) {
+          set((state) => ({ conversationDirtyPages: state.conversationDirtyPages.includes(cursor)
+            ? state.conversationDirtyPages : [cursor, ...state.conversationDirtyPages],
+          conversationError: 'Conversation turns could not be refreshed. Previously loaded turns remain available.' }));
+        }
+      } finally {
+        if (conversationDirtyInFlight?.request === request) conversationDirtyInFlight = null;
+        if (isCurrent()) set({ conversationLoading: false });
+        else if (get().conversationId === conversationId) {
+          // A same-conversation reopen invalidates the response generation but
+          // must not lose the dirty page removed when this request began.
+          set((state) => ({ conversationDirtyPages: state.conversationDirtyPages.includes(cursor)
+            ? state.conversationDirtyPages : [cursor, ...state.conversationDirtyPages] }));
+          void refreshDirtyConversationPages(conversationId);
+        }
+        if (isCurrent() && conversationRefreshPending === request) {
+          conversationRefreshPending = null;
+          const refreshFirstPage = conversationRefreshFirstPagePending;
+          conversationRefreshFirstPagePending = false;
+          if (refreshFirstPage) void get().loadConversation();
+          else void refreshDirtyConversationPages(conversationId);
+        }
+      }
+      if (failed) return;
+    }
+  };
+
+  const refreshConversation = async (conversationId: string, investigationId?: string) => {
+    const state = get();
+    if (state.conversationId !== conversationId) return;
+    const continuation = investigationId && state.conversationPageBookmarks.find((page) => page.ids.includes(investigationId));
+    if (continuation) set((current) => ({ conversationDirtyPages: current.conversationDirtyPages.includes(continuation.cursor)
+      ? current.conversationDirtyPages : [...current.conversationDirtyPages, continuation.cursor] }));
+    if (state.conversationLoading) {
+      conversationRefreshPending = conversationRequest;
+      if (!continuation) conversationRefreshFirstPagePending = true;
+      return;
+    }
+    if (continuation) await refreshDirtyConversationPages(conversationId);
+    else await get().loadConversation();
+  };
+
   const updateSummary = (summary: InvestigationSummary) => {
     if (get().historyActiveOnly) ++historyRequest;
     set((state) => {
@@ -456,7 +568,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     },
     catalog: null, catalogLoading: false, catalogError: null,
     history: [], historySearch: '', historyActiveOnly: false, nextCursor: null, historyLoading: false, historyError: null,
-    conversationId: null, conversationItems: [], conversationPinned: null, conversationCursor: null, conversationLoading: false, conversationError: null,
+    conversationId: null, conversationItems: [], conversationPagePrefixCount: 0, conversationPageBookmarks: [], conversationDirtyPages: [], conversationPinned: null, conversationCursor: null, conversationLoading: false, conversationError: null,
     selectedId: null, selectionGeneration: 0, detail: null, result: null, chat: null,
     chatStatus: 'idle', chatError: null, events: [],
     consent: null, consentOpen: false, loading: false, error: null,
@@ -679,7 +791,14 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       const selected = state.detail ?? state.history.find((item) => item.investigation_id === state.selectedId) ??
         state.conversationItems.find((item) => item.investigation_id === state.selectedId);
       ++conversationRequest;
+      conversationRefreshPending = null;
+      conversationRefreshFirstPagePending = false;
+      const reopenedDirty = sameConversation && conversationDirtyInFlight?.conversationId === conversationId
+        ? [...state.conversationDirtyPages, conversationDirtyInFlight.cursor] : state.conversationDirtyPages;
       set({ conversationId, conversationItems: sameConversation ? state.conversationItems : [],
+        conversationPagePrefixCount: sameConversation ? state.conversationPagePrefixCount : 0,
+        conversationPageBookmarks: sameConversation ? state.conversationPageBookmarks : [],
+        conversationDirtyPages: sameConversation ? [...new Set(reopenedDirty)] : [],
         conversationPinned: selected?.conversation_id === conversationId ? selected : sameConversation ? state.conversationPinned : null,
         conversationCursor: sameConversation ? state.conversationCursor : null,
         conversationLoading: false, conversationError: null });
@@ -692,6 +811,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       const cursor = more ? current.conversationCursor : null;
       const request = ++conversationRequest;
       const isCurrent = () => request === conversationRequest && get().conversationId === conversationId;
+      let loaded = false;
       set({ conversationLoading: true, conversationError: null });
       try {
         const page = await invokeOr<InvestigationPage | null>('list_investigation_conversation', null,
@@ -706,17 +826,45 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
             .filter((item) => item.conversation_id === conversationId);
           const currentPage = page.items.map((item) => known.reduce((newer, candidate) =>
             candidate.investigation_id === item.investigation_id && candidate.revision > newer.revision ? candidate : newer, item));
-          return { conversationItems: more ? mergeHistory(state.conversationItems, currentPage) : currentPage,
-            conversationCursor: page.next_cursor, conversationLoading: false, conversationError: null };
+          const pageIds = new Set(currentPage.map((item) => item.investigation_id));
+          const retainedOlder = more ? [] : state.conversationItems.filter((item) => !pageIds.has(item.investigation_id))
+            .map((item) => known.reduce((newer, candidate) =>
+              candidate.investigation_id === item.investigation_id && candidate.revision > newer.revision ? candidate : newer, item));
+          const prefixCount = more ? Math.min(state.conversationPagePrefixCount, state.conversationItems.length) : 0;
+          const prefixIds = new Set(state.conversationItems.slice(0, prefixCount).map((item) => item.investigation_id));
+          const newPrefixCount = more ? new Set(currentPage.filter((item) => !prefixIds.has(item.investigation_id))
+            .map((item) => item.investigation_id)).size : 0;
+          return { conversationItems: more
+              ? mergeConversationPage(state.conversationItems, currentPage, prefixCount)
+              : [...currentPage, ...retainedOlder],
+            conversationPagePrefixCount: more ? prefixCount + newPrefixCount : currentPage.length,
+            conversationPageBookmarks: more && cursor
+              ? [...state.conversationPageBookmarks.filter((bookmark) => bookmark.cursor !== cursor),
+                { cursor, ids: currentPage.map((item) => item.investigation_id) }]
+              : state.conversationPageBookmarks,
+            conversationCursor: page.next_cursor,
+            conversationLoading: false, conversationError: null };
         });
+        loaded = true;
       } catch {
         if (isCurrent()) set({ conversationLoading: false,
           conversationError: 'Conversation turns could not be loaded. Previously loaded turns remain available.' });
+      } finally {
+        if (isCurrent() && conversationRefreshPending === request) {
+          conversationRefreshPending = null;
+          const refreshFirstPage = conversationRefreshFirstPagePending;
+          conversationRefreshFirstPagePending = false;
+          if (refreshFirstPage) void get().loadConversation();
+          else void refreshDirtyConversationPages(conversationId);
+        }
       }
+      if (loaded) await refreshDirtyConversationPages(conversationId);
     },
     closeConversation: () => {
       ++conversationRequest;
-      set({ conversationId: null, conversationItems: [], conversationPinned: null, conversationCursor: null,
+      conversationRefreshPending = null;
+      conversationRefreshFirstPagePending = false;
+      set({ conversationId: null, conversationItems: [], conversationPagePrefixCount: 0, conversationPageBookmarks: [], conversationDirtyPages: [], conversationPinned: null, conversationCursor: null,
         conversationLoading: false, conversationError: null });
     },
 
@@ -772,7 +920,9 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         set({ conversationPinned: selectedSummary });
       } else if (beforeOpen.conversationId && selectedSummary && selectedSummary.conversation_id !== beforeOpen.conversationId) {
         ++conversationRequest;
-        set({ conversationId: null, conversationItems: [], conversationPinned: null, conversationCursor: null,
+        conversationRefreshPending = null;
+        conversationRefreshFirstPagePending = false;
+        set({ conversationId: null, conversationItems: [], conversationPagePrefixCount: 0, conversationPageBookmarks: [], conversationDirtyPages: [], conversationPinned: null, conversationCursor: null,
           conversationLoading: false, conversationError: null });
       } else if (beforeOpen.conversationId) set({ conversationPinned: null });
       ++detailRequest;
@@ -811,7 +961,9 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         if (!validSummary(detail, id)) throw new Error('Wrong detail.');
         if (get().conversationId && detail.conversation_id !== get().conversationId) {
           ++conversationRequest;
-          set({ conversationId: null, conversationItems: [], conversationPinned: null, conversationCursor: null,
+          conversationRefreshPending = null;
+          conversationRefreshFirstPagePending = false;
+          set({ conversationId: null, conversationItems: [], conversationPagePrefixCount: 0, conversationPageBookmarks: [], conversationDirtyPages: [], conversationPinned: null, conversationCursor: null,
             conversationLoading: false, conversationError: null });
         }
         // Independent reads can straddle the result commit; refresh instead of
@@ -953,9 +1105,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       }
       if (state.conversationId && (message.investigation_id === state.selectedId ||
           state.conversationItems.some((item) => item.investigation_id === message.investigation_id))) {
-        ++conversationRequest;
-        set({ conversationLoading: false });
-        void get().loadConversation();
+        void refreshConversation(state.conversationId, message.investigation_id);
       }
     },
     showConsent: () => {
