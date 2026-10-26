@@ -1497,3 +1497,38 @@ pub struct FakeApi { pub http: Fake }
         ]
     );
 }
+
+#[test]
+fn reqwest_proof_rejects_generic_constructors_and_block_local_structs() {
+    // AC-0367 (#1093 re-review): `Client::new()` under a generic parameter
+    // named `Client` is not reqwest's, and a block-local `Api` with a Client
+    // field proves nothing about a module-level `Api`; a module-level
+    // struct's genuine Client field and a real constructor stay proven.
+    let sites = reqwest_sites_with(
+        r#"
+mod generic {
+    use reqwest::Client;
+    pub trait Fake: Sized { fn new() -> Self; fn get(&self, _: &str); }
+    pub fn run<Client: Fake>() { Client::new().get("/not-http"); }
+    pub fn real() { Client::new().get("/real"); }
+}
+mod collide {
+    fn declarations() { struct Api { http: reqwest::Client } }
+    struct Fake;
+    impl Fake { fn get(&self, _: &str) {} }
+    struct Api { http: Fake }
+    impl Api { fn run(&self) { self.http.get("/not-http"); } }
+}
+pub struct Carrier { pub http: reqwest::Client }
+impl Carrier { pub fn real(&self) { self.http.get("/carrier"); } }
+"#,
+        &[],
+    );
+    assert_eq!(
+        sites,
+        vec![
+            site("GET", "lit /real", "generic::real"),
+            site("GET", "lit /carrier", "Carrier.real"),
+        ]
+    );
+}

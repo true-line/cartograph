@@ -39,7 +39,14 @@ struct Proof<'a, 't> {
 
 impl<'t> Proof<'_, 't> {
     /// The single external path `text` resolves to at `node`, if exactly one.
+    /// A generic parameter in scope named like its first segment shadows
+    /// any import, so such a path resolves to nothing.
     fn path(&self, node: TsNode<'_>, text: &str) -> Option<Vec<String>> {
+        let head = text.split('<').next().unwrap_or(text);
+        let first = head.split("::").next().unwrap_or(head).trim();
+        if generic_names(self.cx, node).contains(first) {
+            return None;
+        }
         let scopes = visible_scopes(self.cx, node);
         let mut paths =
             resolve_external_paths(self.cx, self.bindings, &scopes, text, Some(&self.shadows));
@@ -51,8 +58,7 @@ impl<'t> Proof<'_, 't> {
     }
 
     /// A type spelling written at `node` that names a reqwest `Client`,
-    /// behind `&`, `&mut` and the standard `Arc` / `Rc` only. A generic
-    /// parameter of the same name shadows any import.
+    /// behind `&`, `&mut` and the standard `Arc` / `Rc` only.
     fn is_client_type_text(&self, node: TsNode<'_>, text: &str) -> bool {
         let mut text = text.trim();
         while let Some(rest) = text.strip_prefix('&') {
@@ -60,10 +66,6 @@ impl<'t> Proof<'_, 't> {
             text = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
         }
         let head = text.split('<').next().unwrap_or(text).trim();
-        let first = head.split("::").next().unwrap_or(head).trim();
-        if generic_names(self.cx, node).contains(first) {
-            return false;
-        }
         if let Some(inner) = text
             .strip_suffix('>')
             .and_then(|t| t.split_once('<'))
@@ -194,8 +196,10 @@ impl<'t> Proof<'_, 't> {
         }
     }
 
-    /// `self.<field>` inside an `impl` of a struct declared in the same
-    /// module whose field of that name is typed reqwest `Client`.
+    /// `self.<field>` inside a module-level `impl` of a module-level struct
+    /// declared in the same module whose field of that name is typed
+    /// reqwest `Client`. Items declared inside a block fail closed: a
+    /// module scope cannot tell same-named block-local structs apart.
     fn is_client_field(&self, expr: TsNode<'_>) -> bool {
         let (Some(value), Some(field)) = (
             expr.child_by_field_name("value"),
@@ -214,6 +218,9 @@ impl<'t> Proof<'_, 't> {
                 None => return false,
             }
         };
+        if in_block(imp) {
+            return false;
+        }
         let Some(ty) = imp.child_by_field_name("type") else {
             return false;
         };
@@ -344,6 +351,19 @@ fn generic_names(cx: &FileCx<'_>, node: TsNode<'_>) -> BTreeSet<String> {
     names
 }
 
+/// Whether `node` sits inside a block (a function body or a block
+/// expression) rather than directly in a module.
+fn in_block(node: TsNode<'_>) -> bool {
+    let mut current = node.parent();
+    while let Some(node) = current {
+        if node.kind() == "block" {
+            return true;
+        }
+        current = node.parent();
+    }
+    false
+}
+
 fn is_builder_path(path: &[String]) -> bool {
     matches!(
         path.iter()
@@ -383,6 +403,7 @@ pub(super) fn client_fields(
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         if node.kind() == "struct_item"
+            && !in_block(node)
             && let (Some(name), Some(body)) = (
                 node.child_by_field_name("name"),
                 node.child_by_field_name("body"),
