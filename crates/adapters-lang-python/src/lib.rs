@@ -65,6 +65,7 @@ pub struct Extraction {
     fn_effects: Vec<auth_guards::FnEffects>,
     hooks: Vec<auth_guards::HookFact>,
     wsgi_facts: Vec<auth_guards::WsgiFact>,
+    patched_guards: Vec<String>,
     client_fixtures: Vec<target_tests::ClientFixture>,
     client_calls: Vec<target_tests::ClientCall>,
 }
@@ -2078,6 +2079,7 @@ pub fn extract_dir_incremental_with_progress(
             out.fn_effects.extend(extraction.fn_effects);
             out.hooks.extend(extraction.hooks);
             out.wsgi_facts.extend(extraction.wsgi_facts);
+            out.patched_guards.extend(extraction.patched_guards);
             out.client_fixtures.extend(extraction.client_fixtures);
             out.client_calls.extend(extraction.client_calls);
             Ok(())

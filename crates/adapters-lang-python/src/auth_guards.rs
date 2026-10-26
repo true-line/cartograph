@@ -36,6 +36,12 @@
 //! blocking: the registered or called object is the wrapper, not its body.
 //! An imported guard or `ProxyFix` name counts only when neither the module
 //! nor any function or class scope enclosing its use rebinds it.
+//! A framework guard reassigned on its module anywhere in the repository
+//! (`flask_login.login_required = …`, or `setattr` with a literal name) is
+//! never a guard: the reason is `framework_guard_reassigned:<name>`.
+//! `ProxyFix` is known non-auth only when it wraps the assigned attribute
+//! itself (`app.wsgi_app = ProxyFix(app.wsgi_app, …)`); the assignment is
+//! cited on a `none` fact.
 use crate::request_inputs::{binding_sites, handler_bindings};
 use crate::responses::{self, FnKey, Resolver};
 use crate::{
@@ -102,6 +108,7 @@ pub(crate) enum HookFact {
 #[derive(Debug, Clone)]
 pub(crate) struct WsgiFact {
     pub proxy_fix: bool,
+    pub evidence: EvidenceRef,
 }
 
 fn named(node: TsNode<'_>) -> Vec<TsNode<'_>> {
@@ -425,10 +432,13 @@ fn is_hook_attribute(cx: &FileCx<'_>, callee: TsNode<'_>) -> bool {
             })
 }
 
-/// Whether a call wraps in werkzeug's `ProxyFix`.
+/// Whether `left = right` wraps `left` itself, the application's current
+/// `wsgi_app`, in werkzeug's `ProxyFix`: `app.wsgi_app = ProxyFix(app.wsgi_app, …)`.
+/// Any other wrapped application may be middleware of its own.
 fn is_proxy_fix(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
+    left: TsNode<'_>,
     right: TsNode<'_>,
     bindings: &HashMap<String, ImportBinding>,
 ) -> bool {
@@ -443,10 +453,64 @@ fn is_proxy_fix(
         import_dotted(cx, callee, bindings).as_deref(),
         Some("werkzeug.middleware.proxy_fix.ProxyFix" | "werkzeug.contrib.fixers.ProxyFix")
     );
+    let wraps_itself = right
+        .child_by_field_name("arguments")
+        .and_then(|arguments| {
+            named(arguments)
+                .into_iter()
+                .find(|argument| argument.kind() != "comment")
+        })
+        .map(unparenthesize)
+        .is_some_and(|wrapped| {
+            wrapped.kind() == "attribute"
+                && dotted_parts(cx, wrapped).is_some()
+                && dotted_parts(cx, wrapped) == dotted_parts(cx, left)
+        });
     known
+        && wraps_itself
         && dotted_parts(cx, callee)
             .and_then(|parts| parts.into_iter().next())
             .is_some_and(|name| !rebound(cx, root, &name, Some(right)))
+}
+
+/// The canonical framework guard name of a dotted module member.
+fn framework_guard(dotted: &str) -> Option<String> {
+    login_guard(dotted)
+        .or_else(|| (dotted == "flask_jwt_extended.jwt_required").then(|| dotted.to_string()))
+}
+
+/// A framework guard reassigned on its module, as in
+/// `flask_login.login_required = passthrough`.
+fn patched_guard(
+    cx: &FileCx<'_>,
+    left: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> Option<String> {
+    framework_guard(&import_dotted(cx, left, bindings)?)
+}
+
+/// A framework guard replaced by `setattr(<module>, "<name>", …)` with a
+/// string-literal name.
+fn setattr_guard(
+    cx: &FileCx<'_>,
+    call: TsNode<'_>,
+    callee: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> Option<String> {
+    if callee.kind() != "identifier" || cx.text(&callee) != "setattr" {
+        return None;
+    }
+    let arguments = named(call.child_by_field_name("arguments")?)
+        .into_iter()
+        .filter(|argument| argument.kind() != "comment")
+        .collect::<Vec<_>>();
+    let (object, name) = (unparenthesize(*arguments.first()?), *arguments.get(1)?);
+    if name.kind() != "string" {
+        return None;
+    }
+    let member = cx.text(&name).trim_matches(|c| c == '"' || c == '\'');
+    let module = import_dotted(cx, object, bindings)?;
+    framework_guard(&format!("{module}.{member}"))
 }
 
 /// Collect this file's handler, function-effect, hook and `wsgi_app`
@@ -511,6 +575,10 @@ pub(crate) fn collect(
             let Some(callee) = node.child_by_field_name("function") else {
                 return;
             };
+            if let Some(guard) = setattr_guard(cx, node, callee, bindings) {
+                out.patched_guards.push(guard);
+                return;
+            }
             if !is_hook_attribute(cx, callee) {
                 return;
             }
@@ -540,8 +608,13 @@ pub(crate) fn collect(
                     .is_some_and(|attribute| cx.text(&attribute) == "wsgi_app");
             if wsgi {
                 out.wsgi_facts.push(WsgiFact {
-                    proxy_fix: is_proxy_fix(cx, root, right, bindings),
+                    proxy_fix: is_proxy_fix(cx, root, left, right, bindings),
+                    evidence: cx.evidence(&node),
                 });
+            } else if left.kind() == "attribute"
+                && let Some(guard) = patched_guard(cx, left, bindings)
+            {
+                out.patched_guards.push(guard);
             }
         }
         _ => {}
@@ -622,6 +695,9 @@ pub(crate) fn resolve(
     let handlers = std::mem::take(&mut out.auth_handlers);
     let hooks = std::mem::take(&mut out.hooks);
     let wsgi = std::mem::take(&mut out.wsgi_facts);
+    let patched = std::mem::take(&mut out.patched_guards)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let mut effects: HashMap<FnKey, FnEffects> = HashMap::new();
     for found in std::mem::take(&mut out.fn_effects) {
         // Two functions sharing a key (a nested hook and a top-level
@@ -680,6 +756,11 @@ pub(crate) fn resolve(
         let mut framework = false;
         for decorator in &facts.decorators {
             match decorator {
+                DecoratorFact::Framework { name, .. } if patched.contains(name) => {
+                    // The module attribute is reassigned somewhere in the
+                    // repository, so the decorator may not be the guard.
+                    reasons.insert(format!("framework_guard_reassigned:{name}"));
+                }
                 DecoratorFact::Framework {
                     name,
                     evidence: span,
@@ -739,6 +820,7 @@ pub(crate) fn resolve(
         } else if facts.decorators.is_empty() && repo_reasons.is_empty() {
             let mut evidence = facts.route_evidence.clone();
             evidence.extend(hook_evidence.iter().cloned());
+            evidence.extend(wsgi.iter().map(|fact| fact.evidence.clone()));
             serde_json::json!({
                 "state": "none",
                 "authenticated": false,
@@ -793,5 +875,8 @@ pub(crate) fn retarget(extraction: &mut Extraction, commit: &str) {
     }
     for effects in &mut extraction.fn_effects {
         effects.evidence.commit_sha = commit.into();
+    }
+    for fact in &mut extraction.wsgi_facts {
+        fact.evidence.commit_sha = commit.into();
     }
 }

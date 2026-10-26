@@ -4509,3 +4509,107 @@ register()
         serde_json::json!(["flask_login.login_required"])
     );
 }
+
+#[test]
+fn a_reassigned_framework_guard_is_not_proof() {
+    // AC-0380 (T-0380): a guard reassigned on its module anywhere in the
+    // repository, by assignment or a literal `setattr`, may not be the guard.
+    let assigned = br#"
+import flask_login
+from flask import Flask
+
+app = Flask(__name__)
+flask_login.login_required = lambda function: function
+
+@app.route("/public")
+@flask_login.login_required
+def public():
+    return "public"
+"#;
+    let extraction = extract_source(assigned, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/public");
+    assert_eq!(auth["state"], "unknown");
+    assert_eq!(
+        auth["reasons"],
+        serde_json::json!(["framework_guard_reassigned:flask_login.login_required"])
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/patch.py",
+        "import flask_jwt_extended\n\nsetattr(flask_jwt_extended, \"jwt_required\", lambda: (lambda f: f))\n",
+    );
+    write(
+        dir.path(),
+        "app/views.py",
+        r#"
+from flask import Flask
+from flask_jwt_extended import jwt_required
+
+app = Flask(__name__)
+
+@app.route("/token")
+@jwt_required()
+def token():
+    return "token"
+"#,
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let auth = auth_at(&extraction, "/token");
+    assert_eq!(auth["state"], "unknown");
+    assert_eq!(
+        auth["reasons"],
+        serde_json::json!(["framework_guard_reassigned:flask_jwt_extended.jwt_required"])
+    );
+}
+
+#[test]
+fn proxy_fix_is_known_only_around_the_assigned_application() {
+    // AC-0380 (T-0380): `ProxyFix` wrapping other middleware leaves that
+    // middleware unknown; wrapping the assigned `wsgi_app` itself is cited
+    // on the `none` fact.
+    let nested = br#"
+from flask import Flask
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+app = Flask(__name__)
+app.wsgi_app = ProxyFix(AuthMiddleware(app.wsgi_app))
+
+@app.route("/open")
+def open_view():
+    return "open"
+"#;
+    let extraction = extract_source(nested, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/open");
+    assert_eq!(auth["state"], "unknown");
+    assert_eq!(
+        auth["reasons"],
+        serde_json::json!(["wsgi_middleware_unknown"])
+    );
+
+    let direct = br#"
+from flask import Flask
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+
+@app.route("/open")
+def open_view():
+    return "open"
+"#;
+    let extraction = extract_source(direct, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/open");
+    assert_eq!(auth["state"], "none");
+    let source = std::str::from_utf8(direct).unwrap();
+    let start = source.find("app.wsgi_app = ProxyFix").unwrap() as u64;
+    assert!(
+        auth["prov"]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|span| span["byte_start"].as_u64() == Some(start)),
+        "{auth}"
+    );
+}
