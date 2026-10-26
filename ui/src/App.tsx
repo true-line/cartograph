@@ -34,6 +34,7 @@ import { hasRecordedExecution, selectRecoveryJob } from './jobPresentation';
 import { TopologyCard } from './components/TopologyCard';
 import { InvestigationsSurface } from './components/InvestigationsSurface';
 import { investigationIsActive, useInvestigationStore } from './investigationStore';
+import { useSpecialistActivityStore } from './specialistActivityStore';
 import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
 import { readQuickDispatchFallback, writeQuickDispatchFallback } from './quickDispatchPreference';
 import type { InvestigationChanged } from './investigationTypes';
@@ -105,6 +106,7 @@ export default function App() {
   const packets = useWorkPacketStore();
   const primarySource = usePrimarySourceStore();
   const investigations = useInvestigationStore();
+  const specialistActivity = useSpecialistActivityStore();
   const {
     view,
     recoverJobId,
@@ -211,9 +213,11 @@ export default function App() {
 
   useEffect(() => {
     if (view === 'investigations') {
+      useSpecialistActivityStore.getState().setVisible(true);
       void useInvestigationStore.getState().loadCatalog();
       void useInvestigationStore.getState().loadHistory();
     }
+    return () => useSpecialistActivityStore.getState().setVisible(false);
   }, [view]);
 
   // Folder drop intake (#587): the webview reports dropped paths only while
@@ -251,8 +255,10 @@ export default function App() {
         const stopReviews = await listen<import('./findingReviews').FindingReviewChanged>('investigation-review://changed', (event) =>
           useInvestigationStore.getState().invalidateReview(event.payload));
         if (disposed) stopReviews(); else unlisten = stopReviews;
-        const stop = await listen<InvestigationChanged>('investigation://changed', (event) =>
-          useInvestigationStore.getState().invalidate(event.payload));
+        const stop = await listen<InvestigationChanged>('investigation://changed', (event) => {
+          useInvestigationStore.getState().invalidate(event.payload);
+          useSpecialistActivityStore.getState().invalidate();
+        });
         if (disposed) stop(); else unlisten = () => { stop(); stopReviews(); };
       } catch { /* Browser previews have no event bridge. */ }
     })();
@@ -276,6 +282,7 @@ export default function App() {
       const state = useInvestigationStore.getState();
       if (!state.historyLoading) void state.loadHistory();
       if (!state.loading) void state.refreshSelected();
+      useSpecialistActivityStore.getState().invalidate();
     };
     timer = setTimeout(() => void poll(), 2500);
     window.addEventListener('focus', reconnect);
@@ -547,7 +554,9 @@ export default function App() {
           </>
         );
       case 'investigations':
-        return <InvestigationsSurface state={investigations} anchors={atlas.nodes} canStart={backend === 'up'} />;
+        return <InvestigationsSurface state={investigations} activity={specialistActivity}
+          onRefreshActivity={() => void useSpecialistActivityStore.getState().refresh()}
+          anchors={atlas.nodes} canStart={backend === 'up'} />;
       case 'atlas':
         return (
           <Suspense fallback={<section className="atlas-card">Loading Atlas graph…</section>}>

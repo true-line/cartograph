@@ -5,6 +5,7 @@ import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { InvestigationsSurface } from './InvestigationsSurface';
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
+import { useSpecialistActivityStore } from '../specialistActivityStore';
 import backendQualified from '../fixtures/investigation-coverage-backend.json';
 import { qualifiedCatalog, qualifiedDetail, qualifiedResult, inspectionAssessment, inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from '../investigationFixtures';
 import type { InvestigationChat, InvestigationDetail, InvestigationResult } from '../investigationTypes';
@@ -25,7 +26,9 @@ const meta = { title: 'Surfaces/InvestigationsSurface', component: Investigation
   },
   render: function ComposerStory(args) {
     const { composer, updateComposer } = useInvestigationStore();
-    return <InvestigationsSurface {...args} state={{ ...args.state, composer, updateComposer }} />;
+    return <InvestigationsSurface {...args} activity={useSpecialistActivityStore()}
+      onRefreshActivity={() => void useSpecialistActivityStore.getState().refresh()}
+      state={{ ...args.state, composer, updateComposer }} />;
   },
   args: { state: state(), anchors: [], canStart: true } } satisfies Meta<typeof InvestigationsSurface>;
 export default meta;
@@ -169,6 +172,48 @@ export const ActiveInvestigations: Story = {
     await userEvent.click(row);
     await waitFor(() => expect(useInvestigationStore.getState().selectedId).toBe('awaiting-consent-active'));
     await waitFor(() => expect(useInvestigationStore.getState().detail?.investigation_id).toBe('awaiting-consent-active'));
+  },
+};
+
+export const SpecialistTaskActivity: Story = {
+  // AC-0379: the roster uses exact specialist versions and reports durable task states.
+  beforeEach: () => {
+    const active = [
+      investigationDetail('domain-running-activity', { specialist_id: 'domain-analyst@3', status: 'running', has_result: false }),
+      investigationDetail('auditor-consent-activity', { specialist_id: 'evidence-auditor@3', status: 'awaiting_consent',
+        cancel_requested: true, has_result: false }),
+      investigationDetail('old-domain-activity', { specialist_id: 'domain-analyst@2', status: 'queued', has_result: false }),
+    ];
+    mockIPC((command, args) => {
+      if (command === 'list_investigations') {
+        expect(args).toEqual({ activeOnly: true });
+        return { items: active, next_cursor: null };
+      }
+      return null;
+    });
+    useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: investigationCatalog }, true);
+    useSpecialistActivityStore.getState().setVisible(true);
+    return () => { useSpecialistActivityStore.getState().setVisible(false); clearMocks(); };
+  },
+  render: function ActivityStory() {
+    return <InvestigationsSurface state={useInvestigationStore()} activity={useSpecialistActivityStore()}
+      onRefreshActivity={() => void useSpecialistActivityStore.getState().refresh()} anchors={[]} canStart />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await canvas.findByText(/Running/);
+    await canvas.findByText(/Awaiting cloud consent/);
+    const domain = canvas.getByText(/domain-analyst@3/).closest('label');
+    const auditor = canvas.getByText(/evidence-auditor@3/).closest('label');
+    expect(domain).not.toBeNull();
+    expect(auditor).not.toBeNull();
+    await expect(domain).toHaveTextContent('Running');
+    await expect(domain).not.toHaveTextContent('Queued');
+    await expect(auditor).toHaveTextContent('Awaiting cloud consent');
+    await expect(auditor).toHaveTextContent('Cancellation requested');
+    await expect(canvas.findByText(/active task list is incomplete/i)).resolves.toBeVisible();
+    expect(useInvestigationStore.getState().history).toEqual([]);
+    expect(useInvestigationStore.getState().selectedId).toBeNull();
   },
 };
 

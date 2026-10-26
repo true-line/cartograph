@@ -2,7 +2,7 @@ import { isCompletionSpecialist, isExpandedSpecialist } from '../investigationFa
 import { useRef, useState } from 'react';
 import type { InvestigationState } from '../investigationStore';
 import type { GraphNode } from '../store';
-import type { InvestigationProviderMode, InvestigationScope, InvestigationStatus, SpecialistId } from '../investigationTypes';
+import type { InvestigationProviderMode, InvestigationScope, InvestigationStatus, InvestigationSummary, SpecialistId } from '../investigationTypes';
 import { InvestigationActivity } from './InvestigationActivity';
 import { InvestigationFindings } from './InvestigationFindings';
 import { EgressConsentDialog } from './EgressConsentDialog';
@@ -11,6 +11,7 @@ import { CompletionAssessment } from './CompletionAssessment';
 import { investigationPolicy, obligationEnvelope } from '../investigationObligations';
 import { InvestigationCoverage } from './InvestigationCoverage';
 import { InvestigationChatTranscript } from './InvestigationChatTranscript';
+import type { SpecialistActivityState } from '../specialistActivityStore';
 
 export const INVESTIGATION_STATUS: Record<InvestigationStatus, string> = {
   queued: 'Queued', preparing: 'Preparing context', running: 'Running', awaiting_consent: 'Awaiting cloud consent',
@@ -20,12 +21,18 @@ export const INVESTIGATION_STATUS: Record<InvestigationStatus, string> = {
 
 export interface InvestigationsSurfaceProps {
   state: InvestigationState;
+  activity?: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error'>;
+  onRefreshActivity?: () => void;
   anchors: GraphNode[];
   canStart: boolean;
 }
 
+const EMPTY_ACTIVITY: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error'> = {
+  status: 'idle', tasks: [], error: null,
+};
+
 /** Props/callbacks only: the coordinator and dedicated store own task lifecycle. */
-export function InvestigationsSurface({ state, anchors, canStart }: InvestigationsSurfaceProps) {
+export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefreshActivity, anchors, canStart }: InvestigationsSurfaceProps) {
   const [historySearchText, setHistorySearchText] = useState(state.historySearch);
   const { specialistId, providerMode, question, scopeType, anchor, hops, parent } = state.composer;
   const setSpecialistId = (specialistId: SpecialistId) => state.updateComposer({ specialistId });
@@ -41,6 +48,8 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
   const questionBytes = new TextEncoder().encode(question).length;
   const locked = state.starting || state.pendingStart !== null;
   const requirements = state.draftInspectionRequirements;
+  const activityIncomplete = activity.status === 'incomplete' || Boolean(state.catalog && activity.tasks.some((task) =>
+    !state.catalog?.specialists.some((specialist) => specialist.id === task.specialist_id)));
   const completionVersion = isCompletionSpecialist(specialistId);
   const profile = state.composer.limitProfile ?? 'investigation-v1';
   const policy = investigationPolicy(state.catalog, profile, specialistId);
@@ -68,7 +77,7 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
     questionBytes <= 2048 && (scopeType === 'all' || anchor.trim().length > 0) &&
     (completionVersion ? completionBound && requirements.length === 0 :
       state.draftObligations.length === 0 && (inspectionVersion ? requirements.length > 0 : coverageVersion || requirements.length === 0)) && requestBytes <= requestLimit;
-  const refresh = () => { void state.loadCatalog(); void state.loadHistory(); };
+  const refresh = () => { void state.loadCatalog(); void state.loadHistory(); onRefreshActivity?.(); };
 
   return <section className="investigations-surface" aria-label="Investigations">
     <header className="investigation-heading"><div><h2>Investigations</h2>
@@ -105,9 +114,12 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
           <label key={specialist.id} className={`investigation-specialist${specialistId === specialist.id ? ' selected' : ''}`}>
             <input type="radio" name="specialist" checked={specialistId === specialist.id} onChange={() => setSpecialistId(specialist.id)} />
             <span><strong>{specialist.name}</strong><span className="muted">{specialist.purpose}</span>
-              <code>{specialist.id} · T3 / InferredWeak</code></span>
+              <code>{specialist.id} · T3 / InferredWeak</code>
+            <SpecialistTaskActivity specialistId={specialist.id} activity={activity} complete={!activityIncomplete} /></span>
           </label>)}</div>
       </fieldset>
+      {activityIncomplete && <p role="status">The active task list is incomplete. No idle status is inferred.</p>}
+      {state.catalog === null && activity.status !== 'loading' && <p role="status">The catalog is unavailable; activity cannot be matched to exact specialist versions.</p>}
       {state.catalog && !state.catalogLoading && !selectedSpecialistAvailable && <p role="status">
         Selected specialist <code>{specialistId}</code> is unavailable for this investigation budget. Choose an available specialist explicitly to continue.
         {parent && ' The saved parent keeps its original specialist version.'}
@@ -320,4 +332,32 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
           <pre>{JSON.stringify({ profile: state.consent.provider_profile, limits: state.consent.completion_limits }, null, 2)}</pre></details>
         <p>Approval covers this step only. Declining does not switch to a local provider; reviewing later leaves this task waiting.</p></>} />}
   </section>;
+}
+
+function SpecialistTaskActivity({ specialistId, activity, complete }: {
+  specialistId: string;
+  activity: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error'>;
+  complete: boolean;
+}) {
+  if (activity.status === 'idle' || activity.status === 'loading') {
+    return <span className="muted">{activity.status === 'idle' ? 'Activity not checked' : 'Checking activity…'}</span>;
+  }
+  if (activity.status === 'preview') return <span className="muted">Activity shown in desktop app</span>;
+  if (activity.status === 'error') return <span className="error-text">Activity unknown</span>;
+
+  const tasks = activity.tasks.filter((task) => task.specialist_id === specialistId);
+  if (!complete) return <span className="muted">
+    {tasks.length > 0 ? `${tasks.map(activityStatusLabel).join(', ')} · activity incomplete` : 'Activity incomplete; no idle status inferred'}
+  </span>;
+  return <span className="muted">
+    {tasks.length === 0 ? 'No active tasks' : tasks.map(activityStatusLabel).join(', ')}
+  </span>;
+}
+
+const ACTIVITY_STATUS_LABELS = {
+  queued: 'Queued', preparing: 'Preparing context', running: 'Running', awaiting_consent: 'Awaiting cloud consent',
+} as const;
+
+function activityStatusLabel(task: InvestigationSummary) {
+  return `${ACTIVITY_STATUS_LABELS[task.status as keyof typeof ACTIVITY_STATUS_LABELS] ?? 'Unrecognized status'}${task.cancel_requested ? ' · Cancellation requested' : ''}`;
 }
