@@ -1,7 +1,14 @@
 import cytoscape from 'cytoscape';
 import { HelpTip } from './HelpTip';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { BAND_LABELS, buildAtlasScene, excludeBoundaryPlaceholders, type AtlasScene } from '../atlasLayout';
+import {
+  BAND_LABELS,
+  buildAtlasScene,
+  excludeBoundaryPlaceholders,
+  isBrowserStorage,
+  isServiceWorkerCode,
+  type AtlasScene,
+} from '../atlasLayout';
 import type { AtlasSnapshot, GraphEdge, GraphNode, Tier } from '../store';
 
 export type AtlasLayer = 'all' | 'infra' | 'cloud' | 'server' | 'events' | 'client';
@@ -23,10 +30,12 @@ const TIERS: ReadonlyArray<{ id: Tier; label: string }> = [
   { id: 'Gap', label: 'Gap' },
 ];
 
-function baseLayers(node: GraphNode): GraphLayer[] {
+export function baseLayers(node: GraphNode): GraphLayer[] {
   switch (node.label) {
     case 'Resource':
-      return ['infra', 'cloud'];
+      // Browser storage is client state (#1078) that is still observed
+      // infrastructure the code talks to (#734): Client and Infrastructure.
+      return isBrowserStorage(node) ? ['client', 'infra'] : ['infra', 'cloud'];
     case 'Channel':
       return ['events', 'cloud'];
     case 'Gateway':
@@ -41,6 +50,8 @@ function baseLayers(node: GraphNode): GraphLayer[] {
     case 'Module':
     case 'File':
     case 'Symbol':
+      // Proven service-worker code runs in the browser (#1078).
+      return isServiceWorkerCode(node) ? ['client'] : ['server'];
     case 'Endpoint':
     case 'DataEntity':
     case 'Config':
@@ -154,11 +165,12 @@ function confidence(props: GraphNode['props'] | GraphEdge['props']): Tier {
     : 'Gap';
 }
 
-function displayName(node: GraphNode): string {
+export function displayName(node: GraphNode): string {
   const method = typeof node.props.method === 'string' ? node.props.method : null;
   const path = typeof node.props.path === 'string' ? node.props.path : null;
   if (method && path) return `${method} ${path}`;
-  for (const key of ['name', 'identity', 'logical_id', 'type']) {
+  // `display_name` names an anonymous symbol readably; the id stays `anon@…` (#1078).
+  for (const key of ['display_name', 'name', 'identity', 'logical_id', 'type']) {
     const value = node.props[key];
     if (typeof value === 'string' && value.length > 0) return value;
   }

@@ -84,6 +84,9 @@ pub struct Extraction {
     client_routes: client_routes::Pending,
     /// Vue Router navigations (W11a-2), resolved against the screens.
     client_navigation: client_navigation::Pending,
+    /// Literal `navigator.serviceWorker.register(…)` paths, resolved against
+    /// the walk's files at directory completion (#1078).
+    service_worker_registrations: Vec<service_worker::Registration>,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -260,6 +263,9 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     extraction.target_tests.retarget(commit);
     extraction.client_routes.retarget(commit);
     extraction.client_navigation.retarget(commit);
+    for registration in &mut extraction.service_worker_registrations {
+        registration.retarget(commit);
+    }
 }
 
 impl Extraction {
@@ -290,6 +296,7 @@ impl Extraction {
         self.target_tests = target_tests::Pending::default();
         self.client_routes = client_routes::Pending::default();
         self.client_navigation = client_navigation::Pending::default();
+        self.service_worker_registrations.clear();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -1441,6 +1448,9 @@ fn extract_source_recording(
     // consumer that needs an owner (calls, events, fetches, and later rules).
     let syntax_nodes = callable::walk(root);
     let bindings = callable::Bindings::new(&cx, root, &syntax_nodes);
+    let service_worker = service_worker::proves_worker(&cx, &syntax_nodes, &bindings);
+    out.service_worker_registrations =
+        service_worker::registered_paths(&cx, &syntax_nodes, &bindings);
     let mut methods: HashMap<(String, String), String> = HashMap::new();
     for function in syntax_nodes
         .iter()
@@ -1464,6 +1474,11 @@ fn extract_source_recording(
             "kind": if is_component { "Component" } else if function.kind() == "method_definition" { "Method" } else { "Function" },
             "prov": cx.prov(&evidence, &format!("Symbol {sid}")),
         });
+        if name.starts_with("anon@")
+            && let Some(display) = service_worker::display_name(&cx, function)
+        {
+            props["display_name"] = serde_json::json!(display);
+        }
         if callable::omitted_property_name(function) {
             props["name_capture"] = serde_json::json!("nonidentifier_key_omitted");
         }
@@ -3042,6 +3057,13 @@ fn extract_source_recording(
     client_routes::extract(&cx, root, &route_proofs, &mut out.client_routes);
     client_navigation::extract(&cx, root, &route_proofs, &mut out.client_navigation);
     rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
+    if let Some(evidence) = service_worker {
+        service_worker::mark(
+            &BTreeMap::from([(file_id(id.repo, path), vec![evidence])]),
+            &mut out.nodes,
+            &out.edges,
+        );
+    }
     Ok(out)
 }
 
@@ -3161,6 +3183,8 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.target_tests.extend(ex.target_tests);
     out.client_routes.extend(ex.client_routes);
     out.client_navigation.extend(ex.client_navigation);
+    out.service_worker_registrations
+        .extend(ex.service_worker_registrations);
 }
 
 /// Shared directory completion. Its live configuration inputs are deliberately
@@ -3245,6 +3269,13 @@ fn complete_directory(
     let navigation = std::mem::take(&mut out.client_navigation);
     client_navigation::complete(navigation, &files, id.repo, &mut out.nodes, &mut out.edges);
     next_pages_screens(out, id);
+    let registrations = std::mem::take(&mut out.service_worker_registrations);
+    service_worker::mark_registered(
+        &registrations,
+        &mut out.nodes,
+        &out.edges,
+        &format!("file:{}@", id.repo),
+    );
     // Bare-module import targets are classified against the same index:
     // external only when nothing in the repository could answer them.
     let file_prefix = format!("file:{}@", id.repo);
@@ -3452,6 +3483,7 @@ pub mod node_http;
 pub mod observed_infra;
 pub(crate) mod resolution;
 mod rule_evidence;
+mod service_worker;
 mod source_expression;
 pub mod target_tests;
 pub mod vue;
