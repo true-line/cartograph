@@ -96,3 +96,34 @@ pub(crate) fn next_prompt_pending_source_workspace() -> Option<usize> {
             .max(later),
     )
 }
+
+/// CapacitySnapshot return currency and its derivation peak. Preflight proves
+/// at most MAX_TASKS distinct 128-byte keys, including charges/dispositions via
+/// their reservation foreign keys. Historical rows are replayed one at a time.
+/// Borrowed caller task/projection and native SQLite/allocator/RSS are separate.
+pub(crate) fn next_prompt_source_capacity_workspace() -> Option<(usize, usize)> {
+    let retained = sum(&[
+        size_of::<CapacitySnapshot>(),
+        map::<String, CapacityCharge>(MAX_TASKS)?,
+        MAX_TASKS.checked_mul(128)?,
+    ])?;
+    let pending = sum(&[
+        size_of::<BTreeSet<String>>(),
+        map::<String, ()>(MAX_TASKS)?,
+        MAX_TASKS.checked_mul(128)?,
+    ])?;
+    // derive_capacity retains the accounting map and pending set during
+    // load_validated. SavedRead includes every charge/disposition plus the
+    // malformed-row decoder and identity-validation construction peaks.
+    let replay = next_prompt_read_reservation_workspace()?.1;
+    let peak = sum(&[
+        retained,
+        pending,
+        size_of::<ReadTransaction<'_>>(),
+        128usize.checked_mul(4)?, // task, step, pending insertion and map clone
+        slots::<String>(4)?,
+        4096usize.checked_mul(2)?, // outer scan and nested reader SQL
+        replay,
+    ])?;
+    Some((retained, peak))
+}
