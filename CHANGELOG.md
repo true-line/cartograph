@@ -1,5 +1,12 @@
 # cartograph
 
+## 0.35.0
+
+### Minor Changes
+
+- 596d192: Preflight reports, for each unsupported or partial coverage cell, which installed built-in adapter or WASM plugin declares coverage of it and whether that claim passes its conformance evidence.
+- c1c5dd7: Separate established interpretation-seam omissions into an Interpretation backlog lane and summary count while keeping all gaps listed and counted (#994).
+
 ## 0.34.0
 
 ### Minor Changes
