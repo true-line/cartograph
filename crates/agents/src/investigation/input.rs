@@ -435,6 +435,26 @@ impl InvestigationInput {
         })
     }
 
+    /// Add fixed, non-echoing feedback for the single bounded ordinary
+    /// correction after a source-replay refusal. This runs before firewall
+    /// preparation and disclosure sealing, and uses the ordinary wire limit.
+    pub fn with_source_replay_feedback(mut self) -> Result<Self, InvestigationError> {
+        let mut prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let object = prompt
+            .as_object_mut()
+            .ok_or(InvestigationError::InvalidInput)?;
+        if object.contains_key("finish_correction") {
+            return Err(InvestigationError::InvalidInput);
+        }
+        object.insert("finish_correction".into(), serde_json::json!({
+            "refusal": "source_replay",
+            "instruction": "The prior finish was discarded. For this one correction, return a finish only. Give an original concise formulation and cite already-admitted evidence IDs. Do not quote or paraphrase source text or prior findings. No reads or tools are available."
+        }));
+        wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
+        Ok(self)
+    }
+
     /// Seals metadata against the exact firewall-prepared representation.
     pub fn seal_disclosure(
         &self,
@@ -866,3 +886,76 @@ pub use context_preview::{ContextPreviewBound, ContextPreviewKind, ContextPrevie
 #[path = "input_source_preview.rs"]
 mod source_preview;
 pub use source_preview::UnreadSourcePreviewBound;
+
+#[cfg(test)]
+mod source_replay_feedback_tests {
+    use super::*;
+
+    fn prepare() -> InvestigationInput {
+        let page = serde_json::json!({"facts":[{"properties":{"name":"fixture"}}]}).to_string();
+        let mut basis = super::super::tests::ledger();
+        basis.queries[0].response_hash = content_hash(page.as_bytes());
+        basis.queries[0].response_bytes = page.len();
+        InvestigationInput::prepare(
+            "Explain the bounded evidence",
+            SpecialistId::DomainAnalyst,
+            basis,
+            &[page],
+            &[],
+            &[],
+            &InvestigationUsage::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn investigation_source_replay_feedback_is_fixed_and_respects_existing_wire_limit() {
+        // AC-0184: host-fixed feedback uses the same serialized payload ceiling.
+        let corrected = prepare().with_source_replay_feedback().unwrap();
+        let prompt: Value = serde_json::from_str(&corrected.payload.prompt).unwrap();
+        assert_eq!(prompt["finish_correction"]["refusal"], "source_replay");
+        assert!(
+            prompt["finish_correction"]["instruction"]
+                .as_str()
+                .unwrap()
+                .contains("No reads or tools are available")
+        );
+        assert!(
+            serde_json::to_vec(&corrected.action("inv-one:step-2".into()).unwrap().payload)
+                .unwrap()
+                .len()
+                <= MAX_INPUT_BYTES
+        );
+
+        let mut near_limit = prepare();
+        let mut prompt: Value = serde_json::from_str(&near_limit.payload.prompt).unwrap();
+        let mut low = 0_usize;
+        let mut high = MAX_INPUT_BYTES;
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            prompt["bounded_test_padding"] = Value::String("x".repeat(middle));
+            near_limit.payload.prompt = serde_json::to_string(&prompt).unwrap();
+            let bytes =
+                serde_json::to_vec(&near_limit.action("inv-one:step-2".into()).unwrap().payload)
+                    .unwrap()
+                    .len();
+            if bytes <= MAX_INPUT_BYTES {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        prompt["bounded_test_padding"] = Value::String("x".repeat(low));
+        near_limit.payload.prompt = serde_json::to_string(&prompt).unwrap();
+        assert!(
+            serde_json::to_vec(&near_limit.action("inv-one:step-2".into()).unwrap().payload)
+                .unwrap()
+                .len()
+                <= MAX_INPUT_BYTES
+        );
+        assert!(matches!(
+            near_limit.with_source_replay_feedback(),
+            Err(InvestigationError::LimitExceeded)
+        ));
+    }
+}

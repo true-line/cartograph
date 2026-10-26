@@ -2664,3 +2664,6 @@ fn investigation_finish_diagnostic_classes_fit_the_existing_message_bound() {
         assert!(message.len() <= InvestigationStopReason::InvalidResponse.message().len());
     }
 }
+
+#[path = "source_replay_tests.rs"]
+mod source_replay_tests;

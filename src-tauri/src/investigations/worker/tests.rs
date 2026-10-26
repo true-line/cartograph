@@ -26,6 +26,12 @@ enum Mode {
     PanicAfterQuery,
     MetadataFinish,
     MetadataReplay,
+    MetadataReplayCorrection,
+    MetadataReplayCancelled,
+    PriorFindingReplay,
+    PriorFindingCorrection,
+    PriorFindingCorrectionToolProposal,
+    PriorFindingCorrectionProviderFailure,
     UnadmittedRead,
     InventoryFinish,
     WrongQualifiedContext,
@@ -106,6 +112,12 @@ impl LlmProvider for Scripted {
         }
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
         self.prompts.lock().unwrap().push(prompt.clone());
+        if call == 3 && matches!(self.mode, Mode::PriorFindingCorrectionProviderFailure) {
+            return Err(BoundedCallError {
+                code: FailureCode::Transport,
+                outcome: InvocationOutcome::NotDispatched,
+            });
+        }
         assert!(
             !(call == 1 && matches!(self.mode, Mode::PanicAfterQuery)),
             "simulated owner loss"
@@ -133,9 +145,18 @@ impl LlmProvider for Scripted {
                     "labels":[], "max_facts":12, "max_bytes":16384, "cursor":null } })
             } else {
                 json!({ "type": "query_context", "query": { "scope": {"type":"all"}, "kind":"node",
-                    "labels":if matches!(self.mode, Mode::MetadataReplay) { json!(["Gap"]) } else { json!(["BusinessRule"]) }, "max_facts":1, "max_bytes":32768, "cursor":null } })
+                    "labels":if matches!(self.mode, Mode::MetadataReplay | Mode::MetadataReplayCorrection | Mode::MetadataReplayCancelled) { json!(["Gap"]) } else { json!(["BusinessRule"]) }, "max_facts":1, "max_bytes":32768, "cursor":null } })
             }
-        } else if call == 1 && matches!(self.mode, Mode::MetadataFinish | Mode::MetadataReplay) {
+        } else if (call == 1
+            && matches!(
+                self.mode,
+                Mode::MetadataFinish
+                    | Mode::MetadataReplay
+                    | Mode::MetadataReplayCorrection
+                    | Mode::MetadataReplayCancelled
+            ))
+            || (call == 2 && matches!(self.mode, Mode::MetadataReplay))
+        {
             let citations = prompt
                 .get("citations")
                 .unwrap_or(&prompt["input_ledger"]["citations"])
@@ -158,6 +179,65 @@ impl LlmProvider for Scripted {
                 .unwrap();
             json!({ "type":"read_evidence", "fact":option["fact"], "role":range["role"],
                 "index":if matches!(self.mode, Mode::UnavailableRead) { json!(999) } else { range["index"].clone() } })
+        } else if call == 2
+            && matches!(
+                self.mode,
+                Mode::PriorFindingReplay
+                    | Mode::PriorFindingCorrection
+                    | Mode::PriorFindingCorrectionToolProposal
+                    | Mode::PriorFindingCorrectionProviderFailure
+            )
+            || (call == 3 && matches!(self.mode, Mode::PriorFindingReplay))
+        {
+            let raw = prompt["prior_findings_as_t3_history"][0].as_str().unwrap();
+            let prior: Value = serde_json::from_str(raw).unwrap();
+            let citation = prompt
+                .get("citations")
+                .unwrap_or(&prompt["input_ledger"]["citations"])
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|citation| citation["origin"]["kind"] == "captured_primary_source")
+                .unwrap();
+            json!({"type":"finish","findings":[{"claim_kind":"inferred_interpretation",
+                "title":"A guarded path was observed",
+                "statement":prior["saved_result"]["findings"][0]["statement"],
+                "citation_ids":[citation["citation_id"]],
+                "limitations":["Only the selected captured range was inspected."]}],
+                "knowledge_completeness":"partial","limitations":["The source range does not establish all runtime behavior."]})
+        } else if call == 2 && matches!(self.mode, Mode::MetadataReplayCorrection) {
+            let citation = prompt
+                .get("citations")
+                .unwrap_or(&prompt["input_ledger"]["citations"])
+                .as_array()
+                .unwrap()
+                .first()
+                .unwrap();
+            json!({"type":"finish","findings":[{"claim_kind":"inferred_interpretation",
+                "title":"A bounded graph fact was observed",
+                "statement":"The recorded graph metadata supports this limited observation.",
+                "citation_ids":[citation["citation_id"]],
+                "limitations":["This synthetic graph observation does not verify source behavior."]}],
+                "knowledge_completeness":"partial","limitations":["Only admitted graph metadata was considered."]})
+        } else if call == 3 && matches!(self.mode, Mode::PriorFindingCorrectionToolProposal) {
+            json!({"type":"query_context","query":{"scope":{"type":"all"},"kind":null,
+                "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}})
+        } else if call == 3 && matches!(self.mode, Mode::PriorFindingCorrection) {
+            assert_eq!(prompt["finish_correction"]["refusal"], "source_replay");
+            let citation = prompt
+                .get("citations")
+                .unwrap_or(&prompt["input_ledger"]["citations"])
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|citation| citation["origin"]["kind"] == "captured_primary_source")
+                .unwrap();
+            json!({"type":"finish","findings":[{"claim_kind":"inferred_interpretation",
+                "title":"A conditional return is present",
+                "statement":"The selected function returns false when its explicit Boolean condition is false.",
+                "citation_ids":[citation["citation_id"]],
+                "limitations":["This selected range does not establish other runtime paths."]}],
+                "knowledge_completeness":"partial","limitations":["Only the selected source range was inspected."]})
         } else {
             assert_eq!(
                 call,
@@ -189,7 +269,13 @@ impl LlmProvider for Scripted {
                 "citation_ids":[citation["citation_id"]], "limitations":["Runtime inputs and broader feature coverage remain unknown."] }],
                 "knowledge_completeness":"partial", "limitations":["This scoped result establishes no complete business policy."] })
         };
-        if matches!(self.mode, Mode::MetadataReplay) && action["type"] == "finish" {
+        if (matches!(self.mode, Mode::MetadataReplay)
+            || (matches!(
+                self.mode,
+                Mode::MetadataReplayCorrection | Mode::MetadataReplayCancelled
+            ) && call == 1))
+            && action["type"] == "finish"
+        {
             action["findings"][0]["statement"] = json!(refusal_diagnostics::METADATA);
         }
         if action["type"] == "query_context" && !prompt["context_id"].is_null() {
@@ -199,7 +285,8 @@ impl LlmProvider for Scripted {
                 prompt["context_id"].clone()
             };
         }
-        if (matches!(self.mode, Mode::CancelFinish) && call == 2)
+        if (matches!(self.mode, Mode::MetadataReplayCancelled) && call == 1)
+            || (matches!(self.mode, Mode::CancelFinish) && call == 2)
             || (matches!(self.mode, Mode::CancelTool | Mode::CompletionCancelRefused) && call == 1)
         {
             self.cancel.lock().unwrap().as_ref().unwrap()();

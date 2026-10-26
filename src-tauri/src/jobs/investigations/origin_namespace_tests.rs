@@ -113,7 +113,7 @@ fn task_origin_namespace_rejects_invalid_intent_pairings() {
 
 // AC-0322: the added three-byte App namespace charge cannot gate saved reads
 // or same-intent retries. This is an accounting fixture: SQLite creates opaque
-// event padding; the test does not claim that padding is executable history.
+// response padding; the test does not claim that padding is an admitted response.
 #[test]
 fn task_origin_namespace_over_capacity_keeps_reads_and_retries() {
     let mut fixture = Fixture::new();
@@ -128,7 +128,7 @@ fn task_origin_namespace_over_capacity_keeps_reads_and_retries() {
         .store
         .conn
         .execute(
-            "INSERT INTO investigation_events VALUES (?1,999,zeroblob(?2),?3)",
+            "INSERT INTO investigation_responses VALUES (?1,'capacity-padding',zeroblob(?2),?3)",
             params![id, i64::try_from(padding).unwrap(), "0".repeat(64)],
         )
         .unwrap();

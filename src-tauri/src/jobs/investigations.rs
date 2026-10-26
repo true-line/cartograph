@@ -256,6 +256,12 @@ pub(crate) enum InvestigationTransition {
         tool: Option<InvestigationTool>,
         result: Option<Box<InvestigationResult>>,
     },
+    SourceReplayRefused {
+        step_id: String,
+        reported_input_tokens: Option<u64>,
+        reported_output_tokens: Option<u64>,
+        active_milliseconds: u64,
+    },
     FinishRefused {
         request: Box<StagedObligationRequest>,
         response: InvestigationResponseMeta,
