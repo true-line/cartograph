@@ -53,8 +53,36 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
   const questionBytes = new TextEncoder().encode(question).length;
   const locked = state.starting || state.pendingStart !== null;
   const requirements = state.draftInspectionRequirements;
-  const activityIncomplete = activity.status === 'incomplete' || Boolean(state.catalog && activity.tasks.some((task) =>
-    !state.catalog?.specialists.some((specialist) => specialist.id === task.summary.specialist_id)));
+  const matchedActivityTasks = state.catalog ? activity.tasks.filter((task) =>
+    state.catalog?.specialists.some((specialist) => specialist.id === task.summary.specialist_id)) : [];
+  const activityIncomplete = activity.status === 'incomplete' || matchedActivityTasks.length !== activity.tasks.length;
+  const showActivityRows = activity.status !== 'idle' && activity.status !== 'loading' &&
+    activity.status !== 'preview' && activity.status !== 'error';
+  const activityGroups = state.catalog && showActivityRows ? state.catalog.specialists.map((specialist) => ({
+    specialist,
+    tasks: matchedActivityTasks.filter((task) => task.summary.specialist_id === specialist.id),
+  })).filter(({ tasks }) => tasks.length > 0) : [];
+  const activityCounts = matchedActivityTasks.reduce((counts, task) => {
+    const status = task.summary.status;
+    if (status === 'queued' || status === 'preparing' || status === 'running' || status === 'awaiting_consent') {
+      counts[status] += 1;
+      counts.total += 1;
+      if (task.summary.cancel_requested) counts.cancelRequested += 1;
+    }
+    return counts;
+  }, { queued: 0, preparing: 0, running: 0, awaiting_consent: 0, cancelRequested: 0, total: 0 });
+  const activityCountLabel = activity.refreshing
+    ? activityIncomplete ? 'Last observed partial activity counts' : 'Last observed activity counts'
+    : activityIncomplete ? 'Partial activity counts' : 'Shown activity counts';
+  const activityCountMessage = showActivityRows && !state.catalogLoading
+    ? `${activityCountLabel}: ` +
+      `queued ${activityCounts.queued}, preparing ${activityCounts.preparing}, running ${activityCounts.running}, ` +
+      `awaiting consent ${activityCounts.awaiting_consent}; cancellation requested ${activityCounts.cancelRequested} of ${activityCounts.total} active tasks shown.` +
+      (activityIncomplete ? ' More active tasks may exist.' : '')
+    : null;
+  const activityRefreshMessage = activityIncomplete
+    ? matchedActivityTasks.length > 0 ? 'Activity incomplete · refreshing; last observed matching tasks are shown.' : 'Activity incomplete · refreshing; no idle status is inferred.'
+    : matchedActivityTasks.length > 0 ? 'Refreshing activity; last observed tasks are shown.' : 'Checking for active tasks…';
   const completionVersion = isCompletionSpecialist(specialistId);
   const profile = state.composer.limitProfile ?? 'investigation-v1';
   const policy = investigationPolicy(state.catalog, profile, specialistId);
@@ -117,13 +145,31 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
       <fieldset disabled={locked}><legend>Specialist</legend>
         <div className="investigation-specialists">{state.catalog?.specialists.filter((specialist) => profile === 'investigation-v2' ? isExpandedSpecialist(specialist.id) && Boolean(investigationPolicy(state.catalog, profile, specialist.id)) : !isExpandedSpecialist(specialist.id)).map((specialist) =>
           <label key={specialist.id} className={`investigation-specialist${specialistId === specialist.id ? ' selected' : ''}`}>
-            <input type="radio" name="specialist" checked={specialistId === specialist.id} onChange={() => setSpecialistId(specialist.id)} />
+            <input type="radio" name="specialist" checked={specialistId === specialist.id}
+              onChange={() => setSpecialistId(specialist.id)} />
             <span><strong>{specialist.name}</strong><span className="muted">{specialist.purpose}</span>
-              <code>{specialist.id} · T3 / InferredWeak</code>
-            <SpecialistTaskActivity specialistId={specialist.id} activity={activity} complete={!activityIncomplete} /></span>
+              <code>{specialist.id} · T3 / InferredWeak</code></span>
           </label>)}</div>
       </fieldset>
-      {activityIncomplete && <p role="status">The active task list is incomplete. No idle status is inferred.</p>}
+      {state.catalog && <section className="specialist-activity-list" aria-label="Active specialist tasks">
+        {activityCountMessage && <p className="specialist-activity-counts">{activityCountMessage}</p>}
+        {showActivityRows && activityGroups.map(({ specialist, tasks }) => <section key={specialist.id} className="specialist-activity-group">
+          <h3>{specialist.name} <code>{specialist.id}</code></h3>
+          <SpecialistTaskActivity tasks={tasks} onOpen={(id) => { void state.open(id); }} />
+        </section>)}
+        {activity.status === 'error' && <p className="error-text" role="status">
+          {activity.refreshing ? 'Activity unknown; refreshing after an earlier error.' : 'Activity unknown'}
+        </p>}
+        {activity.status === 'preview' && <p className="muted" role="status">Activity shown in desktop app</p>}
+        {activity.status === 'idle' && <p className="muted" role="status">Activity not checked</p>}
+        {activity.status === 'loading' && <p className="muted" role="status">Checking activity…</p>}
+        {showActivityRows && activity.refreshing && <p role="status">{activityRefreshMessage}</p>}
+        {showActivityRows && !activity.refreshing && activityIncomplete && <p role="status">
+          The active task list is incomplete. No idle status is inferred.
+        </p>}
+        {showActivityRows && !activity.refreshing && !activityIncomplete && !state.catalogLoading && matchedActivityTasks.length === 0 &&
+          <p role="status">No active tasks</p>}
+      </section>}
       {state.catalog === null && activity.status !== 'loading' && <p role="status">The catalog is unavailable; activity cannot be matched to exact specialist versions.</p>}
       {state.catalog && !state.catalogLoading && !selectedSpecialistAvailable && <p role="status">
         Selected specialist <code>{specialistId}</code> is unavailable for this investigation budget. Choose an available specialist explicitly to continue.
@@ -372,39 +418,26 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
   </section>;
 }
 
-function SpecialistTaskActivity({ specialistId, activity, complete }: {
-  specialistId: string;
-  activity: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error' | 'refreshing'>;
-  complete: boolean;
+function SpecialistTaskActivity({ tasks, onOpen }: {
+  tasks: SpecialistActivityItem[];
+  onOpen: (investigationId: string) => void;
 }) {
-  if (activity.refreshing) {
-    const tasks = activity.tasks.filter((task) => task.summary.specialist_id === specialistId);
-    if (tasks.length === 0) return <span className="muted">Checking for active tasks…</span>;
-    return <span className="muted">
-      {tasks.map(activityRowLabel).join(', ')} · {complete ? 'refreshing activity' : 'activity incomplete · refreshing'}
-    </span>;
-  }
-  if (activity.status === 'idle' || activity.status === 'loading') {
-    return <span className="muted">{activity.status === 'idle' ? 'Activity not checked' : 'Checking activity…'}</span>;
-  }
-  if (activity.status === 'preview') return <span className="muted">Activity shown in desktop app</span>;
-  if (activity.status === 'error') return <span className="error-text">Activity unknown</span>;
-
-  const tasks = activity.tasks.filter((task) => task.summary.specialist_id === specialistId);
-  if (!complete) return <span className="muted">
-    {tasks.length > 0 ? `${tasks.map(activityRowLabel).join(', ')} · activity incomplete` : 'Activity incomplete; no idle status inferred'}
-  </span>;
-  return <span className="muted">
-    {tasks.length === 0 ? 'No active tasks' : tasks.map(activityRowLabel).join(', ')}
-  </span>;
+  return <div className="specialist-task-activity">
+    {tasks.map((task) => <SpecialistTaskRow key={task.summary.investigation_id} task={task} onOpen={onOpen} />)}
+  </div>;
 }
 
 const ACTIVITY_STATUS_LABELS = {
   queued: 'Queued', preparing: 'Preparing context', running: 'Running', awaiting_consent: 'Awaiting cloud consent',
 } as const;
 
-function activityRowLabel(task: SpecialistActivityItem) {
+function SpecialistTaskRow({ task, onOpen }: { task: SpecialistActivityItem; onOpen: (investigationId: string) => void }) {
   const summary = task.summary;
   const status = `${ACTIVITY_STATUS_LABELS[summary.status as keyof typeof ACTIVITY_STATUS_LABELS] ?? 'Unrecognized status'}${summary.cancel_requested ? ' · Cancellation requested' : ''}`;
-  return `${status} · Saved provider: ${task.saved_provider.mode} / ${task.saved_provider.provider_id} · ${task.saved_provider.model}`;
+  return <article className="specialist-task-row">
+    <p className="specialist-task-question">{summary.question}</p>
+    <p className="muted">{status} · Saved provider: {task.saved_provider.mode} / {task.saved_provider.provider_id} · {task.saved_provider.model}</p>
+    <button type="button" className="secondary-button" aria-label={`Open investigation: ${summary.question}`}
+      onClick={() => onOpen(summary.investigation_id)}>Open investigation</button>
+  </article>;
 }

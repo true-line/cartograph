@@ -10,7 +10,7 @@ import { useInvestigationStore, type InvestigationState } from '../investigation
 import { useSpecialistActivityStore } from '../specialistActivityStore';
 import backendQualified from '../fixtures/investigation-coverage-backend.json';
 import { qualifiedCatalog, qualifiedDetail, qualifiedResult, inspectionAssessment, inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from '../investigationFixtures';
-import type { InvestigationChat, InvestigationDetail, InvestigationResult } from '../investigationTypes';
+import type { InvestigationChat, InvestigationDetail, InvestigationResult, InvestigationSpecialist, SpecialistId } from '../investigationTypes';
 
 const state = (overrides: Partial<InvestigationState> = {}): InvestigationState => ({
   ...useInvestigationStore.getInitialState(), catalog: investigationCatalog, history: [investigationDetail()],
@@ -36,6 +36,30 @@ const meta = { title: 'Surfaces/InvestigationsSurface', component: Investigation
 export default meta;
 type Story = StoryObj<typeof meta>;
 let conversationDetailReads: string[] = [];
+let openedActivityDetailReads: string[] = [];
+let openedActivityResultReads: string[] = [];
+let openedActivityChatReads: string[] = [];
+let openedActivityCitationReads: string[] = [];
+let activityRefreshResponse: (() => unknown) | null = null;
+
+const productionSpecialistIds = [
+  'domain-analyst@3', 'evidence-auditor@3', 'domain-analyst@4', 'evidence-auditor@4',
+  'domain-analyst@5', 'evidence-auditor@5', 'domain-analyst@6', 'evidence-auditor@6',
+  'domain-analyst@7', 'evidence-auditor@7', 'domain-analyst@10', 'evidence-auditor@10',
+  'spec-writer@1', 'gap-triager@1',
+] as const satisfies readonly SpecialistId[];
+
+const productionRosterCatalog = {
+  ...investigationCatalog,
+  specialists: productionSpecialistIds.map((id): InvestigationSpecialist => {
+    const [family, version] = id.split('@');
+    const name = family === 'domain-analyst' ? 'Domain analyst' : family === 'evidence-auditor' ? 'Evidence auditor' :
+      family === 'spec-writer' ? 'Spec writer' : 'Gap triager';
+    return { id, name, version: Number(version), prompt_fingerprint: `fixture:${id}`,
+      purpose: 'Production roster entry for the complete empty-activity observation story.',
+      operations: ['query_context', 'read_evidence', 'finish'], tier: 'Agentic', confidence_tier: 'InferredWeak' };
+  }),
+};
 
 export const ScopedSpecialistQuestion: Story = {
   // AC-0180/0190: exact host specialist, chosen graph scope and provider form the request.
@@ -181,20 +205,25 @@ export const ActiveInvestigations: Story = {
 export const SpecialistTaskActivity: Story = {
   // AC-0381: activity shows saved provider identity, not current catalog values.
   beforeEach: () => {
+    activityRefreshResponse = null;
     const active = [
       investigationDetail('domain-running-activity', { specialist_id: 'domain-analyst@3', status: 'running', has_result: false,
         provider: { ...investigationCatalog.providers[0], provider_id: 'saved-local-provider', model: 'saved-local-model' } }),
+      investigationDetail('domain-queued-activity', { specialist_id: 'domain-analyst@3', status: 'queued', has_result: false }),
+      investigationDetail('auditor-preparing-activity', { specialist_id: 'evidence-auditor@3', status: 'preparing', has_result: false }),
       investigationDetail('auditor-consent-activity', { specialist_id: 'evidence-auditor@3', status: 'awaiting_consent',
         cancel_requested: true, has_result: false, provider_mode: 'cloud',
         provider: { ...investigationCatalog.providers[1], provider_id: 'saved-cloud-provider', model: 'saved-cloud-model' } }),
       investigationDetail('old-domain-activity', { specialist_id: 'domain-analyst@2', status: 'queued', has_result: false }),
     ];
+    let activityReads = 0;
     mockIPC((command, args) => {
       if (command === 'list_specialist_task_activity') {
         expect(args).toEqual({ cursor: null });
-        return { items: active.map((summary) => ({ summary, saved_provider: {
+        const page = { items: active.map((summary) => ({ summary, saved_provider: {
           mode: summary.provider.mode, provider_id: summary.provider.provider_id, model: summary.provider.model,
-        } })), next_cursor: null };
+        } })), next_cursor: 'older-active-page' };
+        return activityReads++ === 0 ? page : activityRefreshResponse?.() ?? page;
       }
       return null;
     });
@@ -208,33 +237,198 @@ export const SpecialistTaskActivity: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const activityElement = canvas.getByRole('region', { name: 'Active specialist tasks' });
+    const activityPanel = within(activityElement);
     await canvas.findByText(/Running/);
+    await canvas.findByText(/Preparing context/);
     await canvas.findByText(/Awaiting cloud consent/);
-    const domain = canvas.getByText(/domain-analyst@3/).closest('label');
-    const auditor = canvas.getByText(/evidence-auditor@3/).closest('label');
+    const domain = canvas.getByRole('heading', { name: /domain-analyst@3/ }).closest('section');
+    const auditor = canvas.getByRole('heading', { name: /evidence-auditor@3/ }).closest('section');
     expect(domain).not.toBeNull();
     expect(auditor).not.toBeNull();
+    expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(2);
     await expect(domain).toHaveTextContent('Running');
-    await expect(domain).not.toHaveTextContent('Queued');
+    await expect(domain).toHaveTextContent('Queued');
     await expect(domain).toHaveTextContent('Saved provider: local / saved-local-provider · saved-local-model');
     await expect(auditor).toHaveTextContent('Awaiting cloud consent');
     await expect(auditor).toHaveTextContent('Cancellation requested');
     await expect(auditor).toHaveTextContent('Saved provider: cloud / saved-cloud-provider · saved-cloud-model');
-    await expect(canvas.findByText(/active task list is incomplete/i)).resolves.toBeVisible();
+    await expect(activityPanel.getByText('Partial activity counts: queued 1, preparing 1, running 1, awaiting consent 1; cancellation requested 1 of 4 active tasks shown. More active tasks may exist.')).toBeVisible();
+    await expect(activityPanel.findByText(/active task list is incomplete/i)).resolves.toBeVisible();
+    await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
     expect(useInvestigationStore.getState().history).toEqual([]);
     expect(useInvestigationStore.getState().selectedId).toBeNull();
 
     const tasks = useSpecialistActivityStore.getState().tasks;
-    useSpecialistActivityStore.setState({ status: 'ready', tasks: [], error: null, refreshing: true });
-    await expect(within(domain!).findByText('Checking for active tasks…')).resolves.toBeVisible();
-    expect(canvas.queryByText('No active tasks')).toBeNull();
-    useSpecialistActivityStore.setState({ status: 'ready', tasks, error: null, refreshing: true });
+    let resolveRefresh!: (page: { items: typeof tasks; next_cursor: string | null }) => void;
+    activityRefreshResponse = () => new Promise((resolve) => { resolveRefresh = resolve; });
+    const refreshPromise = useSpecialistActivityStore.getState().refresh();
+    await waitFor(() => expect(useSpecialistActivityStore.getState().refreshing).toBe(true));
     await waitFor(() => {
-      const refreshedDomain = canvas.getByText(/domain-analyst@3/).closest('label');
+      const refreshedDomain = canvas.getByRole('heading', { name: /domain-analyst@3/ }).closest('section');
       expect(refreshedDomain).not.toBeNull();
       expect(refreshedDomain).toHaveTextContent('Running');
-      expect(refreshedDomain).toHaveTextContent('activity incomplete · refreshing');
+      expect(refreshedDomain).not.toHaveTextContent(/refreshing/i);
     });
+    await expect(activityPanel.getByText('Last observed partial activity counts: queued 1, preparing 1, running 1, awaiting consent 1; cancellation requested 1 of 4 active tasks shown. More active tasks may exist.')).toBeVisible();
+    await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
+    await expect(activityPanel.getAllByRole('button', { name: /Open investigation:/ })).toHaveLength(4);
+    resolveRefresh({ items: tasks.filter((task) => task.summary.specialist_id !== 'domain-analyst@2'), next_cursor: null });
+    await refreshPromise;
+    await expect(activityPanel.findByText('Shown activity counts: queued 1, preparing 1, running 1, awaiting consent 1; cancellation requested 1 of 4 active tasks shown.')).resolves.toBeVisible();
+
+    useSpecialistActivityStore.setState({ status: 'loading', tasks, error: null, refreshing: true });
+    await expect(activityPanel.findByText('Checking activity…')).resolves.toBeVisible();
+    await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
+    expect(activityElement.querySelector('.specialist-activity-counts')).toBeNull();
+    expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(0);
+    useSpecialistActivityStore.setState({ status: 'preview', tasks, error: null, refreshing: false });
+    await expect(activityPanel.findByText('Activity shown in desktop app')).resolves.toBeVisible();
+    await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
+    expect(activityElement.querySelector('.specialist-activity-counts')).toBeNull();
+    expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(0);
+    activityRefreshResponse = () => { throw new Error('refresh failed'); };
+    await useSpecialistActivityStore.getState().refresh();
+    await expect(activityPanel.findByText('Activity unknown')).resolves.toBeVisible();
+    await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
+    expect(activityElement.querySelector('.specialist-activity-counts')).toBeNull();
+    expect(activityPanel.queryByRole('button', { name: /Open investigation:/ })).toBeNull();
+    expect(activityPanel.queryByText('No active tasks')).toBeNull();
+  },
+};
+
+export const CompleteEmptyProductionRoster: Story = {
+  beforeEach: () => {
+    mockIPC((command, args) => {
+      if (command === 'list_specialist_task_activity') {
+        expect(args).toEqual({ cursor: null });
+        return { items: [], next_cursor: null };
+      }
+      return null;
+    });
+    useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: productionRosterCatalog }, true);
+    useSpecialistActivityStore.getState().setVisible(true);
+    return () => { useSpecialistActivityStore.getState().setVisible(false); clearMocks(); };
+  },
+  render: function EmptyActivityStory() {
+    return <InvestigationsSurface state={useInvestigationStore()} activity={useSpecialistActivityStore()}
+      onRefreshActivity={() => void useSpecialistActivityStore.getState().refresh()} anchors={[]} canStart />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const activityElement = canvas.getByRole('region', { name: 'Active specialist tasks' });
+    const activityPanel = within(activityElement);
+    await expect(productionRosterCatalog.specialists).toHaveLength(14);
+    await expect(activityPanel.findByText('No active tasks')).resolves.toBeVisible();
+    await expect(activityPanel.findByText('Shown activity counts: queued 0, preparing 0, running 0, awaiting consent 0; cancellation requested 0 of 0 active tasks shown.')).resolves.toBeVisible();
+    await expect(activityPanel.getAllByText('No active tasks')).toHaveLength(1);
+    await expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(0);
+    await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
+  },
+};
+
+export const OpenActiveInvestigation: Story = {
+  // AC-0379: opening one activity row uses that task's existing saved-detail path.
+  beforeEach: () => {
+    const first = investigationDetail('active-first', { specialist_id: 'domain-analyst@3', status: 'running', has_result: false,
+      question: 'First active question', updated_at: '2026-10-26T10:00:00Z' });
+    const second = investigationDetail('active-second', { specialist_id: 'domain-analyst@3', status: 'awaiting_consent', has_result: false,
+      question: 'Second active question', updated_at: '2026-10-26T10:01:00Z' });
+    const savedSecond = investigationDetail('active-second', { specialist_id: 'domain-analyst@3', status: 'completed', has_result: true,
+      question: 'Second active question', updated_at: '2026-10-26T10:02:00Z' });
+    const result = investigationResult(savedSecond.investigation_id);
+    const chat: InvestigationChat = { chat_id: `chat:${savedSecond.investigation_id}`, task_id: savedSecond.investigation_id,
+      producer: { specialist_id: savedSecond.specialist.id, specialist_version: savedSecond.specialist.version,
+        prompt_fingerprint: savedSecond.specialist.prompt_fingerprint, tier: savedSecond.specialist.tier,
+        confidence_tier: savedSecond.specialist.confidence_tier, provider_mode: savedSecond.provider.mode,
+        provider_id: savedSecond.provider.provider_id, model: savedSecond.provider.model,
+        protocol_version: savedSecond.provider.protocol_version ?? null },
+      messages: [{ id: 'active-second-question', ordinal: 0, author: 'user',
+        message: { kind: 'user_question', question: savedSecond.question } },
+      { id: 'active-second-result', ordinal: 1, author: 'specialist',
+        message: { kind: 'result_reference', task_id: savedSecond.investigation_id,
+          result_id: result.result_id, result_hash: 'e'.repeat(64) } }] };
+    openedActivityDetailReads = [];
+    openedActivityResultReads = [];
+    openedActivityChatReads = [];
+    openedActivityCitationReads = [];
+    const pendingStart = { schema_version: 1 as const, request_nonce: 'preserved-pending-nonce', specialist_id: 'domain-analyst@3' as const,
+      question: 'Uncertain start retained for retry.', scope: { type: 'all' as const }, provider_mode: 'local' as const,
+      limit_profile: 'investigation-v1' as const };
+    const composer = { ...useInvestigationStore.getInitialState().composer, specialistId: 'evidence-auditor@3' as const,
+      question: 'Keep the composer draft intact.' };
+    mockIPC((command, payload) => {
+      const args = payload as { investigationId?: string; citationId?: string; afterSequence?: number } | undefined;
+      if (command === 'list_specialist_task_activity') return { items: [first, second].map((summary) => ({
+        summary, saved_provider: { mode: summary.provider_mode, provider_id: summary.provider.provider_id, model: summary.provider.model },
+      })), next_cursor: null };
+      if (command === 'get_investigation') {
+        if (args?.investigationId) openedActivityDetailReads.push(args.investigationId);
+        return args?.investigationId === savedSecond.investigation_id ? savedSecond : null;
+      }
+      if (command === 'investigation_result') {
+        if (args?.investigationId) openedActivityResultReads.push(args.investigationId);
+        return args?.investigationId === savedSecond.investigation_id ? result : null;
+      }
+      if (command === 'get_investigation_chat') {
+        if (args?.investigationId) openedActivityChatReads.push(args.investigationId);
+        return args?.investigationId === savedSecond.investigation_id ? chat : null;
+      }
+      if (command === 'investigation_events') {
+        const events = investigationEvents(savedSecond.investigation_id);
+        return { investigation_id: savedSecond.investigation_id,
+          items: events.filter((event) => event.sequence > (args?.afterSequence ?? 0)), next_sequence: events.length, has_more: false };
+      }
+      if (command === 'investigation_consent') return null;
+      if (command === 'read_investigation_citation') {
+        if (args?.investigationId) openedActivityCitationReads.push(args.investigationId);
+        const citation = investigationCitations.find((item) => item.citation_id === args?.citationId);
+        return citation && args?.investigationId === savedSecond.investigation_id ? { investigation_id: savedSecond.investigation_id,
+          citation_id: citation.citation_id, status: 'metadata_only', citation, text: null } : null;
+      }
+      return null;
+    });
+    useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: investigationCatalog,
+      pendingStart, composer, draftObligations: [inventoryObligation], history: [] }, true);
+    useSpecialistActivityStore.getState().setVisible(true);
+    return () => { useSpecialistActivityStore.getState().setVisible(false); clearMocks();
+      useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); };
+  },
+  render: function ActiveTaskNavigationStory() {
+    return <InvestigationsSurface state={useInvestigationStore()} activity={useSpecialistActivityStore()}
+      onRefreshActivity={() => void useSpecialistActivityStore.getState().refresh()} anchors={[]} canStart />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const firstOpen = await canvas.findByRole('button', { name: 'Open investigation: First active question' });
+    const secondOpen = canvas.getByRole('button', { name: 'Open investigation: Second active question' });
+    await expect(firstOpen.closest('label')).toBeNull();
+    await expect(firstOpen.closest('fieldset')).toBeNull();
+    await expect(secondOpen).toBeEnabled();
+    await expect(canvas.getByText(/First active question/)).toBeVisible();
+    await expect(canvas.getByText(/Second active question/)).toBeVisible();
+    await expect(canvas.getByText(/Awaiting cloud consent/)).toBeVisible();
+    const beforeOpen = useInvestigationStore.getState();
+    const expectedPendingStart = beforeOpen.pendingStart;
+    const expectedComposer = beforeOpen.composer;
+    const expectedObligations = beforeOpen.draftObligations;
+    await userEvent.click(secondOpen);
+    await waitFor(() => expect(useInvestigationStore.getState().selectedId).toBe('active-second'));
+    await waitFor(() => expect(useInvestigationStore.getState().detail?.investigation_id).toBe('active-second'));
+    const transcript = within(await canvas.findByRole('region', { name: 'Saved investigation chat' }));
+    await expect(transcript.getByRole('listitem', { name: 'User question' })).toHaveTextContent('Second active question');
+    await expect(canvas.getByRole('region', { name: 'Investigation findings' })).toBeVisible();
+    expect(useInvestigationStore.getState().selectedId).toBe('active-second');
+    expect(useInvestigationStore.getState().pendingStart).toEqual(expectedPendingStart);
+    expect(useInvestigationStore.getState().composer).toEqual(expectedComposer);
+    expect(useInvestigationStore.getState().draftObligations).toEqual(expectedObligations);
+    expect(openedActivityDetailReads).toEqual(['active-second']);
+    expect(openedActivityResultReads).toEqual(['active-second']);
+    await waitFor(() => expect(openedActivityChatReads).toEqual(['active-second']));
+    const finding = canvas.getByRole('region', { name: 'Investigation findings' });
+    await userEvent.click(within(finding).getByRole('button', { name: 'Inspect citation C1' }));
+    await waitFor(() => expect(useInvestigationStore.getState().citationRead?.investigation_id).toBe('active-second'));
+    expect(openedActivityCitationReads).toEqual(['active-second']);
   },
 };
 
