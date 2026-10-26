@@ -48,7 +48,7 @@ Score one exported run of the showcase manifest at the commit above.
 |---|---|---|
 | Link recall | `link` calls cited by a `REQUESTS` edge from their test to the Endpoint of their truth view and method | ≥ 18 / 19 |
 | Link precision | edges citing a sampled call whose Endpoint is that call's truth | 100 % |
-| Gap accuracy | `gap` calls that are a Gap naming the call whose reason means the labelled one, and are not linked | 6 / 6 |
+| Gap accuracy | `gap` calls that are a Gap naming the call whose reason means the labelled one, and are not linked | 7 / 7 |
 | Redirects | `follows_redirects` set on exactly the three labelled edges, with no statuses or keys | 3 / 3 |
 | Status precision / recall | pairs of (edge, status) against the union of the edge's labelled calls | 100 % / ≥ 90 % |
 | Key precision / recall | the same for (edge, key) | 100 % / ≥ 90 % |
