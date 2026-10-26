@@ -23,7 +23,16 @@ impl std::fmt::Display for PinnedReadError {
 
 impl std::error::Error for PinnedReadError {}
 
-type AdmittedReceiptFields = (Option<String>, Option<String>, Option<String>);
+type AdmittedReceiptFields = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    bool,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 fn admitted_receipt_text(
     value: rusqlite::types::ValueRef<'_>,
@@ -38,12 +47,18 @@ fn admitted_receipt_text(
 }
 
 fn admitted_receipt_fields(
-    values: [rusqlite::types::ValueRef<'_>; 3],
+    has_header: bool,
+    values: [rusqlite::types::ValueRef<'_>; 7],
 ) -> Result<AdmittedReceiptFields, PinnedReadError> {
     Ok((
         admitted_receipt_text(values[0])?,
         admitted_receipt_text(values[1])?,
         admitted_receipt_text(values[2])?,
+        has_header,
+        admitted_receipt_text(values[3])?,
+        admitted_receipt_text(values[4])?,
+        admitted_receipt_text(values[5])?,
+        admitted_receipt_text(values[6])?,
     ))
 }
 
@@ -53,26 +68,74 @@ pub(super) fn stored_receipt(conn: &Connection, id: &str) -> Result<Receipt, Pin
     // preserves a coherent selection for callers already holding a transaction.
     let payload_limit =
         i64::try_from(captured::MAX_RECEIPT_BYTES).map_err(|_| PinnedReadError::Invalid)?;
+    let header_limit =
+        i64::try_from(MAX_RECEIPT_HEADER_BYTES).map_err(|_| PinnedReadError::Invalid)?;
     let row: Option<AdmittedReceiptFields> = conn
         .query_row(
             "SELECT
-               CASE WHEN typeof(source_id)='text' AND length(CAST(source_id AS BLOB)) BETWEEN 1 AND 256 THEN source_id END,
-               CASE WHEN typeof(repo_key)='text' AND length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256 THEN repo_key END,
-               CASE WHEN typeof(payload)='text' AND length(CAST(payload AS BLOB)) BETWEEN 1 AND ?2 THEN payload END
-             FROM receipts WHERE id=?1",
-            params![id, payload_limit],
+               CASE WHEN typeof(r.source_id)='text' AND length(CAST(r.source_id AS BLOB)) BETWEEN 1 AND 256 THEN r.source_id END,
+               CASE WHEN typeof(r.repo_key)='text' AND length(CAST(r.repo_key AS BLOB)) BETWEEN 1 AND 256 THEN r.repo_key END,
+               CASE WHEN typeof(r.payload)='text' AND length(CAST(r.payload AS BLOB)) BETWEEN 1 AND ?2 THEN r.payload END,
+               r.header_id IS NOT NULL,
+               CASE WHEN typeof(r.header_id)='text' AND length(CAST(r.header_id AS BLOB)) BETWEEN 1 AND 256 THEN r.header_id END,
+               CASE WHEN typeof(h.source_id)='text' AND length(CAST(h.source_id AS BLOB)) BETWEEN 1 AND 256 THEN h.source_id END,
+               CASE WHEN typeof(h.repo_key)='text' AND length(CAST(h.repo_key AS BLOB)) BETWEEN 1 AND 256 THEN h.repo_key END,
+               CASE WHEN typeof(h.header)='text' AND length(CAST(h.header AS BLOB)) BETWEEN 1 AND ?3 THEN h.header END
+             FROM receipts r
+             LEFT JOIN receipt_headers h
+               ON r.header_id IS NOT NULL
+              AND typeof(r.header_id)='text'
+              AND length(CAST(r.header_id AS BLOB)) BETWEEN 1 AND 256
+              AND h.id = r.header_id
+             WHERE r.id=?1",
+            params![id, payload_limit, header_limit],
             |row| {
                 // SQLite TEXT can contain invalid UTF-8. Borrow the admitted
                 // bytes first so corrupt encoding is Invalid, while actual SQL
                 // access failures remain Operational.
-                Ok(admitted_receipt_fields([row.get_ref(0)?, row.get_ref(1)?, row.get_ref(2)?]))
+                Ok(admitted_receipt_fields(
+                    row.get(3)?,
+                    [
+                        row.get_ref(0)?,
+                        row.get_ref(1)?,
+                        row.get_ref(2)?,
+                        row.get_ref(4)?,
+                        row.get_ref(5)?,
+                        row.get_ref(6)?,
+                        row.get_ref(7)?,
+                    ],
+                ))
             },
         )
         .optional()
         .map_err(|_| PinnedReadError::Operational)?
         .transpose()?;
-    let (Some(source), Some(repo), Some(json)) = row.ok_or(PinnedReadError::Unavailable)? else {
+    let (
+        Some(source),
+        Some(repo),
+        Some(payload),
+        has_header,
+        header_id,
+        header_source,
+        header_repo,
+        header,
+    ) = row.ok_or(PinnedReadError::Unavailable)?
+    else {
         return Err(PinnedReadError::Invalid);
+    };
+    let json = if has_header {
+        let (Some(header_id), Some(header_source), Some(header_repo), Some(header)) =
+            (header_id, header_source, header_repo, header)
+        else {
+            return Err(PinnedReadError::Invalid);
+        };
+        if header_source != source || header_repo != repo {
+            return Err(PinnedReadError::Invalid);
+        }
+        rebuild_normalized_receipt(id, &source, &repo, &header_id, &header, &payload)
+            .map_err(|_| PinnedReadError::Invalid)?
+    } else {
+        payload
     };
     let receipt = Receipt::from_json(&json).map_err(|_| PinnedReadError::Invalid)?;
     if receipt.id() != id

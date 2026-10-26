@@ -5,7 +5,7 @@ use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt, Open
 use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 use core_graph::source::{FactKey, SourceBinding};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use source_capture::{Capture, CaptureLimits, CaptureStore, SourceId, StoreLimits};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -20,13 +20,22 @@ use crate::sources::RegisteredSource;
 
 const MAX_RECEIPTS: u64 = 100_000;
 const MAX_RECEIPT_BYTES: u64 = 128 * 1024;
+const MAX_RECEIPT_HEADER_BYTES: u64 = 16 * 1024;
 const MAX_RECEIPT_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOMBSTONE_CAPTURE_IDS_BYTES: u64 = 64 * 1024;
+const RECEIPT_HEADER_DOMAIN: &[u8] = b"cartograph:receipt-header:v1\0";
 const RECEIPTS_SCHEMA_V1: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 131072)) STRICT";
 const META_SCHEMA_V1: &str =
     "CREATE TABLE receipt_meta (version INTEGER PRIMARY KEY CHECK(version = 1)) STRICT";
 const RECEIPTS_ALTER_V2: &str = "ALTER TABLE receipts ADD COLUMN capture_forgotten_tombstone INTEGER REFERENCES receipt_tombstones(id)";
-const RECEIPTS_SCHEMA: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 131072), capture_forgotten_tombstone INTEGER REFERENCES receipt_tombstones(id)) STRICT";
+const RECEIPTS_SCHEMA_V3: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 131072), capture_forgotten_tombstone INTEGER REFERENCES receipt_tombstones(id)) STRICT";
+/// v4 (ADR-0046 decision 7): per-file shared header table and nullable
+/// foreign key on receipts. Rows with `header_id IS NULL` hold full legacy
+/// JSON in `payload`; rows with `header_id` set hold compact body JSON.
+const RECEIPTS_ALTER_V4: &str =
+    "ALTER TABLE receipts ADD COLUMN header_id TEXT REFERENCES receipt_headers(id)";
+const RECEIPTS_SCHEMA: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 131072), capture_forgotten_tombstone INTEGER REFERENCES receipt_tombstones(id), header_id TEXT REFERENCES receipt_headers(id)) STRICT";
+const HEADERS_SCHEMA: &str = "CREATE TABLE receipt_headers (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, header TEXT NOT NULL CHECK(length(CAST(header AS BLOB)) <= 16384)) STRICT";
 const TOMBSTONES_SCHEMA_V2: &str = "CREATE TABLE receipt_tombstones (id INTEGER PRIMARY KEY, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, capture_ids TEXT NOT NULL CHECK(length(CAST(capture_ids AS BLOB)) <= 65536), capture_ids_truncated INTEGER NOT NULL CHECK (capture_ids_truncated IN (0,1)), forgotten_at TEXT NOT NULL, receipts_reclaimed INTEGER NOT NULL CHECK (receipts_reclaimed >= 0), receipts_retained_pinned INTEGER NOT NULL CHECK (receipts_retained_pinned >= 0)) STRICT";
 /// v3 (ADR-0046 decision 5): why the tombstone's receipts were reclaimed.
 /// Existing tombstones were all written by forget.
@@ -35,12 +44,11 @@ const TOMBSTONES_SCHEMA: &str = "CREATE TABLE receipt_tombstones (id INTEGER PRI
 const RECLAIMS_SCHEMA: &str = "CREATE TABLE receipt_reclaims (receipt_id TEXT PRIMARY KEY NOT NULL, tombstone_id INTEGER NOT NULL REFERENCES receipt_tombstones(id)) STRICT";
 const META_SCHEMA_V2: &str =
     "CREATE TABLE receipt_meta (version INTEGER PRIMARY KEY CHECK(version = 2)) STRICT";
-const META_SCHEMA: &str =
+const META_SCHEMA_V3: &str =
     "CREATE TABLE receipt_meta (version INTEGER PRIMARY KEY CHECK(version = 3)) STRICT";
-/// Indexes that keep `receipt_storage`'s retention integrity checks linear;
-/// without them a valid store with many tombstones costs a quadratic scan on
-/// every open.
-const RECEIPT_INDEXES: [(&str, &str); 3] = [
+const META_SCHEMA: &str =
+    "CREATE TABLE receipt_meta (version INTEGER PRIMARY KEY CHECK(version = 4)) STRICT";
+const RECEIPT_INDEXES_V3: [(&str, &str); 3] = [
     (
         "receipt_reclaims_by_tombstone",
         "CREATE INDEX receipt_reclaims_by_tombstone ON receipt_reclaims (tombstone_id)",
@@ -52,6 +60,18 @@ const RECEIPT_INDEXES: [(&str, &str); 3] = [
     (
         "receipts_by_forgotten_tombstone",
         "CREATE INDEX receipts_by_forgotten_tombstone ON receipts (capture_forgotten_tombstone) WHERE capture_forgotten_tombstone IS NOT NULL",
+    ),
+];
+/// Indexes that keep `receipt_storage`'s retention integrity checks linear;
+/// without them a valid store with many tombstones or headers costs a
+/// quadratic scan on every open.
+const RECEIPT_INDEXES: [(&str, &str); 4] = [
+    RECEIPT_INDEXES_V3[0],
+    RECEIPT_INDEXES_V3[1],
+    RECEIPT_INDEXES_V3[2],
+    (
+        "receipts_by_header",
+        "CREATE INDEX receipts_by_header ON receipts (header_id)",
     ),
 ];
 
@@ -72,11 +92,382 @@ fn delete_orphan_tombstones(tx: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Delete receipt headers that no remaining receipt row references, so
+/// retained headers stay bounded by referencing receipt rows.
+fn delete_orphan_headers(tx: &Connection) -> Result<(), String> {
+    tx.execute(
+        "DELETE FROM receipt_headers
+         WHERE NOT EXISTS (
+             SELECT 1 FROM receipts WHERE header_id = receipt_headers.id
+         )",
+        [],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+fn create_v3_receipt_indexes(tx: &Connection) -> Result<(), String> {
+    for (_, ddl) in RECEIPT_INDEXES_V3 {
+        tx.execute_batch(ddl).map_err(storage_error)?;
+    }
+    Ok(())
+}
+
 fn create_receipt_indexes(tx: &Connection) -> Result<(), String> {
     for (_, ddl) in RECEIPT_INDEXES {
         tx.execute_batch(ddl).map_err(storage_error)?;
     }
     Ok(())
+}
+
+/// Per-file shared fields of a v3 receipt's `content` (everything except
+/// `fact_key`, `fact_digest`, and `ranges`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiptHeader {
+    schema_version: u32,
+    source_id: SourceId,
+    repo_key: String,
+    file: source_capture::CaptureFileRef,
+    commit_sha: String,
+    producer_contract: String,
+    grammar: captured::Grammar,
+    grammar_package: String,
+    parser_package: String,
+    source_scope: String,
+    input_closure: String,
+}
+
+/// Compact v3 receipt body stored in `receipts.payload` when `header_id` is set
+/// (ADR-0046 decision 7):
+/// - `k`: node `fact_key.id` with `<repo_key>@<path>` removed after `<kind-prefix>:`
+///   (stored as `"<kind-prefix>:<suffix>"`, only when re-adding `<repo_key>@<path>`
+///   reproduces `fact_key.id` byte-for-byte)
+/// - `K`: verbatim node `fact_key.id` when the `<kind-prefix>:<repo_key>@<path>`
+///   prefix is absent
+/// - `e`: edge `[source, label, destination]` with `<repo_key>@<path>` removed
+///   from both endpoint IDs
+/// - `E`: verbatim edge `[source, label, destination]` when either endpoint ID
+///   does not start with `<kind-prefix>:<repo_key>@<path>`
+/// - `d`: `fact_digest`
+/// - `r`: `ranges` as `[role, index, byte_start, byte_end]` arrays
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiptBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    k: Option<String>,
+    #[serde(rename = "K", skip_serializing_if = "Option::is_none")]
+    verbatim_k: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    e: Option<(String, String, String)>,
+    #[serde(rename = "E", skip_serializing_if = "Option::is_none")]
+    verbatim_e: Option<(String, String, String)>,
+    d: String,
+    r: Vec<(captured::RangeRole, u32, u64, u64)>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StrictV3WireReceipt {
+    receipt_id: String,
+    content: StrictV3WireContent,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StrictV3WireContent {
+    schema_version: u32,
+    source_id: SourceId,
+    repo_key: String,
+    file: source_capture::CaptureFileRef,
+    commit_sha: String,
+    producer_contract: String,
+    grammar: captured::Grammar,
+    grammar_package: String,
+    parser_package: String,
+    fact_key: FactKey,
+    fact_digest: String,
+    ranges: Vec<StrictV3WireRange>,
+    source_scope: String,
+    input_closure: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StrictV3WireRange {
+    role: captured::RangeRole,
+    index: u32,
+    byte_start: u64,
+    byte_end: u64,
+}
+
+struct NormalizedReceipt {
+    header_id: String,
+    header_json: String,
+    body_json: String,
+}
+
+fn receipt_header_id(header_json: &str) -> String {
+    let mut bytes = Vec::with_capacity(RECEIPT_HEADER_DOMAIN.len() + header_json.len());
+    bytes.extend_from_slice(RECEIPT_HEADER_DOMAIN);
+    bytes.extend_from_slice(header_json.as_bytes());
+    core_prov::content_hash(&bytes)
+}
+
+fn strip_fact_id_prefix(id: &str, repo_key: &str, path: &str) -> Option<String> {
+    if repo_key.is_empty() || path.is_empty() {
+        return None;
+    }
+    let (kind_prefix, rest) = id.split_once(':')?;
+    if kind_prefix.is_empty() {
+        return None;
+    }
+    let suffix = rest
+        .strip_prefix(repo_key)?
+        .strip_prefix('@')?
+        .strip_prefix(path)?;
+    let compact = format!("{kind_prefix}:{suffix}");
+    if restore_fact_id_prefix(&compact, repo_key, path).as_deref() == Some(id) {
+        Some(compact)
+    } else {
+        None
+    }
+}
+
+fn restore_fact_id_prefix(compact: &str, repo_key: &str, path: &str) -> Option<String> {
+    if repo_key.is_empty() || path.is_empty() {
+        return None;
+    }
+    let (kind_prefix, suffix) = compact.split_once(':')?;
+    if kind_prefix.is_empty() {
+        return None;
+    }
+    Some(format!("{kind_prefix}:{repo_key}@{path}{suffix}"))
+}
+
+fn normalize_v3_receipt(receipt: &Receipt, canonical_json: &str) -> Option<NormalizedReceipt> {
+    let wire: StrictV3WireReceipt = serde_json::from_str(canonical_json).ok()?;
+    if wire.content.schema_version != 3
+        || wire.receipt_id != receipt.id()
+        || wire.content.source_id != *receipt.source_id()
+        || wire.content.file.source_id != *receipt.source_id()
+        || wire.content.repo_key != receipt.repo_key()
+    {
+        return None;
+    }
+    let repo_key = &wire.content.repo_key;
+    let path = &wire.content.file.path;
+    let (k, verbatim_k, e, verbatim_e) = match &wire.content.fact_key {
+        FactKey::Node { id } => match strip_fact_id_prefix(id, repo_key, path) {
+            Some(stripped) => (Some(stripped), None, None, None),
+            None => (None, Some(id.clone()), None, None),
+        },
+        FactKey::Edge {
+            source,
+            label,
+            destination,
+        } => match (
+            strip_fact_id_prefix(source, repo_key, path),
+            strip_fact_id_prefix(destination, repo_key, path),
+        ) {
+            (Some(src_stripped), Some(dst_stripped)) => (
+                None,
+                None,
+                Some((src_stripped, label.clone(), dst_stripped)),
+                None,
+            ),
+            _ => (
+                None,
+                None,
+                None,
+                Some((source.clone(), label.clone(), destination.clone())),
+            ),
+        },
+    };
+    let header = ReceiptHeader {
+        schema_version: wire.content.schema_version,
+        source_id: wire.content.source_id,
+        repo_key: wire.content.repo_key,
+        file: wire.content.file,
+        commit_sha: wire.content.commit_sha,
+        producer_contract: wire.content.producer_contract,
+        grammar: wire.content.grammar,
+        grammar_package: wire.content.grammar_package,
+        parser_package: wire.content.parser_package,
+        source_scope: wire.content.source_scope,
+        input_closure: wire.content.input_closure,
+    };
+    let body = ReceiptBody {
+        k,
+        verbatim_k,
+        e,
+        verbatim_e,
+        d: wire.content.fact_digest,
+        r: wire
+            .content
+            .ranges
+            .into_iter()
+            .map(|range| (range.role, range.index, range.byte_start, range.byte_end))
+            .collect(),
+    };
+    let header_json = serde_json::to_string(&header).ok()?;
+    let body_json = serde_json::to_string(&body).ok()?;
+    if header_json.is_empty()
+        || header_json.len() as u64 > MAX_RECEIPT_HEADER_BYTES
+        || body_json.is_empty()
+        || body_json.len() as u64 > MAX_RECEIPT_BYTES
+    {
+        return None;
+    }
+    let header_id = receipt_header_id(&header_json);
+    let rebuilt = rebuild_normalized_receipt(
+        receipt.id(),
+        receipt.source_id().as_str(),
+        receipt.repo_key(),
+        &header_id,
+        &header_json,
+        &body_json,
+    )
+    .ok()?;
+    if rebuilt != canonical_json {
+        return None;
+    }
+    Some(NormalizedReceipt {
+        header_id,
+        header_json,
+        body_json,
+    })
+}
+
+fn rebuild_normalized_receipt(
+    id: &str,
+    source: &str,
+    repo: &str,
+    header_id: &str,
+    header_json: &str,
+    body_json: &str,
+) -> Result<String, String> {
+    if id.is_empty()
+        || id.len() > 256
+        || header_id.is_empty()
+        || header_id.len() > 256
+        || header_json.is_empty()
+        || header_json.len() as u64 > MAX_RECEIPT_HEADER_BYTES
+        || body_json.is_empty()
+        || body_json.len() as u64 > MAX_RECEIPT_BYTES
+        || header_json.len().saturating_add(id.len()) > captured::MAX_RECEIPT_BYTES
+    {
+        return Err(storage_error("normalized receipt bounds"));
+    }
+    if receipt_header_id(header_json) != header_id {
+        return Err(storage_error("receipt header id mismatch"));
+    }
+    let header: ReceiptHeader = serde_json::from_str(header_json).map_err(storage_error)?;
+    if header.schema_version != 3
+        || header.source_id.as_str() != source
+        || header.file.source_id.as_str() != source
+        || header.repo_key != repo
+    {
+        return Err(storage_error("receipt header ownership"));
+    }
+    let body: ReceiptBody = serde_json::from_str(body_json).map_err(storage_error)?;
+    let path = &header.file.path;
+    let fact_key = match (body.k, body.verbatim_k, body.e, body.verbatim_e) {
+        (Some(compact), None, None, None) => {
+            let restored = restore_fact_id_prefix(&compact, repo, path)
+                .ok_or_else(|| storage_error("receipt fact prefix"))?;
+            if strip_fact_id_prefix(&restored, repo, path).as_deref() != Some(compact.as_str()) {
+                return Err(storage_error("receipt fact prefix roundtrip"));
+            }
+            FactKey::Node { id: restored }
+        }
+        (None, Some(verbatim), None, None) => {
+            if strip_fact_id_prefix(&verbatim, repo, path).is_some() {
+                return Err(storage_error("receipt unstripped fact prefix"));
+            }
+            FactKey::Node { id: verbatim }
+        }
+        (None, None, Some((src_compact, label, dst_compact)), None) => {
+            let src = restore_fact_id_prefix(&src_compact, repo, path)
+                .ok_or_else(|| storage_error("receipt edge source prefix"))?;
+            let dst = restore_fact_id_prefix(&dst_compact, repo, path)
+                .ok_or_else(|| storage_error("receipt edge destination prefix"))?;
+            if strip_fact_id_prefix(&src, repo, path).as_deref() != Some(src_compact.as_str())
+                || strip_fact_id_prefix(&dst, repo, path).as_deref() != Some(dst_compact.as_str())
+            {
+                return Err(storage_error("receipt edge prefix roundtrip"));
+            }
+            FactKey::Edge {
+                source: src,
+                label,
+                destination: dst,
+            }
+        }
+        (None, None, None, Some((src, label, dst))) => {
+            if strip_fact_id_prefix(&src, repo, path).is_some()
+                && strip_fact_id_prefix(&dst, repo, path).is_some()
+            {
+                return Err(storage_error("receipt unstripped edge prefix"));
+            }
+            FactKey::Edge {
+                source: src,
+                label,
+                destination: dst,
+            }
+        }
+        _ => return Err(storage_error("receipt body fact key")),
+    };
+    let wire = StrictV3WireReceipt {
+        receipt_id: id.to_owned(),
+        content: StrictV3WireContent {
+            schema_version: header.schema_version,
+            source_id: header.source_id,
+            repo_key: header.repo_key,
+            file: header.file,
+            commit_sha: header.commit_sha,
+            producer_contract: header.producer_contract,
+            grammar: header.grammar,
+            grammar_package: header.grammar_package,
+            parser_package: header.parser_package,
+            fact_key,
+            fact_digest: body.d,
+            ranges: body
+                .r
+                .into_iter()
+                .map(|(role, index, byte_start, byte_end)| StrictV3WireRange {
+                    role,
+                    index,
+                    byte_start,
+                    byte_end,
+                })
+                .collect(),
+            source_scope: header.source_scope,
+            input_closure: header.input_closure,
+        },
+    };
+    struct BoundedReceiptJson {
+        bytes: Vec<u8>,
+    }
+    impl std::io::Write for BoundedReceiptJson {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.len() > captured::MAX_RECEIPT_BYTES.saturating_sub(self.bytes.len()) {
+                return Err(std::io::Error::other("receipt json bound"));
+            }
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = BoundedReceiptJson {
+        bytes: Vec::with_capacity(header_json.len().saturating_add(body_json.len())),
+    };
+    serde_json::to_writer(&mut writer, &wire).map_err(storage_error)?;
+    if writer.bytes.len() > captured::MAX_RECEIPT_BYTES {
+        return Err(storage_error("receipt json bound"));
+    }
+    String::from_utf8(writer.bytes).map_err(storage_error)
 }
 
 /// Summary of the forget operation that reclaimed or marked a receipt.
@@ -459,7 +850,7 @@ fn migrate_v1_to_v2(tx: &Connection) -> Result<(), String> {
     tx.execute_batch(TOMBSTONES_SCHEMA_V2)
         .map_err(storage_error)?;
     tx.execute_batch(RECLAIMS_SCHEMA).map_err(storage_error)?;
-    create_receipt_indexes(tx)?;
+    create_v3_receipt_indexes(tx)?;
     tx.execute_batch("DROP TABLE receipt_meta")
         .map_err(storage_error)?;
     tx.execute_batch(META_SCHEMA_V2).map_err(storage_error)?;
@@ -500,9 +891,51 @@ fn migrate_v2_to_v3(tx: &Connection) -> Result<(), String> {
         .map_err(storage_error)?;
     tx.execute_batch("DROP TABLE receipt_meta")
         .map_err(storage_error)?;
-    tx.execute_batch(META_SCHEMA).map_err(storage_error)?;
+    tx.execute_batch(META_SCHEMA_V3).map_err(storage_error)?;
     require_one(
         tx.execute("INSERT INTO receipt_meta VALUES (3)", [])
+            .map_err(storage_error)?,
+    )
+}
+
+/// True when the store is schema v3, whose receipt rows all carry legacy full
+/// canonical JSON in `payload` before `receipt_headers` and `header_id`.
+fn is_v3_migration_candidate(conn: &Connection) -> Result<bool, String> {
+    for (name, ddl) in [
+        ("receipts", RECEIPTS_SCHEMA_V3),
+        ("receipt_tombstones", TOMBSTONES_SCHEMA),
+        ("receipt_reclaims", RECLAIMS_SCHEMA),
+        ("receipt_meta", META_SCHEMA_V3),
+    ] {
+        let exact: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 AND sql=?2)",
+                params![name, ddl],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !exact {
+            return Ok(false);
+        }
+    }
+    conn.query_row(
+        "SELECT count(*)=1 AND coalesce(min(typeof(version)='integer' AND version=3),0) FROM receipt_meta",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(storage_error)
+}
+
+fn migrate_v3_to_v4(tx: &Connection) -> Result<(), String> {
+    tx.execute_batch(RECEIPTS_ALTER_V4).map_err(storage_error)?;
+    tx.execute_batch(HEADERS_SCHEMA).map_err(storage_error)?;
+    tx.execute_batch(RECEIPT_INDEXES[3].1)
+        .map_err(storage_error)?;
+    tx.execute_batch("DROP TABLE receipt_meta")
+        .map_err(storage_error)?;
+    tx.execute_batch(META_SCHEMA).map_err(storage_error)?;
+    require_one(
+        tx.execute("INSERT INTO receipt_meta VALUES (4)", [])
             .map_err(storage_error)?,
     )
 }
@@ -515,7 +948,7 @@ fn receipt_schema(conn: &Connection) -> Result<(), String> {
             |row| row.get(0),
         )
         .map_err(storage_error)?;
-    if objects != 4 + RECEIPT_INDEXES.len() as i64 {
+    if objects != 5 + RECEIPT_INDEXES.len() as i64 {
         return Err(storage_error("receipt schema objects"));
     }
     for (name, ddl) in RECEIPT_INDEXES {
@@ -532,6 +965,7 @@ fn receipt_schema(conn: &Connection) -> Result<(), String> {
     }
     for (name, ddl) in [
         ("receipts", RECEIPTS_SCHEMA),
+        ("receipt_headers", HEADERS_SCHEMA),
         ("receipt_tombstones", TOMBSTONES_SCHEMA),
         ("receipt_reclaims", RECLAIMS_SCHEMA),
         ("receipt_meta", META_SCHEMA),
@@ -549,7 +983,7 @@ fn receipt_schema(conn: &Connection) -> Result<(), String> {
     }
     let valid: bool = conn
         .query_row(
-            "SELECT count(*)=1 AND coalesce(min(typeof(version)='integer' AND version=3),0) FROM receipt_meta",
+            "SELECT count(*)=1 AND coalesce(min(typeof(version)='integer' AND version=4),0) FROM receipt_meta",
             [],
             |row| row.get(0),
         )
@@ -570,6 +1004,28 @@ fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
     if count < 0 || count > MAX_RECEIPTS as i64 {
         return Err(storage_error("receipt inventory count"));
     }
+    let header_count: i64 = conn
+        .query_row("SELECT count(*) FROM receipt_headers", [], |row| row.get(0))
+        .map_err(storage_error)?;
+    if header_count < 0 || header_count > count {
+        return Err(storage_error("receipt header count"));
+    }
+    let invalid_headers: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM receipt_headers WHERE typeof(id) != 'text'
+         OR length(CAST(id AS BLOB)) NOT BETWEEN 1 AND 256
+         OR typeof(source_id) != 'text' OR length(CAST(source_id AS BLOB)) != 36
+         OR source_id NOT GLOB 'src_*' OR trim(substr(source_id, 5), '0123456789abcdef') != ''
+         OR typeof(repo_key) != 'text' OR length(CAST(repo_key AS BLOB)) NOT BETWEEN 1 AND 256
+         OR typeof(header) != 'text' OR length(CAST(header AS BLOB)) NOT BETWEEN 1 AND ?1
+         OR NOT EXISTS(SELECT 1 FROM receipts WHERE receipts.header_id = receipt_headers.id))",
+            [MAX_RECEIPT_HEADER_BYTES as i64],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if invalid_headers {
+        return Err(storage_error("receipt header bounds"));
+    }
     let invalid: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM receipts WHERE typeof(id) != 'text'
@@ -581,7 +1037,14 @@ fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
              AND (typeof(capture_forgotten_tombstone) != 'integer'
                   OR NOT EXISTS(SELECT 1 FROM receipt_tombstones
                                 WHERE receipt_tombstones.id = receipts.capture_forgotten_tombstone
-                                  AND receipt_tombstones.source_id = receipts.source_id))))",
+                                  AND receipt_tombstones.source_id = receipts.source_id)))
+         OR (header_id IS NOT NULL
+             AND (typeof(header_id) != 'text'
+                  OR length(CAST(header_id AS BLOB)) NOT BETWEEN 1 AND 256
+                  OR NOT EXISTS(SELECT 1 FROM receipt_headers
+                                WHERE receipt_headers.id = receipts.header_id
+                                  AND receipt_headers.source_id = receipts.source_id
+                                  AND receipt_headers.repo_key = receipts.repo_key))))",
             [MAX_RECEIPT_BYTES as i64],
             |row| row.get(0),
         )
@@ -591,7 +1054,8 @@ fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
     }
     let bytes: i64 = conn
         .query_row(
-            "SELECT coalesce(sum(length(CAST(payload AS BLOB))),0) FROM receipts",
+            "SELECT (SELECT coalesce(sum(length(CAST(payload AS BLOB))),0) FROM receipts)
+                  + (SELECT coalesce(sum(length(CAST(header AS BLOB))),0) FROM receipt_headers)",
             [],
             |row| row.get(0),
         )
@@ -731,12 +1195,13 @@ impl ReceiptStore {
             .map_err(storage_error)?;
         if count == 0 {
             tx.execute_batch(RECEIPTS_SCHEMA).map_err(storage_error)?;
+            tx.execute_batch(HEADERS_SCHEMA).map_err(storage_error)?;
             tx.execute_batch(TOMBSTONES_SCHEMA).map_err(storage_error)?;
             tx.execute_batch(RECLAIMS_SCHEMA).map_err(storage_error)?;
             create_receipt_indexes(&tx)?;
             tx.execute_batch(META_SCHEMA).map_err(storage_error)?;
             require_one(
-                tx.execute("INSERT INTO receipt_meta VALUES (3)", [])
+                tx.execute("INSERT INTO receipt_meta VALUES (4)", [])
                     .map_err(storage_error)?,
             )?;
         } else {
@@ -745,6 +1210,9 @@ impl ReceiptStore {
             }
             if is_v2_migration_candidate(&tx)? {
                 migrate_v2_to_v3(&tx)?;
+            }
+            if is_v3_migration_candidate(&tx)? {
+                migrate_v3_to_v4(&tx)?;
             }
         }
         receipt_storage(&tx)?;
@@ -801,6 +1269,7 @@ impl ReceiptStore {
                 Some(old) if old != &json => return Err(storage_error("receipt batch collision")),
                 Some(_) => {}
                 None => {
+                    let normalized = normalize_v3_receipt(receipt, &json);
                     batch.insert(receipt.id().to_owned(), json.clone());
                     rows.push((
                         receipt.id().to_owned(),
@@ -808,6 +1277,7 @@ impl ReceiptStore {
                         receipt.fact_key().clone(),
                         receipt.fact_digest().to_owned(),
                         json,
+                        normalized,
                     ));
                 }
             }
@@ -819,19 +1289,41 @@ impl ReceiptStore {
             .map_err(storage_error)?;
         let (mut count, mut bytes) = receipt_storage(&tx)?;
         let mut retained = RetainedReceipts::default();
-        for (id, path, fact_key, fact_digest, payload) in rows {
-            let old: Option<(String, String, String)> = tx
+        for (id, path, fact_key, fact_digest, canonical_json, normalized) in rows {
+            let old: Option<(String, String, String, Option<String>)> = tx
                 .query_row(
-                    "SELECT source_id,repo_key,payload FROM receipts WHERE id=?1",
+                    "SELECT source_id,repo_key,payload,header_id FROM receipts WHERE id=?1",
                     [&id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .optional()
                 .map_err(storage_error)?;
-            if let Some((old_source, old_repo, old_json)) = old {
+            if let Some((old_source, old_repo, old_payload, old_header_id)) = old {
+                let old_json = if let Some(header_id) = old_header_id {
+                    let (header_source, header_repo, header_json): (String, String, String) = tx
+                        .query_row(
+                            "SELECT source_id,repo_key,header FROM receipt_headers WHERE id=?1",
+                            [&header_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .map_err(storage_error)?;
+                    if header_source != old_source || header_repo != old_repo {
+                        return Err(storage_error("receipt header ownership"));
+                    }
+                    rebuild_normalized_receipt(
+                        &id,
+                        &old_source,
+                        &old_repo,
+                        &header_id,
+                        &header_json,
+                        &old_payload,
+                    )?
+                } else {
+                    old_payload
+                };
                 if old_source != source.source_id
                     || old_repo != source.repo_key
-                    || old_json != payload
+                    || old_json != canonical_json
                 {
                     return Err(storage_error("receipt collision"));
                 }
@@ -842,18 +1334,75 @@ impl ReceiptStore {
                     [&id],
                 )
                 .map_err(storage_error)?;
-            } else if count + 1 > self.capacity.0 || bytes + payload.len() as u64 > self.capacity.1
+            } else if let Some(normalized) = normalized {
+                let existing_header: Option<(String, String, String)> = tx
+                    .query_row(
+                        "SELECT source_id,repo_key,header FROM receipt_headers WHERE id=?1",
+                        [&normalized.header_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(storage_error)?;
+                let header_cost = match &existing_header {
+                    Some((header_source, header_repo, header_json)) => {
+                        if header_source != &source.source_id
+                            || header_repo != &source.repo_key
+                            || header_json != &normalized.header_json
+                        {
+                            return Err(storage_error("receipt header collision"));
+                        }
+                        0
+                    }
+                    None => normalized.header_json.len() as u64,
+                };
+                let row_cost = normalized.body_json.len() as u64 + header_cost;
+                if count + 1 > self.capacity.0 || bytes + row_cost > self.capacity.1 {
+                    *retained.omitted.entry(path).or_default() += 1;
+                    retained.omitted_facts.push((fact_key, fact_digest));
+                    continue;
+                }
+                if existing_header.is_none() {
+                    require_one(
+                        tx.execute(
+                            "INSERT INTO receipt_headers (id,source_id,repo_key,header) VALUES (?1,?2,?3,?4)",
+                            params![
+                                normalized.header_id,
+                                source.source_id,
+                                source.repo_key,
+                                normalized.header_json,
+                            ],
+                        )
+                        .map_err(storage_error)?,
+                    )?;
+                }
+                count += 1;
+                bytes += row_cost;
+                require_one(
+                    tx.execute(
+                        "INSERT INTO receipts (id,source_id,repo_key,payload,header_id) VALUES (?1,?2,?3,?4,?5)",
+                        params![
+                            id,
+                            source.source_id,
+                            source.repo_key,
+                            normalized.body_json,
+                            normalized.header_id,
+                        ],
+                    )
+                    .map_err(storage_error)?,
+                )?;
+            } else if count + 1 > self.capacity.0
+                || bytes + canonical_json.len() as u64 > self.capacity.1
             {
                 *retained.omitted.entry(path).or_default() += 1;
                 retained.omitted_facts.push((fact_key, fact_digest));
                 continue;
             } else {
                 count += 1;
-                bytes += payload.len() as u64;
+                bytes += canonical_json.len() as u64;
                 require_one(
                     tx.execute(
                         "INSERT INTO receipts (id,source_id,repo_key,payload) VALUES (?1,?2,?3,?4)",
-                        params![id, source.source_id, source.repo_key, payload],
+                        params![id, source.source_id, source.repo_key, canonical_json],
                     )
                     .map_err(storage_error)?,
                 )?;
@@ -861,6 +1410,7 @@ impl ReceiptStore {
             retained.ids.insert(id);
         }
         delete_orphan_tombstones(&tx)?;
+        delete_orphan_headers(&tx)?;
         tx.commit().map_err(storage_error)?;
         Ok(retained)
     }
@@ -1062,6 +1612,7 @@ impl ReceiptStore {
             .map_err(storage_error)?;
         }
         delete_orphan_tombstones(&tx)?;
+        delete_orphan_headers(&tx)?;
         receipt_storage(&tx)?;
         tx.commit().map_err(storage_error)?;
         Ok(reclaimed.len() as u64)
@@ -2067,7 +2618,7 @@ mod tests {
         for mutation in [
             "CREATE TRIGGER suppress_receipt BEFORE INSERT ON receipts BEGIN SELECT RAISE(IGNORE); END",
             "CREATE INDEX unexpected_receipt_index ON receipts(source_id)",
-            "PRAGMA ignore_check_constraints=ON; UPDATE receipt_meta SET version=4",
+            "PRAGMA ignore_check_constraints=ON; UPDATE receipt_meta SET version=5",
             "DELETE FROM receipt_meta",
         ] {
             let directory = tempfile::tempdir().unwrap();
@@ -2378,7 +2929,7 @@ mod tests {
         let fresh = ReceiptStore::open(&fresh_path).unwrap();
         let migrated_objects = schema_objects(&migrated.conn);
         let fresh_objects = schema_objects(&fresh.conn);
-        assert_eq!(migrated_objects.len(), 4 + RECEIPT_INDEXES.len());
+        assert_eq!(migrated_objects.len(), 5 + RECEIPT_INDEXES.len());
         assert_eq!(migrated_objects, fresh_objects);
 
         let mut migrated_rows: Vec<(String, String, String, String, i64)> = migrated
@@ -2735,10 +3286,18 @@ mod tests {
                 .collect()
         };
         // Rewrite the tables as v2 left them.
+        let pinned_legacy_payload = receipts[0].to_json().unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(&format!(
             "PRAGMA foreign_keys=OFF;
              BEGIN;
+             CREATE TABLE receipts_v2 AS SELECT id, source_id, repo_key, payload,
+                 capture_forgotten_tombstone FROM receipts;
+             DROP TABLE receipts;
+             DROP TABLE receipt_headers;
+             {RECEIPTS_SCHEMA_V3};
+             INSERT INTO receipts SELECT * FROM receipts_v2;
+             DROP TABLE receipts_v2;
              CREATE TABLE tombstones_v2 AS SELECT id, source_id, repo_key, capture_ids,
                  capture_ids_truncated, forgotten_at, receipts_reclaimed,
                  receipts_retained_pinned FROM receipt_tombstones;
@@ -2752,7 +3311,13 @@ mod tests {
              COMMIT;"
         ))
         .unwrap();
+        conn.execute(
+            "UPDATE receipts SET payload = ?1 WHERE id = ?2",
+            params![pinned_legacy_payload, receipts[0].id()],
+        )
+        .unwrap();
         conn.execute_batch(RECEIPT_INDEXES[1].1).unwrap();
+        conn.execute_batch(RECEIPT_INDEXES[2].1).unwrap();
         let v2_objects = schema_objects(&conn);
         // An unexpected object fails closed and rolls the migration back.
         conn.execute_batch("CREATE INDEX unexpected_v2_idx ON receipts(source_id)")
@@ -2781,5 +3346,768 @@ mod tests {
         }
         drop(migrated);
         ReceiptStore::open(&path).unwrap();
+    }
+
+    fn canonical_json_value(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(object) => serde_json::Value::Object(
+                object
+                    .into_iter()
+                    .map(|(k, v)| (k, canonical_json_value(v)))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+                    .into_iter()
+                    .collect(),
+            ),
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.into_iter().map(canonical_json_value).collect())
+            }
+            other => other,
+        }
+    }
+
+    fn resign_v3_receipt(mut raw: serde_json::Value) -> Receipt {
+        let content_bytes =
+            serde_json::to_vec(&canonical_json_value(raw["content"].clone())).unwrap();
+        let mut domain_input = b"cartograph:ts-primary-receipt:v3\0".to_vec();
+        domain_input.extend_from_slice(&content_bytes);
+        raw["receipt_id"] = serde_json::Value::String(format!(
+            "ts-primary-v3:{}",
+            core_prov::content_hash(&domain_input)
+        ));
+        Receipt::from_json(&serde_json::to_string(&raw).unwrap()).unwrap()
+    }
+
+    fn mint_v2_receipt_from_v3(template: &Receipt) -> Receipt {
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&template.to_json().unwrap()).unwrap();
+        raw["content"]["schema_version"] = serde_json::json!(2);
+        raw["content"].as_object_mut().unwrap().remove("commit_sha");
+        raw["content"]["producer_contract"] = serde_json::json!("t0.adapter-ts/direct-lexical-v2");
+        let full_ranges = serde_json::to_value(template.ranges()).unwrap();
+        raw["content"]["ranges"] = full_ranges;
+        let content_bytes =
+            serde_json::to_vec(&canonical_json_value(raw["content"].clone())).unwrap();
+        let mut domain_input = b"cartograph:ts-primary-receipt:v2\0".to_vec();
+        domain_input.extend_from_slice(&content_bytes);
+        raw["receipt_id"] = serde_json::Value::String(format!(
+            "ts-primary-v2:{}",
+            core_prov::content_hash(&domain_input)
+        ));
+        let receipt = Receipt::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
+        assert!(receipt.id().starts_with("ts-primary-v2:"));
+        receipt
+    }
+
+    // AC-0373: persisting v3 receipts from a file stores one per-file header and
+    // N compact bodies, reduces stored byte count below the sum of full JSON
+    // payloads, and round-trips byte-identically (covering both stripped and
+    // verbatim fact IDs plus legacy fallback for non-v3 receipts).
+    #[test]
+    fn ac0373_normalized_v3_receipts_round_trip_with_single_header_and_reduced_bytes() {
+        let (_directory, source, capture, _, receipts) = fixture();
+        assert!(receipts.len() >= 3);
+        assert!(
+            receipts
+                .iter()
+                .any(|r| matches!(r.fact_key(), FactKey::Edge { .. })),
+            "fixture should include edge receipts as well as node receipts"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("receipts.sqlite");
+        let mut store = ReceiptStore::open(&path).unwrap();
+        let retained = store.persist(&capture, &source, &receipts).unwrap();
+        assert_eq!(retained.ids.len(), receipts.len());
+        assert!(retained.omitted.is_empty());
+
+        let header_count: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM receipt_headers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(header_count, 1);
+
+        let normalized_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM receipts WHERE header_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(normalized_count, receipts.len() as i64);
+
+        let full_payload_bytes: u64 = receipts
+            .iter()
+            .map(|r| r.to_json().unwrap().len() as u64)
+            .sum();
+        let (stored_count, stored_bytes) = receipt_storage(&store.conn).unwrap();
+        assert_eq!(stored_count, receipts.len() as u64);
+        assert!(
+            stored_bytes < full_payload_bytes,
+            "normalized storage ({stored_bytes} bytes) must be smaller than full payloads ({full_payload_bytes} bytes)"
+        );
+
+        for receipt in &receipts {
+            let loaded = store.get(receipt.id()).unwrap();
+            assert_eq!(&loaded, receipt);
+            assert_eq!(loaded.to_json().unwrap(), receipt.to_json().unwrap());
+            let payload: String = store
+                .conn
+                .query_row(
+                    "SELECT payload FROM receipts WHERE id = ?1",
+                    [receipt.id()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            match receipt.fact_key() {
+                FactKey::Node { .. } => {
+                    assert!(body.get("k").is_some());
+                    assert!(body.get("K").is_none());
+                }
+                FactKey::Edge { .. } => {
+                    assert!(body.get("e").is_some());
+                    assert!(body.get("E").is_none());
+                }
+            }
+        }
+
+        // Also verify verbatim fact_key fallback ("K" and "E") and legacy v2 fallback.
+        let mut raw_verbatim_node: serde_json::Value =
+            serde_json::from_str(&receipts[0].to_json().unwrap()).unwrap();
+        raw_verbatim_node["content"]["fact_key"] = serde_json::json!({
+            "kind": "node",
+            "id": "custom_unprefixed_node_id"
+        });
+        let verbatim_node = resign_v3_receipt(raw_verbatim_node);
+
+        let edge_template = receipts
+            .iter()
+            .find(|r| matches!(r.fact_key(), FactKey::Edge { .. }))
+            .unwrap();
+        let mut raw_verbatim_edge: serde_json::Value =
+            serde_json::from_str(&edge_template.to_json().unwrap()).unwrap();
+        raw_verbatim_edge["content"]["fact_key"] = serde_json::json!({
+            "kind": "edge",
+            "source": "custom_src_without_repo_prefix",
+            "label": "GOVERNS",
+            "destination": "custom_dst_without_repo_prefix"
+        });
+        let verbatim_edge = resign_v3_receipt(raw_verbatim_edge);
+
+        let legacy_v2 = mint_v2_receipt_from_v3(&receipts[0]);
+        let extra = [
+            verbatim_node.clone(),
+            verbatim_edge.clone(),
+            legacy_v2.clone(),
+        ];
+        let retained_extra = store.persist(&capture, &source, &extra).unwrap();
+        assert_eq!(retained_extra.ids.len(), 3);
+
+        // Still 1 shared header (the two verbatim v3 receipts share the file's header;
+        // the v2 receipt is stored legacy-style with header_id IS NULL).
+        let header_count_after: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM receipt_headers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(header_count_after, 1);
+
+        let v_node_payload: String = store
+            .conn
+            .query_row(
+                "SELECT payload FROM receipts WHERE id = ?1",
+                [verbatim_node.id()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let v_node_body: serde_json::Value = serde_json::from_str(&v_node_payload).unwrap();
+        assert_eq!(v_node_body["K"], "custom_unprefixed_node_id");
+        assert!(v_node_body.get("k").is_none());
+
+        let v_edge_payload: String = store
+            .conn
+            .query_row(
+                "SELECT payload FROM receipts WHERE id = ?1",
+                [verbatim_edge.id()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let v_edge_body: serde_json::Value = serde_json::from_str(&v_edge_payload).unwrap();
+        assert!(v_edge_body.get("E").is_some());
+        assert!(v_edge_body.get("e").is_none());
+
+        let (v2_payload, v2_header_id): (String, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT payload, header_id FROM receipts WHERE id = ?1",
+                [legacy_v2.id()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(v2_header_id.is_none());
+        assert_eq!(v2_payload, legacy_v2.to_json().unwrap());
+
+        for r in &extra {
+            let loaded = store.get(r.id()).unwrap();
+            assert_eq!(&loaded, r);
+            assert_eq!(loaded.to_json().unwrap(), r.to_json().unwrap());
+        }
+    }
+
+    // AC-0373: headers are never shared across sources even for identical file
+    // content/path, and distinct grammars or producer contracts produce distinct
+    // headers.
+    #[test]
+    fn ac0373_headers_are_isolated_by_source_and_distinct_across_grammars_and_producers() {
+        let directory = tempfile::tempdir().unwrap();
+        let target_a = directory.path().join("target-a");
+        let target_b = directory.path().join("target-b");
+        std::fs::create_dir(&target_a).unwrap();
+        std::fs::create_dir(&target_b).unwrap();
+        let content = b"export function check(x: boolean) { if (!x) return 0; return 1; }";
+        std::fs::write(target_a.join("rule.ts"), content).unwrap();
+        std::fs::write(target_a.join("rule.tsx"), content).unwrap();
+        std::fs::write(target_b.join("rule.ts"), content).unwrap();
+
+        let state_path = directory.path().join("state.sqlite");
+        let _findings = crate::findings::FindingStore::open(&state_path).unwrap();
+        let mut registry =
+            crate::sources::SourceRegistry::open(&state_path, directory.path()).unwrap();
+        let source_a = registry.register_local(&target_a).unwrap();
+        let source_b = registry.register_local(&target_b).unwrap();
+        assert_ne!(source_a.source_id, source_b.source_id);
+
+        let capture_a = source_capture::capture_working_tree(
+            &target_a,
+            &source_id(&source_a.source_id).unwrap(),
+            &["rule.ts".into(), "rule.tsx".into()],
+            CaptureLimits::default(),
+        )
+        .unwrap();
+        let capture_b = source_capture::capture_working_tree(
+            &target_b,
+            &source_id(&source_b.source_id).unwrap(),
+            &["rule.ts".into()],
+            CaptureLimits::default(),
+        )
+        .unwrap();
+
+        let (_, receipts_a_ts) = captured::extract_file(
+            capture_a.file("rule.ts").unwrap(),
+            &adapters_lang_ts::SourceId {
+                repo: &source_a.repo_key,
+                commit: "workdir",
+            },
+        )
+        .unwrap();
+        let (_, receipts_a_tsx) = captured::extract_file(
+            capture_a.file("rule.tsx").unwrap(),
+            &adapters_lang_ts::SourceId {
+                repo: &source_a.repo_key,
+                commit: "workdir",
+            },
+        )
+        .unwrap();
+        let (_, receipts_b_ts) = captured::extract_file(
+            capture_b.file("rule.ts").unwrap(),
+            &adapters_lang_ts::SourceId {
+                repo: &source_b.repo_key,
+                commit: "workdir",
+            },
+        )
+        .unwrap();
+
+        let mut store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+        store
+            .persist(&capture_a, &source_a, &receipts_a_ts)
+            .unwrap();
+        store
+            .persist(&capture_b, &source_b, &receipts_b_ts)
+            .unwrap();
+
+        // Two sources with identical file content and path do not share a header.
+        let headers_two_sources: Vec<(String, String, String)> = store
+            .conn
+            .prepare("SELECT id, source_id, repo_key FROM receipt_headers ORDER BY source_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(headers_two_sources.len(), 2);
+        assert_ne!(headers_two_sources[0].0, headers_two_sources[1].0);
+
+        // Different grammar (tsx vs typescript) in the same source gets a distinct header.
+        store
+            .persist(&capture_a, &source_a, &receipts_a_tsx)
+            .unwrap();
+        let header_count: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM receipt_headers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(header_count, 3);
+
+        // Distinct producer_contract or commit_sha on the same file also produces a distinct header ID.
+        let norm_base =
+            normalize_v3_receipt(&receipts_a_ts[0], &receipts_a_ts[0].to_json().unwrap()).unwrap();
+        let mut alt_header: ReceiptHeader = serde_json::from_str(&norm_base.header_json).unwrap();
+        alt_header.producer_contract = "t0.adapter-ts/direct-lexical-v3-alt".into();
+        let alt_header_json = serde_json::to_string(&alt_header).unwrap();
+        assert_ne!(receipt_header_id(&alt_header_json), norm_base.header_id);
+
+        for r in receipts_a_ts
+            .iter()
+            .chain(receipts_a_tsx.iter())
+            .chain(receipts_b_ts.iter())
+        {
+            assert_eq!(&store.get(r.id()).unwrap(), r);
+        }
+    }
+
+    // AC-0373: corrupt header (edited JSON, foreign source_id/repo_key, deleted
+    // row with foreign keys off) and corrupt body fail closed with Invalid,
+    // never returning a wrong receipt.
+    #[test]
+    fn ac0373_corrupt_header_and_body_fail_closed_as_invalid() {
+        let (_directory, source, capture, _, receipts) = fixture();
+        let target_id = receipts[0].id();
+        let wrong_source = format!("src_{}", "f".repeat(32));
+
+        type StoreMutation<'a> = Box<dyn Fn(&Connection) + 'a>;
+        let header_mutations: Vec<StoreMutation<'_>> = vec![
+            // 1. Edit header JSON (change commit_sha).
+            Box::new(|conn| {
+                conn.execute(
+                    "UPDATE receipt_headers SET header = replace(header, '\"workdir\"', '\"tampered\"')",
+                    [],
+                )
+                .unwrap();
+            }),
+            // 2. Append trailing whitespace to header JSON (non-canonical header bytes).
+            Box::new(|conn| {
+                conn.execute("UPDATE receipt_headers SET header = header || ' '", [])
+                    .unwrap();
+            }),
+            // 3. Malformed header JSON.
+            Box::new(|conn| {
+                conn.execute("UPDATE receipt_headers SET header = '{bad'", [])
+                    .unwrap();
+            }),
+            // 4. Change header source_id to another source.
+            Box::new({
+                let wrong_source = wrong_source.clone();
+                move |conn| {
+                    conn.execute("UPDATE receipt_headers SET source_id = ?1", [&wrong_source])
+                        .unwrap();
+                }
+            }),
+            // 5. Change header repo_key to another repo.
+            Box::new(|conn| {
+                conn.execute("UPDATE receipt_headers SET repo_key = 'other/repo'", [])
+                    .unwrap();
+            }),
+            // 6. Delete header row with foreign_keys = OFF.
+            Box::new(|conn| {
+                conn.execute_batch("PRAGMA foreign_keys = OFF; DELETE FROM receipt_headers;")
+                    .unwrap();
+            }),
+            // 7. Corrupt body: malformed JSON.
+            Box::new(|conn| {
+                conn.execute("UPDATE receipts SET payload = '{bad'", [])
+                    .unwrap();
+            }),
+            // 8. Corrupt body: wrong fact_digest.
+            Box::new(|conn| {
+                let wrong_digest = format!("node-v1:{}", "0".repeat(64));
+                conn.execute(
+                    "UPDATE receipts SET payload = json_set(payload, '$.d', ?1) WHERE id = ?2",
+                    params![wrong_digest, target_id],
+                )
+                .unwrap();
+            }),
+            // 9. Corrupt body: both k and K present.
+            Box::new(|conn| {
+                conn.execute(
+                    "UPDATE receipts SET payload = json_set(payload, '$.K', 'extra') WHERE id = ?1",
+                    [target_id],
+                )
+                .unwrap();
+            }),
+            // 10. Corrupt body: verbatim K holding a strippable id (non-canonical body).
+            Box::new({
+                let FactKey::Node { id } = receipts[0].fact_key() else {
+                    panic!("expected node receipt");
+                };
+                let full_id = id.clone();
+                move |conn| {
+                    conn.execute(
+                        "UPDATE receipts SET payload = json_remove(json_set(payload, '$.K', ?1), '$.k') WHERE id = ?2",
+                        params![full_id, target_id],
+                    )
+                    .unwrap();
+                }
+            }),
+            // 11. Corrupt body: altered range span.
+            Box::new(|conn| {
+                conn.execute(
+                    "UPDATE receipts SET payload = json_set(payload, '$.r[0][3]', 999999) WHERE id = ?1",
+                    [target_id],
+                )
+                .unwrap();
+            }),
+        ];
+
+        for (idx, mutate) in header_mutations.iter().enumerate() {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+            store.persist(&capture, &source, &receipts).unwrap();
+            mutate(&store.conn);
+            assert_eq!(
+                pinned::stored_receipt(&store.conn, target_id).unwrap_err(),
+                PinnedReadError::Invalid,
+                "mutation {idx} must fail pinned::stored_receipt with Invalid"
+            );
+            assert!(
+                store.get(target_id).is_err(),
+                "mutation {idx} must fail store.get"
+            );
+        }
+    }
+
+    // AC-0373: a v3 store with legacy rows migrates to v4 on open, preserves
+    // legacy rows unchanged (never rewritten), normalizes newly persisted v3
+    // rows, and reopens stably.
+    #[test]
+    fn ac0373_v3_store_migrates_to_v4_preserving_legacy_rows_and_normalizing_new_rows() {
+        let (_directory, source, capture, _, receipts) = fixture();
+        assert!(receipts.len() >= 3);
+        let directory = tempfile::tempdir().unwrap();
+        let v3_path = directory.path().join("v3-receipts.sqlite");
+
+        // Build an exact v3 store with legacy rows (receipts[..2]).
+        {
+            let conn = Connection::open(&v3_path).unwrap();
+            conn.execute_batch(RECEIPTS_SCHEMA_V3).unwrap();
+            conn.execute_batch(TOMBSTONES_SCHEMA).unwrap();
+            conn.execute_batch(RECLAIMS_SCHEMA).unwrap();
+            create_v3_receipt_indexes(&conn).unwrap();
+            conn.execute_batch(META_SCHEMA_V3).unwrap();
+            conn.execute("INSERT INTO receipt_meta VALUES (3)", [])
+                .unwrap();
+            for receipt in &receipts[..2] {
+                conn.execute(
+                    "INSERT INTO receipts (id, source_id, repo_key, payload) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        receipt.id(),
+                        source.source_id,
+                        source.repo_key,
+                        receipt.to_json().unwrap()
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        // Open with v4 code -> migrates to v4.
+        let mut store = ReceiptStore::open(&v3_path).unwrap();
+        let fresh = ReceiptStore::open(&directory.path().join("fresh-v4.sqlite")).unwrap();
+        assert_eq!(schema_objects(&store.conn), schema_objects(&fresh.conn));
+
+        // Legacy rows remain legacy (header_id IS NULL, full JSON in payload) and read unchanged.
+        for receipt in &receipts[..2] {
+            let (payload, header_id): (String, Option<String>) = store
+                .conn
+                .query_row(
+                    "SELECT payload, header_id FROM receipts WHERE id = ?1",
+                    [receipt.id()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(header_id.is_none());
+            assert_eq!(payload, receipt.to_json().unwrap());
+            assert_eq!(&store.get(receipt.id()).unwrap(), receipt);
+        }
+
+        // Persist the full batch (including legacy receipts[..2] and new receipts[2..]):
+        // existing legacy rows are NOT rewritten; new v3 rows are normalized.
+        let retained = store.persist(&capture, &source, &receipts).unwrap();
+        assert_eq!(retained.ids.len(), receipts.len());
+
+        for receipt in &receipts[..2] {
+            let (payload, header_id): (String, Option<String>) = store
+                .conn
+                .query_row(
+                    "SELECT payload, header_id FROM receipts WHERE id = ?1",
+                    [receipt.id()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(header_id.is_none(), "legacy row must not be rewritten");
+            assert_eq!(payload, receipt.to_json().unwrap());
+        }
+        for receipt in &receipts[2..] {
+            let (payload, header_id): (String, Option<String>) = store
+                .conn
+                .query_row(
+                    "SELECT payload, header_id FROM receipts WHERE id = ?1",
+                    [receipt.id()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(header_id.is_some(), "new v3 row must be normalized");
+            assert!(payload.len() < receipt.to_json().unwrap().len());
+        }
+        let header_count: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM receipt_headers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(header_count, 1);
+
+        // Collision check against a normalized row compares rebuilt canonical JSON.
+        store
+            .conn
+            .execute(
+                "UPDATE receipts SET payload = json_set(payload, '$.d', ?1) WHERE id = ?2",
+                params![format!("node-v1:{}", "0".repeat(64)), receipts[2].id()],
+            )
+            .unwrap();
+        assert!(store.persist(&capture, &source, &receipts[2..3]).is_err());
+        // Restore valid normalized row and verify reopen stability.
+        let norm2 = normalize_v3_receipt(&receipts[2], &receipts[2].to_json().unwrap()).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE receipts SET payload = ?1 WHERE id = ?2",
+                params![norm2.body_json, receipts[2].id()],
+            )
+            .unwrap();
+
+        let expected_storage = receipt_storage(&store.conn).unwrap();
+        drop(store);
+
+        let reopened = ReceiptStore::open(&v3_path).unwrap();
+        assert_eq!(schema_objects(&reopened.conn), schema_objects(&fresh.conn));
+        assert_eq!(receipt_storage(&reopened.conn).unwrap(), expected_storage);
+        for receipt in &receipts {
+            let loaded = reopened.get(receipt.id()).unwrap();
+            assert_eq!(&loaded, receipt);
+            assert_eq!(loaded.to_json().unwrap(), receipt.to_json().unwrap());
+        }
+    }
+
+    // AC-0373: an interrupted v3 -> v4 migration rolls back completely in one
+    // transaction, leaving the v3 store unchanged and readable; non-exact stores
+    // are rejected without mutation.
+    #[test]
+    fn ac0373_interrupted_or_non_exact_v3_migration_rolls_back_leaving_v3_readable() {
+        let (_directory, source, _capture, _, receipts) = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let v3_path = directory.path().join("v3-rollback.sqlite");
+
+        let conn = Connection::open(&v3_path).unwrap();
+        conn.execute_batch(RECEIPTS_SCHEMA_V3).unwrap();
+        conn.execute_batch(TOMBSTONES_SCHEMA).unwrap();
+        conn.execute_batch(RECLAIMS_SCHEMA).unwrap();
+        create_v3_receipt_indexes(&conn).unwrap();
+        conn.execute_batch(META_SCHEMA_V3).unwrap();
+        conn.execute("INSERT INTO receipt_meta VALUES (3)", [])
+            .unwrap();
+        let mut expected_v3_rows = Vec::new();
+        for receipt in &receipts {
+            let payload = receipt.to_json().unwrap();
+            conn.execute(
+                "INSERT INTO receipts (id, source_id, repo_key, payload) VALUES (?1, ?2, ?3, ?4)",
+                params![receipt.id(), source.source_id, source.repo_key, payload],
+            )
+            .unwrap();
+            expected_v3_rows.push((
+                receipt.id().to_owned(),
+                source.source_id.clone(),
+                source.repo_key.clone(),
+                payload,
+            ));
+        }
+        expected_v3_rows.sort_by(|a, b| a.0.cmp(&b.0));
+        let expected_v3_objects = schema_objects(&conn);
+
+        // 1. Pre-create a conflicting `receipt_headers` table so `migrate_v3_to_v4`
+        // fails after `ALTER TABLE receipts ADD COLUMN header_id ...`.
+        conn.execute_batch("CREATE TABLE receipt_headers (x INTEGER)")
+            .unwrap();
+        drop(conn);
+        assert!(ReceiptStore::open(&v3_path).is_err());
+
+        let conn = Connection::open(&v3_path).unwrap();
+        conn.execute_batch("DROP TABLE receipt_headers").unwrap();
+        assert_eq!(schema_objects(&conn), expected_v3_objects);
+        assert_eq!(
+            conn.query_row("SELECT version FROM receipt_meta", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(v1_rows(&conn), expected_v3_rows);
+
+        // 2. An unexpected index on v3 also fails closed and rolls back the
+        // entire migration transaction.
+        conn.execute_batch("CREATE INDEX unexpected_v3_idx ON receipts(source_id)")
+            .unwrap();
+        drop(conn);
+        assert!(ReceiptStore::open(&v3_path).is_err());
+
+        let conn = Connection::open(&v3_path).unwrap();
+        conn.execute_batch("DROP INDEX unexpected_v3_idx").unwrap();
+        assert_eq!(schema_objects(&conn), expected_v3_objects);
+        assert_eq!(v1_rows(&conn), expected_v3_rows);
+        drop(conn);
+
+        // After removing the conflicting object, the untouched v3 store migrates cleanly.
+        let migrated = ReceiptStore::open(&v3_path).unwrap();
+        for receipt in &receipts {
+            assert_eq!(&migrated.get(receipt.id()).unwrap(), receipt);
+        }
+    }
+
+    // AC-0373: capacity accounting charges each retained header once plus every
+    // row's payload length; exact and one-below bounds behave accurately for
+    // normalized, legacy, and mixed stores.
+    #[test]
+    fn ac0373_capacity_accounting_charges_new_headers_once_across_exact_and_one_below_bounds() {
+        let (_directory, source, capture, _, receipts) = fixture();
+        assert!(receipts.len() >= 3);
+        let norm0 = normalize_v3_receipt(&receipts[0], &receipts[0].to_json().unwrap()).unwrap();
+        let norm1 = normalize_v3_receipt(&receipts[1], &receipts[1].to_json().unwrap()).unwrap();
+        assert_eq!(norm0.header_id, norm1.header_id);
+        let header_len = norm0.header_json.len() as u64;
+        let body0_len = norm0.body_json.len() as u64;
+        let body1_len = norm1.body_json.len() as u64;
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ReceiptStore::open(&directory.path().join("capacity.sqlite")).unwrap();
+
+        // First normalized receipt needs header_len + body0_len.
+        // One-below rejects the receipt and leaves no orphan header.
+        store.capacity.1 = header_len + body0_len - 1;
+        let omitted_first = store.persist(&capture, &source, &receipts[..1]).unwrap();
+        assert!(omitted_first.ids.is_empty());
+        assert_eq!(omitted_first.omitted.get("rule.ts"), Some(&1));
+        assert_eq!(receipt_storage(&store.conn).unwrap(), (0, 0));
+
+        // Exact capacity admits the first receipt and its header.
+        store.capacity.1 = header_len + body0_len;
+        let admitted_first = store.persist(&capture, &source, &receipts[..1]).unwrap();
+        assert_eq!(admitted_first.ids.len(), 1);
+        assert_eq!(
+            receipt_storage(&store.conn).unwrap(),
+            (1, header_len + body0_len)
+        );
+
+        // Second receipt shares the existing header, so it costs only body1_len.
+        // One-below omits the second receipt while keeping the first.
+        store.capacity.1 = header_len + body0_len + body1_len - 1;
+        let omitted_second = store.persist(&capture, &source, &receipts[..2]).unwrap();
+        assert_eq!(omitted_second.ids.len(), 1);
+        assert_eq!(omitted_second.omitted.get("rule.ts"), Some(&1));
+        assert_eq!(
+            receipt_storage(&store.conn).unwrap(),
+            (1, header_len + body0_len)
+        );
+
+        // Exact capacity admits the second receipt with zero additional header charge.
+        store.capacity.1 = header_len + body0_len + body1_len;
+        let admitted_second = store.persist(&capture, &source, &receipts[..2]).unwrap();
+        assert_eq!(admitted_second.ids.len(), 2);
+        assert!(admitted_second.omitted.is_empty());
+        assert_eq!(
+            receipt_storage(&store.conn).unwrap(),
+            (2, header_len + body0_len + body1_len)
+        );
+
+        // Mixed store: adding a legacy v2 receipt charges its full payload length.
+        let legacy_v2 = mint_v2_receipt_from_v3(&receipts[2]);
+        let legacy_len = legacy_v2.to_json().unwrap().len() as u64;
+        store.capacity.1 = header_len + body0_len + body1_len + legacy_len - 1;
+        let omitted_legacy = store
+            .persist(&capture, &source, std::slice::from_ref(&legacy_v2))
+            .unwrap();
+        assert!(omitted_legacy.ids.is_empty());
+
+        store.capacity.1 = header_len + body0_len + body1_len + legacy_len;
+        let admitted_legacy = store
+            .persist(&capture, &source, std::slice::from_ref(&legacy_v2))
+            .unwrap();
+        assert_eq!(admitted_legacy.ids.len(), 1);
+        assert_eq!(
+            receipt_storage(&store.conn).unwrap(),
+            (3, header_len + body0_len + body1_len + legacy_len)
+        );
+    }
+
+    // AC-0373: forget and supersession retain a header while any pinned, kept,
+    // or capture-forgotten row references it, and delete the header in the same
+    // transaction when its last referencing row is removed.
+    #[test]
+    fn ac0373_forget_and_supersession_retain_referenced_headers_and_remove_unreferenced_headers() {
+        let (_directory, source, capture, _, receipts) = fixture();
+        assert!(receipts.len() >= 3);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("retention-headers.sqlite");
+        let mut store = ReceiptStore::open(&path).unwrap();
+        store.persist(&capture, &source, &receipts).unwrap();
+
+        let header_count = |store: &ReceiptStore| -> i64 {
+            store
+                .conn
+                .query_row("SELECT count(*) FROM receipt_headers", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(header_count(&store), 1);
+
+        // 1. Forget with 1 pinned receipt: header survives because the pinned
+        // (capture-forgotten) receipt still references it.
+        let pin0 = std::collections::BTreeSet::from([receipts[0].id().to_owned()]);
+        store
+            .reclaim_forgotten(&source, &[capture.id().to_owned()], &pin0)
+            .unwrap();
+        assert_eq!(header_count(&store), 1);
+        assert_eq!(&store.get(receipts[0].id()).unwrap(), &receipts[0]);
+
+        // 2. Re-persist receipts[1..] and run supersession keeping only receipts[1]:
+        // receipts[2..] are deleted, receipts[0] is capture-forgotten, receipts[1] is kept,
+        // and the shared header survives.
+        store.persist(&capture, &source, &receipts[1..]).unwrap();
+        let keep1 = std::collections::BTreeSet::from([receipts[1].id().to_owned()]);
+        assert_eq!(
+            store
+                .reclaim_superseded(&source, &[capture.id().to_owned()], &keep1)
+                .unwrap(),
+            receipts.len() as u64 - 2
+        );
+        assert_eq!(header_count(&store), 1);
+        assert_eq!(&store.get(receipts[0].id()).unwrap(), &receipts[0]);
+        assert_eq!(&store.get(receipts[1].id()).unwrap(), &receipts[1]);
+
+        // 3. Forget with no pins: the remaining rows (including the previously
+        // capture-forgotten row) are deleted, and the header is removed in the
+        // same transaction.
+        let empty = std::collections::BTreeSet::new();
+        store
+            .reclaim_forgotten(&source, &[capture.id().to_owned()], &empty)
+            .unwrap();
+        assert_eq!(header_count(&store), 0);
+        assert_eq!(receipt_storage(&store.conn).unwrap(), (0, 0));
+
+        // 4. Re-persist and reclaim everything via supersession (no pins/keep):
+        // header is removed with the last referencing row.
+        store.persist(&capture, &source, &receipts).unwrap();
+        assert_eq!(header_count(&store), 1);
+        assert_eq!(
+            store
+                .reclaim_superseded(&source, &[capture.id().to_owned()], &empty)
+                .unwrap(),
+            receipts.len() as u64
+        );
+        assert_eq!(header_count(&store), 0);
+        assert_eq!(receipt_storage(&store.conn).unwrap(), (0, 0));
     }
 }

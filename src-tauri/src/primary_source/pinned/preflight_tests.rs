@@ -5,8 +5,9 @@ fn corrupt_store() -> Connection {
     // Deliberately permissive corrupt fixture; production schema validation
     // remains the caller's responsibility and is not relaxed by this test.
     conn.execute_batch(
-        "CREATE TABLE receipts(id TEXT PRIMARY KEY, source_id, repo_key, payload);
-        INSERT INTO receipts VALUES ('r','src','repo','{}');",
+        "CREATE TABLE receipt_headers(id TEXT PRIMARY KEY, source_id, repo_key, header);
+        CREATE TABLE receipts(id TEXT PRIMARY KEY, source_id, repo_key, payload, header_id);
+        INSERT INTO receipts VALUES ('r','src','repo','{}',NULL);",
     )
     .unwrap();
     conn
@@ -19,6 +20,7 @@ fn receipt_projection_rejects_oversized_invalid_utf8_before_string_decode() {
         ("source_id", 256),
         ("repo_key", 256),
         ("payload", MAX_RECEIPT_BYTES as usize),
+        ("header_id", 256),
     ] {
         let conn = corrupt_store();
         let bytes = vec![0xffu8; limit + 1];
@@ -35,6 +37,29 @@ fn receipt_projection_rejects_oversized_invalid_utf8_before_string_decode() {
             "{column}"
         );
     }
+    for (column, limit) in [
+        ("source_id", 256),
+        ("repo_key", 256),
+        ("header", MAX_RECEIPT_HEADER_BYTES as usize),
+    ] {
+        let conn = corrupt_store();
+        conn.execute_batch(
+            "INSERT INTO receipt_headers VALUES ('h','src','repo','{}');
+             UPDATE receipts SET header_id='h';",
+        )
+        .unwrap();
+        let bytes = vec![0xffu8; limit + 1];
+        conn.execute(
+            &format!("UPDATE receipt_headers SET {column}=CAST(?1 AS TEXT)"),
+            [&bytes],
+        )
+        .unwrap();
+        assert_eq!(
+            stored_receipt(&conn, "r").unwrap_err(),
+            PinnedReadError::Invalid,
+            "receipt_headers.{column}"
+        );
+    }
 }
 
 #[test]
@@ -43,6 +68,31 @@ fn receipt_projection_counts_utf8_bytes_and_rejects_nontext_cells() {
         let conn = corrupt_store();
         for sql_value in ["NULL", "42", "X'7B7D'", "CAST(X'FFFF' AS TEXT)"] {
             conn.execute_batch(&format!("UPDATE receipts SET {column}={sql_value}"))
+                .unwrap();
+            assert_eq!(
+                stored_receipt(&conn, "r").unwrap_err(),
+                PinnedReadError::Invalid
+            );
+        }
+    }
+    for sql_value in ["42", "X'7B7D'", "CAST(X'FFFF' AS TEXT)"] {
+        let conn = corrupt_store();
+        conn.execute_batch(&format!("UPDATE receipts SET header_id={sql_value}"))
+            .unwrap();
+        assert_eq!(
+            stored_receipt(&conn, "r").unwrap_err(),
+            PinnedReadError::Invalid
+        );
+    }
+    for column in ["source_id", "repo_key", "header"] {
+        let conn = corrupt_store();
+        conn.execute_batch(
+            "INSERT INTO receipt_headers VALUES ('h','src','repo','{}');
+             UPDATE receipts SET header_id='h';",
+        )
+        .unwrap();
+        for sql_value in ["NULL", "42", "X'7B7D'", "CAST(X'FFFF' AS TEXT)"] {
+            conn.execute_batch(&format!("UPDATE receipt_headers SET {column}={sql_value}"))
                 .unwrap();
             assert_eq!(
                 stored_receipt(&conn, "r").unwrap_err(),

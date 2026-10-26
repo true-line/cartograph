@@ -1272,7 +1272,8 @@ fn receipt_store_accounting(app_data: &Path) -> (u64, u64) {
         .unwrap();
     let bytes: i64 = conn
         .query_row(
-            "SELECT coalesce(sum(length(CAST(payload AS BLOB))),0) FROM receipts",
+            "SELECT (SELECT coalesce(sum(length(CAST(payload AS BLOB))),0) FROM receipts)
+                  + (SELECT coalesce(sum(length(CAST(header AS BLOB))),0) FROM receipt_headers)",
             [],
             |r| r.get(0),
         )
@@ -1315,10 +1316,24 @@ fn primary_source_forget_reclaims_unpinned_and_retains_pinned_receipts_as_captur
         .cloned()
         .collect();
     assert!(!unpinned_receipts.is_empty());
+    let before_conn = rusqlite::Connection::open_with_flags(
+        app_data.join("retained-source/receipts.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
     let reclaimed_bytes: u64 = unpinned_receipts
         .iter()
-        .map(|receipt| receipt.to_json().unwrap().len() as u64)
+        .map(|receipt| {
+            before_conn
+                .query_row(
+                    "SELECT length(CAST(payload AS BLOB)) FROM receipts WHERE id = ?1",
+                    [receipt.id()],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap() as u64
+        })
         .sum();
+    drop(before_conn);
     let (count_before, bytes_before) = receipt_store_accounting(&app_data);
     assert_eq!(count_before, parsed.receipts.len() as u64);
     for receipt in &parsed.receipts {
