@@ -404,6 +404,10 @@ use storage_writer::persist;
 #[path = "source_snapshot_workspace.rs"]
 pub(super) mod snapshot_workspace;
 
+#[cfg(unix)]
+#[path = "source_settlement_workspace.rs"]
+pub(super) mod writer_workspace;
+
 #[path = "source_continuation_snapshot.rs"]
 mod source_snapshot;
 pub(crate) use source_snapshot::{SourceContinuationOutcome, SourceContinuationSnapshotInput};

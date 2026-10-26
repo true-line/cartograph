@@ -422,7 +422,22 @@ fn task_phase_workspaces(
     let construction = agents::investigation::InvestigationInput::construction_workspace_bytes(
         &agents::investigation::INVESTIGATION_V2_POLICY,
     )?;
+    // The writer holds its projection through retained-source validation and
+    // replay. Candidate preparation survives commit; original invocation,
+    // current/candidate inputs and source guards stay in context below.
+    let settlement = crate::jobs::investigations::source_settlement_workspace(
+        provider,
+        crate::investigations::provider_workspace::source_settlement_retained(
+            &agents::investigation::INVESTIGATION_V2_POLICY,
+        )?,
+        crate::investigations::source_preparation_workspace::peak_bytes(
+            limits.evidence,
+            app_path_bytes,
+        )?,
+    )?
+    .1;
     let execution = provider
+        .max(settlement)
         .max(construction)
         .max(
             crate::investigations::source_candidate_workspace::workspace(

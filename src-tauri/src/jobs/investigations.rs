@@ -51,6 +51,8 @@ pub(crate) use source_admission::lose_next_commit_ack as lose_next_source_admiss
 pub(crate) use source_admission::{CommittedSourceReservation, SourceAdmission};
 #[cfg(unix)]
 pub(crate) use source_settlement::snapshot_workspace::workspace as source_snapshot_workspace;
+#[cfg(unix)]
+pub(crate) use source_settlement::writer_workspace::workspace as source_settlement_workspace;
 #[path = "investigations/source_validation.rs"]
 mod source_validation;
 pub(crate) use source_validation::{CommittedSourceValidation, SourceValidationBasis};
