@@ -1409,6 +1409,18 @@ pub(crate) fn draft_adapter_packets<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &crate::AppState,
 ) -> Result<Vec<DraftAdapterPacket>, PacketHostError> {
+    draft_adapter_packets_with(repo, app, state, &mut || {})
+}
+
+/// [`draft_adapter_packets`] with a hook run after the checkout is first
+/// checked and before anything is sampled, so tests can change the checkout
+/// in between.
+fn draft_adapter_packets_with<R: tauri::Runtime>(
+    repo: &str,
+    app: &tauri::AppHandle<R>,
+    state: &crate::AppState,
+    before_sampling: &mut dyn FnMut(),
+) -> Result<Vec<DraftAdapterPacket>, PacketHostError> {
     if repo.is_empty() || repo.len() > 256 {
         return Err(PacketHostError::code("unavailable_evidence"));
     }
@@ -1458,11 +1470,18 @@ pub(crate) fn draft_adapter_packets<R: tauri::Runtime>(
         .root(&source.repo_key)
         .map_err(|_| PacketHostError::code("unavailable_evidence"))?;
     // Samples are read from the checkout as it is now but cited at the
-    // recovered commit, so a checkout that has moved since recovery would
-    // cite spans the commit never had.
-    if crate::local_commit::local_commit(root).as_str() != inventory.commit {
-        return Err(PacketHostError::code("selection_conflict"));
+    // recovered commit. Only a clean checkout at that commit pins them: a
+    // working-directory recovery has no revision to cite, and a checkout that
+    // moved since recovery would cite spans the commit never had.
+    let checkout = crate::local_commit::local_commit(root);
+    match &checkout {
+        crate::local_commit::LocalCommit::Workdir { .. } if inventory.commit == "workdir" => {
+            return Err(PacketHostError::code("unpinned_revision"));
+        }
+        crate::local_commit::LocalCommit::Clean { sha } if *sha == inventory.commit => {}
+        _ => return Err(PacketHostError::code("selection_conflict")),
     }
+    before_sampling();
     let lookups = crate::preflight_adapter_lookup(app, state, root).map_err(source_error)?;
     let files = ingest::adapter_packet::list_repo_files(root).map_err(source_error)?;
     let context = ingest::adapter_packet::PacketContext {
@@ -1472,6 +1491,11 @@ pub(crate) fn draft_adapter_packets<R: tauri::Runtime>(
         commit_sha: &inventory.commit,
     };
     let bodies = ingest::adapter_packet::adapter_work_packets(&lookups, &files, &context)?;
+    // An edit or checkout during the scan would leave samples the commit
+    // never had; recheck once they are read, as recovery does before publish.
+    if checkout.ensure_unchanged(root).is_err() {
+        return Err(PacketHostError::code("selection_conflict"));
+    }
     bodies
         .into_iter()
         .map(|body| {
@@ -1558,36 +1582,34 @@ mod tests {
         let unrecovered_dir = directory.path().join("unrecovered");
         std::fs::create_dir_all(&data).unwrap();
 
-        write_file(&ruby_dir, ".gitignore", "vendor/\n");
+        // Clean git checkouts, so samples are pinned to the recorded commit.
+        // `.cartograph/` is ignored so installing a plugin keeps it clean.
+        crate::local_commit::tests::init_clean_repo(
+            &ruby_dir,
+            &[
+                (".gitignore", b"vendor/\n.cartograph/\n"),
+                ("README.md", b"# fixture\n"),
+                ("Gemfile", b"source 'https://rubygems.org'\n"),
+                (
+                    "app/models/user.rb",
+                    b"require 'json'\n\nclass User\n  def name\n    'u'\n  end\nend\n",
+                ),
+                (
+                    "app/models/order.rb",
+                    b"class Order\n  def total\n    1\n  end\nend\n",
+                ),
+                (
+                    "app/controllers/users_controller.rb",
+                    b"class UsersController\n  def index\n    User.new.name\n  end\nend\n",
+                ),
+                ("lib/util.rb", b"module Util\n  def self.id(x) = x\nend\n"),
+                ("empty.rb", b""),
+            ],
+        );
         write_file(&ruby_dir, "vendor/ignored.rb", "puts 'vendored'\n");
-        write_file(&ruby_dir, "README.md", "# fixture\n");
-        write_file(&ruby_dir, "Gemfile", "source 'https://rubygems.org'\n");
-        write_file(
-            &ruby_dir,
-            "app/models/user.rb",
-            "require 'json'\n\nclass User\n  def name\n    'u'\n  end\nend\n",
-        );
-        write_file(
-            &ruby_dir,
-            "app/models/order.rb",
-            "class Order\n  def total\n    1\n  end\nend\n",
-        );
-        write_file(
-            &ruby_dir,
-            "app/controllers/users_controller.rb",
-            "class UsersController\n  def index\n    User.new.name\n  end\nend\n",
-        );
-        write_file(
-            &ruby_dir,
-            "lib/util.rb",
-            "module Util\n  def self.id(x) = x\nend\n",
-        );
-        write_file(&ruby_dir, "empty.rb", "");
-
-        write_file(
+        crate::local_commit::tests::init_clean_repo(
             &rust_dir,
-            "src/lib.rs",
-            "pub fn answer() -> i32 {\n    42\n}\n",
+            &[("src/lib.rs", b"pub fn answer() -> i32 {\n    42\n}\n")],
         );
         write_file(&unrecovered_dir, "lib/only.rb", "puts 'hi'\n");
 
@@ -1780,5 +1802,71 @@ mod tests {
                 .code,
             "selection_conflict"
         );
+    }
+
+    /// Register and recover `root` as a local source.
+    fn recovered(
+        state: &crate::AppState,
+        handle: &tauri::AppHandle<tauri::test::MockRuntime>,
+        root: &std::path::Path,
+    ) -> crate::sources::RegisteredSource {
+        let source = crate::register_local_source(state, root).unwrap();
+        let operation = crate::source_operation(state, vec![(source.clone(), false)]).unwrap();
+        let (_, execution) = crate::start_job(state, &source.ingest_job_kind()).unwrap();
+        crate::run_ingest(&source, &operation, &execution, handle, state).unwrap();
+        source
+    }
+
+    #[test]
+    fn a_working_directory_recovery_has_no_revision_to_pin_samples_to() {
+        // AC-0371 (#1101): a source recovered as `workdir` has no commit the
+        // samples could be cited at, so no packet is drafted from it.
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("app");
+        std::fs::create_dir_all(&data).unwrap();
+        let project = directory.path().join("ruby");
+        write_file(&project, "lib/user.rb", "class User\nend\n");
+        let state = crate::registered_source_tests::app_state(&data);
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        app.manage(crate::PreflightRuns::default());
+        let source = recovered(&state, app.handle(), &project);
+        assert_eq!(
+            draft_adapter_packets(&source.repo_key, app.handle(), &state)
+                .unwrap_err()
+                .code,
+            "unpinned_revision"
+        );
+    }
+
+    #[test]
+    fn a_checkout_edited_while_sampling_drafts_no_packet() {
+        // AC-0371 (#1101): the checkout is rechecked once samples are read,
+        // so an edit during the scan fails closed instead of citing bytes the
+        // recovered commit never had.
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("app");
+        std::fs::create_dir_all(&data).unwrap();
+        let project = directory.path().join("ruby");
+        crate::local_commit::tests::init_clean_repo(
+            &project,
+            &[(
+                "lib/user.rb",
+                b"class User\n  def name\n    'u'\n  end\nend\n",
+            )],
+        );
+        let state = crate::registered_source_tests::app_state(&data);
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        app.manage(crate::PreflightRuns::default());
+        let source = recovered(&state, app.handle(), &project);
+        let file = project.join("lib/user.rb");
+        let result =
+            draft_adapter_packets_with(&source.repo_key, app.handle(), &state, &mut || {
+                std::fs::write(&file, "class User\nend\n").unwrap();
+            });
+        assert_eq!(result.unwrap_err().code, "selection_conflict");
     }
 }

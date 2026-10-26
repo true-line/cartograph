@@ -12,6 +12,8 @@ const STATE_LABEL: Record<string, string> = {
 const PACKET_ERROR: Record<string, string> = {
   unavailable_evidence:
     "No recovered local checkout of this repo is available to sample.",
+  unpinned_revision:
+    "This repo was recovered from a working directory, not a clean git checkout, so samples cannot be pinned to a commit. Commit or stash changes, recover it again, then draft the packet.",
   selection_conflict:
     "The checkout has changed since it was recovered. Recover it again, then draft the packet.",
 };
