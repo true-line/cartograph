@@ -1,6 +1,7 @@
 use super::{InvestigationError, bounded_bytes};
 use core_prov::{ConfidenceTier, Tier};
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 /// Public identity of an immutable built-in specialist definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +47,8 @@ pub enum SpecialistId {
     DomainAnalystV10,
     #[serde(rename = "evidence-auditor@10")]
     EvidenceAuditorV10,
+    #[serde(rename = "spec-writer@1")]
+    SpecWriterV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +62,22 @@ pub struct InvestigationSpecialist {
     pub operations: Vec<String>,
     pub tier: Tier,
     pub confidence_tier: ConfidenceTier,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpecWriterDefinitionData {
+    name: String,
+    purpose: String,
+    role_prompt: String,
+}
+
+fn spec_writer_definition_data() -> &'static SpecWriterDefinitionData {
+    static DATA: OnceLock<SpecWriterDefinitionData> = OnceLock::new();
+    DATA.get_or_init(|| {
+        serde_json::from_str(include_str!("data/spec-writer-v1.json"))
+            .expect("compiled Spec Writer definition is valid")
+    })
 }
 
 /// Instructions are versioned product code; context/source is untrusted data.
@@ -118,7 +137,8 @@ impl SpecialistId {
     pub fn uses_compact_disclosure(self) -> bool {
         matches!(
             self,
-            Self::DomainAnalystV3
+            Self::SpecWriterV1
+                | Self::DomainAnalystV3
                 | Self::EvidenceAuditorV3
                 | Self::DomainAnalystV4
                 | Self::EvidenceAuditorV4
@@ -140,7 +160,8 @@ impl SpecialistId {
     pub fn uses_turn_progress(self) -> bool {
         matches!(
             self,
-            Self::DomainAnalystV4
+            Self::SpecWriterV1
+                | Self::DomainAnalystV4
                 | Self::EvidenceAuditorV4
                 | Self::DomainAnalystV5
                 | Self::EvidenceAuditorV5
@@ -165,7 +186,8 @@ impl SpecialistId {
     pub fn uses_coverage_qualification(self) -> bool {
         matches!(
             self,
-            Self::DomainAnalystV6
+            Self::SpecWriterV1
+                | Self::DomainAnalystV6
                 | Self::EvidenceAuditorV6
                 | Self::DomainAnalystV7
                 | Self::EvidenceAuditorV7
@@ -181,7 +203,8 @@ impl SpecialistId {
     pub fn uses_completion_obligations(self) -> bool {
         matches!(
             self,
-            Self::DomainAnalystV7
+            Self::SpecWriterV1
+                | Self::DomainAnalystV7
                 | Self::EvidenceAuditorV7
                 | Self::DomainAnalystV8
                 | Self::EvidenceAuditorV8
@@ -223,7 +246,7 @@ impl SpecialistId {
 
     fn version(self) -> u32 {
         match self {
-            Self::DomainAnalystV1 | Self::EvidenceAuditorV1 => 1,
+            Self::DomainAnalystV1 | Self::EvidenceAuditorV1 | Self::SpecWriterV1 => 1,
             Self::DomainAnalyst | Self::EvidenceAuditor => 2,
             Self::DomainAnalystV3 | Self::EvidenceAuditorV3 => 3,
             Self::DomainAnalystV4 | Self::EvidenceAuditorV4 => 4,
@@ -236,8 +259,19 @@ impl SpecialistId {
         }
     }
 
+    /// Role identity versions are independent from private prompt protocol
+    /// generations. Spec Writer reuses the current schema-4 prompt protocol.
+    fn prompt_generation(self) -> u32 {
+        if self == Self::SpecWriterV1 {
+            7
+        } else {
+            self.version()
+        }
+    }
+
     pub fn prompt(self) -> String {
         let role = match self {
+            Self::SpecWriterV1 => spec_writer_definition_data().role_prompt.as_str(),
             Self::DomainAnalyst
             | Self::DomainAnalystV1
             | Self::DomainAnalystV3
@@ -263,7 +297,7 @@ impl SpecialistId {
                 "Audit the support and limits of existing claims within the question's scope. Identify missing links, unsupported interpretations and unresolved design evidence. Do not mistake missing evidence in a searched subset for proof of absence across the project."
             }
         };
-        let discovery = match self.version() {
+        let discovery = match self.prompt_generation() {
             7..=10 => COVERAGE_V6,
             6 => COVERAGE_V6,
             5 => DISCOVERY_V5,
@@ -274,7 +308,7 @@ impl SpecialistId {
         };
         let progress = if self.uses_query_history_disclosure() {
             DISCOVERY_V9
-        } else if self.version() >= 5 {
+        } else if self.prompt_generation() >= 5 {
             DISCOVERY_V4
         } else {
             ""
@@ -320,6 +354,10 @@ impl SpecialistId {
     pub fn definition(self) -> Result<InvestigationSpecialist, InvestigationError> {
         let prompt = self.prompt();
         let (name, purpose) = match self {
+            Self::SpecWriterV1 => {
+                let data = spec_writer_definition_data();
+                (data.name.as_str(), data.purpose.as_str())
+            }
             Self::DomainAnalyst
             | Self::DomainAnalystV1
             | Self::DomainAnalystV3
@@ -380,6 +418,35 @@ mod policy_tests {
     use super::*;
 
     #[test]
+    fn prompt_generation_preserves_every_preexisting_role_version() {
+        let existing = [
+            SpecialistId::DomainAnalystV1,
+            SpecialistId::EvidenceAuditorV1,
+            SpecialistId::DomainAnalyst,
+            SpecialistId::EvidenceAuditor,
+            SpecialistId::DomainAnalystV3,
+            SpecialistId::EvidenceAuditorV3,
+            SpecialistId::DomainAnalystV4,
+            SpecialistId::EvidenceAuditorV4,
+            SpecialistId::DomainAnalystV5,
+            SpecialistId::EvidenceAuditorV5,
+            SpecialistId::DomainAnalystV6,
+            SpecialistId::EvidenceAuditorV6,
+            SpecialistId::DomainAnalystV7,
+            SpecialistId::EvidenceAuditorV7,
+            SpecialistId::DomainAnalystV8,
+            SpecialistId::EvidenceAuditorV8,
+            SpecialistId::DomainAnalystV9,
+            SpecialistId::EvidenceAuditorV9,
+            SpecialistId::DomainAnalystV10,
+            SpecialistId::EvidenceAuditorV10,
+        ];
+        for role in existing {
+            assert_eq!(role.prompt_generation(), role.version(), "{role:?}");
+        }
+    }
+
+    #[test]
     fn opt_in_specialists_version_budget_text_without_mutating_legacy() {
         // AC-0281: opt-in roles have distinct identities; legacy prompts retain limits.
         for (old, new) in [
@@ -414,5 +481,52 @@ mod policy_tests {
             assert!(new.uses_policy_selection());
             assert!(!old.uses_policy_selection());
         }
+    }
+
+    #[test]
+    fn spec_writer_v1_uses_generation_seven_protocol_without_changing_role_version() {
+        let role = SpecialistId::SpecWriterV1;
+        let definition = role.definition().unwrap();
+        let wire = serde_json::to_value(role).unwrap();
+        assert_eq!(wire, "spec-writer@1");
+        assert_eq!(definition.version, 1);
+        assert_eq!(definition.name, "Spec Writer");
+        assert_eq!(definition.tier, Tier::Agentic);
+        assert_eq!(definition.confidence_tier, ConfidenceTier::InferredWeak);
+        assert_eq!(definition.prompt_fingerprint.len(), 64);
+        assert_eq!(
+            definition.operations,
+            [
+                "query_context",
+                "read_evidence",
+                "read_coverage_inventory",
+                "finish"
+            ]
+        );
+        assert!(role.uses_compact_disclosure());
+        assert!(role.uses_turn_progress());
+        assert!(role.uses_coverage_qualification());
+        assert!(role.uses_completion_obligations());
+        assert!(!role.uses_inspection_requirements());
+        assert!(!role.uses_policy_selection());
+        assert!(!role.uses_query_history_disclosure());
+        assert!(!role.uses_next_prompt_admission());
+        let prompt = role.prompt();
+        assert!(prompt.contains(r#""schema_version":1,"outcome":"supported""#));
+        for section in [
+            "goals",
+            "scope",
+            "requirements",
+            "acceptance criteria",
+            "dependencies and risks",
+            "non-goals",
+            "open questions",
+        ] {
+            assert!(prompt.contains(section), "missing {section}");
+        }
+        assert!(!prompt.contains("replay_query"));
+        assert!(!prompt.contains("finish-only mode"));
+        assert_eq!(definition, role.definition().unwrap());
+        assert_eq!(definition.id, SpecialistId::SpecWriterV1);
     }
 }

@@ -30,6 +30,7 @@ enum Mode {
     InventoryFinish,
     WrongQualifiedContext,
     CompletionSupported,
+    SpecWriterSupported,
     CompletionRepair,
     CompletionCap,
     CompletionInventoryUnavailable,

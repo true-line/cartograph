@@ -1,11 +1,15 @@
 import { qualifiedCatalog, qualifiedDetail, qualifiedResult, qualifiedCoverageContext, inspectionTarget } from './investigationFixtures';
 import type { InvestigationCatalog, InvestigationCompletionDetail, InvestigationDetail, InvestigationObligation,
-  InvestigationObligationChoices, InvestigationResult } from './investigationTypes';
+  InvestigationObligationChoices, InvestigationResult, InvestigationSpecialist } from './investigationTypes';
 
 /** Scripted UI examples only; these never establish provider acceptance. */
 export const completionCatalog: InvestigationCatalog = { ...qualifiedCatalog, specialists: [...qualifiedCatalog.specialists,
   ...(['domain-analyst@7', 'evidence-auditor@7'] as const).map((id, index) => ({ ...qualifiedCatalog.specialists[index], id,
-    version: 7, name: index ? 'Completion evidence auditor' : 'Completion domain analyst', prompt_fingerprint: `fixture-${id}` }))] };
+    version: 7, name: index ? 'Completion evidence auditor' : 'Completion domain analyst', prompt_fingerprint: `fixture-${id}` })),
+  { ...qualifiedCatalog.specialists[0], id: 'spec-writer@1', version: 1, name: 'Spec Writer',
+    purpose: 'Draft a cited proposed specification from the scoped recovered context.',
+    operations: ['query_context', 'read_evidence', 'read_coverage_inventory', 'finish'] as InvestigationSpecialist['operations'],
+    prompt_fingerprint: 'fixture-spec-writer@1' }] };
 export const sourceObligation: Extract<InvestigationObligation, { kind: 'source' }> = { kind: 'source', obligation_id: '1'.repeat(64), target: { ...inspectionTarget, graph_snapshot_id: `context-v1:${'8'.repeat(64)}` } };
 export const inventoryObligation: Extract<InvestigationObligation, { kind: 'inventory' }> = { kind: 'inventory', obligation_id: '2'.repeat(64), target: {
   context_id: qualifiedCoverageContext.context_id, repo: 'acme/api', inventory_hash: '3'.repeat(64) } };
@@ -30,6 +34,19 @@ export function completionResult(id = 'inv-completion', overrides: Partial<Inves
     invocation_step_id: 'finish:1', disclosure_hash: `investigation-disclosure-v4:${'d'.repeat(64)}`,
     completion: { schema_version: 1, outcome: 'supported', request_hash: 'a'.repeat(64), obligations_hash: 'b'.repeat(64),
       finishing_attempts_hash: 'e'.repeat(64), assessment: detail.completion!.assessment }, ...overrides });
+}
+
+export function specWriterDetail(id = 'inv-spec-writer'): InvestigationDetail {
+  return completionDetail(id, { specialist_id: 'spec-writer@1',
+    specialist: completionCatalog.specialists.find((item) => item.id === 'spec-writer@1')! });
+}
+
+export function specWriterResult(id = 'inv-spec-writer'): InvestigationResult {
+  const result = completionResult(id);
+  result.findings = result.findings.slice(0, 1).map((finding) => ({ ...finding, claim_kind: 'proposed_design',
+    title: 'Reject limited inputs before guarded processing',
+    statement: 'Reject limited inputs before guarded processing. Acceptance criterion: when limited is true, the operation returns false. Runtime policy and broader behavior remain unresolved.' }));
+  return result;
 }
 
 /** Advertised opt-in example; production keeps this unavailable until registered. */

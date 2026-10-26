@@ -1,5 +1,7 @@
 import actualAdmission from '../fixtures/completion-v10-supported.json';
-import { admissionCatalog, admissionDetail, admissionResult, queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionCatalog, completionChoices, completionDetail, completionResult, inventoryObligation, sourceObligation } from '../completionFixtures';
+import { admissionCatalog, admissionDetail, admissionResult, queryHistoryCatalog, queryHistoryDetail, queryHistoryResult,
+  expandedCompletionCatalog, completionCatalog, completionChoices, completionDetail, completionResult,
+  inventoryObligation, sourceObligation, specWriterDetail, specWriterResult } from '../completionFixtures';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
@@ -591,6 +593,52 @@ export const V7RequiresExplicitMixedSelection: Story = {
       specialist_id: 'domain-analyst@7', obligations: { schema_version: 1, contract: 'investigation-completion-obligations@1',
         obligations: [inventoryObligation, sourceObligation] } }));
     await expect(useInvestigationStore.getState().start).not.toHaveBeenCalledWith(expect.objectContaining({ inspection_requirements: expect.anything() }));
+  },
+};
+
+export const SpecWriterStandardFamily: Story = {
+  // AC-0382: the saved role is available only in Standard and does not silently fall back.
+  args: { state: state({ catalog: expandedCompletionCatalog, detail: null, result: null, selectedId: null, history: [],
+    obligationChoices: completionChoices, draftObligations: [inventoryObligation] }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const writer = canvas.getByRole('radio', { name: /spec-writer@1/ });
+    await userEvent.click(writer);
+    await expect(writer).toBeChecked();
+    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
+    await expect(canvas.getByText((_, element) => element?.tagName === 'P'
+      && element.textContent?.includes('Selected specialist') === true
+      && element.textContent.includes('spec-writer@1 is unavailable for this investigation budget'))).toBeVisible();
+    await expect(canvas.queryByRole('radio', { name: /spec-writer@1/ })).not.toBeInTheDocument();
+    await expect(useInvestigationStore.getState().composer.specialistId).toBe('spec-writer@1');
+    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v1');
+    await expect(canvas.getByRole('radio', { name: /spec-writer@1/ })).toBeChecked();
+    const question = canvas.getByLabelText('Question');
+    await expect(question).toHaveAttribute('placeholder', 'What specification should the cited evidence support, and what remains unresolved?');
+    await userEvent.clear(question);
+    await userEvent.type(question, 'Draft a cited proposal for the guarded limited-input behavior.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({
+      specialist_id: 'spec-writer@1', limit_profile: 'investigation-v1',
+      obligations: expect.objectContaining({ schema_version: 1 }),
+    }));
+    await expect(args.state.start).not.toHaveBeenCalledWith(expect.objectContaining({ inspection_requirements: expect.anything() }));
+  },
+};
+
+export const SpecWriterSavedCompletion: Story = {
+  // AC-0382: saved specification findings retain their cited result under the exact role identity.
+  args: { state: state({ catalog: completionCatalog, detail: specWriterDetail(), result: specWriterResult(),
+    selectedId: 'inv-spec-writer', history: [specWriterDetail()] }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Supported completion.')).toBeVisible();
+    await expect(canvas.getByText('Completion obligations')).toBeVisible();
+    await expect(canvas.getByText('Reject limited inputs before guarded processing')).toBeVisible();
+    const finding = canvas.getByRole('region', { name: 'Investigation findings' });
+    const citation = args.state.result!.findings[0].citation_ids[0];
+    await userEvent.click(within(finding).getByRole('button', { name: new RegExp(`Inspect citation ${citation}`) }));
+    await expect(args.state.readCitation).toHaveBeenCalledWith(citation);
   },
 };
 

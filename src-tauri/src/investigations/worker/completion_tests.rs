@@ -83,7 +83,8 @@ pub(super) fn scripted_action(mode: Mode, call: usize, prompt: &Value) -> Value 
         .iter()
         .find(|citation| citation["origin"]["kind"] == "captured_primary_source")
         .unwrap_or(&citations[0]);
-    json!({"schema_version":1,"outcome":"supported","action":{"type":"finish","findings":[{"claim_kind":"inferred_interpretation","title":"A bounded guarded path","statement":"The scoped observation suggests a conditional exit; broader policy remains unresolved.","citation_ids":[citation["citation_id"]],"limitations":["Runtime inputs remain unknown."]}],"knowledge_completeness":"partial","limitations":["This scoped result establishes no complete business policy."]}})
+    let spec_writer = matches!(mode, Mode::SpecWriterSupported);
+    json!({"schema_version":1,"outcome":"supported","action":{"type":"finish","findings":[{"claim_kind":if spec_writer {"proposed_design"} else {"inferred_interpretation"},"title":if spec_writer {"Reject limited inputs before guarded processing"} else {"A bounded guarded path"},"statement":if spec_writer {"Proposal: Reject limited inputs before guarded processing. Acceptance criterion: when limited is true, the operation returns false. Runtime policy and broader behavior remain unresolved."} else {"The scoped observation suggests a conditional exit; broader policy remains unresolved."},"citation_ids":[citation["citation_id"]],"limitations":["Runtime inputs remain unknown."]}],"knowledge_completeness":"partial","limitations":["This scoped result establishes no complete business policy."]}})
 }
 
 struct CompletionFixture {
@@ -341,6 +342,49 @@ fn completion_worker_mixed_supported_and_repair_reopen_exactly() {
             .unwrap();
         }
     }
+}
+
+#[test]
+fn spec_writer_scripted_completion_reopens_with_bound_citations() {
+    let provider = Arc::new(Scripted::new(Mode::SpecWriterSupported));
+    let fixture = CompletionFixture::new(&*provider, SpecialistId::SpecWriterV1, true, true, false);
+    fixture.run(provider.clone());
+
+    let state = fixture.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&fixture.id).unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Completed);
+    assert_eq!(detail.summary.schema_version, 4);
+    assert_eq!(detail.summary.specialist_id, SpecialistId::SpecWriterV1);
+    assert_eq!(detail.specialist.version, 1);
+    let result = jobs.investigation_result(&fixture.id).unwrap().unwrap();
+    assert_eq!(result.schema_version, 5);
+    assert!(!result.findings.is_empty());
+    assert!(result.findings.iter().all(|finding| {
+        finding.claim_kind == agents::investigation::InvestigationClaimKind::ProposedDesign
+            && !finding.citation_ids.is_empty()
+            && finding.title == "Reject limited inputs before guarded processing"
+            && finding
+                .statement
+                .contains("when limited is true, the operation returns false")
+            && finding.tier == core_prov::Tier::Agentic
+            && finding.confidence_tier == core_prov::ConfidenceTier::InferredWeak
+            && finding.citation_ids.iter().all(|citation_id| {
+                detail
+                    .citations
+                    .iter()
+                    .any(|citation| &citation.citation_id == citation_id)
+            })
+    }));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    drop(jobs);
+
+    let reopened = crate::jobs::JobStore::open(fixture.base.app_data.join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&fixture.id).unwrap(), detail);
+    assert_eq!(
+        reopened.investigation_result(&fixture.id).unwrap(),
+        Some(result)
+    );
 }
 
 // AC-0266: two real unmet finishes commit a host-only terminal without a third

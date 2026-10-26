@@ -10,7 +10,7 @@ use std::time::Instant;
 use tauri::Manager;
 
 // Shared by the production catalog and staged-version boundary test.
-const AVAILABLE_SPECIALISTS: [SpecialistId; 10] = [
+const AVAILABLE_SPECIALISTS: [SpecialistId; 11] = [
     SpecialistId::DomainAnalystV3,
     SpecialistId::EvidenceAuditorV3,
     SpecialistId::DomainAnalystV4,
@@ -21,6 +21,7 @@ const AVAILABLE_SPECIALISTS: [SpecialistId; 10] = [
     SpecialistId::EvidenceAuditorV6,
     SpecialistId::DomainAnalystV7,
     SpecialistId::EvidenceAuditorV7,
+    SpecialistId::SpecWriterV1,
 ];
 
 fn available_specialists() -> Vec<SpecialistId> {
@@ -62,6 +63,7 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
                     vec![
                         SpecialistId::DomainAnalystV7,
                         SpecialistId::EvidenceAuditorV7,
+                        SpecialistId::SpecWriterV1,
                     ]
                 },
             })
@@ -767,6 +769,30 @@ mod policy_catalog_tests {
             available_specialists().contains(&SpecialistId::DomainAnalystV10),
             InvestigationPolicy::for_profile("investigation-v2").is_some()
         );
+    }
+
+    #[test]
+    fn spec_writer_is_listed_only_in_standard_completion_family() {
+        let choices = policy_catalog();
+        let standard = choices
+            .iter()
+            .find(|choice| choice.limits.profile == "investigation-v1")
+            .unwrap();
+        let expanded = choices
+            .iter()
+            .find(|choice| choice.limits.profile == "investigation-v2");
+
+        assert!(available_specialists().contains(&SpecialistId::SpecWriterV1));
+        assert_eq!(standard.request_schema_version, 4);
+        assert!(
+            standard
+                .specialist_ids
+                .contains(&SpecialistId::SpecWriterV1)
+        );
+        assert!(expanded.is_none_or(|choice| {
+            choice.request_schema_version != 4
+                && !choice.specialist_ids.contains(&SpecialistId::SpecWriterV1)
+        }));
     }
 }
 
