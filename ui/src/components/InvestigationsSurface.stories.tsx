@@ -40,6 +40,7 @@ let openedActivityDetailReads: string[] = [];
 let openedActivityResultReads: string[] = [];
 let openedActivityChatReads: string[] = [];
 let openedActivityCitationReads: string[] = [];
+let activityRefreshResponse: (() => unknown) | null = null;
 
 const productionSpecialistIds = [
   'domain-analyst@3', 'evidence-auditor@3', 'domain-analyst@4', 'evidence-auditor@4',
@@ -204,20 +205,25 @@ export const ActiveInvestigations: Story = {
 export const SpecialistTaskActivity: Story = {
   // AC-0381: activity shows saved provider identity, not current catalog values.
   beforeEach: () => {
+    activityRefreshResponse = null;
     const active = [
       investigationDetail('domain-running-activity', { specialist_id: 'domain-analyst@3', status: 'running', has_result: false,
         provider: { ...investigationCatalog.providers[0], provider_id: 'saved-local-provider', model: 'saved-local-model' } }),
+      investigationDetail('domain-queued-activity', { specialist_id: 'domain-analyst@3', status: 'queued', has_result: false }),
+      investigationDetail('auditor-preparing-activity', { specialist_id: 'evidence-auditor@3', status: 'preparing', has_result: false }),
       investigationDetail('auditor-consent-activity', { specialist_id: 'evidence-auditor@3', status: 'awaiting_consent',
         cancel_requested: true, has_result: false, provider_mode: 'cloud',
         provider: { ...investigationCatalog.providers[1], provider_id: 'saved-cloud-provider', model: 'saved-cloud-model' } }),
       investigationDetail('old-domain-activity', { specialist_id: 'domain-analyst@2', status: 'queued', has_result: false }),
     ];
+    let activityReads = 0;
     mockIPC((command, args) => {
       if (command === 'list_specialist_task_activity') {
         expect(args).toEqual({ cursor: null });
-        return { items: active.map((summary) => ({ summary, saved_provider: {
+        const page = { items: active.map((summary) => ({ summary, saved_provider: {
           mode: summary.provider.mode, provider_id: summary.provider.provider_id, model: summary.provider.model,
-        } })), next_cursor: null };
+        } })), next_cursor: 'older-active-page' };
+        return activityReads++ === 0 ? page : activityRefreshResponse?.() ?? page;
       }
       return null;
     });
@@ -234,62 +240,87 @@ export const SpecialistTaskActivity: Story = {
     const activityElement = canvas.getByRole('region', { name: 'Active specialist tasks' });
     const activityPanel = within(activityElement);
     await canvas.findByText(/Running/);
+    await canvas.findByText(/Preparing context/);
     await canvas.findByText(/Awaiting cloud consent/);
     const domain = canvas.getByRole('heading', { name: /domain-analyst@3/ }).closest('section');
     const auditor = canvas.getByRole('heading', { name: /evidence-auditor@3/ }).closest('section');
     expect(domain).not.toBeNull();
     expect(auditor).not.toBeNull();
+    expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(2);
     await expect(domain).toHaveTextContent('Running');
-    await expect(domain).not.toHaveTextContent('Queued');
+    await expect(domain).toHaveTextContent('Queued');
     await expect(domain).toHaveTextContent('Saved provider: local / saved-local-provider · saved-local-model');
     await expect(auditor).toHaveTextContent('Awaiting cloud consent');
     await expect(auditor).toHaveTextContent('Cancellation requested');
     await expect(auditor).toHaveTextContent('Saved provider: cloud / saved-cloud-provider · saved-cloud-model');
+    await expect(activityPanel.getByText('Partial activity counts: queued 1, preparing 1, running 1, awaiting consent 1; cancellation requested 1 of 4 active tasks shown. More active tasks may exist.')).toBeVisible();
     await expect(activityPanel.findByText(/active task list is incomplete/i)).resolves.toBeVisible();
     await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
     expect(useInvestigationStore.getState().history).toEqual([]);
     expect(useInvestigationStore.getState().selectedId).toBeNull();
 
     const tasks = useSpecialistActivityStore.getState().tasks;
-    useSpecialistActivityStore.setState({ status: 'ready', tasks: [], error: null, refreshing: true });
-    await expect(activityPanel.findByText('Checking for active tasks…')).resolves.toBeVisible();
-    expect(activityPanel.queryByText('No active tasks')).toBeNull();
-    expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(0);
-    useSpecialistActivityStore.setState({ status: 'ready', tasks, error: null, refreshing: true });
+    let resolveRefresh!: (page: { items: typeof tasks; next_cursor: string | null }) => void;
+    activityRefreshResponse = () => new Promise((resolve) => { resolveRefresh = resolve; });
+    const refreshPromise = useSpecialistActivityStore.getState().refresh();
+    await waitFor(() => expect(useSpecialistActivityStore.getState().refreshing).toBe(true));
     await waitFor(() => {
       const refreshedDomain = canvas.getByRole('heading', { name: /domain-analyst@3/ }).closest('section');
       expect(refreshedDomain).not.toBeNull();
       expect(refreshedDomain).toHaveTextContent('Running');
       expect(refreshedDomain).not.toHaveTextContent(/refreshing/i);
     });
-    await expect(activityPanel.getByText('Activity incomplete · refreshing; last observed matching tasks are shown.')).toBeVisible();
+    await expect(activityPanel.getByText('Last observed partial activity counts: queued 1, preparing 1, running 1, awaiting consent 1; cancellation requested 1 of 4 active tasks shown. More active tasks may exist.')).toBeVisible();
     await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
-    await expect(activityPanel.getAllByRole('button', { name: /Open investigation:/ })).toHaveLength(2);
+    await expect(activityPanel.getAllByRole('button', { name: /Open investigation:/ })).toHaveLength(4);
+    resolveRefresh({ items: tasks.filter((task) => task.summary.specialist_id !== 'domain-analyst@2'), next_cursor: null });
+    await refreshPromise;
+    await expect(activityPanel.findByText('Shown activity counts: queued 1, preparing 1, running 1, awaiting consent 1; cancellation requested 1 of 4 active tasks shown.')).resolves.toBeVisible();
 
     useSpecialistActivityStore.setState({ status: 'loading', tasks, error: null, refreshing: true });
     await expect(activityPanel.findByText('Checking activity…')).resolves.toBeVisible();
     await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
+    expect(activityElement.querySelector('.specialist-activity-counts')).toBeNull();
     expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(0);
     useSpecialistActivityStore.setState({ status: 'preview', tasks, error: null, refreshing: false });
     await expect(activityPanel.findByText('Activity shown in desktop app')).resolves.toBeVisible();
     await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
+    expect(activityElement.querySelector('.specialist-activity-counts')).toBeNull();
     expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(0);
-    useSpecialistActivityStore.setState({ status: 'error', tasks, error: 'refresh failed', refreshing: false });
+    activityRefreshResponse = () => { throw new Error('refresh failed'); };
+    await useSpecialistActivityStore.getState().refresh();
     await expect(activityPanel.findByText('Activity unknown')).resolves.toBeVisible();
     await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
+    expect(activityElement.querySelector('.specialist-activity-counts')).toBeNull();
     expect(activityPanel.queryByRole('button', { name: /Open investigation:/ })).toBeNull();
     expect(activityPanel.queryByText('No active tasks')).toBeNull();
   },
 };
 
 export const CompleteEmptyProductionRoster: Story = {
-  args: { state: state({ catalog: productionRosterCatalog }) },
-  render: (args) => <InvestigationsSurface {...args} activity={{ status: 'ready', tasks: [], error: null, refreshing: false }} />,
+  beforeEach: () => {
+    mockIPC((command, args) => {
+      if (command === 'list_specialist_task_activity') {
+        expect(args).toEqual({ cursor: null });
+        return { items: [], next_cursor: null };
+      }
+      return null;
+    });
+    useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: productionRosterCatalog }, true);
+    useSpecialistActivityStore.getState().setVisible(true);
+    return () => { useSpecialistActivityStore.getState().setVisible(false); clearMocks(); };
+  },
+  render: function EmptyActivityStory() {
+    return <InvestigationsSurface state={useInvestigationStore()} activity={useSpecialistActivityStore()}
+      onRefreshActivity={() => void useSpecialistActivityStore.getState().refresh()} anchors={[]} canStart />;
+  },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const activityElement = canvas.getByRole('region', { name: 'Active specialist tasks' });
     const activityPanel = within(activityElement);
     await expect(productionRosterCatalog.specialists).toHaveLength(14);
+    await expect(activityPanel.findByText('No active tasks')).resolves.toBeVisible();
+    await expect(activityPanel.findByText('Shown activity counts: queued 0, preparing 0, running 0, awaiting consent 0; cancellation requested 0 of 0 active tasks shown.')).resolves.toBeVisible();
     await expect(activityPanel.getAllByText('No active tasks')).toHaveLength(1);
     await expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(0);
     await expect(activityPanel.getAllByRole('status')).toHaveLength(1);

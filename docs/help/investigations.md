@@ -27,4 +27,10 @@ composer draft; an uncertain start can still be retried with its original reques
 Only exact specialist versions with observed tasks get a group; a complete empty
 observation shows one **No active tasks** message for the list. During refresh,
 last-observed rows are labeled as such. If a refresh fails, current activity is
-unknown and retained rows are not presented as current.
+unknown and retained rows are not presented as current. The shared activity
+summary counts queued, preparing, running and awaiting-consent tasks, with
+cancellation-requested tasks shown as a subset. Counts from a complete page are
+exact for that bounded observation. A continuation page or unmatched specialist
+version is labeled as a partial lower bound; it does not claim the full runtime
+queue. During refresh the summary is last observed, and an error hides counts
+along with stale task rows.
