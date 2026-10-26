@@ -76,6 +76,8 @@ pub struct Extraction {
     /// The parent of a `register_blueprint` whose argument is not a name.
     wild_mounts: Vec<app_scope::AppRef>,
     app_defs: HashSet<(String, String)>,
+    /// Names assigned as attributes of an imported module (`m.app = …`).
+    module_attr_writes: BTreeSet<String>,
 }
 
 /// A module-level framework receiver: an application instance, or a Flask
@@ -89,6 +91,8 @@ struct ReceiverDef {
     /// Assigned at module scope, so a module-level or imported name proves it;
     /// a function-local assignment proves only reads in its own function.
     module_level: bool,
+    /// This assignment is the module's only binding of the name (#1149).
+    sole: bool,
     prefix: Prefix,
     /// A Flask Blueprint's name, which prefixes its endpoint names.
     name: Prefix,
@@ -994,11 +998,16 @@ fn assignment_receivers(
         if !router {
             receivers.insert(variable.clone(), framework);
         }
+        let sole = call.parent().is_some_and(|assignment| {
+            let writes = module_binding(cx, root, &variable).writes;
+            writes.len() == 1 && writes[0] == assignment
+        });
         out.receiver_defs.push(ReceiverDef {
             key: (cx.path.to_string(), variable),
             framework,
             router,
             module_level: enclosing_function_node(call).is_none(),
+            sole,
             prefix: if router {
                 constructor_prefix(cx, call, framework)
             } else {
@@ -1544,7 +1553,10 @@ fn served_apps(
 /// router with no observed mount keeps its declared prefix at InferredStrong;
 /// so does one mounted only on an annotated parameter or an unproven receiver.
 fn resolve_routes(out: &mut Extraction, repo: &str) {
-    out.app_defs.extend(app_scope::app_defs(&out.receiver_defs));
+    out.app_defs.extend(app_scope::app_defs(
+        &out.receiver_defs,
+        &out.module_attr_writes,
+    ));
     let defs: HashMap<(String, String), ReceiverDef> = std::mem::take(&mut out.receiver_defs)
         .into_iter()
         .map(|def| (def.key.clone(), def))
@@ -1935,6 +1947,12 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                 None => None,
             };
             if let Some(key) = key {
+                // The join below trusts the definition; a receiver its own
+                // file may have rebound is not proven to be it (#1149).
+                if app_scope::app_ref(&cx, route.receiver, &bindings) == app_scope::AppRef::Any {
+                    out.endpoint_apps
+                        .push((handler.clone(), app_scope::AppRef::Any));
+                }
                 out.pending_routes.push(PendingRoute {
                     receiver: key,
                     verb: route.verb,
@@ -2179,6 +2197,7 @@ pub fn extract_dir_incremental_with_progress(
             out.name_uses.extend(extraction.name_uses);
             out.endpoint_apps.extend(extraction.endpoint_apps);
             out.wild_mounts.extend(extraction.wild_mounts);
+            out.module_attr_writes.extend(extraction.module_attr_writes);
             Ok(())
         },
     );

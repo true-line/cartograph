@@ -23,7 +23,7 @@
 //! on scoping records `request_hooks_reach_only_their_application`.
 use crate::{
     Extraction, FileCx, ImportBinding, LocalReceiver, ReceiverDef, enclosing_function_node,
-    local_receiver, parameter_annotation,
+    local_receiver, module_binding, parameter_annotation,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use tree_sitter::Node as TsNode;
@@ -106,6 +106,11 @@ pub(crate) fn app_ref(
         }
         LocalReceiver::App(..) | LocalReceiver::Unproven => AppRef::Any,
         LocalReceiver::Parameter(_) => parameter_ref(cx, object, name),
+        // Any other module binding (`app = other`, `global app`) may
+        // replace the application the name was first given.
+        LocalReceiver::Free if module_binding(cx, module_root(object), name).writes.len() != 1 => {
+            AppRef::Any
+        }
         LocalReceiver::Free => match bindings.get(name) {
             Some(ImportBinding::Symbol {
                 target_file: Some(target),
@@ -116,6 +121,13 @@ pub(crate) fn app_ref(
             None => AppRef::Def((cx.path.to_string(), name.to_string())),
         },
     }
+}
+
+fn module_root(mut node: TsNode<'_>) -> TsNode<'_> {
+    while let Some(parent) = node.parent() {
+        node = parent;
+    }
+    node
 }
 
 /// The parameter `name` that `object` reads, when its function is a
@@ -193,6 +205,24 @@ pub(crate) fn collect(
             }
             "identifier" if is_use(node) => {
                 out.name_uses.insert(cx.text(&node).to_string());
+            }
+            // `module.app = …` rebinds another module's name.
+            "assignment" | "augmented_assignment" => {
+                if let Some(attribute) = node
+                    .child_by_field_name("left")
+                    .filter(|left| left.kind() == "attribute")
+                    && let (Some(object), Some(name)) = (
+                        attribute.child_by_field_name("object"),
+                        attribute.child_by_field_name("attribute"),
+                    )
+                    && object.kind() == "identifier"
+                    && matches!(
+                        bindings.get(cx.text(&object)),
+                        Some(ImportBinding::Module { .. })
+                    )
+                {
+                    out.module_attr_writes.insert(cx.text(&name).to_string());
+                }
             }
             _ => {}
         }
@@ -286,13 +316,22 @@ fn is_use(node: TsNode<'_>) -> bool {
     true
 }
 
-/// Keys whose every receiver definition is a module-level Flask
-/// application.
-pub(crate) fn app_defs(defs: &[ReceiverDef]) -> HashSet<(String, String)> {
+/// Keys whose only receiver definition is a module-level Flask application
+/// that is its module's sole binding of the name, never assigned through
+/// an imported module.
+pub(crate) fn app_defs(
+    defs: &[ReceiverDef],
+    module_attr_writes: &BTreeSet<String>,
+) -> HashSet<(String, String)> {
     let mut apps = HashSet::new();
     let mut other = HashSet::new();
     for def in defs {
-        if !def.router && def.module_level && def.framework == crate::Framework::Flask {
+        if !def.router
+            && def.module_level
+            && def.sole
+            && def.framework == crate::Framework::Flask
+            && !module_attr_writes.contains(&def.key.1)
+        {
             apps.insert(def.key.clone());
         } else {
             other.insert(def.key.clone());

@@ -5004,3 +5004,67 @@ def open_view():
     let extraction = extract_dir(dir.path(), &id()).unwrap();
     assert_eq!(auth_at(&extraction, "/open")["state"], "unknown");
 }
+
+#[test]
+fn a_rebound_module_application_is_not_proven_apart() {
+    // AC-0383 (T-0383): a module-level name proves an application only when
+    // its `Flask()` assignment is the module's sole binding of it, and no
+    // module assigns it through an import.
+    let gate = r#"from flask import Flask, abort
+
+a = Flask(__name__)
+b = Flask(__name__)
+b = a
+
+@a.before_request
+def gate():
+    abort(503)
+
+@b.route("/same")
+def same():
+    return "ok"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "apps.py", gate);
+    write(
+        dir.path(),
+        "views.py",
+        r#"from apps import b
+
+@b.route("/imported")
+def imported():
+    return "ok"
+"#,
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(auth_at(&extraction, "/same")["state"], "unknown");
+    assert_eq!(auth_at(&extraction, "/imported")["state"], "unknown");
+
+    // Without the rebinding the two applications are apart ...
+    let apart = gate.replace("b = a\n", "");
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "apps.py", &apart);
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(auth_at(&extraction, "/same")["state"], "none");
+
+    // ... unless another module assigns the name through its import, or a
+    // module that imports it rebinds it.
+    for other in [
+        "import apps\n\napps.b = apps.a\n",
+        "from flask import Flask\nfrom apps import a, b\n\nb = a\n\n@b.route(\"/rebound\")\ndef rebound():\n    return \"ok\"\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "apps.py", &apart);
+        write(dir.path(), "other.py", other);
+        let extraction = extract_dir(dir.path(), &id()).unwrap();
+        if other.contains("apps.b") {
+            assert_eq!(auth_at(&extraction, "/same")["state"], "unknown", "{other}");
+        } else {
+            assert_eq!(
+                auth_at(&extraction, "/rebound")["state"],
+                "unknown",
+                "{other}"
+            );
+        }
+    }
+}

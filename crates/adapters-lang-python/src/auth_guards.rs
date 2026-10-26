@@ -774,7 +774,10 @@ pub(crate) fn resolve(
     let calls = std::mem::take(&mut out.app_calls);
     let used = std::mem::take(&mut out.name_uses);
     let mut app_defs = std::mem::take(&mut out.app_defs);
-    app_defs.extend(app_scope::app_defs(&out.receiver_defs));
+    app_defs.extend(app_scope::app_defs(
+        &out.receiver_defs,
+        &out.module_attr_writes,
+    ));
     let scope = app_scope::Scope::new(&calls, &used, &app_defs);
     let mut handler_apps: HashMap<String, Apps> = HashMap::new();
     for (handler, app) in std::mem::take(&mut out.endpoint_apps) {
