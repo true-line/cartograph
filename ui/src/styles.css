@@ -4145,6 +4145,15 @@ button.register-row:hover {
 .investigation-specialist > span { display: grid; gap: .35rem; font-size: .78rem; }
 .investigation-specialist input { margin-top: .2rem; accent-color: var(--accent); }
 .investigation-specialist code { color: var(--tier-inferred-weak); }
+.specialist-activity-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
+.specialist-activity-group { display: grid; align-content: start; gap: .45rem; min-width: 0; }
+.specialist-activity-group h3 { margin: 0; font-size: .78rem; font-weight: 600; }
+.specialist-task-activity { display: grid; gap: .45rem; min-width: 0; }
+.specialist-task-activity > p { margin: 0; }
+.specialist-task-row { display: grid; gap: .3rem; padding: .65rem .75rem; border: 1px solid var(--border); border-radius: var(--radius-control); }
+.specialist-task-row p { margin: 0; }
+.specialist-task-row .secondary-button { justify-self: start; }
+.specialist-task-question { overflow-wrap: anywhere; }
 .investigation-form-row { display: flex; align-items: end; flex-wrap: wrap; gap: .8rem; }
 .investigation-compose label:not(.investigation-specialist) { display: grid; gap: .4rem; font-size: .76rem; }
 .investigation-compose select, .investigation-compose input:not([type="radio"]), .investigation-compose textarea {
@@ -4191,7 +4200,7 @@ details.investigation-section { display: block; }
   .investigation-history > ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 650px) {
-  .investigation-specialists, .investigation-history > ul { grid-template-columns: 1fr; }
+  .investigation-specialists, .specialist-activity-list, .investigation-history > ul { grid-template-columns: 1fr; }
 }
 
 /* Coverage inventory (AC-0238): one disclosure per repo. */

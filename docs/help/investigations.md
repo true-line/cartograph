@@ -19,3 +19,8 @@ visible even when it falls outside the current page. Parent links identify the
 task each follow-up came from, so sibling follow-ups remain siblings. Selecting
 a turn opens only that task's saved activity, findings, and citations. This
 view navigates investigation tasks; it does not represent freeform agent chat.
+
+The specialist list also shows each active task's saved question, current status,
+and saved provider/model. Choose **Open investigation** on a task row to inspect
+that exact saved task. This does not change the selected specialist or your
+composer draft; an uncertain start can still be retried with its original request.

@@ -36,6 +36,10 @@ const meta = { title: 'Surfaces/InvestigationsSurface', component: Investigation
 export default meta;
 type Story = StoryObj<typeof meta>;
 let conversationDetailReads: string[] = [];
+let openedActivityDetailReads: string[] = [];
+let openedActivityResultReads: string[] = [];
+let openedActivityChatReads: string[] = [];
+let openedActivityCitationReads: string[] = [];
 
 export const ScopedSpecialistQuestion: Story = {
   // AC-0180/0190: exact host specialist, chosen graph scope and provider form the request.
@@ -210,8 +214,8 @@ export const SpecialistTaskActivity: Story = {
     const canvas = within(canvasElement);
     await canvas.findByText(/Running/);
     await canvas.findByText(/Awaiting cloud consent/);
-    const domain = canvas.getByText(/domain-analyst@3/).closest('label');
-    const auditor = canvas.getByText(/evidence-auditor@3/).closest('label');
+    const domain = canvas.getByRole('heading', { name: /domain-analyst@3/ }).closest('section');
+    const auditor = canvas.getByRole('heading', { name: /evidence-auditor@3/ }).closest('section');
     expect(domain).not.toBeNull();
     expect(auditor).not.toBeNull();
     await expect(domain).toHaveTextContent('Running');
@@ -230,11 +234,116 @@ export const SpecialistTaskActivity: Story = {
     expect(canvas.queryByText('No active tasks')).toBeNull();
     useSpecialistActivityStore.setState({ status: 'ready', tasks, error: null, refreshing: true });
     await waitFor(() => {
-      const refreshedDomain = canvas.getByText(/domain-analyst@3/).closest('label');
+      const refreshedDomain = canvas.getByRole('heading', { name: /domain-analyst@3/ }).closest('section');
       expect(refreshedDomain).not.toBeNull();
       expect(refreshedDomain).toHaveTextContent('Running');
-      expect(refreshedDomain).toHaveTextContent('activity incomplete · refreshing');
+      expect(refreshedDomain).toHaveTextContent(/activity incomplete · refreshing/i);
     });
+  },
+};
+
+export const OpenActiveInvestigation: Story = {
+  // AC-0379: opening one activity row uses that task's existing saved-detail path.
+  beforeEach: () => {
+    const first = investigationDetail('active-first', { specialist_id: 'domain-analyst@3', status: 'running', has_result: false,
+      question: 'First active question', updated_at: '2026-10-26T10:00:00Z' });
+    const second = investigationDetail('active-second', { specialist_id: 'domain-analyst@3', status: 'awaiting_consent', has_result: false,
+      question: 'Second active question', updated_at: '2026-10-26T10:01:00Z' });
+    const savedSecond = investigationDetail('active-second', { specialist_id: 'domain-analyst@3', status: 'completed', has_result: true,
+      question: 'Second active question', updated_at: '2026-10-26T10:02:00Z' });
+    const result = investigationResult(savedSecond.investigation_id);
+    const chat: InvestigationChat = { chat_id: `chat:${savedSecond.investigation_id}`, task_id: savedSecond.investigation_id,
+      producer: { specialist_id: savedSecond.specialist.id, specialist_version: savedSecond.specialist.version,
+        prompt_fingerprint: savedSecond.specialist.prompt_fingerprint, tier: savedSecond.specialist.tier,
+        confidence_tier: savedSecond.specialist.confidence_tier, provider_mode: savedSecond.provider.mode,
+        provider_id: savedSecond.provider.provider_id, model: savedSecond.provider.model,
+        protocol_version: savedSecond.provider.protocol_version ?? null },
+      messages: [{ id: 'active-second-question', ordinal: 0, author: 'user',
+        message: { kind: 'user_question', question: savedSecond.question } },
+      { id: 'active-second-result', ordinal: 1, author: 'specialist',
+        message: { kind: 'result_reference', task_id: savedSecond.investigation_id,
+          result_id: result.result_id, result_hash: 'e'.repeat(64) } }] };
+    openedActivityDetailReads = [];
+    openedActivityResultReads = [];
+    openedActivityChatReads = [];
+    openedActivityCitationReads = [];
+    const pendingStart = { schema_version: 1 as const, request_nonce: 'preserved-pending-nonce', specialist_id: 'domain-analyst@3' as const,
+      question: 'Uncertain start retained for retry.', scope: { type: 'all' as const }, provider_mode: 'local' as const,
+      limit_profile: 'investigation-v1' as const };
+    const composer = { ...useInvestigationStore.getInitialState().composer, specialistId: 'evidence-auditor@3' as const,
+      question: 'Keep the composer draft intact.' };
+    mockIPC((command, payload) => {
+      const args = payload as { investigationId?: string; citationId?: string; afterSequence?: number } | undefined;
+      if (command === 'list_specialist_task_activity') return { items: [first, second].map((summary) => ({
+        summary, saved_provider: { mode: summary.provider_mode, provider_id: summary.provider.provider_id, model: summary.provider.model },
+      })), next_cursor: null };
+      if (command === 'get_investigation') {
+        if (args?.investigationId) openedActivityDetailReads.push(args.investigationId);
+        return args?.investigationId === savedSecond.investigation_id ? savedSecond : null;
+      }
+      if (command === 'investigation_result') {
+        if (args?.investigationId) openedActivityResultReads.push(args.investigationId);
+        return args?.investigationId === savedSecond.investigation_id ? result : null;
+      }
+      if (command === 'get_investigation_chat') {
+        if (args?.investigationId) openedActivityChatReads.push(args.investigationId);
+        return args?.investigationId === savedSecond.investigation_id ? chat : null;
+      }
+      if (command === 'investigation_events') {
+        const events = investigationEvents(savedSecond.investigation_id);
+        return { investigation_id: savedSecond.investigation_id,
+          items: events.filter((event) => event.sequence > (args?.afterSequence ?? 0)), next_sequence: events.length, has_more: false };
+      }
+      if (command === 'investigation_consent') return null;
+      if (command === 'read_investigation_citation') {
+        if (args?.investigationId) openedActivityCitationReads.push(args.investigationId);
+        const citation = investigationCitations.find((item) => item.citation_id === args?.citationId);
+        return citation && args?.investigationId === savedSecond.investigation_id ? { investigation_id: savedSecond.investigation_id,
+          citation_id: citation.citation_id, status: 'metadata_only', citation, text: null } : null;
+      }
+      return null;
+    });
+    useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: investigationCatalog,
+      pendingStart, composer, draftObligations: [inventoryObligation], history: [] }, true);
+    useSpecialistActivityStore.getState().setVisible(true);
+    return () => { useSpecialistActivityStore.getState().setVisible(false); clearMocks();
+      useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); };
+  },
+  render: function ActiveTaskNavigationStory() {
+    return <InvestigationsSurface state={useInvestigationStore()} activity={useSpecialistActivityStore()}
+      onRefreshActivity={() => void useSpecialistActivityStore.getState().refresh()} anchors={[]} canStart />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const firstOpen = await canvas.findByRole('button', { name: 'Open investigation: First active question' });
+    const secondOpen = canvas.getByRole('button', { name: 'Open investigation: Second active question' });
+    await expect(firstOpen.closest('label')).toBeNull();
+    await expect(firstOpen.closest('fieldset')).toBeNull();
+    await expect(secondOpen).toBeEnabled();
+    await expect(canvas.getByText(/First active question/)).toBeVisible();
+    await expect(canvas.getByText(/Second active question/)).toBeVisible();
+    await expect(canvas.getByText(/Awaiting cloud consent/)).toBeVisible();
+    const beforeOpen = useInvestigationStore.getState();
+    const expectedPendingStart = beforeOpen.pendingStart;
+    const expectedComposer = beforeOpen.composer;
+    const expectedObligations = beforeOpen.draftObligations;
+    await userEvent.click(secondOpen);
+    await waitFor(() => expect(useInvestigationStore.getState().selectedId).toBe('active-second'));
+    await waitFor(() => expect(useInvestigationStore.getState().detail?.investigation_id).toBe('active-second'));
+    const transcript = within(await canvas.findByRole('region', { name: 'Saved investigation chat' }));
+    await expect(transcript.getByRole('listitem', { name: 'User question' })).toHaveTextContent('Second active question');
+    await expect(canvas.getByRole('region', { name: 'Investigation findings' })).toBeVisible();
+    expect(useInvestigationStore.getState().selectedId).toBe('active-second');
+    expect(useInvestigationStore.getState().pendingStart).toEqual(expectedPendingStart);
+    expect(useInvestigationStore.getState().composer).toEqual(expectedComposer);
+    expect(useInvestigationStore.getState().draftObligations).toEqual(expectedObligations);
+    expect(openedActivityDetailReads).toEqual(['active-second']);
+    expect(openedActivityResultReads).toEqual(['active-second']);
+    await waitFor(() => expect(openedActivityChatReads).toEqual(['active-second']));
+    const finding = canvas.getByRole('region', { name: 'Investigation findings' });
+    await userEvent.click(within(finding).getByRole('button', { name: 'Inspect citation C1' }));
+    await waitFor(() => expect(useInvestigationStore.getState().citationRead?.investigation_id).toBe('active-second'));
+    expect(openedActivityCitationReads).toEqual(['active-second']);
   },
 };
 
