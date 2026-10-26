@@ -36,6 +36,7 @@ const initialComposer: InvestigationComposer = {
 };
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown']);
 const ACTIVE_HISTORY_STATUSES = new Set(['queued', 'preparing', 'running', 'awaiting_consent']);
+export const INVESTIGATION_PAGE_LIMIT = 50;
 export function investigationIsActive(summary: InvestigationSummary): boolean {
   return !TERMINAL.has(summary.status) || summary.invocation_pending;
 }
@@ -48,7 +49,7 @@ const LEGACY_SPECIALISTS = new Set<SpecialistId>([
   'domain-analyst@1', 'evidence-auditor@1', 'domain-analyst@2', 'evidence-auditor@2',
   'domain-analyst@3', 'evidence-auditor@3', 'domain-analyst@4', 'evidence-auditor@4',
 ]);
-function validSummary(value: InvestigationSummary | null, id?: string): value is InvestigationSummary {
+export function validSummary(value: InvestigationSummary | null, id?: string): value is InvestigationSummary {
   if (value === null || typeof value.investigation_id !== 'string' || value.investigation_id.length === 0 ||
       (id && value.investigation_id !== id) || !Number.isSafeInteger(value.revision) || value.revision < 0 ||
       !Number.isSafeInteger(value.last_event_sequence) || value.last_event_sequence < 0 ||
@@ -599,7 +600,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       try {
         const page = await invokeOr<InvestigationPage | null>('list_investigations', null,
           { ...(cursor ? { cursor } : {}), ...(search ? { search } : {}), ...(activeOnly ? { activeOnly: true } : {}) });
-        if (!page || !Array.isArray(page.items) || page.items.length > 50 ||
+        if (!page || !Array.isArray(page.items) || page.items.length > INVESTIGATION_PAGE_LIMIT ||
             page.items.some((item) => !validSummary(item)) ||
             (activeOnly && page.items.some((item) => !investigationIsInActiveHistory(item))) ||
             (normalizedSearch && page.items.some((item) => !summaryMatchesHistorySearch(item, normalizedSearch)))) {
