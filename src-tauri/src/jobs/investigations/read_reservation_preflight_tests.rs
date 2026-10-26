@@ -36,6 +36,25 @@ fn read_reservation_preflight_handle_reuses_one_coherent_snapshot() {
     assert_eq!(reads.preflight_runs, 1);
     assert_eq!(reads.snapshot_runs, 1);
     assert_eq!(reads.validated_reads, 2);
+    #[cfg(unix)]
+    {
+        // AC-0327: inspect the actual pending + settled snapshot, not row wire
+        // alone. Map node currency is logical; this is not an allocator peak.
+        let snapshot = reads.capacity.as_ref().unwrap();
+        let actual = std::mem::size_of_val(snapshot)
+            + context_hub::logical::map::<String, CapacityCharge>(snapshot.tasks.len()).unwrap()
+            + snapshot.tasks.keys().map(String::len).sum::<usize>();
+        let (retained, peak) = workspace::next_prompt_source_capacity_workspace().unwrap();
+        assert!(retained >= actual);
+        assert_eq!(snapshot.tasks.len(), 2);
+        assert!(
+            peak >= retained
+                + workspace::next_prompt_read_reservation_workspace()
+                    .unwrap()
+                    .1
+        );
+    }
+
     for _ in 0..3 {
         assert_eq!(reads.capacity_charge(None).unwrap(), global);
     }

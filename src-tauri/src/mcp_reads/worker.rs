@@ -456,6 +456,7 @@ fn task_phase_workspaces(
         .max(crate::jobs::investigations::next_prompt_saved_validation_workspace()?.0)
         .max(crate::jobs::investigations::next_prompt_saved_validation_workspace()?.1)
         .max(crate::jobs::investigations::next_prompt_pending_source_workspace()?)
+        .max(crate::jobs::investigations::next_prompt_source_capacity_workspace()?.1)
         .max(crate::jobs::investigations::next_prompt_result_workspace()?.1)
         .max(crate::jobs::investigations::next_prompt_staged_workspace()?.1)
         .max(crate::jobs::investigations::next_prompt_task_load_workspace()?.1)
