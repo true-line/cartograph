@@ -206,25 +206,48 @@ pub(crate) fn collect(
             "identifier" if is_use(node) => {
                 out.name_uses.insert(cx.text(&node).to_string());
             }
-            // `module.app = …` rebinds another module's name.
-            "assignment" | "augmented_assignment" => {
-                if let Some(attribute) = node
-                    .child_by_field_name("left")
-                    .filter(|left| left.kind() == "attribute")
-                    && let (Some(object), Some(name)) = (
-                        attribute.child_by_field_name("object"),
-                        attribute.child_by_field_name("attribute"),
-                    )
-                    && object.kind() == "identifier"
-                    && matches!(
-                        bindings.get(cx.text(&object)),
-                        Some(ImportBinding::Module { .. })
-                    )
-                {
-                    out.module_attr_writes.insert(cx.text(&name).to_string());
+            // `module.app = …` rebinds another module's name, also from
+            // inside a tuple or list target, a loop, `with … as` or `del`.
+            "assignment" | "augmented_assignment" | "for_statement" | "for_in_clause" => {
+                if let Some(target) = node.child_by_field_name("left") {
+                    module_attribute_writes(cx, target, bindings, out);
                 }
             }
+            "as_pattern" => {
+                if let Some(target) = node.child_by_field_name("alias") {
+                    module_attribute_writes(cx, target, bindings, out);
+                }
+            }
+            "delete_statement" => module_attribute_writes(cx, node, bindings, out),
             _ => {}
+        }
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+    }
+}
+
+/// Every `module.name` under binding target `target`, where `module` is an
+/// imported module.
+fn module_attribute_writes(
+    cx: &FileCx<'_>,
+    target: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+    out: &mut Extraction,
+) {
+    let mut stack = vec![target];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "attribute"
+            && let (Some(object), Some(name)) = (
+                node.child_by_field_name("object"),
+                node.child_by_field_name("attribute"),
+            )
+            && object.kind() == "identifier"
+            && matches!(
+                bindings.get(cx.text(&object)),
+                Some(ImportBinding::Module { .. })
+            )
+        {
+            out.module_attr_writes.insert(cx.text(&name).to_string());
         }
         let mut walk = node.walk();
         stack.extend(node.named_children(&mut walk));

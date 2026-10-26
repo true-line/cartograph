@@ -5051,6 +5051,10 @@ def imported():
     // module that imports it rebinds it.
     for other in [
         "import apps\n\napps.b = apps.a\n",
+        "import apps\n\napps.b, other = (apps.a, 1)\n",
+        "import apps\n\n[(apps.b, other)] = [(apps.a, 1)]\n",
+        "import apps\n\nfor apps.b in [apps.a]:\n    pass\n",
+        "import apps\n\nwith apps.a as apps.b:\n    pass\n",
         "from flask import Flask\nfrom apps import a, b\n\nb = a\n\n@b.route(\"/rebound\")\ndef rebound():\n    return \"ok\"\n",
     ] {
         let dir = tempfile::tempdir().unwrap();
