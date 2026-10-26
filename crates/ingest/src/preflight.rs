@@ -13,6 +13,7 @@
 //! Detectors are a versioned registry ([`DETECTOR_ID`]): provenance on every
 //! finding records which detector produced it, so re-runs are attributable.
 
+use crate::adapter_lookup::{CellLookup, PluginDeclaration, builtin_claims, lookup_coverage};
 use crate::matrix::{ReportedCell, cells_for};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -89,6 +90,31 @@ pub struct PreflightReport {
     pub potential_gaps: Vec<PatternFinding>,
     /// Detector registry version used for this report.
     pub detector: String,
+    /// For each unsupported or partial cell above, which installed source
+    /// declares coverage of it (#1071). Built-in claims and gated plugins
+    /// only; a host with ungated plugins calls [`Self::refresh_adapter_lookup`].
+    pub adapter_lookup: Vec<CellLookup>,
+}
+
+impl PreflightReport {
+    /// Recompute [`Self::adapter_lookup`] against `plugins`, which may
+    /// include plugins whose gate has not passed (reported as declared but
+    /// unverified). Reads declarations only.
+    pub fn refresh_adapter_lookup(&mut self, plugins: &[PluginDeclaration]) {
+        self.adapter_lookup = report_lookup(&self.languages, plugins);
+    }
+}
+
+/// The lookup over every non-supported cell the detected languages report.
+fn report_lookup(
+    languages: &[LanguageDetection],
+    plugins: &[PluginDeclaration],
+) -> Vec<CellLookup> {
+    let cells: Vec<ReportedCell> = languages
+        .iter()
+        .flat_map(|language| language.coverage.iter().cloned())
+        .collect();
+    lookup_coverage(&cells, &builtin_claims(), plugins)
 }
 
 /// One installed deterministic adapter — the per-language/per-format
@@ -248,6 +274,8 @@ pub fn planned_adapter_for(language: &str) -> bool {
 pub struct PluginCoverage {
     /// The plugin id, reported as the covering adapter.
     pub plugin_id: String,
+    /// The gated artifact's content hash, the plugin's version key.
+    pub version: String,
     /// Extensions the corpus declares, without the leading dot.
     pub extensions: Vec<String>,
     /// Coverage cells the gated corpus declares (AC-0263).
@@ -525,8 +553,12 @@ pub fn preflight_scan(
 
     frameworks.sort();
     frameworks.dedup();
+    let languages: Vec<LanguageDetection> = languages.into_values().collect();
+    let declared: Vec<PluginDeclaration> = plugins.iter().map(PluginDeclaration::from).collect();
+    let adapter_lookup = report_lookup(&languages, &declared);
     Ok(Some(PreflightReport {
-        languages: languages.into_values().collect(),
+        languages,
+        adapter_lookup,
         frameworks,
         unsupported,
         potential_gaps,
@@ -1288,6 +1320,7 @@ mod tests {
         };
         let plugins = [PluginCoverage {
             plugin_id: "t0.plugin-ruby".into(),
+            version: "hash".into(),
             extensions: vec!["rb".into()],
             cells: vec![cell.clone()],
             languages: Default::default(),
@@ -1313,6 +1346,7 @@ mod tests {
         write(dir.path(), "main.ts", "export const x = 1;\n");
         let contested = [PluginCoverage {
             plugin_id: "t0.plugin-rogue".into(),
+            version: "hash".into(),
             extensions: vec!["ts".into()],
             cells: vec![],
             languages: Default::default(),
@@ -1324,6 +1358,41 @@ mod tests {
             .find(|l| l.language == "TypeScript")
             .expect("TypeScript detected");
         assert_eq!(ts.adapter.as_deref(), Some("t0.adapter-ts"));
+    }
+
+    #[test]
+    fn preflight_exposes_the_adapter_lookup_for_each_gap_cell() {
+        // #1071: every non-supported cell carries who declares coverage.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.py"), "import os\n").unwrap();
+        let report = preflight(dir.path()).unwrap();
+        let gaps: Vec<_> = report
+            .languages
+            .iter()
+            .flat_map(|l| &l.coverage)
+            .filter(|c| c.support != crate::matrix::Support::Supported)
+            .collect();
+        assert!(!gaps.is_empty());
+        assert_eq!(report.adapter_lookup.len(), gaps.len());
+
+        // A declared-but-ungated plugin shows as unverified on refresh.
+        let mut report = report;
+        let target = report.adapter_lookup[0].cell.clone();
+        let declared = [PluginDeclaration {
+            id: "t0.plugin-x".into(),
+            version: "h".into(),
+            gate_passed: false,
+            cells: vec![ReportedCell {
+                support: crate::matrix::Support::Supported,
+                note: String::new(),
+                ..target.clone()
+            }],
+        }];
+        report.refresh_adapter_lookup(&declared);
+        assert!(matches!(
+            report.adapter_lookup[0].status,
+            crate::adapter_lookup::LookupStatus::DeclaredUnverified { .. }
+        ));
     }
 
     #[test]
@@ -1349,6 +1418,7 @@ mod tests {
         );
         let plugins = [PluginCoverage {
             plugin_id: "t0.plugin-scripts".into(),
+            version: "hash".into(),
             extensions: vec!["rb".into(), "php".into()],
             cells: vec![ruby_cell.clone(), php_cell.clone()],
             languages: Default::default(),
@@ -1373,6 +1443,7 @@ mod tests {
         let bar_cell = cell("Bar", crate::matrix::Support::Partial, "no routes");
         let plugins = [PluginCoverage {
             plugin_id: "t0.plugin-foo".into(),
+            version: "hash".into(),
             extensions: vec!["foo".into(), "bar".into(), "rb".into()],
             cells: vec![foo_cell.clone(), bar_cell.clone(), ruby_cell.clone()],
             languages: [("foo", "Foo"), ("bar", "Bar")]

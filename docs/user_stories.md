@@ -627,9 +627,10 @@
 - **AC-0263** Given a plugin adapter whose golden corpus declares coverage cells, when preflight or Settings reports coverage, then its cells appear with the plugin only once its conformance gate passes for the exact artifact and corpus bytes; each supported or partial cell names golden cases that the gate ran, partial and unsupported cells name what they miss, a malformed or unproven declaration fails the gate, and editing the declared claims after gating leaves the plugin ungated.
 - **AC-0254** Given a Gap or omission, when it is shown, then it names its class (unsupported extractor, missing input, unresolved relationship, contradictory or stale, genuine gap) and the seam that would fill it.
 - **AC-0255** Given the event SDK and channel backing registries, when a versioned data file adds an entry, then ingest uses it with the file's identity recorded in provenance, and an invalid file fails closed without changing recovered facts.
+- **AC-0361** Given a preflight report, when it lists a language's unsupported or partial cells, then each distinct cell carries an adapter lookup: `covered_by` the built-in adapters and gate-passed plugins whose `Supported` claim matches it, else `declared_unverified` with the installed plugins that declare it without a passing gate, else `none`. Sources name the adapter id, or the plugin id and artifact content hash. A `Partial` claim never covers a cell, languages compare case-insensitively, the output order is stable, and the lookup reads declarations only: it installs, loads or executes nothing (#1071, epic #998).
 - **Security:** Registry files are data, never code; plugins keep the existing WASM sandbox.
 - **Performance:** Matrix and registry loading happen once per ingest.
-- **Trace:** P1 (ROADMAP W9) · `ingest`, `adapters-fw`, `dynamic`, `adapters-plugin-host`, `app`, `ui` · — · T-0253..0255, T-0263
+- **Trace:** P1 (ROADMAP W9) · `ingest`, `adapters-fw`, `dynamic`, `adapters-plugin-host`, `app`, `ui` · — · T-0253..0255, T-0263, T-0361
 
 ### US-0039 — Resolve unambiguous call gaps deterministically before semantic matching
 - **Actor:** Engine
