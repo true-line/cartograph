@@ -1612,7 +1612,10 @@ fn extract_tree_with_registries(
         };
         extraction.nodes.extend(go.nodes);
         extraction.edges.extend(go.edges);
-
+    }
+    // Rust carries server routes (axum, actix-web) and client calls
+    // (reqwest), so a client-only Rust repository runs it too, as Java does.
+    if wants_application {
         let rust_id = adapters_lang_rust::SourceId { repo, commit };
         let mut rust_progress = |path: &str| on_file(&format!("Reading Rust sources — {path}"));
         let (rust, stats) = adapters_lang_rust::extract_dir_incremental_with_progress(

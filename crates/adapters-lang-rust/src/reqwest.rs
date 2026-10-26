@@ -6,9 +6,10 @@
 //! `patch`, `head`, `request(Method::X, url)`) on a receiver proven to be a
 //! reqwest `Client`. A receiver is proven when it is a `Client::new()` /
 //! `Client::builder()…build()` expression, a name the function binds exactly
-//! once to such an expression, a parameter typed `Client` (behind `&`,
-//! `Arc` or `Rc`), or `self.<field>` where every field of that name in the
-//! file is typed `Client`. A literal URL is reported as written; anything
+//! once to such an expression, a parameter typed `Client` (behind `&` or
+//! the standard `Arc` / `Rc`; a generic parameter named `Client` shadows the
+//! import), or `self.<field>` inside an `impl` of a struct this module
+//! declares with that field typed `Client`. A literal URL is reported as written; anything
 //! else is a computed URL the stitcher keeps as a Gap. Lookalikes yield
 //! nothing.
 
@@ -32,8 +33,8 @@ struct Proof<'a, 't> {
     bindings: &'a Bindings,
     function: TsNode<'t>,
     shadows: BTreeSet<String>,
-    /// File-level field names whose every declaration is a reqwest Client.
-    client_fields: &'a BTreeSet<String>,
+    /// Fields typed reqwest Client, per (module scope, struct name).
+    client_fields: &'a ClientFields,
 }
 
 impl<'t> Proof<'_, 't> {
@@ -46,22 +47,32 @@ impl<'t> Proof<'_, 't> {
     }
 
     fn is_client_type(&self, node: TsNode<'_>) -> bool {
-        let mut text = self.cx.text(&node).trim();
-        loop {
-            let stripped = text
-                .strip_prefix('&')
-                .map(str::trim_start)
-                .map(|t| t.strip_prefix("mut ").unwrap_or(t))
-                .or_else(|| {
-                    ["Arc<", "Rc<", "std::sync::Arc<", "std::rc::Rc<"]
-                        .iter()
-                        .find_map(|wrapper| text.strip_prefix(wrapper))
-                        .and_then(|t| t.strip_suffix('>'))
-                });
-            match stripped {
-                Some(inner) => text = inner.trim(),
-                None => break,
-            }
+        self.is_client_type_text(node, self.cx.text(&node))
+    }
+
+    /// A type spelling written at `node` that names a reqwest `Client`,
+    /// behind `&`, `&mut` and the standard `Arc` / `Rc` only. A generic
+    /// parameter of the same name shadows any import.
+    fn is_client_type_text(&self, node: TsNode<'_>, text: &str) -> bool {
+        let mut text = text.trim();
+        while let Some(rest) = text.strip_prefix('&') {
+            let rest = rest.trim_start();
+            text = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
+        }
+        let head = text.split('<').next().unwrap_or(text).trim();
+        let first = head.split("::").next().unwrap_or(head).trim();
+        if generic_names(self.cx, node).contains(first) {
+            return false;
+        }
+        if let Some(inner) = text
+            .strip_suffix('>')
+            .and_then(|t| t.split_once('<'))
+            .map(|(_, inner)| inner)
+        {
+            return self
+                .path(node, head)
+                .is_some_and(|path| is_shared_pointer(&path))
+                && self.is_client_type_text(node, inner);
         }
         self.path(node, text)
             .is_some_and(|path| is_client_path(&path))
@@ -183,6 +194,8 @@ impl<'t> Proof<'_, 't> {
         }
     }
 
+    /// `self.<field>` inside an `impl` of a struct declared in the same
+    /// module whose field of that name is typed reqwest `Client`.
     fn is_client_field(&self, expr: TsNode<'_>) -> bool {
         let (Some(value), Some(field)) = (
             expr.child_by_field_name("value"),
@@ -190,7 +203,37 @@ impl<'t> Proof<'_, 't> {
         ) else {
             return false;
         };
-        value.kind() == "self" && self.client_fields.contains(self.cx.text(&field))
+        if value.kind() != "self" {
+            return false;
+        }
+        let mut node = expr;
+        let imp = loop {
+            match node.parent() {
+                Some(parent) if parent.kind() == "impl_item" => break parent,
+                Some(parent) => node = parent,
+                None => return false,
+            }
+        };
+        let Some(ty) = imp.child_by_field_name("type") else {
+            return false;
+        };
+        let ty = match ty.kind() {
+            "generic_type" => ty.child_by_field_name("type").unwrap_or(ty),
+            _ => ty,
+        };
+        // A path (`other::Api`) names a struct this file may not declare.
+        if ty.kind() != "type_identifier" {
+            return false;
+        }
+        let key = (
+            scope_of(self.cx, imp).join("::"),
+            self.cx.text(&ty).to_string(),
+        );
+        self.client_fields
+            .get(&key)
+            .and_then(|fields| fields.get(self.cx.text(&field)))
+            .copied()
+            .unwrap_or(false)
     }
 
     fn url(&self, node: TsNode<'_>) -> IdentityExpr {
@@ -256,6 +299,51 @@ fn is_client_path(path: &[String]) -> bool {
     )
 }
 
+/// `std::sync::Arc` / `std::rc::Rc` (or their `alloc` paths).
+fn is_shared_pointer(path: &[String]) -> bool {
+    matches!(
+        path.iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        ["std" | "alloc", "sync", "Arc"] | ["std" | "alloc", "rc", "Rc"]
+    )
+}
+
+/// Generic type parameters in scope at `node`: those of every enclosing
+/// function, impl, trait and struct.
+fn generic_names(cx: &FileCx<'_>, node: TsNode<'_>) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut current = Some(node);
+    while let Some(node) = current {
+        if matches!(
+            node.kind(),
+            "function_item"
+                | "function_signature_item"
+                | "impl_item"
+                | "trait_item"
+                | "struct_item"
+        ) && let Some(params) = node.child_by_field_name("type_parameters")
+        {
+            let mut walk = params.walk();
+            for param in params.named_children(&mut walk) {
+                let name = if param.kind() == "type_identifier" {
+                    Some(param)
+                } else {
+                    param
+                        .child_by_field_name("name")
+                        .or_else(|| param.child_by_field_name("left"))
+                };
+                if let Some(name) = name {
+                    names.insert(cx.text(&name).to_string());
+                }
+            }
+        }
+        current = node.parent();
+    }
+    names
+}
+
 fn is_builder_path(path: &[String]) -> bool {
     matches!(
         path.iter()
@@ -280,39 +368,53 @@ fn pattern_names(cx: &FileCx<'_>, node: TsNode<'_>) -> Vec<String> {
     out
 }
 
-/// Field names whose every declaration in the file is typed reqwest Client.
+/// (module scope, struct name) -> field name -> typed reqwest `Client`.
+pub(super) type ClientFields = BTreeMap<(String, String), BTreeMap<String, bool>>;
+
+/// The named fields of every struct in the file, and whether each is typed
+/// reqwest `Client`.
 pub(super) fn client_fields(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
     bindings: &Bindings,
-) -> BTreeSet<String> {
-    let mut verdicts: BTreeMap<String, bool> = BTreeMap::new();
+) -> ClientFields {
+    let empty = ClientFields::new();
+    let mut out = ClientFields::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if node.kind() == "field_declaration"
-            && let (Some(name), Some(ty)) = (
+        if node.kind() == "struct_item"
+            && let (Some(name), Some(body)) = (
                 node.child_by_field_name("name"),
-                node.child_by_field_name("type"),
+                node.child_by_field_name("body"),
             )
         {
-            let proof = Proof {
-                cx,
-                bindings,
-                function: node,
-                shadows: BTreeSet::new(),
-                client_fields: &BTreeSet::new(),
-            };
-            let client = proof.is_client_type(ty);
-            let entry = verdicts.entry(cx.text(&name).to_string()).or_insert(true);
-            *entry &= client;
+            let key = (scope_of(cx, node).join("::"), cx.text(&name).to_string());
+            let fields = out.entry(key).or_default();
+            let mut walk = body.walk();
+            for field in body.named_children(&mut walk) {
+                if field.kind() != "field_declaration" {
+                    continue;
+                }
+                let (Some(field_name), Some(ty)) = (
+                    field.child_by_field_name("name"),
+                    field.child_by_field_name("type"),
+                ) else {
+                    continue;
+                };
+                let proof = Proof {
+                    cx,
+                    bindings,
+                    function: field,
+                    shadows: BTreeSet::new(),
+                    client_fields: &empty,
+                };
+                fields.insert(cx.text(&field_name).to_string(), proof.is_client_type(ty));
+            }
         }
         let mut walk = node.walk();
         stack.extend(node.named_children(&mut walk));
     }
-    verdicts
-        .into_iter()
-        .filter_map(|(name, client)| client.then_some(name))
-        .collect()
+    out
 }
 
 /// Client calls made in `function` (nested functions excluded).
@@ -321,7 +423,7 @@ pub(super) fn extract_function_calls(
     function: TsNode<'_>,
     symbol: &str,
     bindings: &Bindings,
-    client_fields: &BTreeSet<String>,
+    client_fields: &ClientFields,
     out: &mut Extraction,
 ) {
     let proof = Proof {

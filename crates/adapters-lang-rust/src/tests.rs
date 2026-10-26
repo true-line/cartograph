@@ -1357,6 +1357,10 @@ pub fn app() -> Router {
 // a proven Client receiver become fetch sites; literal URLs as written,
 // anything else computed.
 fn reqwest_sites(lib: &str) -> Vec<(String, String, String)> {
+    reqwest_sites_with(lib, &[])
+}
+
+fn reqwest_sites_with(lib: &str, extra: &[(&str, &str)]) -> Vec<(String, String, String)> {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -1364,6 +1368,9 @@ fn reqwest_sites(lib: &str) -> Vec<(String, String, String)> {
         "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
     );
     write(dir.path(), "src/lib.rs", lib);
+    for (path, text) in extra {
+        write(dir.path(), path, text);
+    }
     let x = extract_dir(dir.path(), &id()).unwrap();
     x.fetch_sites
         .iter()
@@ -1442,9 +1449,51 @@ pub fn rebound(other: Client) {
 pub fn untyped(client: Thing) { client.get("/untyped"); }
 pub fn map(m: std::collections::HashMap<u8, u8>) { m.get(&1); }
 pub fn shadowed_get(get: fn(&str)) { get("/shadowed"); }
-impl A { pub fn mixed(&self) { self.http.get("/mixed-field"); } }
+impl B { pub fn lookalike_field(&self) { self.http.get("/b-field"); } }
 pub fn closure() { let f = |client: Client| client.get("/closure"); }
 "#,
     );
     assert!(sites.is_empty(), "{sites:?}");
+}
+
+#[test]
+fn reqwest_proof_rejects_local_wrappers_and_foreign_impl_fields() {
+    // AC-0367 (#1093 review): a generic parameter named `Client` shadows the
+    // import, a local `Arc` is not std's, and `self.http`
+    // in `impl other::FakeApi` is not proven by another struct's Client
+    // field; std::sync::Arc and the struct's own impl stay proven.
+    let sites = reqwest_sites_with(
+        r#"
+mod other;
+mod local {
+    use reqwest::Client;
+    pub struct Arc<T>(T);
+    impl<T> Arc<T> { pub fn get(&self, _: &str) {} }
+    pub fn run(client: Arc<Client>) { client.get("/local-arc"); }
+}
+mod generic {
+    use reqwest::Client;
+    pub struct S;
+    pub fn f<Client: Fake>(client: &Client) { client.get("/generic"); }
+    impl<Client: Fake> S { pub fn g(c: Client) { c.get("/generic-impl"); } }
+}
+pub struct Carrier { pub http: reqwest::Client }
+impl other::FakeApi { pub fn f(&self) { self.http.get("/not-http"); } }
+impl Carrier { pub fn real(&self) { self.http.get("/carrier"); } }
+pub fn std_arc(client: std::sync::Arc<reqwest::Client>) { client.get("/std-arc"); }
+"#,
+        &[(
+            "src/other.rs",
+            "pub struct Fake; impl Fake { pub fn get(&self, _: &str) {} }
+pub struct FakeApi { pub http: Fake }
+",
+        )],
+    );
+    assert_eq!(
+        sites,
+        vec![
+            site("GET", "lit /carrier", "Carrier.real"),
+            site("GET", "lit /std-arc", "std_arc"),
+        ]
+    );
 }
