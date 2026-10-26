@@ -38,6 +38,7 @@ import { useSpecialistActivityStore } from './specialistActivityStore';
 import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
 import { SavedResultNotices } from './components/SavedResultNotices';
 import { useSavedResultNoticeStore } from './savedResultNoticeStore';
+import { AgentChatsSurface } from './components/AgentChatsSurface';
 import { readQuickDispatchFallback, writeQuickDispatchFallback } from './quickDispatchPreference';
 import type { InvestigationChanged } from './investigationTypes';
 import type { Job, PreflightProgress, SpecArtifact, SpecAssertion, SpecBundle } from './store';
@@ -214,9 +215,13 @@ export default function App() {
   }, [refresh]);
 
   useEffect(() => {
-    if (view === 'investigations') {
-      useSpecialistActivityStore.getState().setVisible(true);
-      void useInvestigationStore.getState().loadCatalog();
+    if (view === 'investigations' || view === 'agent-chats') {
+      if (view === 'investigations') {
+        useSpecialistActivityStore.getState().setVisible(true);
+        void useInvestigationStore.getState().loadCatalog();
+      } else if (useInvestigationStore.getState().selectedId) {
+        void useInvestigationStore.getState().refreshSelected();
+      }
       void useInvestigationStore.getState().loadHistory();
     }
     return () => useSpecialistActivityStore.getState().setVisible(false);
@@ -269,7 +274,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (view !== 'investigations') return;
+    if (view !== 'investigations' && view !== 'agent-chats') return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
@@ -560,6 +565,11 @@ export default function App() {
         return <InvestigationsSurface state={investigations} activity={specialistActivity}
           onRefreshActivity={() => void useSpecialistActivityStore.getState().refresh()}
           anchors={atlas.nodes} canStart={backend === 'up'} />;
+      case 'agent-chats':
+        return <AgentChatsSurface state={investigations} onOpenResult={(id) => {
+          navigate('investigations');
+          void useInvestigationStore.getState().open(id);
+        }} />;
       case 'atlas':
         return (
           <Suspense fallback={<section className="atlas-card">Loading Atlas graph…</section>}>

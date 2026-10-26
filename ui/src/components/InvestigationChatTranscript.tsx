@@ -6,15 +6,21 @@ export interface InvestigationChatTranscriptProps {
   status: InvestigationChatStatus;
   error: string | null;
   onRefresh: () => void;
+  onOpenResult?: (investigationId: string) => void;
+  onOpenInvestigation?: () => void;
 }
 
 /** Renders only the persisted user question and typed result reference. */
-export function InvestigationChatTranscript({ chat, status, error, onRefresh }: InvestigationChatTranscriptProps) {
+export function InvestigationChatTranscript({ chat, status, error, onRefresh, onOpenResult, onOpenInvestigation }: InvestigationChatTranscriptProps) {
   return <section className="investigation-section" aria-label="Saved investigation chat">
     <h3>Conversation</h3>
     {status === 'loading' && <p role="status">Loading saved conversation…</p>}
     {status === 'preview' && <p className="muted">Saved conversations are available when Cartograph is running in the desktop app.</p>}
-    {status === 'legacy' && <p className="muted">No saved conversation is available for this older investigation. Its findings remain available below.</p>}
+    {status === 'legacy' && <div className="muted">
+      <p>No saved conversation is available for this older investigation.</p>
+      {onOpenInvestigation && <button type="button" className="secondary-button"
+        onClick={onOpenInvestigation}>Open this investigation to inspect its findings</button>}
+    </div>}
     {status === 'error' && <div role="alert" className="error-text">
       <p>{error ?? 'The saved conversation could not be loaded.'}</p>
       <button type="button" className="secondary-button" onClick={onRefresh}>Refresh conversation</button>
@@ -31,7 +37,10 @@ export function InvestigationChatTranscript({ chat, status, error, onRefresh }: 
           : <li key={entry.id} aria-label="Specialist result reference">
             <strong>Specialist result</strong>
             <p>Saved result <code>{entry.message.result_id}</code></p>
-            <a href="#investigation-findings">View admitted findings and citations</a>
+            <a href="#investigation-findings" onClick={onOpenResult ? (event) => {
+              event.preventDefault();
+              onOpenResult(chat.task_id);
+            } : undefined}>{onOpenResult ? 'Open this task’s findings and citations' : 'View admitted findings and citations'}</a>
           </li>)}
       </ol>
     </>}

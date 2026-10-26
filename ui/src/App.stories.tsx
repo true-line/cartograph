@@ -1311,6 +1311,46 @@ export const ShellNavigation: Story = {
   },
 };
 
+export const AgentChatsDestinationPreservesInvestigationDraft: Story = {
+  // AC-0388: the forum destination is a read-only saved-task surface; it must
+  // not dispatch work or replace the existing composer/retry request.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const initial = useInvestigationStore.getState();
+    const composer = { ...initial.composer, specialistId: 'evidence-auditor@3' as const,
+      question: 'Keep this investigation draft.' };
+    const pendingStart = { schema_version: 1 as const, request_nonce: 'preserved-agent-chat-nonce',
+      specialist_id: 'domain-analyst@3' as const, question: 'Keep this exact retry request.',
+      scope: { type: 'all' as const }, provider_mode: 'local' as const, limit_profile: 'investigation-v1' };
+    useInvestigationStore.setState({ composer, pendingStart });
+    await waitFor(() => expect(canvas.getByText('core v0.0.1')).toBeInTheDocument());
+    await userEvent.click(canvas.getByRole('button', { name: 'Agent Chats' }));
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Agent Chats' })).toBeVisible());
+    await expect(canvas.getByText('No saved tasks loaded.')).toBeVisible();
+    await expect(useInvestigationStore.getState().composer).toEqual(composer);
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(pendingStart);
+    await expect(investigationRequests).toHaveLength(0);
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Command palette' }));
+    const palette = within(canvas.getByRole('dialog', { name: 'Command palette' }));
+    const chats = palette.getByRole('option', { name: /^Agent Chats/ });
+    await expect(chats.querySelector('kbd')).toBeNull();
+    await userEvent.click(chats);
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Agent Chats' })).toBeVisible());
+    await expect(useInvestigationStore.getState().composer).toEqual(composer);
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(pendingStart);
+    await expect(investigationRequests).toHaveLength(0);
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Command palette' }));
+    const returnPalette = within(canvas.getByRole('dialog', { name: 'Command palette' }));
+    await userEvent.click(returnPalette.getByRole('option', { name: /^Investigations/ }));
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Investigations' })).toBeVisible());
+    await expect(useInvestigationStore.getState().composer).toEqual(composer);
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(pendingStart);
+    await expect(investigationRequests).toHaveLength(0);
+  },
+};
+
 export const EvidenceJumpToSource: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);

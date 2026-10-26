@@ -27,6 +27,7 @@ const ORDER = [
   'prov',
   'jobs',
   'investigations',
+  'agent-chats',
   'settings',
   'quick-investigation',
 ];

@@ -28,11 +28,12 @@ export const TocCoversEverySurfaceOffline: Story = {
       'Gaps & Drift register',
       'Provenance & Eval',
       'Jobs',
+      'Agent Chats',
       'Settings',
     ]) {
       await expect(toc.getByRole('button', { name: title })).toBeInTheDocument();
     }
-    await expect(HELP_TOPICS).toHaveLength(12);
+    await expect(HELP_TOPICS).toHaveLength(13);
 
     // The active topic renders as structured content, not raw markdown.
     await expect(
@@ -61,5 +62,6 @@ export const ContextualTopicsResolvePerView: Story = {
     await expect(topicForView('connect')).toBe('ingest');
     await expect(topicForView('preflight')).toBe('ingest');
     await expect(topicForView('help')).toBe('concepts');
+    await expect(topicForView('agent-chats')).toBe('agent-chats');
   },
 };
