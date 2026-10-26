@@ -10,7 +10,7 @@ import { useInvestigationStore, type InvestigationState } from '../investigation
 import { useSpecialistActivityStore } from '../specialistActivityStore';
 import backendQualified from '../fixtures/investigation-coverage-backend.json';
 import { qualifiedCatalog, qualifiedDetail, qualifiedResult, inspectionAssessment, inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from '../investigationFixtures';
-import type { InvestigationChat, InvestigationDetail, InvestigationResult } from '../investigationTypes';
+import type { InvestigationChat, InvestigationDetail, InvestigationResult, InvestigationSpecialist, SpecialistId } from '../investigationTypes';
 
 const state = (overrides: Partial<InvestigationState> = {}): InvestigationState => ({
   ...useInvestigationStore.getInitialState(), catalog: investigationCatalog, history: [investigationDetail()],
@@ -40,6 +40,25 @@ let openedActivityDetailReads: string[] = [];
 let openedActivityResultReads: string[] = [];
 let openedActivityChatReads: string[] = [];
 let openedActivityCitationReads: string[] = [];
+
+const productionSpecialistIds = [
+  'domain-analyst@3', 'evidence-auditor@3', 'domain-analyst@4', 'evidence-auditor@4',
+  'domain-analyst@5', 'evidence-auditor@5', 'domain-analyst@6', 'evidence-auditor@6',
+  'domain-analyst@7', 'evidence-auditor@7', 'domain-analyst@10', 'evidence-auditor@10',
+  'spec-writer@1', 'gap-triager@1',
+] as const satisfies readonly SpecialistId[];
+
+const productionRosterCatalog = {
+  ...investigationCatalog,
+  specialists: productionSpecialistIds.map((id): InvestigationSpecialist => {
+    const [family, version] = id.split('@');
+    const name = family === 'domain-analyst' ? 'Domain analyst' : family === 'evidence-auditor' ? 'Evidence auditor' :
+      family === 'spec-writer' ? 'Spec writer' : 'Gap triager';
+    return { id, name, version: Number(version), prompt_fingerprint: `fixture:${id}`,
+      purpose: 'Production roster entry for the complete empty-activity observation story.',
+      operations: ['query_context', 'read_evidence', 'finish'], tier: 'Agentic', confidence_tier: 'InferredWeak' };
+  }),
+};
 
 export const ScopedSpecialistQuestion: Story = {
   // AC-0180/0190: exact host specialist, chosen graph scope and provider form the request.
@@ -212,6 +231,8 @@ export const SpecialistTaskActivity: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const activityElement = canvas.getByRole('region', { name: 'Active specialist tasks' });
+    const activityPanel = within(activityElement);
     await canvas.findByText(/Running/);
     await canvas.findByText(/Awaiting cloud consent/);
     const domain = canvas.getByRole('heading', { name: /domain-analyst@3/ }).closest('section');
@@ -224,21 +245,54 @@ export const SpecialistTaskActivity: Story = {
     await expect(auditor).toHaveTextContent('Awaiting cloud consent');
     await expect(auditor).toHaveTextContent('Cancellation requested');
     await expect(auditor).toHaveTextContent('Saved provider: cloud / saved-cloud-provider · saved-cloud-model');
-    await expect(canvas.findByText(/active task list is incomplete/i)).resolves.toBeVisible();
+    await expect(activityPanel.findByText(/active task list is incomplete/i)).resolves.toBeVisible();
+    await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
     expect(useInvestigationStore.getState().history).toEqual([]);
     expect(useInvestigationStore.getState().selectedId).toBeNull();
 
     const tasks = useSpecialistActivityStore.getState().tasks;
     useSpecialistActivityStore.setState({ status: 'ready', tasks: [], error: null, refreshing: true });
-    await expect(within(domain!).findByText('Checking for active tasks…')).resolves.toBeVisible();
-    expect(canvas.queryByText('No active tasks')).toBeNull();
+    await expect(activityPanel.findByText('Checking for active tasks…')).resolves.toBeVisible();
+    expect(activityPanel.queryByText('No active tasks')).toBeNull();
+    expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(0);
     useSpecialistActivityStore.setState({ status: 'ready', tasks, error: null, refreshing: true });
     await waitFor(() => {
       const refreshedDomain = canvas.getByRole('heading', { name: /domain-analyst@3/ }).closest('section');
       expect(refreshedDomain).not.toBeNull();
       expect(refreshedDomain).toHaveTextContent('Running');
-      expect(refreshedDomain).toHaveTextContent(/activity incomplete · refreshing/i);
+      expect(refreshedDomain).not.toHaveTextContent(/refreshing/i);
     });
+    await expect(activityPanel.getByText('Activity incomplete · refreshing; last observed matching tasks are shown.')).toBeVisible();
+    await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
+    await expect(activityPanel.getAllByRole('button', { name: /Open investigation:/ })).toHaveLength(2);
+
+    useSpecialistActivityStore.setState({ status: 'loading', tasks, error: null, refreshing: true });
+    await expect(activityPanel.findByText('Checking activity…')).resolves.toBeVisible();
+    await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
+    expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(0);
+    useSpecialistActivityStore.setState({ status: 'preview', tasks, error: null, refreshing: false });
+    await expect(activityPanel.findByText('Activity shown in desktop app')).resolves.toBeVisible();
+    await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
+    expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(0);
+    useSpecialistActivityStore.setState({ status: 'error', tasks, error: 'refresh failed', refreshing: false });
+    await expect(activityPanel.findByText('Activity unknown')).resolves.toBeVisible();
+    await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
+    expect(activityPanel.queryByRole('button', { name: /Open investigation:/ })).toBeNull();
+    expect(activityPanel.queryByText('No active tasks')).toBeNull();
+  },
+};
+
+export const CompleteEmptyProductionRoster: Story = {
+  args: { state: state({ catalog: productionRosterCatalog }) },
+  render: (args) => <InvestigationsSurface {...args} activity={{ status: 'ready', tasks: [], error: null, refreshing: false }} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const activityElement = canvas.getByRole('region', { name: 'Active specialist tasks' });
+    const activityPanel = within(activityElement);
+    await expect(productionRosterCatalog.specialists).toHaveLength(14);
+    await expect(activityPanel.getAllByText('No active tasks')).toHaveLength(1);
+    await expect(activityElement.querySelectorAll('.specialist-activity-group')).toHaveLength(0);
+    await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
   },
 };
 
