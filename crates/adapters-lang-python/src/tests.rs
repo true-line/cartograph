@@ -4315,6 +4315,56 @@ def open_view():
             .get("blocking_hooks")
             .is_none()
     );
+
+    // A hook nested in a factory is cited by its own qualified Symbol, never
+    // by a top-level function of the same name.
+    let factory = br#"
+from flask import Flask, abort, jsonify
+
+def gate():
+    return None
+
+def create_app():
+    app = Flask(__name__)
+
+    @app.before_request
+    def gate():
+        abort(503)
+
+    @app.route("/open")
+    def open_view():
+        return jsonify(ok=True)
+
+    return app
+"#;
+    let extraction = extract_source(factory, "app.py", &id()).unwrap();
+    let open = auth_at(&extraction, "/open");
+    let text = std::str::from_utf8(factory).unwrap();
+    let hooks = open["blocking_hooks"].as_array().unwrap();
+    assert_eq!(hooks.len(), 1, "{hooks:?}");
+    assert_eq!(
+        hooks[0]["hook"],
+        crate::symbol_id(id().repo, "app.py", "create_app.gate")
+    );
+    let evidence = &hooks[0]["evidence"];
+    let span = evidence["byte_start"].as_u64().unwrap() as usize
+        ..evidence["byte_end"].as_u64().unwrap() as usize;
+    assert_eq!(&text[span], "@app.before_request");
+    assert!(open.get("blocking_hooks_omitted").is_none());
+
+    // Past the evidence bound the rest are counted, not dropped silently.
+    let mut many =
+        String::from("from flask import Flask, abort, jsonify\n\napp = Flask(__name__)\n\n");
+    for index in 0..66 {
+        many.push_str(&format!(
+            "@app.before_request\ndef gate_{index}():\n    abort(503)\n\n"
+        ));
+    }
+    many.push_str("@app.route(\"/open\")\ndef open_view():\n    return jsonify(ok=True)\n");
+    let extraction = extract_source(many.as_bytes(), "app.py", &id()).unwrap();
+    let open = auth_at(&extraction, "/open");
+    assert_eq!(open["blocking_hooks"].as_array().unwrap().len(), 64);
+    assert_eq!(open["blocking_hooks_omitted"], 2);
 }
 
 #[test]
@@ -4446,6 +4496,10 @@ def open_view():
         (
             "hook returns the callee's value",
             "def make():\n    return 'stop'\n\n@app.before_request\ndef tag():\n    return make()\n",
+        ),
+        (
+            "generator hook",
+            "def token():\n    return 'denied'\n\n@app.before_request\ndef tag():\n    yield token()\n",
         ),
     ] {
         let source = format!(

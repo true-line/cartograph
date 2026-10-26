@@ -16,14 +16,16 @@
 //!   no `raise`, and no `abort` call, and every repository function it
 //!   calls is itself non-blocking (followed at most four deep; deeper or
 //!   a cycle is blocking). A called function's own `return` of a value
-//!   does not block: only the hook's return value ends the request. Calls that do not resolve to a repository
+//!   does not block: only the hook's return value ends the request, and a
+//!   hook that `yield`s returns a generator, which is a value. Calls that do not resolve to a repository
 //!   function are assumed not to abort; that assumption is recorded.
 //! - `unknown`: anything else, with sorted reasons and no
 //!   `authenticated` key: an unclassified or not-classified decorator, a
 //!   hook that may block, or an unknown `wsgi_app` middleware. A hook that
-//!   may block is listed in `blocking_hooks` by its symbol (`null` when the
-//!   registered argument does not resolve) and its registration span: the
-//!   decorator, or the registering call.
+//!   may block is listed in `blocking_hooks` by its recovered Symbol
+//!   (`null` when the registered argument does not resolve to exactly one)
+//!   and its registration span: the decorator, or the registering call.
+//!   Past the evidence bound, `blocking_hooks_omitted` counts the rest.
 //!
 //! Only decorators below every route decorator wrap the registered view.
 //! One above every route decorator is applied after registration and never
@@ -99,6 +101,8 @@ pub(crate) struct HandlerAuthFacts {
 #[derive(Debug, Clone)]
 pub(crate) struct FnEffects {
     pub key: FnKey,
+    /// The recovered Symbol, `None` once two functions share `key`.
+    pub symbol: Option<String>,
     pub blocks: bool,
     pub returns_value: bool,
     pub calls: Vec<FnKey>,
@@ -108,8 +112,13 @@ pub(crate) struct FnEffects {
 /// One `before_request` / `before_app_request` registration.
 #[derive(Debug, Clone)]
 pub(crate) enum HookFact {
-    /// The hook is this repository function, registered at `evidence`.
-    Resolved { key: FnKey, evidence: EvidenceRef },
+    /// The hook is this repository function, registered at `evidence`;
+    /// `symbol` is the decorated function's own Symbol when known.
+    Resolved {
+        key: FnKey,
+        symbol: Option<String>,
+        evidence: EvidenceRef,
+    },
     /// Registered at `evidence` by a call whose argument does not
     /// resolve: blocking.
     Unresolved { evidence: EvidenceRef },
@@ -379,7 +388,12 @@ fn handler_facts(
 }
 
 /// What `function` proves about blocking a request, by its own body.
-fn fn_effects(cx: &FileCx<'_>, function: TsNode<'_>, resolver: &Resolver<'_>) -> Option<FnEffects> {
+fn fn_effects(
+    cx: &FileCx<'_>,
+    function: TsNode<'_>,
+    symbol: &str,
+    resolver: &Resolver<'_>,
+) -> Option<FnEffects> {
     let name = cx.text(&function.child_by_field_name("name")?).to_string();
     let body = function.child_by_field_name("body")?;
     let bound = handler_bindings(cx, function, body);
@@ -406,6 +420,8 @@ fn fn_effects(cx: &FileCx<'_>, function: TsNode<'_>, resolver: &Resolver<'_>) ->
             }
         }
         "raise_statement" => blocks = true,
+        // A generator function returns a generator object, never `None`.
+        "yield" => returns_value = true,
         "call" => {
             let Some(callee) = node.child_by_field_name("function") else {
                 return;
@@ -427,6 +443,7 @@ fn fn_effects(cx: &FileCx<'_>, function: TsNode<'_>, resolver: &Resolver<'_>) ->
     });
     Some(FnEffects {
         key: (cx.path.to_string(), name),
+        symbol: Some(symbol.to_string()),
         blocks,
         returns_value,
         calls: calls.into_iter().collect(),
@@ -559,7 +576,7 @@ pub(crate) fn collect(
     };
     for (function, symbol) in functions {
         if top_level(function, symbol)
-            && let Some(effects) = fn_effects(cx, *function, resolver)
+            && let Some(effects) = fn_effects(cx, *function, symbol, resolver)
         {
             out.fn_effects.push(effects);
         }
@@ -591,10 +608,11 @@ pub(crate) fn collect(
             let key = (cx.path.to_string(), cx.text(&name).to_string());
             out.hooks.push(HookFact::Resolved {
                 key,
+                symbol: Some(handler.clone()),
                 evidence: cx.evidence(&decorator),
             });
             if !top_level(function, handler)
-                && let Some(effects) = fn_effects(cx, *function, resolver)
+                && let Some(effects) = fn_effects(cx, *function, handler, resolver)
             {
                 out.fn_effects.push(effects);
             }
@@ -623,7 +641,11 @@ pub(crate) fn collect(
                 .map(unparenthesize);
             let evidence = cx.evidence(&node);
             match argument.and_then(|argument| resolver.target(cx, argument, &BTreeSet::new())) {
-                Some(key) => out.hooks.push(HookFact::Resolved { key, evidence }),
+                Some(key) => out.hooks.push(HookFact::Resolved {
+                    key,
+                    symbol: None,
+                    evidence,
+                }),
                 None => out.hooks.push(HookFact::Unresolved { evidence }),
             }
         }
@@ -738,6 +760,9 @@ pub(crate) fn resolve(
         match effects.entry(found.key.clone()) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let merged = entry.get_mut();
+                if merged.symbol != found.symbol {
+                    merged.symbol = None;
+                }
                 merged.blocks |= found.blocks;
                 merged.returns_value |= found.returns_value;
                 merged.calls.extend(found.calls);
@@ -763,13 +788,23 @@ pub(crate) fn resolve(
     let mut blocking_hooks = Vec::new();
     for hook in &hooks {
         match hook {
-            HookFact::Resolved { key, evidence } => {
-                if let Some(found) = lookup_effects(&effects, key) {
+            HookFact::Resolved {
+                key,
+                symbol,
+                evidence,
+            } => {
+                let found = lookup_effects(&effects, key);
+                if let Some(found) = found {
                     hook_evidence.push(found.evidence.clone());
                 }
                 if !non_blocking(key, &effects, &files, &mut HashSet::new(), 0) {
                     repo_reasons.insert("request_hook_may_block".to_string());
-                    blocking_hooks.push((Some(symbol_id(repo, &key.0, &key.1)), evidence.clone()));
+                    // Never a name built from the key: a nested hook's
+                    // Symbol is qualified, and a shared key names no one.
+                    let symbol = symbol
+                        .clone()
+                        .or_else(|| found.and_then(|found| found.symbol.clone()));
+                    blocking_hooks.push((symbol, evidence.clone()));
                 }
             }
             HookFact::Unresolved { evidence } => {
@@ -781,6 +816,7 @@ pub(crate) fn resolve(
     blocking_hooks
         .sort_by(|a, b| (&a.1.path, a.1.byte_start, &a.0).cmp(&(&b.1.path, b.1.byte_start, &b.0)));
     blocking_hooks.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    let omitted_hooks = blocking_hooks.len().saturating_sub(MAX_EVIDENCE);
     blocking_hooks.truncate(MAX_EVIDENCE);
     let blocking_hooks = blocking_hooks
         .into_iter()
@@ -884,6 +920,9 @@ pub(crate) fn resolve(
             let mut value = serde_json::json!({ "state": "unknown", "reasons": reasons });
             if !blocking_hooks.is_empty() {
                 value["blocking_hooks"] = serde_json::json!(blocking_hooks);
+            }
+            if omitted_hooks > 0 {
+                value["blocking_hooks_omitted"] = serde_json::json!(omitted_hooks);
             }
             value
         };
