@@ -38,7 +38,8 @@
 //! nor any function or class scope enclosing its use rebinds it.
 //! A framework guard reassigned on its module anywhere in the repository
 //! (`flask_login.login_required = …`, or `setattr` on its module, where a
-//! name that is not a literal string may be any of that module's guards) is
+//! name that is not a plain literal string, or holds an escape, may be any
+//! of that module's guards) is
 //! never a guard: the reason is `framework_guard_reassigned:<name>`.
 //! `ProxyFix` is known non-auth only when it wraps the assigned attribute
 //! itself (`app.wsgi_app = ProxyFix(app.wsgi_app, …)`); the assignment is
@@ -516,7 +517,8 @@ fn setattr_guards(
     let Some(module) = import_dotted(cx, *object, bindings) else {
         return Vec::new();
     };
-    match crate::literal_string(cx, *name) {
+    // An escape is not decoded here, so it may spell any member name.
+    match crate::literal_string(cx, *name).filter(|member| !member.contains('\\')) {
         Some(member) => framework_guard(&format!("{module}.{member}"))
             .into_iter()
             .collect(),

@@ -4572,6 +4572,10 @@ def token():
             "framework_guard_reassigned:flask_login.login_required",
         ),
         (
+            "setattr(flask_login, \"login\\x5frequired\", lambda f: f)",
+            "framework_guard_reassigned:flask_login.login_required",
+        ),
+        (
             "setattr(flask_login, NAME, lambda f: f)",
             "framework_guard_reassigned:flask_login.login_required",
         ),
