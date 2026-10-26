@@ -8,7 +8,8 @@ those records are available. Older tasks without a persisted conversation
 remain identifiable and can still be opened in Investigations.
 
 Use the result link to open that exact task in Investigations, where its saved
-findings and citations are displayed. Opening conversations does not start a
-task or change the composer or an uncertain start request. This surface shows
-persisted task conversations; it does not provide freeform assistant messages,
+findings and citations are displayed. Viewing a transcript here keeps its
+saved-result notice unread; opening the matching findings in Investigations
+consumes it. Opening conversations does not start a task or change the composer
+or an uncertain start request. This surface shows persisted task conversations; it does not provide freeform assistant messages,
 streaming, or multiple conversation panes.
