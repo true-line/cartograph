@@ -27,6 +27,7 @@ enum Mode {
     MetadataFinish,
     MetadataReplay,
     MetadataReplayCorrection,
+    MetadataReplayCancelled,
     PriorFindingReplay,
     PriorFindingCorrection,
     PriorFindingCorrectionToolProposal,
@@ -144,12 +145,15 @@ impl LlmProvider for Scripted {
                     "labels":[], "max_facts":12, "max_bytes":16384, "cursor":null } })
             } else {
                 json!({ "type": "query_context", "query": { "scope": {"type":"all"}, "kind":"node",
-                    "labels":if matches!(self.mode, Mode::MetadataReplay | Mode::MetadataReplayCorrection) { json!(["Gap"]) } else { json!(["BusinessRule"]) }, "max_facts":1, "max_bytes":32768, "cursor":null } })
+                    "labels":if matches!(self.mode, Mode::MetadataReplay | Mode::MetadataReplayCorrection | Mode::MetadataReplayCancelled) { json!(["Gap"]) } else { json!(["BusinessRule"]) }, "max_facts":1, "max_bytes":32768, "cursor":null } })
             }
         } else if (call == 1
             && matches!(
                 self.mode,
-                Mode::MetadataFinish | Mode::MetadataReplay | Mode::MetadataReplayCorrection
+                Mode::MetadataFinish
+                    | Mode::MetadataReplay
+                    | Mode::MetadataReplayCorrection
+                    | Mode::MetadataReplayCancelled
             ))
             || (call == 2 && matches!(self.mode, Mode::MetadataReplay))
         {
@@ -266,7 +270,10 @@ impl LlmProvider for Scripted {
                 "knowledge_completeness":"partial", "limitations":["This scoped result establishes no complete business policy."] })
         };
         if (matches!(self.mode, Mode::MetadataReplay)
-            || (matches!(self.mode, Mode::MetadataReplayCorrection) && call == 1))
+            || (matches!(
+                self.mode,
+                Mode::MetadataReplayCorrection | Mode::MetadataReplayCancelled
+            ) && call == 1))
             && action["type"] == "finish"
         {
             action["findings"][0]["statement"] = json!(refusal_diagnostics::METADATA);
@@ -278,7 +285,8 @@ impl LlmProvider for Scripted {
                 prompt["context_id"].clone()
             };
         }
-        if (matches!(self.mode, Mode::CancelFinish) && call == 2)
+        if (matches!(self.mode, Mode::MetadataReplayCancelled) && call == 1)
+            || (matches!(self.mode, Mode::CancelFinish) && call == 2)
             || (matches!(self.mode, Mode::CancelTool | Mode::CompletionCancelRefused) && call == 1)
         {
             self.cancel.lock().unwrap().as_ref().unwrap()();

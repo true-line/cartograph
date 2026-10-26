@@ -776,18 +776,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                         if completion_request.is_none()
                             && source_replay_correction_for.is_none() =>
                     {
-                        self.transition(InvestigationTransition::SourceReplayRefused {
-                            step_id: step_id.clone(),
-                            reported_input_tokens: completion
-                                .usage
-                                .as_ref()
-                                .and_then(|usage| usage.input_tokens),
-                            reported_output_tokens: completion
-                                .usage
-                                .as_ref()
-                                .and_then(|usage| usage.output_tokens),
-                            active_milliseconds: self.clock.active_milliseconds(),
-                        })?;
+                        self.admit_source_replay_refusal(&response)?;
                         source_replay_correction_for = Some(step_id);
                         if terminal(self.detail.summary.status) {
                             return Ok(());
@@ -1055,6 +1044,38 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             self.clear_pending()?;
         }
         outcome
+    }
+
+    fn admit_source_replay_refusal(
+        &mut self,
+        response: &InvestigationResponseMeta,
+    ) -> Result<(), Failure> {
+        for _ in 0..3 {
+            let updated = {
+                let mut jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
+                let current = jobs.investigation(self.id)?;
+                jobs.advance_investigation(
+                    self.execution,
+                    current.summary.revision,
+                    InvestigationTransition::SourceReplayRefused {
+                        step_id: response.step_id.clone(),
+                        reported_input_tokens: response.reported_input_tokens,
+                        reported_output_tokens: response.reported_output_tokens,
+                        active_milliseconds: response.active_milliseconds,
+                    },
+                )
+            };
+            match updated {
+                Ok(detail) => {
+                    self.detail = detail;
+                    super::emit_changed(self.app, &self.detail);
+                    return Ok(());
+                }
+                Err(InvestigationStoreError::Stale) => continue,
+                Err(_) => return Err(Failure::Stop(InvestigationStopReason::OutcomeUnknown)),
+            }
+        }
+        Err(Failure::Stop(InvestigationStopReason::OutcomeUnknown))
     }
 
     fn admit_refusal(
