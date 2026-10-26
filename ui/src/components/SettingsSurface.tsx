@@ -38,6 +38,7 @@ export interface SettingsSurfaceProps {
   onParallelismChange?: (setting: number) => void;
   quickDispatchFallbackEnabled?: boolean;
   onQuickDispatchFallbackChange?: (enabled: boolean) => void;
+  onOpenQuickDispatch: () => void;
 }
 
 /** "Ingest parallelism" (#236): Auto or a fixed worker count. Workers only
@@ -255,6 +256,7 @@ export function SettingsSurface({
   onParallelismChange,
   quickDispatchFallbackEnabled = true,
   onQuickDispatchFallbackChange,
+  onOpenQuickDispatch,
 }: SettingsSurfaceProps) {
   return (
     <section className="settings-surface" aria-label="Settings">
@@ -283,7 +285,8 @@ export function SettingsSurface({
         <input type="checkbox" checked={quickDispatchFallbackEnabled} onChange={(event) => onQuickDispatchFallbackChange?.(event.target.checked)} />
         <span>Enable Cmd+J fallback for quick investigation</span>
       </label>
-      <p className="muted">Cmd+Space always opens quick investigation. Cmd+J can be disabled here if another app uses it.</p>
+      <p className="muted">Cmd+Space works while Cartograph is focused and receives it; macOS may intercept it. Use this button if the shortcut is unavailable, or enable Cmd+J as a fallback.</p>
+      <button type="button" className="secondary-button" onClick={onOpenQuickDispatch}>Open quick investigation</button>
 
       <h3 className="settings-section-title">Recovery tiers</h3>
       <ul className="tier-cards">

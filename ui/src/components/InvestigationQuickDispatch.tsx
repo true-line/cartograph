@@ -6,10 +6,11 @@ const QUICK_IDS: SpecialistId[] = ['domain-analyst@3', 'evidence-auditor@3', 'do
 
 export interface InvestigationQuickDispatchProps {
   fallbackEnabled: boolean;
+  openRequest: number;
   onNavigate: (view: 'investigations') => void;
 }
 
-export function InvestigationQuickDispatch({ fallbackEnabled, onNavigate }: InvestigationQuickDispatchProps) {
+export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNavigate }: InvestigationQuickDispatchProps) {
   const state = useInvestigationStore();
   const [open, setOpen] = useState(false);
   const [question, setQuestion] = useState('');
@@ -17,6 +18,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, onNavigate }: Inve
   const [providerMode, setProviderMode] = useState<InvestigationProviderMode>('local');
   const [busy, setBusy] = useState(false);
   const previousFocus = useRef<HTMLElement | null>(null);
+  const handledOpenRequest = useRef(0);
   const catalogRequested = useRef(false);
   const dialogRef = useRef<HTMLElement>(null);
   const questionRef = useRef<HTMLTextAreaElement>(null);
@@ -29,29 +31,38 @@ export function InvestigationQuickDispatch({ fallbackEnabled, onNavigate }: Inve
   const scopeValid = composer.scopeType === 'all' || (composer.anchor.trim().length > 0 && Number.isInteger(composer.hops) && composer.hops >= 1 && composer.hops <= 3);
   const questionBytes = new TextEncoder().encode(question).length;
   const hasPendingStart = state.pendingStart !== null;
-  const locked = busy || state.starting || state.pendingStart !== null;
+  const inFlight = busy || state.starting;
+  const locked = inFlight || state.pendingStart !== null;
   const valid = supported && Boolean(provider?.available) && question.trim().length > 0 && questionBytes <= 2048 && scopeValid;
 
-  const close = useCallback(() => {
+  const openDialog = useCallback(() => {
+    if (open) return;
+    previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setOpen(true);
+  }, [open]);
+  const close = useCallback((accepted = false) => {
+    if (inFlight && !accepted) return;
     setOpen(false);
     catalogRequested.current = false;
     if (previousFocus.current?.isConnected) previousFocus.current.focus();
-  }, []);
+  }, [inFlight]);
+  useEffect(() => {
+    if (openRequest === handledOpenRequest.current) return;
+    handledOpenRequest.current = openRequest;
+    openDialog();
+  }, [openDialog, openRequest]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && open) { event.preventDefault(); close(); return; }
       if (event.altKey || event.ctrlKey || event.shiftKey || !event.metaKey) return;
       if (event.code === 'Space' || (event.key.toLowerCase() === 'j' && fallbackEnabled)) {
         event.preventDefault();
-        if (!open) {
-          previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-          setOpen(true);
-        }
+        openDialog();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [close, fallbackEnabled, open]);
+  }, [close, fallbackEnabled, open, openDialog]);
   useEffect(() => {
     if (!open) return;
     if (questionRef.current) questionRef.current.focus();
@@ -66,7 +77,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, onNavigate }: Inve
   const accepted = (id: string | null) => {
     if (id === null) return;
     onNavigate('investigations');
-    close();
+    close(true);
     setQuestion('');
   };
   const start = async () => {
@@ -92,7 +103,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, onNavigate }: Inve
 
   if (!open) return null;
   const pendingIsQuick = state.pendingStart && QUICK_IDS.includes(state.pendingStart.specialist_id);
-  return <div className="quick-dispatch-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !locked) close(); }}>
+  return <div className="quick-dispatch-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !inFlight) close(); }}>
     <section ref={dialogRef} className="quick-dispatch-dialog" role="dialog" aria-modal="true" aria-label="Quick investigation dispatch" onKeyDown={(event) => {
       if (event.key !== 'Tab') return;
       const items = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')];
@@ -102,7 +113,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, onNavigate }: Inve
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }}>
       <header><div><h2>Quick investigation</h2><p className="muted">Start a saved investigation with a supported specialist. Findings remain T3 / InferredWeak.</p></div>
-        <button type="button" className="secondary-button" onClick={close} aria-label="Close quick investigation">Close</button></header>
+        <button type="button" className="secondary-button" onClick={() => close()} disabled={inFlight} aria-label="Close quick investigation">Close</button></header>
       {state.catalogError && <p className="error-text" role="alert">Specialist catalog unavailable. Refresh in Investigations before starting.</p>}
       {state.startError && <p className="error-text" role="alert">{state.startError}</p>}
       {state.pendingStart ? <div>
@@ -124,7 +135,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, onNavigate }: Inve
         {questionBytes > 2048 && <p className="error-text">Question exceeds the existing 2,048-byte limit.</p>}
         {state.catalog && specialists.length === 0 && <p className="muted">No supported quick-dispatch specialists are available. Use the full Investigations composer.</p>}
         {composer.scopeType === 'neighborhood' && !scopeValid && <p role="alert" className="error-text">Choose a valid fact anchor and one to three hops in the full Investigations composer.</p>}
-        <footer><button type="button" className="secondary-button" onClick={close} disabled={locked}>Cancel</button>
+        <footer><button type="button" className="secondary-button" onClick={() => close()} disabled={inFlight}>Cancel</button>
           <button type="submit" disabled={!valid || locked || state.catalogLoading}>Start investigation</button></footer>
       </form>}
     </section>

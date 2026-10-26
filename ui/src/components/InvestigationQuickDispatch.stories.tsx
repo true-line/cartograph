@@ -7,12 +7,13 @@ import { InvestigationQuickDispatch } from './InvestigationQuickDispatch';
 
 let retriedNonce: string | undefined;
 let finishCatalogLoad: (() => void) | undefined;
+let finishStart: (() => void) | undefined;
 const pressMeta = (key: string, code: string) => fireEvent.keyDown(window, { key, code, metaKey: true, bubbles: true });
 
 const meta = {
   title: 'InvestigationQuickDispatch',
   component: InvestigationQuickDispatch,
-  args: { fallbackEnabled: true, onNavigate: fn() },
+  args: { fallbackEnabled: true, openRequest: 0, onNavigate: fn() },
   beforeEach: () => {
     useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: investigationCatalog,
       startError: null, pendingStart: null, starting: false, composer: { ...useInvestigationStore.getInitialState().composer,
@@ -117,6 +118,53 @@ export const DisabledFallbackDoesNotOpen: Story = {
     const canvas = within(canvasElement);
     pressMeta('j', 'KeyJ');
     await expect(canvas.queryByRole('dialog', { name: 'Quick investigation dispatch' })).not.toBeInTheDocument();
+  },
+};
+
+export const ExternalLaunchOpensWhenFallbackIsDisabled: Story = {
+  args: { fallbackEnabled: false, openRequest: 1 },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('dialog', { name: 'Quick investigation dispatch' })).toBeVisible();
+  },
+};
+
+export const CannotDismissWhileStartIsInFlightButCanCloseUnknownOutcome: Story = {
+  beforeEach: () => {
+    finishStart = undefined;
+    const initial = useInvestigationStore.getInitialState();
+    useInvestigationStore.setState({ ...initial, catalog: investigationCatalog }, true);
+    mockIPC((command) => {
+      if (command === 'start_investigation') return new Promise((resolve) => {
+        finishStart = () => resolve(null);
+      });
+      return null;
+    });
+    return () => { finishStart = undefined; clearMocks(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); };
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    pressMeta(' ', 'Space');
+    await userEvent.type(canvas.getByLabelText('Question'), 'Keep the start outcome recoverable.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    const dialog = canvas.getByRole('dialog', { name: 'Quick investigation dispatch' });
+    const close = canvas.getByRole('button', { name: 'Close quick investigation' });
+    await waitFor(() => expect(close).toBeDisabled());
+    // Once the store records an uncertain request, the dialog switches to its
+    // recovery view; Close stays disabled until the start call settles.
+    await expect(canvas.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape', code: 'Escape', bubbles: true });
+    const backdrop = canvasElement.querySelector('.quick-dispatch-backdrop');
+    if (!backdrop) throw new Error('Quick dispatch backdrop missing.');
+    fireEvent.mouseDown(backdrop);
+    await expect(dialog).toBeVisible();
+
+    finishStart?.();
+    await waitFor(() => expect(close).toBeEnabled());
+    await expect(useInvestigationStore.getState().pendingStart?.question).toBe('Keep the start outcome recoverable.');
+    await userEvent.click(close);
+    await expect(canvas.queryByRole('dialog', { name: 'Quick investigation dispatch' })).not.toBeInTheDocument();
+    await expect(useInvestigationStore.getState().pendingStart?.question).toBe('Keep the start outcome recoverable.');
   },
 };
 

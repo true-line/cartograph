@@ -2,6 +2,8 @@
 
 While Cartograph is focused and receives the shortcut, press **Cmd+Space** to
 open quick dispatch, or use **Cmd+J** when its fallback is enabled in Settings.
+macOS may intercept Cmd+Space; Settings always has an **Open quick
+investigation** button as a pointer-accessible entry to the same dialog.
 The dialog starts one of the host catalog's supported
 Domain Analyst or Evidence Auditor simple investigations. It uses the existing
 investigation coordinator, provider availability, saved history, and cloud

@@ -203,6 +203,7 @@ export default function App() {
   const [atlasLayer, setAtlasLayer] = useState('All layers');
   const [dropActive, setDropActive] = useState(false);
   const [quickDispatchFallbackEnabled, setQuickDispatchFallbackEnabled] = useState(readQuickDispatchFallback);
+  const [quickDispatchOpenRequest, setQuickDispatchOpenRequest] = useState(0);
 
   useEffect(() => {
     void refresh();
@@ -762,6 +763,7 @@ export default function App() {
             onParallelismChange={(setting) => void setIngestParallelism(setting)}
             quickDispatchFallbackEnabled={quickDispatchFallbackEnabled}
             onQuickDispatchFallbackChange={(enabled) => { setQuickDispatchFallbackEnabled(enabled); writeQuickDispatchFallback(enabled); }}
+            onOpenQuickDispatch={() => setQuickDispatchOpenRequest((request) => request + 1)}
           />
           <McpSettings available={backend === 'up'} />
           <SourceRetention sources={primarySource.sources} preview={primarySource.preview}
@@ -811,7 +813,7 @@ export default function App() {
         onClose={() => setPaletteOpen(false)}
         onNavigate={navigate}
       />
-      <InvestigationQuickDispatch fallbackEnabled={quickDispatchFallbackEnabled} onNavigate={navigate} />
+      <InvestigationQuickDispatch fallbackEnabled={quickDispatchFallbackEnabled} openRequest={quickDispatchOpenRequest} onNavigate={navigate} />
       <LegendPopover open={legendOpen} onClose={() => setLegendOpen(false)} />
       {selected && (
         <div className="evidence-area">
