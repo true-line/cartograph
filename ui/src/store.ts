@@ -483,6 +483,8 @@ export interface RegisterFinding {
  *  the spec register's own predicates — reused by every surface. */
 export interface FindingsSummary {
   gaps: number;
+  /** Subset of gaps the interpretation seam fills (#994); still counted in gaps. */
+  interpretation_backlog?: number;
   unsupported: number;
   no_evidence: number;
   drift: number;

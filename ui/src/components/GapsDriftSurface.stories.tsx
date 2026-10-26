@@ -145,7 +145,7 @@ export const ThreeLanesNeverConflate: Story = {
     // restatement (a 4th assertion) is filtered out, not double-counted.
     await expect(canvas.getByText('System gaps · 3')).toBeInTheDocument();
     // #164: each register term explains itself in place.
-    await expect(canvas.getByRole('button', { name: 'What is system gap?' })).toBeInTheDocument();
+    await expect(canvas.getAllByRole('button', { name: 'What is system gap?' })).toHaveLength(2);
     await expect(
       canvas.getByRole('button', { name: 'What is unsupported pattern?' }),
     ).toBeInTheDocument();
@@ -447,5 +447,112 @@ export const FailedBatchReviewKeepsProposalPending: Story = {
     await expect(await canvas.findByRole('alert')).toHaveTextContent('Review was not saved');
     await expect(proposals.getAllByRole('button', { name: 'Accept' })).toHaveLength(2);
     await expect(proposals.getAllByRole('button', { name: 'Accept' })[0]).toBeEnabled();
+  },
+};
+
+export const InterpretationBacklogIsSeparateFromSystemGaps: Story = {
+  // AC-0359 (#994): established interpretation-seam omissions render in their
+  // own lane while adapter omissions and unclassified fallbacks stay in
+  // System gaps, with nothing suppressed.
+  args: {
+    summary: {
+      gaps: 5,
+      interpretation_backlog: 2,
+      unsupported: 2,
+      no_evidence: 1,
+      drift: 1,
+      open_findings: 8,
+      graph_facts: 134,
+    },
+    gaps: [
+      {
+        id: 'node:gap:return-interp',
+        subject_id: 'gap:return-interp',
+        subject_kind: 'Gap',
+        summary: "Gap: The caller's interpretation of this local return or throw is unknown.",
+        provenance: gapProvenance('Deterministic'),
+        omission: {
+          class: 'unresolved_relationship',
+          seam: 'interpretation',
+          detail: "The caller's interpretation of this local return or throw is unknown.",
+        },
+      },
+      {
+        id: 'node:gap:rule-incomplete',
+        subject_id: 'gap:rule-incomplete',
+        subject_kind: 'Gap',
+        summary: 'Gap: Source-rule interpretation remains incomplete.',
+        provenance: gapProvenance('Deterministic'),
+        omission: {
+          class: 'unresolved_relationship',
+          seam: 'interpretation',
+          detail: 'Source-rule interpretation remains incomplete.',
+        },
+      },
+      {
+        id: 'node:gap:unclassified-reason',
+        subject_id: 'gap:unclassified-reason',
+        subject_kind: 'Gap',
+        summary: 'Gap: novel custom stop reason',
+        provenance: gapProvenance('Deterministic'),
+        omission: {
+          class: 'unresolved_relationship',
+          seam: 'interpretation',
+          detail: 'unclassified: novel custom stop reason',
+        },
+      },
+      {
+        id: 'node:gap:unresolved-call',
+        subject_id: 'gap:unresolved-call',
+        subject_kind: 'Gap',
+        summary: 'Gap: unresolved call target',
+        provenance: gapProvenance('Deterministic'),
+        omission: {
+          class: 'unresolved_relationship',
+          seam: 'adapter',
+          detail: 'unresolved call target',
+        },
+      },
+      {
+        id: 'node:gap:dynamic-dispatch',
+        subject_id: 'gap:dynamic-dispatch',
+        subject_kind: 'Gap',
+        summary: 'Gap: dynamic dispatch - needs type hierarchy',
+        provenance: gapProvenance('Deterministic'),
+        omission: {
+          class: 'unresolved_relationship',
+          seam: 'adapter',
+          detail: 'dynamic dispatch - needs type hierarchy',
+        },
+      },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByText(/3 for adapters and inputs, 2 interpretation backlog/),
+    ).toBeInTheDocument();
+    await expect(canvas.getByText('System gaps · 3')).toBeInTheDocument();
+    await expect(canvas.getByText('Interpretation backlog · 2')).toBeInTheDocument();
+
+    const systemLane = canvas.getByText('System gaps · 3').closest('.register-lane') as HTMLElement;
+    const backlogLane = canvas
+      .getByText('Interpretation backlog · 2')
+      .closest('.register-lane') as HTMLElement;
+    const systemRows = systemLane.nextElementSibling as HTMLElement;
+    const backlogRows = backlogLane.nextElementSibling as HTMLElement;
+
+    await expect(within(systemRows).getByText(/novel custom stop reason/)).toBeInTheDocument();
+    await expect(within(systemRows).getByText(/unresolved call target/)).toBeInTheDocument();
+    await expect(within(systemRows).getByText(/dynamic dispatch/)).toBeInTheDocument();
+    await expect(within(backlogRows).queryByText(/novel custom stop reason/)).not.toBeInTheDocument();
+    await expect(
+      within(backlogRows).getByText(
+        /The caller's interpretation of this local return or throw is unknown\./,
+      ),
+    ).toBeInTheDocument();
+    await expect(
+      within(backlogRows).getByText(/Source-rule interpretation remains incomplete\./),
+    ).toBeInTheDocument();
   },
 };

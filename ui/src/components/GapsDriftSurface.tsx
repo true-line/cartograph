@@ -4,6 +4,7 @@ import {
   classOmissionLabel,
   groupGapClasses,
   isEscalatable,
+  isInterpretationBacklog,
   nextTier,
   omissionLabel,
   type GapClass,
@@ -339,10 +340,14 @@ export function GapsDriftSurface({
       assertion.id.startsWith('node:') ||
       (assertion.id.startsWith('edge:') && !supportsListedNode(assertion)),
   );
+  const systemGaps = gapFindings.filter((assertion) => !isInterpretationBacklog(assertion));
+  const backlogGaps = gapFindings.filter((assertion) => isInterpretationBacklog(assertion));
   // At scale the lane triages by cause class, never row-by-row (#167).
   const flowGapSet = new Set(flowGapIds ?? []);
-  const gapClasses =
-    gapFindings.length > GROUP_THRESHOLD ? groupGapClasses(gapFindings, flowGapSet) : null;
+  const systemGapClasses =
+    systemGaps.length > GROUP_THRESHOLD ? groupGapClasses(systemGaps, flowGapSet) : null;
+  const backlogGapClasses =
+    backlogGaps.length > GROUP_THRESHOLD ? groupGapClasses(backlogGaps, flowGapSet) : null;
   const driftFindings = drift.filter((assertion) => assertion.id.startsWith('node:'));
   const unsupported = registerFindings.filter((finding) => finding.kind === 'unsupported');
   const noEvidence = registerFindings.filter((finding) => finding.kind === 'no-evidence');
@@ -356,8 +361,11 @@ export function GapsDriftSurface({
           <p className="muted">
             The honest slice the deterministic core could not confirm. Register complete ·{' '}
             <strong>{summary.open_findings} open findings</strong> —{' '}
-            <span className="lane-gap">{summary.gaps} gaps</span> ·{' '}
-            <span className="lane-unsupported">{summary.unsupported} unsupported</span> ·{' '}
+            <span className="lane-gap">{summary.gaps} gaps</span>
+            {typeof summary.interpretation_backlog === 'number' &&
+              summary.interpretation_backlog > 0 &&
+              ` (${summary.gaps - summary.interpretation_backlog} for adapters and inputs, ${summary.interpretation_backlog} interpretation backlog)`}{' '}
+            · <span className="lane-unsupported">{summary.unsupported} unsupported</span> ·{' '}
             <strong>{summary.no_evidence} no-evidence</strong>. Each gap carries a Resolution
             Strategy — escalate to T1/T2/T3 and review the proposal.
           </p>
@@ -397,28 +405,60 @@ export function GapsDriftSurface({
               <span className="material-symbols-outlined" aria-hidden="true">
                 link_off
               </span>
-              System gaps · {gapFindings.length}
+              System gaps · {systemGaps.length}
               <HelpTip topic="gap" />
-              {gapClasses && ` — ${gapClasses.length} ${gapClasses.length === 1 ? 'cause' : 'causes'}`}
+              {systemGapClasses && ` — ${systemGapClasses.length} ${systemGapClasses.length === 1 ? 'cause' : 'causes'}`}
             </h3>
             <p className="muted">
-              {gapClasses
+              {systemGapClasses
                 ? 'Grouped by cause (stop reason × extractor), largest first — expand a class for its instances. Each gap has a Resolution Strategy.'
                 : 'Hops the deterministic tier could not resolve. Each has a Resolution Strategy.'}
             </p>
           </div>
-          {gapFindings.length === 0 ? (
+          {systemGaps.length === 0 ? (
             <p className="muted">No unresolved facts.</p>
-          ) : gapClasses ? (
+          ) : systemGapClasses ? (
             <GapClassRows
-              classes={gapClasses}
+              classes={systemGapClasses}
               onOpenGap={onOpenGap}
               onEscalateClass={onEscalateClass}
               onDecideProposal={onDecideProposal}
               allowedEdgeLabels={allowedEdgeLabels}
             />
           ) : (
-            <GapRows gaps={gapFindings} onOpenGap={onOpenGap} allowedEdgeLabels={allowedEdgeLabels} />
+            <GapRows gaps={systemGaps} onOpenGap={onOpenGap} allowedEdgeLabels={allowedEdgeLabels} />
+          )}
+
+          <div className="register-lane interpretation-lane">
+            <h3>
+              <span className="material-symbols-outlined" aria-hidden="true">
+                psychology
+              </span>
+              Interpretation backlog · {backlogGaps.length}
+              <HelpTip topic="gap" />
+              {backlogGapClasses && ` — ${backlogGapClasses.length} ${backlogGapClasses.length === 1 ? 'cause' : 'causes'}`}
+            </h3>
+            <p className="muted">
+              Deliberately left for a reviewer, a semantic or agentic rung, or a decision — not
+              extraction failures. Every class stays listed and countable.
+            </p>
+          </div>
+          {backlogGaps.length === 0 ? (
+            <p className="muted">Nothing waiting on interpretation.</p>
+          ) : backlogGapClasses ? (
+            <GapClassRows
+              classes={backlogGapClasses}
+              onOpenGap={onOpenGap}
+              onEscalateClass={onEscalateClass}
+              onDecideProposal={onDecideProposal}
+              allowedEdgeLabels={allowedEdgeLabels}
+            />
+          ) : (
+            <GapRows
+              gaps={backlogGaps}
+              onOpenGap={onOpenGap}
+              allowedEdgeLabels={allowedEdgeLabels}
+            />
           )}
 
           <div className="register-lane unsupported-lane">

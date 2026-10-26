@@ -509,6 +509,57 @@ pub fn count_gap_findings<'a>(
             .count()
 }
 
+/// Subset of [`count_gap_findings`] whose classified omission (the same
+/// [`gap_omission`] the rendered assertion carries) is filled by
+/// [`FillSeam::Interpretation`] and is not an unclassified fallback (#994,
+/// ADR-0036). Every other gap finding — including `None` omissions and
+/// unclassified fallbacks — stays a system gap, and nothing is subtracted from
+/// [`count_gap_findings`].
+pub fn count_interpretation_backlog<'a>(
+    nodes: impl IntoIterator<Item = &'a Node>,
+    edges: impl IntoIterator<Item = &'a Edge>,
+) -> usize {
+    let is_backlog = |omission: Option<Omission>| {
+        matches!(
+            omission,
+            Some(o) if o.seam == FillSeam::Interpretation && !o.is_unclassified()
+        )
+    };
+    let mut gap_ids = BTreeSet::new();
+    let gap_nodes: Vec<&Node> = nodes
+        .into_iter()
+        .filter(|node| is_gap_node(node) && gap_ids.insert(node.id.as_str()))
+        .collect();
+    let node_backlog = gap_nodes
+        .into_iter()
+        .filter(|node| {
+            let prov = provenance(&node.props, &node.id);
+            is_backlog(gap_omission(
+                &prov,
+                &node.props,
+                &render::NodeName(node).to_string(),
+            ))
+        })
+        .count();
+    let edge_backlog = edges
+        .into_iter()
+        .filter(|edge| {
+            is_gap_edge(edge)
+                && !gap_ids.contains(edge.src.as_str())
+                && !gap_ids.contains(edge.dst.as_str())
+        })
+        .filter(|edge| {
+            let prov = provenance(&edge.props, &edge_identity(edge));
+            is_backlog(gap_omission(
+                &prov,
+                &edge.props,
+                &format!("unresolved {} edge", edge.label),
+            ))
+        })
+        .count();
+    node_backlog + edge_backlog
+}
+
 /// True when `edge` records ADR/code, API contract or schema drift (see
 /// [`is_drift_node`]).
 pub fn is_drift_edge(edge: &Edge) -> bool {
@@ -2959,6 +3010,74 @@ mod tests {
                 .contains("| unclassified (unresolved relationship) | interpretation |")
         );
         assert_eq!(index["by_omission"][0]["unclassified"], true);
+    }
+
+    #[test]
+    fn count_interpretation_backlog_separates_established_interpretation_from_system_gaps() {
+        // AC-0359 (T-0359, #994): only established FillSeam::Interpretation
+        // omissions enter the interpretation backlog; adapter omissions,
+        // unclassified fallbacks, and supporting edges folded into a gap node
+        // do not.
+        let nodes = vec![
+            reason_gap(
+                "gap:interp",
+                "The caller's interpretation of this local return or throw is unknown.",
+            ),
+            reason_gap("gap:adapter", "unresolved call target"),
+            reason_gap("gap:unclassified", "something entirely new"),
+            node(
+                "sym:a",
+                "Symbol",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+            node(
+                "sym:b",
+                "Symbol",
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+            ),
+        ];
+        let mut folded_edge = edge(
+            "sym:a",
+            "gap:interp",
+            "DEPENDS_ON",
+            Tier::Deterministic,
+            ConfidenceTier::Gap,
+        );
+        folded_edge.props["reason"] = serde_json::json!(
+            "The caller's interpretation of this local return or throw is unknown."
+        );
+        let standalone_adapter_edge = edge(
+            "sym:a",
+            "sym:b",
+            "CALLS",
+            Tier::Deterministic,
+            ConfidenceTier::Gap,
+        );
+        let mut standalone_interp_edge = edge(
+            "sym:a",
+            "sym:b",
+            "ROUTES",
+            Tier::Deterministic,
+            ConfidenceTier::Gap,
+        );
+        standalone_interp_edge.props["reason"] =
+            serde_json::json!("Source-rule interpretation remains incomplete.");
+
+        let base_edges = [folded_edge.clone(), standalone_adapter_edge.clone()];
+        let total = count_gap_findings(&nodes, &base_edges);
+        let backlog = count_interpretation_backlog(&nodes, &base_edges);
+        assert!(backlog <= total);
+        assert_eq!(total, 4);
+        assert_eq!(backlog, 1);
+
+        let all_edges = [folded_edge, standalone_adapter_edge, standalone_interp_edge];
+        let total_with_edge_interp = count_gap_findings(&nodes, &all_edges);
+        let backlog_with_edge_interp = count_interpretation_backlog(&nodes, &all_edges);
+        assert!(backlog_with_edge_interp <= total_with_edge_interp);
+        assert_eq!(total_with_edge_interp, 5);
+        assert_eq!(backlog_with_edge_interp, 2);
     }
 
     // AC-0338 (#833): a replayed migration history adds `## Schema drift`
