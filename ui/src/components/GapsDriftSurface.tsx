@@ -364,7 +364,7 @@ export function GapsDriftSurface({
             <span className="lane-gap">{summary.gaps} gaps</span>
             {typeof summary.interpretation_backlog === 'number' &&
               summary.interpretation_backlog > 0 &&
-              ` (${summary.gaps - summary.interpretation_backlog} for adapters and inputs, ${summary.interpretation_backlog} interpretation backlog)`}{' '}
+              ` (${summary.gaps - summary.interpretation_backlog} system gaps, ${summary.interpretation_backlog} interpretation backlog)`}{' '}
             · <span className="lane-unsupported">{summary.unsupported} unsupported</span> ·{' '}
             <strong>{summary.no_evidence} no-evidence</strong>. Each gap carries a Resolution
             Strategy — escalate to T1/T2/T3 and review the proposal.

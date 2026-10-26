@@ -530,7 +530,7 @@ export const InterpretationBacklogIsSeparateFromSystemGaps: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(
-      canvas.getByText(/3 for adapters and inputs, 2 interpretation backlog/),
+      canvas.getByText(/3 system gaps, 2 interpretation backlog/),
     ).toBeInTheDocument();
     await expect(canvas.getByText('System gaps · 3')).toBeInTheDocument();
     await expect(canvas.getByText('Interpretation backlog · 2')).toBeInTheDocument();
