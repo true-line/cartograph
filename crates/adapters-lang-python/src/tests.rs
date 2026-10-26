@@ -4248,6 +4248,126 @@ def me():
 }
 
 #[test]
+fn an_unknown_fact_cites_each_hook_that_may_block() {
+    // AC-0380 (T-0380): `blocking_hooks` names every registration whose
+    // hook may block, by symbol (null for an unresolved argument) and the
+    // registration's own span; a non-blocking hook is not listed.
+    let source = br#"
+from flask import Flask, abort, jsonify
+
+app = Flask(__name__)
+
+@app.before_request
+def quiet():
+    return None
+
+@app.before_request
+def gate():
+    abort(503)
+
+app.before_request(make_hook())
+
+@app.route("/open")
+def open_view():
+    return jsonify(ok=True)
+"#;
+    let extraction = extract_source(source, "app.py", &id()).unwrap();
+    let open = auth_at(&extraction, "/open");
+    assert_eq!(open["state"], "unknown");
+    let text = std::str::from_utf8(source).unwrap();
+    let hooks: Vec<_> = open["blocking_hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hook| {
+            let evidence = &hook["evidence"];
+            let start = evidence["byte_start"].as_u64().unwrap() as usize;
+            let end = evidence["byte_end"].as_u64().unwrap() as usize;
+            assert_eq!(evidence["path"], "app.py");
+            (hook["hook"].clone(), &text[start..end])
+        })
+        .collect();
+    assert_eq!(
+        hooks,
+        [
+            (
+                serde_json::json!(crate::symbol_id(id().repo, "app.py", "gate")),
+                "@app.before_request"
+            ),
+            (serde_json::Value::Null, "app.before_request(make_hook())"),
+        ]
+    );
+
+    // With no blocking hook there is nothing to cite.
+    let quiet = br#"
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+app.wsgi_app = Custom(app.wsgi_app)
+
+@app.route("/open")
+def open_view():
+    return jsonify(ok=True)
+"#;
+    let extraction = extract_source(quiet, "app.py", &id()).unwrap();
+    assert!(
+        auth_at(&extraction, "/open")
+            .get("blocking_hooks")
+            .is_none()
+    );
+
+    // A hook nested in a factory is cited by its own qualified Symbol, never
+    // by a top-level function of the same name.
+    let factory = br#"
+from flask import Flask, abort, jsonify
+
+def gate():
+    return None
+
+def create_app():
+    app = Flask(__name__)
+
+    @app.before_request
+    def gate():
+        abort(503)
+
+    @app.route("/open")
+    def open_view():
+        return jsonify(ok=True)
+
+    return app
+"#;
+    let extraction = extract_source(factory, "app.py", &id()).unwrap();
+    let open = auth_at(&extraction, "/open");
+    let text = std::str::from_utf8(factory).unwrap();
+    let hooks = open["blocking_hooks"].as_array().unwrap();
+    assert_eq!(hooks.len(), 1, "{hooks:?}");
+    assert_eq!(
+        hooks[0]["hook"],
+        crate::symbol_id(id().repo, "app.py", "create_app.gate")
+    );
+    let evidence = &hooks[0]["evidence"];
+    let span = evidence["byte_start"].as_u64().unwrap() as usize
+        ..evidence["byte_end"].as_u64().unwrap() as usize;
+    assert_eq!(&text[span], "@app.before_request");
+    assert!(open.get("blocking_hooks_omitted").is_none());
+
+    // Past the evidence bound the rest are counted, not dropped silently.
+    let mut many =
+        String::from("from flask import Flask, abort, jsonify\n\napp = Flask(__name__)\n\n");
+    for index in 0..66 {
+        many.push_str(&format!(
+            "@app.before_request\ndef gate_{index}():\n    abort(503)\n\n"
+        ));
+    }
+    many.push_str("@app.route(\"/open\")\ndef open_view():\n    return jsonify(ok=True)\n");
+    let extraction = extract_source(many.as_bytes(), "app.py", &id()).unwrap();
+    let open = auth_at(&extraction, "/open");
+    assert_eq!(open["blocking_hooks"].as_array().unwrap().len(), 64);
+    assert_eq!(open["blocking_hooks_omitted"], 2);
+}
+
+#[test]
 fn call_and_unresolved_decorators_are_unknown() {
     // AC-0380 (T-0380): a call decorator, a `jwt_required` call with an
     // argument, and a pass-through repository decorator are unknown.
@@ -4340,6 +4460,58 @@ def split():
             split["reasons"],
             serde_json::json!(["decorator_between_route_decorators:@login_required"]),
             "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_hooks_callee_returning_a_value_does_not_block() {
+    // AC-0380 (T-0380): only the hook's own return value ends a request. A
+    // repository function it calls may return a value; one that raises
+    // still blocks, and so does a hook returning a callee's value.
+    let open = br#"
+from flask import Flask, g, jsonify
+
+app = Flask(__name__)
+
+def make_id():
+    return "id"
+
+@app.before_request
+def tag():
+    g.request_id = make_id()
+
+@app.route("/open")
+def open_view():
+    return jsonify(ok=True)
+"#;
+    let extraction = extract_source(open, "app.py", &id()).unwrap();
+    assert_eq!(auth_at(&extraction, "/open")["state"], "none");
+
+    for (case, hook) in [
+        (
+            "callee raises",
+            "def check():\n    raise PermissionError()\n\n@app.before_request\ndef tag():\n    check()\n",
+        ),
+        (
+            "hook returns the callee's value",
+            "def make():\n    return 'stop'\n\n@app.before_request\ndef tag():\n    return make()\n",
+        ),
+        (
+            "generator hook",
+            "def token():\n    return 'denied'\n\n@app.before_request\ndef tag():\n    yield token()\n",
+        ),
+    ] {
+        let source = format!(
+            "from flask import Flask, jsonify\n\napp = Flask(__name__)\n\n{hook}\n@app.route(\"/open\")\ndef open_view():\n    return jsonify(ok=True)\n"
+        );
+        let extraction = extract_source(source.as_bytes(), "app.py", &id()).unwrap();
+        let auth = auth_at(&extraction, "/open");
+        assert_eq!(auth["state"], "unknown", "{case}");
+        assert_eq!(
+            auth["reasons"],
+            serde_json::json!(["request_hook_may_block"]),
+            "{case}"
         );
     }
 }
