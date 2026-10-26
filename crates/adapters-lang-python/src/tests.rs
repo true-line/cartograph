@@ -4414,3 +4414,98 @@ def create_app():
         serde_json::json!(["request_hook_may_block"])
     );
 }
+
+#[test]
+fn decorated_request_hooks_may_block() {
+    // AC-0380 (T-0380): Flask registers the decorated hook, so a hook with
+    // any decorator besides its registration may block even when its own
+    // body is `pass`; the undecorated `pass` hook stays non-blocking.
+    let decorated = br#"
+from flask import Flask
+from flask_login import login_required
+
+app = Flask(__name__)
+
+@app.before_request
+@login_required
+def gate():
+    pass
+
+@app.route("/private")
+def private():
+    return "secret"
+"#;
+    let extraction = extract_source(decorated, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/private");
+    assert_eq!(auth["state"], "unknown");
+    assert_eq!(
+        auth["reasons"],
+        serde_json::json!(["request_hook_may_block"])
+    );
+
+    let plain = br#"
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.before_request
+def gate():
+    pass
+
+@app.route("/open")
+def open_view():
+    return "open"
+"#;
+    let extraction = extract_source(plain, "app.py", &id()).unwrap();
+    assert_eq!(auth_at(&extraction, "/open")["state"], "none");
+}
+
+#[test]
+fn an_enclosing_binding_shadows_an_imported_guard() {
+    // AC-0380 (T-0380): a factory parameter named like the imported guard is
+    // what the decorator resolves to, so it is not a Confirmed guard; the
+    // same factory without the parameter keeps the import.
+    let shadowed = br#"
+from flask import Flask
+from flask_login import login_required
+
+app = Flask(__name__)
+
+def register(login_required):
+    @app.route("/public")
+    @login_required
+    def public():
+        return "public"
+
+register(lambda function: function)
+"#;
+    let extraction = extract_source(shadowed, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/public");
+    assert_eq!(auth["state"], "unknown");
+    assert_eq!(
+        auth["reasons"],
+        serde_json::json!(["unclassified_decorator:login_required"])
+    );
+
+    let imported = br#"
+from flask import Flask
+from flask_login import login_required
+
+app = Flask(__name__)
+
+def register():
+    @app.route("/private")
+    @login_required
+    def private():
+        return "private"
+
+register()
+"#;
+    let extraction = extract_source(imported, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/private");
+    assert_eq!(auth["state"], "required");
+    assert_eq!(
+        auth["guards"],
+        serde_json::json!(["flask_login.login_required"])
+    );
+}

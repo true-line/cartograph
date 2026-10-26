@@ -32,7 +32,11 @@
 //! argument does not resolve to a repository function are never guards. A
 //! hook's call into a repository file where no function of that name was
 //! recovered (a re-export, a class) is blocking.
-use crate::request_inputs::handler_bindings;
+//! A function carrying any decorator other than a hook registration is
+//! blocking: the registered or called object is the wrapper, not its body.
+//! An imported guard or `ProxyFix` name counts only when neither the module
+//! nor any function or class scope enclosing its use rebinds it.
+use crate::request_inputs::{binding_sites, handler_bindings};
 use crate::responses::{self, FnKey, Resolver};
 use crate::{
     Extraction, FileCx, ImportBinding, module_binding, prov_from, route_decorator, symbol_id,
@@ -173,15 +177,26 @@ fn import_dotted(
     }
 }
 
-/// Whether the file or the handler rebinds `name` after its import.
-fn rebound(cx: &FileCx<'_>, root: TsNode<'_>, name: &str, handler: Option<TsNode<'_>>) -> bool {
+/// Whether the file rebinds `name` after its import, or any function or
+/// class enclosing `scope` (the handler itself included) binds it, so the
+/// name at `scope` may not be the imported one.
+fn rebound(cx: &FileCx<'_>, root: TsNode<'_>, name: &str, scope: Option<TsNode<'_>>) -> bool {
     if module_binding(cx, root, name).writes.len() > 1 {
         return true;
     }
-    handler.is_some_and(|function| {
-        function
-            .child_by_field_name("body")
-            .is_some_and(|body| handler_bindings(cx, function, body).contains(name))
+    std::iter::successors(scope, |node| node.parent()).any(|node| {
+        let Some(body) = node.child_by_field_name("body") else {
+            return false;
+        };
+        match node.kind() {
+            "function_definition" => handler_bindings(cx, node, body).contains(name),
+            "class_definition" => {
+                let mut bound = false;
+                binding_sites(cx, body, &mut |_, names| bound |= names.contains(name));
+                bound
+            }
+            _ => false,
+        }
     })
 }
 
@@ -350,7 +365,18 @@ fn fn_effects(cx: &FileCx<'_>, function: TsNode<'_>, resolver: &Resolver<'_>) ->
     let name = cx.text(&function.child_by_field_name("name")?).to_string();
     let body = function.child_by_field_name("body")?;
     let bound = handler_bindings(cx, function, body);
-    let mut blocks = false;
+    // The registered or called object is the decorated wrapper, whose body
+    // is not this one: any decorator other than a hook registration may block.
+    let mut blocks = function
+        .parent()
+        .filter(|parent| parent.kind() == "decorated_definition")
+        .is_some_and(|parent| {
+            named(parent)
+                .into_iter()
+                .filter(|child| child.kind() == "decorator")
+                .filter_map(|decorator| decorator.named_child(0).map(unparenthesize))
+                .any(|expression| !is_hook_attribute(cx, expression))
+        });
     let mut calls = BTreeSet::new();
     every_descendant(body, &mut |node| match node.kind() {
         "return_statement" => {
@@ -420,7 +446,7 @@ fn is_proxy_fix(
     known
         && dotted_parts(cx, callee)
             .and_then(|parts| parts.into_iter().next())
-            .is_some_and(|name| !rebound(cx, root, &name, None))
+            .is_some_and(|name| !rebound(cx, root, &name, Some(right)))
 }
 
 /// Collect this file's handler, function-effect, hook and `wsgi_app`
