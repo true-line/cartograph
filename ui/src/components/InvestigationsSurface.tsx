@@ -62,6 +62,24 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
     specialist,
     tasks: matchedActivityTasks.filter((task) => task.summary.specialist_id === specialist.id),
   })).filter(({ tasks }) => tasks.length > 0) : [];
+  const activityCounts = matchedActivityTasks.reduce((counts, task) => {
+    const status = task.summary.status;
+    if (status === 'queued' || status === 'preparing' || status === 'running' || status === 'awaiting_consent') {
+      counts[status] += 1;
+      counts.total += 1;
+      if (task.summary.cancel_requested) counts.cancelRequested += 1;
+    }
+    return counts;
+  }, { queued: 0, preparing: 0, running: 0, awaiting_consent: 0, cancelRequested: 0, total: 0 });
+  const activityCountLabel = activity.refreshing
+    ? activityIncomplete ? 'Last observed partial activity counts' : 'Last observed activity counts'
+    : activityIncomplete ? 'Partial activity counts' : 'Shown activity counts';
+  const activityCountMessage = showActivityRows && !state.catalogLoading
+    ? `${activityCountLabel}: ` +
+      `queued ${activityCounts.queued}, preparing ${activityCounts.preparing}, running ${activityCounts.running}, ` +
+      `awaiting consent ${activityCounts.awaiting_consent}; cancellation requested ${activityCounts.cancelRequested} of ${activityCounts.total} active tasks shown.` +
+      (activityIncomplete ? ' More active tasks may exist.' : '')
+    : null;
   const activityRefreshMessage = activityIncomplete
     ? matchedActivityTasks.length > 0 ? 'Activity incomplete · refreshing; last observed matching tasks are shown.' : 'Activity incomplete · refreshing; no idle status is inferred.'
     : matchedActivityTasks.length > 0 ? 'Refreshing activity; last observed tasks are shown.' : 'Checking for active tasks…';
@@ -134,6 +152,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
           </label>)}</div>
       </fieldset>
       {state.catalog && <section className="specialist-activity-list" aria-label="Active specialist tasks">
+        {activityCountMessage && <p className="specialist-activity-counts">{activityCountMessage}</p>}
         {showActivityRows && activityGroups.map(({ specialist, tasks }) => <section key={specialist.id} className="specialist-activity-group">
           <h3>{specialist.name} <code>{specialist.id}</code></h3>
           <SpecialistTaskActivity tasks={tasks} onOpen={(id) => { void state.open(id); }} />

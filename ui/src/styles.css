@@ -4146,6 +4146,7 @@ button.register-row:hover {
 .investigation-specialist input { margin-top: .2rem; accent-color: var(--accent); }
 .investigation-specialist code { color: var(--tier-inferred-weak); }
 .specialist-activity-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
+.specialist-activity-counts { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: .82rem; }
 .specialist-activity-group { display: grid; align-content: start; gap: .45rem; min-width: 0; }
 .specialist-activity-group h3 { margin: 0; font-size: .78rem; font-weight: 600; }
 .specialist-task-activity { display: grid; gap: .45rem; min-width: 0; }
