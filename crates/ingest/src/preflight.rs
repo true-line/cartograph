@@ -255,13 +255,47 @@ fn uncovered_language(extension: &str) -> Option<&'static str> {
     {
         return Some(planned.language);
     }
-    match extension {
-        "rb" => Some("Ruby"),
-        "cs" => Some("C#"),
-        "php" => Some("PHP"),
-        "wasm" => Some("WebAssembly"),
-        _ => None,
+    NAMED_ONLY
+        .iter()
+        .find(|(ext, _)| *ext == extension)
+        .map(|(_, language)| *language)
+}
+
+/// Languages Preflight names without a catalog entry, by extension.
+const NAMED_ONLY: &[(&str, &str)] = &[
+    ("rb", "Ruby"),
+    ("cs", "C#"),
+    ("php", "PHP"),
+    ("wasm", "WebAssembly"),
+];
+
+/// Every extension Preflight attributes to `language` (case-insensitive),
+/// sorted; a plugin-named language such as `.zig` yields its bare extension.
+pub(crate) fn extensions_for_language(language: &str) -> Vec<String> {
+    let mut out: Vec<String> = INSTALLED_ADAPTERS
+        .iter()
+        .filter(|adapter| adapter.language.eq_ignore_ascii_case(language))
+        .flat_map(|adapter| adapter.extensions.iter())
+        .chain(
+            PLANNED_ADAPTERS
+                .iter()
+                .filter(|planned| planned.language.eq_ignore_ascii_case(language))
+                .flat_map(|planned| planned.extensions.iter()),
+        )
+        .map(|ext| ext.to_string())
+        .chain(
+            NAMED_ONLY
+                .iter()
+                .filter(|(_, named)| named.eq_ignore_ascii_case(language))
+                .map(|(ext, _)| ext.to_string()),
+        )
+        .collect();
+    if let Some(bare) = language.strip_prefix('.') {
+        out.push(bare.to_string());
     }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// True when a `language` has a planned adapter in the catalog.
