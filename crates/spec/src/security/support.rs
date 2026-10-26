@@ -47,6 +47,15 @@ pub(super) struct Support<'a> {
     _method: Method<'a>,
 }
 impl<'a> Support<'a> {
+    /// An endpoint's support: its `auth` fact's own provenance when it has
+    /// one (#1128), else the endpoint's `prov`.
+    pub fn from_endpoint_props(props: &'a serde_json::Value) -> Option<Self> {
+        if props["auth"]["prov"].is_object() {
+            return Self::from_props(&props["auth"]);
+        }
+        Self::from_props(props)
+    }
+
     pub fn from_props(props: &'a serde_json::Value) -> Option<Self> {
         let support: Self = Self::deserialize(&props["prov"]).ok()?;
         // Core's integrity validation checks the tier/ceiling. Required source

@@ -173,7 +173,12 @@ pub(crate) struct Resolver<'a> {
 }
 
 impl Resolver<'_> {
-    fn target(&self, cx: &FileCx<'_>, node: TsNode<'_>, bound: &BTreeSet<String>) -> Option<FnKey> {
+    pub(crate) fn target(
+        &self,
+        cx: &FileCx<'_>,
+        node: TsNode<'_>,
+        bound: &BTreeSet<String>,
+    ) -> Option<FnKey> {
         match node.kind() {
             "identifier" => {
                 let name = cx.text(&node);
@@ -722,16 +727,30 @@ fn every_descendant<'t>(node: TsNode<'t>, f: &mut dyn FnMut(TsNode<'t>)) {
     }
 }
 
+/// The merged responses of following `@key` as a decorator (#1128).
+pub(crate) fn decorator_responses(
+    key: &FnKey,
+    functions: &HashMap<FnKey, FunctionFacts>,
+    repo: &str,
+) -> Responses {
+    let facts = Facts {
+        responses: Responses::default(),
+        follows: vec![Follow::Decorator(key.clone())],
+    };
+    merge(&facts, functions, repo, 0)
+}
+
 /// Merge every handler's follows into its Flask endpoints, once all files
-/// are read.
-pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
+/// are read. Returns the repository functions by key, which
+/// `auth_guards::resolve` follows the same decorators through.
+pub(crate) fn resolve(out: &mut Extraction, repo: &str) -> HashMap<FnKey, FunctionFacts> {
     let handlers = std::mem::take(&mut out.handler_facts);
     let functions = std::mem::take(&mut out.function_facts)
         .into_iter()
         .map(|facts| (facts.key.clone(), facts))
         .collect::<HashMap<_, _>>();
     if handlers.is_empty() {
-        return;
+        return functions;
     }
     let resolved = handlers
         .into_iter()
@@ -759,6 +778,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
             }
         }
     }
+    functions
 }
 
 fn lookup<'f>(

@@ -26,6 +26,15 @@ fn typed_provenance(props: &serde_json::Value) -> Option<Provenance> {
         .filter(|provenance| provenance.validate().is_ok())
 }
 
+/// An endpoint's support: its `auth` fact's own provenance when it has one
+/// (#1128), else the endpoint's `prov`.
+fn endpoint_support(props: &serde_json::Value) -> Option<Provenance> {
+    if props["auth"]["prov"].is_object() {
+        return typed_provenance(&props["auth"]);
+    }
+    typed_provenance(props)
+}
+
 fn explicit_auth_state(node: &Node) -> Option<bool> {
     node.props["authenticated"]
         .as_bool()
@@ -129,7 +138,7 @@ pub(crate) fn derive_security_findings<N: Borrow<Node>, E: Borrow<Edge>>(
         .map(Borrow::borrow)
         .filter(|node| node.label == "Endpoint" && explicit_auth_state(node) == Some(false))
     {
-        let Some(support) = typed_provenance(&endpoint.props) else {
+        let Some(support) = endpoint_support(&endpoint.props) else {
             continue;
         };
         let name = endpoint_name(endpoint);
@@ -289,5 +298,65 @@ mod tests {
             finding.props["us_id"] == "US-0015"
                 && finding.props["prov"]["confidence_tier"] == "Confirmed"
         }));
+    }
+
+    #[test]
+    fn auth_provenance_is_the_finding_support() {
+        // AC-0380 (T-0380): an `auth` object with its own InferredStrong
+        // provenance produces an InferredStrong finding, not one carried
+        // by the endpoint's Confirmed `prov`.
+        let auth_prov = serde_json::to_value(
+            Provenance::new(
+                Tier::Deterministic,
+                ConfidenceTier::InferredStrong,
+                vec![EvidenceRef {
+                    repo: "local/shop".into(),
+                    path: "app.py".into(),
+                    byte_start: 10,
+                    byte_end: 40,
+                    commit_sha: "abc123".into(),
+                }],
+                "t0.adapter-python",
+                b"auth of open endpoint",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let nodes = vec![Node {
+            id: "ep:open".into(),
+            label: "Endpoint".into(),
+            props: serde_json::json!({
+                "method": "GET",
+                "path": "/open",
+                "auth": {
+                    "state": "none",
+                    "authenticated": false,
+                    "prov": auth_prov,
+                },
+                "prov": prov("open endpoint"),
+            }),
+        }];
+        let findings = derive_security_findings(&nodes, &[] as &[Edge]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].props["subject_id"], "ep:open");
+        assert_eq!(
+            findings[0].props["prov"]["confidence_tier"],
+            "InferredStrong"
+        );
+        assert_eq!(findings[0].props["prov"]["evidence"][0]["path"], "app.py");
+        let bounded = derive_security_findings_bounded(
+            &nodes,
+            &[],
+            SecurityLimits {
+                max_rows: 4,
+                max_output_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        assert_eq!(bounded.len(), 1);
+        assert_eq!(
+            bounded[0].props["prov"]["confidence_tier"],
+            "InferredStrong"
+        );
     }
 }
