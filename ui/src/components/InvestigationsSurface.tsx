@@ -21,14 +21,14 @@ export const INVESTIGATION_STATUS: Record<InvestigationStatus, string> = {
 
 export interface InvestigationsSurfaceProps {
   state: InvestigationState;
-  activity?: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error'>;
+  activity?: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error' | 'refreshing'>;
   onRefreshActivity?: () => void;
   anchors: GraphNode[];
   canStart: boolean;
 }
 
-const EMPTY_ACTIVITY: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error'> = {
-  status: 'idle', tasks: [], error: null,
+const EMPTY_ACTIVITY: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error' | 'refreshing'> = {
+  status: 'idle', tasks: [], error: null, refreshing: false,
 };
 
 /** Props/callbacks only: the coordinator and dedicated store own task lifecycle. */
@@ -336,9 +336,16 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
 
 function SpecialistTaskActivity({ specialistId, activity, complete }: {
   specialistId: string;
-  activity: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error'>;
+  activity: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error' | 'refreshing'>;
   complete: boolean;
 }) {
+  if (activity.refreshing) {
+    const tasks = activity.tasks.filter((task) => task.specialist_id === specialistId);
+    if (tasks.length === 0) return <span className="muted">Checking for active tasks…</span>;
+    return <span className="muted">
+      {tasks.map(activityStatusLabel).join(', ')} · {complete ? 'refreshing activity' : 'activity incomplete · refreshing'}
+    </span>;
+  }
   if (activity.status === 'idle' || activity.status === 'loading') {
     return <span className="muted">{activity.status === 'idle' ? 'Activity not checked' : 'Checking activity…'}</span>;
   }

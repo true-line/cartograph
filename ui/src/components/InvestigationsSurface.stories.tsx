@@ -214,6 +214,13 @@ export const SpecialistTaskActivity: Story = {
     await expect(canvas.findByText(/active task list is incomplete/i)).resolves.toBeVisible();
     expect(useInvestigationStore.getState().history).toEqual([]);
     expect(useInvestigationStore.getState().selectedId).toBeNull();
+
+    const tasks = useSpecialistActivityStore.getState().tasks;
+    useSpecialistActivityStore.setState({ status: 'ready', tasks: [], error: null, refreshing: true });
+    await expect(within(domain!).findByText('Checking for active tasks…')).resolves.toBeVisible();
+    expect(canvas.queryByText('No active tasks')).toBeNull();
+    useSpecialistActivityStore.setState({ status: 'ready', tasks, error: null, refreshing: true });
+    await expect(canvas.findByText('Running · activity incomplete · refreshing')).resolves.toBeVisible();
   },
 };
 

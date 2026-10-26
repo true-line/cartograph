@@ -9,6 +9,7 @@ export interface SpecialistActivityState {
   status: SpecialistActivityStatus;
   tasks: InvestigationSummary[];
   error: string | null;
+  refreshing: boolean;
   setVisible: (visible: boolean) => void;
   refresh: () => Promise<void>;
   invalidate: () => void;
@@ -25,7 +26,7 @@ export function createSpecialistActivityStore() {
       if (!visible) return Promise.resolve();
       if (inFlight) {
         trailing = true;
-        set({ status: 'loading', tasks: [], error: null });
+        set({ refreshing: true });
         return inFlight;
       }
 
@@ -33,7 +34,11 @@ export function createSpecialistActivityStore() {
         while (visible) {
           trailing = false;
           const requestGeneration = generation;
-          set({ status: 'loading', tasks: [], error: null });
+          set((state) => ({
+            status: state.status === 'idle' ? 'loading' : state.status,
+            error: null,
+            refreshing: true,
+          }));
           let observation: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error'>;
           try {
             if (!inTauri()) {
@@ -49,15 +54,17 @@ export function createSpecialistActivityStore() {
               observation = { status: page.next_cursor === null ? 'ready' : 'incomplete', tasks: page.items, error: null };
             }
           } catch {
-            observation = { status: 'error', tasks: [], error: 'Task activity could not be refreshed; current activity is unknown.' };
+            observation = { status: 'error', tasks: store.getState().tasks,
+              error: 'Task activity could not be refreshed; current activity is unknown.' };
           }
 
           if (!visible) return;
-          if (requestGeneration !== generation || trailing) {
+          if (requestGeneration !== generation) {
             trailing = true;
             continue;
           }
-          set(observation);
+          set({ ...observation, refreshing: trailing });
+          if (trailing) continue;
           return;
         }
       };
@@ -71,15 +78,18 @@ export function createSpecialistActivityStore() {
     };
 
     return {
-      status: 'idle', tasks: [], error: null,
+      status: 'idle', tasks: [], error: null, refreshing: false,
       setVisible: (next) => {
         if (visible === next) return;
         visible = next;
         generation += 1;
-        if (next) void refresh();
+        if (next) {
+          set({ status: 'loading', tasks: [], error: null, refreshing: true });
+          void refresh();
+        }
         else {
           trailing = false;
-          set({ status: 'idle', tasks: [], error: null });
+          set({ status: 'idle', tasks: [], error: null, refreshing: false });
         }
       },
       refresh,

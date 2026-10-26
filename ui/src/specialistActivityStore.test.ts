@@ -60,52 +60,64 @@ describe('separate specialist task activity projection (AC-0379)', () => {
     expect(store.getState().tasks.find((task) => task.investigation_id === 'running')?.cancel_requested).toBe(true);
   });
 
-  it('does not publish an empty page when an event arrives during the read; a burst gets one trailing refresh', async () => {
+  it('publishes each completed observation and coalesces continuous events into sequential reads', async () => {
     vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
     const first = deferred<{ items: ReturnType<typeof investigationDetail>[]; next_cursor: string | null }>();
-    const active = investigationDetail('created-during-refresh', { status: 'running', has_result: false });
+    const second = deferred<{ items: ReturnType<typeof investigationDetail>[]; next_cursor: string | null }>();
+    const intermediate = investigationDetail('intermediate-observation', { status: 'running', has_result: false });
+    const active = investigationDetail('created-during-refresh', { status: 'awaiting_consent', has_result: false });
     let calls = 0;
     mockIPC((command, args) => {
       expect(command).toBe('list_investigations');
       expect(args).toEqual({ activeOnly: true });
       calls += 1;
-      return calls === 1 ? first.promise : { items: [active], next_cursor: null };
+      if (calls === 1) return first.promise;
+      if (calls === 2) return second.promise;
+      return { items: [active], next_cursor: null };
     });
     const store = createSpecialistActivityStore();
-    const observations: { status: string; taskIds: string[] }[] = [];
+    const observations: { status: string; taskIds: string[]; refreshing: boolean }[] = [];
     store.subscribe((state) => observations.push({ status: state.status,
-      taskIds: state.tasks.map((task) => task.investigation_id) }));
+      taskIds: state.tasks.map((task) => task.investigation_id), refreshing: state.refreshing }));
     store.getState().setVisible(true);
     store.getState().invalidate();
     store.getState().invalidate();
     first.resolve({ items: [], next_cursor: null });
-    await vi.waitFor(() => expect(store.getState()).toMatchObject({ status: 'ready', tasks: [active] }));
+    await vi.waitFor(() => expect(calls).toBe(2));
+    expect(store.getState()).toMatchObject({ status: 'ready', tasks: [], refreshing: true });
 
-    expect(calls).toBe(2);
-    expect(observations).not.toContainEqual({ status: 'ready', taskIds: [] });
-    expect(observations.filter((item) => item.status === 'ready')).toEqual([
-      { status: 'ready', taskIds: ['created-during-refresh'] },
-    ]);
-    expect(store.getState()).toMatchObject({ status: 'ready', tasks: [active] });
+    store.getState().invalidate();
+    second.resolve({ items: [intermediate], next_cursor: null });
+    await vi.waitFor(() => expect(calls).toBe(3));
+    expect(observations).toContainEqual({ status: 'ready', taskIds: [], refreshing: true });
+    expect(observations).toContainEqual({ status: 'ready', taskIds: ['intermediate-observation'], refreshing: true });
+
+    await vi.waitFor(() => expect(store.getState()).toMatchObject({ status: 'ready', tasks: [active], refreshing: false }));
+
+    expect(calls).toBe(3);
+    expect(store.getState()).toMatchObject({ status: 'ready', tasks: [active], refreshing: false });
   });
 
   it('replaces active rows with a complete terminal observation and fails closed on malformed/error responses', async () => {
     vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
     const active = investigationDetail('terminal-transition', { status: 'awaiting_consent', has_result: false });
-    let terminal = false;
-    mockIPC(() => terminal ? { items: [], next_cursor: null } : { items: [active], next_cursor: null });
+    let respond: () => unknown = () => ({ items: [active], next_cursor: null });
+    mockIPC(() => respond());
     const store = createSpecialistActivityStore();
     store.getState().setVisible(true);
     await vi.waitFor(() => expect(store.getState()).toMatchObject({ status: 'ready', tasks: [active] }));
     expect(store.getState().tasks).toEqual([active]);
-    terminal = true;
+    const terminal = deferred<{ items: ReturnType<typeof investigationDetail>[]; next_cursor: string | null }>();
+    respond = () => terminal.promise;
     store.getState().invalidate();
-    await vi.waitFor(() => expect(store.getState()).toMatchObject({ status: 'ready', tasks: [] }));
+    expect(store.getState()).toMatchObject({ status: 'ready', tasks: [active], refreshing: true });
+    terminal.resolve({ items: [], next_cursor: null });
+    await vi.waitFor(() => expect(store.getState()).toMatchObject({ status: 'ready', tasks: [], refreshing: false }));
 
-    mockIPC(() => ({ items: [{ ...active, status: 'outcome_unknown' }], next_cursor: null }));
+    respond = () => ({ items: [{ ...active, status: 'outcome_unknown' }], next_cursor: null });
     await store.getState().refresh();
     expect(store.getState().status).toBe('error');
-    mockIPC(() => { throw new Error('offline'); });
+    respond = () => { throw new Error('offline'); };
     await store.getState().refresh();
     expect(store.getState()).toMatchObject({ status: 'error', tasks: [], error: expect.stringContaining('unknown') });
   });
@@ -121,7 +133,7 @@ describe('separate specialist task activity projection (AC-0379)', () => {
     store.getState().setVisible(false);
     store.getState().setVisible(true);
     expect(calls).toBe(1);
-    expect(store.getState()).toMatchObject({ status: 'loading', tasks: [] });
+    expect(store.getState()).toMatchObject({ status: 'loading', tasks: [], refreshing: true });
     older.resolve({ items: [], next_cursor: null });
     await vi.waitFor(() => expect(store.getState().tasks).toEqual([fresh]));
     expect(calls).toBe(2);
