@@ -4816,3 +4816,259 @@ def open_view():
         "{auth}"
     );
 }
+
+/// Two factories, each building its own Flask application, as SimpleLogin
+/// does: the maintenance app's blocking hook and the main app's routes.
+fn two_app_tree(dir: &std::path::Path, main: &str) {
+    write(
+        dir,
+        "maintenance.py",
+        r#"from flask import Flask, abort
+
+def create_maintenance_app():
+    app = Flask(__name__)
+
+    @app.before_request
+    def gate():
+        abort(503)
+
+    @app.route("/health")
+    def health():
+        return "ok"
+
+    return app
+"#,
+    );
+    write(
+        dir,
+        "views.py",
+        r#"from flask import Blueprint
+
+bp = Blueprint("views", __name__)
+
+@bp.route("/open")
+def open_view():
+    return "ok"
+"#,
+    );
+    write(dir, "main.py", main);
+    write(
+        dir,
+        "server.py",
+        r#"import config
+
+def create_app():
+    if config.MAINTENANCE:
+        from maintenance import create_maintenance_app
+        return create_maintenance_app()
+    from main import create_main_app
+    return create_main_app()
+"#,
+    );
+}
+
+const MAIN_APP: &str = r#"from flask import Flask
+from views import bp
+
+def register(app):
+    app.register_blueprint(bp)
+
+def create_main_app():
+    app = Flask(__name__)
+    register(app)
+
+    @app.route("/direct")
+    def direct():
+        return "ok"
+
+    return app
+"#;
+
+#[test]
+fn a_request_hook_reaches_only_its_own_application() {
+    // AC-0383 (T-0383): a blocking hook on one function-local Flask app does
+    // not make another proven app's endpoints `unknown`; a parameter app is
+    // followed to every call of its function.
+    let dir = tempfile::tempdir().unwrap();
+    two_app_tree(dir.path(), MAIN_APP);
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    for path in ["/open", "/direct"] {
+        let auth = auth_at(&extraction, path);
+        assert_eq!(auth["state"], "none", "{path}: {auth}");
+        assert_eq!(
+            auth["assumptions"],
+            serde_json::json!([
+                "non_repository_calls_in_request_hooks_do_not_abort",
+                "request_hooks_reach_only_their_application"
+            ]),
+            "{path}"
+        );
+    }
+    let health = auth_at(&extraction, "/health");
+    assert_eq!(health["state"], "unknown");
+    assert_eq!(health["blocking_hooks"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        health["blocking_hooks"][0]["hook"],
+        crate::symbol_id(id().repo, "maintenance.py", "create_maintenance_app.gate")
+    );
+}
+
+#[test]
+fn a_request_hook_stays_global_whenever_its_application_may_escape() {
+    // AC-0383 (T-0383): every way the main app may be the hook's app keeps
+    // the hook on the main app's endpoints.
+    let escapes = [
+        // The registering function is used as a value, so it may be called
+        // with any application.
+        MAIN_APP.replace(
+            "    return app\n",
+            "    return app\n\nREGISTRARS = [register]\n",
+        ),
+        // A spread argument may be any application.
+        MAIN_APP.replace(
+            "    register(app)\n",
+            "    register(app)\n    register(**OPTIONS)\n",
+        ),
+        // An omitted argument is the parameter's default.
+        MAIN_APP
+            .replace("def register(app):", "def register(app=None):")
+            .replace("    register(app)\n", "    register(app)\n    register()\n"),
+        // Renamed on import, the function is called by another name.
+        format!("{MAIN_APP}\nfrom main import register as install\n"),
+        // A decorated function is called through its wrapper.
+        MAIN_APP.replace("def register(app):", "@trace\ndef register(app):"),
+        // An unproven receiver may be the maintenance app.
+        MAIN_APP.replace(
+            "    register(app)\n",
+            "    register(app)\n    register(current())\n",
+        ),
+    ];
+    for main in escapes {
+        let dir = tempfile::tempdir().unwrap();
+        two_app_tree(dir.path(), &main);
+        let extraction = extract_dir(dir.path(), &id()).unwrap();
+        let auth = auth_at(&extraction, "/open");
+        assert_eq!(auth["state"], "unknown", "{main}");
+        assert!(
+            auth["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("request_hook_may_block")),
+            "{main}"
+        );
+        // The main app's own direct route is still proven apart.
+        assert_eq!(auth_at(&extraction, "/direct")["state"], "none", "{main}");
+    }
+
+    // A Blueprint registration this tier cannot name may register any
+    // Blueprint on the maintenance app.
+    let dir = tempfile::tempdir().unwrap();
+    two_app_tree(dir.path(), MAIN_APP);
+    let maintenance = std::fs::read_to_string(dir.path().join("maintenance.py")).unwrap();
+    write(
+        dir.path(),
+        "maintenance.py",
+        &maintenance.replace(
+            "    return app\n",
+            "    for blueprint in BLUEPRINTS:\n        app.register_blueprint(blueprint)\n    return app\n",
+        ),
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(auth_at(&extraction, "/open")["state"], "unknown");
+    assert_eq!(auth_at(&extraction, "/direct")["state"], "none");
+
+    // A hook and a route on one module-level application share it.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app.py",
+        r#"from flask import Flask, abort
+
+app = Flask(__name__)
+
+@app.before_request
+def gate():
+    abort(503)
+"#,
+    );
+    write(
+        dir.path(),
+        "views.py",
+        r#"from app import app
+
+@app.route("/open")
+def open_view():
+    return "ok"
+"#,
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(auth_at(&extraction, "/open")["state"], "unknown");
+}
+
+#[test]
+fn a_rebound_module_application_is_not_proven_apart() {
+    // AC-0383 (T-0383): a module-level name proves an application only when
+    // its `Flask()` assignment is the module's sole binding of it, and no
+    // module assigns it through an import.
+    let gate = r#"from flask import Flask, abort
+
+a = Flask(__name__)
+b = Flask(__name__)
+b = a
+
+@a.before_request
+def gate():
+    abort(503)
+
+@b.route("/same")
+def same():
+    return "ok"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "apps.py", gate);
+    write(
+        dir.path(),
+        "views.py",
+        r#"from apps import b
+
+@b.route("/imported")
+def imported():
+    return "ok"
+"#,
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(auth_at(&extraction, "/same")["state"], "unknown");
+    assert_eq!(auth_at(&extraction, "/imported")["state"], "unknown");
+
+    // Without the rebinding the two applications are apart ...
+    let apart = gate.replace("b = a\n", "");
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "apps.py", &apart);
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(auth_at(&extraction, "/same")["state"], "none");
+
+    // ... unless another module assigns the name through its import, or a
+    // module that imports it rebinds it.
+    for other in [
+        "import apps\n\napps.b = apps.a\n",
+        "import apps\n\napps.b, other = (apps.a, 1)\n",
+        "import apps\n\n[(apps.b, other)] = [(apps.a, 1)]\n",
+        "import apps\n\nfor apps.b in [apps.a]:\n    pass\n",
+        "import apps\n\nwith apps.a as apps.b:\n    pass\n",
+        "from flask import Flask\nfrom apps import a, b\n\nb = a\n\n@b.route(\"/rebound\")\ndef rebound():\n    return \"ok\"\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "apps.py", &apart);
+        write(dir.path(), "other.py", other);
+        let extraction = extract_dir(dir.path(), &id()).unwrap();
+        if other.contains("apps.b") {
+            assert_eq!(auth_at(&extraction, "/same")["state"], "unknown", "{other}");
+        } else {
+            assert_eq!(
+                auth_at(&extraction, "/rebound")["state"],
+                "unknown",
+                "{other}"
+            );
+        }
+    }
+}
