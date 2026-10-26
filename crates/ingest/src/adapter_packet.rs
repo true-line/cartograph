@@ -15,7 +15,7 @@
 //! the file listing; a file is read once, bounded, to compute its byte span.
 
 use crate::adapter_lookup::{CellLookup, LookupStatus};
-use crate::matrix::{CORE, Capability, ReportedCell, Support};
+use crate::matrix::{CORE, COVERAGE_MATRIX, Capability, ReportedCell, Support};
 use crate::preflight::{LanguageDetection, extensions_for_language, skip_dir};
 use core_graph::Node;
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
@@ -128,6 +128,29 @@ pub fn export_adapter_packet(body: &PacketBody) -> PacketResult<(String, String)
         execution: work_packets::ExecutionState::Unoffered,
     };
     Ok((packet_id, export_markdown(&detail)?))
+}
+
+/// The adapter contract a packet's steps follow, per
+/// docs/adapters/AUTHORING_GUIDE.md: a language no compiled-in crate owns
+/// gets a WASM plugin (Path A); one a crate already covers in the compiled
+/// matrix is extended in that crate (Path B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Contract {
+    Plugin,
+    CompiledIn,
+}
+
+impl Contract {
+    fn for_language(language: &str) -> Self {
+        if COVERAGE_MATRIX
+            .iter()
+            .any(|cell| cell.language.eq_ignore_ascii_case(language))
+        {
+            Self::CompiledIn
+        } else {
+            Self::Plugin
+        }
+    }
 }
 
 fn cell_id(cell: &ReportedCell) -> String {
@@ -243,9 +266,13 @@ fn build_packet(
         origin: from_cells(),
     };
 
+    let contract = Contract::for_language(language);
     let fixtures: Vec<String> = cells
         .iter()
-        .map(|cell| format!("crates/ingest/conformance/{}", cell_id(cell)))
+        .map(|cell| match contract {
+            Contract::Plugin => format!("golden case(s) proving {}", cell_id(cell)),
+            Contract::CompiledIn => format!("crates/ingest/conformance/{}", cell_id(cell)),
+        })
         .collect();
     let claims: Vec<String> = cells
         .iter()
@@ -267,19 +294,33 @@ fn build_packet(
     }];
 
     body.intent.objective = supplied(format!(
-        "Make {language} a covered language: write an adapter that claims the {} target cell(s) below, with each conformance fixture written first.",
-        cells.len()
+        "Make {language} a covered language: write an adapter that claims the {} target cell(s) below, with {} written first.",
+        cells.len(),
+        match contract {
+            Contract::Plugin => "the golden cases proving each cell",
+            Contract::CompiledIn => "each conformance fixture",
+        }
     ));
-    body.intent.expected_outcome = supplied(
-        "Each claimed cell passes its conformance fixture and reads Supported in the coverage matrix; a re-ingest reports the cell as covered."
+    body.intent.expected_outcome = supplied(match contract {
+        Contract::Plugin => "Each claimed cell is proved by golden cases the plugin gate passes and is declared supported in the plugin's coverage; a re-ingest reports the cell as covered."
             .into(),
-    );
+        Contract::CompiledIn => "Each claimed cell passes its conformance fixture and reads Supported in the coverage matrix; a re-ingest reports the cell as covered."
+            .into(),
+    });
     body.intent.current_behavior = supplied(format!(
         "No compiled-in adapter or installed plugin declares coverage of these {language} cells (adapter lookup: none), so Preflight reports them as an unsupported tool limitation."
     ));
     body.intent.intended_behavior = supplied(format!("Claim: {}", claims.join("; ")));
     body.intent.scope = supplied(format!(
-        "Adapter contract: ADR-0017 plugin host (WASM) or ADR-0003 tree-sitter SPI (compiled-in), per docs/adapters/AUTHORING_GUIDE.md. Target cells: {}.",
+        "{} Target cells: {}.",
+        match contract {
+            Contract::Plugin => format!(
+                "Adapter contract: ADR-0017 WASM plugin (docs/adapters/AUTHORING_GUIDE.md Path A), because no compiled-in crate covers {language}."
+            ),
+            Contract::CompiledIn => format!(
+                "Adapter contract: ADR-0003 compiled-in crate (docs/adapters/AUTHORING_GUIDE.md Path B), because the coverage matrix already has {language} cells."
+            ),
+        },
         cells
             .iter()
             .map(|c| cell_id(c))
@@ -308,27 +349,43 @@ fn build_packet(
         }
     };
     body.work.proposed_approach = supplied_list(
-        vec![
-            format!(
-                "Write the conformance fixtures first, each a src/ tree plus expect.json: {}.",
-                fixtures.join(", ")
-            ),
-            "Implement extraction under the chosen adapter contract until every fixture passes."
-                .into(),
-            "Claim each target cell in the coverage matrix as Supported, naming its fixture."
-                .into(),
-            "Re-ingest the repo and confirm Preflight reports each target cell as covered.".into(),
-        ],
+        match contract {
+            Contract::Plugin => vec![
+                format!(
+                    "Write the golden corpus first, {{plugin-id}}.golden.json, with cases from representative sources: {}.",
+                    fixtures.join(", ")
+                ),
+                "Declare each target cell in the corpus `coverage` as supported, naming the golden cases that prove it."
+                    .into(),
+                "Build {plugin-id}.wasm against the ADR-0017 SPI until every golden case passes."
+                    .into(),
+                "Copy the .wasm and .golden.json into .cartograph/adapters/, gate the plugin in Settings, then re-ingest and confirm Preflight reports each target cell as covered."
+                    .into(),
+            ],
+            Contract::CompiledIn => vec![
+                format!(
+                    "Write the conformance fixtures first, each a src/ tree plus expect.json: {}.",
+                    fixtures.join(", ")
+                ),
+                format!(
+                    "Implement extraction in the compiled-in crate that owns {language} until every fixture passes."
+                ),
+                "Claim each target cell in COVERAGE_MATRIX as Supported, naming its fixture."
+                    .into(),
+                "Re-ingest the repo and confirm Preflight reports each target cell as covered."
+                    .into(),
+            ],
+        },
         &cell_ids,
     );
+    let contract_dependency = match contract {
+        Contract::Plugin => "ADR-0017 runtime WASM adapter plugin host",
+        Contract::CompiledIn => "ADR-0003 tree-sitter adapter SPI (compiled-in adapters)",
+    };
     body.work.dependencies = Known::Supplied {
         value: vec![
             Dependency {
-                description: "ADR-0003 tree-sitter adapter SPI (compiled-in adapters)".into(),
-                evidence_ids: vec![],
-            },
-            Dependency {
-                description: "ADR-0017 runtime WASM adapter plugin host".into(),
+                description: contract_dependency.into(),
                 evidence_ids: vec![],
             },
             Dependency {
@@ -339,10 +396,12 @@ fn build_packet(
         origin: from_cells(),
     };
     body.work.open_decisions = supplied_list(
-        vec![
-            "Adapter contract: ADR-0017 WASM plugin (default; no core PR) or ADR-0003 compiled-in SPI (maintainer path)."
-                .into(),
-        ],
+        vec![match contract {
+            Contract::Plugin => "The plugin id ({plugin-id} above).".into(),
+            Contract::CompiledIn => format!(
+                "Whether {language} framework support belongs in the owning crate or a new module of it."
+            ),
+        }],
         &cell_ids,
     );
 
@@ -351,19 +410,41 @@ fn build_packet(
         .zip(&cell_facts)
         .map(|(cell, fact)| AcceptanceProcedure {
             id: format!("fixture-{}", cell_id(cell)),
-            description: format!("Cell {} passes its conformance fixture.", cell_id(cell)),
-            steps: vec![
-                format!(
-                    "Write crates/ingest/conformance/{}/src with representative {language} sources.",
-                    cell_id(cell)
-                ),
-                format!(
-                    "Write crates/ingest/conformance/{}/expect.json listing the facts it must yield.",
-                    cell_id(cell)
-                ),
-                "Run the conformance test; the cell's fixture must pass.".into(),
-            ],
-            expected_evidence: vec![format!("conformance fixture passes for {}", cell_id(cell))],
+            description: match contract {
+                Contract::Plugin => format!("Cell {} is proved by its golden cases.", cell_id(cell)),
+                Contract::CompiledIn => {
+                    format!("Cell {} passes its conformance fixture.", cell_id(cell))
+                }
+            },
+            steps: match contract {
+                Contract::Plugin => vec![
+                    format!(
+                        "Add golden cases with representative {language} sources whose expected output proves {}.",
+                        cell_id(cell)
+                    ),
+                    format!(
+                        "Declare {} in the corpus `coverage`, naming those cases (at least one asserts nodes or edges).",
+                        cell_id(cell)
+                    ),
+                    "Gate the plugin; every golden case and the coverage-declarations check must pass."
+                        .into(),
+                ],
+                Contract::CompiledIn => vec![
+                    format!(
+                        "Write crates/ingest/conformance/{}/src with representative {language} sources.",
+                        cell_id(cell)
+                    ),
+                    format!(
+                        "Write crates/ingest/conformance/{}/expect.json listing the facts it must yield.",
+                        cell_id(cell)
+                    ),
+                    "Run the conformance test; the cell's fixture must pass.".into(),
+                ],
+            },
+            expected_evidence: vec![match contract {
+                Contract::Plugin => format!("the plugin gate passes with {} declared", cell_id(cell)),
+                Contract::CompiledIn => format!("conformance fixture passes for {}", cell_id(cell)),
+            }],
             evidence_ids: vec![fact.id.clone()],
         })
         .collect();
@@ -374,9 +455,27 @@ fn build_packet(
     body.acceptance.negative_cases = Known::Supplied {
         value: vec![AcceptanceProcedure {
             id: "claim-without-fixture".into(),
-            description: "A claimed cell with no conformance fixture is rejected.".into(),
-            steps: vec!["Run the ingest tests with a cell claimed and its fixture absent.".into()],
-            expected_evidence: vec!["the ingest tests fail on the claim with no fixture".into()],
+            description: match contract {
+                Contract::Plugin => "A claimed cell naming no golden case is rejected.".into(),
+                Contract::CompiledIn => {
+                    "A claimed cell with no conformance fixture is rejected.".into()
+                }
+            },
+            steps: vec![match contract {
+                Contract::Plugin => {
+                    "Gate the plugin with a cell declared in `coverage` and no golden case named for it."
+                        .into()
+                }
+                Contract::CompiledIn => {
+                    "Run the ingest tests with a cell claimed and its fixture absent.".into()
+                }
+            }],
+            expected_evidence: vec![match contract {
+                Contract::Plugin => "the coverage-declarations check fails on that cell".into(),
+                Contract::CompiledIn => {
+                    "the ingest tests fail on the claim with no fixture".into()
+                }
+            }],
             evidence_ids: cell_ids.clone(),
         }],
         origin: from_cells(),
@@ -384,13 +483,28 @@ fn build_packet(
     body.acceptance.proposed_verification = Known::Supplied {
         value: vec![AcceptanceProcedure {
             id: "matrix-updated".into(),
-            description: "The coverage matrix states every claimed cell.".into(),
+            description: match contract {
+                Contract::Plugin => "The plugin's coverage declares every claimed cell.".into(),
+                Contract::CompiledIn => "The coverage matrix states every claimed cell.".into(),
+            },
             steps: vec![
-                "Compare the matrix against the target cells.".into(),
+                match contract {
+                    Contract::Plugin => {
+                        "Compare the corpus `coverage` against the target cells.".into()
+                    }
+                    Contract::CompiledIn => "Compare the matrix against the target cells.".into(),
+                },
                 "Re-run Preflight on the repo.".into(),
             ],
             expected_evidence: vec![
-                "each target cell reads Supported in the coverage matrix".into(),
+                match contract {
+                    Contract::Plugin => {
+                        "each target cell is declared supported in the plugin's coverage".into()
+                    }
+                    Contract::CompiledIn => {
+                        "each target cell reads Supported in the coverage matrix".into()
+                    }
+                },
                 "adapter lookup reports each target cell as covered".into(),
             ],
             evidence_ids: cell_ids.clone(),
@@ -473,10 +587,10 @@ fn read_sample(file: &WalkedFile) -> Option<Sample<'_>> {
         return None;
     }
     let mut end = bytes.len().min(MAX_SPAN_BYTES);
-    if end < bytes.len()
-        && let Some(newline) = bytes[..end].iter().rposition(|b| *b == b'\n')
-    {
-        end = newline + 1;
+    if end < bytes.len() {
+        // A span must end on a line boundary; a file whose first line
+        // outruns the span cap has none, so it is not sampled.
+        end = bytes[..end].iter().rposition(|b| *b == b'\n')? + 1;
     }
     Some(Sample {
         file,
@@ -574,6 +688,50 @@ mod tests {
         }
         let expected = std::fs::read_to_string(&golden).expect("golden file is checked in");
         assert_eq!(markdown, expected);
+    }
+
+    #[test]
+    fn a_compiled_in_language_gets_path_b_steps_and_a_new_one_gets_path_a() {
+        assert_eq!(Contract::for_language("Ruby"), Contract::Plugin);
+        assert_eq!(Contract::for_language("typescript"), Contract::CompiledIn);
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/a.ts", "export const a = 1;\n");
+        let files = list_repo_files(dir.path()).unwrap();
+        let detection = vec![LanguageDetection {
+            language: "TypeScript".into(),
+            files: 1,
+            adapter: None,
+            coverage: vec![],
+        }];
+        let body = adapter_work_packets(&lookups_for(&detection), &files, &context())
+            .unwrap()
+            .remove(0);
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("Path B"));
+        assert!(json.contains("crates/ingest/conformance/typescript.core."));
+        assert!(!json.contains("golden.json"));
+        assert!(!json.contains("ADR-0017"));
+
+        let repo = ruby_repo();
+        let json = serde_json::to_string(&generate(repo.path())[0]).unwrap();
+        assert!(json.contains("Path A"));
+        assert!(json.contains("{plugin-id}.golden.json"));
+        assert!(!json.contains("crates/ingest/conformance/"));
+        assert!(!json.contains("ADR-0003"));
+    }
+
+    #[test]
+    fn a_file_whose_first_line_outruns_the_span_cap_is_not_sampled() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = format!("x = '{}'\ny = 1\n", "a".repeat(MAX_SPAN_BYTES));
+        write(dir.path(), "src/long.rb", &long);
+        write(dir.path(), "src/short.rb", "x = 1\n");
+        let files = list_repo_files(dir.path()).unwrap();
+        let names: Vec<_> = sample_files("Ruby", &files)
+            .iter()
+            .map(|s| s.file.rel.clone())
+            .collect();
+        assert_eq!(names, ["src/short.rb"]);
     }
 
     #[test]

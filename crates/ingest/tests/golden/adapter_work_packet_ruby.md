@@ -4,7 +4,7 @@ Execution: unoffered. Capability requests confer no authority.
 
 ## Packet identity
 
-    "work-packet-v1:8d4d9ea52b6dea88f2a1f91dab948f4a63d421a17a9719c4dc5641f9625cf128"
+    "work-packet-v1:bba01c364967e0a739fdeae0c5e61bd8f719f5d8b9d2204867fad6b9cfda49af"
 
 ## Body schema version
 
@@ -95,7 +95,7 @@ Execution: unoffered. Capability requests confer no authority.
     {
       "objective": {
         "state": "supplied",
-        "value": "Make Ruby a covered language: write an adapter that claims the 3 target cell(s) below, with each conformance fixture written first.",
+        "value": "Make Ruby a covered language: write an adapter that claims the 3 target cell(s) below, with the golden cases proving each cell written first.",
         "origin": {
           "kind": "evidence",
           "evidence_ids": [
@@ -107,7 +107,7 @@ Execution: unoffered. Capability requests confer no authority.
       },
       "expected_outcome": {
         "state": "supplied",
-        "value": "Each claimed cell passes its conformance fixture and reads Supported in the coverage matrix; a re-ingest reports the cell as covered.",
+        "value": "Each claimed cell is proved by golden cases the plugin gate passes and is declared supported in the plugin's coverage; a re-ingest reports the cell as covered.",
         "origin": {
           "kind": "evidence",
           "evidence_ids": [
@@ -143,7 +143,7 @@ Execution: unoffered. Capability requests confer no authority.
       },
       "scope": {
         "state": "supplied",
-        "value": "Adapter contract: ADR-0017 plugin host (WASM) or ADR-0003 tree-sitter SPI (compiled-in), per docs/adapters/AUTHORING_GUIDE.md. Target cells: ruby.core.calls, ruby.core.imports, ruby.core.types.",
+        "value": "Adapter contract: ADR-0017 WASM plugin (docs/adapters/AUTHORING_GUIDE.md Path A), because no compiled-in crate covers Ruby. Target cells: ruby.core.calls, ruby.core.imports, ruby.core.types.",
         "origin": {
           "kind": "evidence",
           "evidence_ids": [
@@ -639,10 +639,10 @@ Execution: unoffered. Capability requests confer no authority.
       "proposed_approach": {
         "state": "supplied",
         "value": [
-          "Write the conformance fixtures first, each a src/ tree plus expect.json: crates/ingest/conformance/ruby.core.calls, crates/ingest/conformance/ruby.core.imports, crates/ingest/conformance/ruby.core.types.",
-          "Implement extraction under the chosen adapter contract until every fixture passes.",
-          "Claim each target cell in the coverage matrix as Supported, naming its fixture.",
-          "Re-ingest the repo and confirm Preflight reports each target cell as covered."
+          "Write the golden corpus first, {plugin-id}.golden.json, with cases from representative sources: golden case(s) proving ruby.core.calls, golden case(s) proving ruby.core.imports, golden case(s) proving ruby.core.types.",
+          "Declare each target cell in the corpus `coverage` as supported, naming the golden cases that prove it.",
+          "Build {plugin-id}.wasm against the ADR-0017 SPI until every golden case passes.",
+          "Copy the .wasm and .golden.json into .cartograph/adapters/, gate the plugin in Settings, then re-ingest and confirm Preflight reports each target cell as covered."
         ],
         "origin": {
           "kind": "evidence",
@@ -656,10 +656,6 @@ Execution: unoffered. Capability requests confer no authority.
       "dependencies": {
         "state": "supplied",
         "value": [
-          {
-            "description": "ADR-0003 tree-sitter adapter SPI (compiled-in adapters)",
-            "evidence_ids": []
-          },
           {
             "description": "ADR-0017 runtime WASM adapter plugin host",
             "evidence_ids": []
@@ -681,7 +677,7 @@ Execution: unoffered. Capability requests confer no authority.
       "open_decisions": {
         "state": "supplied",
         "value": [
-          "Adapter contract: ADR-0017 WASM plugin (default; no core PR) or ADR-0003 compiled-in SPI (maintainer path)."
+          "The plugin id ({plugin-id} above)."
         ],
         "origin": {
           "kind": "evidence",
@@ -702,14 +698,14 @@ Execution: unoffered. Capability requests confer no authority.
         "value": [
           {
             "id": "fixture-ruby.core.calls",
-            "description": "Cell ruby.core.calls passes its conformance fixture.",
+            "description": "Cell ruby.core.calls is proved by its golden cases.",
             "steps": [
-              "Write crates/ingest/conformance/ruby.core.calls/src with representative Ruby sources.",
-              "Write crates/ingest/conformance/ruby.core.calls/expect.json listing the facts it must yield.",
-              "Run the conformance test; the cell's fixture must pass."
+              "Add golden cases with representative Ruby sources whose expected output proves ruby.core.calls.",
+              "Declare ruby.core.calls in the corpus `coverage`, naming those cases (at least one asserts nodes or edges).",
+              "Gate the plugin; every golden case and the coverage-declarations check must pass."
             ],
             "expected_evidence": [
-              "conformance fixture passes for ruby.core.calls"
+              "the plugin gate passes with ruby.core.calls declared"
             ],
             "evidence_ids": [
               "fact:aba6f62a77dcbd2cd87206d7b684702fc0105be446b9df965ac671b891a3fd67"
@@ -717,14 +713,14 @@ Execution: unoffered. Capability requests confer no authority.
           },
           {
             "id": "fixture-ruby.core.imports",
-            "description": "Cell ruby.core.imports passes its conformance fixture.",
+            "description": "Cell ruby.core.imports is proved by its golden cases.",
             "steps": [
-              "Write crates/ingest/conformance/ruby.core.imports/src with representative Ruby sources.",
-              "Write crates/ingest/conformance/ruby.core.imports/expect.json listing the facts it must yield.",
-              "Run the conformance test; the cell's fixture must pass."
+              "Add golden cases with representative Ruby sources whose expected output proves ruby.core.imports.",
+              "Declare ruby.core.imports in the corpus `coverage`, naming those cases (at least one asserts nodes or edges).",
+              "Gate the plugin; every golden case and the coverage-declarations check must pass."
             ],
             "expected_evidence": [
-              "conformance fixture passes for ruby.core.imports"
+              "the plugin gate passes with ruby.core.imports declared"
             ],
             "evidence_ids": [
               "fact:210537a31526c6d2c36013dc51ee08404ac4e6c4e7b82d8ed5f5d8392e91b66e"
@@ -732,14 +728,14 @@ Execution: unoffered. Capability requests confer no authority.
           },
           {
             "id": "fixture-ruby.core.types",
-            "description": "Cell ruby.core.types passes its conformance fixture.",
+            "description": "Cell ruby.core.types is proved by its golden cases.",
             "steps": [
-              "Write crates/ingest/conformance/ruby.core.types/src with representative Ruby sources.",
-              "Write crates/ingest/conformance/ruby.core.types/expect.json listing the facts it must yield.",
-              "Run the conformance test; the cell's fixture must pass."
+              "Add golden cases with representative Ruby sources whose expected output proves ruby.core.types.",
+              "Declare ruby.core.types in the corpus `coverage`, naming those cases (at least one asserts nodes or edges).",
+              "Gate the plugin; every golden case and the coverage-declarations check must pass."
             ],
             "expected_evidence": [
-              "conformance fixture passes for ruby.core.types"
+              "the plugin gate passes with ruby.core.types declared"
             ],
             "evidence_ids": [
               "fact:c648d47a8c31e6ad15d559e71100979ae0517e3778ba03958ec7c34a15e509fd"
@@ -760,12 +756,12 @@ Execution: unoffered. Capability requests confer no authority.
         "value": [
           {
             "id": "claim-without-fixture",
-            "description": "A claimed cell with no conformance fixture is rejected.",
+            "description": "A claimed cell naming no golden case is rejected.",
             "steps": [
-              "Run the ingest tests with a cell claimed and its fixture absent."
+              "Gate the plugin with a cell declared in `coverage` and no golden case named for it."
             ],
             "expected_evidence": [
-              "the ingest tests fail on the claim with no fixture"
+              "the coverage-declarations check fails on that cell"
             ],
             "evidence_ids": [
               "fact:aba6f62a77dcbd2cd87206d7b684702fc0105be446b9df965ac671b891a3fd67",
@@ -788,13 +784,13 @@ Execution: unoffered. Capability requests confer no authority.
         "value": [
           {
             "id": "matrix-updated",
-            "description": "The coverage matrix states every claimed cell.",
+            "description": "The plugin's coverage declares every claimed cell.",
             "steps": [
-              "Compare the matrix against the target cells.",
+              "Compare the corpus `coverage` against the target cells.",
               "Re-run Preflight on the repo."
             ],
             "expected_evidence": [
-              "each target cell reads Supported in the coverage matrix",
+              "each target cell is declared supported in the plugin's coverage",
               "adapter lookup reports each target cell as covered"
             ],
             "evidence_ids": [
