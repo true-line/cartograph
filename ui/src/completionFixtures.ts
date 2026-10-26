@@ -9,7 +9,11 @@ export const completionCatalog: InvestigationCatalog = { ...qualifiedCatalog, sp
   { ...qualifiedCatalog.specialists[0], id: 'spec-writer@1', version: 1, name: 'Spec Writer',
     purpose: 'Draft a cited proposed specification from the scoped recovered context.',
     operations: ['query_context', 'read_evidence', 'read_coverage_inventory', 'finish'] as InvestigationSpecialist['operations'],
-    prompt_fingerprint: 'fixture-spec-writer@1' }] };
+    prompt_fingerprint: 'fixture-spec-writer@1' },
+  { ...qualifiedCatalog.specialists[0], id: 'gap-triager@1', version: 1, name: 'Gap Triager',
+    purpose: 'Recommend a cited next investigation step for a recorded gap.',
+    operations: ['query_context', 'read_evidence', 'read_coverage_inventory', 'finish'] as InvestigationSpecialist['operations'],
+    prompt_fingerprint: 'fixture-gap-triager@1' }] };
 export const sourceObligation: Extract<InvestigationObligation, { kind: 'source' }> = { kind: 'source', obligation_id: '1'.repeat(64), target: { ...inspectionTarget, graph_snapshot_id: `context-v1:${'8'.repeat(64)}` } };
 export const inventoryObligation: Extract<InvestigationObligation, { kind: 'inventory' }> = { kind: 'inventory', obligation_id: '2'.repeat(64), target: {
   context_id: qualifiedCoverageContext.context_id, repo: 'acme/api', inventory_hash: '3'.repeat(64) } };
@@ -114,4 +118,17 @@ export function admissionDetail(id = 'inv-admission'): InvestigationDetail {
 export function admissionResult(id = 'inv-admission'): InvestigationResult {
   return { ...queryHistoryResult(id), schema_version: 7, result_id: `investigation-result-v7:${'7'.repeat(64)}`,
     disclosure_hash: `investigation-disclosure-v6:${'d'.repeat(64)}` };
+}
+
+export function gapTriagerDetail(id = 'inv-gap-triager'): InvestigationDetail {
+  return completionDetail(id, { specialist_id: 'gap-triager@1',
+    specialist: completionCatalog.specialists.find((item) => item.id === 'gap-triager@1')! });
+}
+
+export function gapTriagerResult(id = 'inv-gap-triager'): InvestigationResult {
+  const result = completionResult(id);
+  result.findings = result.findings.slice(0, 1).map((finding) => ({ ...finding, claim_kind: 'proposed_design',
+    title: 'Verify the guarded boundary before treating the gap as closed',
+    statement: 'Inspect the admitted source behind this recorded gap and add a test for both outcomes before deciding whether the boundary is closed. The gap remains unresolved here.' }));
+  return result;
 }

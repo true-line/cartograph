@@ -31,6 +31,7 @@ enum Mode {
     WrongQualifiedContext,
     CompletionSupported,
     SpecWriterSupported,
+    GapTriagerSupported,
     CompletionRepair,
     CompletionCap,
     CompletionInventoryUnavailable,

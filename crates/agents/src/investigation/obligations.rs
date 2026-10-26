@@ -367,13 +367,20 @@ fn request_family(
     // when hashing saved requests. Public request7 and historical requests
     // retain their exact schema, specialist and policy tuple.
     match (policy.profile(), schema_version, specialist_id) {
-        ("investigation-v1", 4, "domain-analyst@7" | "evidence-auditor@7" | "spec-writer@1") => {
-            Ok((
-                4,
-                &["domain-analyst@7", "evidence-auditor@7", "spec-writer@1"],
-                b"cartograph:investigation-client-intent:v4\0",
-            ))
-        }
+        (
+            "investigation-v1",
+            4,
+            "domain-analyst@7" | "evidence-auditor@7" | "spec-writer@1" | "gap-triager@1",
+        ) => Ok((
+            4,
+            &[
+                "domain-analyst@7",
+                "evidence-auditor@7",
+                "spec-writer@1",
+                "gap-triager@1",
+            ],
+            b"cartograph:investigation-client-intent:v4\0",
+        )),
         ("investigation-v2", 5, "domain-analyst@8" | "evidence-auditor@8") => Ok((
             5,
             &["domain-analyst@8", "evidence-auditor@8"],

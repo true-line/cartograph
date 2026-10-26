@@ -30,6 +30,15 @@ fn spec_writer_fixture() -> PreparedFixture {
         Some(SpecialistId::SpecWriterV1),
     )
 }
+fn gap_triager_fixture() -> PreparedFixture {
+    fixture_policy(
+        true,
+        true,
+        false,
+        Some(&INVESTIGATION_V1_POLICY),
+        Some(SpecialistId::GapTriagerV1),
+    )
+}
 fn fixture_version(source: bool, inventory: bool, secret: bool, v7: bool) -> PreparedFixture {
     fixture_policy(
         source,
@@ -384,6 +393,19 @@ fn staged_finish_requires_exact_mixed_finishing_disclosure_and_security_first() 
 #[test]
 fn spec_writer_rejects_non_proposed_design_findings_at_finish() {
     let fixture = spec_writer_fixture();
+    assert!(matches!(
+        decide(&fixture, &finish(false), &[]),
+        Err(InvestigationError::InvalidAction)
+    ));
+    assert!(matches!(
+        decide(&fixture, &spec_writer_finish(), &[]),
+        Ok(FinishDecision::Accepted(_))
+    ));
+}
+
+#[test]
+fn gap_triager_rejects_non_proposed_design_findings_at_finish() {
+    let fixture = gap_triager_fixture();
     assert!(matches!(
         decide(&fixture, &finish(false), &[]),
         Err(InvestigationError::InvalidAction)

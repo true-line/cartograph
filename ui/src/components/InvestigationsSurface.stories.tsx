@@ -1,7 +1,7 @@
 import actualAdmission from '../fixtures/completion-v10-supported.json';
 import { admissionCatalog, admissionDetail, admissionResult, queryHistoryCatalog, queryHistoryDetail, queryHistoryResult,
   expandedCompletionCatalog, completionCatalog, completionChoices, completionDetail, completionResult,
-  inventoryObligation, sourceObligation, specWriterDetail, specWriterResult } from '../completionFixtures';
+  gapTriagerDetail, gapTriagerResult, inventoryObligation, sourceObligation, specWriterDetail, specWriterResult } from '../completionFixtures';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
@@ -635,6 +635,45 @@ export const SpecWriterSavedCompletion: Story = {
     await expect(canvas.getByText('Supported completion.')).toBeVisible();
     await expect(canvas.getByText('Completion obligations')).toBeVisible();
     await expect(canvas.getByText('Reject limited inputs before guarded processing')).toBeVisible();
+    const finding = canvas.getByRole('region', { name: 'Investigation findings' });
+    const citation = args.state.result!.findings[0].citation_ids[0];
+    await userEvent.click(within(finding).getByRole('button', { name: new RegExp(`Inspect citation ${citation}`) }));
+    await expect(args.state.readCitation).toHaveBeenCalledWith(citation);
+  },
+};
+
+export const GapTriagerStandardFamily: Story = {
+  // AC-0384: exact Gap Triager selection is unavailable in Expanded and restores without substitution.
+  args: { state: state({ catalog: expandedCompletionCatalog, detail: null, result: null, selectedId: null, history: [],
+    obligationChoices: completionChoices, draftObligations: [inventoryObligation] }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const role = canvas.getByRole('radio', { name: /gap-triager@1/ });
+    await userEvent.click(role);
+    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
+    await expect(canvas.queryByRole('radio', { name: /gap-triager@1/ })).not.toBeInTheDocument();
+    await expect(useInvestigationStore.getState().composer.specialistId).toBe('gap-triager@1');
+    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v1');
+    await expect(canvas.getByRole('radio', { name: /gap-triager@1/ })).toBeChecked();
+    const question = canvas.getByLabelText('Question');
+    await expect(question).toHaveAttribute('placeholder', 'Which recorded gap should be investigated next, and what evidence would reduce it?');
+    await userEvent.type(question, 'What evidence should reduce the recorded gap?');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({
+      specialist_id: 'gap-triager@1', limit_profile: 'investigation-v1',
+      obligations: expect.objectContaining({ schema_version: 1 }),
+    }));
+  },
+};
+
+export const GapTriagerSavedCompletion: Story = {
+  // AC-0384: saved recommendation preserves the proposed design and citation.
+  args: { state: state({ catalog: completionCatalog, detail: gapTriagerDetail(), result: gapTriagerResult(),
+    selectedId: 'inv-gap-triager', history: [gapTriagerDetail()] }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Supported completion.')).toBeVisible();
+    await expect(canvas.getByText('Verify the guarded boundary before treating the gap as closed')).toBeVisible();
     const finding = canvas.getByRole('region', { name: 'Investigation findings' });
     const citation = args.state.result!.findings[0].citation_ids[0];
     await userEvent.click(within(finding).getByRole('button', { name: new RegExp(`Inspect citation ${citation}`) }));
