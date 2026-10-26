@@ -219,8 +219,6 @@ export default function App() {
       if (view === 'investigations') {
         useSpecialistActivityStore.getState().setVisible(true);
         void useInvestigationStore.getState().loadCatalog();
-      } else if (useInvestigationStore.getState().selectedId) {
-        void useInvestigationStore.getState().refreshSelected();
       }
       void useInvestigationStore.getState().loadHistory();
     }

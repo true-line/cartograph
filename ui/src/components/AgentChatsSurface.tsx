@@ -1,4 +1,5 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
+import { useAgentChatDockStore } from '../agentChatDockStore';
 import type { InvestigationState } from '../investigationStore';
 import { InvestigationChatTranscript } from './InvestigationChatTranscript';
 
@@ -15,8 +16,8 @@ function statusLabel(status: string) {
  * existing investigation coordinator and its task/result binding checks. */
 export function AgentChatsSurface({ state, onOpenResult }: AgentChatsSurfaceProps) {
   const [searchText, setSearchText] = useState(state.historySearch);
-  const selectedSummary = state.detail?.investigation_id === state.selectedId
-    ? state.detail : state.history.find((item) => item.investigation_id === state.selectedId);
+  const dock = useAgentChatDockStore();
+  useEffect(() => dock.connect(), [dock.connect]);
   const submitSearch = (event: FormEvent) => {
     event.preventDefault();
     void state.searchHistory(searchText);
@@ -25,9 +26,9 @@ export function AgentChatsSurface({ state, onOpenResult }: AgentChatsSurfaceProp
   return <section className="agent-chats-surface" aria-label="Agent Chats">
     <header className="agent-chats-heading">
       <div><h2>Agent Chats</h2>
-        <p className="muted">Review saved specialist conversations and open their findings.</p></div>
+        <p className="muted">Dock up to four saved task chats and open their findings.</p></div>
       <button type="button" className="secondary-button" disabled={state.historyLoading}
-        onClick={() => { void state.loadHistory(); if (state.selectedId) void state.refreshSelected(); }}>Refresh saved chats</button>
+        onClick={() => { void state.loadHistory(); if (dock.focusedTask) dock.open(dock.focusedTask); }}>Refresh saved chats</button>
     </header>
     <div className="agent-chats-layout">
       <aside className="agent-chats-history" aria-label="Saved task history">
@@ -55,8 +56,8 @@ export function AgentChatsSurface({ state, onOpenResult }: AgentChatsSurfaceProp
             ? 'No saved tasks match this search.' : state.historyActiveOnly ? 'No active saved tasks.' : 'No saved tasks loaded.'}
         </p>}
         <ul>{state.history.map((item) => <li key={item.investigation_id}>
-          <button type="button" className={`agent-chat-history-item${item.investigation_id === state.selectedId ? ' selected' : ''}`}
-            aria-pressed={item.investigation_id === state.selectedId} onClick={() => void state.open(item.investigation_id)}>
+          <button type="button" className={`agent-chat-history-item${item.investigation_id === dock.focusedTask ? ' selected' : ''}`}
+            aria-pressed={item.investigation_id === dock.focusedTask} onClick={() => dock.open(item.investigation_id)}>
             <strong>{item.question}</strong>
             <span>{item.specialist_id} · {statusLabel(item.status)}</span>
             <time>{item.updated_at}</time>
@@ -65,18 +66,28 @@ export function AgentChatsSurface({ state, onOpenResult }: AgentChatsSurfaceProp
         {state.nextCursor && <button type="button" className="secondary-button" disabled={state.historyLoading}
           onClick={() => void state.loadHistory(true)}>Load older saved tasks</button>}
       </aside>
-      <section className="agent-chat-pane" aria-label="Selected saved conversation">
-        {!state.selectedId && <p className="muted">Select a saved task to view its persisted question and result reference.</p>}
-        {state.selectedId && <>
-          <header><div><h3>{selectedSummary?.question ?? 'Loading saved task'}</h3>
-            <code>{state.selectedId}</code>{selectedSummary && <p role="status">{statusLabel(selectedSummary.status)}</p>}</div></header>
-          {state.loading && !state.detail && <p role="status">Loading saved task…</p>}
-          {state.error && <p role="alert" className="error-text">{state.error}</p>}
-          {state.detail && <InvestigationChatTranscript chat={state.chat} status={state.chatStatus}
-            error={state.chatError} onRefresh={() => void state.refreshSelected()} onOpenResult={onOpenResult}
-            onOpenInvestigation={() => state.selectedId && onOpenResult(state.selectedId)} />}
-        </>}
-      </section>
+      <div className="agent-chat-workspace">
+        {dock.pendingTask && <p role="status">Loading saved chat {dock.pendingTask}…
+          <button type="button" className="secondary-button" onClick={() => dock.close(dock.pendingTask!)}>Cancel opening chat</button></p>}
+        {dock.error && <div role="alert" className="error-text">{dock.error}
+          {dock.fallbackTask && <button type="button" className="secondary-button"
+            onClick={() => onOpenResult(dock.fallbackTask!)}>Open this investigation to inspect its findings</button>}
+        </div>}
+        {!dock.docks.length && !dock.pendingTask && <p className="muted">Select a saved task to dock its persisted conversation.</p>}
+        <div className={`agent-chat-docks agent-chat-docks-${dock.docks.length}`}>
+          {dock.docks.map(({ chat, question }) => <section className="agent-chat-pane" key={chat.chat_id}
+            aria-label={`Saved chat ${chat.task_id}`}>
+            <header><h3>{question}</h3><code>{chat.task_id}</code>
+              <p className="muted">Last observed snapshot · {chat.chat_id}</p>
+              <button type="button" className="secondary-button" aria-pressed={dock.focusedTask === chat.task_id}
+                onClick={() => dock.open(chat.task_id)}>Focus / refresh {chat.task_id}</button>
+              <button type="button" className="secondary-button" onClick={() => dock.close(chat.task_id)}>Close {chat.task_id}</button>
+            </header>
+            <InvestigationChatTranscript chat={chat} status="saved" error={null}
+              onRefresh={() => dock.open(chat.task_id)} onOpenResult={onOpenResult} />
+          </section>)}
+        </div>
+      </div>
     </div>
   </section>;
 }
