@@ -275,17 +275,21 @@ pub(super) fn start_access<R: tauri::Runtime>(
 pub(crate) async fn list_investigations(
     cursor: Option<String>,
     search: Option<String>,
+    active_only: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<InvestigationPage, String> {
     crate::off_ui_thread(move || {
         let state = app.state::<AppState>();
         let jobs = state.jobs.lock().map_err(|e| e.to_string())?;
-        match search.as_deref() {
-            Some(search) => jobs
+        match (active_only.unwrap_or(false), search.as_deref()) {
+            (false, None) => jobs
+                .investigation_history(None, cursor.as_deref())
+                .map_err(|e| e.to_string()),
+            (false, Some(search)) => jobs
                 .search_investigation_history(search, cursor.as_deref())
                 .map_err(|e| e.to_string()),
-            None => jobs
-                .investigation_history(None, cursor.as_deref())
+            (active_only, search) => jobs
+                .investigation_history_selection(search, active_only, cursor.as_deref())
                 .map_err(|e| e.to_string()),
         }
     })

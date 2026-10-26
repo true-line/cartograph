@@ -156,6 +156,63 @@ describe('durable investigation observations (AC-0190)', () => {
     expect(useInvestigationStore.getState().nextCursor).toBe('after-older');
   });
 
+  it('does not let an older active page restore a task after a terminal summary arrives (AC-0372)', async () => {
+    const active = investigationDetail('active-race', { status: 'running', has_result: false,
+      actions: { can_cancel: true, can_follow_up: false }, revision: 2 });
+    const terminal = investigationDetail('active-race', { status: 'cancelled', has_result: false,
+      actions: { can_cancel: false, can_follow_up: false }, revision: 3 });
+    const pendingPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    mockIPC((command) => {
+      if (command === 'list_investigations') return pendingPage.promise;
+      if (command === 'cancel_investigation') return terminal;
+      return response(command);
+    });
+
+    useInvestigationStore.setState({ historyActiveOnly: true }, false);
+    const oldPage = useInvestigationStore.getState().loadHistory();
+    await useInvestigationStore.getState().cancel(active.investigation_id);
+    expect(useInvestigationStore.getState().history).toEqual([]);
+    pendingPage.resolve({ items: [active], next_cursor: null });
+    await oldPage;
+    expect(useInvestigationStore.getState().history).toEqual([]);
+    expect(useInvestigationStore.getState().historyLoading).toBe(false);
+  });
+
+  it('replaces active pages on refresh and ignores a stale page across view switches (AC-0372)', async () => {
+    const oldAllPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const staleAll = investigationDetail('stale-all-result');
+    const activeFirst = investigationDetail('active-first', { status: 'running', has_result: false });
+    const activeRefresh = investigationDetail('active-refresh', { status: 'awaiting_consent', has_result: false });
+    const latestAll = investigationDetail('latest-all-result');
+    let activeCalls = 0;
+    let allCalls = 0;
+    mockIPC((command, args) => {
+      if (command !== 'list_investigations') return null;
+      if (args?.activeOnly) {
+        activeCalls += 1;
+        return activeCalls === 1
+          ? { items: [activeFirst], next_cursor: 'active-first-cursor' }
+          : { items: [activeRefresh], next_cursor: 'active-refresh-cursor' };
+      }
+      allCalls += 1;
+      return allCalls === 1 ? oldAllPage.promise : { items: [latestAll], next_cursor: 'latest-all-cursor' };
+    });
+
+    const oldAllRequest = useInvestigationStore.getState().loadHistory();
+    await useInvestigationStore.getState().selectHistoryActive(true);
+    useInvestigationStore.setState({ history: [activeFirst, investigationDetail('older-active', { status: 'preparing', has_result: false })],
+      nextCursor: 'older-active-cursor' });
+    await useInvestigationStore.getState().loadHistory();
+    expect(useInvestigationStore.getState().history.map((item) => item.investigation_id)).toEqual(['active-refresh']);
+    expect(useInvestigationStore.getState().nextCursor).toBe('active-refresh-cursor');
+
+    await useInvestigationStore.getState().selectHistoryActive(false);
+    oldAllPage.resolve({ items: [staleAll], next_cursor: 'stale-all-cursor' });
+    await oldAllRequest;
+    expect(useInvestigationStore.getState().history.map((item) => item.investigation_id)).toEqual(['latest-all-result']);
+    expect(useInvestigationStore.getState().nextCursor).toBe('latest-all-cursor');
+  });
+
   it('orders exact duplicate pages and rejects gaps, foreign identities and conflicting events', () => {
     const events = investigationEvents('original');
     expect(mergeInvestigationEvents('original', events.slice(0, 4), events.slice(3))).toEqual(events);

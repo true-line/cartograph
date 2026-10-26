@@ -198,7 +198,14 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
 
     <div className="investigation-layout">
       <aside className="investigation-history" aria-label="Investigation history">
-        <h3>Saved investigations</h3><p className="muted">Questions, activity and findings survive restart and job cleanup.</p>
+        <h3>{state.historyActiveOnly ? 'Active investigations' : 'Saved investigations'}</h3>
+        <p className="muted">Questions, activity and findings survive restart and job cleanup.</p>
+        <div role="group" aria-label="Investigation history view">
+          <button type="button" className="secondary-button" aria-pressed={!state.historyActiveOnly}
+            onClick={() => void state.selectHistoryActive(false)}>All investigations</button>
+          <button type="button" className="secondary-button" aria-pressed={state.historyActiveOnly}
+            onClick={() => void state.selectHistoryActive(true)}>Active investigations</button>
+        </div>
         <form aria-label="Search saved investigations" onSubmit={(event) => {
           event.preventDefault();
           void state.searchHistory(historySearchText);
@@ -215,13 +222,17 @@ export function InvestigationsSurface({ state, anchors, canStart }: Investigatio
         {state.historyLoading && <p role="status">Loading history…</p>}
         {state.historyError && <p role="alert" className="error-text">{state.historyError}</p>}
         {!state.historyLoading && state.history.length === 0 && <p className="muted">
-          {/^[\t\n\v\f\r ]+$/.test(state.historySearch) || !state.historySearch
-            ? 'No saved investigations loaded.' : 'No saved investigations match this search.'}
+          {state.historyActiveOnly
+            ? (/^[\t\n\v\f\r ]+$/.test(state.historySearch) || !state.historySearch
+              ? 'No active investigations.' : 'No active investigations match this search.')
+            : (/^[\t\n\v\f\r ]+$/.test(state.historySearch) || !state.historySearch
+              ? 'No saved investigations loaded.' : 'No saved investigations match this search.')}
         </p>}
         <ul>{state.history.map((item) => <li key={item.investigation_id}>
           <button type="button" className={`investigation-history-item${item.investigation_id === state.selectedId ? ' selected' : ''}`}
             aria-pressed={item.investigation_id === state.selectedId} onClick={() => void state.open(item.investigation_id)}>
             <strong>{item.question}</strong><span>{item.specialist_id}</span><span>{INVESTIGATION_STATUS[item.status]}</span>
+            {state.historyActiveOnly && <><span>Provider: {item.provider_mode}</span><time>Updated {item.updated_at}</time></>}
             {item.schema_version === 3 && <span>Coverage-qualified · saved basis shown on open</span>}
             <span>Source inspections: {item.inspection_status === 'pending' ? 'Awaiting assessment' : item.inspection_status === 'supplied'
               ? 'Required sources available' : item.inspection_status === 'unmet' ? 'Required sources missing' : 'Not assessed'}

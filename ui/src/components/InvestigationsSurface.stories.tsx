@@ -135,6 +135,43 @@ export const SearchesPersistedHistory: Story = {
   },
 };
 
+export const ActiveInvestigations: Story = {
+  // AC-0372: Active is selected by the host and opens the exact saved task.
+  beforeEach: () => {
+    const active = investigationDetail('awaiting-consent-active', { status: 'awaiting_consent', provider_mode: 'cloud',
+      has_result: false, revision: 12, updated_at: '2026-10-25T14:30:00Z',
+      actions: { can_cancel: true, can_follow_up: false } });
+    mockIPC((command, args) => {
+      if (command === 'list_investigations') {
+        expect(args).toEqual({ activeOnly: true });
+        return { items: [active], next_cursor: null };
+      }
+      if (command === 'get_investigation') return active;
+      if (command === 'investigation_result') return null;
+      if (command === 'investigation_consent') return null;
+      if (command === 'investigation_events') return { investigation_id: active.investigation_id,
+        items: investigationEvents(active.investigation_id), next_sequence: active.last_event_sequence, has_more: false };
+      return null;
+    });
+    useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: investigationCatalog }, true);
+    return () => clearMocks();
+  },
+  render: function ActiveHistoryStory() {
+    return <InvestigationsSurface state={useInvestigationStore()} anchors={[]} canStart />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Active investigations' }));
+    const row = await canvas.findByRole('button', { name: /What stock behavior is supported/ });
+    await expect(row).toHaveTextContent('Awaiting cloud consent');
+    await expect(row).toHaveTextContent('Provider: cloud');
+    await expect(row).toHaveTextContent('Updated 2026-10-25T14:30:00Z');
+    await userEvent.click(row);
+    await waitFor(() => expect(useInvestigationStore.getState().selectedId).toBe('awaiting-consent-active'));
+    await waitFor(() => expect(useInvestigationStore.getState().detail?.investigation_id).toBe('awaiting-consent-active'));
+  },
+};
+
 let releaseEarlier: (value: InvestigationDetail) => void = () => {};
 let earlierRequest: Promise<void> | null = null;
 

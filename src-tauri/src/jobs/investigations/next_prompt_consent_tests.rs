@@ -156,6 +156,21 @@ impl Fixture {
 }
 
 #[test]
+fn investigation_active_history_includes_durable_awaiting_consent() {
+    // AC-0372: consent-waiting tasks remain active in persisted selection.
+    let fixture = Fixture::new();
+    let id = fixture.f.task.detail.summary.investigation_id.clone();
+    let page = fixture
+        .f
+        .store
+        .investigation_history_selection(None, true, None)
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].investigation_id, id);
+    assert_eq!(page.items[0].status, InvestigationStatus::AwaitingConsent);
+}
+
+#[test]
 fn next_prompt_consent_exact_approval_then_real_begin_preserves_single_invocation() {
     let mut f = Fixture::new();
     let before = f.snapshot();
