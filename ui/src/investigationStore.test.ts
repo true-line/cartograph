@@ -174,18 +174,35 @@ describe('durable investigation observations (AC-0190)', () => {
       }
       return response(command, args);
     });
-    await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@2', question: 'Inspect this scope.',
+    const uncertain = await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@2', question: 'Inspect this scope.',
       scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1' });
+    expect(uncertain).toBeNull();
     expect(useInvestigationStore.getState().pendingStart).toEqual(starts[0]);
     await useInvestigationStore.getState().start({ specialist_id: 'evidence-auditor@2', question: 'Cannot replace pending start.',
       scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1' });
     expect(starts).toHaveLength(1);
-    await useInvestigationStore.getState().retryStart();
+    const recoveredId = await useInvestigationStore.getState().retryStart();
+    expect(recoveredId).toBe('same-durable-task');
     expect(starts).toHaveLength(2);
     expect(starts[1]).toEqual(starts[0]);
     expect(starts[0].request_nonce.length).toBeGreaterThan(0);
     expect(useInvestigationStore.getState().selectedId).toBe('same-durable-task');
     expect(useInvestigationStore.getState().pendingStart).toBeNull();
+  });
+
+  it('returns confirmed admission identity even when the subsequent detail read fails', async () => {
+    mockIPC((command) => {
+      if (command === 'start_investigation') return investigationDetail('accepted-but-unavailable');
+      if (command === 'get_investigation') throw new Error('Detail read failed');
+      return response(command, { investigationId: 'accepted-but-unavailable' });
+    });
+    const id = await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@3', question: 'Inspect this scope.',
+      scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1' });
+    expect(id).toBe('accepted-but-unavailable');
+    expect(useInvestigationStore.getState().selectedId).toBe('accepted-but-unavailable');
+    expect(useInvestigationStore.getState().pendingStart).toBeNull();
+    expect(useInvestigationStore.getState().startError).toBeNull();
+    expect(useInvestigationStore.getState().error).toMatch(/could not be refreshed consistently/i);
   });
 
   it('ignores an older task response after selecting another task', async () => {

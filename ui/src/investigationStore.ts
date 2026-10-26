@@ -232,8 +232,8 @@ export interface InvestigationState {
   loadCatalog: () => Promise<void>;
   loadHistory: (more?: boolean) => Promise<void>;
   searchHistory: (query: string) => Promise<void>;
-  start: (draft: InvestigationDraft) => Promise<void>;
-  retryStart: () => Promise<void>;
+  start: (draft: InvestigationDraft) => Promise<string | null>;
+  retryStart: () => Promise<string | null>;
   open: (id: string) => Promise<void>;
   refreshSelected: () => Promise<void>;
   invalidate: (message: InvestigationChanged) => void;
@@ -273,18 +273,14 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     };
   });
 
-  const startRequest = async (request: StartInvestigationRequest) => {
-    if (get().starting) return;
+  const startRequest = async (request: StartInvestigationRequest): Promise<string | null> => {
+    if (get().starting) return null;
     set({ starting: true, pendingStart: request, startError: null });
+    let summary: InvestigationSummary;
     try {
-      const summary = await invokeOr<InvestigationSummary | null>('start_investigation', null, { request });
-      if (!validSummary(summary)) throw new Error('No durable identity returned.');
-      updateSummary(summary);
-      set((state) => ({ starting: false, pendingStart: null,
-        composer: { ...state.composer, question: '', parent: null },
-        draftInspectionRequirements: [], inspectionDraftError: null,
-    draftObligations: [], obligationChoices: null, obligationChoicesLoading: false, obligationDraftError: null }));
-      await get().open(summary.investigation_id);
+      const response = await invokeOr<InvestigationSummary | null>('start_investigation', null, { request });
+      if (!validSummary(response)) throw new Error('No durable identity returned.');
+      summary = response;
     } catch (error) {
       if (typeof error === 'object' && error !== null && 'code' in error && (error.code === 'refresh_required' || error.code === 'invalid_input') &&
           'definitive' in error && error.definitive === true) {
@@ -293,10 +289,24 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
             ? [4, 5, 6, 7].includes(request.schema_version) ? 'The selected evidence or completion context changed before admission. No investigation was started. Refresh choices and remove stale obligations.'
               : 'The selected captured source changed before admission. No investigation was started. Remove the stale requirement and select its source again.'
             : `The request was rejected before admission. No investigation was started.${'message' in error && typeof error.message === 'string' ? ` ${error.message}` : ''}` });
-        return;
+        return null;
       }
       set({ starting: false, startError: 'The start outcome could not be confirmed. Retry this same request to recover its durable identity; this does not start another investigation.' });
+      return null;
     }
+    updateSummary(summary);
+    set((state) => ({ starting: false, pendingStart: null,
+      composer: { ...state.composer, question: '', parent: null },
+      draftInspectionRequirements: [], inspectionDraftError: null,
+      draftObligations: [], obligationChoices: null, obligationChoicesLoading: false, obligationDraftError: null }));
+    // Admission is already confirmed. A later detail-load failure must not
+    // turn this into an uncertain start or invite a fresh nonce.
+    try {
+      await get().open(summary.investigation_id);
+    } catch {
+      set({ error: 'Investigation started, but its detail could not be loaded. Refresh the saved investigation.' });
+    }
+    return summary.investigation_id;
   };
 
   const consentAction = async (command: string) => {
@@ -565,15 +575,15 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     },
 
     start: async (draft) => {
-      if (get().pendingStart || get().starting) return;
+      if (get().pendingStart || get().starting) return null;
       const request_nonce = crypto.randomUUID();
       const { obligations: completionObligations, ...legacyBase } = draft;
       if (isCompletionSpecialist(draft.specialist_id)) {
         const policy = investigationPolicy(get().catalog, draft.limit_profile, draft.specialist_id);
-        if (!policy) return;
+        if (!policy) return null;
         const choices = get().obligationChoices;
         if (!choices || !draft.obligations || !validObligationEnvelope(draft.obligations, policy) || draft.inspection_requirements !== undefined ||
-            draft.obligations.obligations.some((item) => item.kind === 'source' ? item.target.graph_snapshot_id !== choices.graph_snapshot_id : item.target.context_id !== choices.context_id)) return;
+            draft.obligations.obligations.some((item) => item.kind === 'source' ? item.target.graph_snapshot_id !== choices.graph_snapshot_id : item.target.context_id !== choices.context_id)) return null;
         const request: StartInvestigationRequest = { schema_version: policy.request_schema_version, request_nonce, specialist_id: draft.specialist_id,
           obligations: structuredClone(draft.obligations), question: draft.question, scope: draft.scope,
           provider_mode: draft.provider_mode, limit_profile: draft.limit_profile,
@@ -581,32 +591,32 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           conversation_id: draft.conversation_id ?? null, parent_id: draft.parent_id ?? null };
         if (new TextEncoder().encode(JSON.stringify(request)).length > policy.request_bytes) {
           set({ obligationDraftError: `This complete request exceeds ${policy.request_bytes.toLocaleString()} bytes. Shorten it or remove an obligation.` });
-          return;
+          return null;
         }
-        await startRequest(request);
-      } else if (completionObligations !== undefined) return;
+        return startRequest(request);
+      } else if (completionObligations !== undefined) return null;
       else if (draft.specialist_id.endsWith('@6')) {
         const { inspection_requirements: requirements, ...qualified } = legacyBase;
-        if (requirements !== undefined && requirements.length === 0) return;
-        await startRequest(structuredClone({ ...qualified, schema_version: 3, request_nonce,
+        if (requirements !== undefined && requirements.length === 0) return null;
+        return startRequest(structuredClone({ ...qualified, schema_version: 3, request_nonce,
           ...(requirements ? { expected_graph_revision: requirements[0].graph_snapshot_id,
             inspection_requirements: requirements } : {}) }));
       } else if (draft.specialist_id.endsWith('@5')) {
         const { expected_context_id, ...inspectionDraft } = legacyBase;
-        if (!draft.inspection_requirements?.length || expected_context_id !== undefined) return;
-        await startRequest(structuredClone({ ...inspectionDraft, schema_version: 2, request_nonce,
+        if (!draft.inspection_requirements?.length || expected_context_id !== undefined) return null;
+        return startRequest(structuredClone({ ...inspectionDraft, schema_version: 2, request_nonce,
           expected_graph_revision: draft.inspection_requirements[0].graph_snapshot_id,
           inspection_requirements: draft.inspection_requirements }));
       } else {
         // Preserve legacy schema bytes: requirements are absent, never an empty list.
         const { inspection_requirements: requirements, expected_context_id, ...legacy } = legacyBase;
-        if (requirements?.length || expected_context_id !== undefined) return;
-        await startRequest(structuredClone({ ...legacy, schema_version: 1, request_nonce }));
+        if (requirements?.length || expected_context_id !== undefined) return null;
+        return startRequest(structuredClone({ ...legacy, schema_version: 1, request_nonce }));
       }
     },
     retryStart: async () => {
       const request = get().pendingStart;
-      if (request) await startRequest(request);
+      return request ? startRequest(request) : null;
     },
     open: async (id) => {
       ++detailRequest;

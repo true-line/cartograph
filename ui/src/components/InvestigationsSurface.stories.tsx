@@ -12,7 +12,7 @@ import type { InvestigationDetail, InvestigationResult } from '../investigationT
 const state = (overrides: Partial<InvestigationState> = {}): InvestigationState => ({
   ...useInvestigationStore.getInitialState(), catalog: investigationCatalog, history: [investigationDetail()],
   selectedId: 'inv-fixture', detail: investigationDetail(), result: investigationResult(), events: investigationEvents(),
-  start: fn(async () => {}), retryStart: fn(async () => {}), open: fn(async () => {}),
+  start: fn(async () => null), retryStart: fn(async () => null), open: fn(async () => {}),
   approve: fn(async () => {}), decline: fn(async () => {}), cancel: fn(async () => {}),
   hideConsent: fn(), showConsent: fn(), loadHistory: fn(async () => {}), loadCatalog: fn(async () => {}),
   refreshSelected: fn(async () => {}), readCitation: fn(async () => {}), clearCitation: fn(), ...overrides,

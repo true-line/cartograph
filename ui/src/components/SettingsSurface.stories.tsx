@@ -121,6 +121,7 @@ const meta = {
     onProviderChange: fn(),
     onGrantConsent: fn(),
     onRevokeConsent: fn(),
+    onOpenQuickDispatch: fn(),
     parallelism: PARALLELISM,
     onParallelismChange: fn(),
   },
@@ -158,6 +159,16 @@ export const LocalOnlyDefaults: Story = {
     const t2Group = within(canvas.getByRole('radiogroup', { name: 'T2 provider' }));
     await userEvent.click(t2Group.getByRole('radio', { name: 'Cloud (opt-in)' }));
     await expect(args.onProviderChange).toHaveBeenCalledWith('T2', 'cloud');
+
+  },
+};
+
+export const QuickInvestigationHasSettingsEntry: Story = {
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText(/macOS may intercept it/)).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole('button', { name: 'Open quick investigation' }));
+    await expect(args.onOpenQuickDispatch).toHaveBeenCalledTimes(1);
   },
 };
 

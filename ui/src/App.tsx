@@ -34,6 +34,8 @@ import { hasRecordedExecution, selectRecoveryJob } from './jobPresentation';
 import { TopologyCard } from './components/TopologyCard';
 import { InvestigationsSurface } from './components/InvestigationsSurface';
 import { investigationIsActive, useInvestigationStore } from './investigationStore';
+import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
+import { readQuickDispatchFallback, writeQuickDispatchFallback } from './quickDispatchPreference';
 import type { InvestigationChanged } from './investigationTypes';
 import type { Job, PreflightProgress, SpecArtifact, SpecAssertion, SpecBundle } from './store';
 import {
@@ -200,6 +202,8 @@ export default function App() {
   const [legendOpen, setLegendOpen] = useState(false);
   const [atlasLayer, setAtlasLayer] = useState('All layers');
   const [dropActive, setDropActive] = useState(false);
+  const [quickDispatchFallbackEnabled, setQuickDispatchFallbackEnabled] = useState(readQuickDispatchFallback);
+  const [quickDispatchOpenRequest, setQuickDispatchOpenRequest] = useState(0);
 
   useEffect(() => {
     void refresh();
@@ -757,6 +761,9 @@ export default function App() {
             onRevokeConsent={(tier) => void revokeCloudConsent(tier)}
             parallelism={ingestParallelism}
             onParallelismChange={(setting) => void setIngestParallelism(setting)}
+            quickDispatchFallbackEnabled={quickDispatchFallbackEnabled}
+            onQuickDispatchFallbackChange={(enabled) => { setQuickDispatchFallbackEnabled(enabled); writeQuickDispatchFallback(enabled); }}
+            onOpenQuickDispatch={() => setQuickDispatchOpenRequest((request) => request + 1)}
           />
           <McpSettings available={backend === 'up'} />
           <SourceRetention sources={primarySource.sources} preview={primarySource.preview}
@@ -806,6 +813,7 @@ export default function App() {
         onClose={() => setPaletteOpen(false)}
         onNavigate={navigate}
       />
+      <InvestigationQuickDispatch fallbackEnabled={quickDispatchFallbackEnabled} openRequest={quickDispatchOpenRequest} onNavigate={navigate} />
       <LegendPopover open={legendOpen} onClose={() => setLegendOpen(false)} />
       {selected && (
         <div className="evidence-area">
