@@ -225,16 +225,18 @@ fn handler_function<'t>(
     }
 }
 
-fn request_param(cx: &FileCx<'_>, function: TsNode<'_>) -> Option<String> {
+/// The request parameter's name and the node `Bindings` records as its
+/// declaration: the arrow function for `req => …`, else the first parameter.
+fn request_param<'t>(cx: &FileCx<'_>, function: TsNode<'t>) -> Option<(String, TsNode<'t>)> {
     if let Some(parameter) = function.child_by_field_name("parameter") {
-        return Some(cx.text(&parameter).to_string());
+        return (parameter.kind() == "identifier")
+            .then(|| (cx.text(&parameter).to_string(), function));
     }
     let first = function.child_by_field_name("parameters")?.named_child(0)?;
     match first.kind() {
-        "identifier" => Some(cx.text(&first).to_string()),
         "required_parameter" | "optional_parameter" => {
             let pattern = first.child_by_field_name("pattern")?;
-            (pattern.kind() == "identifier").then(|| cx.text(&pattern).to_string())
+            (pattern.kind() == "identifier").then(|| (cx.text(&pattern).to_string(), first))
         }
         _ => None,
     }
@@ -245,6 +247,9 @@ struct Handler<'a, 't> {
     cx: &'a FileCx<'a>,
     proofs: &'a Proofs<'a, 't>,
     req: String,
+    /// The request parameter's declaration; a `req` resolving elsewhere (a
+    /// nested parameter, a shadowing `const`) is not the server request.
+    req_declaration: TsNode<'t>,
     /// `const url = new URL(req.url, …)` declarators by name.
     urls: HashMap<String, TsNode<'t>>,
     /// `const pathname = new URL(req.url, …).pathname` declarators by name.
@@ -256,7 +261,13 @@ impl<'a, 't> Handler<'a, 't> {
         let node = strip(node);
         node.kind() == "member_expression"
             && node.child_by_field_name("object").is_some_and(|object| {
-                object.kind() == "identifier" && self.cx.text(&object) == self.req
+                object.kind() == "identifier"
+                    && self.cx.text(&object) == self.req
+                    && self
+                        .proofs
+                        .bindings
+                        .stable_declaration(object, &self.req)
+                        .is_some_and(|declaration| declaration.id() == self.req_declaration.id())
             })
             && node
                 .child_by_field_name("property")
@@ -524,8 +535,10 @@ impl<'a, 't> Handler<'a, 't> {
     }
 
     /// The method an enclosing `if (req.method === 'M') { … }` imposes on
-    /// `node`: `Some(None)` when none does, `None` when two disagree (the
-    /// branch is unreachable).
+    /// `node`: `Some(None)` when none does. `None` declines the claim: two
+    /// guards disagree (unreachable), or an enclosing condition constrains the
+    /// method in a way one method cannot state (its `else` branch, a negated
+    /// or mixed guard).
     fn enclosing_method(
         &self,
         node: TsNode<'t>,
@@ -538,25 +551,30 @@ impl<'a, 't> Handler<'a, 't> {
                 break;
             }
             if parent.kind() == "if_statement"
-                && parent
-                    .child_by_field_name("consequence")
-                    .is_some_and(|block| block.id() == current.id())
                 && let Some(condition) = parent.child_by_field_name("condition")
+                && callable::walk(condition)
+                    .into_iter()
+                    .any(|inner| self.is_req_member(inner, "method"))
             {
+                let in_consequence = parent
+                    .child_by_field_name("consequence")
+                    .is_some_and(|block| block.id() == current.id());
+                if !in_consequence {
+                    return None;
+                }
                 let alts = self.analyze(condition);
                 // Only a pure method guard: every way it holds names the
                 // same method and no route.
-                let guard = alts.first().and_then(|first| first.method.clone());
-                if let Some(guard) = guard
-                    && alts.iter().all(|alt| {
-                        alt.routes.is_empty() && alt.method.as_ref().is_some_and(|m| m.0 == guard.0)
-                    })
-                {
-                    match &method {
-                        Some(inner) if inner.0 != guard.0 => return None,
-                        Some(_) => {}
-                        None => method = Some(guard),
-                    }
+                let guard = alts.first().and_then(|first| first.method.clone())?;
+                if !alts.iter().all(|alt| {
+                    alt.routes.is_empty() && alt.method.as_ref().is_some_and(|m| m.0 == guard.0)
+                }) {
+                    return None;
+                }
+                match &method {
+                    Some(inner) if inner.0 != guard.0 => return None,
+                    Some(_) => {}
+                    None => method = Some(guard),
                 }
             }
             current = parent;
@@ -727,6 +745,7 @@ pub(crate) fn extract<'t>(
     out: &mut crate::Extraction,
 ) {
     let mut seen_endpoints = HashSet::new();
+    let mut seen_handles = HashSet::new();
     let mut seen_gaps = HashSet::new();
     let mut seen_handlers = HashSet::new();
     for call in callable::walk(root) {
@@ -748,13 +767,14 @@ pub(crate) fn extract<'t>(
         if !seen_handlers.insert(function.id()) {
             continue;
         }
-        let Some(req) = request_param(cx, function) else {
+        let Some((req, req_declaration)) = request_param(cx, function) else {
             continue;
         };
         let mut handler = Handler {
             cx,
             proofs,
             req,
+            req_declaration,
             urls: HashMap::new(),
             paths: HashMap::new(),
         };
@@ -847,9 +867,11 @@ pub(crate) fn extract<'t>(
                         Match::Prefix => format!("{}*", route.path),
                     };
                     let ep_id = format!("ep:{}@{method}:{path}", cx.id.repo);
-                    if !seen_endpoints.insert(ep_id.clone()) {
+                    // One endpoint node, but every handler that serves it.
+                    if !seen_handles.insert((ep_id.clone(), handler_id.clone())) {
                         continue;
                     }
+                    let new_endpoint = seen_endpoints.insert(ep_id.clone());
                     let mut props = serde_json::json!({
                         "method": method,
                         "path": path,
@@ -863,11 +885,13 @@ pub(crate) fn extract<'t>(
                     if route.kind == Match::Prefix {
                         props["match"] = serde_json::json!("prefix");
                     }
-                    out.nodes.push(Node {
-                        id: ep_id.clone(),
-                        label: "Endpoint".into(),
-                        props,
-                    });
+                    if new_endpoint {
+                        out.nodes.push(Node {
+                            id: ep_id.clone(),
+                            label: "Endpoint".into(),
+                            props,
+                        });
+                    }
                     out.edges.push(Edge {
                         src: ep_id,
                         dst: handler_id.clone(),

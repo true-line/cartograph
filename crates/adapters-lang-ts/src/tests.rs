@@ -4480,6 +4480,8 @@ createServer((req, res) => {
 });
 "#;
 
+// AC-0363 (T-0363): raw node:http `createServer` routes. Every
+// `node_http_*` test below cites this acceptance criterion.
 fn node_http_endpoints(ex: &Extraction) -> Vec<(String, String)> {
     ex.nodes
         .iter()
@@ -4696,4 +4698,65 @@ http.createServer((req, res) => {
             ("ALL".to_string(), "/b".to_string()),
         ]
     );
+}
+
+#[test]
+fn node_http_request_members_must_be_the_handler_parameter() {
+    // AC-0363: a nested parameter or a shadowing binding named `req` is not
+    // the server request.
+    let src = r#"
+import { createServer } from 'node:http';
+createServer((req, res) => {
+  function helper(req) { if (req.url === '/internal') {} }
+  { const req = { url: '/fake' }; if (req.url === '/fake') {} }
+  [1].forEach(() => { if (req.url === '/captured') {} });
+  if (req.url === '/real') {}
+});
+"#;
+    let ex = extract_source(src.as_bytes(), "s.mjs", &id()).unwrap();
+    assert_eq!(
+        node_http_endpoints(&ex),
+        vec![
+            ("ALL".to_string(), "/captured".to_string()),
+            ("ALL".to_string(), "/real".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn node_http_else_of_a_method_guard_declines_inner_claims() {
+    // AC-0363: an `else` (or negated) method constraint cannot be stated as
+    // one method, so routes under it are not claimed.
+    let src = r#"
+import { createServer } from "node:http";
+createServer((req, res) => {
+  if (req.method === "POST") {} else { if (req.method === "POST" && req.url === "/never") {} }
+  if (req.method !== "GET") { if (req.url === "/not-get") {} }
+});
+"#;
+    let ex = extract_source(src.as_bytes(), "s.mjs", &id()).unwrap();
+    assert!(
+        node_http_endpoints(&ex).is_empty(),
+        "{:?}",
+        node_http_endpoints(&ex)
+    );
+}
+
+#[test]
+fn node_http_shared_endpoint_keeps_every_handler() {
+    // AC-0363: two servers in one file serving the same route share the
+    // endpoint node and each keep a HANDLES edge.
+    let src = r#"
+import http from 'node:http';
+http.createServer((req, res) => { if (req.url === '/health') {} });
+http.createServer((req, res) => { if (req.url === '/health') {} });
+"#;
+    let ex = extract_source(src.as_bytes(), "s.mjs", &id()).unwrap();
+    assert_eq!(node_http_endpoints(&ex).len(), 1);
+    let handles = ex
+        .edges
+        .iter()
+        .filter(|e| e.label == "HANDLES" && e.src.ends_with("ALL:/health"))
+        .count();
+    assert_eq!(handles, 2);
 }
