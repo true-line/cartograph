@@ -24,3 +24,7 @@ The specialist list also shows each active task's saved question, current status
 and saved provider/model. Choose **Open investigation** on a task row to inspect
 that exact saved task. This does not change the selected specialist or your
 composer draft; an uncertain start can still be retried with its original request.
+Only exact specialist versions with observed tasks get a group; a complete empty
+observation shows one **No active tasks** message for the list. During refresh,
+last-observed rows are labeled as such. If a refresh fails, current activity is
+unknown and retained rows are not presented as current.

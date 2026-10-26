@@ -53,8 +53,18 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
   const questionBytes = new TextEncoder().encode(question).length;
   const locked = state.starting || state.pendingStart !== null;
   const requirements = state.draftInspectionRequirements;
-  const activityIncomplete = activity.status === 'incomplete' || Boolean(state.catalog && activity.tasks.some((task) =>
-    !state.catalog?.specialists.some((specialist) => specialist.id === task.summary.specialist_id)));
+  const matchedActivityTasks = state.catalog ? activity.tasks.filter((task) =>
+    state.catalog?.specialists.some((specialist) => specialist.id === task.summary.specialist_id)) : [];
+  const activityIncomplete = activity.status === 'incomplete' || matchedActivityTasks.length !== activity.tasks.length;
+  const showActivityRows = activity.status !== 'idle' && activity.status !== 'loading' &&
+    activity.status !== 'preview' && activity.status !== 'error';
+  const activityGroups = state.catalog && showActivityRows ? state.catalog.specialists.map((specialist) => ({
+    specialist,
+    tasks: matchedActivityTasks.filter((task) => task.summary.specialist_id === specialist.id),
+  })).filter(({ tasks }) => tasks.length > 0) : [];
+  const activityRefreshMessage = activityIncomplete
+    ? matchedActivityTasks.length > 0 ? 'Activity incomplete · refreshing; last observed matching tasks are shown.' : 'Activity incomplete · refreshing; no idle status is inferred.'
+    : matchedActivityTasks.length > 0 ? 'Refreshing activity; last observed tasks are shown.' : 'Checking for active tasks…';
   const completionVersion = isCompletionSpecialist(specialistId);
   const profile = state.composer.limitProfile ?? 'investigation-v1';
   const policy = investigationPolicy(state.catalog, profile, specialistId);
@@ -124,13 +134,23 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
           </label>)}</div>
       </fieldset>
       {state.catalog && <section className="specialist-activity-list" aria-label="Active specialist tasks">
-        {state.catalog.specialists.map((specialist) => <section key={specialist.id} className="specialist-activity-group">
+        {showActivityRows && activityGroups.map(({ specialist, tasks }) => <section key={specialist.id} className="specialist-activity-group">
           <h3>{specialist.name} <code>{specialist.id}</code></h3>
-          <SpecialistTaskActivity specialistId={specialist.id} activity={activity} complete={!activityIncomplete}
-            onOpen={(id) => { void state.open(id); }} />
+          <SpecialistTaskActivity tasks={tasks} onOpen={(id) => { void state.open(id); }} />
         </section>)}
+        {activity.status === 'error' && <p className="error-text" role="status">
+          {activity.refreshing ? 'Activity unknown; refreshing after an earlier error.' : 'Activity unknown'}
+        </p>}
+        {activity.status === 'preview' && <p className="muted" role="status">Activity shown in desktop app</p>}
+        {activity.status === 'idle' && <p className="muted" role="status">Activity not checked</p>}
+        {activity.status === 'loading' && <p className="muted" role="status">Checking activity…</p>}
+        {showActivityRows && activity.refreshing && <p role="status">{activityRefreshMessage}</p>}
+        {showActivityRows && !activity.refreshing && activityIncomplete && <p role="status">
+          The active task list is incomplete. No idle status is inferred.
+        </p>}
+        {showActivityRows && !activity.refreshing && !activityIncomplete && !state.catalogLoading && matchedActivityTasks.length === 0 &&
+          <p role="status">No active tasks</p>}
       </section>}
-      {activityIncomplete && <p role="status">The active task list is incomplete. No idle status is inferred.</p>}
       {state.catalog === null && activity.status !== 'loading' && <p role="status">The catalog is unavailable; activity cannot be matched to exact specialist versions.</p>}
       {state.catalog && !state.catalogLoading && !selectedSpecialistAvailable && <p role="status">
         Selected specialist <code>{specialistId}</code> is unavailable for this investigation budget. Choose an available specialist explicitly to continue.
@@ -379,31 +399,10 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
   </section>;
 }
 
-function SpecialistTaskActivity({ specialistId, activity, complete, onOpen }: {
-  specialistId: string;
-  activity: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error' | 'refreshing'>;
-  complete: boolean;
+function SpecialistTaskActivity({ tasks, onOpen }: {
+  tasks: SpecialistActivityItem[];
   onOpen: (investigationId: string) => void;
 }) {
-  const tasks = activity.tasks.filter((task) => task.summary.specialist_id === specialistId);
-  if (activity.refreshing) {
-    if (tasks.length === 0) return <p className="muted">Checking for active tasks…</p>;
-    return <div className="specialist-task-activity">
-      {tasks.map((task) => <SpecialistTaskRow key={task.summary.investigation_id} task={task} onOpen={onOpen} />)}
-      <p className="muted">{complete ? 'Refreshing activity' : 'Activity incomplete · refreshing'}</p>
-    </div>;
-  }
-  if (activity.status === 'idle' || activity.status === 'loading') {
-    return <p className="muted">{activity.status === 'idle' ? 'Activity not checked' : 'Checking activity…'}</p>;
-  }
-  if (activity.status === 'preview') return <p className="muted">Activity shown in desktop app</p>;
-  if (activity.status === 'error') return <p className="error-text">Activity unknown</p>;
-
-  if (!complete) return <div className="specialist-task-activity">
-    {tasks.map((task) => <SpecialistTaskRow key={task.summary.investigation_id} task={task} onOpen={onOpen} />)}
-    <p className="muted">Activity incomplete; no idle status inferred</p>
-  </div>;
-  if (tasks.length === 0) return <p className="muted">No active tasks</p>;
   return <div className="specialist-task-activity">
     {tasks.map((task) => <SpecialistTaskRow key={task.summary.investigation_id} task={task} onOpen={onOpen} />)}
   </div>;
