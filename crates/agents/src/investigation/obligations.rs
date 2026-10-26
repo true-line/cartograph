@@ -362,29 +362,31 @@ fn request_family(
     policy: &InvestigationPolicy,
     schema_version: u32,
     specialist_id: &str,
-) -> Result<(u32, [&'static str; 2], &'static [u8]), InvestigationError> {
+) -> Result<(u32, &'static [&'static str], &'static [u8]), InvestigationError> {
     // Policy alone cannot select an immutable request/prompt family, including
     // when hashing saved requests. Public request7 and historical requests
     // retain their exact schema, specialist and policy tuple.
     match (policy.profile(), schema_version, specialist_id) {
-        ("investigation-v1", 4, "domain-analyst@7" | "evidence-auditor@7") => Ok((
-            4,
-            ["domain-analyst@7", "evidence-auditor@7"],
-            b"cartograph:investigation-client-intent:v4\0",
-        )),
+        ("investigation-v1", 4, "domain-analyst@7" | "evidence-auditor@7" | "spec-writer@1") => {
+            Ok((
+                4,
+                &["domain-analyst@7", "evidence-auditor@7", "spec-writer@1"],
+                b"cartograph:investigation-client-intent:v4\0",
+            ))
+        }
         ("investigation-v2", 5, "domain-analyst@8" | "evidence-auditor@8") => Ok((
             5,
-            ["domain-analyst@8", "evidence-auditor@8"],
+            &["domain-analyst@8", "evidence-auditor@8"],
             b"cartograph:investigation-client-intent:v5\0",
         )),
         ("investigation-v2", 6, "domain-analyst@9" | "evidence-auditor@9") => Ok((
             6,
-            ["domain-analyst@9", "evidence-auditor@9"],
+            &["domain-analyst@9", "evidence-auditor@9"],
             b"cartograph:investigation-client-intent:v6\0",
         )),
         ("investigation-v2", 7, "domain-analyst@10" | "evidence-auditor@10") => Ok((
             7,
-            ["domain-analyst@10", "evidence-auditor@10"],
+            &["domain-analyst@10", "evidence-auditor@10"],
             b"cartograph:investigation-client-intent:v7\0",
         )),
         _ => Err(InvestigationError::InvalidRequest),

@@ -21,12 +21,22 @@ fn identified(mut item: Obligation) -> Obligation {
 fn fixture(source: bool, inventory: bool, secret: bool) -> PreparedFixture {
     fixture_version(source, inventory, secret, false)
 }
+fn spec_writer_fixture() -> PreparedFixture {
+    fixture_policy(
+        true,
+        true,
+        false,
+        Some(&INVESTIGATION_V1_POLICY),
+        Some(SpecialistId::SpecWriterV1),
+    )
+}
 fn fixture_version(source: bool, inventory: bool, secret: bool, v7: bool) -> PreparedFixture {
     fixture_policy(
         source,
         inventory,
         secret,
         v7.then_some(&INVESTIGATION_V1_POLICY),
+        None,
     )
 }
 /// `completion` selects the v7 completion input under that exact policy.
@@ -35,6 +45,7 @@ fn fixture_policy(
     inventory: bool,
     secret: bool,
     completion: Option<&InvestigationPolicy>,
+    specialist: Option<SpecialistId>,
 ) -> PreparedFixture {
     let legacy = completion.is_none_or(|policy| policy.profile() == "investigation-v1");
     let (target, mut ledger, _) = super::inspection_tests::fixture();
@@ -158,12 +169,17 @@ fn fixture_policy(
     let request = StagedObligationRequest {
         schema_version: if legacy { 4 } else { 5 },
         request_nonce: "staged-nonce".into(),
-        specialist_id: if legacy {
-            "domain-analyst@7"
-        } else {
-            "domain-analyst@8"
-        }
-        .into(),
+        specialist_id: specialist.map_or_else(
+            || {
+                if legacy {
+                    "domain-analyst@7"
+                } else {
+                    "domain-analyst@8"
+                }
+                .into()
+            },
+            |id| serde_json::to_value(id).unwrap().as_str().unwrap().into(),
+        ),
         inspection_requirements: None,
         question: "Inspect selected evidence".into(),
         scope: InvestigationScope::All,
@@ -211,11 +227,11 @@ fn fixture_policy(
         };
         input = InvestigationInput::prepare_v7_with_policy(
             &request.question,
-            if legacy {
+            specialist.unwrap_or(if legacy {
                 SpecialistId::DomainAnalystV7
             } else {
                 SpecialistId::DomainAnalystV8
-            },
+            }),
             ledger.clone(),
             &pages,
             &evidence,
@@ -269,6 +285,15 @@ fn finish(insufficient: bool) -> StagedFinish {
         },
         action,
     }
+}
+fn spec_writer_finish() -> StagedFinish {
+    let mut value = finish(false);
+    if let InvestigationAction::Finish { findings, .. } = &mut value.action {
+        for finding in findings {
+            finding.claim_kind = InvestigationClaimKind::ProposedDesign;
+        }
+    }
+    value
 }
 fn attempt(fixture: &PreparedFixture, item: &Obligation, outcome: AttemptOutcome) -> AttemptRecord {
     let read = match item {
@@ -355,6 +380,20 @@ fn staged_finish_requires_exact_mixed_finishing_disclosure_and_security_first() 
         Err(InvestigationError::InvalidAction)
     ));
 }
+
+#[test]
+fn spec_writer_rejects_non_proposed_design_findings_at_finish() {
+    let fixture = spec_writer_fixture();
+    assert!(matches!(
+        decide(&fixture, &finish(false), &[]),
+        Err(InvestigationError::InvalidAction)
+    ));
+    assert!(matches!(
+        decide(&fixture, &spec_writer_finish(), &[]),
+        Ok(FinishDecision::Accepted(_))
+    ));
+}
+
 #[test]
 fn staged_finish_insufficient_requires_every_completed_attempt_and_binds_identity() {
     let fixture = fixture(false, false, false);
@@ -963,7 +1002,7 @@ fn sealing_reconstructs_contract_sourced_targets_for_the_selected_policy() {
     // AC-0281: a non-v1 completion prompt carries its inspection targets once,
     // in the completion contract; sealing rebuilds and binds them.
     let policy = &INVESTIGATION_V2_POLICY;
-    let fixture = fixture_policy(true, true, false, Some(policy));
+    let fixture = fixture_policy(true, true, false, Some(policy), None);
     let prompt: serde_json::Value = serde_json::from_str(
         &fixture
             .input
@@ -1076,7 +1115,7 @@ fn sealing_reconstructs_contract_sourced_targets_for_the_selected_policy() {
 #[test]
 fn attempt_binding_workspace_covers_real_policy_validation() {
     for policy in [&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY] {
-        let f = fixture_policy(true, true, false, Some(policy));
+        let f = fixture_policy(true, true, false, Some(policy), None);
         let ledger = f.input.ledger();
         let bytes = serde_json::to_vec(ledger).unwrap().len();
         let bound = attempt_binding_validation_workspace(policy, bytes).unwrap();

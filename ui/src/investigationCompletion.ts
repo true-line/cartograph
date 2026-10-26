@@ -46,7 +46,7 @@ export function validCompletionSummary(value: InvestigationSummary): boolean {
   if (!fields(value, ['schema_version', 'investigation_id', 'conversation_id', 'parent_id', 'job_id', 'specialist_id', 'question', 'scope', 'provider_mode', 'status', 'revision', 'cancel_requested', 'invocation_pending', 'actions', 'graph_snapshot_id', 'last_event_sequence', 'has_result', 'created_at', 'updated_at', 'obligation_status'],
       ['completion_outcome', 'completion', 'coverage_context', 'context_owner', 'origin', 'specialist', 'provider', 'scope_snapshot_id', 'limits', 'usage', 'citations', 'error']) ||
       !['queued', 'preparing', 'running', 'awaiting_consent', 'completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(value.status) ||
-      (!family || ![`domain-analyst@${family.roleVersion}`, `evidence-auditor@${family.roleVersion}`].includes(value.specialist_id)) ||
+      (!family || !family.specialistIds.some((id) => id === value.specialist_id)) ||
       !['not_assessed', 'satisfied', 'unmet'].includes(value.obligation_status ?? '') ||
       ['inspection_status', 'inspection_requirement_count', 'inspection_requirements', 'inspection_assessment'].some((key) => key in value)) return false;
   if (value.completion_outcome === undefined) return !value.has_result && value.status !== 'completed';

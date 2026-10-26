@@ -4,7 +4,8 @@ import queryHistoryWire from './fixtures/completion-v9-supported.json';
 import terminalWire from './fixtures/completion-v7-terminal.json';
 import insufficientWire from './fixtures/completion-v7-insufficient.json';
 import type { InvestigationDetail, InvestigationResult } from './investigationTypes';
-import { queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionDetail, completionResult } from './completionFixtures';
+import { queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionDetail, completionResult,
+  specWriterDetail, specWriterResult } from './completionFixtures';
 import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
 
 describe('V7 completion wire coherence (AC-0266)', () => {
@@ -93,6 +94,18 @@ describe('V7 completion wire coherence (AC-0266)', () => {
     const result = completionResult(); Object.assign(result.completion!, { extra: true });
     expect(validCompletionResult(result.completion, result)).toBe(false);
   });
+});
+
+it('accepts Spec Writer only as its exact schema-four completion identity (AC-0382)', () => {
+  const detail = specWriterDetail();
+  const result = specWriterResult();
+  expect(validCompletionSummary(detail)).toBe(true);
+  expect(validCompletionResult(result.completion, result)).toBe(true);
+  expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
+  expect(result.findings.every((finding) => finding.claim_kind === 'proposed_design')).toBe(true);
+  expect(validCompletionSummary({ ...detail, specialist_id: 'spec-writer@2' as InvestigationDetail['specialist_id'] })).toBe(false);
+  expect(validCompletionSummary({ ...detail, schema_version: 5 })).toBe(false);
+  expect(validCompletionSummary({ ...detail, specialist_id: 'domain-analyst@8' })).toBe(false);
 });
 
 

@@ -226,6 +226,55 @@ fn admission_family_public_decoder_preserves_existing_completion_wires() {
 }
 
 #[test]
+fn spec_writer_v1_is_admitted_only_in_the_exact_standard_schema_four_family() {
+    // AC-0382 / T-0382: the role version is independent from protocol schema.
+    let policy = &INVESTIGATION_V1_POLICY;
+    let mut request = request("spec-writer@1");
+    request.schema_version = 4;
+    request.obligations.schema_version = 1;
+    request.obligations.contract = CONTRACT.into();
+    request.limit_profile = "investigation-v1".into();
+    let raw = serde_json::to_string(&request).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&StagedObligationRequest::decode(&raw).unwrap()).unwrap(),
+        serde_json::to_vec(&request).unwrap()
+    );
+    let decoded = InvestigationStartRequest::decode(&raw).unwrap();
+    let InvestigationStartRequest::Completion(decoded) = decoded else {
+        panic!("schema-four Spec Writer request decoded as legacy")
+    };
+    assert_eq!(
+        serde_json::to_vec(&decoded).unwrap(),
+        serde_json::to_vec(&request).unwrap()
+    );
+    assert_eq!(
+        request.intent_hash_with_policy(policy).unwrap(),
+        crate::source_basis::domain_hash(
+            b"cartograph:investigation-client-intent:v4\0",
+            &serde_json::to_vec(&request).unwrap()
+        )
+    );
+    for (schema, profile) in [
+        (3, "investigation-v1"),
+        (5, "investigation-v2"),
+        (4, "investigation-v2"),
+    ] {
+        let mut invalid = request.clone();
+        invalid.schema_version = schema;
+        invalid.limit_profile = profile.into();
+        if schema == 5 {
+            invalid.obligations.schema_version = 2;
+            invalid.obligations.contract = "investigation-completion-obligations@2".into();
+        }
+        let selected = InvestigationPolicy::for_profile(profile).unwrap();
+        assert!(invalid.normalized_with_policy(selected).is_err());
+    }
+    let mut invalid_role = request;
+    invalid_role.specialist_id = "spec-writer@7".into();
+    assert!(invalid_role.normalized_with_policy(policy).is_err());
+}
+
+#[test]
 fn admission_family_specialists_add_only_internal_admission_instructions() {
     // AC-0287 / T-0287: @9 text and operations retain their published meaning.
     for (old, new) in [

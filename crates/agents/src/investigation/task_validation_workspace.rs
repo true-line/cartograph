@@ -119,6 +119,7 @@ mod tests {
             SpecialistId::EvidenceAuditorV9,
             SpecialistId::DomainAnalystV10,
             SpecialistId::EvidenceAuditorV10,
+            SpecialistId::SpecWriterV1,
         ] {
             assert!(definition_workspace(role).unwrap() <= admitted, "{role:?}");
         }
