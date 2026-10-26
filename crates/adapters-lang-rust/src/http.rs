@@ -47,8 +47,9 @@ enum AxumRouterItem {
 #[derive(Debug, Clone)]
 enum AxumSubRouter {
     Inline(Vec<AxumRouterItem>),
+    /// A router-returning function, keyed by its resolved symbol (unique
+    /// across workspace crates), wherever it is defined.
     Call {
-        crate_name: String,
         target: HandlerTarget,
     },
     None,
@@ -56,7 +57,7 @@ enum AxumSubRouter {
 
 #[derive(Debug, Clone)]
 pub(super) struct AxumRouterDef {
-    owner_fn: Option<(String, String)>,
+    owner_fn: Option<String>,
     items: Vec<AxumRouterItem>,
 }
 
@@ -154,27 +155,51 @@ fn resolve_external_paths(
     if parts.len() == 1 && value_shadows.is_some_and(|s| s.contains(&parts[0])) {
         return Vec::new();
     }
-    if let Some((base, external)) = bindings.get(scopes, &parts[0]) {
-        if !external {
+    // Innermost scope first: a nearer item or `use` decides; globs only
+    // speak for a name nothing nearer declares, and a workspace glob that
+    // could also bring it in leaves the origin unproven.
+    let name = &parts[0];
+    let mut workspace_glob = false;
+    let mut external_globs = Vec::new();
+    for scope in scopes {
+        let key = (scope.clone(), name.clone());
+        if bindings.items.contains(&key) {
             return Vec::new();
         }
-        let mut full = base.clone();
-        full.extend(parts[1..].iter().cloned());
-        return vec![full];
+        if let Some((base, external)) = bindings.map.get(&key) {
+            if !external || workspace_glob || !external_globs.is_empty() {
+                return Vec::new();
+            }
+            let mut full = base.clone();
+            full.extend(parts[1..].iter().cloned());
+            return vec![full];
+        }
+        workspace_glob |= bindings.globs.contains_key(scope);
+        external_globs.extend(
+            bindings
+                .external_globs
+                .get(scope)
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
     }
-    if matches!(parts[0].as_str(), "axum" | "actix_web")
-        && !cx.workspace_crates.contains(&parts[0])
-        && !cx.declared_mods.contains(&parts[0])
+    if matches!(name.as_str(), "axum" | "actix_web")
+        && !cx.workspace_crates.contains(name)
+        && !cx.declared_mods.contains(name)
     {
         return vec![parts];
     }
-    let mut out = Vec::new();
-    for glob in bindings.external_globs(scopes) {
-        let mut full = glob.clone();
-        full.extend(parts.iter().cloned());
-        out.push(full);
+    if workspace_glob {
+        return Vec::new();
     }
-    out
+    external_globs
+        .into_iter()
+        .map(|mut full| {
+            full.extend(parts.iter().cloned());
+            full
+        })
+        .collect()
 }
 
 fn unquote_string_literal(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
@@ -183,7 +208,7 @@ fn unquote_string_literal(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
         "string_literal" => text
             .strip_prefix('"')
             .and_then(|s| s.strip_suffix('"'))
-            .map(str::to_string),
+            .and_then(decode_rust_escapes),
         "raw_string_literal" => text
             .strip_prefix('r')
             .map(|s| s.trim_matches('#'))
@@ -192,6 +217,51 @@ fn unquote_string_literal(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
             .map(str::to_string),
         _ => None,
     }
+}
+
+/// The value of a (non-raw) Rust string body: escapes decoded, `\`-newline
+/// continuations dropped. `None` for an escape Rust rejects, so a route is
+/// never claimed under its source spelling.
+fn decode_rust_escapes(body: &str) -> Option<String> {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            '0' => out.push('\0'),
+            '\\' => out.push('\\'),
+            '\'' => out.push('\''),
+            '"' => out.push('"'),
+            'x' => {
+                let hex: String = [chars.next()?, chars.next()?].iter().collect();
+                let value = u8::from_str_radix(&hex, 16).ok().filter(u8::is_ascii)?;
+                out.push(char::from(value));
+            }
+            'u' => {
+                if chars.next()? != '{' {
+                    return None;
+                }
+                let mut hex = String::new();
+                loop {
+                    match chars.next()? {
+                        '}' => break,
+                        '_' => {}
+                        digit => hex.push(digit),
+                    }
+                }
+                out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+            }
+            '\n' | '\r' => while chars.next_if(|c| c.is_whitespace()).is_some() {},
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 fn parse_route_path_arg(cx: &FileCx<'_>, node: TsNode<'_>) -> RoutePathArg {
@@ -559,7 +629,6 @@ fn parse_axum_sub_router(
         let name = cx.text(&expr).trim();
         if let Some(target) = local_call_vars.get(name) {
             return AxumSubRouter::Call {
-                crate_name: cx.crate_name.clone(),
                 target: target.clone(),
             };
         }
@@ -572,7 +641,6 @@ fn parse_axum_sub_router(
         let href = resolve_handler_expr(cx, callee, bindings, locals, &shadows);
         if !matches!(href.target, HandlerTarget::Unresolved) {
             return AxumSubRouter::Call {
-                crate_name: cx.crate_name.clone(),
                 target: href.target,
             };
         }
@@ -789,6 +857,7 @@ fn parse_actix_route_builder(
     None
 }
 
+/// Axum nests: a nested root route (`""` or `"/"`) is the prefix itself.
 fn join_route(prefix: &str, route: &str) -> String {
     if prefix.is_empty() {
         return route.to_string();
@@ -804,6 +873,23 @@ fn join_route(prefix: &str, route: &str) -> String {
         let r = route.trim_start_matches('/');
         format!("{p}/{r}")
     }
+}
+
+/// Actix joins a scope prefix and a route pattern as written: `""` is the
+/// scope itself (`/api`) and `"/"` keeps its slash (`/api/`), unlike an
+/// axum nested root route.
+fn join_actix_route(prefix: &str, route: &str) -> String {
+    if prefix.is_empty() {
+        return route.to_string();
+    }
+    if route.is_empty() {
+        return prefix.to_string();
+    }
+    format!(
+        "{}/{}",
+        prefix.trim_end_matches('/'),
+        route.trim_start_matches('/')
+    )
 }
 
 fn flatten_actix_chain(chain: ActixChain) -> (Vec<PendingDirectEndpoint>, Vec<ActixServiceMount>) {
@@ -859,12 +945,12 @@ fn flatten_actix_chain(chain: ActixChain) -> (Vec<PendingDirectEndpoint>, Vec<Ac
             RoutePathArg::Literal(lit_prefix) => {
                 for ep in &mut endpoints {
                     if let RoutePathArg::Literal(sub) = &ep.path {
-                        ep.path = RoutePathArg::Literal(join_route(&lit_prefix, sub));
+                        ep.path = RoutePathArg::Literal(join_actix_route(&lit_prefix, sub));
                     }
                 }
                 for m in &mut mounts {
                     if let RoutePathArg::Literal(sub) = &m.prefix {
-                        m.prefix = RoutePathArg::Literal(join_route(&lit_prefix, sub));
+                        m.prefix = RoutePathArg::Literal(join_actix_route(&lit_prefix, sub));
                     }
                 }
                 (endpoints, mounts)
@@ -1018,8 +1104,8 @@ fn eval_actix_chain(
                     }
                 }
                 "service" => {
-                    if let Some(&arg) = args.first()
-                        && let Some(child_chain) = eval_actix_chain(
+                    if let Some(&arg) = args.first() {
+                        if let Some(child_chain) = eval_actix_chain(
                             cx,
                             arg,
                             bindings,
@@ -1027,11 +1113,22 @@ fn eval_actix_chain(
                             value_shadows,
                             local_actix,
                             consumed_actix,
-                        )
-                    {
-                        let (child_eps, child_mounts) = flatten_actix_chain(child_chain);
-                        endpoints.extend(child_eps);
-                        mounts.extend(child_mounts);
+                        ) {
+                            let (child_eps, child_mounts) = flatten_actix_chain(child_chain);
+                            endpoints.extend(child_eps);
+                            mounts.extend(child_mounts);
+                        } else {
+                            // A handler served at the root keeps its bare
+                            // path beside any scoped mount of it.
+                            let href =
+                                resolve_handler_expr(cx, arg, bindings, locals, value_shadows);
+                            if !matches!(href.target, HandlerTarget::Unresolved) {
+                                mounts.push(ActixServiceMount {
+                                    prefix: RoutePathArg::Literal(String::new()),
+                                    target: href.target,
+                                });
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -1288,7 +1385,7 @@ pub(super) fn extract_function_routes(
     if !all_axum_items.is_empty() {
         let owner_fn = fn_node
             .child_by_field_name("return_type")
-            .map(|_| (cx.crate_name.clone(), fn_sym.to_string()));
+            .map(|_| fn_sym.to_string());
         out.axum_routers.push(AxumRouterDef {
             owner_fn,
             items: all_axum_items,
@@ -1480,9 +1577,9 @@ fn emit_computed_route(
 
 fn mark_consumed_axum_fns(
     items: &[AxumRouterItem],
-    routers_by_fn: &BTreeMap<(String, String), Vec<AxumRouterItem>>,
+    routers_by_fn: &BTreeMap<String, Vec<AxumRouterItem>>,
     index: &SymbolIndex,
-    consumed: &mut BTreeSet<(String, String)>,
+    consumed: &mut BTreeSet<String>,
 ) {
     for item in items {
         let sub = match item {
@@ -1493,9 +1590,9 @@ fn mark_consumed_axum_fns(
             AxumSubRouter::Inline(inner) => {
                 mark_consumed_axum_fns(inner, routers_by_fn, index, consumed);
             }
-            AxumSubRouter::Call { crate_name, target } => {
+            AxumSubRouter::Call { target } => {
                 if let Some(sym) = resolve_handler_target(target, index) {
-                    let key = (crate_name.clone(), sym);
+                    let key = sym;
                     if routers_by_fn.contains_key(&key) {
                         consumed.insert(key);
                     }
@@ -1510,9 +1607,9 @@ fn mark_consumed_axum_fns(
 fn expand_axum_items(
     items: &[AxumRouterItem],
     prefix: &str,
-    routers_by_fn: &BTreeMap<(String, String), Vec<AxumRouterItem>>,
+    routers_by_fn: &BTreeMap<String, Vec<AxumRouterItem>>,
     index: &SymbolIndex,
-    visited: &mut BTreeSet<(String, String)>,
+    visited: &mut BTreeSet<String>,
     out: &mut Extraction,
     seen_nodes: &mut BTreeSet<String>,
     seen_edges: &mut BTreeSet<(String, String, String)>,
@@ -1560,9 +1657,9 @@ fn expand_axum_items(
                                 seen_edges,
                             );
                         }
-                        AxumSubRouter::Call { crate_name, target } => {
+                        AxumSubRouter::Call { target } => {
                             if let Some(sym) = resolve_handler_target(target, index) {
-                                let key = (crate_name.clone(), sym);
+                                let key = sym;
                                 if let Some(inner) = routers_by_fn.get(&key)
                                     && visited.insert(key.clone())
                                 {
@@ -1597,9 +1694,9 @@ fn expand_axum_items(
                         seen_edges,
                     );
                 }
-                AxumSubRouter::Call { crate_name, target } => {
+                AxumSubRouter::Call { target } => {
                     if let Some(sym) = resolve_handler_target(target, index) {
-                        let key = (crate_name.clone(), sym);
+                        let key = sym;
                         if let Some(inner) = routers_by_fn.get(&key)
                             && visited.insert(key.clone())
                         {
@@ -1628,7 +1725,7 @@ pub(super) fn finalize_endpoints(out: &mut Extraction, index: &SymbolIndex) {
     let mut seen_edges = BTreeSet::new();
 
     let axum_routers = std::mem::take(&mut out.axum_routers);
-    let mut routers_by_fn: BTreeMap<(String, String), Vec<AxumRouterItem>> = BTreeMap::new();
+    let mut routers_by_fn: BTreeMap<String, Vec<AxumRouterItem>> = BTreeMap::new();
     for router in &axum_routers {
         if let Some(key) = &router.owner_fn {
             routers_by_fn
@@ -1670,7 +1767,6 @@ pub(super) fn finalize_endpoints(out: &mut Extraction, index: &SymbolIndex) {
     let mut mounts_by_sym: BTreeMap<String, Vec<Option<String>>> = BTreeMap::new();
     for mount in actix_mounts {
         let prefix = match mount.prefix {
-            RoutePathArg::Literal(p) if p.is_empty() => continue,
             RoutePathArg::Literal(p) => Some(p),
             RoutePathArg::Computed(_) => None,
         };
@@ -1731,7 +1827,7 @@ pub(super) fn finalize_endpoints(out: &mut Extraction, index: &SymbolIndex) {
                             );
                             continue;
                         };
-                        let full_path = join_route(pfx, sub_path);
+                        let full_path = join_actix_route(pfx, sub_path);
                         for method in &attr.methods {
                             emit_endpoint(
                                 "actix-web",

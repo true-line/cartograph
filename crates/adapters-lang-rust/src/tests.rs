@@ -1164,3 +1164,191 @@ pub fn configure(prefix: &str) {
         "the handler is cited by a computed-route Gap"
     );
 }
+
+fn endpoint_ids(x: &Extraction) -> Vec<&str> {
+    let mut ids: Vec<&str> = x
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Endpoint")
+        .map(|n| n.id.as_str())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn nearer_local_items_shadow_framework_imports_and_globs() {
+    // AC-0364 (#1089): a function-local `fn get` shadows the module's
+    // `use axum::routing::get`, and a same-scope `fn post` shadows a
+    // `routing::*` glob: neither is claimed as an axum route.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"svc\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "src/lib.rs",
+        r#"
+use axum::{Router, routing::get};
+
+pub async fn advertised() {}
+pub async fn actual() {}
+
+pub fn shadowed() -> Router {
+    fn get<H>(_: H) -> axum::routing::MethodRouter {
+        axum::routing::post(actual)
+    }
+    Router::new().route("/x", get(advertised))
+}
+
+pub fn real() -> Router {
+    Router::new().route("/real", get(actual))
+}
+
+pub mod globbed {
+    use axum::routing::*;
+    use axum::Router;
+    fn post<H>(_: H) -> axum::routing::MethodRouter { todo!() }
+    pub async fn h() {}
+    pub fn app() -> Router {
+        Router::new().route("/g", post(h)).route("/p", put(h))
+    }
+}
+"#,
+    );
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        endpoint_ids(&x),
+        ["ep:local/rust-ws@GET:/real", "ep:local/rust-ws@PUT:/p",]
+    );
+}
+
+#[test]
+fn nested_routers_from_another_workspace_crate_keep_their_prefix() {
+    // AC-0364 (#1089): routers are keyed by the defining crate's symbol.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "api/Cargo.toml",
+        "[package]\nname = \"api\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "api/src/lib.rs",
+        r#"
+use axum::{Router, routing::get};
+pub async fn health() {}
+pub fn router() -> Router {
+    Router::new().route("/health", get(health))
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "web/Cargo.toml",
+        "[package]\nname = \"web\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "web/src/lib.rs",
+        r#"
+use axum::Router;
+pub fn app() -> Router {
+    Router::new().nest("/api", api::router())
+}
+"#,
+    );
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(endpoint_ids(&x), ["ep:local/rust-ws@GET:/api/health"]);
+}
+
+#[test]
+fn actix_root_and_scoped_mounts_and_root_route_slashes() {
+    // AC-0364 (#1089): a handler served at the root and under a scope keeps
+    // both paths; actix keeps a scoped `"/"` route's slash and treats `""`
+    // as the scope itself, while an axum nested root route is the prefix.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"svc\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "src/lib.rs",
+        r#"
+use actix_web::{get, web, App};
+use axum::{Router, routing};
+
+#[get("/status")]
+pub async fn status() {}
+pub async fn index() {}
+pub async fn bare() {}
+pub async fn nested() {}
+
+pub fn actix() {
+    let _app = App::new()
+        .service(status)
+        .service(
+            web::scope("/api")
+                .service(status)
+                .route("/", web::get().to(index))
+                .route("", web::post().to(bare)),
+        );
+}
+
+pub fn axum() -> Router {
+    Router::new().nest("/v1", Router::new().route("/", routing::get(nested)))
+}
+"#,
+    );
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        endpoint_ids(&x),
+        [
+            "ep:local/rust-ws@GET:/api/",
+            "ep:local/rust-ws@GET:/api/status",
+            "ep:local/rust-ws@GET:/status",
+            "ep:local/rust-ws@GET:/v1",
+            "ep:local/rust-ws@POST:/api",
+        ]
+    );
+}
+
+#[test]
+fn route_literals_decode_rust_escapes_or_decline() {
+    // AC-0364 (#1089): `"\u{2f}"` is `/` at runtime, raw strings keep their
+    // backslashes, and an escape Rust rejects is not claimed as a path.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"svc\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "src/lib.rs",
+        r###"
+use axum::{Router, routing::get};
+pub async fn h() {}
+pub fn app() -> Router {
+    Router::new()
+        .route("/a\u{2f}b", get(h))
+        .route(r"/raw\d", get(h))
+        .route("/bad\q", get(h))
+        .nest("/n\x2Fm", Router::new().route("/c", get(h)))
+}
+"###,
+    );
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        endpoint_ids(&x),
+        [
+            "ep:local/rust-ws@GET:/a/b",
+            "ep:local/rust-ws@GET:/n/m/c",
+            r"ep:local/rust-ws@GET:/raw\d",
+        ]
+    );
+}

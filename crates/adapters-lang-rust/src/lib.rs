@@ -343,6 +343,9 @@ struct Bindings {
     globs: HashMap<String, Vec<Vec<String>>>,
     /// Module scope -> external glob import prefixes (`use axum::routing::*`).
     external_globs: HashMap<String, Vec<Vec<String>>>,
+    /// (visible scope, name) of every item declared there, any kind: a
+    /// nearer item shadows outer `use`s and globs of the same name.
+    items: BTreeSet<(String, String)>,
 }
 
 impl Bindings {
@@ -357,16 +360,6 @@ impl Bindings {
         scopes
             .iter()
             .filter_map(|scope| self.globs.get(scope))
-            .flatten()
-            .cloned()
-            .collect()
-    }
-    /// Every external glob prefix visible from `scopes`
-    /// (`use axum::routing::*`).
-    fn external_globs(&self, scopes: &[String]) -> Vec<Vec<String>> {
-        scopes
-            .iter()
-            .filter_map(|scope| self.external_globs.get(scope))
             .flatten()
             .cloned()
             .collect()
@@ -515,6 +508,19 @@ fn parse_imports(cx: &FileCx<'_>, root: TsNode<'_>, out: &mut Extraction) -> Bin
                 label: "IMPORTS".into(),
                 props,
             });
+        }
+    }
+    let q = query(
+        "[(function_item) (struct_item) (enum_item) (union_item) (trait_item) (type_item) \
+          (const_item) (static_item) (mod_item) (macro_definition)] @item",
+    );
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(q, root, cx.source);
+    while let Some(found) = matches.next() {
+        let item = found.captures()[0].node;
+        if let Some(name) = item.child_by_field_name("name") {
+            let scope = visible_scopes(cx, item).swap_remove(0);
+            bindings.items.insert((scope, cx.text(&name).to_string()));
         }
     }
     bindings
