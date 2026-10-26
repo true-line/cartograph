@@ -103,11 +103,26 @@ function toolConfigFileIds(snapshot: AtlasSnapshot): Set<string> {
   return ids;
 }
 
+/**
+ * A File or Symbol the TS adapter proved to be browser service-worker code
+ * (`props.runtime`, #1078, AC-0365): it runs in the browser, so it belongs
+ * on the client side whatever its kind says.
+ */
+export function isServiceWorkerCode(node: GraphNode): boolean {
+  return node.props.runtime === 'service-worker';
+}
+
+/** An observed browser-storage Resource (Cache Storage, IndexedDB, Web
+ *  Storage — `observed_infra.rs`, #734): it lives in the client (#1078). */
+export function isBrowserStorage(node: GraphNode): boolean {
+  return node.label === 'Resource' && node.props.kind === 'browser-storage';
+}
+
 /** The primary band a node kind belongs to; Gaps inherit from neighbors. */
 function kindBand(node: GraphNode, configFileIds: ReadonlySet<string>): Band | null {
   switch (node.label) {
     case 'Resource':
-      return 'infra';
+      return isBrowserStorage(node) ? 'client' : 'infra';
     case 'Gateway':
       return 'cloud';
     case 'Channel':
@@ -122,8 +137,9 @@ function kindBand(node: GraphNode, configFileIds: ReadonlySet<string>): Band | n
     case 'Tool':
     case 'Config':
       return 'tools';
-    case 'Module':
     case 'Symbol':
+      return isServiceWorkerCode(node) ? 'client' : 'server';
+    case 'Module':
     case 'Endpoint':
     case 'DataEntity':
       return 'server';
@@ -134,7 +150,8 @@ function kindBand(node: GraphNode, configFileIds: ReadonlySet<string>): Band | n
       // emitted it directly), or it's the DEFINED_IN target of a Tool node
       // (an adapter's own richer File node superseded the toolchain's,
       // #244 review).
-      return node.props.config === true || configFileIds.has(node.id) ? 'tools' : 'server';
+      if (node.props.config === true || configFileIds.has(node.id)) return 'tools';
+      return isServiceWorkerCode(node) ? 'client' : 'server';
     case 'Gap':
       return null; // resolved from neighbors below
     default:

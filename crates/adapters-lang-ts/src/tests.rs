@@ -4788,3 +4788,161 @@ http.createServer((req, res) => { if (req.url === '/health') {} });
         .count();
     assert_eq!(handles, 2);
 }
+
+const SERVICE_WORKER_JS: &str = r#"
+const CACHE = 'shell-v1';
+self.addEventListener('install', (event) => {
+  event.waitUntil(caches.open(CACHE));
+});
+self.addEventListener('fetch', (event) => {
+  event.respondWith(
+    fetch(event.request).then((response) => {
+      return response;
+    }),
+  );
+});
+function helper() {}
+"#;
+
+/// Runtime prop of every File, Symbol and Component node, by id.
+fn runtimes(out: &Extraction) -> BTreeMap<String, Option<String>> {
+    out.nodes
+        .iter()
+        .filter(|node| matches!(node.label.as_str(), "File" | "Symbol" | "Component"))
+        .map(|node| {
+            (
+                node.id.clone(),
+                node.props["runtime"].as_str().map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+// AC-0365: `self.addEventListener('install' | 'fetch', …)` on the unshadowed
+// global proves a service worker; the File and every Symbol in it carry
+// `runtime: "service-worker"`.
+#[test]
+fn a_self_lifecycle_listener_marks_the_file_and_its_symbols_as_a_service_worker() {
+    let out = extract_tree(&[("web/sw.js", SERVICE_WORKER_JS)]);
+    let runtimes = runtimes(&out);
+    assert!(runtimes.len() >= 4, "{runtimes:?}");
+    assert!(
+        runtimes
+            .values()
+            .all(|runtime| runtime.as_deref() == Some("service-worker")),
+        "{runtimes:?}"
+    );
+}
+
+// AC-0365: a file with no worker proof, and a `self` the file rebinds, stay
+// unmarked, as does a non-lifecycle event on the global.
+#[test]
+fn non_worker_and_shadowed_self_files_stay_unmarked() {
+    let out = extract_tree(&[
+        (
+            "app.js",
+            "function run() { window.addEventListener('install', () => {}); }",
+        ),
+        (
+            "shadow.js",
+            "function run(self) { self.addEventListener('install', () => {}); }\n\
+             function other() { const self = makeBus(); self.addEventListener('fetch', () => {}); }",
+        ),
+        ("message.js", "self.addEventListener('message', () => {});"),
+    ]);
+    let runtimes = runtimes(&out);
+    assert!(!runtimes.is_empty());
+    assert!(runtimes.values().all(Option::is_none), "{runtimes:?}");
+}
+
+// AC-0365: a file whose path is the literal argument of
+// `navigator.serviceWorker.register` is a worker even without a lifecycle
+// listener; an ambiguous or unresolvable literal marks nothing.
+#[test]
+fn a_registered_path_marks_exactly_one_resolved_file() {
+    let out = extract_tree(&[
+        (
+            "web/app.js",
+            "navigator.serviceWorker.register('/worker.js');",
+        ),
+        ("web/worker.js", "function boot() {}"),
+        (
+            "web/other.js",
+            "navigator.serviceWorker.register('/dup.js');\nnavigator.serviceWorker.register('../up.js');",
+        ),
+        ("a/dup.js", "function a() {}"),
+        ("b/dup.js", "function b() {}"),
+        ("up.js", "function up() {}"),
+    ]);
+    let runtimes = runtimes(&out);
+    for (id, runtime) in &runtimes {
+        let worker = id.contains("worker.js");
+        assert_eq!(runtime.is_some(), worker, "{id}: {runtime:?}");
+    }
+    assert!(runtimes.contains_key("sym:qwtm/example@web/worker.js#boot"));
+}
+
+// AC-0365: a shadowed `navigator` registers nothing.
+#[test]
+fn a_shadowed_navigator_register_proves_nothing() {
+    let out = extract_tree(&[
+        (
+            "web/app.js",
+            "function f(navigator) { navigator.serviceWorker.register('/worker.js'); }",
+        ),
+        ("web/worker.js", "function boot() {}"),
+    ]);
+    assert!(runtimes(&out).values().all(Option::is_none));
+}
+
+// AC-0365: anonymous callbacks keep their `anon@<byte>` ids and gain a
+// deterministic `display_name` from the call they are passed to.
+#[test]
+fn anonymous_callbacks_get_display_names_without_changing_ids() {
+    let out = client_extract("web/sw.js", SERVICE_WORKER_JS);
+    let named: BTreeMap<String, Option<String>> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Symbol")
+        .map(|node| {
+            (
+                node.props["name"].as_str().unwrap().to_string(),
+                node.props["display_name"].as_str().map(str::to_string),
+            )
+        })
+        .collect();
+    let by_display: BTreeSet<_> = named
+        .iter()
+        .filter(|(name, _)| name.starts_with("anon@"))
+        .map(|(_, display)| display.clone())
+        .collect();
+    assert_eq!(
+        by_display,
+        BTreeSet::from([
+            Some("sw.js · install listener".to_string()),
+            Some("sw.js · fetch listener".to_string()),
+            Some("sw.js · fetch().then callback".to_string()),
+        ])
+    );
+    assert_eq!(named["helper"], None);
+    for node in out.nodes.iter().filter(|node| node.label == "Symbol") {
+        let name = node.props["name"].as_str().unwrap();
+        assert_eq!(node.id, format!("sym:qwtm/example@web/sw.js#{name}"));
+    }
+}
+
+// AC-0365: an anonymous function that is not a method-call argument has no
+// display name, and neither does a named one.
+#[test]
+fn display_names_are_absent_without_a_method_call_argument() {
+    let out = client_extract(
+        "app.js",
+        "export default () => {};\nwrap(() => {});\nconst named = () => {};",
+    );
+    assert!(
+        out.nodes
+            .iter()
+            .filter(|node| node.label == "Symbol")
+            .all(|node| node.props.get("display_name").is_none())
+    );
+}

@@ -103,8 +103,13 @@ export function EvidencePanel({
     dragging.current = false;
   }, []);
 
+  // A readable `display_name` (#1078) stands in for an anonymous `anon@<byte>` id.
   const name =
-    typeof node.props.name === 'string' ? node.props.name : (node.props.path ?? node.id);
+    typeof node.props.display_name === 'string'
+      ? node.props.display_name
+      : typeof node.props.name === 'string'
+        ? node.props.name
+        : (node.props.path ?? node.id);
 
   return (
     <section

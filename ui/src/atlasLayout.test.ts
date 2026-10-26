@@ -112,3 +112,40 @@ describe('assignBands — Gap neighbors', () => {
     expect(fastest).toBeLessThan(3_000);
   });
 });
+
+// AC-0365 (#1078): a File or Symbol the TS adapter proved to be service-worker
+// code (`props.runtime`) sits in the Client band, and so does an observed
+// browser-storage Resource; unproven code and other Resources keep their bands.
+describe('assignBands — service-worker code and browser storage', () => {
+  it('bands proven service-worker File/Symbol and browser-storage Resources as client', () => {
+    const snapshot: AtlasSnapshot = {
+      nodes: [
+        node('file:r@web/sw.js', 'File', { path: 'web/sw.js', runtime: 'service-worker' }),
+        node('sym:r@web/sw.js#anon@954', 'Symbol', {
+          name: 'anon@954',
+          runtime: 'service-worker',
+        }),
+        node('res:r@cache', 'Resource', { name: 'agent-bot-ui-v1', kind: 'browser-storage' }),
+        node('file:r@web/app.js', 'File', { path: 'web/app.js' }),
+        node('sym:r@web/app.js#run', 'Symbol', { name: 'run' }),
+        node('res:r@db', 'Resource', { name: 'postgres', kind: 'database' }),
+      ],
+      edges: [],
+    };
+    const bands = assignBands(snapshot);
+    expect(bands.get('file:r@web/sw.js')).toBe('client');
+    expect(bands.get('sym:r@web/sw.js#anon@954')).toBe('client');
+    expect(bands.get('res:r@cache')).toBe('client');
+    expect(bands.get('file:r@web/app.js')).toBe('server');
+    expect(bands.get('sym:r@web/app.js#run')).toBe('server');
+    expect(bands.get('res:r@db')).toBe('infra');
+  });
+
+  it('keeps a config File in Tools/Build even when it is marked service-worker', () => {
+    const snapshot: AtlasSnapshot = {
+      nodes: [node('file:r@sw.config.js', 'File', { config: true, runtime: 'service-worker' })],
+      edges: [],
+    };
+    expect(assignBands(snapshot).get('file:r@sw.config.js')).toBe('tools');
+  });
+});
