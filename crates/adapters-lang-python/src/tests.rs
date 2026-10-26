@@ -4013,3 +4013,634 @@ def cyclic_helper():
         ]
     );
 }
+
+fn auth_at(extraction: &Extraction, path: &str) -> serde_json::Value {
+    extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "Endpoint" && node.props["path"] == path)
+        .unwrap_or_else(|| panic!("{path}"))
+        .props["auth"]
+        .clone()
+}
+
+#[test]
+fn flask_login_required_is_a_confirmed_guard() {
+    // AC-0380 (T-0380): `@login_required` imported from flask_login is a
+    // framework guard with Confirmed provenance.
+    let source = br#"
+import flask_login
+from flask import Flask, jsonify
+from flask_login import login_required
+from flask_login.utils import fresh_login_required
+from flask_jwt_extended import jwt_required
+
+app = Flask(__name__)
+
+@app.route("/me")
+@login_required
+def me():
+    return jsonify(ok=True)
+
+@app.route("/attr")
+@flask_login.login_required
+def attr():
+    return jsonify(ok=True)
+
+@app.route("/fresh")
+@fresh_login_required
+def fresh():
+    return jsonify(ok=True)
+
+@app.route("/jwt")
+@jwt_required()
+def jwt():
+    return jsonify(ok=True)
+"#;
+    let extraction = extract_source(source, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/me");
+    assert_eq!(auth["state"], "required");
+    assert_eq!(auth["authenticated"], true);
+    assert_eq!(
+        auth["guards"],
+        serde_json::json!(["flask_login.login_required"])
+    );
+    assert_eq!(auth["basis"], serde_json::json!(["framework_guard"]));
+    assert_eq!(auth["prov"]["confidence_tier"], "Confirmed");
+    assert!(!auth["prov"]["evidence"].as_array().unwrap().is_empty());
+    assert_eq!(
+        auth_at(&extraction, "/attr")["guards"],
+        serde_json::json!(["flask_login.login_required"])
+    );
+    assert_eq!(
+        auth_at(&extraction, "/fresh")["guards"],
+        serde_json::json!(["flask_login.fresh_login_required"])
+    );
+    let jwt = auth_at(&extraction, "/jwt");
+    assert_eq!(jwt["state"], "required");
+    assert_eq!(
+        jwt["guards"],
+        serde_json::json!(["flask_jwt_extended.jwt_required"])
+    );
+    assert_eq!(jwt["prov"]["confidence_tier"], "Confirmed");
+}
+
+#[test]
+fn repository_decorator_returning_401_is_an_inferred_guard() {
+    // AC-0380 (T-0380): a cross-file repository decorator whose wrapper
+    // delegates to a check returning 401 is an InferredStrong guard.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/base.py",
+        r#"
+from functools import wraps
+from flask import Blueprint, jsonify
+
+api_bp = Blueprint("api", __name__, url_prefix="/api")
+
+def authorize():
+    if missing():
+        return jsonify(error="Wrong api key"), 401
+    return None
+
+def require_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        error_return = authorize()
+        if error_return:
+            return error_return
+        return f(*args, **kwargs)
+    return decorated
+"#,
+    );
+    write(
+        dir.path(),
+        "app/views.py",
+        r#"
+from flask import jsonify
+from app.base import api_bp, require_auth
+
+@api_bp.route("/me")
+@require_auth
+def me():
+    return jsonify(ok=True)
+"#,
+    );
+    write(
+        dir.path(),
+        "app/main.py",
+        "from flask import Flask\nfrom app.base import api_bp\napp = Flask(__name__)\napp.register_blueprint(api_bp)\n",
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let auth = auth_at(&extraction, "/api/me");
+    assert_eq!(auth["state"], "required");
+    assert_eq!(auth["authenticated"], true);
+    assert_eq!(
+        auth["guards"],
+        serde_json::json!(["sym:local/python-service@app/base.py#require_auth"])
+    );
+    assert_eq!(
+        auth["basis"],
+        serde_json::json!(["decorator_returns_401_or_403"])
+    );
+    assert_eq!(auth["prov"]["confidence_tier"], "InferredStrong");
+}
+
+#[test]
+fn undecorated_route_with_non_blocking_hooks_is_unauthenticated() {
+    // AC-0380 (T-0380): a route with no guard decorator, a non-blocking
+    // `before_request` hook (following a repository helper), and only a
+    // ProxyFix `wsgi_app` is `none`, with the recorded assumption.
+    let source = br#"
+import time
+from flask import Flask, g, jsonify
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app)
+
+def stamp():
+    g.y = time.time()
+    return None
+
+@app.before_request
+def before():
+    g.x = time.time()
+    stamp()
+
+@app.route("/open")
+def open_view():
+    return jsonify(ok=True)
+"#;
+    let extraction = extract_source(source, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/open");
+    assert_eq!(auth["state"], "none");
+    assert_eq!(auth["authenticated"], false);
+    assert_eq!(auth["basis"], "no_guard_decorator_or_blocking_request_hook");
+    assert_eq!(
+        auth["assumptions"],
+        serde_json::json!(["non_repository_calls_in_request_hooks_do_not_abort"])
+    );
+    assert_eq!(auth["prov"]["confidence_tier"], "InferredStrong");
+    assert!(auth["prov"]["evidence"].as_array().unwrap().len() >= 2);
+}
+
+#[test]
+fn blocking_hook_or_unknown_middleware_makes_undecorated_routes_unknown() {
+    // AC-0380 (T-0380): a hook that aborts, or an unknown `wsgi_app`
+    // middleware, leaves undecorated routes unknown; a guarded route in
+    // the same app stays required.
+    let blocking = br#"
+from flask import Flask, abort, jsonify
+from flask_login import login_required
+
+app = Flask(__name__)
+
+@app.before_request
+def before():
+    abort(401)
+
+@app.route("/open")
+def open_view():
+    return jsonify(ok=True)
+
+@app.route("/me")
+@login_required
+def me():
+    return jsonify(ok=True)
+"#;
+    let extraction = extract_source(blocking, "app.py", &id()).unwrap();
+    let open = auth_at(&extraction, "/open");
+    assert_eq!(open["state"], "unknown");
+    assert_eq!(
+        open["reasons"],
+        serde_json::json!(["request_hook_may_block"])
+    );
+    assert!(open.get("authenticated").is_none());
+    assert_eq!(auth_at(&extraction, "/me")["state"], "required");
+
+    let middleware = br#"
+from flask import Flask, jsonify
+from flask_login import login_required
+
+app = Flask(__name__)
+app.wsgi_app = Custom(app.wsgi_app)
+
+@app.route("/open")
+def open_view():
+    return jsonify(ok=True)
+
+@app.route("/me")
+@login_required
+def me():
+    return jsonify(ok=True)
+"#;
+    let extraction = extract_source(middleware, "app.py", &id()).unwrap();
+    let open = auth_at(&extraction, "/open");
+    assert_eq!(open["state"], "unknown");
+    assert_eq!(
+        open["reasons"],
+        serde_json::json!(["wsgi_middleware_unknown"])
+    );
+    assert!(open.get("authenticated").is_none());
+    assert_eq!(auth_at(&extraction, "/me")["state"], "required");
+}
+
+#[test]
+fn call_and_unresolved_decorators_are_unknown() {
+    // AC-0380 (T-0380): a call decorator, a `jwt_required` call with an
+    // argument, and a pass-through repository decorator are unknown.
+    let source = br#"
+from flask import Flask, jsonify
+from flask_jwt_extended import jwt_required
+
+app = Flask(__name__)
+
+def passthrough(f):
+    def wrapper(*args, **kwargs):
+        return f(*args, **kwargs)
+    return wrapper
+
+@app.route("/limited")
+@limiter.limit("2/minute")
+def limited():
+    return jsonify(ok=True)
+
+@app.route("/optional")
+@jwt_required(optional=True)
+def optional():
+    return jsonify(ok=True)
+
+@app.route("/passed")
+@passthrough
+def passed():
+    return jsonify(ok=True)
+"#;
+    let extraction = extract_source(source, "app.py", &id()).unwrap();
+    let limited = auth_at(&extraction, "/limited");
+    assert_eq!(limited["state"], "unknown");
+    assert_eq!(
+        limited["reasons"],
+        serde_json::json!([r#"unclassified_decorator:limiter.limit("2/minute")"#])
+    );
+    let optional = auth_at(&extraction, "/optional");
+    assert_eq!(optional["state"], "unknown");
+    assert_eq!(
+        optional["reasons"],
+        serde_json::json!(["unclassified_decorator:jwt_required(optional=True)"])
+    );
+    let passed = auth_at(&extraction, "/passed");
+    assert_eq!(passed["state"], "unknown");
+    assert_eq!(
+        passed["reasons"],
+        serde_json::json!(["decorator_not_classified:sym:local/python-service@app.py#passthrough"])
+    );
+    for auth in [limited, optional, passed] {
+        assert!(auth.get("authenticated").is_none());
+        assert!(auth.get("prov").is_none());
+    }
+}
+
+#[test]
+fn decorators_above_or_between_route_decorators_do_not_guard_the_route() {
+    // AC-0380 (T-0380): a guard above every route decorator is applied after
+    // registration, so the registered view is unguarded: it is listed as
+    // ineffective and the route is `none`. A decorator between two route
+    // decorators wraps only one registration, so the state is `unknown`.
+    let source = br#"
+from flask import Flask, jsonify
+from flask_login import login_required
+
+app = Flask(__name__)
+
+@login_required
+@app.route("/late")
+def late():
+    return jsonify(ok=True)
+
+@app.route("/a")
+@login_required
+@app.route("/b")
+def split():
+    return jsonify(ok=True)
+"#;
+    let extraction = extract_source(source, "app.py", &id()).unwrap();
+    let late = auth_at(&extraction, "/late");
+    assert_eq!(late["state"], "none");
+    assert_eq!(late["authenticated"], false);
+    assert_eq!(
+        late["ineffective_decorators"],
+        serde_json::json!(["@login_required"])
+    );
+    for path in ["/a", "/b"] {
+        let split = auth_at(&extraction, path);
+        assert_eq!(split["state"], "unknown", "{path}");
+        assert_eq!(
+            split["reasons"],
+            serde_json::json!(["decorator_between_route_decorators:@login_required"]),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_hook_calling_an_unrecovered_repository_name_may_block() {
+    // AC-0380 (T-0380): a hook's call into a repository file where no
+    // function of that name was recovered (here a re-export through a
+    // package `__init__`) is not assumed non-blocking, and two functions
+    // sharing a key are merged conservatively.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/checks/core.py",
+        "from flask import abort\n\ndef check():\n    abort(401)\n",
+    );
+    write(
+        dir.path(),
+        "app/checks/__init__.py",
+        "from app.checks.core import check\n",
+    );
+    write(
+        dir.path(),
+        "app/main.py",
+        r#"
+from flask import Flask, jsonify
+from app.checks import check
+
+app = Flask(__name__)
+
+@app.before_request
+def gate():
+    check()
+
+@app.route("/open")
+def open_view():
+    return jsonify(ok=True)
+"#,
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let auth = auth_at(&extraction, "/open");
+    assert_eq!(auth["state"], "unknown");
+    assert_eq!(
+        auth["reasons"],
+        serde_json::json!(["request_hook_may_block"])
+    );
+
+    let shared = br#"
+from flask import Flask, abort, jsonify
+
+def gate():
+    return None
+
+def create_app():
+    app = Flask(__name__)
+
+    @app.before_request
+    def gate():
+        abort(403)
+
+    @app.route("/open")
+    def open_view():
+        return jsonify(ok=True)
+
+    return app
+"#;
+    let extraction = extract_source(shared, "factory.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/open");
+    assert_eq!(auth["state"], "unknown");
+    assert_eq!(
+        auth["reasons"],
+        serde_json::json!(["request_hook_may_block"])
+    );
+}
+
+#[test]
+fn decorated_request_hooks_may_block() {
+    // AC-0380 (T-0380): Flask registers the decorated hook, so a hook with
+    // any decorator besides its registration may block even when its own
+    // body is `pass`; the undecorated `pass` hook stays non-blocking.
+    let decorated = br#"
+from flask import Flask
+from flask_login import login_required
+
+app = Flask(__name__)
+
+@app.before_request
+@login_required
+def gate():
+    pass
+
+@app.route("/private")
+def private():
+    return "secret"
+"#;
+    let extraction = extract_source(decorated, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/private");
+    assert_eq!(auth["state"], "unknown");
+    assert_eq!(
+        auth["reasons"],
+        serde_json::json!(["request_hook_may_block"])
+    );
+
+    let plain = br#"
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.before_request
+def gate():
+    pass
+
+@app.route("/open")
+def open_view():
+    return "open"
+"#;
+    let extraction = extract_source(plain, "app.py", &id()).unwrap();
+    assert_eq!(auth_at(&extraction, "/open")["state"], "none");
+}
+
+#[test]
+fn an_enclosing_binding_shadows_an_imported_guard() {
+    // AC-0380 (T-0380): a factory parameter named like the imported guard is
+    // what the decorator resolves to, so it is not a Confirmed guard; the
+    // same factory without the parameter keeps the import.
+    let shadowed = br#"
+from flask import Flask
+from flask_login import login_required
+
+app = Flask(__name__)
+
+def register(login_required):
+    @app.route("/public")
+    @login_required
+    def public():
+        return "public"
+
+register(lambda function: function)
+"#;
+    let extraction = extract_source(shadowed, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/public");
+    assert_eq!(auth["state"], "unknown");
+    assert_eq!(
+        auth["reasons"],
+        serde_json::json!(["unclassified_decorator:login_required"])
+    );
+
+    let imported = br#"
+from flask import Flask
+from flask_login import login_required
+
+app = Flask(__name__)
+
+def register():
+    @app.route("/private")
+    @login_required
+    def private():
+        return "private"
+
+register()
+"#;
+    let extraction = extract_source(imported, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/private");
+    assert_eq!(auth["state"], "required");
+    assert_eq!(
+        auth["guards"],
+        serde_json::json!(["flask_login.login_required"])
+    );
+}
+
+#[test]
+fn a_reassigned_framework_guard_is_not_proof() {
+    // AC-0380 (T-0380): a guard reassigned on its module anywhere in the
+    // repository, by assignment or a literal `setattr`, may not be the guard.
+    let assigned = br#"
+import flask_login
+from flask import Flask
+
+app = Flask(__name__)
+flask_login.login_required = lambda function: function
+
+@app.route("/public")
+@flask_login.login_required
+def public():
+    return "public"
+"#;
+    let extraction = extract_source(assigned, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/public");
+    assert_eq!(auth["state"], "unknown");
+    assert_eq!(
+        auth["reasons"],
+        serde_json::json!(["framework_guard_reassigned:flask_login.login_required"])
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/patch.py",
+        "import flask_jwt_extended\n\nsetattr(flask_jwt_extended, \"jwt_required\", lambda: (lambda f: f))\n",
+    );
+    write(
+        dir.path(),
+        "app/views.py",
+        r#"
+from flask import Flask
+from flask_jwt_extended import jwt_required
+
+app = Flask(__name__)
+
+@app.route("/token")
+@jwt_required()
+def token():
+    return "token"
+"#,
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let auth = auth_at(&extraction, "/token");
+    assert_eq!(auth["state"], "unknown");
+    assert_eq!(
+        auth["reasons"],
+        serde_json::json!(["framework_guard_reassigned:flask_jwt_extended.jwt_required"])
+    );
+    for (patch, reason) in [
+        (
+            "setattr(flask_login, (\"login_required\"), lambda f: f)",
+            "framework_guard_reassigned:flask_login.login_required",
+        ),
+        (
+            "setattr(flask_login, u\"login_required\", lambda f: f)",
+            "framework_guard_reassigned:flask_login.login_required",
+        ),
+        (
+            "setattr(flask_login, \"login\\x5frequired\", lambda f: f)",
+            "framework_guard_reassigned:flask_login.login_required",
+        ),
+        (
+            "setattr(flask_login, NAME, lambda f: f)",
+            "framework_guard_reassigned:flask_login.login_required",
+        ),
+        ("setattr(flask_login, \"other\", 1)", ""),
+    ] {
+        let source = format!(
+            "import flask_login\nfrom flask import Flask\n\napp = Flask(__name__)\n{patch}\n\n@app.route(\"/p\")\n@flask_login.login_required\ndef p():\n    return \"p\"\n"
+        );
+        let extraction = extract_source(source.as_bytes(), "app.py", &id()).unwrap();
+        let auth = auth_at(&extraction, "/p");
+        if reason.is_empty() {
+            assert_eq!(auth["state"], "required", "{patch}");
+        } else {
+            assert_eq!(auth["state"], "unknown", "{patch}");
+            assert_eq!(auth["reasons"], serde_json::json!([reason]), "{patch}");
+        }
+    }
+}
+
+#[test]
+fn proxy_fix_is_known_only_around_the_assigned_application() {
+    // AC-0380 (T-0380): `ProxyFix` wrapping other middleware leaves that
+    // middleware unknown; wrapping the assigned `wsgi_app` itself is cited
+    // on the `none` fact.
+    let nested = br#"
+from flask import Flask
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+app = Flask(__name__)
+app.wsgi_app = ProxyFix(AuthMiddleware(app.wsgi_app))
+
+@app.route("/open")
+def open_view():
+    return "open"
+"#;
+    let extraction = extract_source(nested, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/open");
+    assert_eq!(auth["state"], "unknown");
+    assert_eq!(
+        auth["reasons"],
+        serde_json::json!(["wsgi_middleware_unknown"])
+    );
+
+    let direct = br#"
+from flask import Flask
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+
+@app.route("/open")
+def open_view():
+    return "open"
+"#;
+    let extraction = extract_source(direct, "app.py", &id()).unwrap();
+    let auth = auth_at(&extraction, "/open");
+    assert_eq!(auth["state"], "none");
+    let source = std::str::from_utf8(direct).unwrap();
+    let start = source.find("app.wsgi_app = ProxyFix").unwrap() as u64;
+    assert!(
+        auth["prov"]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|span| span["byte_start"].as_u64() == Some(start)),
+        "{auth}"
+    );
+}

@@ -231,7 +231,7 @@ fn findings<'a, N: Borrow<Node>, E: Borrow<Edge>>(
         .map(Borrow::borrow)
         .filter(|node| node.label == "Endpoint" && explicit_auth_state(node) == Some(false))
     {
-        let Some(support) = Support::from_props(&node.props) else {
+        let Some(support) = Support::from_endpoint_props(&node.props) else {
             continue;
         };
         let name = match (node.props["method"].as_str(), node.props["path"].as_str()) {

@@ -15,6 +15,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 
 mod alembic;
+mod auth_guards;
 pub mod observed_infra;
 mod request_inputs;
 mod responses;
@@ -60,6 +61,11 @@ pub struct Extraction {
     orm_files: Vec<sqlalchemy::OrmFile>,
     function_facts: Vec<responses::FunctionFacts>,
     handler_facts: Vec<responses::HandlerFacts>,
+    auth_handlers: Vec<auth_guards::HandlerAuthFacts>,
+    fn_effects: Vec<auth_guards::FnEffects>,
+    hooks: Vec<auth_guards::HookFact>,
+    wsgi_facts: Vec<auth_guards::WsgiFact>,
+    patched_guards: Vec<String>,
     client_fixtures: Vec<target_tests::ClientFixture>,
     client_calls: Vec<target_tests::ClientCall>,
 }
@@ -261,7 +267,7 @@ fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
 }
 
 /// Endpoint props whose objects carry a nested `prov`.
-const NESTED_PROV: &[&str] = &["request_inputs", "responses"];
+const NESTED_PROV: &[&str] = &["request_inputs", "responses", "auth"];
 
 fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for node in &mut extraction.nodes {
@@ -294,6 +300,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     }
     sqlalchemy::retarget(extraction, commit);
     responses::retarget(extraction, commit);
+    auth_guards::retarget(extraction, commit);
     target_tests::retarget(extraction, commit);
 }
 
@@ -1643,7 +1650,8 @@ pub fn extract_source(
     id: &SourceId<'_>,
 ) -> Result<Extraction, ExtractError> {
     let mut out = extract_file(source, path, id)?;
-    responses::resolve(&mut out, id.repo);
+    let functions = responses::resolve(&mut out, id.repo);
+    auth_guards::resolve(&mut out, id.repo, &functions);
     target_tests::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
     Ok(out)
@@ -1744,6 +1752,9 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             out.function_facts.push(facts);
         }
     }
+    auth_guards::collect(
+        &cx, root, &bindings, &resolver, &locals, &functions, &mut out,
+    );
     for (function, handler) in &functions {
         let Some(parent) = function
             .parent()
@@ -2064,6 +2075,11 @@ pub fn extract_dir_incremental_with_progress(
             out.orm_files.extend(extraction.orm_files);
             out.function_facts.extend(extraction.function_facts);
             out.handler_facts.extend(extraction.handler_facts);
+            out.auth_handlers.extend(extraction.auth_handlers);
+            out.fn_effects.extend(extraction.fn_effects);
+            out.hooks.extend(extraction.hooks);
+            out.wsgi_facts.extend(extraction.wsgi_facts);
+            out.patched_guards.extend(extraction.patched_guards);
             out.client_fixtures.extend(extraction.client_fixtures);
             out.client_calls.extend(extraction.client_calls);
             Ok(())
@@ -2086,7 +2102,8 @@ pub fn extract_dir_incremental_with_progress(
     }
     resolve_absolute_imports(&mut out, id.repo);
     resolve_routes(&mut out, id.repo);
-    responses::resolve(&mut out, id.repo);
+    let functions = responses::resolve(&mut out, id.repo);
+    auth_guards::resolve(&mut out, id.repo, &functions);
     target_tests::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
     alembic::extract(root, id, &mut out)?;

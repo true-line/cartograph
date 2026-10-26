@@ -285,9 +285,10 @@
 - **Priority:** Should · **Status:** Done
 - **AC-0041** Given an endpoint with an explicit negative auth fact, when projected, then it is listed as a cited security finding mapped to US-0015/AC-0041; missing auth evidence alone never asserts unauthenticated status.
 - **AC-0042** Given an IAM `GRANTS` edge with a wildcard action or literal wildcard resource scope, when analyzed, then a confidence-preserving finding lists the exact actions and resource scope and maps to US-0015/AC-0042.
+- **AC-0380** Given a recovered Flask endpoint, when its authentication is derived, then `props.auth` is `required` (a `flask_login` `login_required`/`fresh_login_required` or bare `jwt_required()` guard, Confirmed; or a repository decorator whose followed responses include 401/403, InferredStrong), `none` (no decorator below the route and every request hook and `wsgi_app` assignment provably non-blocking, InferredStrong, with the non-repository-call assumption recorded), or `unknown` with sorted reasons; a decorator above the route registration is listed as ineffective, a decorated hook or a name shadowed by an enclosing scope is never proof, and the security finding takes the auth fact's own provenance.
 - **Security:** This story *is* the security projection.
 - **Performance:** —
-- **Trace:** M9 · `iac`, `spec`, `ui` · — · T-0041..0042
+- **Trace:** M9 · `iac`, `spec`, `ui`, `adapters-lang-python` · — · T-0041..0042,T-0380
 
 ### US-0016 — Recover WebExtension systems end to end
 - **Actor:** Engineer
