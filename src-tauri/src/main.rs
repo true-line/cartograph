@@ -3180,6 +3180,26 @@ fn plugin_coverage(plugins: &[ActivePlugin]) -> Vec<ingest::preflight::PluginCov
         .collect()
 }
 
+/// Scan `root` and refresh its adapter lookup the same way [`preflight_blocking`]
+/// does, without persisting findings or touching the register (#1101).
+pub(crate) fn preflight_adapter_lookup<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    root: &std::path::Path,
+) -> Result<Vec<ingest::adapter_lookup::CellLookup>, String> {
+    let plugins = plugin_coverage(&active_plugins_for_root(app, state, root)?);
+    let mut report = ingest::preflight::preflight_scan(
+        root,
+        &plugins,
+        ingest::preflight::EvalProofSource::PendingRecovery,
+        &mut |_| std::ops::ControlFlow::Continue(()),
+    )
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| PREFLIGHT_CANCELLED.to_string())?;
+    report.refresh_adapter_lookup(&plugin_declarations_for_root(app, state, root)?);
+    Ok(report.adapter_lookup)
+}
+
 /// The register holds one preflight result per repo: each scan replaces the
 /// previous one, so every surface quotes the latest classification.
 fn persist_preflight_findings(
@@ -5922,6 +5942,7 @@ fn main() {
             work_packets::get_work_packet,
             work_packets::review_work_packet,
             work_packets::export_work_packet,
+            work_packets::draft_adapter_work_packets,
             export_save::save_export_file,
             investigations::commands::investigation_specialists,
             investigations::commands::start_investigation,

@@ -1388,6 +1388,116 @@ pub(crate) async fn assess_work_packet(
     .await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DraftAdapterPacket {
+    pub(crate) language: String,
+    pub(crate) content_id: String,
+    pub(crate) markdown: String,
+}
+
+fn packet_language(body: &packets::PacketBody) -> String {
+    body.evidence
+        .facts
+        .iter()
+        .find_map(|fact| fact.fact.props().get("language").and_then(|v| v.as_str()))
+        .unwrap_or_default()
+        .to_string()
+}
+
+pub(crate) fn draft_adapter_packets<R: tauri::Runtime>(
+    repo: &str,
+    app: &tauri::AppHandle<R>,
+    state: &crate::AppState,
+) -> Result<Vec<DraftAdapterPacket>, PacketHostError> {
+    if repo.is_empty() || repo.len() > 256 {
+        return Err(PacketHostError::code("unavailable_evidence"));
+    }
+    let ((nodes, edges), recorded) = {
+        let graph = state.graph.lock().map_err(|_| PacketHostError::storage())?;
+        graph
+            .read_snapshot_with_coverage_bounded(
+                snapshot_limits(),
+                core_graph::coverage::CoverageReadLimits::default(),
+            )
+            .map_err(graph_error)?
+    };
+    let snapshot_id = context_hub::ContextSnapshot::new(nodes, edges)
+        .map_err(source_error)?
+        .id()
+        .to_string();
+    let stored = recorded
+        .into_iter()
+        .find(|stored| stored.record.repo_key == repo)
+        .ok_or_else(|| PacketHostError::code("unavailable_evidence"))?;
+    let registration_id = stored
+        .record
+        .registered_source_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| PacketHostError::code("unavailable_evidence"))?;
+    let inventory: ingest::coverage::RepoCoverage =
+        serde_json::from_str(&stored.record.inventory_json)
+            .map_err(|_| PacketHostError::code("unavailable_evidence"))?;
+    if inventory.repo != repo || inventory.commit.is_empty() {
+        return Err(PacketHostError::code("unavailable_evidence"));
+    }
+    let source = {
+        let sources = state
+            .sources
+            .lock()
+            .map_err(|_| PacketHostError::storage())?;
+        sources
+            .get_by_repo(repo)
+            .map_err(|_| PacketHostError::storage())?
+    }
+    .filter(|source| source.source_id == registration_id && source.is_ready())
+    .ok_or_else(|| PacketHostError::code("unavailable_evidence"))?;
+    let operation = crate::SourceOperation::acquire(&state.sources, [(source.clone(), false)])
+        .map_err(|_| PacketHostError::code("unavailable_evidence"))?;
+    let root = operation
+        .root(&source.repo_key)
+        .map_err(|_| PacketHostError::code("unavailable_evidence"))?;
+    // Samples are read from the checkout as it is now but cited at the
+    // recovered commit, so a checkout that has moved since recovery would
+    // cite spans the commit never had.
+    if crate::local_commit::local_commit(root).as_str() != inventory.commit {
+        return Err(PacketHostError::code("selection_conflict"));
+    }
+    let lookups = crate::preflight_adapter_lookup(app, state, root).map_err(source_error)?;
+    let files = ingest::adapter_packet::list_repo_files(root).map_err(source_error)?;
+    let context = ingest::adapter_packet::PacketContext {
+        snapshot_id: &snapshot_id,
+        registration_id: &source.source_id,
+        repo_key: &source.repo_key,
+        commit_sha: &inventory.commit,
+    };
+    let bodies = ingest::adapter_packet::adapter_work_packets(&lookups, &files, &context)?;
+    bodies
+        .into_iter()
+        .map(|body| {
+            let language = packet_language(&body);
+            let (content_id, markdown) = ingest::adapter_packet::export_adapter_packet(&body)?;
+            Ok(DraftAdapterPacket {
+                language,
+                content_id,
+                markdown,
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub(crate) async fn draft_adapter_work_packets(
+    repo: String,
+    app: tauri::AppHandle,
+) -> Result<Vec<DraftAdapterPacket>, PacketHostError> {
+    packet_worker(move || {
+        let state = app.state::<crate::AppState>();
+        draft_adapter_packets(&repo, &app, &state)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod acceptance_tests;
 
@@ -1424,6 +1534,250 @@ mod tests {
                 &[]
             )
             .unwrap_err(),
+            "selection_conflict"
+        );
+    }
+
+    fn write_file(root: &std::path::Path, rel: &str, contents: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn draft_adapter_work_packets_for_recovered_repos() {
+        // AC-0371 (#1101): draft_adapter_work_packets returns the #1084 export
+        // for each uncovered language of a recovered repo, is byte-identical
+        // across calls, returns empty when all looked-up cells have a
+        // declaring source, fails closed for unknown or unrecovered repos, and
+        // mutates nothing in the graph, packet store, repo, or register.
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("app");
+        let ruby_dir = directory.path().join("ruby");
+        let rust_dir = directory.path().join("rust");
+        let unrecovered_dir = directory.path().join("unrecovered");
+        std::fs::create_dir_all(&data).unwrap();
+
+        write_file(&ruby_dir, ".gitignore", "vendor/\n");
+        write_file(&ruby_dir, "vendor/ignored.rb", "puts 'vendored'\n");
+        write_file(&ruby_dir, "README.md", "# fixture\n");
+        write_file(&ruby_dir, "Gemfile", "source 'https://rubygems.org'\n");
+        write_file(
+            &ruby_dir,
+            "app/models/user.rb",
+            "require 'json'\n\nclass User\n  def name\n    'u'\n  end\nend\n",
+        );
+        write_file(
+            &ruby_dir,
+            "app/models/order.rb",
+            "class Order\n  def total\n    1\n  end\nend\n",
+        );
+        write_file(
+            &ruby_dir,
+            "app/controllers/users_controller.rb",
+            "class UsersController\n  def index\n    User.new.name\n  end\nend\n",
+        );
+        write_file(
+            &ruby_dir,
+            "lib/util.rb",
+            "module Util\n  def self.id(x) = x\nend\n",
+        );
+        write_file(&ruby_dir, "empty.rb", "");
+
+        write_file(
+            &rust_dir,
+            "src/lib.rs",
+            "pub fn answer() -> i32 {\n    42\n}\n",
+        );
+        write_file(&unrecovered_dir, "lib/only.rb", "puts 'hi'\n");
+
+        let state = crate::registered_source_tests::app_state(&data);
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        app.manage(crate::PreflightRuns::default());
+        let handle = app.handle();
+
+        // Unknown repo and unrecovered registered repo both fail closed.
+        assert_eq!(
+            draft_adapter_packets("unknown/repo", handle, &state)
+                .unwrap_err()
+                .code,
+            "unavailable_evidence"
+        );
+        let unrecovered = crate::register_local_source(&state, &unrecovered_dir).unwrap();
+        assert_eq!(
+            draft_adapter_packets(&unrecovered.repo_key, handle, &state)
+                .unwrap_err()
+                .code,
+            "unavailable_evidence"
+        );
+
+        // Recover the Ruby fixture repo and draft adapter work packets.
+        let ruby_source = crate::register_local_source(&state, &ruby_dir).unwrap();
+        let operation =
+            crate::source_operation(&state, vec![(ruby_source.clone(), false)]).unwrap();
+        let (_, execution) = crate::start_job(&state, &ruby_source.ingest_job_kind()).unwrap();
+        let summary =
+            crate::run_ingest(&ruby_source, &operation, &execution, handle, &state).unwrap();
+        drop(operation);
+
+        let snapshot_before = prepare_selection(
+            &state.graph.lock().unwrap(),
+            &state.decisions.lock().unwrap(),
+            &[],
+            &[],
+        )
+        .unwrap()
+        .snapshot_id;
+        let packets_before = state
+            .work_packets
+            .store
+            .lock()
+            .unwrap()
+            .list_after(20, None)
+            .unwrap()
+            .len();
+        let findings_before =
+            serde_json::to_value(state.findings.lock().unwrap().list().unwrap()).unwrap();
+        let files_before = ingest::adapter_packet::list_repo_files(ruby_source.root()).unwrap();
+        let file_bytes_before: Vec<_> = files_before
+            .iter()
+            .map(|file| std::fs::read(&file.path).unwrap())
+            .collect();
+
+        let first = draft_adapter_packets(&ruby_source.repo_key, handle, &state).unwrap();
+        let second = draft_adapter_packets(&ruby_source.repo_key, handle, &state).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first, second);
+        assert_eq!(first[0].language, "Ruby");
+
+        let lookups = crate::preflight_adapter_lookup(handle, &state, ruby_source.root()).unwrap();
+        let expected_bodies = ingest::adapter_packet::adapter_work_packets(
+            &lookups,
+            &files_before,
+            &ingest::adapter_packet::PacketContext {
+                snapshot_id: &snapshot_before,
+                registration_id: &ruby_source.source_id,
+                repo_key: &ruby_source.repo_key,
+                commit_sha: &summary.coverage[0].commit,
+            },
+        )
+        .unwrap();
+        assert_eq!(expected_bodies.len(), 1);
+        let (expected_id, expected_markdown) =
+            ingest::adapter_packet::export_adapter_packet(&expected_bodies[0]).unwrap();
+        assert_eq!(first[0].content_id, expected_id);
+        assert_eq!(first[0].markdown, expected_markdown);
+
+        let snapshot_after = prepare_selection(
+            &state.graph.lock().unwrap(),
+            &state.decisions.lock().unwrap(),
+            &[],
+            &[],
+        )
+        .unwrap()
+        .snapshot_id;
+        let packets_after = state
+            .work_packets
+            .store
+            .lock()
+            .unwrap()
+            .list_after(20, None)
+            .unwrap()
+            .len();
+        let findings_after =
+            serde_json::to_value(state.findings.lock().unwrap().list().unwrap()).unwrap();
+        let files_after = ingest::adapter_packet::list_repo_files(ruby_source.root()).unwrap();
+        let file_bytes_after: Vec<_> = files_after
+            .iter()
+            .map(|file| std::fs::read(&file.path).unwrap())
+            .collect();
+        assert_eq!(snapshot_after, snapshot_before);
+        assert_eq!(packets_after, 0);
+        assert_eq!(packets_after, packets_before);
+        assert_eq!(findings_after, findings_before);
+        assert_eq!(files_after, files_before);
+        assert_eq!(file_bytes_after, file_bytes_before);
+
+        // An ungated plugin declaring Ruby's core cells counts as declared, so
+        // no packet is drafted once those cells are declared.
+        let adapters_dir = ruby_source.root().join(".cartograph/adapters");
+        std::fs::create_dir_all(&adapters_dir).unwrap();
+        std::fs::write(adapters_dir.join("t0.plugin-ruby.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        std::fs::write(
+            adapters_dir.join("t0.plugin-ruby.golden.json"),
+            serde_json::json!({
+                "extensions": ["rb"],
+                "cases": [{"path": "a.rb", "source": "x = 1\n", "nodes": [], "edges": []}],
+                "coverage": [
+                    {"language": "Ruby", "framework": "core", "capability": "imports", "support": "supported", "cases": ["a.rb"]},
+                    {"language": "Ruby", "framework": "core", "capability": "calls", "support": "supported", "cases": ["a.rb"]},
+                    {"language": "Ruby", "framework": "core", "capability": "types", "support": "supported", "cases": ["a.rb"]}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            draft_adapter_packets(&ruby_source.repo_key, handle, &state)
+                .unwrap()
+                .is_empty()
+        );
+
+        // A recovered repo whose compiled-in cells are all supported also
+        // returns an empty list.
+        let rust_source = crate::register_local_source(&state, &rust_dir).unwrap();
+        let operation =
+            crate::source_operation(&state, vec![(rust_source.clone(), false)]).unwrap();
+        let (_, execution) = crate::start_job(&state, &rust_source.ingest_job_kind()).unwrap();
+        crate::run_ingest(&rust_source, &operation, &execution, handle, &state).unwrap();
+        drop(operation);
+        assert!(
+            draft_adapter_packets(&rust_source.repo_key, handle, &state)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_checkout_that_moved_since_recovery_drafts_no_packet() {
+        // AC-0371 (#1101): samples would be read from a checkout the recovered
+        // commit no longer describes, so the draft fails closed.
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("app");
+        std::fs::create_dir_all(&data).unwrap();
+        let project = directory.path().join("ruby");
+        crate::local_commit::tests::init_clean_repo(
+            &project,
+            &[(
+                "lib/user.rb",
+                b"class User\n  def name\n    'u'\n  end\nend\n",
+            )],
+        );
+        let state = crate::registered_source_tests::app_state(&data);
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        app.manage(crate::PreflightRuns::default());
+        let handle = app.handle();
+        let source = crate::register_local_source(&state, &project).unwrap();
+        let operation = crate::source_operation(&state, vec![(source.clone(), false)]).unwrap();
+        let (_, execution) = crate::start_job(&state, &source.ingest_job_kind()).unwrap();
+        crate::run_ingest(&source, &operation, &execution, handle, &state).unwrap();
+        drop(operation);
+        assert_eq!(
+            draft_adapter_packets(&source.repo_key, handle, &state)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        std::fs::write(project.join("lib/user.rb"), "class User\nend\n").unwrap();
+        assert_eq!(
+            draft_adapter_packets(&source.repo_key, handle, &state)
+                .unwrap_err()
+                .code,
             "selection_conflict"
         );
     }
