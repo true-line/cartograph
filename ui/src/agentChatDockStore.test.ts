@@ -16,11 +16,11 @@ function chat(id: string): InvestigationChat {
       message: { kind: 'user_question', question: detail.question } }] };
 }
 const tick = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
-function harness() {
+function harness(selectedId: string | null = null) {
   const calls: string[] = [];
   let release: (() => void) | undefined;
   let hold = false;
-  const coordinator = create<InvestigationState>(() => ({ ...useInvestigationStore.getInitialState(),
+  const coordinator = create<InvestigationState>(() => ({ ...useInvestigationStore.getInitialState(), selectedId,
     open: async (id) => {
       calls.push(id);
       coordinator.setState((state) => ({ selectedId: id, selectionGeneration: state.selectionGeneration + 1,
@@ -103,6 +103,20 @@ describe('saved task chat docks', () => {
     expect(h.calls).toEqual(['a']);
     expect(h.dock.getState().pendingTask).toBeNull();
     h.leave();
+  });
+
+  it('does not redock a closed coordinator selection on reconnect, but explicit open can restore it', async () => {
+    const h = harness('a'); await tick(); h.finish('a'); await tick();
+    expect(h.dock.getState().docks[0].chat.chat_id).toBe('real-chat:a');
+    h.dock.getState().close('a');
+    expect(h.coordinator.getState().selectedId).toBe('a');
+    h.leave(); const leaveAgain = h.dock.getState().connect(); await tick();
+    expect(h.calls).toEqual(['a']);
+    expect(h.dock.getState().docks).toEqual([]);
+    await h.open('a');
+    expect(h.calls).toEqual(['a', 'a']);
+    expect(h.dock.getState().docks[0].chat.chat_id).toBe('real-chat:a');
+    leaveAgain();
   });
 
   it('reconnects after effect cleanup and retains snapshots without implying live updates', async () => {

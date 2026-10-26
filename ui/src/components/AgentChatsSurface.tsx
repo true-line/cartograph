@@ -17,7 +17,8 @@ function statusLabel(status: string) {
 export function AgentChatsSurface({ state, onOpenResult }: AgentChatsSurfaceProps) {
   const [searchText, setSearchText] = useState(state.historySearch);
   const dock = useAgentChatDockStore();
-  useEffect(() => dock.connect(), [dock.connect]);
+  const connect = dock.connect;
+  useEffect(() => connect(), [connect]);
   const submitSearch = (event: FormEvent) => {
     event.preventDefault();
     void state.searchHistory(searchText);

@@ -17,6 +17,7 @@ interface DockState {
 /** Session snapshots only. The existing coordinator owns all validation and I/O. */
 export function createAgentChatDockStore(coordinator = useInvestigationStore) {
   let connected = false;
+  let adoptedInitialSelection = false;
   let intent = 0;
   let unsubscribe: (() => void) | undefined;
   let reading = false;
@@ -69,7 +70,8 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
       docks: [], focusedTask: null, pendingTask: null, error: null, fallbackTask: null,
       connect: () => {
         connected = true;
-        const selected = get().focusedTask ?? coordinator.getState().selectedId;
+        const selected = get().focusedTask ?? (!adoptedInitialSelection ? coordinator.getState().selectedId : null);
+        adoptedInitialSelection = true;
         if (selected) get().open(selected);
         return () => { connected = false; stop(); set({ pendingTask: null }); };
       },

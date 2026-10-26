@@ -150,6 +150,7 @@ export const LegacyTaskRoutesToFindings: Story = {
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: /Older saved task without a transcript/ }));
     await expect(await canvas.findByText('No saved conversation is available for this older investigation.')).toBeVisible();
     await userEvent.click(canvas.getByRole('button', { name: 'Open this investigation to inspect its findings' }));
     await expect(args.onOpenResult).toHaveBeenCalledTimes(1);
