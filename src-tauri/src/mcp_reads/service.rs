@@ -228,6 +228,33 @@ impl Service {
         self.enable_selected(app, parent, policy, None)
     }
 
+    /// Owner IPC entry: admission is checked before publishing an endpoint.
+    pub(crate) fn enable_tasks<R: tauri::Runtime>(
+        &self,
+        app: tauri::AppHandle<R>,
+        parent: &Path,
+        policy: Policy,
+        client: agents::investigation::McpClientId,
+        maximum_identities: std::num::NonZeroUsize,
+    ) -> Result<PathBuf, ReadError> {
+        use tauri::Manager;
+        policy.validate()?;
+        let state = app.state::<crate::AppState>();
+        let registered = state
+            .jobs
+            .lock()
+            .map_err(|_| ReadError::Storage)?
+            .mcp_client_exists(&client)
+            .map_err(|_| ReadError::Storage)?;
+        if !registered {
+            return Err(ReadError::InvalidRequest);
+        }
+        // Principals are durable; do not hold the store mutex during endpoint
+        // startup or while acquiring Service/grant lifecycle locks.
+        let tasks = agents::investigation::McpTaskActivation::granted(client, maximum_identities);
+        Self::enable_transition(&self.0, app.clone(), parent, policy, tasks, None)
+    }
+
     // Host-only boundary. No transport argument selects a principal or grant.
     fn enable_selected<R: tauri::Runtime>(
         &self,

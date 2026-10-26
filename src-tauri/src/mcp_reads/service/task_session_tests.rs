@@ -115,14 +115,45 @@ fn service_task_sessions_follow_host_grant_and_rotation() {
         drop(read);
         service.disable().await.unwrap();
         idle(&service).await;
+        let mut insufficient = policy;
+        insufficient.worker.reserved_bytes = nz(policy.worker.reserved_bytes.get() - 1);
+        assert!(
+            service
+                .enable_tasks(
+                    app.handle().clone(),
+                    endpoint.path(),
+                    insufficient,
+                    client.clone(),
+                    nz(1)
+                )
+                .is_err()
+        );
+        assert_eq!(service.owner_status().unwrap()["service"], "disabled");
+        let unknown = agents::investigation::McpClientId::from_host_bytes([0; 16]);
+        assert!(
+            service
+                .enable_tasks(
+                    app.handle().clone(),
+                    endpoint.path(),
+                    policy,
+                    unknown,
+                    nz(1)
+                )
+                .is_err()
+        );
         let path = service
-            .enable_selected(
+            .enable_tasks(
                 app.handle().clone(),
                 endpoint.path(),
                 policy,
-                Some((&state.jobs.lock().unwrap(), client.clone(), nz(1))),
+                client.clone(),
+                nz(1),
             )
             .unwrap();
+        let observed = service.owner_status().unwrap();
+        assert_eq!(observed["task_dispatch_available"], true);
+        assert_eq!(observed["task_grant"]["client_id"], client.as_str());
+        assert_eq!(observed["task_grant"]["maximum_identities"], 1);
         let record = ConnectionRecord::read(&path).unwrap();
         // Wrong activation credentials cannot reach the task-aware factory.
         assert!(!readonly.exists());

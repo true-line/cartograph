@@ -23,8 +23,7 @@ impl Drop for Rotation {
 }
 
 impl Service {
-    /// One owner observation. Selection is not authority; production task
-    /// dispatch remains unavailable until the worker admission slice lands.
+    /// One owner observation. Selection alone is never authority.
     pub(crate) fn owner_status(&self) -> Result<serde_json::Value, ReadError> {
         let state = self.0.lock().map_err(|_| ReadError::Storage)?;
         let selected = state
@@ -34,11 +33,18 @@ impl Service {
             .transpose()
             .map_err(|_| ReadError::Storage)?
             .flatten();
+        let grant = state
+            .active
+            .as_ref()
+            .map(|active| active.tasks.owner_snapshot())
+            .transpose()
+            .map_err(|_| ReadError::Storage)?
+            .flatten();
         Ok(serde_json::json!({
             "service": state.status()?,
             "selected_client": selected,
-            "task_dispatch_available": false,
-            "task_grant": null,
+            "task_dispatch_available": true,
+            "task_grant": grant,
         }))
     }
 

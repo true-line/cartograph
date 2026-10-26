@@ -80,8 +80,8 @@ fn host_activation_validates_principal_and_revokes_before_cleanup() {
         let observed = service.owner_status().unwrap();
         assert_eq!(observed["selected_client"], client.as_str());
         assert_eq!(observed["service"], "running");
-        assert_eq!(observed["task_dispatch_available"], false);
-        assert!(observed["task_grant"].is_null());
+        assert_eq!(observed["task_dispatch_available"], true);
+        assert_eq!(observed["task_grant"]["client_id"], client.as_str());
         let cleanup = service.begin_stop(false).unwrap();
         assert!(session.with_grant(|_, _| ()).is_err());
         Service::await_cleanup(cleanup).await.unwrap();
@@ -140,7 +140,7 @@ fn host_rotation_preserves_selection_without_restoring_authority() {
             .unwrap();
         let observed = service.owner_status().unwrap();
         assert_eq!(observed["selected_client"], client.as_str());
-        assert_eq!(observed["task_dispatch_available"], false);
+        assert_eq!(observed["task_dispatch_available"], true);
         assert!(observed["task_grant"].is_null());
         assert_ne!(old, new);
         assert!(!old.exists());
