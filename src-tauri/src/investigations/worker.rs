@@ -761,7 +761,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                         completion.response_model,
                         timestamp,
                     )
-                    .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+                    .map_err(|error| {
+                        Failure::Stop(InvestigationStopReason::InvalidFinish(error))
+                    })?;
                 // A valid finish belongs to the last supplied ledger, even if
                 // cancellation/Jobs cleanup won while the response was in flight.
                 self.admit_finish(response, result)?;
@@ -802,6 +804,11 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                             .read_evidence_completion(state, fact, role, index, &mut sink)?
                             .map(|reason| (read, reason))
                     } else {
+                        // Classify the exact ordinary-read membership refusal before
+                        // acquisition; completion keeps its separate refusal contract.
+                        if !context.ledger.selected_facts.iter().any(|s| s.fact == fact) {
+                            return Err(Failure::Stop(InvestigationStopReason::UnadmittedRead));
+                        }
                         context.read_evidence(state, fact, role, index, &mut sink)?;
                         None
                     }

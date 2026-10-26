@@ -1584,3 +1584,29 @@ mod principal_access_tests;
 
 #[path = "mcp_nonce_tests.rs"]
 mod mcp_nonce_tests;
+
+#[test]
+fn investigation_finish_diagnostic_classes_fit_the_existing_message_bound() {
+    // AC-0184 (#937): finite internal classes do not widen persisted strings.
+    use agents::investigation::InvestigationError::*;
+    let errors = [
+        InvalidRequest,
+        InvalidAction,
+        LimitExceeded,
+        InvalidInput,
+        InvalidCitation,
+        SourceReplay,
+        SensitiveOutput,
+    ];
+    let messages: std::collections::BTreeSet<_> = errors
+        .into_iter()
+        .map(|error| InvestigationStopReason::InvalidFinish(error).message())
+        .collect();
+    assert_eq!(messages.len(), errors.len());
+    for message in messages
+        .into_iter()
+        .chain([InvestigationStopReason::UnadmittedRead.message()])
+    {
+        assert!(message.len() <= InvestigationStopReason::InvalidResponse.message().len());
+    }
+}
