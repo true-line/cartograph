@@ -19,8 +19,8 @@ export const Open: Story = {
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
     const dialog = canvas.getByRole('dialog', { name: 'Command palette' });
-    // AC-0190: eight unchanged shortcuts, plus Investigations and Help.
-    await expect(within(dialog).getAllByRole('option')).toHaveLength(10);
+    // AC-0190/0388: eight unchanged shortcuts plus routed destinations.
+    await expect(within(dialog).getAllByRole('option')).toHaveLength(11);
     await expect(within(dialog).getByText('Help')).toBeInTheDocument();
 
     // Click navigates and closes.
@@ -69,5 +69,15 @@ export const InvestigationsPreservesShortcuts: Story = {
       .toEqual([...Array.from({ length: 8 }, (_, index) => `${modifier}${index + 1}`), '?']);
     await userEvent.click(entry);
     await expect(args.onNavigate).toHaveBeenCalledWith('investigations');
+  },
+};
+
+export const AgentChatsHasNoNinthShortcut: Story = {
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const entry = canvas.getByRole('option', { name: /^Agent Chats/ });
+    await expect(entry.querySelector('kbd')).toBeNull();
+    await userEvent.click(entry);
+    await expect(args.onNavigate).toHaveBeenCalledWith('agent-chats');
   },
 };

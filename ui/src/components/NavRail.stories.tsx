@@ -28,6 +28,7 @@ export const AllSurfaces: Story = {
       'Provenance & Eval',
       'Jobs',
       'Settings',
+      'Agent Chats',
       'Command palette',
     ]) {
       await expect(canvas.getByRole('button', { name: label })).toBeInTheDocument();

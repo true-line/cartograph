@@ -1,6 +1,5 @@
-/** The eight primary surfaces of the IDE shell (design handoff §App Shell).
- *  Single source of truth for the nav rail, command palette, and ⌘1–⌘8
- *  shortcuts — order here IS the shortcut order. */
+/** Primary surfaces of the IDE shell. The first eight remain the stable
+ *  ⌘1–⌘8 destinations; later surfaces are reachable from the rail/palette. */
 
 export type SurfaceView =
   | 'workspace'
@@ -11,6 +10,7 @@ export type SurfaceView =
   | 'prov'
   | 'jobs'
   | 'settings'
+  | 'agent-chats'
   // The ingest flow (handoff §Screens 1–3): routed views, not rail surfaces.
   | 'connect'
   | 'preflight'
@@ -53,6 +53,7 @@ export const SURFACES: readonly SurfaceDef[] = [
   },
   { id: 'jobs', label: 'Jobs', icon: 'terminal', hint: 'Durable background work' },
   { id: 'settings', label: 'Settings', icon: 'settings', hint: 'Tiers, providers, egress' },
+  { id: 'agent-chats', label: 'Agent Chats', icon: 'forum', hint: 'Saved specialist conversations' },
 ] as const;
 
 /** Breadcrumb labels for the ingest-flow views (not on the rail/palette). */
