@@ -7,7 +7,9 @@ import {
   excludeBoundaryPlaceholders,
   isBrowserStorage,
   isServiceWorkerCode,
+  type AtlasGroup,
   type AtlasScene,
+  expandAcross,
 } from '../atlasLayout';
 import type { AtlasSnapshot, GraphEdge, GraphNode, Tier } from '../store';
 
@@ -18,9 +20,9 @@ const LAYERS: ReadonlyArray<{ id: AtlasLayer; label: string }> = [
   { id: 'all', label: 'All layers' },
   { id: 'infra', label: 'Infrastructure' },
   { id: 'cloud', label: 'Cloud' },
-  { id: 'server', label: 'Server' },
+  { id: 'server', label: 'Server code' },
   { id: 'events', label: 'Events' },
-  { id: 'client', label: 'Client' },
+  { id: 'client', label: 'Client code' },
 ];
 
 const TIERS: ReadonlyArray<{ id: Tier; label: string }> = [
@@ -186,6 +188,21 @@ export function nodeShapeClass(node: GraphNode): 'atlas-gap' | 'kind-channel' | 
   return 'kind-box';
 }
 
+/** Ids of every group and cluster nested under `group`. */
+function descendantIds(group: AtlasGroup): string[] {
+  return group.children.flatMap((child) =>
+    'group' in child ? [child.group.id, ...descendantIds(child.group)] : [child.cluster.id],
+  );
+}
+
+/** Clusters folded inside a collapsed group tile. */
+function foldedClusterCount(scene: AtlasScene): number {
+  return (
+    scene.collapsedGroups.reduce((total, group) => total + group.clusters.length, 0) +
+    scene.unfocused.length
+  );
+}
+
 /** Scene → Cytoscape elements: band compounds, real nodes at deterministic
  *  banded positions, collapsed-cluster proxies, and edges (real ones keep
  *  the tier chip; aggregated ones carry a relation count). */
@@ -195,11 +212,11 @@ function elementsFor(scene: AtlasScene, overlay: boolean): cytoscape.ElementDefi
     classes: 'atlas-band',
   }));
   const nodeElements = scene.nodes.map((item) => {
-    if (item.cluster) {
+    if (item.cluster || item.group) {
       return {
         data: { id: item.id, label: item.label, parent: `band:${item.band}` },
         position: { ...item.position },
-        classes: 'atlas-cluster tier-neutral',
+        classes: `${item.group ? 'atlas-group' : 'atlas-cluster'} tier-neutral`,
       };
     }
     const node = item.node as GraphNode;
@@ -368,6 +385,25 @@ export const CY_STYLE: cytoscape.StylesheetStyle[] = [
     },
   },
   {
+    // Collapsed group of clusters (#1079): a repository or a key range.
+    selector: '.atlas-group',
+    style: {
+      shape: 'round-rectangle',
+      width: 76,
+      height: 60,
+      'border-width': 3,
+      'border-style': 'solid',
+      'border-color': '#abc7ff',
+      'background-color': '#1a2433',
+      'text-valign': 'center',
+      'text-halign': 'center',
+      'text-wrap': 'wrap',
+      'text-max-width': '70px',
+      'text-background-opacity': 0,
+      'font-size': 8,
+    },
+  },
+  {
     // Aggregated relations between collapsed endpoints.
     selector: '.atlas-agg',
     style: {
@@ -460,8 +496,9 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
     );
     cy.on('tap', 'node', (event) => {
       const id = event.target.id() as string;
-      // A collapsed cluster expands in place; bands are inert containers.
-      if (id.startsWith('cluster:')) {
+      // A collapsed cluster or group expands in place; bands are inert
+      // containers.
+      if (id.startsWith('cluster:') || id.startsWith('group:')) {
         setExpanded((open) => new Set([...open, id]));
         return;
       }
@@ -476,13 +513,9 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
     cy.on('tap', 'edge', (event) => {
       const id = event.target.id() as string;
       if (id.startsWith('agg:')) {
-        setExpanded((open) => {
-          const next = new Set(open);
-          for (const endpoint of [event.target.data('source'), event.target.data('target')]) {
-            if (typeof endpoint === 'string' && endpoint.startsWith('cluster:')) next.add(endpoint);
-          }
-          return next;
-        });
+        setExpanded((open) =>
+          expandAcross(open, String(event.target.data('source')), String(event.target.data('target'))),
+        );
         return;
       }
       const edge = byEdgeId.get(id);
@@ -599,13 +632,17 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
         <strong role="status">
           {visible.nodes.length} nodes · {visible.edges.length} edges
           {!scene.autoExpanded &&
-            ` · ${scene.collapsed.length} of ${scene.clusters.length} clusters collapsed`}
+            ` · ${scene.collapsed.length + foldedClusterCount(scene)} of ${scene.clusters.length} clusters collapsed`}
+          {scene.collapsedGroups.length > 0 && ` · ${scene.collapsedGroups.length} groups`}
         </strong>
         {!scene.autoExpanded && (
           <span className="atlas-cluster-controls">
             <button
               type="button"
-              onClick={() => setExpanded(new Set(scene.clusters.map((cluster) => cluster.id)))}
+              onClick={() =>
+                // Opens the clusters on screen; groups stay a drill-in.
+                setExpanded((open) => new Set([...open, ...scene.collapsed.map((cluster) => cluster.id)]))
+              }
             >
               Expand all clusters
             </button>
@@ -634,11 +671,51 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
         )}
       </div>
 
+      {scene.openGroups.length > 0 && (
+        <div className="atlas-entity-index" aria-label="Open groups">
+          <span className="muted">Open groups — click to fold back</span>
+          <div>
+            {scene.openGroups.map((group) => (
+              <button
+                key={group.id}
+                type="button"
+                onClick={() =>
+                  setExpanded((open) => {
+                    // Folding a group also folds everything opened under it.
+                    const inside = new Set([group.id, ...descendantIds(group)]);
+                    return new Set([...open].filter((id) => !inside.has(id)));
+                  })
+                }
+              >
+                ▾ {BAND_LABELS[group.band]} · {group.key}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {scene.collapsedGroups.length > 0 && (
+        <div className="atlas-entity-index" aria-label="Collapsed groups">
+          <span className="muted">Collapsed groups — click to open</span>
+          <div>
+            {scene.collapsedGroups.map((group) => (
+              <button
+                key={group.id}
+                type="button"
+                onClick={() => setExpanded((open) => new Set([...open, group.id]))}
+              >
+                ▸ {BAND_LABELS[group.band]} · {group.key} · {group.clusters.length} clusters
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {scene.collapsed.length > 0 && (
         <div className="atlas-entity-index" aria-label="Collapsed clusters">
           <span className="muted">Collapsed clusters — click to expand</span>
           <div>
-            {scene.collapsed.slice(0, 24).map((cluster) => (
+            {scene.collapsed.map((cluster) => (
               <button
                 key={cluster.id}
                 type="button"
@@ -647,9 +724,6 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
                 ▸ {BAND_LABELS[cluster.band]} · {cluster.key} · {cluster.members.length}
               </button>
             ))}
-            {scene.collapsed.length > 24 && (
-              <span className="muted">+{scene.collapsed.length - 24} more on canvas</span>
-            )}
           </div>
         </div>
       )}
