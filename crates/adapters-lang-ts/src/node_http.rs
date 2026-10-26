@@ -67,6 +67,9 @@ struct Alt<'t> {
     routes: Vec<Route<'t>>,
     gaps: Vec<GapSite<'t>>,
     method: Option<(String, TsNode<'t>)>,
+    /// The way also constrains `req.method` in a form one method cannot
+    /// state (`!==`, a negation, a computed read): its routes are declined.
+    opaque_method: bool,
 }
 
 fn substitution(part: TsNode<'_>) -> Option<TsNode<'_>> {
@@ -354,11 +357,18 @@ impl<'a, 't> Handler<'a, 't> {
         }
     }
 
+    fn mentions_method(&self, node: TsNode<'_>) -> bool {
+        callable::walk(node)
+            .into_iter()
+            .any(|inner| self.is_req_member(inner, "method"))
+    }
+
     fn neutral_with_gaps(&self, node: TsNode<'t>) -> Vec<Alt<'t>> {
         let mut gaps = Vec::new();
         self.computed_calls(node, &mut gaps);
         vec![Alt {
             gaps,
+            opaque_method: self.mentions_method(node),
             ..Alt::default()
         }]
     }
@@ -375,6 +385,7 @@ impl<'a, 't> Handler<'a, 't> {
                     .map(|argument| self.analyze(argument))
                     .unwrap_or_default();
                 for alt in &mut alts {
+                    alt.opaque_method |= alt.method.is_some();
                     alt.routes.clear();
                     alt.method = None;
                 }
@@ -442,6 +453,7 @@ impl<'a, 't> Handler<'a, 't> {
                 };
                 let mut alt = Alt {
                     method,
+                    opaque_method: l.opaque_method || r.opaque_method,
                     ..Alt::default()
                 };
                 let copy = |route: &Route<'t>| Route {
@@ -567,7 +579,9 @@ impl<'a, 't> Handler<'a, 't> {
                 // same method and no route.
                 let guard = alts.first().and_then(|first| first.method.clone())?;
                 if !alts.iter().all(|alt| {
-                    alt.routes.is_empty() && alt.method.as_ref().is_some_and(|m| m.0 == guard.0)
+                    alt.routes.is_empty()
+                        && !alt.opaque_method
+                        && alt.method.as_ref().is_some_and(|m| m.0 == guard.0)
                 }) {
                     return None;
                 }
@@ -849,6 +863,9 @@ pub(crate) fn extract<'t>(
                 }
                 for gap in &alt.gaps {
                     emit_gap(cx, out, &handler_id, gap, &mut seen_gaps);
+                }
+                if alt.opaque_method {
+                    continue;
                 }
                 for route in &alt.routes {
                     let method = match (&route.method, &alt.method) {

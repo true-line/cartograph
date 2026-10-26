@@ -4743,6 +4743,34 @@ createServer((req, res) => {
 }
 
 #[test]
+fn node_http_negative_method_in_the_route_conjunction_declines_the_claim() {
+    // AC-0363: a method constraint one method cannot state, written in the
+    // route's own condition (`!==`, a negation, a computed read), declines
+    // the route instead of widening it to ALL.
+    let src = r#"
+import { createServer } from "node:http";
+createServer((req, res) => {
+  if (req.method !== 'GET' && req.url === '/not-get') {}
+  if (!(req.method === 'GET') && req.url === '/negated') {}
+  if (req.method.toUpperCase() === 'GET' && req.url === '/computed') {}
+  if (req.method === 'POST' && req.url === '/post') {}
+  if (req.method !== 'GET' || req.url === '/either') {}
+  if (req.method === 'GET' && req.method.length > 9) { if (req.url === '/narrowed') {} }
+});
+"#;
+    let ex = extract_source(src.as_bytes(), "s.mjs", &id()).unwrap();
+    let mut endpoints = node_http_endpoints(&ex);
+    endpoints.sort();
+    assert_eq!(
+        endpoints,
+        [
+            ("ALL".to_string(), "/either".to_string()),
+            ("POST".to_string(), "/post".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn node_http_shared_endpoint_keeps_every_handler() {
     // AC-0363: two servers in one file serving the same route share the
     // endpoint node and each keep a HANDLES edge.
