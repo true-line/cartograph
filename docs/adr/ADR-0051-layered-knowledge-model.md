@@ -50,25 +50,44 @@ service dependency, while keeping the base authoritative.
    already built on SQLite. A later shared estate server may *export* to one;
    it is not a store of record.
 
-2. **The knowledge layer is separate, derived and disposable.** Its facts
-   live in the same graph under their own producers and tiers:
+2. **The knowledge layer is a separate, derived and disposable overlay.**
+   Its facts never enter the deterministic graph or its content-hash
+   identity, so re-ingesting a commit yields the same base graph whether or
+   not a provider was available (AGENTS.md determinism invariant). The
+   overlay is stored and hashed on its own, and its identity binds the base
+   graph revision (ADR-0047), the versioned recipe, the ADR-0037 embedding
+   namespace and whether the provider phase ran. Its facts are:
    - embeddings and retrieval at T2 (`InferredStrong` ceiling);
    - knowledge nodes (`Capability`, `DomainEntity`, `Actor`,
      `BusinessFlow`) produced first by deterministic rules where they apply,
-     then by clustering over embeddings (T2), then by bounded agent labelling
-     with cited evidence (T3, `InferredWeak`);
-   - every knowledge fact cites the base facts it rests on.
+     then by clustering over embeddings (T2);
+   - agent labels (T3), which are **staged proposals** under R-INT-3, never
+     written as overlay facts directly. A label reaches the overlay only
+     through an explicit acceptance step into a curated projection, keeps its
+     Agentic/`InferredWeak` provenance there, and is excluded from
+     `verified-only` exports (R-INT-5).
 
-   Dropping the layer and rebuilding it from the same base and the same
-   recipe yields the same retrieval index and the same rule- and
-   cluster-derived facts. Agent-labelled facts are reproducible only from
-   their recorded receipts.
+   Every overlay fact cites the base facts it rests on. Reproducibility is
+   semantic, not byte-identical by default: rebuilding from the same base,
+   recipe and *pinned cached vectors* with deterministic index and
+   clustering settings yields the same overlay. Without pinned vectors,
+   ADR-0037 does not attest deterministic provider execution, so a rebuild
+   may differ and is reported as a new overlay identity. Accepted labels are
+   reproducible only from their recorded receipts.
+
+   This extends ADR-0037, which keeps T2 an ephemeral overlay that rebuilds
+   ANN membership from the current graph: ANN membership is still rebuilt
+   from current inputs and never authoritative; what is new is a persisted,
+   separately hashed overlay of derived facts. Graph clear, schema reset and
+   retained-source forget invalidate overlay facts and index membership as
+   well as the cached vectors ADR-0037 already covers.
 
 3. **Embeddings become an ingest phase, after the base.** Units are symbols,
    endpoints, flows, docs, ADRs, and issue and commit text, chunked by a
    versioned recipe after deterministic redaction. Vectors persist under
    ADR-0037's identity and bounds in SQLite. The `usearch` index is built
-   from those rows and is a rebuildable cache, never authority. Providers
+   from those rows and the current overlay inputs, and is a rebuildable
+   cache, never authority. Providers
    are local by default (ADR-0037 identity rules apply). A run with no
    provider skips the phase and reports it as a named omission.
 
@@ -76,7 +95,7 @@ service dependency, while keeping the base authoritative.
    anchors and their graph neighbourhood deterministically, then ranks text
    with SQLite FTS5 (lexical) fused with vector similarity. Every answer
    cites base facts. Retrieval results carry the T2 tier and are never
-   written back as base facts.
+   written back into the base graph.
 
 5. **Artifact-derived facts are a third evidence basis.** Provenance gains an
    evidence basis distinct from tier: `source`, `artifact` or
@@ -103,7 +122,8 @@ service dependency, while keeping the base authoritative.
 ## Consequences
 
 - No new service: the desktop app keeps one SQLite file plus a rebuildable
-  vector index.
+  vector index, and the base graph's content-hash identity is unchanged by
+  the overlay.
 - The empty knowledge-node artifacts get producers with an explicit tier
   ladder, and each producer is testable on its own.
 - `core-prov` needs an evidence-basis field and an artifact `EvidenceRef`
@@ -121,12 +141,11 @@ service dependency, while keeping the base authoritative.
 - **Neo4j as the graph store:** the strongest server graph database, but a
   JVM service, and the provenance, determinism and revision contracts would
   have to be rebuilt on it.
-- **Chroma for vectors:** a Python service that adds nothing over `usearch`
-  plus SQLite rows for a local app.
-- **LanceDB:** embedded and strong on metadata filtering at scale. Revisit if
-  filtered vector search over millions of chunks is measured to be slow.
-- **sqlite-vec:** one file and transactional, but no approximate index for
-  large estates; kept as a candidate if `usearch` persistence proves costly.
+- **Another vector store:** Chroma is a Python service that adds nothing over
+  `usearch` plus SQLite rows for a local app. LanceDB (embedded, strong
+  metadata filtering) and sqlite-vec (one transactional file, no approximate
+  index) stay candidates if filtered search at estate scale or `usearch`
+  persistence is measured to fall short.
 - **Embeddings as the primary index:** rejected by VISION V2/V3:
   deterministic facts first, embeddings as retrieval and inference aids.
 
