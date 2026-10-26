@@ -1,4 +1,4 @@
-//! Append-only dispatch chat identity and typed result references (AC-0375).
+//! Append-only dispatch chat identity and typed result references (AC-0375/0377).
 use super::*;
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +20,7 @@ pub(super) fn fail_after_result_reference_insert_once() {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum StoredChatMessage {
+pub(crate) enum StoredChatMessage {
     UserQuestion {
         question: String,
     },
@@ -31,19 +31,44 @@ pub(super) enum StoredChatMessage {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(test)]
-pub(super) struct StoredChatTranscript {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredChatTranscript {
     pub chat_id: String,
     pub task_id: String,
+    pub producer: StoredChatProducer,
     pub messages: Vec<StoredChatEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(test)]
-pub(super) struct StoredChatEntry {
+/// Identity copied from the task at admission, never reconstructed from the
+/// current specialist catalog or provider configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredChatProducer {
+    pub specialist_id: SpecialistId,
+    pub specialist_version: u32,
+    pub prompt_fingerprint: String,
+    pub tier: core_prov::Tier,
+    pub confidence_tier: core_prov::ConfidenceTier,
+    pub provider_mode: InvestigationProviderMode,
+    pub provider_id: String,
+    pub model: String,
+    pub protocol_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StoredChatAuthor {
+    User,
+    Specialist,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredChatEntry {
     pub id: String,
     pub ordinal: u8,
+    pub author: StoredChatAuthor,
     pub message: StoredChatMessage,
 }
 
@@ -174,33 +199,36 @@ fn insert_message(
     Ok(())
 }
 
-/// Bounded test reader: resolve each persisted row against its saved task/result.
+/// Bounded test wrapper around the same snapshot validator used by the app read.
 #[cfg(test)]
 pub(super) fn read_for_task(
     connection: &Connection,
     task_id: &str,
 ) -> Result<StoredChatTranscript, InvestigationStoreError> {
     let tx = connection.unchecked_transaction()?;
-    let transcript = read_from_snapshot(&tx, task_id)?;
+    let transcript = read_from_snapshot(&tx, task_id)?.ok_or(InvestigationStoreError::Missing)?;
     tx.commit()?;
     Ok(transcript)
 }
 
-#[cfg(test)]
-fn read_from_snapshot(
+pub(super) fn read_from_snapshot(
     connection: &Connection,
     task_id: &str,
-) -> Result<StoredChatTranscript, InvestigationStoreError> {
+) -> Result<Option<StoredChatTranscript>, InvestigationStoreError> {
     let task = storage::load_execution_task(connection, task_id)?;
-    let (chat_id, saved_task_id): (String, String) = connection
+    let chat_row: Option<(Option<String>, Option<String>)> = connection
         .query_row(
             "SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END, CASE WHEN typeof(task_id)='text' AND length(CAST(task_id AS BLOB))<=128 THEN task_id END FROM investigation_chats WHERE task_id=?1",
             [task_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional()?
-        .ok_or(InvestigationStoreError::Missing)?;
-    if saved_task_id != task_id {
+        .optional()?;
+    let (chat_id, saved_task_id) = match chat_row {
+        None => return Ok(None),
+        Some((Some(chat_id), Some(saved_task_id))) => (chat_id, saved_task_id),
+        Some(_) => return Err(InvestigationStoreError::Invalid),
+    };
+    if chat_id.is_empty() || saved_task_id != task_id {
         return Err(InvestigationStoreError::Invalid);
     }
     let mut statement = connection.prepare(
@@ -268,15 +296,31 @@ fn read_from_snapshot(
         messages.push(StoredChatEntry {
             id,
             ordinal: ordinal as u8,
+            author: if ordinal == 0 {
+                StoredChatAuthor::User
+            } else {
+                StoredChatAuthor::Specialist
+            },
             message,
         });
     }
     if task.detail.summary.has_result != (messages.len() == 2) {
         return Err(InvestigationStoreError::Invalid);
     }
-    Ok(StoredChatTranscript {
+    Ok(Some(StoredChatTranscript {
         chat_id,
         task_id: task_id.to_owned(),
+        producer: StoredChatProducer {
+            specialist_id: task.detail.specialist.id,
+            specialist_version: task.detail.specialist.version,
+            prompt_fingerprint: task.detail.specialist.prompt_fingerprint,
+            tier: task.detail.specialist.tier,
+            confidence_tier: task.detail.specialist.confidence_tier,
+            provider_mode: task.detail.provider.mode,
+            provider_id: task.detail.provider.provider_id,
+            model: task.detail.provider.model,
+            protocol_version: task.detail.provider.protocol_version,
+        },
         messages,
-    })
+    }))
 }

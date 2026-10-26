@@ -178,7 +178,11 @@ fn chat_result_reference_rejects_cross_task_identity_on_read() {
     .unwrap();
     tx.execute_batch(&trigger).unwrap();
     tx.commit().unwrap();
-    assert!(chat::read_for_task(&reopened.conn, &id).is_err());
+    assert_eq!(
+        reopened.investigation_chat(&id),
+        Err(InvestigationStoreError::Invalid),
+        "the app-facing reader rejects a reference to another task"
+    );
     assert!(reopened.investigation_result(&id).unwrap().is_some());
 }
 
