@@ -145,6 +145,18 @@ function mergeHistory(existing: InvestigationSummary[], incoming: InvestigationS
   return [...byId.values()];
 }
 
+function normalizedHistorySearch(query: string) {
+  return query.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, '')
+    .replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+}
+
+function summaryMatchesHistorySearch(summary: InvestigationSummary, query: string) {
+  const needle = normalizedHistorySearch(query);
+  if (!needle) return true;
+  const normalizeAscii = (value: string) => value.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+  return normalizeAscii(summary.question).includes(needle) || normalizeAscii(summary.specialist_id).includes(needle);
+}
+
 /** A duplicate must agree exactly; a hole is not silently compressed into a log. */
 export function mergeInvestigationEvents(
   id: string, current: InvestigationEvent[], incoming: InvestigationEvent[], maximumSequence = 96,
@@ -174,6 +186,7 @@ export interface InvestigationState {
   catalogLoading: boolean;
   catalogError: string | null;
   history: InvestigationSummary[];
+  historySearch: string;
   nextCursor: string | null;
   historyLoading: boolean;
   historyError: string | null;
@@ -218,6 +231,7 @@ export interface InvestigationState {
   citationError: string | null;
   loadCatalog: () => Promise<void>;
   loadHistory: (more?: boolean) => Promise<void>;
+  searchHistory: (query: string) => Promise<void>;
   start: (draft: InvestigationDraft) => Promise<void>;
   retryStart: () => Promise<void>;
   open: (id: string) => Promise<void>;
@@ -242,15 +256,22 @@ let locationRequest = 0;
 let choicesRequest = 0;
 
 export const useInvestigationStore = create<InvestigationState>((set, get) => {
-  const updateSummary = (summary: InvestigationSummary) => set((state) => ({
-    history: state.history.some((item) => item.investigation_id === summary.investigation_id)
-      ? mergeHistory(state.history, [summary]) : [summary, ...state.history],
-    // A summary that reports a result is merged into the detail only once that
-    // result is held; otherwise the next consistent refresh supplies both.
-    detail: ![4, 5, 6, 7].includes(summary.schema_version) && state.detail?.investigation_id === summary.investigation_id && summary.revision >= state.detail.revision &&
-      (!summary.has_result || state.result !== null)
-      ? { ...state.detail, ...summary } : state.detail,
-  }));
+  const updateSummary = (summary: InvestigationSummary) => set((state) => {
+    const isSearching = Boolean(normalizedHistorySearch(state.historySearch));
+    const matches = summaryMatchesHistorySearch(summary, state.historySearch);
+    const history = isSearching && !matches
+      ? state.history.filter((item) => item.investigation_id !== summary.investigation_id)
+      : state.history.some((item) => item.investigation_id === summary.investigation_id)
+        ? mergeHistory(state.history, [summary]) : [summary, ...state.history];
+    return {
+      history,
+      // A summary that reports a result is merged into the detail only once that
+      // result is held; otherwise the next consistent refresh supplies both.
+      detail: ![4, 5, 6, 7].includes(summary.schema_version) && state.detail?.investigation_id === summary.investigation_id && summary.revision >= state.detail.revision &&
+        (!summary.has_result || state.result !== null)
+        ? { ...state.detail, ...summary } : state.detail,
+    };
+  });
 
   const startRequest = async (request: StartInvestigationRequest) => {
     if (get().starting) return;
@@ -351,7 +372,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       if (!known || message.review_revision > known.revision) void get().refreshReviews();
     },
     catalog: null, catalogLoading: false, catalogError: null,
-    history: [], nextCursor: null, historyLoading: false, historyError: null,
+    history: [], historySearch: '', nextCursor: null, historyLoading: false, historyError: null,
     selectedId: null, selectionGeneration: 0, detail: null, result: null, events: [],
     consent: null, consentOpen: false, loading: false, error: null,
     actionBusy: false, actionError: null, pendingStart: null, starting: false, startError: null,
@@ -505,20 +526,27 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     loadHistory: async (more = false) => {
       if (more && (!get().nextCursor || get().historyLoading)) return;
       const request = ++historyRequest;
-      const cursor = more ? get().nextCursor : null;
+      const current = get();
+      const cursor = more ? current.nextCursor : null;
+      const search = current.historySearch;
+      const normalizedSearch = normalizedHistorySearch(search);
       set({ historyLoading: true, historyError: null });
       try {
         const page = await invokeOr<InvestigationPage | null>('list_investigations', null,
-          cursor ? { cursor } : {});
+          { ...(cursor ? { cursor } : {}), ...(search ? { search } : {}) });
         if (!page || !Array.isArray(page.items) || page.items.length > 50 ||
-            page.items.some((item) => !validSummary(item))) throw new Error('Invalid history.');
+            page.items.some((item) => !validSummary(item)) ||
+            (normalizedSearch && page.items.some((item) => !summaryMatchesHistorySearch(item, normalizedSearch)))) {
+          throw new Error('Invalid history.');
+        }
+        const incoming = page.items;
         if (request !== historyRequest) return;
-        set((state) => ({ history: more ? mergeHistory(state.history, page.items) : [
-          ...page.items.map((item) => {
+        set((state) => ({ history: more ? mergeHistory(state.history, incoming) : [
+          ...incoming.map((item) => {
             const saved = state.history.find((previous) => previous.investigation_id === item.investigation_id);
             return saved && saved.revision > item.revision ? saved : item;
           }),
-          ...state.history.filter((item) => !page.items.some((incoming) => incoming.investigation_id === item.investigation_id)),
+          ...state.history.filter((item) => !incoming.some((fresh) => fresh.investigation_id === item.investigation_id)),
         ],
         // Background first-page refresh must not discard older explicit pages
         // or move their continuation backwards while another task is active.
@@ -526,8 +554,14 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         historyLoading: false }));
       } catch {
         if (request === historyRequest) set({ historyLoading: false,
-          historyError: 'Investigation history could not be refreshed. Previously loaded records are retained.' });
+          historyError: normalizedSearch ? 'Investigation history search could not be completed.'
+            : 'Investigation history could not be refreshed. Previously loaded records are retained.' });
       }
+    },
+
+    searchHistory: async (query) => {
+      set({ historySearch: query, history: [], nextCursor: null, historyError: null });
+      await get().loadHistory();
     },
 
     start: async (draft) => {

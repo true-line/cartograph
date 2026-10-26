@@ -108,6 +108,33 @@ export const HistoryAndReconnection: Story = {
   },
 };
 
+export const SearchesPersistedHistory: Story = {
+  // AC-0368: the surface asks the backend for persisted matches and never searches only loaded rows.
+  beforeEach: () => {
+    const matching = investigationDetail('older-match', { question: 'Legacy needle in a saved question' });
+    const nonmatching = investigationDetail('unrelated', { question: 'Unrelated saved question' });
+    mockIPC((command, args) => {
+      const search = (args as { search?: unknown } | undefined)?.search;
+      return command === 'list_investigations'
+        ? { items: search ? [matching] : [matching, nonmatching], next_cursor: null } : null;
+    });
+    useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: investigationCatalog,
+      history: [], selectedId: null, detail: null }, true);
+    return () => clearMocks();
+  },
+  render: function SearchHistoryStory() {
+    return <InvestigationsSurface state={useInvestigationStore()} anchors={[]} canStart />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.type(canvas.getByRole('searchbox'), 'LEGACY NEEDLE');
+    await userEvent.click(canvas.getByRole('button', { name: 'Search history' }));
+    await expect(canvas.getByText('Legacy needle in a saved question')).toBeVisible();
+    await expect(canvas.queryByText('Unrelated saved question')).not.toBeInTheDocument();
+    expect(useInvestigationStore.getState().history.map((item) => item.investigation_id)).toEqual(['older-match']);
+  },
+};
+
 let releaseEarlier: (value: InvestigationDetail) => void = () => {};
 let earlierRequest: Promise<void> | null = null;
 

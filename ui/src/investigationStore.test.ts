@@ -46,6 +46,100 @@ afterEach(() => {
 });
 
 describe('durable investigation observations (AC-0190)', () => {
+  it('rejects a server search page containing a nonmatching summary (AC-0368)', async () => {
+    const nonmatch = investigationDetail('wrong-search-result', { question: 'Unrelated history' });
+    mockIPC((command) => command === 'list_investigations'
+      ? { items: [nonmatch], next_cursor: null } : null);
+
+    await useInvestigationStore.getState().searchHistory('needle');
+    expect(useInvestigationStore.getState().history).toEqual([]);
+    expect(useInvestigationStore.getState().historyError).toBe('Investigation history search could not be completed.');
+  });
+
+  it('ignores stale search responses after a newer query or clear (AC-0368)', async () => {
+    const alpha = investigationDetail('alpha-result', { question: 'Alpha saved question' });
+    const beta = investigationDetail('beta-result', { question: 'Beta saved question' });
+    const gamma = investigationDetail('gamma-result', { question: 'Gamma saved question' });
+    const ordinary = investigationDetail('ordinary-result', { question: 'Ordinary history' });
+    const pendingAlpha = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const pendingGamma = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    mockIPC((command, args) => {
+      if (command !== 'list_investigations') return null;
+      if (args?.search === 'alpha') return pendingAlpha.promise;
+      if (args?.search === 'gamma') return pendingGamma.promise;
+      if (args?.search === 'beta') return { items: [beta], next_cursor: 'beta-next' };
+      return { items: [ordinary], next_cursor: 'ordinary-next' };
+    });
+
+    const alphaSearch = useInvestigationStore.getState().searchHistory('alpha');
+    await useInvestigationStore.getState().searchHistory('beta');
+    expect(useInvestigationStore.getState().history.map((item) => item.investigation_id)).toEqual(['beta-result']);
+    pendingAlpha.resolve({ items: [alpha], next_cursor: null });
+    await alphaSearch;
+    expect(useInvestigationStore.getState().history.map((item) => item.investigation_id)).toEqual(['beta-result']);
+
+    const gammaSearch = useInvestigationStore.getState().searchHistory('gamma');
+    await useInvestigationStore.getState().searchHistory('');
+    expect(useInvestigationStore.getState().history.map((item) => item.investigation_id)).toEqual(['ordinary-result']);
+    pendingGamma.resolve({ items: [gamma], next_cursor: null });
+    await gammaSearch;
+    expect(useInvestigationStore.getState().history.map((item) => item.investigation_id)).toEqual(['ordinary-result']);
+  });
+
+  it('keeps persisted-history search complete and filters selected/background task updates (AC-0368)', async () => {
+    const match = investigationDetail('older-match', { question: 'Needle in an older saved question' });
+    const nonmatch = investigationDetail('selected-nonmatch', { question: 'A different saved question' });
+    const listCalls: Array<Record<string, unknown>> = [];
+    const clearingPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    let holdClear = false;
+    mockIPC((command, args) => {
+      if (command === 'list_investigations') {
+        listCalls.push(args ?? {});
+        if (!args?.search && holdClear) return clearingPage.promise;
+        return { items: args?.search ? [match] : [match, nonmatch],
+          next_cursor: args?.search ? 'search-next' : 'ordinary-next' };
+      }
+      if (command === 'get_investigation') return nonmatch;
+      if (command === 'investigation_result') return investigationResult(nonmatch.investigation_id);
+      if (command === 'investigation_consent') return null;
+      if (command === 'investigation_events') return {
+        investigation_id: nonmatch.investigation_id, items: investigationEvents(nonmatch.investigation_id),
+        next_sequence: nonmatch.last_event_sequence, has_more: false,
+      };
+      return null;
+    });
+
+    const store = useInvestigationStore.getState();
+    await store.searchHistory('\u000bNeedle\u000b');
+    expect(listCalls[0]).toEqual({ search: '\u000bNeedle\u000b' });
+    expect(useInvestigationStore.getState().history.map((item) => item.investigation_id)).toEqual(['older-match']);
+    expect(useInvestigationStore.getState().nextCursor).toBe('search-next');
+
+    await useInvestigationStore.getState().open(nonmatch.investigation_id);
+    expect(useInvestigationStore.getState().selectedId).toBe(nonmatch.investigation_id);
+    expect(useInvestigationStore.getState().detail?.question).toBe(nonmatch.question);
+    expect(useInvestigationStore.getState().history.map((item) => item.investigation_id)).toEqual(['older-match']);
+
+    useInvestigationStore.getState().invalidate({ investigation_id: 'remote-nonmatch', revision: 1, last_event_sequence: 1 });
+    await vi.waitFor(() => expect(listCalls).toHaveLength(2));
+    expect(listCalls[1]).toEqual({ search: '\u000bNeedle\u000b' });
+    expect(useInvestigationStore.getState().history.map((item) => item.investigation_id)).toEqual(['older-match']);
+
+    holdClear = true;
+    const clearing = useInvestigationStore.getState().searchHistory('');
+    expect(useInvestigationStore.getState().history).toEqual([]);
+    expect(useInvestigationStore.getState().nextCursor).toBeNull();
+    expect(useInvestigationStore.getState().selectedId).toBe(nonmatch.investigation_id);
+    expect(useInvestigationStore.getState().detail?.question).toBe(nonmatch.question);
+    clearingPage.resolve({ items: [match, nonmatch], next_cursor: 'ordinary-next' });
+    await clearing;
+    expect(listCalls[2]).toEqual({});
+    expect(useInvestigationStore.getState().history.map((item) => item.investigation_id)).toEqual(['older-match', 'selected-nonmatch']);
+    expect(useInvestigationStore.getState().selectedId).toBe(nonmatch.investigation_id);
+    expect(useInvestigationStore.getState().detail?.question).toBe(nonmatch.question);
+    expect(useInvestigationStore.getState().nextCursor).toBe('ordinary-next');
+  });
+
   it('preserves older explicit pages and their cursor when refreshing ordered recent history', async () => {
     let recent = investigationDetail('recent', { revision: 10 });
     mockIPC((command, args) => {
