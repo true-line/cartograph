@@ -3536,6 +3536,12 @@ button.status-live-link:hover {
 .register-lane.gap-lane h3 {
   color: var(--tier-gap);
 }
+.register-lane.interpretation-lane {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+.register-lane.interpretation-lane h3 {
+  color: var(--accent);
+}
 .register-lane.unsupported-lane {
   border-color: color-mix(in srgb, var(--finding-unsupported) 35%, var(--border));
 }

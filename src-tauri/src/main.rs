@@ -2575,6 +2575,10 @@ fn apply_found_adrs(
 struct FindingsSummary {
     /// Explicit System Gaps in the graph (spec-register definition).
     gaps: u64,
+    /// Subset of `gaps` the interpretation seam fills (#994, AC-0359); stays
+    /// counted in `gaps` and `open_findings`, and nothing is subtracted or
+    /// suppressed.
+    interpretation_backlog: u64,
     /// Unsupported patterns — tool limitations, never Gaps.
     unsupported: u64,
     /// Questions recovery found no evidence for.
@@ -2604,12 +2608,15 @@ fn summarize_register(
     // the pair into one finding while keeping an edge-only gap (no gap node
     // on either end) as its own. Shared definition, every surface (#116).
     let gaps = spec::count_gap_findings(nodes.iter(), edges.iter()) as u64;
+    let interpretation_backlog =
+        spec::count_interpretation_backlog(nodes.iter(), edges.iter()) as u64;
     let drift = nodes
         .iter()
         .filter(|node| spec::is_drift_node(node))
         .count() as u64;
     FindingsSummary {
         gaps,
+        interpretation_backlog,
         unsupported,
         no_evidence,
         drift,
@@ -6223,6 +6230,7 @@ mod tests {
         let summary = super::summarize_register(&nodes, &edges, 2, 1);
         // One finding for the node+edge pair, one for the standalone edge.
         assert_eq!(summary.gaps, 2);
+        assert_eq!(summary.interpretation_backlog, 0);
         // Drift keeps its own node-only rule: the CONFLICTS edge supports
         // the drift node's finding (parity with drift_register's count).
         assert_eq!(summary.drift, 1);
@@ -6230,6 +6238,22 @@ mod tests {
         assert_eq!(summary.no_evidence, 1);
         assert_eq!(summary.open_findings, 5); // 2 gaps + 2 unsupported + 1 no-evidence
         assert_eq!(summary.graph_facts, 6);
+
+        // AC-0359 (#994): an established interpretation-seam gap is counted in
+        // `interpretation_backlog` while remaining counted in `gaps` and
+        // `open_findings`.
+        let mut with_backlog = nodes;
+        with_backlog.push(Node {
+            id: "gap:rule".into(),
+            label: "Gap".into(),
+            props: serde_json::json!({
+                "reason": "The caller's interpretation of this local return or throw is unknown.",
+            }),
+        });
+        let summary_with_backlog = super::summarize_register(&with_backlog, &edges, 2, 1);
+        assert_eq!(summary_with_backlog.gaps, 3);
+        assert_eq!(summary_with_backlog.interpretation_backlog, 1);
+        assert_eq!(summary_with_backlog.open_findings, 6);
     }
 
     #[test]

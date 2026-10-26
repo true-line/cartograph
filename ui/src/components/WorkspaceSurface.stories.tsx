@@ -197,6 +197,7 @@ export const ConfirmedWithGapsIsNotInferred: Story = {
   args: {
     findings: {
       gaps: 203,
+      interpretation_backlog: 120,
       unsupported: 0,
       no_evidence: 0,
       drift: 0,
@@ -217,6 +218,11 @@ export const ConfirmedWithGapsIsNotInferred: Story = {
     await expect(canvas.getByText('Partial recovery')).toBeInTheDocument();
     await expect(canvas.getByText('Confirmed overall')).toBeInTheDocument();
     await expect(canvas.queryByText(/Inferred\w+ overall/)).not.toBeInTheDocument();
+    await expect(
+      canvas.getByText(
+        /203 gaps \(120 of them an interpretation backlog, not extraction failures\)/,
+      ),
+    ).toBeInTheDocument();
   },
 };
 

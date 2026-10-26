@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { classOmissionLabel, isEscalatable, omissionLabel } from './gapClasses';
+import {
+  classOmissionLabel,
+  isEscalatable,
+  isInterpretationBacklog,
+  omissionLabel,
+} from './gapClasses';
 import type { SpecAssertion } from './store';
 
 const assertion = (overrides: Partial<SpecAssertion> = {}): SpecAssertion => ({
@@ -82,5 +87,49 @@ describe('omission labels (AC-0254, #585)', () => {
       },
     });
     expect(omissionLabel(fallback)).toBe('unclassified (unresolved relationship) · filled by interpretation');
+  });
+});
+
+describe('isInterpretationBacklog (AC-0359, #994)', () => {
+  it('accepts established interpretation-seam omissions', () => {
+    const interp = assertion({
+      omission: {
+        class: 'unresolved_relationship',
+        seam: 'interpretation',
+        detail: "The caller's interpretation of this local return or throw is unknown.",
+      },
+    });
+    expect(isInterpretationBacklog(interp)).toBe(true);
+  });
+
+  it('excludes unclassified fallbacks even though their seam is interpretation', () => {
+    const fallback = assertion({
+      omission: {
+        class: 'unresolved_relationship',
+        seam: 'interpretation',
+        detail: 'unclassified: something entirely new',
+      },
+    });
+    expect(isInterpretationBacklog(fallback)).toBe(false);
+  });
+
+  it('excludes non-interpretation seams and assertions without an omission', () => {
+    const adapter = assertion({
+      omission: {
+        class: 'unresolved_relationship',
+        seam: 'adapter',
+        detail: 'unresolved call target',
+      },
+    });
+    const input = assertion({
+      omission: {
+        class: 'missing_input',
+        seam: 'manifest_input',
+        detail: 'env key X not found',
+      },
+    });
+    expect(isInterpretationBacklog(adapter)).toBe(false);
+    expect(isInterpretationBacklog(input)).toBe(false);
+    expect(isInterpretationBacklog(assertion())).toBe(false);
   });
 });

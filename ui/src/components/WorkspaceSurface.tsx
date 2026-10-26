@@ -162,8 +162,12 @@ export function WorkspaceSurface({
             <p>
               A third party could re-specify the Confirmed core from the artifacts.{' '}
               <strong>{findings.open_findings} open findings</strong>
-              <HelpTip topic="gap" /> — {findings.gaps} gaps and{' '}
-              {findings.unsupported} unsupported patterns (plus {findings.no_evidence}{' '}
+              <HelpTip topic="gap" /> — {findings.gaps} gaps
+              {typeof findings.interpretation_backlog === 'number' &&
+              findings.interpretation_backlog > 0
+                ? ` (${findings.interpretation_backlog} of them an interpretation backlog, not extraction failures)`
+                : ''}{' '}
+              and {findings.unsupported} unsupported patterns (plus {findings.no_evidence}{' '}
               no-evidence) — are listed explicitly rather than guessed. Triage them to raise
               recovery authority.
             </p>
