@@ -1,5 +1,12 @@
 import { CoverageMatrix } from './CoverageMatrix';
-import type { IngestSource, PatternFinding, PreflightProgress, PreflightReport } from '../store';
+import type {
+  AdapterLookup,
+  AdapterSource,
+  IngestSource,
+  PatternFinding,
+  PreflightProgress,
+  PreflightReport,
+} from '../store';
 
 export interface PreflightSurfaceProps {
   source: IngestSource;
@@ -22,7 +29,48 @@ export interface PreflightSurfaceProps {
  *  adapter — the unsupported finding's resolution path, not a dead end. */
 function requestAdapterUrl(language: string): string {
   const title = encodeURIComponent(`Adapter request: ${language}`);
-  return `https://github.com/qwts/cartograph/issues/new?title=${title}&labels=adapter-request`;
+  return `https://github.com/true-line/cartograph/issues/new?title=${title}&labels=adapter-request`;
+}
+
+function sourceName(source: AdapterSource): string {
+  return source.kind === 'builtin' ? source.adapter : `plugin ${source.id}`;
+}
+
+/** Adapter lookup (#1101, epic #998): for each unsupported or partial cell,
+ *  which installed source declares it. Only a verified claim covers a cell;
+ *  a declared but ungated plugin and an undeclared cell are said plainly. */
+function AdapterLookupList({ lookups }: { lookups: AdapterLookup[] }) {
+  return (
+    <ul className="preflight-items adapter-lookup">
+      {lookups.map((lookup) => {
+        const { language, framework, capability } = lookup.cell;
+        return (
+          <li key={`${language}.${framework}.${capability}`}>
+            <code>
+              {language} · {framework} · {capability}
+            </code>{' '}
+            {lookup.status === 'covered_by' ? (
+              <>
+                <span aria-hidden="true">✓</span> covered by{' '}
+                {lookup.sources.map(sourceName).join(', ')}
+              </>
+            ) : lookup.status === 'declared_unverified' ? (
+              <>
+                <span aria-hidden="true">~</span> declared by{' '}
+                {lookup.sources.map(sourceName).join(', ')}, conformance gate not passed — run it
+                in Settings
+              </>
+            ) : (
+              <>
+                <span aria-hidden="true">✗</span> no installed adapter declares this cell —
+                after recovery, an adapter work packet can be drafted for it
+              </>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
 }
 
 function FindingList({ items, marker }: { items: PatternFinding[]; marker: string }) {
@@ -230,6 +278,18 @@ export function PreflightSurface({
               </>
             )}
           </div>
+
+          {report.adapter_lookup && report.adapter_lookup.length > 0 && (
+            <div className="preflight-card unsupported">
+              <h3>
+                <span className="material-symbols-outlined" aria-hidden="true">
+                  extension
+                </span>
+                Adapter lookup
+              </h3>
+              <AdapterLookupList lookups={report.adapter_lookup} />
+            </div>
+          )}
         </div>
       )}
 

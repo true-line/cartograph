@@ -192,6 +192,19 @@ export interface PatternFinding {
   request_adapter?: string | null;
 }
 
+/** An installed source declaring a coverage claim (`ingest::adapter_lookup`). */
+export type AdapterSource =
+  | { kind: 'builtin'; adapter: string }
+  | { kind: 'plugin'; id: string; version: string };
+
+/** Who declares coverage of one unsupported or partial cell (#1071):
+ *  verified sources, sources whose evidence has not passed, or nobody. */
+export type AdapterLookup = { cell: CoverageCell } & (
+  | { status: 'covered_by'; sources: AdapterSource[] }
+  | { status: 'declared_unverified'; sources: AdapterSource[] }
+  | { status: 'none' }
+);
+
 /** Local preflight output (#116): the three-way classification exists from
  *  first contact — potential gaps and unsupported patterns never conflate. */
 export interface PreflightReport {
@@ -200,6 +213,9 @@ export interface PreflightReport {
   unsupported: PatternFinding[];
   potential_gaps: PatternFinding[];
   detector: string;
+  /** For each unsupported or partial cell, which installed source declares
+   *  coverage of it (#1071). Absent from reports older than the lookup. */
+  adapter_lookup?: AdapterLookup[];
   /** Set on `preflight` results: the report's place in the register order.
    *  A scan a recovery reconciled past carries that recovery's report. */
   register?: RegisterStamp;
