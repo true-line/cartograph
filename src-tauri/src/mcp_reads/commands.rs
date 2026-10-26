@@ -255,6 +255,37 @@ pub(crate) async fn mcp_reads_enable(
     }
 }
 
+/// Owner IPC only. Relay requests cannot activate a principal or grant.
+#[tauri::command]
+pub(crate) async fn mcp_tasks_enable(
+    app: tauri::AppHandle,
+    policy: AdvancedPolicy,
+    client_id: agents::investigation::McpClientId,
+    maximum_identities: NonZeroUsize,
+) -> Result<(), CommandError> {
+    #[cfg(unix)]
+    {
+        let policy = policy.into_policy()?;
+        let runtime =
+            tokio::runtime::Handle::try_current().map_err(|_| CommandError::Unavailable)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let parent = runtime_parent(&app)?;
+            let _runtime = runtime.enter();
+            app.state::<super::service::Service>()
+                .enable_tasks(app.clone(), &parent, policy, client_id, maximum_identities)
+                .map(|_| ())
+                .map_err(|_| CommandError::Unavailable)
+        })
+        .await
+        .map_err(|_| CommandError::Unavailable)?
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (app, policy, client_id, maximum_identities);
+        Err(CommandError::UnsupportedPlatform)
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn mcp_reads_owner_status(
     app: tauri::AppHandle,
