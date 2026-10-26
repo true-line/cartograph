@@ -236,6 +236,12 @@ export interface InvestigationState {
   nextCursor: string | null;
   historyLoading: boolean;
   historyError: string | null;
+  conversationId: string | null;
+  conversationItems: InvestigationSummary[];
+  conversationPinned: InvestigationSummary | null;
+  conversationCursor: string | null;
+  conversationLoading: boolean;
+  conversationError: string | null;
   selectedId: string | null;
   selectionGeneration: number;
   detail: InvestigationDetail | null;
@@ -284,6 +290,9 @@ export interface InvestigationState {
   searchHistory: (query: string) => Promise<void>;
   start: (draft: InvestigationDraft) => Promise<string | null>;
   retryStart: () => Promise<string | null>;
+  openConversation: (conversationId: string) => Promise<void>;
+  loadConversation: (more?: boolean) => Promise<void>;
+  closeConversation: () => void;
   open: (id: string) => Promise<void>;
   refreshSelected: () => Promise<void>;
   invalidate: (message: InvestigationChanged) => void;
@@ -299,6 +308,7 @@ export interface InvestigationState {
 let reviewRequest = 0;
 let catalogRequest = 0;
 let historyRequest = 0;
+let conversationRequest = 0;
 let detailRequest = 0;
 let citationRequest = 0;
 let actionRequest = 0;
@@ -309,14 +319,16 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
   const updateSummary = (summary: InvestigationSummary) => {
     if (get().historyActiveOnly) ++historyRequest;
     set((state) => {
-      const matches = (!state.historyActiveOnly || investigationIsInActiveHistory(summary)) &&
-        summaryMatchesHistorySearch(summary, state.historySearch);
+      const matches = (!state.historyActiveOnly || investigationIsInActiveHistory(summary)) && summaryMatchesHistorySearch(summary, state.historySearch);
       const history = !matches
         ? state.history.filter((item) => item.investigation_id !== summary.investigation_id)
         : state.history.some((item) => item.investigation_id === summary.investigation_id)
           ? mergeHistory(state.history, [summary]) : [summary, ...state.history];
       return {
         history,
+        conversationPinned: state.conversationPinned?.investigation_id === summary.investigation_id &&
+          state.conversationPinned.conversation_id === summary.conversation_id && summary.revision >= state.conversationPinned.revision
+          ? summary : state.conversationPinned,
         // A summary that reports a result is merged into the detail only once that
         // result is held; otherwise the next consistent refresh supplies both.
         detail: ![4, 5, 6, 7].includes(summary.schema_version) && state.detail?.investigation_id === summary.investigation_id && summary.revision >= state.detail.revision &&
@@ -357,6 +369,13 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     // turn this into an uncertain start or invite a fresh nonce.
     try {
       await get().open(summary.investigation_id);
+      if (get().conversationId === summary.conversation_id) {
+        ++conversationRequest;
+        set({ conversationLoading: false });
+        // Admission is already confirmed; an optional conversation refresh must
+        // not keep the start action busy while its page is loading.
+        void get().loadConversation();
+      }
     } catch {
       set({ error: 'Investigation started, but its detail could not be loaded. Refresh the saved investigation.' });
     }
@@ -437,6 +456,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     },
     catalog: null, catalogLoading: false, catalogError: null,
     history: [], historySearch: '', historyActiveOnly: false, nextCursor: null, historyLoading: false, historyError: null,
+    conversationId: null, conversationItems: [], conversationPinned: null, conversationCursor: null, conversationLoading: false, conversationError: null,
     selectedId: null, selectionGeneration: 0, detail: null, result: null, chat: null,
     chatStatus: 'idle', chatError: null, events: [],
     consent: null, consentOpen: false, loading: false, error: null,
@@ -653,6 +673,53 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       await get().loadHistory();
     },
 
+    openConversation: async (conversationId) => {
+      const state = get();
+      const sameConversation = state.conversationId === conversationId;
+      const selected = state.detail ?? state.history.find((item) => item.investigation_id === state.selectedId) ??
+        state.conversationItems.find((item) => item.investigation_id === state.selectedId);
+      ++conversationRequest;
+      set({ conversationId, conversationItems: sameConversation ? state.conversationItems : [],
+        conversationPinned: selected?.conversation_id === conversationId ? selected : sameConversation ? state.conversationPinned : null,
+        conversationCursor: sameConversation ? state.conversationCursor : null,
+        conversationLoading: false, conversationError: null });
+      await get().loadConversation();
+    },
+    loadConversation: async (more = false) => {
+      const current = get();
+      if (!current.conversationId || current.conversationLoading || (more && !current.conversationCursor)) return;
+      const conversationId = current.conversationId;
+      const cursor = more ? current.conversationCursor : null;
+      const request = ++conversationRequest;
+      const isCurrent = () => request === conversationRequest && get().conversationId === conversationId;
+      set({ conversationLoading: true, conversationError: null });
+      try {
+        const page = await invokeOr<InvestigationPage | null>('list_investigation_conversation', null,
+          { conversationId, ...(cursor ? { cursor } : {}) });
+        if (!page || !Array.isArray(page.items) || page.items.length > 50 ||
+            page.items.some((item) => !validSummary(item) || item.conversation_id !== conversationId) ||
+            (page.next_cursor !== null && typeof page.next_cursor !== 'string')) throw new Error('Invalid conversation page.');
+        if (!isCurrent()) return;
+        set((state) => {
+          const known = [...state.history, ...state.conversationItems,
+            ...(state.detail ? [state.detail] : []), ...(state.conversationPinned ? [state.conversationPinned] : [])]
+            .filter((item) => item.conversation_id === conversationId);
+          const currentPage = page.items.map((item) => known.reduce((newer, candidate) =>
+            candidate.investigation_id === item.investigation_id && candidate.revision > newer.revision ? candidate : newer, item));
+          return { conversationItems: more ? mergeHistory(state.conversationItems, currentPage) : currentPage,
+            conversationCursor: page.next_cursor, conversationLoading: false, conversationError: null };
+        });
+      } catch {
+        if (isCurrent()) set({ conversationLoading: false,
+          conversationError: 'Conversation turns could not be loaded. Previously loaded turns remain available.' });
+      }
+    },
+    closeConversation: () => {
+      ++conversationRequest;
+      set({ conversationId: null, conversationItems: [], conversationPinned: null, conversationCursor: null,
+        conversationLoading: false, conversationError: null });
+    },
+
     start: async (draft) => {
       if (get().pendingStart || get().starting) return null;
       const request_nonce = crypto.randomUUID();
@@ -698,6 +765,16 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       return request ? startRequest(request) : null;
     },
     open: async (id) => {
+      const beforeOpen = get();
+      const selectedSummary = (beforeOpen.detail?.investigation_id === id ? beforeOpen.detail : null) ?? beforeOpen.history.find((item) => item.investigation_id === id) ??
+        beforeOpen.conversationItems.find((item) => item.investigation_id === id);
+      if (beforeOpen.conversationId && selectedSummary?.conversation_id === beforeOpen.conversationId) {
+        set({ conversationPinned: selectedSummary });
+      } else if (beforeOpen.conversationId && selectedSummary && selectedSummary.conversation_id !== beforeOpen.conversationId) {
+        ++conversationRequest;
+        set({ conversationId: null, conversationItems: [], conversationPinned: null, conversationCursor: null,
+          conversationLoading: false, conversationError: null });
+      } else if (beforeOpen.conversationId) set({ conversationPinned: null });
       ++detailRequest;
       ++reviewRequest;
       set({ findingReviews: [], reviewLoading: false, reviewBusy: false, reviewError: null });
@@ -732,6 +809,11 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         ]);
         if (!current()) return;
         if (!validSummary(detail, id)) throw new Error('Wrong detail.');
+        if (get().conversationId && detail.conversation_id !== get().conversationId) {
+          ++conversationRequest;
+          set({ conversationId: null, conversationItems: [], conversationPinned: null, conversationCursor: null,
+            conversationLoading: false, conversationError: null });
+        }
         // Independent reads can straddle the result commit; refresh instead of
         // recording a task whose detail and findings disagree.
         if ((result !== null) !== detail.has_result) throw new Error('Result observation changed.');
@@ -812,6 +894,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         updateSummary(detail);
         set((state) => ({ detail, result: result ?? savedResult, chat: null, chatStatus: 'loading', chatError: null,
           events, consent,
+          conversationPinned: state.conversationId === detail.conversation_id ? detail : state.conversationPinned,
           consentOpen: state.consentOpen && state.consent?.step_id === consent?.step_id &&
             state.consent?.preview.payload_hash === consent?.preview.payload_hash,
           loading: false, error: null }));
@@ -867,6 +950,12 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       } else if (message.investigation_id !== state.selectedId && !state.historyLoading &&
           message.revision > (state.history.find((item) => item.investigation_id === message.investigation_id)?.revision ?? -1)) {
         void state.loadHistory();
+      }
+      if (state.conversationId && (message.investigation_id === state.selectedId ||
+          state.conversationItems.some((item) => item.investigation_id === message.investigation_id))) {
+        ++conversationRequest;
+        set({ conversationLoading: false });
+        void get().loadConversation();
       }
     },
     showConsent: () => {

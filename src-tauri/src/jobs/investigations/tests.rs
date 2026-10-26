@@ -1161,6 +1161,194 @@ fn investigation_history_is_bounded_stable_and_idempotent_after_full_admission()
 }
 
 #[test]
+fn investigation_history_conversation_keeps_forks_as_siblings() {
+    let mut fixture = Fixture::new();
+    let parent = fixture
+        .store
+        .start_investigation(
+            &request("conversation-parent", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap()
+        .detail
+        .summary;
+
+    let mut child_request = request("conversation-child", InvestigationProviderMode::Local);
+    child_request.conversation_id = Some(parent.conversation_id.clone());
+    child_request.parent_id = Some(parent.investigation_id.clone());
+    let child = fixture
+        .store
+        .start_investigation(
+            &child_request,
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap()
+        .detail
+        .summary;
+    fixture
+        .store
+        .cancel_investigation(&child.investigation_id)
+        .unwrap();
+
+    let mut grandchild_request =
+        request("conversation-grandchild", InvestigationProviderMode::Local);
+    grandchild_request.conversation_id = Some(parent.conversation_id.clone());
+    grandchild_request.parent_id = Some(child.investigation_id.clone());
+    let grandchild = fixture
+        .store
+        .start_investigation(
+            &grandchild_request,
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap()
+        .detail
+        .summary;
+    fixture
+        .store
+        .cancel_investigation(&grandchild.investigation_id)
+        .unwrap();
+
+    let mut siblings = Vec::new();
+    for index in 0..49 {
+        let mut sibling_request = request(
+            &format!("conversation-sibling-{index}"),
+            InvestigationProviderMode::Local,
+        );
+        sibling_request.conversation_id = Some(parent.conversation_id.clone());
+        sibling_request.parent_id = Some(parent.investigation_id.clone());
+        let sibling = fixture
+            .store
+            .start_investigation(
+                &sibling_request,
+                Some(&provider(InvestigationProviderMode::Local)),
+            )
+            .unwrap()
+            .detail
+            .summary;
+        fixture
+            .store
+            .cancel_investigation(&sibling.investigation_id)
+            .unwrap();
+        siblings.push(sibling);
+    }
+    fixture
+        .store
+        .cancel_investigation(&parent.investigation_id)
+        .unwrap();
+
+    let mut unrelated_request = request("conversation-unrelated", InvestigationProviderMode::Local);
+    unrelated_request.conversation_id = None;
+    let unrelated = fixture
+        .store
+        .start_investigation(
+            &unrelated_request,
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap()
+        .detail
+        .summary;
+    fixture
+        .store
+        .cancel_investigation(&unrelated.investigation_id)
+        .unwrap();
+
+    let page = fixture
+        .store
+        .investigation_history(Some(&parent.conversation_id), None)
+        .unwrap();
+    assert_eq!(page.items.len(), 50);
+    assert_eq!(
+        page.items[0].investigation_id,
+        siblings.last().unwrap().investigation_id
+    );
+    assert!(
+        page.items
+            .iter()
+            .all(|item| item.conversation_id == parent.conversation_id)
+    );
+    assert!(
+        !page
+            .items
+            .iter()
+            .any(|item| item.investigation_id == unrelated.investigation_id)
+    );
+    let cursor = page.next_cursor.unwrap();
+    assert!(
+        fixture
+            .store
+            .investigation_history(Some("conversation:unknown"), None)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .store
+            .investigation_history(Some("conversation:other"), Some(&cursor))
+            .is_err()
+    );
+    let second = fixture
+        .store
+        .investigation_history(Some(&parent.conversation_id), Some(&cursor))
+        .unwrap();
+    assert_eq!(
+        second
+            .items
+            .iter()
+            .map(|item| item.investigation_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            child.investigation_id.as_str(),
+            parent.investigation_id.as_str()
+        ]
+    );
+    assert_eq!(
+        grandchild.parent_id.as_deref(),
+        Some(child.investigation_id.as_str())
+    );
+    assert_eq!(
+        second.items[0].parent_id.as_deref(),
+        Some(parent.investigation_id.as_str())
+    );
+    assert_eq!(second.items[1].parent_id, None);
+
+    // AC-0374: the persisted conversation and its bounded cursor survive a real
+    // store close/reopen; selected-turn reads remain independently addressable.
+    let database_path = fixture.directory.path().join("state.db");
+    drop(fixture.store);
+    let reopened = JobStore::open(database_path).unwrap();
+    let reopened_first = reopened
+        .investigation_history(Some(&parent.conversation_id), None)
+        .unwrap();
+    assert_eq!(
+        reopened_first
+            .items
+            .iter()
+            .map(|item| item.investigation_id.as_str())
+            .collect::<Vec<_>>(),
+        page.items
+            .iter()
+            .map(|item| item.investigation_id.as_str())
+            .collect::<Vec<_>>()
+    );
+    let reopened_cursor = reopened_first.next_cursor.unwrap();
+    let reopened_second = reopened
+        .investigation_history(Some(&parent.conversation_id), Some(&reopened_cursor))
+        .unwrap();
+    assert_eq!(
+        reopened_second
+            .items
+            .iter()
+            .map(|item| item.investigation_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            child.investigation_id.as_str(),
+            parent.investigation_id.as_str()
+        ]
+    );
+}
+
+#[test]
 fn investigation_history_search_finds_persisted_legacy_rows_beyond_first_page() {
     // AC-0368: search traverses retained summaries outside the loaded first page
     // and returns the exact saved family instead of upgrading legacy history.

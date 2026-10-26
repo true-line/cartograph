@@ -296,6 +296,27 @@ pub(crate) async fn list_investigations(
     .await
 }
 
+/// App-only conversation navigation over durable investigation summaries.
+/// Results and citations remain task-scoped and are loaded by the existing
+/// selected-investigation commands.
+#[tauri::command]
+pub(crate) async fn list_investigation_conversation(
+    conversation_id: String,
+    cursor: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<InvestigationPage, String> {
+    crate::off_ui_thread(move || {
+        let state = app.state::<AppState>();
+        state
+            .jobs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .investigation_history(Some(&conversation_id), cursor.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
 #[tauri::command]
 pub(crate) async fn list_specialist_task_activity(
     cursor: Option<String>,

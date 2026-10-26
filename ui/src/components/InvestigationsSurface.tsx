@@ -45,6 +45,11 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const provider = state.catalog?.providers.find((item) => item.mode === providerMode);
   const summary = state.detail ?? state.history.find((item) => item.investigation_id === state.selectedId);
+  const conversationSelected = state.conversationPinned?.investigation_id === state.selectedId &&
+    state.conversationPinned.conversation_id === state.conversationId ? state.conversationPinned :
+    summary?.investigation_id === state.selectedId && summary.conversation_id === state.conversationId ? summary : null;
+  const conversationRows = state.conversationItems;
+  const selectedIsOnPage = conversationSelected && state.conversationItems.some((item) => item.investigation_id === conversationSelected.investigation_id);
   const questionBytes = new TextEncoder().encode(question).length;
   const locked = state.starting || state.pendingStart !== null;
   const requirements = state.draftInspectionRequirements;
@@ -271,6 +276,11 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
                 summary.completion_outcome === 'insufficient_evidence' ? 'Admitted insufficient-evidence completion.' : summary.completion_outcome === 'supported' ? 'Supported completion.' : 'No completion outcome recorded.'}</p>}
               {summary.actions.can_cancel && <button type="button" className="danger-button" disabled={state.actionBusy}
                 onClick={() => void state.cancel()}>Request cancellation</button>}
+              {summary.conversation_id && <button type="button" className="secondary-button"
+                aria-expanded={state.conversationId === summary.conversation_id}
+                onClick={() => state.conversationId === summary.conversation_id ? state.closeConversation() : void state.openConversation(summary.conversation_id)}>
+                {state.conversationId === summary.conversation_id ? 'Close conversation turns' : 'Open conversation turns'}
+              </button>}
               {summary.actions.can_follow_up && <button type="button" className="secondary-button" disabled={locked || state.catalogLoading || !state.catalog} onClick={() => {
                 if (state.catalogLoading || !state.catalog) return;
                 state.clearInspectionRequirements();
@@ -283,6 +293,34 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
               {state.consent && <button type="button" disabled={state.actionBusy || state.loading} onClick={state.showConsent}>Review next cloud action</button>}
             </div>
           </>}
+          {state.conversationId && <section className="investigation-section" aria-label="Conversation turns">
+            <h4>Conversation turns</h4>
+            <p className="muted">Saved investigation tasks in this conversation, newest first. Each task keeps its own result and citations.</p>
+            {conversationSelected && !selectedIsOnPage && <div className="muted" aria-label="Selected conversation turn">
+              <strong>Selected turn (pinned):</strong> {conversationSelected.question} · <code>{conversationSelected.specialist_id}</code>
+              <span> · {INVESTIGATION_STATUS[conversationSelected.status]} · {conversationSelected.updated_at}</span>
+              {conversationSelected.parent_id && <><span> · follow-up to {conversationSelected.parent_id}</span>
+                <button type="button" className="secondary-button" onClick={() => void state.open(conversationSelected.parent_id!)}>Open parent turn</button></>}
+            </div>}
+            {state.conversationLoading && <p role="status">Loading conversation turns…</p>}
+            {state.conversationError && <p role="alert" className="error-text">{state.conversationError}</p>}
+            {!state.conversationLoading && conversationRows.length === 0 && !conversationSelected && <p className="muted">No saved turns in this conversation.</p>}
+            <button type="button" className="secondary-button" disabled={state.conversationLoading}
+              onClick={() => void state.loadConversation()}>Refresh conversation turns</button>
+            <ol>{conversationRows.map((item) => <li key={item.investigation_id}>
+              <button type="button" className="investigation-history-item" aria-current={item.investigation_id === state.selectedId ? 'true' : undefined}
+                onClick={() => void state.open(item.investigation_id)}>
+                <strong>{item.question}</strong><span><code>{item.specialist_id}</code></span>
+                <span>{INVESTIGATION_STATUS[item.status]}</span><time>{item.updated_at}</time>
+                {item.parent_id && <span>Follow-up to {item.parent_id}</span>}
+              </button>
+              {item.parent_id && <button type="button" className="secondary-button" onClick={() => void state.open(item.parent_id!)}>
+                Open parent turn
+              </button>}
+            </li>)}</ol>
+            {state.conversationCursor && <button type="button" className="secondary-button" disabled={state.conversationLoading}
+              onClick={() => void state.loadConversation(true)}>Load older turns</button>}
+          </section>}
           {state.loading && !state.detail && <p role="status">Loading saved investigation…</p>}
           {state.error && <p className="error-text" role="alert">{state.error}</p>}
           {state.actionError && <p className="error-text" role="alert">{state.actionError}</p>}

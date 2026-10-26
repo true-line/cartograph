@@ -33,6 +33,7 @@ const meta = { title: 'Surfaces/InvestigationsSurface', component: Investigation
   args: { state: state(), anchors: [], canStart: true } } satisfies Meta<typeof InvestigationsSurface>;
 export default meta;
 type Story = StoryObj<typeof meta>;
+let conversationDetailReads: string[] = [];
 
 export const ScopedSpecialistQuestion: Story = {
   // AC-0180/0190: exact host specialist, chosen graph scope and provider form the request.
@@ -866,5 +867,47 @@ export const PersistedChatUsesSelectedFindingsAndCitation: Story = {
     await waitFor(() => expect(useInvestigationStore.getState().citationRead?.investigation_id).toBe('chat-selected'));
     await expect(findings.getByRole('complementary', { name: 'Historical citation' })).toBeVisible();
     await expect(canvas.getAllByRole('region', { name: 'Investigation findings' })).toHaveLength(1);
+  },
+};
+
+export const ConversationTurnsNavigation: Story = {
+  beforeEach: () => {
+    conversationDetailReads = [];
+    const parent = investigationDetail('parent-turn', { conversation_id: 'conversation-one', question: 'Parent investigation question' });
+    const child = investigationDetail('child-turn', { conversation_id: 'conversation-one', parent_id: 'parent-turn', question: 'Follow-up investigation question' });
+    const older = investigationDetail('older-turn', { conversation_id: 'conversation-one', parent_id: 'parent-turn', question: 'Older sibling question', created_at: '2026-09-09T10:00:00Z' });
+    mockIPC((command, args) => {
+      const namedArgs = args as Record<string, unknown> | undefined;
+      if (command === 'list_investigation_conversation') return namedArgs?.cursor
+        ? { items: [older], next_cursor: null } : { items: [parent], next_cursor: 'older-page' };
+      const id = namedArgs?.investigationId as string;
+      if (command === 'get_investigation') { conversationDetailReads.push(id); return id === 'parent-turn' ? parent : child; }
+      if (command === 'investigation_result') return investigationResult(id);
+      if (command === 'investigation_consent') return null;
+      if (command === 'investigation_events') return { investigation_id: id, items: investigationEvents(id), next_sequence: 9, has_more: false };
+      return null;
+    });
+    useInvestigationStore.setState({ selectedId: 'child-turn', detail: child, result: investigationResult('child-turn'),
+      history: [child], conversationId: null, conversationItems: [], conversationPinned: null });
+    return () => clearMocks();
+  },
+  render: function ConversationTurnsStory(args) {
+    const liveState = useInvestigationStore();
+    return <InvestigationsSurface {...args} state={liveState} />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Open conversation turns' }));
+    await expect(canvas.getByRole('region', { name: 'Conversation turns' })).toBeVisible();
+    const selectedTurn = canvas.getByLabelText('Selected conversation turn');
+    await expect(selectedTurn).toBeVisible();
+    await expect(within(selectedTurn).getByText(/follow-up to parent-turn/)).toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: 'Load older turns' }));
+    await expect(canvas.getByRole('button', { name: /Older sibling question/ })).toBeVisible();
+    await expect(conversationDetailReads).toEqual([]);
+    await userEvent.click(canvas.getByRole('button', { name: /Parent investigation question/ }));
+    await waitFor(() => expect(useInvestigationStore.getState().selectedId).toBe('parent-turn'));
+    await expect(useInvestigationStore.getState().detail?.investigation_id).toBe('parent-turn');
+    await expect(conversationDetailReads).toEqual(['parent-turn']);
   },
 };
