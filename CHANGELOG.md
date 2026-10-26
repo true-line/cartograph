@@ -1,5 +1,12 @@
 # cartograph
 
+## 0.36.0
+
+### Minor Changes
+
+- 440afa7: Recover raw Node `http.createServer` route predicates (pathname comparisons, prefixes, literal regex alternations and method-path lists) as `node-http` endpoints, with computed routes cited as gaps.
+- 95b6d50: Adds a deterministic Rust language adapter extracting files, symbols, imports and call edges.
+
 ## 0.35.0
 
 ### Minor Changes
