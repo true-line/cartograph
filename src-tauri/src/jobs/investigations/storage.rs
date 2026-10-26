@@ -1073,6 +1073,7 @@ fn load_task_base_contract(
             }
         }
     }
+    super::transitions::source_replay_state(connection, &task)?;
     let qualified = task
         .detail
         .summary

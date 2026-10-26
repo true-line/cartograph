@@ -308,6 +308,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             })?;
         }
 
+        let mut source_replay_correction_for: Option<String> = None;
         loop {
             self.check_new_work()?;
             if self.detail.usage.model_invocations >= self.detail.limits.model_invocations {
@@ -347,7 +348,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             // Preserve the exact coherent PRE-call mode, including historical
             // consent usage. Charging a call must never change its saved mode.
             let admission_mode = next_snapshot.as_ref().map(|snapshot| snapshot.mode());
-            let input = if let Some(snapshot) = &next_snapshot {
+            let mut input = if let Some(snapshot) = &next_snapshot {
                 let mut pre_call_usage = snapshot.detail().usage.clone();
                 if snapshot.pending_step().is_none() {
                     pre_call_usage.active_milliseconds = self.clock.active_milliseconds();
@@ -462,6 +463,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     &self.detail.usage,
                 )?
             };
+            if source_replay_correction_for.is_some() {
+                input = input.with_source_replay_feedback()?;
+            }
             // Input owns its projection; saved replay rows are no longer needed
             // during disclosure, consent or provider execution.
             drop(next_snapshot);
@@ -681,6 +685,13 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 let hash = content_hash(&bounded_json(&action, 32 * 1024)?);
                 (Some(action), None, hash)
             };
+            if source_replay_correction_for.is_some()
+                && !matches!(action.as_ref(), Some(InvestigationAction::Finish { .. }))
+            {
+                return Err(Failure::Stop(
+                    InvestigationStopReason::FinishOnlyToolProposal,
+                ));
+            }
             let response = InvestigationResponseMeta {
                 step_id: step_id.clone(),
                 response_hash: content_hash(completion.text.as_bytes()),
@@ -752,18 +763,41 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .lock()
                     .map_err(|_| HostError::Operational)?
                     .investigation_timestamp(0)?;
-                let result = input
-                    .admit_result_for_step(
-                        self.id,
-                        &step_id,
-                        disclosure.as_ref(),
-                        action,
-                        completion.response_model,
-                        timestamp,
-                    )
-                    .map_err(|error| {
-                        Failure::Stop(InvestigationStopReason::InvalidFinish(error))
-                    })?;
+                let result = match input.admit_result_for_step(
+                    self.id,
+                    &step_id,
+                    disclosure.as_ref(),
+                    action,
+                    completion.response_model,
+                    timestamp,
+                ) {
+                    Ok(result) => result,
+                    Err(InvestigationError::SourceReplay)
+                        if completion_request.is_none()
+                            && source_replay_correction_for.is_none() =>
+                    {
+                        self.transition(InvestigationTransition::SourceReplayRefused {
+                            step_id: step_id.clone(),
+                            reported_input_tokens: completion
+                                .usage
+                                .as_ref()
+                                .and_then(|usage| usage.input_tokens),
+                            reported_output_tokens: completion
+                                .usage
+                                .as_ref()
+                                .and_then(|usage| usage.output_tokens),
+                            active_milliseconds: self.clock.active_milliseconds(),
+                        })?;
+                        source_replay_correction_for = Some(step_id);
+                        if terminal(self.detail.summary.status) {
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(Failure::Stop(InvestigationStopReason::InvalidFinish(error)));
+                    }
+                };
                 // A valid finish belongs to the last supplied ledger, even if
                 // cancellation/Jobs cleanup won while the response was in flight.
                 self.admit_finish(response, result)?;

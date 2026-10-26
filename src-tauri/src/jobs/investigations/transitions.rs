@@ -1,5 +1,161 @@
 use super::*;
 
+const SOURCE_REPLAY_FEEDBACK: &str = "A source-replay finish was discarded.";
+
+// Stream the existing bounded journal; summaries never authorize another call.
+pub(super) fn source_replay_state(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<Option<(String, bool)>, InvestigationStoreError> {
+    if task.completion_intent.is_some()
+        || task
+            .detail
+            .summary
+            .specialist_id
+            .uses_next_prompt_admission()
+    {
+        return Ok(None);
+    }
+    let id = &task.detail.summary.investigation_id;
+    let limit = journal_event_limit(task)?;
+    let mut statement = connection.prepare(
+        "SELECT sequence, CASE WHEN typeof(body)='blob' AND length(body)<=16384 THEN body END, CASE WHEN typeof(body_hash)='text' AND length(CAST(body_hash AS BLOB))=64 THEN body_hash END FROM investigation_events WHERE task_id=?1 ORDER BY sequence LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![id, signed(limit + 1)?], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<Vec<u8>>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    let mut count = 0_u64;
+    let mut starts = 0_u32;
+    let mut refusal: Option<String> = None;
+    let mut correction: Option<PendingInvestigationStep> = None;
+    let mut last_started: Option<String> = None;
+    let mut revision = 0;
+    for row in rows {
+        let (sequence, Some(body), Some(hash)) = row? else {
+            return Err(InvestigationStoreError::Invalid);
+        };
+        count += 1;
+        if count > limit {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let event: InvestigationEvent = decode(&body, &hash)?;
+        if event.investigation_id != *id
+            || event.sequence != count
+            || sequence != signed(count)?
+            || event.revision < revision
+            || event.revision > task.detail.summary.revision
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        revision = event.revision;
+        match event.kind {
+            InvestigationEventKind::ModelStarted => {
+                starts = starts
+                    .checked_add(1)
+                    .ok_or(InvestigationStoreError::Invalid)?;
+                let step_id = event.step_id.ok_or(InvestigationStoreError::Invalid)?;
+                if let Some(refused_step) = refusal.as_deref() {
+                    if correction.is_some() || step_id == refused_step {
+                        return Err(InvestigationStoreError::Invalid);
+                    }
+                    correction = Some(source_replay_step(connection, task, &step_id)?);
+                }
+                last_started = Some(step_id);
+            }
+            InvestigationEventKind::SourceReplayRefused => {
+                let refused_step = event.step_id.ok_or(InvestigationStoreError::Invalid)?;
+                if refusal.is_some()
+                    || event.tool.is_some()
+                    || last_started.as_deref() != Some(refused_step.as_str())
+                {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+                source_replay_step(connection, task, &refused_step)?;
+                refusal = Some(refused_step);
+            }
+            _ if refusal.is_some()
+                && (event.tool.is_some()
+                    || matches!(
+                        event.kind,
+                        InvestigationEventKind::ToolStarted
+                            | InvestigationEventKind::ToolCompleted
+                            | InvestigationEventKind::ContextPrepared
+                            | InvestigationEventKind::ReadUnavailable
+                            | InvestigationEventKind::EvidenceValidationReserved
+                    )) =>
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            _ => {}
+        }
+    }
+    if count != task.detail.summary.last_event_sequence {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let invocations: u32 = connection.query_row(
+        "SELECT count(*) FROM investigation_invocations WHERE task_id=?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    if invocations != starts || starts != task.detail.usage.model_invocations {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if let Some(refused_step) = refusal.as_ref()
+        && (!matches!(
+            task.phase,
+            Phase::Ready | Phase::Consent | Phase::Invocation | Phase::Terminal
+        ) || (task.phase == Phase::Invocation && task.pending.as_ref() != correction.as_ref())
+            || (task.phase == Phase::Consent
+                && task.pending.as_ref().is_none_or(|step| {
+                    step.step_id == *refused_step
+                        || task.ledger_hash.as_ref() != Some(&step.input_ledger_hash)
+                }))
+            || (correction.is_some() && !matches!(task.phase, Phase::Invocation | Phase::Terminal))
+            || (task.detail.summary.has_result && correction.is_none()))
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(refusal.map(|step| (step, correction.is_some())))
+}
+
+fn source_replay_step(
+    connection: &Connection,
+    task: &StoredTask,
+    step_id: &str,
+) -> Result<PendingInvestigationStep, InvestigationStoreError> {
+    let step: PendingInvestigationStep = read_body(
+        connection,
+        "investigation_invocations",
+        "step_id",
+        &task.detail.summary.investigation_id,
+        &step_id,
+    )?
+    .ok_or(InvestigationStoreError::Invalid)?;
+    validate_step(&step, &task.detail.limits)?;
+    validate_step_basis(connection, task, &step)?;
+    if step.step_id != step_id || task.ledger_hash.as_ref() != Some(&step.input_ledger_hash) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(step)
+}
+
+fn validate_source_replay_begin(
+    connection: &Connection,
+    task: &StoredTask,
+    step: &PendingInvestigationStep,
+) -> Result<(), InvestigationStoreError> {
+    if let Some((refused_step, consumed)) = source_replay_state(connection, task)?
+        && (consumed || step.step_id == refused_step)
+    {
+        return Err(InvestigationStoreError::Stale);
+    }
+    Ok(())
+}
+
 impl JobStore {
     pub(crate) fn advance_investigation(
         &mut self,
@@ -24,6 +180,7 @@ impl JobStore {
                 result: Some(_),
                 ..
             } | InvestigationTransition::FinishRefused { .. }
+                | InvestigationTransition::SourceReplayRefused { .. }
         );
         let stopping = matches!(&transition, InvestigationTransition::StopWithElapsed { .. });
         if task.detail.summary.revision != expected_revision {
@@ -88,6 +245,7 @@ impl JobStore {
                 )?;
             }
             InvestigationTransition::BeginInvocation { step } => {
+                validate_source_replay_begin(&tx, &task, &step)?;
                 completion::reserve_invocation(&tx, &task)?;
                 validate_step(&step, &task.detail.limits)?;
                 validate_step_basis(&tx, &task, &step)?;
@@ -157,6 +315,11 @@ impl JobStore {
             } => {
                 if task.phase != Phase::Invocation || tool.is_some() == result.is_some() {
                     return Err(InvestigationStoreError::Stale);
+                }
+                if source_replay_state(&tx, &task)?.is_some_and(|(_, consumed)| consumed)
+                    && tool.is_some()
+                {
+                    return Err(InvestigationStoreError::Invalid);
                 }
                 if tool == Some(InvestigationTool::ReadCoverageInventory)
                     && !task
@@ -248,6 +411,121 @@ impl JobStore {
                 if result.is_some() {
                     sync_terminal_job(&tx, &task)?;
                 }
+            }
+            InvestigationTransition::SourceReplayRefused {
+                step_id,
+                reported_input_tokens,
+                reported_output_tokens,
+                active_milliseconds,
+            } => {
+                if task.phase != Phase::Invocation
+                    || task.completion_intent.is_some()
+                    || task
+                        .detail
+                        .summary
+                        .specialist_id
+                        .uses_next_prompt_admission()
+                    || active_milliseconds < task.detail.usage.active_milliseconds
+                    || task
+                        .pending
+                        .as_ref()
+                        .is_none_or(|step| step.step_id != step_id)
+                    || source_replay_state(&tx, &task)?.is_some()
+                {
+                    return Err(InvestigationStoreError::Stale);
+                }
+                let invoked: PendingInvestigationStep =
+                    read_body(&tx, "investigation_invocations", "step_id", &id, &step_id)?
+                        .ok_or(InvestigationStoreError::Invalid)?;
+                if task.pending.as_ref() != Some(&invoked) {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+                let mut usage = task.detail.usage.clone();
+                usage.reported_input_tokens = add_reported(
+                    usage.reported_input_tokens,
+                    reported_input_tokens,
+                    usage.model_invocations == 1,
+                )?;
+                usage.reported_output_tokens = add_reported(
+                    usage.reported_output_tokens,
+                    reported_output_tokens,
+                    usage.model_invocations == 1,
+                )?;
+                usage.active_milliseconds = active_milliseconds;
+                validate_usage(&usage, &task.detail.limits)?;
+                task.detail.usage = usage;
+                task.pending = None;
+                task.approved = false;
+                task.action_tool = None;
+                task.phase = Phase::Ready;
+                task.detail.summary.status = InvestigationStatus::Running;
+                let policy = InvestigationPolicy::for_limits(&task.detail.limits)
+                    .ok_or(InvestigationStoreError::Invalid)?;
+                let has_invocation_budget =
+                    task.detail.usage.model_invocations < task.detail.limits.model_invocations;
+                let has_token_budget = task
+                    .detail
+                    .usage
+                    .generated_token_reservations
+                    .checked_add(policy.limits().generated_tokens_per_invocation)
+                    .is_some_and(|reserved| {
+                        reserved <= task.detail.limits.generated_token_reservations
+                    });
+                let has_time_budget = task.detail.usage.active_milliseconds
+                    < task.detail.limits.active_seconds.saturating_mul(1000);
+                let settled = task.clone();
+                if !task.detail.summary.cancel_requested
+                    && has_invocation_budget
+                    && has_token_budget
+                    && has_time_budget
+                {
+                    // A failed continuation must leave room for the known refusal's
+                    // terminal receipt. Roll back its nonterminal reservation first.
+                    tx.execute_batch("SAVEPOINT source_replay_ready")?;
+                    let ready = (|| {
+                        bump(&tx, &mut task)?;
+                        event(
+                            &tx,
+                            &mut task,
+                            InvestigationEventKind::SourceReplayRefused,
+                            Some(&step_id),
+                            None,
+                            SOURCE_REPLAY_FEEDBACK,
+                        )?;
+                        save_task(&tx, &task, expected_revision, false)
+                    })();
+                    match ready {
+                        Ok(()) => {
+                            tx.execute_batch("RELEASE source_replay_ready")?;
+                            tx.commit()?;
+                            return Ok(task.detail);
+                        }
+                        Err(InvestigationStoreError::Capacity) => {
+                            tx.execute_batch(
+                                "ROLLBACK TO source_replay_ready; RELEASE source_replay_ready",
+                            )?;
+                            task = settled;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                // Both terminal events use the already reserved terminal slots/bytes.
+                task.phase = Phase::Terminal;
+                bump(&tx, &mut task)?;
+                event(
+                    &tx,
+                    &mut task,
+                    InvestigationEventKind::SourceReplayRefused,
+                    Some(&step_id),
+                    None,
+                    SOURCE_REPLAY_FEEDBACK,
+                )?;
+                let reason = if task.detail.summary.cancel_requested {
+                    InvestigationStopReason::Cancelled
+                } else {
+                    InvestigationStopReason::InvalidFinish(InvestigationError::SourceReplay)
+                };
+                stop(&tx, &mut task, reason)?;
             }
             InvestigationTransition::FinishRefused {
                 request,

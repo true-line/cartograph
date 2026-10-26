@@ -52,7 +52,7 @@ fn source_revision() -> String {
     revision
 }
 
-fn ordered_events(jobs: &crate::jobs::JobStore, id: &str) -> Vec<InvestigationEvent> {
+pub(super) fn ordered_events(jobs: &crate::jobs::JobStore, id: &str) -> Vec<InvestigationEvent> {
     let mut items = Vec::new();
     let mut after = 0;
     loop {
@@ -475,9 +475,9 @@ fn investigation_acceptance_explicit_specialists_match_prepared_report_and_durab
 }
 
 #[test]
-fn investigation_prior_finding_replay_retains_terminal_class_without_repair() {
-    // AC-0184 (#937): supplied prior findings remain replay protected; the
-    // ordinary auditor stops rather than using completion's refusal loop.
+fn investigation_prior_finding_replay_allows_one_bounded_finish_correction() {
+    // AC-0184 (#937): the rejected finish remains discarded and one fixed,
+    // durable finish-only correction may use the unchanged source ledger.
     let parent_provider = Arc::new(Scripted::new(Mode::Finish));
     let fixture = Fixture::new(parent_provider.as_ref());
     fixture.run(parent_provider.clone());
@@ -489,26 +489,162 @@ fn investigation_prior_finding_replay_retains_terminal_class_without_repair() {
         .investigation_result(&fixture.id)
         .unwrap()
         .unwrap();
-    let provider = Arc::new(Scripted::new(Mode::Finish));
+    let provider = Arc::new(Scripted::new(Mode::PriorFindingCorrection));
     let (id, _) = auditor(&fixture, provider.clone(), AcceptanceSpecialists::V2);
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
-        3,
-        "no repair invocation"
+        4,
+        "exactly one finish-only correction follows the replay refusal"
     );
-    super::refusal_diagnostics::assert_saved_refusal(
+    let state = fixture.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&id).unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Completed);
+    let result = jobs.investigation_result(&id).unwrap().unwrap();
+    assert_ne!(result.findings[0].statement, parent.findings[0].statement);
+    let events = ordered_events(&jobs, &id);
+    let refusal = events
+        .iter()
+        .find(|event| event.kind == InvestigationEventKind::SourceReplayRefused)
+        .expect("the original finish refusal is durable");
+    assert_eq!(refusal.step_id.as_deref(), Some("step-3"));
+    assert_eq!(refusal.summary, "A source-replay finish was discarded.");
+    assert!(events.iter().any(|event| {
+        event.kind == InvestigationEventKind::ModelStarted
+            && event.sequence > refusal.sequence
+            && event.step_id.as_deref() == Some("step-4")
+    }));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == InvestigationEventKind::SourceReplayRefused)
+            .count(),
+        1
+    );
+    assert_eq!(
+        provider.prompts.lock().unwrap()[3]["finish_correction"]["refusal"],
+        "source_replay"
+    );
+    assert!(
+        !events.iter().any(|event| {
+            event.kind == InvestigationEventKind::ModelCompleted
+                && event.step_id.as_deref() == Some("step-3")
+        }),
+        "the rejected response is not admitted into the event history"
+    );
+    drop(jobs);
+    let reopened = crate::jobs::JobStore::open(fixture.app_data.join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&id).unwrap(), detail);
+    assert_eq!(reopened.investigation_result(&id).unwrap(), Some(result));
+    assert_eq!(ordered_events(&reopened, &id), events);
+    assert_eq!(
+        reopened.investigation_result(&fixture.id).unwrap(),
+        Some(parent)
+    );
+}
+
+#[test]
+fn investigation_second_prior_finding_replay_is_terminal() {
+    let parent_provider = Arc::new(Scripted::new(Mode::Finish));
+    let fixture = Fixture::new(parent_provider.as_ref());
+    fixture.run(parent_provider);
+    let state = fixture.app.state::<AppState>();
+    let parent = state
+        .jobs
+        .lock()
+        .unwrap()
+        .investigation_result(&fixture.id)
+        .unwrap()
+        .unwrap();
+    let provider = Arc::new(Scripted::new(Mode::PriorFindingReplay));
+    let (id, _) = auditor(&fixture, provider.clone(), AcceptanceSpecialists::V2);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    refusal_diagnostics::assert_saved_refusal(
         &fixture,
         &id,
         "Investigation finish refused: source_replay.",
         &parent.findings[0].statement,
     );
+    let jobs = state.jobs.lock().unwrap();
+    let events = ordered_events(&jobs, &id);
     assert_eq!(
-        state
-            .jobs
-            .lock()
-            .unwrap()
-            .investigation_result(&fixture.id)
-            .unwrap(),
-        Some(parent)
+        events
+            .iter()
+            .filter(|event| event.kind == InvestigationEventKind::SourceReplayRefused)
+            .count(),
+        1,
+        "the corrective attempt cannot open a second correction"
+    );
+}
+
+#[test]
+fn investigation_correction_tool_proposal_is_terminal_without_tool_work() {
+    let parent_provider = Arc::new(Scripted::new(Mode::Finish));
+    let fixture = Fixture::new(parent_provider.as_ref());
+    fixture.run(parent_provider);
+    let provider = Arc::new(Scripted::new(Mode::PriorFindingCorrectionToolProposal));
+    let (id, _) = auditor(&fixture, provider.clone(), AcceptanceSpecialists::V2);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    let state = fixture.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&id).unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+    assert_eq!(
+        detail.error.as_deref(),
+        Some("The provider proposed a tool when only a finishing response was permitted.")
+    );
+    let events = ordered_events(&jobs, &id);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == InvestigationEventKind::SourceReplayRefused)
+            .count(),
+        1
+    );
+    let refusal_sequence = events
+        .iter()
+        .find(|event| event.kind == InvestigationEventKind::SourceReplayRefused)
+        .unwrap()
+        .sequence;
+    assert!(!events.iter().any(|event| {
+        event.sequence > refusal_sequence
+            && matches!(
+                event.kind,
+                InvestigationEventKind::ToolStarted | InvestigationEventKind::ToolCompleted
+            )
+    }));
+    assert_eq!(
+        provider.prompts.lock().unwrap()[3]["finish_correction"]["refusal"],
+        "source_replay"
+    );
+}
+
+#[test]
+fn investigation_correction_provider_failure_is_terminal() {
+    let parent_provider = Arc::new(Scripted::new(Mode::Finish));
+    let fixture = Fixture::new(parent_provider.as_ref());
+    fixture.run(parent_provider);
+    let provider = Arc::new(Scripted::new(Mode::PriorFindingCorrectionProviderFailure));
+    let (id, _) = auditor(&fixture, provider.clone(), AcceptanceSpecialists::V2);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    let state = fixture.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&id).unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+    assert_eq!(
+        detail.error.as_deref(),
+        Some("The provider call failed without a usable response.")
+    );
+    let events = ordered_events(&jobs, &id);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == InvestigationEventKind::SourceReplayRefused)
+            .count(),
+        1
+    );
+    assert_eq!(
+        provider.prompts.lock().unwrap()[3]["finish_correction"]["refusal"],
+        "source_replay"
     );
 }
