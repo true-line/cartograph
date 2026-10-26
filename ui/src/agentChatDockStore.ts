@@ -11,6 +11,8 @@ interface DockState {
   fallbackTask: string | null;
   connect: () => () => void;
   open: (taskId: string) => void;
+  requestOpenFromNotice: (taskId: string) => void;
+  cancelNavigationIntent: () => void;
   close: (taskId: string) => void;
 }
 
@@ -22,6 +24,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
   let unsubscribe: (() => void) | undefined;
   let reading = false;
   let requestedGeneration = 0;
+  let navigationIntent: string | null = null;
   let loadingOwner: AbortController | undefined;
   const stop = (releaseLoading = false) => {
     ++intent; unsubscribe?.(); unsubscribe = undefined;
@@ -78,10 +81,12 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
       docks: [], focusedTask: null, pendingTask: null, error: null, fallbackTask: null,
       connect: () => {
         connected = true;
-        const selected = get().focusedTask ?? (!adoptedInitialSelection ? coordinator.getState().selectedId : null);
+        const requested = navigationIntent;
+        navigationIntent = null;
+        const selected = requested ?? get().focusedTask ?? (!adoptedInitialSelection ? coordinator.getState().selectedId : null);
         adoptedInitialSelection = true;
         if (selected) get().open(selected);
-        return () => { connected = false; stop(true); set({ pendingTask: null }); };
+        return () => { connected = false; navigationIntent = null; stop(true); set({ pendingTask: null }); };
       },
       open: (taskId) => {
         if (!connected || get().pendingTask === taskId) return;
@@ -90,6 +95,11 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         set({ focusedTask: taskId, pendingTask: taskId, error: null, fallbackTask: null });
         run();
       },
+      requestOpenFromNotice: (taskId) => {
+        if (connected) get().open(taskId);
+        else navigationIntent = taskId;
+      },
+      cancelNavigationIntent: () => { navigationIntent = null; },
       close: (taskId) => {
         if (get().pendingTask === taskId || get().focusedTask === taskId) stop(true);
         set((state) => ({ docks: state.docks.filter((dock) => dock.chat.task_id !== taskId),

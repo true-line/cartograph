@@ -39,6 +39,7 @@ import { InvestigationQuickDispatch } from './components/InvestigationQuickDispa
 import { SavedResultNotices } from './components/SavedResultNotices';
 import { useSavedResultNoticeStore } from './savedResultNoticeStore';
 import { AgentChatsSurface } from './components/AgentChatsSurface';
+import { useAgentChatDockStore } from './agentChatDockStore';
 import { readQuickDispatchFallback, writeQuickDispatchFallback } from './quickDispatchPreference';
 import type { InvestigationChanged } from './investigationTypes';
 import type { Job, PreflightProgress, SpecArtifact, SpecAssertion, SpecBundle } from './store';
@@ -215,6 +216,7 @@ export default function App() {
   }, [refresh]);
 
   useEffect(() => {
+    if (view !== 'agent-chats') useAgentChatDockStore.getState().cancelNavigationIntent();
     if (view === 'investigations' || view === 'agent-chats') {
       if (view === 'investigations') {
         useSpecialistActivityStore.getState().setVisible(true);
@@ -834,7 +836,10 @@ export default function App() {
         onNavigate={navigate}
       />
       <InvestigationQuickDispatch fallbackEnabled={quickDispatchFallbackEnabled} openRequest={quickDispatchOpenRequest} onNavigate={navigate} />
-      <SavedResultNotices view={view} onOpenTask={(taskId) => {
+      <SavedResultNotices view={view} onOpenChat={(taskId) => {
+        useAgentChatDockStore.getState().requestOpenFromNotice(taskId);
+        navigate('agent-chats');
+      }} onOpenFindings={(taskId) => {
         navigate('investigations');
         void useInvestigationStore.getState().open(taskId);
       }} />

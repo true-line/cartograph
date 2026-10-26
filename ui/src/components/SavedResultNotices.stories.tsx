@@ -30,6 +30,8 @@ function pendingChatFor(id: string): InvestigationChat {
 }
 const chat = savedChatFor(taskId, detail.question);
 
+let openedNoticeChats: string[] = [];
+
 function NoticeHarness({ store }: { store: ReturnType<typeof createSavedResultNoticeStore> }) {
   const [view, setView] = useState<SurfaceView>('workspace');
   const [openCount, setOpenCount] = useState(0);
@@ -48,7 +50,7 @@ function NoticeHarness({ store }: { store: ReturnType<typeof createSavedResultNo
       useInvestigationStore.setState({ selectedId: id, loading: false, detail, result, chat, chatStatus: 'saved' });
     }
   };
-  return <SavedResultNotices view={view} onOpenTask={openTask} store={store} />;
+  return <SavedResultNotices view={view} onOpenChat={(id) => openedNoticeChats.push(id)} onOpenFindings={openTask} store={store} />;
 }
 
 const meta = {
@@ -62,9 +64,10 @@ type Story = StoryObj<typeof meta>;
 let activeStoryStore: ReturnType<typeof createSavedResultNoticeStore> | null = null;
 
 export const DismissalFailedOpenAndExactVisibleRead: Story = {
-  args: { view: 'workspace', onOpenTask: () => {} },
+  args: { view: 'workspace', onOpenChat: () => {}, onOpenFindings: () => {} },
   render: () => {
     const store = createSavedResultNoticeStore();
+    openedNoticeChats = [];
     activeStoryStore = store;
     return <NoticeHarness store={store} />;
   },
@@ -85,7 +88,10 @@ export const DismissalFailedOpenAndExactVisibleRead: Story = {
     await waitFor(() => expect(canvas.getByText(/Saved result ready/)).toBeTruthy());
     await userEvent.click(canvas.getByRole('button', { name: 'Dismiss saved result notice' }));
     await userEvent.click(canvas.getByRole('button', { name: /New results/ }));
-    const savedItem = () => canvas.getByRole('button', { name: `Open saved result for ${taskId}: ${detail.question}` });
+    await userEvent.click(canvas.getByRole('button', { name: `Open chat for ${taskId}: ${detail.question}` }));
+    expect(openedNoticeChats).toEqual([taskId]);
+    expect(store.getState().unread).toHaveLength(1); // Open chat does not consume findings unread.
+    const savedItem = () => canvas.getByRole('button', { name: `Open findings for ${taskId}: ${detail.question}` });
 
     await userEvent.click(savedItem());
     expect(store.getState().unread).toHaveLength(1); // failed open does not consume
@@ -100,13 +106,13 @@ export const DismissalFailedOpenAndExactVisibleRead: Story = {
 };
 
 export const ToastsKeepTheirOwnDeadlines: Story = {
-  args: { view: 'workspace', onOpenTask: () => {} },
+  args: { view: 'workspace', onOpenChat: () => {}, onOpenFindings: () => {} },
   render: () => {
     const store = createSavedResultNoticeStore();
     const notice = { task_id: 'task-a', result_id: 'result:task-a', question: 'Question for task-a' };
     store.setState({ unread: [notice], toasts: [savedResultNoticeKey(notice)] });
     activeStoryStore = store;
-    return <StrictMode><SavedResultNotices view="workspace" onOpenTask={() => {}} store={store} /></StrictMode>;
+    return <StrictMode><SavedResultNotices view="workspace" onOpenChat={() => {}} onOpenFindings={() => {}} store={store} /></StrictMode>;
   },
   play: async ({ canvasElement }) => {
     const store = activeStoryStore!;
@@ -118,7 +124,7 @@ export const ToastsKeepTheirOwnDeadlines: Story = {
       taskBReads += 1;
       return taskBReads === 1 ? pendingChatFor(id) : savedChatFor(id);
     });
-    const openButton = (id: string) => canvas.getByRole('button', { name: new RegExp(`Open saved result for ${id}`) });
+    const openButton = (id: string) => canvas.getByRole('button', { name: new RegExp(`Open findings for ${id}`) });
     await waitFor(() => expect(openButton('task-a')).toBeTruthy());
     await new Promise((resolve) => setTimeout(resolve, 3_000));
     store.getState().observe({ investigation_id: 'task-b', revision: 1, last_event_sequence: 1 });
@@ -126,7 +132,7 @@ export const ToastsKeepTheirOwnDeadlines: Story = {
     store.getState().observe({ investigation_id: 'task-b', revision: 2, last_event_sequence: 2 });
     await waitFor(() => expect(openButton('task-b')).toBeTruthy());
     await new Promise((resolve) => setTimeout(resolve, 2_600));
-    await waitFor(() => expect(canvas.queryByRole('button', { name: /Open saved result for task-a/ })).toBeNull());
+    await waitFor(() => expect(canvas.queryByRole('button', { name: /Open findings for task-a/ })).toBeNull());
     expect(openButton('task-b')).toBeTruthy();
   },
 };

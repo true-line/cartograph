@@ -17,7 +17,7 @@ function chat(id: string): InvestigationChat {
       message: { kind: 'user_question', question: detail.question } }] };
 }
 const tick = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
-function harness(selectedId: string | null = null) {
+function harness(selectedId: string | null = null, autoConnect = true) {
   const calls: string[] = [];
   let release: (() => void) | undefined;
   let hold = false;
@@ -29,10 +29,12 @@ function harness(selectedId: string | null = null) {
       if (hold) await new Promise<void>((done) => { release = done; });
     } }));
   const dock = createAgentChatDockStore(coordinator);
-  const leave = dock.getState().connect();
+  let leave = () => {};
+  const connect = () => { leave = dock.getState().connect(); };
+  if (autoConnect) connect();
   const finish = (id: string) => coordinator.setState({ detail: investigationDetail(id), chat: chat(id), chatStatus: 'saved' });
   const open = async (id: string) => { dock.getState().open(id); await tick(); finish(id); await tick(); };
-  return { coordinator, dock, calls, leave, finish, open,
+  return { coordinator, dock, calls, leave: () => leave(), connect, finish, open,
     hold: () => { hold = true; }, release: () => { hold = false; release?.(); } };
 }
 
@@ -63,6 +65,40 @@ function delayedCloudChats() {
 
 // AC-0389: snapshots are admitted only after the coordinator validates the chat.
 describe('saved task chat docks', () => {
+  it('hands one replaceable notice intent to the next connection and cancels an abandoned handoff', async () => {
+    const h = harness('already-selected', false);
+    h.dock.getState().requestOpenFromNotice('first');
+    h.dock.getState().requestOpenFromNotice('chosen');
+    expect(h.calls).toEqual([]);
+    h.connect(); await tick();
+    expect(h.calls).toEqual(['chosen']);
+    h.finish('chosen'); await tick();
+    expect(h.dock.getState().docks.map((item) => item.chat.task_id)).toEqual(['chosen']);
+    h.leave();
+
+    const abandoned = harness(null, false);
+    abandoned.dock.getState().requestOpenFromNotice('never-open');
+    abandoned.dock.getState().cancelNavigationIntent();
+    abandoned.connect(); await tick();
+    expect(abandoned.calls).toEqual([]);
+    expect(abandoned.dock.getState().docks).toEqual([]);
+    abandoned.leave();
+  });
+
+  it('focuses an existing connected dock from a notice without changing its age', async () => {
+    const h = harness();
+    await h.open('older');
+    expect(h.dock.getState().docks.map((item) => item.chat.task_id)).toEqual(['older']);
+    await h.open('newer');
+    expect(h.dock.getState().docks.map((item) => item.chat.task_id)).toEqual(['older', 'newer']);
+    h.dock.getState().requestOpenFromNotice('older'); await tick();
+    expect(h.calls).toEqual(['older', 'newer', 'older']);
+    h.finish('older'); await tick();
+    expect(h.dock.getState().docks.map((item) => item.chat.task_id)).toEqual(['older', 'newer']);
+    expect(h.dock.getState().focusedTask).toBe('older');
+    h.leave();
+  });
+
   it('deduplicates without changing age, evicts the oldest valid dock, and reopens closed chats', async () => {
     const h = harness();
     for (const id of ['a', 'b', 'c', 'd', 'b', 'e']) await h.open(id);

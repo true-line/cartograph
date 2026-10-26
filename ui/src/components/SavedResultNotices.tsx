@@ -5,11 +5,12 @@ import { createSavedResultNoticeStore, useSavedResultNoticeStore, SAVED_RESULT_T
 
 export interface SavedResultNoticesProps {
   view: SurfaceView;
-  onOpenTask: (taskId: string) => void;
+  onOpenChat: (taskId: string) => void;
+  onOpenFindings: (taskId: string) => void;
   store?: ReturnType<typeof createSavedResultNoticeStore>;
 }
 
-export function SavedResultNotices({ view, onOpenTask, store = useSavedResultNoticeStore }: SavedResultNoticesProps) {
+export function SavedResultNotices({ view, onOpenChat, onOpenFindings, store = useSavedResultNoticeStore }: SavedResultNoticesProps) {
   const notices = store();
   const investigation = useInvestigationStore();
   const [listOpen, setListOpen] = useState(false);
@@ -56,8 +57,10 @@ export function SavedResultNotices({ view, onOpenTask, store = useSavedResultNot
         <section className="saved-result-toast" role="status" key={savedResultNoticeKey(notice)}>
           <strong>Saved result ready</strong>
           <span title={notice.question}>{notice.question.slice(0, 100)}</span>
-          <button type="button" aria-label={`Open saved result for ${notice.task_id}: ${notice.question}`}
-            onClick={() => onOpenTask(notice.task_id)}>Open</button>
+          <button type="button" aria-label={`Open chat for ${notice.task_id}: ${notice.question}`}
+            onClick={() => onOpenChat(notice.task_id)}>Open chat</button>
+          <button type="button" aria-label={`Open findings for ${notice.task_id}: ${notice.question}`}
+            onClick={() => onOpenFindings(notice.task_id)}>Open findings</button>
           <button type="button" aria-label="Dismiss saved result notice"
             onClick={() => store.getState().dismissToast(savedResultNoticeKey(notice))}>×</button>
         </section>
@@ -69,10 +72,11 @@ export function SavedResultNotices({ view, onOpenTask, store = useSavedResultNot
           </button>
           {listOpen && <ul>
             {notices.unread.map((notice) => <li key={savedResultNoticeKey(notice)}>
-              <button type="button" aria-label={`Open saved result for ${notice.task_id}: ${notice.question}`}
-                onClick={() => onOpenTask(notice.task_id)}>
-                {notice.question.slice(0, 100)}
-              </button>
+              <span title={notice.question}>{notice.question.slice(0, 100)}</span>
+              <button type="button" aria-label={`Open chat for ${notice.task_id}: ${notice.question}`}
+                onClick={() => onOpenChat(notice.task_id)}>Open chat</button>
+              <button type="button" aria-label={`Open findings for ${notice.task_id}: ${notice.question}`}
+                onClick={() => onOpenFindings(notice.task_id)}>Open findings</button>
             </li>)}
           </ul>}
         </div>
