@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 
 export type McpStatus = 'disabled' | 'running' | 'stopped' | 'draining' | 'cleanup_failed' | 'unavailable';
 export type McpClientSkill = { status: 'unavailable' } | {
@@ -19,6 +19,7 @@ export interface McpSettingsPanelProps {
   onRotate: () => void;
   onRefresh: () => void;
   onConfiguration: () => void;
+  renderTaskControls?: (policy: Record<string, unknown> | null) => ReactNode;
 }
 const policyShape = {
   acquisition_mode: 'complete',
@@ -42,8 +43,8 @@ export function McpSettingsPanel(props: McpSettingsPanelProps) {
     }
   } catch { /* The backend validates the complete required policy on submission. */ }
   const disabled = props.busy || !props.available;
-  return <section className="settings-section" aria-label="Read-only MCP">
-    <h3>Read-only MCP</h3>
+  return <section className="settings-section" aria-label="MCP access">
+    <h3>MCP access</h3>
     <p>Connect local agent clients to recovered context, artifacts, and retained evidence.
       Access starts disabled and ends when Cartograph closes. Connected clients control
       their own model and provider settings.</p>
@@ -88,6 +89,7 @@ export function McpSettingsPanel(props: McpSettingsPanelProps) {
         {props.skillBusy ? 'Loading packaged client skill…' : 'Show packaged client skill'}
       </button>
     </div>
+    {props.renderTaskControls?.(policy)}
     {props.skill?.status === 'unavailable' && <p role="alert">The packaged client skill is unavailable or does not match this build. Reinstall a complete matching app bundle.</p>}
     {props.skill?.status === 'available' && <section className="mcp-client-skill" aria-label="Packaged client skill">
       <h4>Client skill · Cartograph {props.skill.app_version}</h4>

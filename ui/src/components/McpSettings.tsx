@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { McpTaskSettings } from './McpTaskSettings';
 import { McpSettingsPanel, type McpClientSkill, type McpStatus } from './McpSettingsPanel';
 
 export function McpSettings({ available }: { available: boolean }) {
@@ -47,7 +48,7 @@ function McpSettingsSession({ available }: { available: boolean }) {
     } catch (failure) {
       if (ticket === generation.current) setStatus('unavailable');
       if (ticket === generation.current) setError(String(failure) === 'unsupported_platform'
-        ? 'Read-only MCP is not available on this platform.'
+        ? 'MCP access is not available on this platform.'
         : 'The request could not be completed. Check the resource policy and packaged relay, then refresh the service.');
     } finally { if (ticket === generation.current) setBusy(false); }
   }, [available]);
@@ -75,6 +76,8 @@ function McpSettingsSession({ available }: { available: boolean }) {
   }, [available]);
   return <McpSettingsPanel status={available ? status : 'unavailable'} available={available} busy={available && busy} error={available ? error : null}
     skill={available ? skill : null} skillBusy={available && skillBusy} onSkill={() => void showSkill()}
+    renderTaskControls={(policy) => <McpTaskSettings available={available} serviceBusy={busy} status={status} policy={policy}
+      onGrant={(chosenPolicy, clientId, maximumIdentities) => void run(() => invoke('mcp_tasks_enable', { policy: chosenPolicy, clientId, maximumIdentities }))} />}
     configuration={available ? configuration : null} onRefresh={() => void run()}
     onEnable={(policy) => void run(() => invoke('mcp_reads_enable', { policy }))}
     onDisable={() => void run(() => invoke('mcp_reads_disable'))}
