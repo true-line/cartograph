@@ -58,8 +58,9 @@ pub(crate) struct Worker {
     max_request_frame_bytes: NonZeroUsize,
 }
 impl Worker {
-    /// Called only by the authenticated connection factory. Activation policy
-    /// and numeric ceilings remain host responsibilities, never client arguments.
+    /// Read-only fixture shorthand; production uses the authenticated factory
+    /// with an optional activation-owned task session.
+    #[cfg(test)]
     pub(crate) async fn start<R: tauri::Runtime>(
         app: tauri::AppHandle<R>,
         session_id: String,
@@ -70,8 +71,8 @@ impl Worker {
         Self::start_with_tasks(app, session_id, mode, limits, budget, None).await
     }
 
-    /// Internal authenticated factory path. Public activation still calls start
-    /// without tasks until the complete detached-execution admission lands.
+    /// Authenticated factory path. Host activation owns the optional grant;
+    /// transport arguments cannot supply a principal or task authority.
     pub(crate) async fn start_with_tasks<R: tauri::Runtime>(
         app: tauri::AppHandle<R>,
         session_id: String,

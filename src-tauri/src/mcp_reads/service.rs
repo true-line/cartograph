@@ -289,18 +289,26 @@ impl Service {
         state.cleanup = None;
         let budget = WorkBudget::new(policy.worker_budget()?);
         let factory_budget = budget.clone();
+        // Preserve the read-only worker path for absent/rotated grants. A
+        // captured granted session shares revocation with this activation.
+        let task_session = tasks
+            .owner_snapshot()
+            .map_err(|_| ReadError::Storage)?
+            .map(|_| tasks.session());
         let activation = Activation::start(parent, policy.transport, move || {
             let app = app.clone();
             let budget = factory_budget.clone();
+            let tasks = task_session.clone();
             async move {
                 let id = mcp_wire::capability::Capability::generate()
                     .map_err(|_| ServeError::Application)?;
-                Worker::start(
+                Worker::start_with_tasks(
                     app,
                     id.expose_for_local_transport(),
                     policy.export_mode,
                     policy.worker,
                     budget,
+                    tasks,
                 )
                 .await
                 .map_err(|_| ServeError::Application)
@@ -795,3 +803,7 @@ mod configuration_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "service/task_session_tests.rs"]
+mod task_session_tests;
