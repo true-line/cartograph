@@ -33,8 +33,9 @@ const TIERS: ReadonlyArray<{ id: Tier; label: string }> = [
 export function baseLayers(node: GraphNode): GraphLayer[] {
   switch (node.label) {
     case 'Resource':
-      // Browser storage is client state, not infrastructure (#1078).
-      return isBrowserStorage(node) ? ['client'] : ['infra', 'cloud'];
+      // Browser storage is client state (#1078) that is still observed
+      // infrastructure the code talks to (#734): Client and Infrastructure.
+      return isBrowserStorage(node) ? ['client', 'infra'] : ['infra', 'cloud'];
     case 'Channel':
       return ['events', 'cloud'];
     case 'Gateway':

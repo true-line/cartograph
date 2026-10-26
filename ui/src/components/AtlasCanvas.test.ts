@@ -8,7 +8,7 @@ function node(id: string, label: string, props: GraphNode['props'] = {}): GraphN
 
 // AC-0365 (#1078): the layer filter follows the same classification as the
 // bands — proven service-worker code and browser storage are Client, not
-// Server/Infrastructure.
+// Server; browser storage stays visible as observed infrastructure (#734).
 describe('filterAtlasGraph — service worker layer', () => {
   const snapshot: AtlasSnapshot = {
     nodes: [
@@ -27,13 +27,13 @@ describe('filterAtlasGraph — service worker layer', () => {
       .nodes.map((n) => n.id)
       .sort();
 
-  it('shows the worker and its storage under Client only', () => {
+  it('shows the worker and its storage under Client, not Server', () => {
     expect(ids('client')).toEqual(['res:r@cache', 'sym:r@sw.js#anon@954']);
     expect(ids('server')).toEqual(['sym:r@api.js#handler']);
   });
 
-  it('keeps server infrastructure under Infrastructure and leaves browser storage out of it', () => {
-    expect(ids('infra')).toEqual(['res:r@db', 'sym:r@api.js#handler']);
+  it('keeps browser storage and its users visible under Infrastructure', () => {
+    expect(ids('infra')).toEqual(['res:r@cache', 'res:r@db', 'sym:r@api.js#handler', 'sym:r@sw.js#anon@954']);
   });
 });
 
