@@ -534,19 +534,53 @@ fn impl_trait(cx: &FileCx<'_>, mut node: TsNode<'_>) -> Option<String> {
     None
 }
 
-/// Names of the functions whose bodies enclose `node`, outermost first.
+/// The enclosing functions and blocks of `node`, outermost first, as symbol
+/// id segments: each function's name, and `<blockN>` for a block that is not
+/// a function body, numbered in source order within its function so sibling
+/// blocks declaring the same name keep distinct identities.
 fn enclosing_function_names(cx: &FileCx<'_>, mut node: TsNode<'_>) -> Vec<String> {
     let mut names = Vec::new();
     while let Some(parent) = node.parent() {
-        if parent.kind() == "function_item"
-            && let Some(name) = parent.child_by_field_name("name")
-        {
-            names.push(cx.text(&name).to_string());
+        match parent.kind() {
+            "function_item" => {
+                if let Some(name) = parent.child_by_field_name("name") {
+                    names.push(cx.text(&name).to_string());
+                }
+            }
+            "block" if parent.parent().is_none_or(|p| p.kind() != "function_item") => {
+                names.push(format!("<block{}>", block_ordinal(parent)));
+            }
+            _ => {}
         }
         node = parent;
     }
     names.reverse();
     names
+}
+
+/// 1-based source-order position of `block` among the non-body blocks of its
+/// nearest enclosing function (or of the file outside any function).
+fn block_ordinal(block: TsNode<'_>) -> usize {
+    let mut owner = block;
+    while let Some(parent) = owner.parent() {
+        owner = parent;
+        if owner.kind() == "function_item" {
+            break;
+        }
+    }
+    let mut count = 0;
+    let mut stack = vec![owner];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "block"
+            && node.start_byte() <= block.start_byte()
+            && node.parent().is_none_or(|p| p.kind() != "function_item")
+        {
+            count += 1;
+        }
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+    }
+    count
 }
 
 fn trait_type(cx: &FileCx<'_>, mut node: TsNode<'_>) -> Option<String> {

@@ -612,3 +612,40 @@ pub fn blocks() { { use crate::y::g; g(); } g(); }
         vec![format!("{lib}#x::g"), format!("{lib}#y::g")]
     );
 }
+
+#[test]
+fn sibling_block_items_keep_distinct_identities() {
+    // #1075 review: same-name items in sibling blocks are distinct symbols,
+    // and each call reaches the one in its own block.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "src/lib.rs",
+        "pub fn caller() { { fn target() {} target(); } { fn target() {} target(); } }\n",
+    );
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    let lib = "sym:local/rust-ws@src/lib.rs";
+    let first = format!("{lib}#caller::<block1>::target");
+    let second = format!("{lib}#caller::<block2>::target");
+    let ids: Vec<&str> = x
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Symbol")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert!(
+        ids.contains(&first.as_str()) && ids.contains(&second.as_str()),
+        "{ids:?}"
+    );
+    let mut calls: Vec<String> = edge_pairs(&x, "CALLS")
+        .into_iter()
+        .map(|(_, d)| d.to_string())
+        .collect();
+    calls.sort();
+    assert_eq!(calls, vec![first, second]);
+}
