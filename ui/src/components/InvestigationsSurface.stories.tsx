@@ -6,8 +6,8 @@ import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { InvestigationsSurface } from './InvestigationsSurface';
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
 import backendQualified from '../fixtures/investigation-coverage-backend.json';
-import { qualifiedCatalog, qualifiedDetail, qualifiedResult, inspectionAssessment, inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from '../investigationFixtures';
-import type { InvestigationDetail, InvestigationResult } from '../investigationTypes';
+import { qualifiedCatalog, qualifiedDetail, qualifiedResult, inspectionAssessment, inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from '../investigationFixtures';
+import type { InvestigationChat, InvestigationDetail, InvestigationResult } from '../investigationTypes';
 
 const state = (overrides: Partial<InvestigationState> = {}): InvestigationState => ({
   ...useInvestigationStore.getInitialState(), catalog: investigationCatalog, history: [investigationDetail()],
@@ -189,6 +189,7 @@ export const LateTaskSelectionCannotReplaceCurrent: Story = {
       const id = args.investigationId;
       if (command === 'get_investigation') return id === 'earlier' ? delayed : current;
       if (command === 'investigation_result') return investigationResult(id);
+      if (command === 'get_investigation_chat') return null;
       if (command === 'investigation_consent') return null;
       if (command === 'investigation_events') return { investigation_id: id,
         items: investigationEvents(id).filter((event) => event.sequence > (args.afterSequence ?? 0)),
@@ -745,5 +746,62 @@ export const ActualNextPromptWorkerReopened: Story = {
     await expect(useInvestigationStore.getState().result).toEqual(actualAdmission.result);
     await expect(useInvestigationStore.getState().events).toEqual(actualAdmission.events);
     await expect(canvas.getByText(/Findings cover the inspected scope; knowledge remains partial/)).toBeVisible();
+  },
+};
+
+export const PersistedChatUsesSelectedFindingsAndCitation: Story = {
+  // AC-0378: transcript references reuse this selected task's one findings/citation renderer.
+  beforeEach: () => {
+    const detail = investigationDetail('chat-selected');
+    const result = investigationResult(detail.investigation_id);
+    const chat: InvestigationChat = { chat_id: `chat:${detail.investigation_id}`, task_id: detail.investigation_id,
+      producer: { specialist_id: detail.specialist.id, specialist_version: detail.specialist.version,
+        prompt_fingerprint: detail.specialist.prompt_fingerprint, tier: detail.specialist.tier,
+        confidence_tier: detail.specialist.confidence_tier, provider_mode: detail.provider.mode,
+        provider_id: detail.provider.provider_id, model: detail.provider.model,
+        protocol_version: detail.provider.protocol_version ?? null },
+      messages: [{ id: 'saved-user', ordinal: 0, author: 'user',
+        message: { kind: 'user_question', question: detail.question } },
+      { id: 'saved-result', ordinal: 1, author: 'specialist',
+        message: { kind: 'result_reference', task_id: detail.investigation_id,
+          result_id: result.result_id, result_hash: 'd'.repeat(64) } }] };
+    mockIPC((command, payload) => {
+      const args = payload as { investigationId?: string; citationId?: string; afterSequence?: number } | undefined;
+      if (command === 'get_investigation') return detail;
+      if (command === 'investigation_result') return result;
+      if (command === 'get_investigation_chat') return chat;
+      if (command === 'investigation_consent') return null;
+      if (command === 'investigation_events') return { investigation_id: detail.investigation_id,
+        items: investigationEvents(detail.investigation_id).filter((event) => event.sequence > (args?.afterSequence ?? 0)),
+        next_sequence: detail.last_event_sequence, has_more: false };
+      if (command === 'read_investigation_citation') {
+        const citation = investigationCitations.find((item) => item.citation_id === args?.citationId);
+        return citation ? { investigation_id: detail.investigation_id, citation_id: citation.citation_id,
+          status: 'metadata_only', citation, text: null } : null;
+      }
+      return null;
+    });
+    useInvestigationStore.setState({ catalog: investigationCatalog, history: [detail] });
+    return () => clearMocks();
+  },
+  render: function PersistedChatSurface() {
+    return <InvestigationsSurface state={useInvestigationStore()} anchors={[]} canStart />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await useInvestigationStore.getState().open('chat-selected');
+    const transcript = within(canvas.getByRole('region', { name: 'Saved investigation chat' }));
+    await expect(transcript.getByText(/Saved producer:/)).toHaveTextContent(/version 3/);
+    await expect(transcript.getByRole('listitem', { name: 'User question' })).toHaveTextContent('You');
+    await expect(transcript.getByRole('listitem', { name: 'Specialist result reference' })).toHaveTextContent(/Saved result/);
+    await expect(canvas.getAllByRole('region', { name: 'Investigation findings' })).toHaveLength(1);
+    const findingsLink = transcript.getByRole('link', { name: 'View admitted findings and citations' });
+    await expect(findingsLink).toHaveAttribute('href', '#investigation-findings');
+    await expect(canvasElement.querySelectorAll('#investigation-findings')).toHaveLength(1);
+    const findings = within(canvas.getByRole('region', { name: 'Investigation findings' }));
+    await userEvent.click(findings.getByRole('button', { name: 'Inspect citation C1' }));
+    await waitFor(() => expect(useInvestigationStore.getState().citationRead?.investigation_id).toBe('chat-selected'));
+    await expect(findings.getByRole('complementary', { name: 'Historical citation' })).toBeVisible();
+    await expect(canvas.getAllByRole('region', { name: 'Investigation findings' })).toHaveLength(1);
   },
 };

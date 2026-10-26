@@ -308,6 +308,37 @@ export interface InvestigationResult {
   created_at: string;
 }
 
+export type InvestigationChatMessage =
+  | { kind: 'user_question'; question: string }
+  | { kind: 'result_reference'; task_id: string; result_id: string; result_hash: string };
+
+export interface InvestigationChatEntry {
+  id: string;
+  ordinal: number;
+  author: 'user' | 'specialist';
+  message: InvestigationChatMessage;
+}
+
+/** Saved task attribution only; never resolved from the current catalog. */
+export interface InvestigationChatProducer {
+  specialist_id: SpecialistId;
+  specialist_version: number;
+  prompt_fingerprint: string;
+  tier: InvestigationSpecialist['tier'];
+  confidence_tier: InvestigationSpecialist['confidence_tier'];
+  provider_mode: InvestigationProviderMode;
+  provider_id: string;
+  model: string;
+  protocol_version: string | null;
+}
+
+export interface InvestigationChat {
+  chat_id: string;
+  task_id: string;
+  producer: InvestigationChatProducer;
+  messages: InvestigationChatEntry[];
+}
+
 export interface InvestigationCitation {
   citation_id: string;
   fact: FactKey;

@@ -34,7 +34,7 @@ export interface InvestigationFindingsProps {
 
 export function InvestigationFindings({ result, citations, citationId, read, loading, error, onRead, onClose, reviews = [], reviewLoading = false, reviewBusy = false, reviewError, onRefreshReviews, onReview }: InvestigationFindingsProps) {
   const selected = citations.find((citation) => citation.citation_id === citationId);
-  return <section className="investigation-section" aria-label="Investigation findings">
+  return <section id="investigation-findings" className="investigation-section" aria-label="Investigation findings">
     <h3>Findings <TierBadge tier="InferredWeak" /></h3>
     <p className="muted">Every specialist finding is T3 / InferredWeak, including statements about implemented behavior.
       Findings do not change confirmed facts, accepted proposals, context or exports.</p>

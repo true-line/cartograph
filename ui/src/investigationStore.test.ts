@@ -6,7 +6,7 @@ import queryHistoryWire from './fixtures/completion-v9-supported.json';
 import backendQualified from './fixtures/investigation-coverage-backend.json';
 import { mergeInvestigationEvents, useInvestigationStore } from './investigationStore';
 import { qualifiedCoverageContext, qualifiedDetail, qualifiedResult, inspectionAssessment, inspectionDetail, inspectionTarget, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from './investigationFixtures';
-import type { InvestigationCapturedLocation, InvestigationCitationRead, InvestigationDetail, InvestigationEvent, InvestigationInspectionTarget, InvestigationResult, StartInvestigationRequest } from './investigationTypes';
+import type { InvestigationCapturedLocation, InvestigationChat, InvestigationCitationRead, InvestigationDetail, InvestigationEvent, InvestigationInspectionTarget, InvestigationResult, StartInvestigationRequest } from './investigationTypes';
 
 // These commands use named JSON arguments; Tauri also supports unrelated binary payloads.
 function mockIPC(handler: (command: string, args?: Record<string, unknown>) => unknown) {
@@ -25,6 +25,7 @@ function response(command: string, args?: Record<string, unknown>) {
   switch (command) {
     case 'get_investigation': return investigationDetail(id);
     case 'investigation_result': return investigationResult(id);
+    case 'get_investigation_chat': return null;
     case 'investigation_consent': return null;
     case 'investigation_events': {
       const events = investigationEvents(id);
@@ -33,6 +34,20 @@ function response(command: string, args?: Record<string, unknown>) {
     }
     default: throw new Error('Unexpected command in fixture.');
   }
+}
+
+function savedChat(detail: InvestigationDetail, result: InvestigationResult | null): InvestigationChat {
+  return { chat_id: `chat:${detail.investigation_id}`, task_id: detail.investigation_id,
+    producer: { specialist_id: detail.specialist.id, specialist_version: detail.specialist.version,
+      prompt_fingerprint: detail.specialist.prompt_fingerprint, tier: detail.specialist.tier,
+      confidence_tier: detail.specialist.confidence_tier, provider_mode: detail.provider.mode,
+      provider_id: detail.provider.provider_id, model: detail.provider.model,
+      protocol_version: detail.provider.protocol_version ?? null },
+    messages: [{ id: `user:${detail.investigation_id}`, ordinal: 0, author: 'user',
+      message: { kind: 'user_question', question: detail.question } },
+    ...(result ? [{ id: `result:${detail.investigation_id}`, ordinal: 1, author: 'specialist' as const,
+      message: { kind: 'result_reference' as const, task_id: detail.investigation_id,
+        result_id: result.result_id, result_hash: 'c'.repeat(64) } }] : [])] };
 }
 
 beforeEach(() => {
@@ -699,6 +714,7 @@ it('accepts actual schema-2 V5 start/history/detail and schema-3 result/location
     if (command === 'list_investigations') return { items: [detail], next_cursor: null };
     if (command === 'investigation_result') return fixture.result;
     if (command === 'investigation_consent') return null;
+    if (command === 'get_investigation_chat') return null;
     if (command === 'inspection_captured_location') return fixture.location;
     if (command === 'investigation_events') {
       const items = events.filter((event) => event.sequence > Number(args?.afterSequence ?? 0));
@@ -784,6 +800,7 @@ function qualifiedTransport(detail: InvestigationDetail, result: InvestigationRe
         kind: 'created', step_id: null, tool: null, summary: 'Saved activity transport fixture.', created_at: detail.created_at,
       })).filter((event) => event.sequence > Number(args?.afterSequence ?? 0)),
       next_sequence: detail.last_event_sequence, has_more: false };
+    if (command === 'get_investigation_chat') return null;
     throw new Error('Unexpected qualified command');
   });
 }
@@ -998,4 +1015,247 @@ it('reopens actual durable query-history worker history with its original journa
   expect(useInvestigationStore.getState().detail).toEqual(detail);
   expect(useInvestigationStore.getState().result).toEqual(result);
   expect(useInvestigationStore.getState().events).toEqual(events);
+});
+
+describe('persisted investigation chat UI binding (AC-0378)', () => {
+  function taskTransport(detail: InvestigationDetail, result: InvestigationResult | null,
+    chat: InvestigationChat | null | (() => unknown)) {
+    mockIPC((command, payload) => {
+      const args = payload as { investigationId?: string; afterSequence?: number } | undefined;
+      if (command === 'get_investigation') return detail;
+      if (command === 'investigation_result') return result;
+      if (command === 'get_investigation_chat') return typeof chat === 'function' ? chat() : chat;
+      if (command === 'investigation_consent') return null;
+      if (command === 'investigation_events') return { investigation_id: detail.investigation_id,
+        items: investigationEvents(detail.investigation_id).filter((event) => event.sequence > Number(args?.afterSequence ?? 0)),
+        next_sequence: detail.last_event_sequence, has_more: false };
+      return null;
+    });
+  }
+
+  it('loads pending user-authored question and completed saved specialist reference', async () => {
+    const pending = investigationDetail('pending-chat-ui', { status: 'running', has_result: false,
+      actions: { can_cancel: true, can_follow_up: false } });
+    const pendingChat = savedChat(pending, null);
+    taskTransport(pending, null, pendingChat);
+    await useInvestigationStore.getState().open(pending.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
+    expect(useInvestigationStore.getState().chatStatus).toBe('saved');
+    expect(useInvestigationStore.getState().chat?.messages).toHaveLength(1);
+    expect(useInvestigationStore.getState().chat?.messages[0]).toMatchObject({ author: 'user', ordinal: 0,
+      message: { kind: 'user_question', question: pending.question } });
+    expect(useInvestigationStore.getState().chat?.producer).toMatchObject({
+      specialist_id: pending.specialist.id, specialist_version: pending.specialist.version,
+      prompt_fingerprint: pending.specialist.prompt_fingerprint, provider_id: pending.provider.provider_id,
+      model: pending.provider.model,
+    });
+
+    const completed = investigationDetail('completed-chat-ui');
+    const result = investigationResult(completed.investigation_id);
+    const completedChat = savedChat(completed, result);
+    taskTransport(completed, result, completedChat);
+    await useInvestigationStore.getState().open(completed.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
+    expect(useInvestigationStore.getState().chatStatus).toBe('saved');
+    expect(useInvestigationStore.getState().chat?.messages[1]).toMatchObject({ author: 'specialist', ordinal: 1,
+      message: { kind: 'result_reference', task_id: completed.investigation_id, result_id: result.result_id } });
+    expect(useInvestigationStore.getState().result).toEqual(result);
+  });
+
+  it('distinguishes legacy absence from read failure and rejects mismatches without hiding findings', async () => {
+    const detail = investigationDetail('chat-mismatch');
+    const result = investigationResult(detail.investigation_id);
+    const mismatched = savedChat(detail, result);
+    const reference = mismatched.messages[1];
+    if (reference.message.kind === 'result_reference') reference.message.result_id = 'result:another-task';
+    taskTransport(detail, result, mismatched);
+    await useInvestigationStore.getState().open(detail.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('error'));
+    expect(useInvestigationStore.getState().chatStatus).toBe('error');
+    expect(useInvestigationStore.getState().chat).toBeNull();
+    expect(useInvestigationStore.getState().result).toEqual(result);
+    expect(useInvestigationStore.getState().error).toBeNull();
+
+    taskTransport(detail, result, null);
+    await useInvestigationStore.getState().refreshSelected();
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('legacy'));
+    expect(useInvestigationStore.getState().chatStatus).toBe('legacy');
+    expect(useInvestigationStore.getState().result).toEqual(result);
+    expect(useInvestigationStore.getState().error).toBeNull();
+
+    mockIPC((command) => {
+      if (command === 'get_investigation') return detail;
+      if (command === 'investigation_result') return result;
+      if (command === 'get_investigation_chat') throw new Error('Host unavailable.');
+      if (command === 'investigation_consent') return null;
+      if (command === 'investigation_events') return { investigation_id: detail.investigation_id,
+        items: investigationEvents(detail.investigation_id), next_sequence: detail.last_event_sequence, has_more: false };
+      return null;
+    });
+    await useInvestigationStore.getState().refreshSelected();
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('error'));
+    expect(useInvestigationStore.getState().chatStatus).toBe('error');
+    expect(useInvestigationStore.getState().chatError).toMatch(/could not be read/);
+    expect(useInvestigationStore.getState().result).toEqual(result);
+    expect(useInvestigationStore.getState().error).toBeNull();
+  });
+
+  it('keeps findings visible when chat read straddles result admission, then reconnects on refresh', async () => {
+    const detail = investigationDetail('chat-straddled');
+    const result = investigationResult(detail.investigation_id);
+    const admittedChat = savedChat(detail, result);
+    let chat: InvestigationChat = { ...admittedChat, messages: [admittedChat.messages[0]] };
+    taskTransport(detail, result, () => chat);
+    await useInvestigationStore.getState().open(detail.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('error'));
+    expect(useInvestigationStore.getState().chatStatus).toBe('error');
+    expect(useInvestigationStore.getState().chatError).toMatch(/did not match this task and result/);
+    expect(useInvestigationStore.getState().result).toEqual(result);
+    expect(useInvestigationStore.getState().error).toBeNull();
+
+    chat = admittedChat;
+    await useInvestigationStore.getState().refreshSelected();
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
+    expect(useInvestigationStore.getState().chatStatus).toBe('saved');
+    expect(useInvestigationStore.getState().chat?.messages).toHaveLength(2);
+    expect(useInvestigationStore.getState().result).toEqual(result);
+  });
+
+  it('publishes valid findings while the independent transcript request is still pending', async () => {
+    const detail = investigationDetail('chat-pending-read');
+    const result = investigationResult(detail.investigation_id);
+    const chat = savedChat(detail, result);
+    const delayed = deferred<InvestigationChat>();
+    taskTransport(detail, result, () => delayed.promise);
+
+    const opening = useInvestigationStore.getState().open(detail.investigation_id);
+    for (let attempt = 0; attempt < 20 && !useInvestigationStore.getState().detail; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(useInvestigationStore.getState().detail).toEqual(detail);
+    expect(useInvestigationStore.getState().result).toEqual(result);
+    expect(useInvestigationStore.getState().chatStatus).toBe('loading');
+    expect(useInvestigationStore.getState().error).toBeNull();
+
+    delayed.resolve(chat);
+    await opening;
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
+    expect(useInvestigationStore.getState().result).toEqual(result);
+  });
+
+  it('returns confirmed start identity before its optional transcript read completes', async () => {
+    const detail = investigationDetail('start-chat-pending', { status: 'running', has_result: false,
+      actions: { can_cancel: true, can_follow_up: false } });
+    const delayed = deferred<InvestigationChat | null>();
+    mockIPC((command, args) => {
+      if (command === 'start_investigation' || command === 'get_investigation') return detail;
+      if (command === 'investigation_result') return null;
+      if (command === 'get_investigation_chat') return delayed.promise;
+      return response(command, args);
+    });
+
+    const id = await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@3',
+      question: 'Inspect the admitted investigation.', scope: { type: 'all' }, provider_mode: 'local',
+      limit_profile: 'investigation-v1' });
+    expect(id).toBe(detail.investigation_id);
+    expect(useInvestigationStore.getState().detail).toEqual(detail);
+    expect(useInvestigationStore.getState().chatStatus).toBe('loading');
+    expect(useInvestigationStore.getState().error).toBeNull();
+
+    delayed.resolve(savedChat(detail, null));
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
+    expect(useInvestigationStore.getState().chat?.task_id).toBe(id);
+    expect(useInvestigationStore.getState().error).toBeNull();
+  });
+
+  it('rejects saved producer and ordinal mismatches', async () => {
+    const detail = investigationDetail('chat-binding-mismatch');
+    const result = investigationResult(detail.investigation_id);
+    for (const corrupt of [
+      (chat: InvestigationChat) => { chat.producer.specialist_version += 1; },
+      (chat: InvestigationChat) => { chat.messages[1].ordinal = 2; },
+    ]) {
+      const chat = savedChat(detail, result);
+      corrupt(chat);
+      taskTransport(detail, result, chat);
+      await useInvestigationStore.getState().open(detail.investigation_id);
+      await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('error'));
+      expect(useInvestigationStore.getState().chatStatus).toBe('error');
+      expect(useInvestigationStore.getState().chat).toBeNull();
+      expect(useInvestigationStore.getState().result).toEqual(result);
+    }
+  });
+
+  it('refreshes the result reference after admission without losing the user turn', async () => {
+    let detail = investigationDetail('chat-admitted-later', { status: 'running', has_result: false,
+      revision: 10, actions: { can_cancel: true, can_follow_up: false } });
+    let result: InvestigationResult | null = null;
+    let chat: InvestigationChat = savedChat(detail, null);
+    taskTransport(detail, result, () => chat);
+    await useInvestigationStore.getState().open(detail.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chat?.messages).toHaveLength(1));
+    expect(useInvestigationStore.getState().chat?.messages).toHaveLength(1);
+
+    detail = { ...detail, status: 'completed', has_result: true, revision: 11,
+      actions: { can_cancel: false, can_follow_up: true } };
+    result = investigationResult(detail.investigation_id);
+    chat = savedChat(detail, result);
+    taskTransport(detail, result, () => chat);
+    await useInvestigationStore.getState().refreshSelected();
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
+    expect(useInvestigationStore.getState().chatStatus).toBe('saved');
+    expect(useInvestigationStore.getState().chat?.messages).toHaveLength(2);
+    expect(useInvestigationStore.getState().chat?.messages[0].message).toEqual({ kind: 'user_question', question: detail.question });
+    expect(useInvestigationStore.getState().chat?.messages[1].message).toMatchObject({ kind: 'result_reference', result_id: result.result_id });
+  });
+
+  it('ignores delayed responses after A to B and same-task reopen selections', async () => {
+    const a = investigationDetail('chat-a'); const aResult = investigationResult(a.investigation_id);
+    const aChat = savedChat(a, aResult);
+    const b = investigationDetail('chat-b'); const bResult = investigationResult(b.investigation_id);
+    const bChat = savedChat(b, bResult);
+    const delayedA = deferred<InvestigationChat>();
+    const delayedReopenA = deferred<InvestigationChat>();
+    let aReads = 0;
+    mockIPC((command, payload) => {
+      const args = payload as { investigationId?: string; afterSequence?: number } | undefined;
+      const id = args?.investigationId;
+      const detail = id === a.investigation_id ? a : b;
+      const result = id === a.investigation_id ? aResult : bResult;
+      if (command === 'get_investigation') return detail;
+      if (command === 'investigation_result') return result;
+      if (command === 'get_investigation_chat') {
+        if (id === a.investigation_id) {
+          aReads += 1;
+          if (aReads === 1) return delayedA.promise;
+          if (aReads === 2) return delayedReopenA.promise;
+          return aChat;
+        }
+        return bChat;
+      }
+      if (command === 'investigation_consent') return null;
+      if (command === 'investigation_events') return { investigation_id: detail.investigation_id,
+        items: investigationEvents(detail.investigation_id).filter((event) => event.sequence > Number(args?.afterSequence ?? 0)),
+        next_sequence: detail.last_event_sequence, has_more: false };
+      return null;
+    });
+
+    const oldA = useInvestigationStore.getState().open(a.investigation_id);
+    await useInvestigationStore.getState().open(b.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chat?.task_id).toBe(b.investigation_id));
+    delayedA.resolve(aChat);
+    await oldA;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(useInvestigationStore.getState().selectedId).toBe(b.investigation_id);
+    expect(useInvestigationStore.getState().chat?.task_id).toBe(b.investigation_id);
+
+    const oldSameTask = useInvestigationStore.getState().open(a.investigation_id);
+    await useInvestigationStore.getState().open(a.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chat?.chat_id).toBe(aChat.chat_id));
+    delayedReopenA.resolve({ ...aChat, chat_id: 'chat:reopened' });
+    await oldSameTask;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(useInvestigationStore.getState().selectedId).toBe(a.investigation_id);
+    expect(useInvestigationStore.getState().chat?.chat_id).toBe(aChat.chat_id);
+  });
 });

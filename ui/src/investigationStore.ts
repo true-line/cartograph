@@ -5,7 +5,7 @@ import { investigationPolicy, obligationEnvelope, validObligation, validObligati
 import { create } from 'zustand';
 import { invokeOr } from './tauri';
 import type {
-  InvestigationCatalog, InvestigationChanged, InvestigationCitationRead,
+  InvestigationCatalog, InvestigationChanged, InvestigationChat, InvestigationCitationRead,
   InvestigationConsent, InvestigationDetail, InvestigationEvent,
   InvestigationEventPage, InvestigationPage, InvestigationResult,
   InvestigationSummary, StartInvestigationRequest, InvestigationInspectionTarget, InvestigationCapturedLocation,
@@ -42,6 +42,7 @@ export function investigationIsActive(summary: InvestigationSummary): boolean {
 export function investigationIsInActiveHistory(summary: InvestigationSummary): boolean {
   return ACTIVE_HISTORY_STATUSES.has(summary.status);
 }
+export type InvestigationChatStatus = 'idle' | 'loading' | 'saved' | 'legacy' | 'preview' | 'error';
 
 const LEGACY_SPECIALISTS = new Set<SpecialistId>([
   'domain-analyst@1', 'evidence-auditor@1', 'domain-analyst@2', 'evidence-auditor@2',
@@ -140,6 +141,45 @@ function validResultBinding(result: InvestigationResult, maximum = 12): boolean 
       (item.status === 'supplied' ? item.supplied : item.status === 'unmet' && !item.supplied));
 }
 
+/** Validate the app-facing chat join against this selected saved task/result. */
+function validInvestigationChat(value: unknown, id: string, detail: InvestigationDetail,
+  result: InvestigationResult | null): value is InvestigationChat {
+  const record = (item: unknown): item is Record<string, unknown> => typeof item === 'object' && item !== null && !Array.isArray(item);
+  if (!record(value) || !closedFields(value, ['chat_id', 'task_id', 'producer', 'messages'])) return false;
+  const chat = value as unknown as InvestigationChat;
+  if (!identity(chat.chat_id) || chat.task_id !== id || !Array.isArray(chat.messages) ||
+      chat.messages.length !== (detail.has_result ? 2 : 1)) return false;
+  const producer = chat.producer as unknown;
+  if (!record(producer) || !closedFields(producer, ['specialist_id', 'specialist_version', 'prompt_fingerprint', 'tier',
+      'confidence_tier', 'provider_mode', 'provider_id', 'model', 'protocol_version']) ||
+      producer.specialist_id !== detail.specialist.id || producer.specialist_version !== detail.specialist.version ||
+      producer.prompt_fingerprint !== detail.specialist.prompt_fingerprint || !identity(producer.prompt_fingerprint) ||
+      producer.tier !== detail.specialist.tier || producer.confidence_tier !== detail.specialist.confidence_tier ||
+      producer.provider_mode !== detail.provider.mode || producer.provider_id !== detail.provider.provider_id ||
+      producer.model !== detail.provider.model ||
+      (producer.protocol_version !== null && !identity(producer.protocol_version)) ||
+      (producer.protocol_version ?? null) !== (detail.provider.protocol_version ?? null)) return false;
+
+  const ids = new Set<string>();
+  const first = chat.messages[0] as unknown;
+  if (!record(first) || !closedFields(first, ['id', 'ordinal', 'author', 'message']) ||
+      !identity(first.id) || first.ordinal !== 0 || first.author !== 'user' || ids.has(first.id)) return false;
+  ids.add(first.id);
+  const firstMessage = first.message as unknown;
+  if (!record(firstMessage) || !closedFields(firstMessage, ['kind', 'question']) || firstMessage.kind !== 'user_question' ||
+      typeof firstMessage.question !== 'string' || new TextEncoder().encode(firstMessage.question).length > 16 * 1024 ||
+      firstMessage.question !== detail.question) return false;
+  if (!detail.has_result) return result === null;
+
+  const second = chat.messages[1] as unknown;
+  if (!result || !record(second) || !closedFields(second, ['id', 'ordinal', 'author', 'message']) ||
+      !identity(second.id) || ids.has(second.id) || second.ordinal !== 1 || second.author !== 'specialist') return false;
+  const secondMessage = second.message as unknown;
+  return record(secondMessage) && closedFields(secondMessage, ['kind', 'task_id', 'result_id', 'result_hash']) &&
+    secondMessage.kind === 'result_reference' && secondMessage.task_id === id &&
+    secondMessage.result_id === result.result_id && hash(secondMessage.result_hash);
+}
+
 function mergeHistory(existing: InvestigationSummary[], incoming: InvestigationSummary[]) {
   const byId = new Map(existing.map((item) => [item.investigation_id, item]));
   for (const item of incoming) {
@@ -199,6 +239,9 @@ export interface InvestigationState {
   selectionGeneration: number;
   detail: InvestigationDetail | null;
   result: InvestigationResult | null;
+  chat: InvestigationChat | null;
+  chatStatus: InvestigationChatStatus;
+  chatError: string | null;
   events: InvestigationEvent[];
   consent: InvestigationConsent | null;
   consentOpen: boolean;
@@ -393,7 +436,8 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     },
     catalog: null, catalogLoading: false, catalogError: null,
     history: [], historySearch: '', historyActiveOnly: false, nextCursor: null, historyLoading: false, historyError: null,
-    selectedId: null, selectionGeneration: 0, detail: null, result: null, events: [],
+    selectedId: null, selectionGeneration: 0, detail: null, result: null, chat: null,
+    chatStatus: 'idle', chatError: null, events: [],
     consent: null, consentOpen: false, loading: false, error: null,
     actionBusy: false, actionError: null, pendingStart: null, starting: false, startError: null,
     composer: initialComposer,
@@ -660,7 +704,8 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       ++actionRequest;
       ++locationRequest;
       set((state) => ({ selectedId: id, selectionGeneration: state.selectionGeneration + 1,
-        detail: null, result: null, events: [], consent: null, consentOpen: false,
+        detail: null, result: null, chat: null, chatStatus: 'loading', chatError: null,
+        events: [], consent: null, consentOpen: false,
         loading: false, error: null, actionBusy: false, actionError: null,
         citationId: null, citationRead: null, citationLoading: false, citationError: null }));
       set({ inspectionLocation: null, inspectionLocationTargetId: null, inspectionLocationLoading: false, inspectionLocationError: null });
@@ -672,8 +717,13 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       if (!id) return;
       const request = ++detailRequest;
       const current = () => get().selectedId === id && get().selectionGeneration === selectionGeneration && request === detailRequest;
-      set({ loading: true, error: null });
+      set({ loading: true, error: null, chatStatus: 'loading', chatError: null });
       try {
+        const chatObservation = invokeOr<InvestigationChat | null | undefined>('get_investigation_chat', undefined,
+          { investigationId: id }).then(
+          (value) => ({ kind: 'value' as const, value }),
+          () => ({ kind: 'error' as const }),
+        );
         const [detail, result, consent] = await Promise.all([
           invokeOr<InvestigationDetail | null>('get_investigation', null, { investigationId: id }),
           invokeOr<InvestigationResult | null>('investigation_result', null, { investigationId: id }),
@@ -737,7 +787,8 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         if (!current()) return;
         const saved = get().detail;
         if (saved && saved.revision > detail.revision) {
-          set({ loading: false });
+          set({ loading: false, chat: null, chatStatus: 'error',
+            chatError: 'The transcript observation was older than this task. Refresh to load a consistent version.' });
           return;
         }
         // Family, immutable specialist definition and selected limits belong to
@@ -755,14 +806,49 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         const savedResult = get().result;
         if (saved && [4, 5, 6, 7].includes(saved.schema_version) && savedResult && result === null) throw new Error('Completion result disappeared.');
         if (savedResult && result && JSON.stringify(savedResult) !== JSON.stringify(result)) throw new Error('Result changed.');
+        // Publish the usable task/result snapshot independently of transcript I/O.
+        // A stalled or unavailable chat read must not hold back existing findings.
         updateSummary(detail);
-        set((state) => ({ detail, result: result ?? savedResult, events, consent,
+        set((state) => ({ detail, result: result ?? savedResult, chat: null, chatStatus: 'loading', chatError: null,
+          events, consent,
           consentOpen: state.consentOpen && state.consent?.step_id === consent?.step_id &&
             state.consent?.preview.payload_hash === consent?.preview.payload_hash,
           loading: false, error: null }));
-        await get().refreshReviews();
+        if (current()) void get().refreshReviews();
+
+        void chatObservation.then((chatRead) => {
+          if (!current()) return;
+          if (get().detail && get().detail!.revision > detail.revision) {
+            set({ chat: null, chatStatus: 'error',
+              chatError: 'The transcript observation was older than this task. Refresh to load a consistent version.' });
+            return;
+          }
+          let chat: InvestigationChat | null = null;
+          let chatStatus: InvestigationChatStatus = 'error';
+          let chatError: string | null = null;
+          if (chatRead.kind === 'error') {
+            chatError = 'The saved transcript could not be read. Refresh the selected investigation to try again.';
+          } else if (chatRead.value === undefined) {
+            // invokeOr uses undefined only for the non-Tauri browser preview; host null is legacy absence.
+            chatStatus = 'preview';
+          } else if (chatRead.value === null) {
+            chatStatus = 'legacy';
+          } else if (validInvestigationChat(chatRead.value, id, detail, result)) {
+            chat = chatRead.value;
+            chatStatus = 'saved';
+          } else {
+            chatError = 'The saved transcript did not match this task and result. Refresh to reconnect.';
+          }
+          set({ chat, chatStatus, chatError });
+        }).catch(() => {
+          // Transcript failures stay local to the transcript; confirmed task and
+          // findings state remains available even if detached validation rejects.
+          if (current()) set({ chat: null, chatStatus: 'error',
+            chatError: 'The saved transcript could not be read. Refresh the selected investigation to try again.' });
+        });
       } catch {
-        if (current()) set({ loading: false, consent: null, consentOpen: false,
+        if (current()) set({ loading: false, chat: null, chatStatus: 'error',
+          chatError: 'The transcript is unavailable until this investigation refreshes consistently.', consent: null, consentOpen: false,
           reviewError: 'Saved investigation binding could not be refreshed. Refresh before reviewing; historical findings remain visible.',
           error: 'The investigation could not be refreshed consistently. Saved findings and activity remain visible; refresh to reconnect.' });
       }
