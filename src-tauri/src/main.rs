@@ -440,6 +440,56 @@ fn active_plugins_for_root<R: tauri::Runtime>(
     active_plugins_in(state, root, &user_dir)
 }
 
+/// Every plugin installed for `root`, gated or not, as coverage
+/// declarations for the adapter lookup (#1071 review): an installed plugin
+/// whose gate has not passed for its exact bytes, or that is not enabled,
+/// declares its cells unverified rather than disappearing. Declarations
+/// only: nothing is loaded or executed.
+fn plugin_declarations_for_root<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    root: &std::path::Path,
+) -> Result<Vec<ingest::adapter_lookup::PluginDeclaration>, String> {
+    let user_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("adapters");
+    plugin_declarations_in(state, root, &user_dir)
+}
+
+fn plugin_declarations_in(
+    state: &AppState,
+    root: &std::path::Path,
+    user_dir: &std::path::Path,
+) -> Result<Vec<ingest::adapter_lookup::PluginDeclaration>, String> {
+    let root_key = root.display().to_string();
+    let discovered = adapters_plugin_host::discovery::discover(&[root.to_path_buf()], user_dir);
+    let settings_store = state.settings.lock().map_err(|e| e.to_string())?;
+    let mut declarations = Vec::new();
+    for plugin in discovered {
+        let settings_root = plugin_settings_root(&plugin);
+        if settings_root != root_key && settings_root != "user" {
+            continue;
+        }
+        let corpus = PluginCorpus::read(&plugin);
+        // Verified means exactly what extraction trusts (`active_plugins_in`).
+        let gate_passed = settings_store
+            .plugin_enabled_exact(&settings_root, &plugin.id, &plugin.content_hash)
+            .map_err(|e| e.to_string())?
+            && settings_store
+                .plugin_gate_passed_exact(&plugin.id, &corpus.gate_key)
+                .map_err(|e| e.to_string())?;
+        declarations.push(ingest::adapter_lookup::PluginDeclaration {
+            id: plugin.id,
+            version: plugin.content_hash,
+            gate_passed,
+            cells: corpus.cells(),
+        });
+    }
+    Ok(declarations)
+}
+
 /// The effective event registries for one ingest (#594): the built-in
 /// files plus `<app_data>/registries/*.json`. Read once per ingest and
 /// shared by every repository, extraction lane, backing join, and the
@@ -3038,7 +3088,7 @@ fn preflight_blocking<R: tauri::Runtime>(
     // and recovery performs exactly that parse moments later. Inline-eval
     // lines are reported pending that proof, and recovery reconciles them
     // (`reconciled_preflight_report`) — never claimed closed before then.
-    let report = ingest::preflight::preflight_scan(
+    let mut report = ingest::preflight::preflight_scan(
         root,
         &plugins,
         ingest::preflight::EvalProofSource::PendingRecovery,
@@ -3052,6 +3102,9 @@ fn preflight_blocking<R: tauri::Runtime>(
     )
     .map_err(|e| e.to_string())?
     .ok_or(PREFLIGHT_CANCELLED)?;
+    // The lookup also names installed plugins whose gate has not passed, so
+    // a cell they declare is never reported as having no source.
+    report.refresh_adapter_lookup(&plugin_declarations_for_root(app, state, root)?);
     // A stopped scan must not replace the register with a result the user
     // abandoned.
     let persisted = runs.persist_if_current(token, &repo, |live| {
@@ -11640,5 +11693,16 @@ export function App() {
                 .unwrap()
                 .is_empty()
         );
+
+        // #1071 review: the adapter lookup still sees root A's installed,
+        // ungated copy, as unverified; root B's user copy is verified.
+        let declared_a = super::plugin_declarations_in(&state, &root_a, &user_dir).unwrap();
+        assert_eq!(declared_a.len(), 1);
+        assert_eq!(declared_a[0].id, "t0.plugin-fixture");
+        assert!(!declared_a[0].gate_passed);
+        let declared_b = super::plugin_declarations_in(&state, &root_b, &user_dir).unwrap();
+        assert_eq!(declared_b.len(), 1);
+        assert!(declared_b[0].gate_passed);
+        assert_eq!(declared_b[0].version, user_hash);
     }
 }
