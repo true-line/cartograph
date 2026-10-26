@@ -35,9 +35,13 @@ version is labeled as a partial lower bound; it does not claim the full runtime
 queue. During refresh the summary is last observed, and an error hides counts
 along with stale task rows.
 
-When a specialist result is saved while its transcript is not open, the app may
-show a **Saved result ready** notice. Open it to load that exact investigation.
-Dismissing the toast keeps it in the session-only **New results** list; the
-notice is consumed only after the matching saved result and transcript are
-visible. This checks persisted task-bound result references only. It does not
-recover unread state after restart or create assistant messages.
+The app shows a **Saved result ready** notice only after it has first observed a
+valid saved question without a result, then later observes that task's saved
+result reference. A result already present on the first valid observation is
+treated as known and stays silent; a task that finishes before a valid pending
+observation may not produce a notice. Legacy, missing, malformed, and failed
+reads do not establish pending evidence. Open a notice to load that exact
+investigation. Dismissing the toast keeps it in the session-only **New results**
+list; the notice is consumed only after the matching saved result and transcript
+are visible. This checks persisted task-bound result references only. It does
+not recover unread state after restart or create assistant messages.

@@ -24,6 +24,10 @@ function savedChatFor(id: string, question = `Question for ${id}`): Investigatio
     ],
   };
 }
+function pendingChatFor(id: string): InvestigationChat {
+  const saved = savedChatFor(id);
+  return { ...saved, messages: [saved.messages[0]] };
+}
 const chat = savedChatFor(taskId, detail.question);
 
 function NoticeHarness({ store }: { store: ReturnType<typeof createSavedResultNoticeStore> }) {
@@ -68,12 +72,16 @@ export const DismissalFailedOpenAndExactVisibleRead: Story = {
     const store = activeStoryStore!;
     const canvas = within(canvasElement);
     useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+    let reads = 0;
     mockIPC((command, args) => {
       expect(command).toBe('get_investigation_chat');
       expect(args).toEqual({ investigationId: taskId });
-      return chat;
+      reads += 1;
+      return reads === 1 ? pendingChatFor(taskId) : chat;
     });
     store.getState().observe({ investigation_id: taskId, revision: 1, last_event_sequence: 4 });
+    await waitFor(() => expect(reads).toBe(1));
+    store.getState().observe({ investigation_id: taskId, revision: 2, last_event_sequence: 5 });
     await waitFor(() => expect(canvas.getByText(/Saved result ready/)).toBeTruthy());
     await userEvent.click(canvas.getByRole('button', { name: 'Dismiss saved result notice' }));
     await userEvent.click(canvas.getByRole('button', { name: /New results/ }));
@@ -103,11 +111,19 @@ export const ToastsKeepTheirOwnDeadlines: Story = {
   play: async ({ canvasElement }) => {
     const store = activeStoryStore!;
     const canvas = within(canvasElement);
-    mockIPC((_command, args) => savedChatFor((args as { investigationId: string }).investigationId));
+    let taskBReads = 0;
+    mockIPC((_command, args) => {
+      const id = (args as { investigationId: string }).investigationId;
+      if (id !== 'task-b') return savedChatFor(id);
+      taskBReads += 1;
+      return taskBReads === 1 ? pendingChatFor(id) : savedChatFor(id);
+    });
     const openButton = (id: string) => canvas.getByRole('button', { name: new RegExp(`Open saved result for ${id}`) });
     await waitFor(() => expect(openButton('task-a')).toBeTruthy());
     await new Promise((resolve) => setTimeout(resolve, 3_000));
     store.getState().observe({ investigation_id: 'task-b', revision: 1, last_event_sequence: 1 });
+    await waitFor(() => expect(taskBReads).toBe(1));
+    store.getState().observe({ investigation_id: 'task-b', revision: 2, last_event_sequence: 2 });
     await waitFor(() => expect(openButton('task-b')).toBeTruthy());
     await new Promise((resolve) => setTimeout(resolve, 2_600));
     await waitFor(() => expect(canvas.queryByRole('button', { name: /Open saved result for task-a/ })).toBeNull());

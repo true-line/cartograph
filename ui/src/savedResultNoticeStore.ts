@@ -25,7 +25,9 @@ const identity = (value: unknown): value is string => typeof value === 'string' 
   value.length <= 256 && !value.includes('\0');
 const noticeKey = (notice: SavedResultNotice) => `${notice.task_id}\0${notice.result_id}`;
 
-function savedResultReference(value: InvestigationChat | null | undefined, taskId: string): SavedResultNotice | null | undefined {
+type ChatCandidate = { kind: 'pending'; task_id: string } | { kind: 'saved'; notice: SavedResultNotice } | null | undefined;
+
+function savedResultReference(value: InvestigationChat | null | undefined, taskId: string): ChatCandidate {
   if (value === null || value === undefined) return null;
   if (value.task_id !== taskId || !identity(value.chat_id) || !Array.isArray(value.messages) ||
       (value.messages.length !== 1 && value.messages.length !== 2)) return undefined;
@@ -37,9 +39,9 @@ function savedResultReference(value: InvestigationChat | null | undefined, taskI
       reference.message?.kind !== 'result_reference' ||
       reference.message.task_id !== taskId || !identity(reference.message.result_id) ||
       !/^[0-9a-f]{64}$/.test(reference.message.result_hash)))) return undefined;
-  if (!reference) return null;
+  if (!reference) return { kind: 'pending', task_id: taskId };
   if (reference.message.kind !== 'result_reference') return undefined;
-  return { task_id: taskId, result_id: reference.message.result_id, question: question.message.question };
+  return { kind: 'saved', notice: { task_id: taskId, result_id: reference.message.result_id, question: question.message.question } };
 }
 
 export function createSavedResultNoticeStore() {
@@ -50,6 +52,7 @@ export function createSavedResultNoticeStore() {
   const queued = new Map<string, InvestigationChanged>();
   const observedRevision = new Map<string, number>();
   const knownResults = new Set<string>();
+  const pendingTasks = new Set<string>();
   const store = create<SavedResultNoticeState>((set, get) => {
     const pump = () => {
       if (inFlight || queued.size === 0) return;
@@ -69,14 +72,31 @@ export function createSavedResultNoticeStore() {
           }
           observedRevision.set(taskId, Math.max(observedRevision.get(taskId) ?? -1, event.revision));
           if (!notice) return;
-          const key = noticeKey(notice);
-          if (knownResults.has(key)) return;
+          if (notice.kind === 'pending') {
+            pendingTasks.add(taskId);
+            return;
+          }
+          const resultNotice = notice.notice;
+          const key = noticeKey(resultNotice);
+          if (knownResults.has(key)) {
+            pendingTasks.delete(taskId);
+            return;
+          }
+          if (!pendingTasks.has(taskId)) {
+            if (knownResults.size >= SAVED_RESULT_NOTICE_LIMIT) {
+              set({ incomplete: true });
+              return;
+            }
+            knownResults.add(key);
+            return;
+          }
           if (knownResults.size >= SAVED_RESULT_NOTICE_LIMIT || get().unread.length >= SAVED_RESULT_NOTICE_LIMIT) {
             set({ incomplete: true });
             return;
           }
+          pendingTasks.delete(taskId);
           knownResults.add(key);
-          set((state) => ({ unread: [...state.unread, notice],
+          set((state) => ({ unread: [...state.unread, resultNotice],
             toasts: [...state.toasts, key].slice(-SAVED_RESULT_TOAST_LIMIT) }));
         } catch {
           set({ incomplete: true });

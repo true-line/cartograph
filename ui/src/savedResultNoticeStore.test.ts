@@ -15,6 +15,11 @@ function savedChat(taskId: string, resultId = `result-${taskId}`): Investigation
   };
 }
 
+function pendingChat(taskId: string): InvestigationChat {
+  const chat = savedChat(taskId);
+  return { ...chat, messages: [chat.messages[0]] };
+}
+
 function event(taskId: string, revision: number) {
   return { investigation_id: taskId, revision, last_event_sequence: revision };
 }
@@ -56,39 +61,59 @@ describe('saved result notice candidate reads (AC-0386)', () => {
     store.getState().observe(event('task-b', 1));
     await vi.waitFor(() => expect(calls).toEqual(['task-a']));
     expect(calls).toEqual(['task-a']);
-    first.resolve(savedChat('task-a'));
-    await vi.waitFor(() => expect(store.getState().unread).toHaveLength(2));
+    first.resolve(pendingChat('task-a'));
+    await vi.waitFor(() => expect(store.getState().unread).toHaveLength(1));
+    expect(store.getState().unread[0].task_id).toBe('task-a');
     expect(calls).toEqual(['task-a', 'task-a', 'task-b']);
     expect(maximumActive).toBe(1);
   });
 
-  it('rejects legacy, malformed, and failed reads without false notices; a later event can retry', async () => {
+  it('requires a valid pending baseline and ignores an already-saved result on a later no-op event', async () => {
     vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
-    let attempt = 0;
-    mockIPC(() => {
-      attempt += 1;
-      if (attempt === 1) return null;
-      if (attempt === 2) return { ...savedChat('task-a'), messages: [] };
-      if (attempt === 3) throw new Error('Unavailable');
-      return savedChat('task-a');
+    const attempts = new Map<string, number>();
+    mockIPC((_command, args) => {
+      const taskId = (args as { investigationId: string }).investigationId;
+      const attempt = (attempts.get(taskId) ?? 0) + 1;
+      attempts.set(taskId, attempt);
+      if (attempt === 1 && taskId === 'legacy') return null;
+      if (attempt === 1 && taskId === 'malformed') return { ...savedChat(taskId), messages: [] };
+      if (attempt === 1 && taskId === 'unavailable') throw new Error('Unavailable');
+      if (attempt === 1 && taskId === 'missing') return undefined;
+      return attempt === 1 ? pendingChat(taskId) : savedChat(taskId);
     });
     const store = createSavedResultNoticeStore();
-    store.getState().observe(event('task-a', 1));
-    await vi.waitFor(() => expect(attempt).toBe(1));
-    store.getState().observe(event('task-a', 2));
-    await vi.waitFor(() => expect(attempt).toBe(2));
+    for (const taskId of ['legacy', 'malformed', 'unavailable', 'missing']) {
+      store.getState().observe(event(taskId, 1));
+      await vi.waitFor(() => expect(attempts.get(taskId)).toBe(1));
+    }
+    for (const taskId of ['legacy', 'malformed', 'unavailable', 'missing']) store.getState().observe(event(taskId, 2));
+    await vi.waitFor(() => expect([...attempts.values()].reduce((sum, count) => sum + count, 0)).toBe(8));
     expect(store.getState().unread).toEqual([]);
-    store.getState().observe(event('task-a', 3));
-    await vi.waitFor(() => expect(attempt).toBe(3));
-    store.getState().observe(event('task-a', 4));
-    await vi.waitFor(() => expect(store.getState().unread).toMatchObject([{ task_id: 'task-a', result_id: 'result-task-a' }]));
+    store.getState().observe(event('pending', 1));
+    await vi.waitFor(() => expect(attempts.get('pending')).toBe(1));
+    expect(store.getState().unread).toEqual([]);
+    store.getState().observe(event('pending', 2));
+    await vi.waitFor(() => expect(store.getState().unread).toMatchObject([{ task_id: 'pending', result_id: 'result-pending' }]));
   });
 
   it('caps toast cards, retains dismissed unread entries, and consumes only a visibly opened result', async () => {
     vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
-    mockIPC((_command, args) => savedChat((args as { investigationId: string }).investigationId));
+    const reads = new Map<string, number>();
+    let completedReads = 0;
+    mockIPC(async (_command, args) => {
+      const taskId = (args as { investigationId: string }).investigationId;
+      const count = (reads.get(taskId) ?? 0) + 1;
+      reads.set(taskId, count);
+      const value = count === 1 ? pendingChat(taskId) : savedChat(taskId);
+      await Promise.resolve();
+      completedReads += 1;
+      return value;
+    });
     const store = createSavedResultNoticeStore();
     for (let i = 0; i < SAVED_RESULT_NOTICE_LIMIT + 1; i += 1) store.getState().observe(event(`task-${i}`, 1));
+    await vi.waitFor(() => expect(completedReads).toBe(SAVED_RESULT_NOTICE_LIMIT));
+    expect(store.getState().unread).toEqual([]);
+    for (let i = 0; i < SAVED_RESULT_NOTICE_LIMIT; i += 1) store.getState().observe(event(`task-${i}`, 2));
     await vi.waitFor(() => expect(store.getState().unread).toHaveLength(SAVED_RESULT_NOTICE_LIMIT));
     expect(store.getState().toasts).toHaveLength(SAVED_RESULT_TOAST_LIMIT);
     const latest = store.getState().toasts.at(-1)!;
@@ -105,17 +130,40 @@ describe('saved result notice candidate reads (AC-0386)', () => {
     let calls = 0;
     mockIPC((_command, args) => {
       calls += 1;
-      return calls === 1 ? pending.promise : savedChat((args as { investigationId: string }).investigationId);
+      const taskId = (args as { investigationId: string }).investigationId;
+      if (calls === 1) return pendingChat(taskId);
+      return calls === 2 ? pending.promise : savedChat(taskId);
     });
     const store = createSavedResultNoticeStore();
     store.getState().observe(event('task-a', 1));
     await vi.waitFor(() => expect(calls).toBe(1));
-    store.getState().markVisible('task-a', 'result-task-a');
     store.getState().observe(event('task-a', 2));
+    await vi.waitFor(() => expect(calls).toBe(2));
+    store.getState().markVisible('task-a', 'result-task-a');
     pending.resolve(savedChat('task-a'));
     await vi.waitFor(() => expect(calls).toBe(2));
+    store.getState().observe(event('task-a', 3));
+    await vi.waitFor(() => expect(calls).toBe(3));
     expect(store.getState().unread).toEqual([]);
     expect(store.getState().toasts).toEqual([]);
     expect(store.getState().incomplete).toBe(false);
+  });
+
+  it('does not announce an old result after a no-op terminal invalidation', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    let calls = 0;
+    const first = deferred<InvestigationChat>();
+    mockIPC(() => {
+      calls += 1;
+      return calls === 1 ? first.promise : savedChat('already-completed');
+    });
+    const store = createSavedResultNoticeStore();
+    store.getState().observe(event('already-completed', 7));
+    await vi.waitFor(() => expect(calls).toBe(1));
+    store.getState().observe(event('already-completed', 8));
+    first.resolve(savedChat('already-completed'));
+    await vi.waitFor(() => expect(calls).toBe(2));
+    expect(store.getState().unread).toEqual([]);
+    expect(store.getState().toasts).toEqual([]);
   });
 });
