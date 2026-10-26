@@ -1,0 +1,20 @@
+[package]
+name = "adapters-lang-rust"
+description = "Deterministic Rust language extraction"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file.workspace = true
+
+[dependencies]
+core-graph = { workspace = true }
+core-prov = { workspace = true }
+source-walk = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tree-sitter = "0.27"
+tree-sitter-rust = "0.24"
+streaming-iterator = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
