@@ -2034,6 +2034,18 @@ fn extract_source_recording(
         }
     }
 
+    // --- Raw Node http.createServer route predicates (#1077) -----------------
+    node_http::extract(
+        &cx,
+        root,
+        &node_http::Proofs {
+            bindings: &bindings,
+            import_modules: &import_modules,
+            imported_names: &imported_names,
+        },
+        &mut out,
+    );
+
     // --- Target tests and their GraphQL requests (#968) ---------------------
     target_tests::extract(
         &cx,
@@ -3436,6 +3448,7 @@ mod grammar;
 pub mod graphql_resolvers;
 pub mod indexeddb;
 mod local_definitions;
+pub mod node_http;
 pub mod observed_infra;
 pub(crate) mod resolution;
 mod rule_evidence;
