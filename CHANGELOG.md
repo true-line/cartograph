@@ -1,5 +1,22 @@
 # cartograph
 
+## 0.37.0
+
+### Minor Changes
+
+- 63403ad: Generate a deterministic W6 work packet for each coverage-matrix cell no installed adapter covers, citing sample sources and the conformance fixtures to write first.
+- b43f6f8: The Atlas stays readable at estate scale: a band with more than 60 clusters opens as repository and range groups that wrap into a grid, with edges combined between groups. The code bands are now labelled "Server code" and "Client code".
+- ea78eb9: Add an owner-only command to activate MCP task access for a registered client with explicit resource and identity limits. Owner status reports the live grant; credential rotation drops task authority.
+- 457680a: Add explicit investigation access controls to MCP Settings, including registered client selection, separate task grants, and observed grant status after credential rotation.
+- 2b0c8f7: Add deterministic (T0) HTTP endpoint recovery for Rust axum and actix-web routes.
+- 33bce82: Recover reqwest HTTP client calls in the Rust adapter, so Rust services join the client-to-endpoint stitching.
+- fc425b1: Search persisted investigation summaries by saved question or specialist ID, including older retained history.
+
+### Patch Changes
+
+- 3e3060e: Keep content-free validation classes in ordinary investigation finish and unadmitted-read diagnostics without retaining rejected output or retrying the task (#937).
+- c7918f2: Service-worker code and browser-storage Resources now appear in the Atlas Client layer, and anonymous callbacks get readable display names (#1078).
+
 ## 0.36.0
 
 ### Minor Changes
