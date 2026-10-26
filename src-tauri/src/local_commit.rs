@@ -279,7 +279,7 @@ fn is_valid_sha(sha: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;

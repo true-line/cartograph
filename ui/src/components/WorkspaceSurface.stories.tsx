@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
+import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, within } from 'storybook/test';
 import { WorkspaceSurface } from './WorkspaceSurface';
 import type { FindingsSummary, SpecBundle, SystemRepo, TierDistribution } from '../store';
@@ -506,5 +507,78 @@ export const CoverageInventoryBeforeInterpretation: Story = {
       inventory.compareDocumentPosition(entry) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  },
+};
+
+export const DraftAdapterWorkPacketsInCoverage: Story = {
+  // AC-0371 (#1101): drafting adapter work packets for a recovered repo shows
+  // each returned packet's language and Markdown in a read-only <pre> with a
+  // Copy button, shows "Every looked-up cell has a declaring adapter" when
+  // empty, and shows errors as text.
+  args: {
+    summary: { ...meta.args.summary, coverage: COVERAGE },
+  },
+  beforeEach: () => () => clearMocks(),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const inventory = within(canvas.getByTestId("coverage-inventory"));
+    const button = inventory.getByRole("button", {
+      name: "Draft adapter work packet",
+    });
+
+    const seenRepos: string[] = [];
+    mockIPC((command, args) => {
+      if (command === "draft_adapter_work_packets") {
+        seenRepos.push(String((args as { repo?: string })?.repo));
+        return [
+          {
+            language: "Ruby",
+            content_id: "work-packet-v1:ruby-fixture",
+            markdown:
+              "# Work Packet: Add adapter coverage for Ruby (imports, calls, types)\n",
+          },
+        ];
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    await userEvent.click(button);
+    await expect(seenRepos).toEqual(["acme/api"]);
+    await expect(
+      await inventory.findByLabelText("Ruby adapter work packet"),
+    ).toHaveTextContent(
+      "# Work Packet: Add adapter coverage for Ruby (imports, calls, types)",
+    );
+    await expect(
+      inventory.getByRole("button", { name: "Copy" }),
+    ).toBeInTheDocument();
+
+    mockIPC((command) => {
+      if (command === "draft_adapter_work_packets") return [];
+      throw new Error(`unexpected command: ${command}`);
+    });
+    await userEvent.click(button);
+    await expect(
+      await inventory.findByText(
+        "Every looked-up cell has a declaring adapter",
+      ),
+    ).toBeInTheDocument();
+    await expect(
+      inventory.queryByLabelText("Ruby adapter work packet"),
+    ).not.toBeInTheDocument();
+
+    mockIPC((command) => {
+      if (command === "draft_adapter_work_packets") {
+        // The host rejects with its typed error object.
+        throw { code: "selection_conflict" };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    await userEvent.click(button);
+    await expect(await inventory.findByRole("alert")).toHaveTextContent(
+      "The checkout has changed since it was recovered.",
+    );
+    await expect(
+      inventory.queryByText("Every looked-up cell has a declaring adapter"),
+    ).not.toBeInTheDocument();
   },
 };

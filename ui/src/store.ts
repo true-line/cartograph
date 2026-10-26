@@ -358,6 +358,12 @@ export interface Omission {
   detail: string;
 }
 
+export interface DraftAdapterPacket {
+  language: string;
+  content_id: string;
+  markdown: string;
+}
+
 export interface SpecArtifact {
   id: string;
   file_name: string;
@@ -1036,6 +1042,9 @@ export interface AppStore {
     proposal: StagedProposal,
     decision: 'accepted' | 'rejected',
   ) => Promise<boolean>;
+  /** Draft adapter work packets for a recovered repo (#1101, AC-0371);
+   *  read-only — nothing is written to the graph, packet store, or register. */
+  draftAdapterWorkPackets: (repo: string) => Promise<DraftAdapterPacket[]>;
 }
 
 async function loadEndpoints(): Promise<GraphNode[]> {
@@ -1964,5 +1973,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } catch (e) {
       set({ settingsError: String(e) });
     }
+  },
+
+  draftAdapterWorkPackets: async (repo) => {
+    const packets = await invokeOr<DraftAdapterPacket[] | null>(
+      'draft_adapter_work_packets',
+      null,
+      { repo },
+    );
+    if (!packets) {
+      throw new Error('unavailable_evidence');
+    }
+    return packets;
   },
 }));

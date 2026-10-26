@@ -105,7 +105,8 @@ impl PreflightReport {
     }
 }
 
-/// The lookup over every non-supported cell the detected languages report.
+/// The lookup over every non-supported cell the detected languages report,
+/// plus the core cells an uncovered language requires.
 fn report_lookup(
     languages: &[LanguageDetection],
     plugins: &[PluginDeclaration],
@@ -113,6 +114,7 @@ fn report_lookup(
     let cells: Vec<ReportedCell> = languages
         .iter()
         .flat_map(|language| language.coverage.iter().cloned())
+        .chain(crate::adapter_packet::uncovered_cells(languages))
         .collect();
     lookup_coverage(&cells, &builtin_claims(), plugins)
 }
@@ -856,6 +858,36 @@ mod tests {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn an_uncovered_language_looks_up_its_core_cells() {
+        // AC-0361 (#1101): a language no adapter covers reports no matrix
+        // cells, so the lookup names the core cells a first adapter claims.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app.rb", "class App\nend\n");
+        let report = preflight(dir.path()).unwrap();
+        let ruby: Vec<_> = report
+            .adapter_lookup
+            .iter()
+            .filter(|lookup| lookup.cell.language == "Ruby")
+            .map(|lookup| {
+                (
+                    lookup.cell.framework.as_str(),
+                    lookup.cell.capability.as_str(),
+                    &lookup.status,
+                )
+            })
+            .collect();
+        let none = crate::adapter_lookup::LookupStatus::None;
+        assert_eq!(
+            ruby,
+            [
+                ("core", "calls", &none),
+                ("core", "imports", &none),
+                ("core", "types", &none)
+            ]
+        );
     }
 
     #[test]
