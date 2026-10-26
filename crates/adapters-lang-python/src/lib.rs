@@ -15,6 +15,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 
 mod alembic;
+mod app_scope;
 mod auth_guards;
 pub mod observed_infra;
 mod request_inputs;
@@ -68,6 +69,13 @@ pub struct Extraction {
     patched_guards: Vec<String>,
     client_fixtures: Vec<target_tests::ClientFixture>,
     client_calls: Vec<target_tests::ClientCall>,
+    app_calls: Vec<app_scope::AppCall>,
+    name_uses: BTreeSet<String>,
+    /// What each Flask route handler's receiver may be (#1149).
+    endpoint_apps: Vec<(String, app_scope::AppRef)>,
+    /// The parent of a `register_blueprint` whose argument is not a name.
+    wild_mounts: Vec<app_scope::AppRef>,
+    app_defs: HashSet<(String, String)>,
 }
 
 /// A module-level framework receiver: an application instance, or a Flask
@@ -125,6 +133,8 @@ struct Mount {
     prefix: Prefix,
     /// `register_blueprint(bp, name=…)`, which replaces the Blueprint's name.
     name: Prefix,
+    /// What the mount's parent may be, for scoping request hooks.
+    app: app_scope::AppRef,
     evidence: EvidenceRef,
 }
 
@@ -807,7 +817,8 @@ fn nonlocal_in(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
 enum LocalReceiver<'s> {
     /// The scope's only binding is an import-proven factory assignment that
     /// precedes the call: at the call the name holds that app or is unbound.
-    App(Framework),
+    /// The assignment's start byte identifies the app.
+    App(Framework, usize),
     /// An unrebound parameter, with its annotation if one is written.
     Parameter(Option<&'s str>),
     /// Bound locally, but not provably to an application.
@@ -854,7 +865,9 @@ fn local_receiver<'s>(
                 return LocalReceiver::Unproven;
             }
             return factory_assignment(cx, write, name, bindings)
-                .map_or(LocalReceiver::Unproven, LocalReceiver::App);
+                .map_or(LocalReceiver::Unproven, |framework| {
+                    LocalReceiver::App(framework, write.start_byte())
+                });
         }
         scope = enclosing_function_node(function);
     }
@@ -890,7 +903,7 @@ fn mount_parent(
     }
     let name = cx.text(&object);
     match local_receiver(cx, object, name, bindings) {
-        LocalReceiver::App(framework) => return MountParent::LocalApp(framework),
+        LocalReceiver::App(framework, _) => return MountParent::LocalApp(framework),
         LocalReceiver::Parameter(annotation) => {
             return annotation
                 .and_then(|annotation| framework_factory(annotation, bindings))
@@ -1256,16 +1269,18 @@ fn collect_mounts(
             "include_router" => Framework::FastApi,
             _ => continue,
         };
-        let Some(first) = named_arguments(call).first().copied() else {
-            continue;
-        };
-        if first.kind() != "identifier" {
-            continue;
-        }
         let Some(object) = call
             .child_by_field_name("function")
             .and_then(|function| function.child_by_field_name("object"))
         else {
+            continue;
+        };
+        let app = app_scope::app_ref(cx, object, bindings);
+        let first = named_arguments(call).first().copied();
+        let Some(first) = first.filter(|first| first.kind() == "identifier") else {
+            if framework == Framework::Flask {
+                out.wild_mounts.push(app);
+            }
             continue;
         };
         let name = cx.text(&first).to_string();
@@ -1275,7 +1290,12 @@ fn collect_mounts(
                 exported,
                 ..
             }) => (target.clone(), exported.clone()),
-            Some(_) => continue,
+            Some(_) => {
+                if framework == Framework::Flask {
+                    out.wild_mounts.push(app);
+                }
+                continue;
+            }
             None => (cx.path.to_string(), name),
         };
         out.mounts.push(Mount {
@@ -1287,6 +1307,7 @@ fn collect_mounts(
                 Framework::Flask => keyword_prefix(cx, call, "name"),
                 Framework::FastApi => Prefix::Absent,
             },
+            app,
             evidence: cx.evidence(&call),
         });
     }
@@ -1476,12 +1497,54 @@ fn served_prefixes(
     served
 }
 
+/// Every application the routes on `key` may be served by, over every mount
+/// chain `served_prefixes` follows, none dropped (#1149).
+fn served_apps(
+    key: &(String, String),
+    defs: &HashMap<(String, String), ReceiverDef>,
+    mounts: &HashMap<(String, String), Vec<Mount>>,
+    chain: &mut Vec<(String, String)>,
+) -> Vec<app_scope::AppRef> {
+    let Some(def) = defs.get(key) else {
+        return vec![app_scope::AppRef::Any];
+    };
+    if !def.router {
+        return vec![app_scope::AppRef::Def(key.clone())];
+    }
+    let observed: Vec<&Mount> = mounts
+        .get(key)
+        .into_iter()
+        .flatten()
+        .filter(|mount| mount.framework == def.framework)
+        .collect();
+    if observed.is_empty() || chain.contains(key) || chain.len() >= MAX_MOUNT_DEPTH {
+        return vec![app_scope::AppRef::Any];
+    }
+    chain.push(key.clone());
+    let mut apps = Vec::new();
+    for mount in observed {
+        match &mount.parent {
+            MountParent::Def(parent)
+                if defs
+                    .get(parent)
+                    .is_some_and(|parent| parent.router && parent.framework == def.framework) =>
+            {
+                apps.extend(served_apps(parent, defs, mounts, chain));
+            }
+            _ => apps.push(mount.app.clone()),
+        }
+    }
+    chain.pop();
+    apps
+}
+
 /// Join pending router routes with their definitions and the complete mount
 /// chain up to an application. A prefix this tier cannot read, a cyclic or
 /// over-deep chain, yields a Gap on the handler instead of an invented path. A
 /// router with no observed mount keeps its declared prefix at InferredStrong;
 /// so does one mounted only on an annotated parameter or an unproven receiver.
 fn resolve_routes(out: &mut Extraction, repo: &str) {
+    out.app_defs.extend(app_scope::app_defs(&out.receiver_defs));
     let defs: HashMap<(String, String), ReceiverDef> = std::mem::take(&mut out.receiver_defs)
         .into_iter()
         .map(|def| (def.key.clone(), def))
@@ -1493,6 +1556,23 @@ fn resolve_routes(out: &mut Extraction, repo: &str) {
             .or_default()
             .push(mount);
     }
+    // A Blueprint registration this tier cannot name may register any
+    // Blueprint on its parent.
+    let mut wild = std::mem::take(&mut out.wild_mounts);
+    wild.extend(
+        mounts
+            .iter()
+            .filter(|(key, _)| {
+                !defs
+                    .get(*key)
+                    .is_some_and(|def| def.router && def.framework == Framework::Flask)
+            })
+            .flat_map(|(_, mounts)| mounts)
+            .filter(|mount| mount.framework == Framework::Flask)
+            .map(|mount| mount.app.clone()),
+    );
+    wild.sort();
+    wild.dedup();
     let mut emitted = BTreeSet::new();
     for route in std::mem::take(&mut out.pending_routes) {
         let Some(def) = defs.get(&route.receiver) else {
@@ -1501,6 +1581,14 @@ fn resolve_routes(out: &mut Extraction, repo: &str) {
         let methods = methods_for(def.framework, &route.verb, &route.listed_methods);
         if methods.is_empty() {
             continue;
+        }
+        if def.framework == Framework::Flask {
+            let mut apps = served_apps(&route.receiver, &defs, &mounts, &mut Vec::new());
+            if def.router {
+                apps.extend(wild.iter().cloned());
+            }
+            out.endpoint_apps
+                .extend(apps.into_iter().map(|app| (route.handler.clone(), app)));
         }
         for served in served_prefixes(&route.receiver, &defs, &mounts, &mut Vec::new()) {
             let mount = served.mount;
@@ -1680,6 +1768,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     let bindings = parse_imports(&cx, root, &language, &mut out);
     let receivers = assignment_receivers(&cx, root, &language, &bindings, &mut out);
     collect_mounts(&cx, root, &language, &bindings, &mut out);
+    app_scope::collect(&cx, root, &bindings, &mut out);
     sqlalchemy::extract(&cx, root, &language, &bindings, &mut out);
     target_tests::extract(&cx, root, &bindings, &mut out);
     let function_query = Query::new(
@@ -1809,6 +1898,10 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             };
             let receiver = cx.text(&route.receiver).to_string();
             if let Some(framework) = receivers.get(&receiver).copied() {
+                out.endpoint_apps.push((
+                    handler.clone(),
+                    app_scope::app_ref(&cx, route.receiver, &bindings),
+                ));
                 for method in methods_for(framework, &route.verb, &route.listed_methods) {
                     push_endpoint(
                         &mut out,
@@ -2082,6 +2175,10 @@ pub fn extract_dir_incremental_with_progress(
             out.patched_guards.extend(extraction.patched_guards);
             out.client_fixtures.extend(extraction.client_fixtures);
             out.client_calls.extend(extraction.client_calls);
+            out.app_calls.extend(extraction.app_calls);
+            out.name_uses.extend(extraction.name_uses);
+            out.endpoint_apps.extend(extraction.endpoint_apps);
+            out.wild_mounts.extend(extraction.wild_mounts);
             Ok(())
         },
     );

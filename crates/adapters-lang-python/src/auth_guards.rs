@@ -27,6 +27,10 @@
 //!   and its registration span: the decorator, or the registering call.
 //!   Past the evidence bound, `blocking_hooks_omitted` counts the rest.
 //!
+//! A hook reaches only the endpoints that may be served by the application
+//! it is registered on (see `app_scope`, #1149); a `none` fact that one
+//! excluded records `request_hooks_reach_only_their_application`.
+//!
 //! Only decorators below every route decorator wrap the registered view.
 //! One above every route decorator is applied after registration and never
 //! runs for the route, so it is listed in `ineffective_decorators` and not
@@ -50,6 +54,7 @@
 //! `ProxyFix` is known non-auth only when it wraps the assigned attribute
 //! itself (`app.wsgi_app = ProxyFix(app.wsgi_app, …)`); the assignment is
 //! cited on a `none` fact.
+use crate::app_scope::{self, AppRef, Apps};
 use crate::request_inputs::{binding_sites, handler_bindings};
 use crate::responses::{self, FnKey, Resolver};
 use crate::{
@@ -117,11 +122,12 @@ pub(crate) enum HookFact {
     Resolved {
         key: FnKey,
         symbol: Option<String>,
+        app: AppRef,
         evidence: EvidenceRef,
     },
     /// Registered at `evidence` by a call whose argument does not
     /// resolve: blocking.
-    Unresolved { evidence: EvidenceRef },
+    Unresolved { app: AppRef, evidence: EvidenceRef },
 }
 
 /// One assignment to a `wsgi_app` attribute.
@@ -144,7 +150,7 @@ fn every_descendant<'t>(node: TsNode<'t>, f: &mut dyn FnMut(TsNode<'t>)) {
     }
 }
 
-fn unparenthesize(mut node: TsNode<'_>) -> TsNode<'_> {
+pub(crate) fn unparenthesize(mut node: TsNode<'_>) -> TsNode<'_> {
     while node.kind() == "parenthesized_expression"
         && node.named_child_count() == 1
         && let Some(inner) = node.named_child(0)
@@ -462,6 +468,19 @@ fn is_hook_attribute(cx: &FileCx<'_>, callee: TsNode<'_>) -> bool {
             })
 }
 
+/// What the receiver of hook attribute `callee` may be (#1149).
+fn hook_app(
+    cx: &FileCx<'_>,
+    callee: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> AppRef {
+    callee
+        .child_by_field_name("object")
+        .map_or(AppRef::Any, |object| {
+            app_scope::app_ref(cx, object, bindings)
+        })
+}
+
 /// Whether `left = right` wraps `left` itself, the application's current
 /// `wsgi_app`, in werkzeug's `ProxyFix`: `app.wsgi_app = ProxyFix(app.wsgi_app, …)`.
 /// Any other wrapped application may be middleware of its own.
@@ -609,6 +628,7 @@ pub(crate) fn collect(
             out.hooks.push(HookFact::Resolved {
                 key,
                 symbol: Some(handler.clone()),
+                app: hook_app(cx, expression, bindings),
                 evidence: cx.evidence(&decorator),
             });
             if !top_level(function, handler)
@@ -640,13 +660,15 @@ pub(crate) fn collect(
                 })
                 .map(unparenthesize);
             let evidence = cx.evidence(&node);
+            let app = hook_app(cx, callee, bindings);
             match argument.and_then(|argument| resolver.target(cx, argument, &BTreeSet::new())) {
                 Some(key) => out.hooks.push(HookFact::Resolved {
                     key,
                     symbol: None,
+                    app,
                     evidence,
                 }),
-                None => out.hooks.push(HookFact::Unresolved { evidence }),
+                None => out.hooks.push(HookFact::Unresolved { app, evidence }),
             }
         }
         "assignment" => {
@@ -749,6 +771,20 @@ pub(crate) fn resolve(
 ) {
     let handlers = std::mem::take(&mut out.auth_handlers);
     let hooks = std::mem::take(&mut out.hooks);
+    let calls = std::mem::take(&mut out.app_calls);
+    let used = std::mem::take(&mut out.name_uses);
+    let mut app_defs = std::mem::take(&mut out.app_defs);
+    app_defs.extend(app_scope::app_defs(&out.receiver_defs));
+    let scope = app_scope::Scope::new(&calls, &used, &app_defs);
+    let mut handler_apps: HashMap<String, Apps> = HashMap::new();
+    for (handler, app) in std::mem::take(&mut out.endpoint_apps) {
+        let apps = scope.apps(&app);
+        let merged = match handler_apps.remove(&handler) {
+            Some(known) => known.union(apps),
+            None => apps,
+        };
+        handler_apps.insert(handler, merged);
+    }
     let wsgi = std::mem::take(&mut out.wsgi_facts);
     let patched = std::mem::take(&mut out.patched_guards)
         .into_iter()
@@ -783,14 +819,15 @@ pub(crate) fn resolve(
 
     let mut repo_reasons = BTreeSet::new();
     let mut hook_evidence = Vec::new();
-    // Each registration whose hook may block, cited on every `unknown` fact
-    // that this reason reaches.
-    let mut blocking_hooks = Vec::new();
+    // Each registration whose hook may block, with the applications it is
+    // registered on: cited on every `unknown` fact it reaches.
+    let mut blocking = Vec::new();
     for hook in &hooks {
         match hook {
             HookFact::Resolved {
                 key,
                 symbol,
+                app,
                 evidence,
             } => {
                 let found = lookup_effects(&effects, key);
@@ -798,30 +835,28 @@ pub(crate) fn resolve(
                     hook_evidence.push(found.evidence.clone());
                 }
                 if !non_blocking(key, &effects, &files, &mut HashSet::new(), 0) {
-                    repo_reasons.insert("request_hook_may_block".to_string());
                     // Never a name built from the key: a nested hook's
                     // Symbol is qualified, and a shared key names no one.
                     let symbol = symbol
                         .clone()
                         .or_else(|| found.and_then(|found| found.symbol.clone()));
-                    blocking_hooks.push((symbol, evidence.clone()));
+                    blocking.push((symbol, evidence.clone(), scope.apps(app)));
                 }
             }
-            HookFact::Unresolved { evidence } => {
-                repo_reasons.insert("request_hook_may_block".to_string());
-                blocking_hooks.push((None, evidence.clone()));
+            HookFact::Unresolved { app, evidence } => {
+                blocking.push((None, evidence.clone(), scope.apps(app)));
             }
         }
     }
-    blocking_hooks
+    blocking
         .sort_by(|a, b| (&a.1.path, a.1.byte_start, &a.0).cmp(&(&b.1.path, b.1.byte_start, &b.0)));
-    blocking_hooks.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
-    let omitted_hooks = blocking_hooks.len().saturating_sub(MAX_EVIDENCE);
-    blocking_hooks.truncate(MAX_EVIDENCE);
-    let blocking_hooks = blocking_hooks
-        .into_iter()
-        .map(|(hook, evidence)| serde_json::json!({ "hook": hook, "evidence": evidence }))
-        .collect::<Vec<_>>();
+    blocking.dedup_by(|a, b| {
+        let same = a.0 == b.0 && a.1 == b.1;
+        if same {
+            b.2 = std::mem::replace(&mut b.2, Apps::Any).union(a.2.clone());
+        }
+        same
+    });
     if wsgi.iter().any(|fact| !fact.proxy_fix) {
         repo_reasons.insert("wsgi_middleware_unknown".to_string());
     }
@@ -832,6 +867,13 @@ pub(crate) fn resolve(
     }
     let mut auth: HashMap<String, serde_json::Value> = HashMap::new();
     for (handler, facts) in &by_handler {
+        // A hook reaches the handler only when they may share an application.
+        let apps = handler_apps.get(handler).unwrap_or(&Apps::Any);
+        let reaching = blocking
+            .iter()
+            .filter(|(_, _, hook)| hook.meets(apps))
+            .collect::<Vec<_>>();
+        let scoped_out = reaching.len() < blocking.len();
         let mut guards = BTreeSet::new();
         let mut basis = BTreeSet::new();
         let mut reasons = BTreeSet::new();
@@ -900,15 +942,19 @@ pub(crate) fn resolve(
                     &format!("Auth of {handler}"),
                 ),
             })
-        } else if facts.decorators.is_empty() && repo_reasons.is_empty() {
+        } else if facts.decorators.is_empty() && repo_reasons.is_empty() && reaching.is_empty() {
             let mut evidence = facts.route_evidence.clone();
             evidence.extend(hook_evidence.iter().cloned());
             evidence.extend(wsgi.iter().map(|fact| fact.evidence.clone()));
+            let mut assumptions = vec!["non_repository_calls_in_request_hooks_do_not_abort"];
+            if scoped_out {
+                assumptions.push("request_hooks_reach_only_their_application");
+            }
             serde_json::json!({
                 "state": "none",
                 "authenticated": false,
                 "basis": "no_guard_decorator_or_blocking_request_hook",
-                "assumptions": ["non_repository_calls_in_request_hooks_do_not_abort"],
+                "assumptions": assumptions,
                 "prov": prov_from(
                     bounded(evidence),
                     ConfidenceTier::InferredStrong,
@@ -917,12 +963,19 @@ pub(crate) fn resolve(
             })
         } else {
             reasons.extend(repo_reasons.iter().cloned());
-            let mut value = serde_json::json!({ "state": "unknown", "reasons": reasons });
-            if !blocking_hooks.is_empty() {
-                value["blocking_hooks"] = serde_json::json!(blocking_hooks);
+            if !reaching.is_empty() {
+                reasons.insert("request_hook_may_block".to_string());
             }
-            if omitted_hooks > 0 {
-                value["blocking_hooks_omitted"] = serde_json::json!(omitted_hooks);
+            let mut value = serde_json::json!({ "state": "unknown", "reasons": reasons });
+            if !reaching.is_empty() {
+                value["blocking_hooks"] = reaching
+                    .iter()
+                    .take(MAX_EVIDENCE)
+                    .map(|(hook, evidence, _)| serde_json::json!({ "hook": hook, "evidence": evidence }))
+                    .collect();
+            }
+            if reaching.len() > MAX_EVIDENCE {
+                value["blocking_hooks_omitted"] = serde_json::json!(reaching.len() - MAX_EVIDENCE);
             }
             value
         };
@@ -971,7 +1024,7 @@ pub(crate) fn retarget(extraction: &mut Extraction, commit: &str) {
     }
     for hook in &mut extraction.hooks {
         match hook {
-            HookFact::Resolved { evidence, .. } | HookFact::Unresolved { evidence } => {
+            HookFact::Resolved { evidence, .. } | HookFact::Unresolved { evidence, .. } => {
                 evidence.commit_sha = commit.into();
             }
         }
