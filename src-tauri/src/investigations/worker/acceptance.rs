@@ -473,3 +473,42 @@ fn investigation_acceptance_explicit_specialists_match_prepared_report_and_durab
         }
     }
 }
+
+#[test]
+fn investigation_prior_finding_replay_retains_terminal_class_without_repair() {
+    // AC-0184 (#937): supplied prior findings remain replay protected; the
+    // ordinary auditor stops rather than using completion's refusal loop.
+    let parent_provider = Arc::new(Scripted::new(Mode::Finish));
+    let fixture = Fixture::new(parent_provider.as_ref());
+    fixture.run(parent_provider.clone());
+    let state = fixture.app.state::<AppState>();
+    let parent = state
+        .jobs
+        .lock()
+        .unwrap()
+        .investigation_result(&fixture.id)
+        .unwrap()
+        .unwrap();
+    let provider = Arc::new(Scripted::new(Mode::Finish));
+    let (id, _) = auditor(&fixture, provider.clone(), AcceptanceSpecialists::V2);
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        3,
+        "no repair invocation"
+    );
+    super::refusal_diagnostics::assert_saved_refusal(
+        &fixture,
+        &id,
+        "Investigation finish refused: source_replay.",
+        &parent.findings[0].statement,
+    );
+    assert_eq!(
+        state
+            .jobs
+            .lock()
+            .unwrap()
+            .investigation_result(&fixture.id)
+            .unwrap(),
+        Some(parent)
+    );
+}

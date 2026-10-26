@@ -281,6 +281,8 @@ pub(crate) enum InvestigationStopReason {
     InputChanged,
     SourceUnavailable,
     InvalidResponse,
+    InvalidFinish(agents::investigation::InvestigationError),
+    UnadmittedRead,
     FinishOnlyToolProposal,
     LimitExceeded,
     ProviderFailure,
@@ -300,6 +302,31 @@ impl InvestigationStopReason {
             Self::InvalidResponse => {
                 "The completed provider response was not an admissible action."
             }
+            // Fixed classes only: never format rejected text or provider details.
+            Self::InvalidFinish(error) => match error {
+                agents::investigation::InvestigationError::InvalidRequest => {
+                    "Investigation finish refused: invalid_request."
+                }
+                agents::investigation::InvestigationError::InvalidAction => {
+                    "Investigation finish refused: invalid_action."
+                }
+                agents::investigation::InvestigationError::LimitExceeded => {
+                    "Investigation finish refused: limit_exceeded."
+                }
+                agents::investigation::InvestigationError::InvalidInput => {
+                    "Investigation finish refused: invalid_input."
+                }
+                agents::investigation::InvestigationError::InvalidCitation => {
+                    "Investigation finish refused: invalid_citation."
+                }
+                agents::investigation::InvestigationError::SourceReplay => {
+                    "Investigation finish refused: source_replay."
+                }
+                agents::investigation::InvestigationError::SensitiveOutput => {
+                    "Investigation finish refused: sensitive_output."
+                }
+            },
+            Self::UnadmittedRead => "Investigation read refused: unadmitted_fact.",
             Self::FinishOnlyToolProposal => {
                 "The provider proposed a tool when only a finishing response was permitted."
             }

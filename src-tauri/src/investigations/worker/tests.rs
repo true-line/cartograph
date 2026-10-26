@@ -25,6 +25,8 @@ enum Mode {
     UnavailableRead,
     PanicAfterQuery,
     MetadataFinish,
+    MetadataReplay,
+    UnadmittedRead,
     InventoryFinish,
     WrongQualifiedContext,
     CompletionSupported,
@@ -108,6 +110,10 @@ impl LlmProvider for Scripted {
         );
         let mut action = if matches!(prompt["schema_version"].as_u64(), Some(6..=8)) {
             completion_tests::scripted_action(self.mode, call, &prompt)
+        } else if matches!(self.mode, Mode::UnadmittedRead) {
+            assert_eq!(call, 0, "unadmitted reads never buy a second call");
+            json!({"type":"read_evidence", "fact":{"kind":"node", "id":"node:unadmitted"},
+                "role":"provenance", "index":0})
         } else if matches!(self.mode, Mode::InventoryFinish) {
             if call == 0 {
                 let repo = &prompt["coverage_qualification"]["repos"][0];
@@ -125,9 +131,9 @@ impl LlmProvider for Scripted {
                     "labels":[], "max_facts":12, "max_bytes":16384, "cursor":null } })
             } else {
                 json!({ "type": "query_context", "query": { "scope": {"type":"all"}, "kind":"node",
-                    "labels":["BusinessRule"], "max_facts":1, "max_bytes":32768, "cursor":null } })
+                    "labels":if matches!(self.mode, Mode::MetadataReplay) { json!(["Gap"]) } else { json!(["BusinessRule"]) }, "max_facts":1, "max_bytes":32768, "cursor":null } })
             }
-        } else if call == 1 && matches!(self.mode, Mode::MetadataFinish) {
+        } else if call == 1 && matches!(self.mode, Mode::MetadataFinish | Mode::MetadataReplay) {
             let citations = prompt
                 .get("citations")
                 .unwrap_or(&prompt["input_ledger"]["citations"])
@@ -181,6 +187,9 @@ impl LlmProvider for Scripted {
                 "citation_ids":[citation["citation_id"]], "limitations":["Runtime inputs and broader feature coverage remain unknown."] }],
                 "knowledge_completeness":"partial", "limitations":["This scoped result establishes no complete business policy."] })
         };
+        if matches!(self.mode, Mode::MetadataReplay) && action["type"] == "finish" {
+            action["findings"][0]["statement"] = json!(refusal_diagnostics::METADATA);
+        }
         if action["type"] == "query_context" && !prompt["context_id"].is_null() {
             action["context_id"] = if matches!(self.mode, Mode::WrongQualifiedContext) {
                 json!(format!("context-v2:{}", "f".repeat(64)))
@@ -844,6 +853,10 @@ fn investigation_worker_rejects_malformed_actions_without_model_repair() {
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     assert_eq!(detail.usage.tool_actions, 0);
     assert!(!detail.summary.has_result);
+    assert_eq!(
+        detail.error.as_deref(),
+        Some("The completed provider response was not an admissible action.")
+    );
 }
 
 #[test]
@@ -898,3 +911,6 @@ pub(in crate::investigations) use completion_tests::{
 
 #[path = "finding_review_integration_tests.rs"]
 mod finding_review_integration_tests;
+
+#[path = "refusal_diagnostics_tests.rs"]
+mod refusal_diagnostics;
