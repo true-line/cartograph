@@ -78,6 +78,19 @@ pub(crate) fn continuation_retained(policy: &InvestigationPolicy) -> Option<usiz
         )
 }
 
+/// Candidate preparation and its sealed disclosure coexist with durable source
+/// projection/validation. Current invocation owners are charged separately.
+#[cfg(unix)]
+pub(crate) fn source_settlement_retained(policy: &InvestigationPolicy) -> Option<usize> {
+    let limits = CompletionLimits::new(completion_limit_values(policy).ok()?).ok()?;
+    limits
+        .firewall_workspace_bytes()?
+        .prepared_bytes
+        .checked_add(
+            agents::investigation::InvestigationInput::sealing_workspace_bytes(policy, &limits)?.0,
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

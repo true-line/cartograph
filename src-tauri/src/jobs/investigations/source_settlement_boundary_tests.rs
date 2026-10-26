@@ -108,6 +108,25 @@ fn source_settlement_exact_stage_allocation_accepts_all_alternatives_and_one_les
                 exact,
                 "{kind:?}, charged={charged}"
             );
+            #[cfg(unix)]
+            {
+                // AC-0327: actual acquired/unavailable/terminal projections,
+                // including the pre-refusal one-byte-short case. Payload is
+                // only a lower bound on ownership, not measured peak or RSS.
+                let p = &plan.projection;
+                let wire = serde_json::to_vec(&(
+                    &p.task,
+                    &p.disposition,
+                    &p.events,
+                    &p.ledger,
+                    &p.attempts,
+                ))
+                .unwrap()
+                .len();
+                let (retained, peak) = writer_workspace::workspace(0, 0, 0).unwrap();
+                assert!(retained >= wire + std::mem::size_of_val(&plan));
+                assert!(peak > retained);
+            }
             let result = persist(&tx, &fixture.f.task, plan);
             if short {
                 assert!(matches!(result, Err(InvestigationStoreError::Capacity)));
