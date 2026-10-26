@@ -121,6 +121,67 @@ export const ThreeWayClassification: Story = {
   },
 };
 
+/** AC-0369 (#1101, epic #998): Preflight shows the adapter lookup for each
+ *  unsupported or partial cell — verified coverage, a declared plugin whose
+ *  gate has not passed, or no declaring source — and the request lane points
+ *  at the current tracker. */
+export const AdapterLookupStatuses: Story = {
+  args: {
+    report: {
+      ...REPORT,
+      adapter_lookup: [
+        {
+          cell: {
+            language: 'Rust',
+            framework: 'core',
+            capability: 'calls',
+            support: 'unsupported',
+            note: 'no installed adapter covers this language',
+          },
+          status: 'none',
+        },
+        {
+          cell: {
+            language: 'Rust',
+            framework: 'core',
+            capability: 'imports',
+            support: 'unsupported',
+            note: 'no installed adapter covers this language',
+          },
+          status: 'declared_unverified',
+          sources: [{ kind: 'plugin', id: 'rust-lite', version: 'sha256:ab12' }],
+        },
+        {
+          cell: {
+            language: 'TypeScript/JavaScript',
+            framework: 'react',
+            capability: 'routes',
+            support: 'partial',
+            note: 'lazy routes',
+          },
+          status: 'covered_by',
+          sources: [{ kind: 'builtin', adapter: 't0.adapter-ts' }],
+        },
+      ],
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Adapter lookup')).toBeInTheDocument();
+    await expect(canvas.getByText(/covered by t0\.adapter-ts/)).toBeInTheDocument();
+    await expect(
+      canvas.getByText(/declared by plugin rust-lite, conformance gate not passed/),
+    ).toBeInTheDocument();
+    await expect(
+      canvas.getByText(/no installed adapter declares this cell/),
+    ).toBeInTheDocument();
+    await expect(canvas.getByRole('link', { name: 'Request this adapter' })).toHaveAttribute(
+      'href',
+      expect.stringMatching(/^https:\/\/github\.com\/true-line\/cartograph\/issues\/new\?/),
+    );
+  },
+};
+
 export const CleanTree: Story = {
   args: {
     report: {
@@ -133,8 +194,10 @@ export const CleanTree: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    // Both classification cards render their honest empty state.
+    // Both classification cards render their honest empty state, and a
+    // report with no looked-up cells shows no lookup card.
     await expect(canvas.getAllByText('None detected.')).toHaveLength(2);
+    await expect(canvas.queryByText('Adapter lookup')).not.toBeInTheDocument();
     await expect(canvas.getByText('No framework markers detected.')).toBeInTheDocument();
   },
 };
