@@ -15,7 +15,7 @@ fn layout(connection: &Connection) -> Vec<(String, String, String)> {
 // AC-0294: production migration rolls back metadata DDL and review objects together.
 #[test]
 fn finding_review_migration_faults_restore_complete_v1_layout() {
-    for stage in [1, 2, 3, 4, 5] {
+    for stage in [1, 2, 3, 4, 5, 6] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
         let mut store = JobStore::open(&path).unwrap();
@@ -74,7 +74,7 @@ fn finding_review_migration_refuses_partial_and_unknown_versions() {
     for sql in [
         "DROP TRIGGER investigation_finding_reviews_no_delete",
         "CREATE TABLE investigation_finding_review_extra (x TEXT) STRICT",
-        "PRAGMA ignore_check_constraints=ON; UPDATE investigation_meta SET version=4",
+        "PRAGMA ignore_check_constraints=ON; UPDATE investigation_meta SET version=5",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
@@ -124,7 +124,7 @@ fn finding_review_migration_preserves_supported_optional_extensions() {
 // AC-0323: every v2 rebuild failure leaves the supported old store intact.
 #[test]
 fn mcp_namespace_migration_faults_preserve_v2_and_reject_old_layout_readers() {
-    for point in [3, 4, 5] {
+    for point in [3, 4, 5, 6] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
         let mut store = JobStore::open(&path).unwrap();

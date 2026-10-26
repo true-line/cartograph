@@ -12,6 +12,8 @@ mod admission_contract;
 mod admission_journal;
 #[path = "investigations/admission_transition.rs"]
 mod admission_transition;
+#[path = "investigations/chat.rs"]
+mod chat;
 #[path = "investigations/completion.rs"]
 mod completion;
 pub(crate) use completion::NextPromptFinish;
@@ -728,6 +730,7 @@ impl JobStore {
         } else {
             save_task(&tx, &record, 0, true)?;
         }
+        chat::insert_dispatch_chat(&tx, &record)?;
         check_task_capacity(&tx, &id, false)?;
         tx.commit()?;
         Ok(InvestigationStart {

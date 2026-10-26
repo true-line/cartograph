@@ -150,10 +150,17 @@ impl JobStore {
                             &authenticated.core.step,
                         )?;
                         let body = encode(&result, MAX_RESULT_BYTES)?;
+                        let result_hash = core_prov::content_hash(&body);
                         one(tx.execute(
                             "INSERT INTO investigation_results VALUES (?1,?2,?3)",
-                            params![id, body, core_prov::content_hash(&body)],
+                            params![id, body, result_hash],
                         )?)?;
+                        super::chat::insert_result_reference(
+                            &tx,
+                            &id,
+                            &result.result_id,
+                            &result_hash,
+                        )?;
                         persist_response(
                             &tx,
                             &mut task,

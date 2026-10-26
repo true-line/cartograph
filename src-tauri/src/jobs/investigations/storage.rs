@@ -46,10 +46,11 @@ fn version_two_schema() -> Vec<(String, String, String)> {
 }
 
 const META_V3: &str = "CREATE TABLE investigation_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=3), namespace TEXT NOT NULL) STRICT";
+const META_V4: &str = "CREATE TABLE investigation_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=4), namespace TEXT NOT NULL) STRICT";
 const MCP_CLIENTS_V3: &str = "CREATE TABLE investigation_mcp_clients (id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=32), created_at TEXT NOT NULL) STRICT";
 const TASKS_V3: &str = "CREATE TABLE investigation_tasks (ordinal INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, nonce TEXT NOT NULL, request_namespace TEXT NOT NULL DEFAULT 'app', conversation_id TEXT NOT NULL, job_id INTEGER NOT NULL UNIQUE, revision INTEGER NOT NULL CHECK(revision>=0), live INTEGER NOT NULL CHECK(live IN (0,1)), record BLOB NOT NULL, record_hash TEXT NOT NULL, UNIQUE(request_namespace,nonce)) STRICT";
 
-fn schema() -> Vec<(String, String, String)> {
+fn version_three_schema() -> Vec<(String, String, String)> {
     let mut objects = version_two_schema();
     objects[0].2 = META_V3.into();
     objects
@@ -62,6 +63,13 @@ fn schema() -> Vec<(String, String, String)> {
         "table".into(),
         MCP_CLIENTS_V3.into(),
     ));
+    objects
+}
+
+fn schema() -> Vec<(String, String, String)> {
+    let mut objects = version_three_schema();
+    objects[0].2 = META_V4.into();
+    objects.extend(super::chat::schema());
     objects
 }
 
@@ -133,7 +141,7 @@ fn initialize_transaction(
         }
         one(tx.execute("INSERT INTO investigation_coverage_meta VALUES (1,1)", [])?)?;
     }
-    let version: i64 = tx.query_row(
+    let mut version: i64 = tx.query_row(
         "SELECT version FROM investigation_meta WHERE singleton=1",
         [],
         |r| r.get(0),
@@ -153,7 +161,7 @@ fn initialize_transaction(
             tx.execute_batch(&sql)?;
         }
         hook(2)?;
-    } else if version != 2 && version != 3 {
+    } else if version != 2 && version != 3 && version != 4 {
         return Err(InvestigationStoreError::Invalid);
     }
     if version <= 2 {
@@ -172,6 +180,21 @@ fn initialize_transaction(
             [&namespace.value],
         )?)?;
         hook(5)?;
+        version = 3;
+    }
+    if version == 3 {
+        validate_version_schema(&tx, 3)?;
+        validate_metadata(&tx, namespace, 3)?;
+        tx.execute_batch("DROP TABLE investigation_meta")?;
+        tx.execute_batch(META_V4)?;
+        one(tx.execute(
+            "INSERT INTO investigation_meta VALUES (1,4,?1)",
+            [&namespace.value],
+        )?)?;
+        for (_, _, sql) in super::chat::schema() {
+            tx.execute_batch(&sql)?;
+        }
+        hook(6)?;
     }
     validate(&tx, namespace)?;
     hook(3)?;
@@ -193,10 +216,10 @@ pub(super) fn validate(
 ) -> Result<(), InvestigationStoreError> {
     execution::validate(connection, namespace)?;
     validate_archive_schema(connection)?;
-    validate_metadata(connection, namespace, 3)
+    validate_metadata(connection, namespace, 4)
 }
 
-/// Logical owners in version3 schema validation, including both optional
+/// Logical owners in version-3-and-later schema validation, including both optional
 /// namespaces. Trusted DDL construction is bounded independently of stored SQL.
 #[cfg(unix)]
 pub(super) fn archive_schema_workspace() -> Option<usize> {
@@ -237,7 +260,7 @@ pub(super) fn archive_schema_workspace() -> Option<usize> {
 pub(super) fn validate_archive_schema(
     connection: &Connection,
 ) -> Result<(), InvestigationStoreError> {
-    validate_version_schema(connection, 3)
+    validate_version_schema(connection, 4)
 }
 
 fn validate_version_schema(
@@ -248,6 +271,8 @@ fn validate_version_schema(
         version_one_schema()
     } else if version == 2 {
         version_two_schema()
+    } else if version == 3 {
+        version_three_schema()
     } else {
         schema()
     };
@@ -347,12 +372,23 @@ pub(super) fn decode<T: serde::de::DeserializeOwned + Serialize>(
     bytes: &[u8],
     hash: &str,
 ) -> Result<T, InvestigationStoreError> {
+    decode_bounded(bytes, hash, MAX_RECORD_BYTES)
+}
+
+pub(super) fn decode_bounded<T: serde::de::DeserializeOwned + Serialize>(
+    bytes: &[u8],
+    hash: &str,
+    maximum: usize,
+) -> Result<T, InvestigationStoreError> {
+    if bytes.len() > maximum {
+        return Err(InvestigationStoreError::Invalid);
+    }
     if !hash_valid(hash) || core_prov::content_hash(bytes) != hash {
         return Err(InvestigationStoreError::Invalid);
     }
     let text = std::str::from_utf8(bytes).map_err(|_| InvestigationStoreError::Invalid)?;
     let value = decode_record(text)?;
-    if encode(&value, MAX_RECORD_BYTES)? != bytes {
+    if encode(&value, maximum)? != bytes {
         return Err(InvestigationStoreError::Invalid);
     }
     Ok(value)
@@ -1206,10 +1242,29 @@ pub(super) fn actual_stored_bytes(
     id: Option<&str>,
 ) -> Result<usize, InvestigationStoreError> {
     super::read_reservations::with_compatibility_scope(connection, |reads| {
-        stored_bytes_with_reads(connection, id, reads)?
-            .checked_sub(reads.capacity_charge(id)?.claims)
+        let occupied = stored_bytes_with_reads(connection, id, reads)?;
+        let claims = reads.capacity_charge(id)?.claims;
+        let chat_reservation = unspent_chat_reference_reservation(connection, id)?;
+        occupied
+            .checked_sub(claims)
+            .and_then(|bytes| bytes.checked_sub(chat_reservation))
             .ok_or(InvestigationStoreError::Invalid)
     })
+}
+
+fn unspent_chat_reference_reservation(
+    connection: &Connection,
+    id: Option<&str>,
+) -> Result<usize, InvestigationStoreError> {
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM investigation_chats c JOIN investigation_tasks t ON t.id=c.task_id WHERE (?1 IS NULL OR c.task_id=?1) AND t.live=1 AND NOT EXISTS (SELECT 1 FROM investigation_chat_messages m WHERE m.chat_id=c.id AND m.ordinal=1)",
+        [id],
+        |row| row.get(0),
+    )?;
+    usize::try_from(count)
+        .ok()
+        .and_then(|count| count.checked_mul(super::chat::RESULT_REFERENCE_SLOT_BYTES))
+        .ok_or(InvestigationStoreError::Capacity)
 }
 
 pub(super) fn stored_bytes_with_reads(
@@ -1253,6 +1308,23 @@ pub(super) fn stored_bytes_with_reads(
             .checked_add(usize::try_from(sum).map_err(|_| InvestigationStoreError::Invalid)?)
             .ok_or(InvestigationStoreError::Capacity)?;
     }
+    let chat_metadata: i64 = connection.query_row(
+        "SELECT coalesce(sum(length(CAST(id AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(created_at AS BLOB))+256),0) FROM investigation_chats WHERE (?1 IS NULL OR task_id=?1)",
+        [id],
+        |row| row.get(0),
+    )?;
+    let chat_messages: i64 = connection.query_row(
+        "SELECT coalesce(sum(length(CAST(id AS BLOB))+length(CAST(chat_id AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(kind AS BLOB))+length(CAST(body AS BLOB))+length(CAST(body_hash AS BLOB))+256),0) FROM investigation_chat_messages WHERE (?1 IS NULL OR task_id=?1)",
+        [id],
+        |row| row.get(0),
+    )?;
+    bytes = bytes
+        .checked_add(usize::try_from(chat_metadata).map_err(|_| InvestigationStoreError::Invalid)?)
+        .and_then(|bytes| bytes.checked_add(usize::try_from(chat_messages).ok()?))
+        .and_then(|bytes| {
+            bytes.checked_add(unspent_chat_reference_reservation(connection, id).ok()?)
+        })
+        .ok_or(InvestigationStoreError::Capacity)?;
     // The optional journal is lazily created; legacy stores keep identical
     // accounting without creating or migrating its private schema.
     let journal_bytes = super::staged::journal_bytes(connection, id)?;
@@ -1591,9 +1663,6 @@ pub(super) fn insert_body(
 /// Construct an actual old layout for migration fixtures, never for runtime.
 #[cfg(test)]
 pub(super) fn version_two_fixture(connection: &Connection) {
-    connection
-        .execute_batch("DROP TABLE investigation_mcp_clients")
-        .unwrap();
     let foreign_keys: bool = connection
         .pragma_query_value(None, "foreign_keys", |r| r.get(0))
         .unwrap();
@@ -1602,6 +1671,11 @@ pub(super) fn version_two_fixture(connection: &Connection) {
         .unwrap();
     connection
         .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE investigation_chat_messages; DROP TABLE investigation_chats; DROP TABLE investigation_mcp_clients",
+        )
         .unwrap();
     connection
         .pragma_update(None, "legacy_alter_table", true)
@@ -1637,6 +1711,34 @@ pub(super) fn version_two_fixture(connection: &Connection) {
             "INSERT INTO investigation_meta VALUES (1,2,?1)",
             [&namespace],
         )
+        .unwrap();
+}
+
+#[cfg(test)]
+pub(super) fn version_three_fixture(connection: &Connection) {
+    let foreign_keys: bool = connection
+        .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+        .unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    let namespace: String = connection
+        .query_row("SELECT namespace FROM investigation_meta", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    connection
+        .execute_batch("DROP TABLE investigation_chat_messages; DROP TABLE investigation_chats; DROP TABLE investigation_meta")
+        .unwrap();
+    connection.execute_batch(META_V3).unwrap();
+    connection
+        .execute(
+            "INSERT INTO investigation_meta VALUES (1,3,?1)",
+            [&namespace],
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", foreign_keys)
         .unwrap();
 }
 
