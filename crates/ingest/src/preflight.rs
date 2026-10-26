@@ -178,6 +178,12 @@ pub const INSTALLED_ADAPTERS: &[AdapterInfo] = &[
         covers: "imports, call graph, net/http, chi and gin endpoint registrations",
     },
     AdapterInfo {
+        id: "t0.adapter-rust",
+        language: "Rust",
+        extensions: &["rs"],
+        covers: "imports, call graph",
+    },
+    AdapterInfo {
         id: "t0.adapter-java",
         language: "Java",
         extensions: &["java"],
@@ -253,7 +259,6 @@ fn uncovered_language(extension: &str) -> Option<&'static str> {
         "rb" => Some("Ruby"),
         "cs" => Some("C#"),
         "php" => Some("PHP"),
-        "rs" => Some("Rust"),
         "wasm" => Some("WebAssembly"),
         _ => None,
     }
@@ -852,7 +857,13 @@ mod tests {
             .iter()
             .find(|l| l.language == "Rust")
             .unwrap();
-        assert!(rust.adapter.is_none() && rust.coverage.is_empty());
+        assert_eq!(rust.adapter.as_deref(), Some("t0.adapter-rust"));
+        assert!(rust.coverage.iter().all(|cell| cell.language == "Rust"));
+        assert!(rust.coverage.iter().any(|cell| (
+            cell.framework.as_str(),
+            cell.capability.as_str()
+        ) == ("core", "imports")
+            && cell.support == crate::matrix::Support::Supported));
     }
 
     #[test]

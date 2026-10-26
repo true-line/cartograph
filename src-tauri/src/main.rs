@@ -86,6 +86,7 @@ struct RepoExtractionCache {
     ts: adapters_lang_ts::IncrementalCache,
     python: adapters_lang_python::IncrementalCache,
     go: adapters_lang_go::IncrementalCache,
+    rust: adapters_lang_rust::IncrementalCache,
     java: adapters_lang_java::IncrementalCache,
     kotlin: adapters_lang_kotlin::IncrementalCache,
     tf: iac::IncrementalCache,
@@ -228,6 +229,7 @@ struct LayerBreakdown {
     ts: LayerSummary,
     python: LayerSummary,
     go: LayerSummary,
+    rust: LayerSummary,
     java: LayerSummary,
     kotlin: LayerSummary,
     tf: LayerSummary,
@@ -243,6 +245,7 @@ impl LayerBreakdown {
         self.ts.add(other.ts);
         self.python.add(other.python);
         self.go.add(other.go);
+        self.rust.add(other.rust);
         self.java.add(other.java);
         self.kotlin.add(other.kotlin);
         self.tf.add(other.tf);
@@ -256,6 +259,7 @@ impl LayerBreakdown {
         self.ts.files
             + self.python.files
             + self.go.files
+            + self.rust.files
             + self.java.files
             + self.kotlin.files
             + self.tf.files
@@ -1231,6 +1235,7 @@ fn repo_coverage(
             ("t0.webextension", count(&layers.webext)),
             ("t0.adapter-python", count(&layers.python)),
             ("t0.adapter-go", count(&layers.go)),
+            ("t0.adapter-rust", count(&layers.rust)),
             ("t0.adapter-java", count(&layers.java)),
             ("t0.adapter-kotlin", count(&layers.kotlin)),
             ("t0.iac-terraform", count(&layers.tf)),
@@ -1607,6 +1612,32 @@ fn extract_tree_with_registries(
         };
         extraction.nodes.extend(go.nodes);
         extraction.edges.extend(go.edges);
+
+        let rust_id = adapters_lang_rust::SourceId { repo, commit };
+        let mut rust_progress = |path: &str| on_file(&format!("Reading Rust sources — {path}"));
+        let (rust, stats) = adapters_lang_rust::extract_dir_incremental_with_progress(
+            root,
+            &rust_id,
+            &mut cache.rust,
+            &mut rust_progress,
+        )
+        .map_err(|error| error.to_string())?;
+        delta.add(
+            stats.recomputed_files,
+            stats.reused_files,
+            stats.deleted_files,
+        );
+        layers.rust = LayerSummary {
+            files: rust
+                .nodes
+                .iter()
+                .filter(|node| node.label == "File" && node.props.get("placeholder").is_none())
+                .count() as u64,
+            nodes: distinct_node_count(&rust.nodes),
+            edges: distinct_edge_count(&rust.edges),
+        };
+        extraction.nodes.extend(rust.nodes);
+        extraction.edges.extend(rust.edges);
     }
     // Java and Kotlin carry server routes and client calls (Retrofit), so a
     // client-only Android or JVM repository runs them too (#757 review).
@@ -3380,6 +3411,7 @@ fn record_ingest_metrics(
         ("t0.adapter-ts", layers.ts.files),
         ("t0.adapter-python", layers.python.files),
         ("t0.adapter-go", layers.go.files),
+        ("t0.adapter-rust", layers.rust.files),
         ("t0.adapter-java", layers.java.files),
         ("t0.adapter-kotlin", layers.kotlin.files),
         ("t0.iac-terraform", layers.tf.files),
