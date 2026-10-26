@@ -117,12 +117,19 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
       <fieldset disabled={locked}><legend>Specialist</legend>
         <div className="investigation-specialists">{state.catalog?.specialists.filter((specialist) => profile === 'investigation-v2' ? isExpandedSpecialist(specialist.id) && Boolean(investigationPolicy(state.catalog, profile, specialist.id)) : !isExpandedSpecialist(specialist.id)).map((specialist) =>
           <label key={specialist.id} className={`investigation-specialist${specialistId === specialist.id ? ' selected' : ''}`}>
-            <input type="radio" name="specialist" checked={specialistId === specialist.id} onChange={() => setSpecialistId(specialist.id)} />
+            <input type="radio" name="specialist" checked={specialistId === specialist.id}
+              onChange={() => setSpecialistId(specialist.id)} />
             <span><strong>{specialist.name}</strong><span className="muted">{specialist.purpose}</span>
-              <code>{specialist.id} · T3 / InferredWeak</code>
-            <SpecialistTaskActivity specialistId={specialist.id} activity={activity} complete={!activityIncomplete} /></span>
+              <code>{specialist.id} · T3 / InferredWeak</code></span>
           </label>)}</div>
       </fieldset>
+      {state.catalog && <section className="specialist-activity-list" aria-label="Active specialist tasks">
+        {state.catalog.specialists.map((specialist) => <section key={specialist.id} className="specialist-activity-group">
+          <h3>{specialist.name} <code>{specialist.id}</code></h3>
+          <SpecialistTaskActivity specialistId={specialist.id} activity={activity} complete={!activityIncomplete}
+            onOpen={(id) => { void state.open(id); }} />
+        </section>)}
+      </section>}
       {activityIncomplete && <p role="status">The active task list is incomplete. No idle status is inferred.</p>}
       {state.catalog === null && activity.status !== 'loading' && <p role="status">The catalog is unavailable; activity cannot be matched to exact specialist versions.</p>}
       {state.catalog && !state.catalogLoading && !selectedSpecialistAvailable && <p role="status">
@@ -372,39 +379,47 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
   </section>;
 }
 
-function SpecialistTaskActivity({ specialistId, activity, complete }: {
+function SpecialistTaskActivity({ specialistId, activity, complete, onOpen }: {
   specialistId: string;
   activity: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error' | 'refreshing'>;
   complete: boolean;
+  onOpen: (investigationId: string) => void;
 }) {
+  const tasks = activity.tasks.filter((task) => task.summary.specialist_id === specialistId);
   if (activity.refreshing) {
-    const tasks = activity.tasks.filter((task) => task.summary.specialist_id === specialistId);
-    if (tasks.length === 0) return <span className="muted">Checking for active tasks…</span>;
-    return <span className="muted">
-      {tasks.map(activityRowLabel).join(', ')} · {complete ? 'refreshing activity' : 'activity incomplete · refreshing'}
-    </span>;
+    if (tasks.length === 0) return <p className="muted">Checking for active tasks…</p>;
+    return <div className="specialist-task-activity">
+      {tasks.map((task) => <SpecialistTaskRow key={task.summary.investigation_id} task={task} onOpen={onOpen} />)}
+      <p className="muted">{complete ? 'Refreshing activity' : 'Activity incomplete · refreshing'}</p>
+    </div>;
   }
   if (activity.status === 'idle' || activity.status === 'loading') {
-    return <span className="muted">{activity.status === 'idle' ? 'Activity not checked' : 'Checking activity…'}</span>;
+    return <p className="muted">{activity.status === 'idle' ? 'Activity not checked' : 'Checking activity…'}</p>;
   }
-  if (activity.status === 'preview') return <span className="muted">Activity shown in desktop app</span>;
-  if (activity.status === 'error') return <span className="error-text">Activity unknown</span>;
+  if (activity.status === 'preview') return <p className="muted">Activity shown in desktop app</p>;
+  if (activity.status === 'error') return <p className="error-text">Activity unknown</p>;
 
-  const tasks = activity.tasks.filter((task) => task.summary.specialist_id === specialistId);
-  if (!complete) return <span className="muted">
-    {tasks.length > 0 ? `${tasks.map(activityRowLabel).join(', ')} · activity incomplete` : 'Activity incomplete; no idle status inferred'}
-  </span>;
-  return <span className="muted">
-    {tasks.length === 0 ? 'No active tasks' : tasks.map(activityRowLabel).join(', ')}
-  </span>;
+  if (!complete) return <div className="specialist-task-activity">
+    {tasks.map((task) => <SpecialistTaskRow key={task.summary.investigation_id} task={task} onOpen={onOpen} />)}
+    <p className="muted">Activity incomplete; no idle status inferred</p>
+  </div>;
+  if (tasks.length === 0) return <p className="muted">No active tasks</p>;
+  return <div className="specialist-task-activity">
+    {tasks.map((task) => <SpecialistTaskRow key={task.summary.investigation_id} task={task} onOpen={onOpen} />)}
+  </div>;
 }
 
 const ACTIVITY_STATUS_LABELS = {
   queued: 'Queued', preparing: 'Preparing context', running: 'Running', awaiting_consent: 'Awaiting cloud consent',
 } as const;
 
-function activityRowLabel(task: SpecialistActivityItem) {
+function SpecialistTaskRow({ task, onOpen }: { task: SpecialistActivityItem; onOpen: (investigationId: string) => void }) {
   const summary = task.summary;
   const status = `${ACTIVITY_STATUS_LABELS[summary.status as keyof typeof ACTIVITY_STATUS_LABELS] ?? 'Unrecognized status'}${summary.cancel_requested ? ' · Cancellation requested' : ''}`;
-  return `${status} · Saved provider: ${task.saved_provider.mode} / ${task.saved_provider.provider_id} · ${task.saved_provider.model}`;
+  return <article className="specialist-task-row">
+    <p className="specialist-task-question">{summary.question}</p>
+    <p className="muted">{status} · Saved provider: {task.saved_provider.mode} / {task.saved_provider.provider_id} · {task.saved_provider.model}</p>
+    <button type="button" className="secondary-button" aria-label={`Open investigation: ${summary.question}`}
+      onClick={() => onOpen(summary.investigation_id)}>Open investigation</button>
+  </article>;
 }
