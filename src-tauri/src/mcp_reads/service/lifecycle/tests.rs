@@ -19,6 +19,24 @@ fn policy() -> Policy {
     super::super::tests::policy()
 }
 
+fn task_fixture() -> (tauri::App<tauri::test::MockRuntime>, Policy) {
+    use tauri::Manager;
+    let root = tempfile::tempdir().unwrap();
+    let app = app();
+    app.manage(crate::registered_source_tests::app_state(root.path()));
+    let mut policy = policy();
+    policy.worker = crate::mcp_reads::worker::tests::task_limits(&app.state::<crate::AppState>());
+    let transport =
+        crate::mcp_reads::reservation::TransportReservation::for_limits(policy.transport)
+            .unwrap()
+            .activation_bytes;
+    policy.aggregate.max_reserved_bytes = nz(transport
+        .checked_add(policy.worker.reserved_bytes.get())
+        .unwrap());
+    app.manage(root);
+    (app, policy)
+}
+
 // AC-0320/0321: host validation precedes endpoint creation; no task is dispatched.
 #[test]
 fn host_activation_validates_principal_and_revokes_before_cleanup() {
@@ -26,14 +44,14 @@ fn host_activation_validates_principal_and_revokes_before_cleanup() {
     let parent = tempfile::tempdir().unwrap();
     let mut store = crate::jobs::JobStore::open(dir.path().join("jobs.sqlite")).unwrap();
     let client = store.create_mcp_client(nz(1)).unwrap();
-    let app = app();
+    let (app, task_policy) = task_fixture();
     let service = Service::default();
     assert_eq!(
         service
             .enable_selected(
                 app.handle().clone(),
                 parent.path(),
-                policy(),
+                task_policy,
                 Some((&store, McpClientId::from_host_bytes([0; 16]), nz(1)))
             )
             .unwrap_err(),
@@ -45,7 +63,7 @@ fn host_activation_validates_principal_and_revokes_before_cleanup() {
             .enable_selected(
                 app.handle().clone(),
                 parent.path(),
-                policy(),
+                task_policy,
                 Some((&store, client.clone(), nz(1))),
             )
             .unwrap();
@@ -95,14 +113,14 @@ fn host_rotation_preserves_selection_without_restoring_authority() {
     let parent = tempfile::tempdir().unwrap();
     let mut store = crate::jobs::JobStore::open(dir.path().join("jobs.sqlite")).unwrap();
     let client = store.create_mcp_client(nz(1)).unwrap();
-    let app = app();
+    let (app, task_policy) = task_fixture();
     let service = Service::default();
     tauri::async_runtime::block_on(async {
         let old = service
             .enable_selected(
                 app.handle().clone(),
                 parent.path(),
-                policy(),
+                task_policy,
                 Some((&store, client.clone(), nz(1))),
             )
             .unwrap();
@@ -134,7 +152,7 @@ fn host_rotation_preserves_selection_without_restoring_authority() {
             assert!(tasks.owner_snapshot().unwrap().is_none());
             assert!(tasks.session().with_grant(|_, _| ()).is_err());
         }
-        let limits = policy().transport;
+        let limits = task_policy.transport;
         assert!(
             old_record
                 .connect(
