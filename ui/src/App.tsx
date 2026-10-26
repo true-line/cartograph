@@ -265,7 +265,7 @@ export default function App() {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
       let state = useInvestigationStore.getState();
-      if (!state.historyLoading && state.history.some(investigationIsActive)) await state.loadHistory();
+      if (!state.historyLoading && (state.historyActiveOnly || state.history.some(investigationIsActive))) await state.loadHistory();
       if (disposed) return;
       state = useInvestigationStore.getState();
       const summary = state.detail ?? state.history.find((item) => item.investigation_id === state.selectedId);

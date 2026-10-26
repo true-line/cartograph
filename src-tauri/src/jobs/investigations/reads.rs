@@ -8,6 +8,8 @@ struct HistoryCursor {
     conversation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     search_hash: Option<String>,
+    #[serde(default)]
+    active_only: bool,
     high: i64,
     before: i64,
 }
@@ -18,7 +20,7 @@ impl JobStore {
         conversation_id: Option<&str>,
         cursor: Option<&str>,
     ) -> Result<InvestigationPage, InvestigationStoreError> {
-        self.investigation_history_filtered(conversation_id, None, cursor)
+        self.investigation_history_filtered(conversation_id, None, false, cursor)
     }
 
     pub(crate) fn search_investigation_history(
@@ -26,36 +28,58 @@ impl JobStore {
         query: &str,
         cursor: Option<&str>,
     ) -> Result<InvestigationPage, InvestigationStoreError> {
-        if query.len() > agents::investigation::MAX_QUESTION_BYTES {
-            return Err(InvestigationStoreError::Invalid);
-        }
-        let query = query.trim_matches(|character: char| {
-            matches!(
-                character,
-                '\t' | '\n' | '\u{000b}' | '\u{000c}' | '\r' | ' '
-            )
-        });
-        let query = if query.is_empty() {
-            None
-        } else {
-            let mut normalized = query.as_bytes().to_vec();
-            normalized.make_ascii_lowercase();
-            Some(normalized)
-        };
-        self.investigation_history_filtered(None, query.as_deref(), cursor)
+        self.investigation_history_selection(Some(query), false, cursor)
+    }
+
+    pub(crate) fn investigation_history_selection(
+        &self,
+        search: Option<&str>,
+        active_only: bool,
+        cursor: Option<&str>,
+    ) -> Result<InvestigationPage, InvestigationStoreError> {
+        let query = search
+            .map(|query| {
+                if query.len() > agents::investigation::MAX_QUESTION_BYTES {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+                let query = query.trim_matches(|character: char| {
+                    matches!(
+                        character,
+                        '\t' | '\n' | '\u{000b}' | '\u{000c}' | '\r' | ' '
+                    )
+                });
+                let query = if query.is_empty() {
+                    None
+                } else {
+                    let mut normalized = query.as_bytes().to_vec();
+                    normalized.make_ascii_lowercase();
+                    Some(normalized)
+                };
+                Ok(query)
+            })
+            .transpose()?
+            .flatten();
+        self.investigation_history_filtered(None, query.as_deref(), active_only, cursor)
     }
 
     fn investigation_history_filtered(
         &self,
         conversation_id: Option<&str>,
         query: Option<&[u8]>,
+        active_only: bool,
         cursor: Option<&str>,
     ) -> Result<InvestigationPage, InvestigationStoreError> {
         if conversation_id.is_some_and(|id| !id_valid(id)) {
             return Err(InvestigationStoreError::Invalid);
         }
         let search_hash = query.map(core_prov::content_hash);
-        let cursor_version = if search_hash.is_some() { 2 } else { 1 };
+        let cursor_version = if active_only {
+            3
+        } else if search_hash.is_some() {
+            2
+        } else {
+            1
+        };
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let selection = match cursor {
@@ -68,6 +92,7 @@ impl JobStore {
                     || cursor.namespace != self.namespace.value
                     || cursor.conversation.as_deref() != conversation_id
                     || cursor.search_hash != search_hash
+                    || cursor.active_only != active_only
                     || cursor.high < 0
                     || cursor.before <= 0
                     || cursor.before > cursor.high
@@ -87,6 +112,7 @@ impl JobStore {
                     namespace: self.namespace.value.clone(),
                     conversation: conversation_id.map(str::to_owned),
                     search_hash: search_hash.clone(),
+                    active_only,
                     high,
                     before: high
                         .checked_add(1)
@@ -94,11 +120,15 @@ impl JobStore {
                 }
             }
         };
-        let candidate_limit = if query.is_some() { MAX_TASKS + 1 } else { 51 };
+        let candidate_limit = if query.is_some() || active_only {
+            MAX_TASKS + 1
+        } else {
+            51
+        };
         let rows=tx.prepare("SELECT ordinal,CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE ordinal<=?1 AND ordinal<?2 AND (?3 IS NULL OR conversation_id=?3) ORDER BY ordinal DESC LIMIT ?4")?
             .query_map(params![selection.high,selection.before,conversation_id,i64::try_from(candidate_limit).map_err(|_| InvestigationStoreError::Capacity)?],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<String>>(1)?)))?
             .collect::<Result<Vec<_>,_>>()?;
-        if query.is_some() && rows.len() > MAX_TASKS {
+        if (query.is_some() || active_only) && rows.len() > MAX_TASKS {
             return Err(InvestigationStoreError::Capacity);
         }
         let mut items = Vec::new();
@@ -111,17 +141,20 @@ impl JobStore {
                 return Err(InvestigationStoreError::Invalid);
             }
             let task = load_execution_task(&tx, &id)?;
-            if let Some(query) = query {
-                if !history_summary_matches(&task.detail.summary, query)? {
-                    if items.len() < 50 {
-                        before = ordinal;
-                    }
-                    continue;
+            let summary = &task.detail.summary;
+            let query_matches = query
+                .map(|query| history_summary_matches(summary, query))
+                .transpose()?
+                .unwrap_or(true);
+            if (active_only && !investigation_status_is_active(summary.status)) || !query_matches {
+                if items.len() < 50 {
+                    before = ordinal;
                 }
-                if items.len() == 50 {
-                    more = true;
-                    break;
-                }
+                continue;
+            }
+            if query.is_some() && items.len() == 50 {
+                more = true;
+                break;
             }
             let size = encode(&task.detail.summary, 4096)?.len() + 1;
             if items.len() == 50 || size > remaining {
@@ -402,6 +435,18 @@ impl JobStore {
         tx.commit()?;
         Ok(references)
     }
+}
+
+pub(super) fn investigation_status_is_active(
+    status: agents::investigation::InvestigationStatus,
+) -> bool {
+    matches!(
+        status,
+        agents::investigation::InvestigationStatus::Queued
+            | agents::investigation::InvestigationStatus::Preparing
+            | agents::investigation::InvestigationStatus::Running
+            | agents::investigation::InvestigationStatus::AwaitingConsent
+    )
 }
 
 fn history_summary_matches(

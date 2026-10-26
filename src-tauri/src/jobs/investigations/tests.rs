@@ -1110,6 +1110,187 @@ fn investigation_history_search_cursor_binds_term_and_fixed_high_water() {
 }
 
 #[test]
+fn investigation_active_history_finds_older_active_work_and_excludes_terminal() {
+    // AC-0372: active selection scans persisted rows beyond the ordinary first
+    // page and uses each row's current durable status.
+    let mut fixture = Fixture::new();
+    let active = fixture
+        .store
+        .start_investigation(
+            &request("active-history-old", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap()
+        .detail
+        .summary;
+    for index in 0..60 {
+        let created = fixture
+            .store
+            .start_investigation(
+                &request(
+                    &format!("active-history-terminal:{index}"),
+                    InvestigationProviderMode::Local,
+                ),
+                Some(&provider(InvestigationProviderMode::Local)),
+            )
+            .unwrap()
+            .detail;
+        fixture
+            .store
+            .cancel_investigation(&created.summary.investigation_id)
+            .unwrap();
+    }
+
+    let ordinary = fixture.store.investigation_history(None, None).unwrap();
+    assert_eq!(ordinary.items.len(), 50);
+    assert!(
+        ordinary
+            .items
+            .iter()
+            .all(|item| item.investigation_id != active.investigation_id)
+    );
+
+    let active_page = fixture
+        .store
+        .investigation_history_selection(None, true, None)
+        .unwrap();
+    assert_eq!(active_page.items.len(), 1);
+    assert_eq!(
+        active_page.items[0].investigation_id,
+        active.investigation_id
+    );
+    assert_eq!(active_page.items[0].status, InvestigationStatus::Queued);
+    assert!(active_page.next_cursor.is_none());
+}
+
+#[test]
+fn investigation_active_history_cursor_binds_selection_and_refreshes_current_status() {
+    // AC-0372: active and ordinary cursors cannot cross selections, and the
+    // query reflects current status after a task becomes terminal.
+    let mut fixture = Fixture::new();
+    let active_id = fixture
+        .store
+        .start_investigation(
+            &request("active-history-oldest", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap()
+        .detail
+        .summary
+        .investigation_id;
+    for index in 0..51 {
+        let created = fixture
+            .store
+            .start_investigation(
+                &request(
+                    &format!("active-history-page:{index}"),
+                    InvestigationProviderMode::Local,
+                ),
+                Some(&provider(InvestigationProviderMode::Local)),
+            )
+            .unwrap()
+            .detail;
+        fixture
+            .store
+            .cancel_investigation(&created.summary.investigation_id)
+            .unwrap();
+    }
+    let active_recent = fixture
+        .store
+        .start_investigation(
+            &request("active-history-recent", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap()
+        .detail
+        .summary
+        .investigation_id;
+    let ordinary = fixture.store.investigation_history(None, None).unwrap();
+    let ordinary_cursor = ordinary.next_cursor.unwrap();
+    assert!(
+        fixture
+            .store
+            .investigation_history_selection(None, true, Some(&ordinary_cursor))
+            .is_err()
+    );
+    let active_page = fixture
+        .store
+        .investigation_history_selection(None, true, None)
+        .unwrap();
+    assert_eq!(active_page.items.len(), 2);
+    assert_eq!(active_page.items[0].investigation_id, active_recent);
+    assert_eq!(active_page.items[1].investigation_id, active_id);
+    assert!(active_page.next_cursor.is_none());
+    let active_matching_search = fixture
+        .store
+        .investigation_history_selection(Some("EVIDENCE"), true, None)
+        .unwrap();
+    assert_eq!(active_matching_search.items.len(), 2);
+    let active_nonmatching_search = fixture
+        .store
+        .investigation_history_selection(Some("no matching question"), true, None)
+        .unwrap();
+    assert!(active_nonmatching_search.items.is_empty());
+
+    fixture.store.cancel_investigation(&active_id).unwrap();
+    let refreshed = fixture
+        .store
+        .investigation_history_selection(None, true, None)
+        .unwrap();
+    assert_eq!(refreshed.items.len(), 1);
+    assert_eq!(refreshed.items[0].investigation_id, active_recent);
+    assert!(refreshed.next_cursor.is_none());
+}
+
+#[test]
+fn investigation_active_history_keeps_cancellation_requested_until_terminal() {
+    // AC-0372: cancellation is a request while an invocation remains owned.
+    let mut fixture = Fixture::new();
+    let (id, execution) =
+        fixture.start("active-cancel-requested", InvestigationProviderMode::Local);
+    let ledger = fixture.prepare(&id, &execution, true);
+    let running = begin(&mut fixture, &id, &execution, step(&ledger, 1));
+    let requested = fixture.store.cancel_investigation(&id).unwrap();
+    assert_eq!(requested.summary.status, InvestigationStatus::Running);
+    assert!(requested.summary.cancel_requested);
+    assert_eq!(
+        fixture
+            .store
+            .investigation_history_selection(None, true, None)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.investigation_id == id)
+            .unwrap()
+            .status,
+        running.summary.status
+    );
+}
+
+#[test]
+fn investigation_active_history_status_set_excludes_interrupted_and_unknown() {
+    // AC-0372: only executing/consent-waiting states are active; uncertain
+    // and interrupted durable outcomes remain historical, not running work.
+    for status in [
+        InvestigationStatus::Queued,
+        InvestigationStatus::Preparing,
+        InvestigationStatus::Running,
+        InvestigationStatus::AwaitingConsent,
+    ] {
+        assert!(super::reads::investigation_status_is_active(status));
+    }
+    for status in [
+        InvestigationStatus::Completed,
+        InvestigationStatus::Failed,
+        InvestigationStatus::Cancelled,
+        InvestigationStatus::Interrupted,
+        InvestigationStatus::OutcomeUnknown,
+    ] {
+        assert!(!super::reads::investigation_status_is_active(status));
+    }
+}
+
+#[test]
 fn investigation_strict_storage_rejects_oversize_records_and_partial_schemas() {
     // AC-0188: SQL rejects oversized bodies before retrieving them; private
     // schema migration never CREATE-repairs a partial or future owned schema.

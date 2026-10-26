@@ -35,8 +35,12 @@ const initialComposer: InvestigationComposer = {
   scopeType: 'all', anchor: '', hops: 1, parent: null,
 };
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown']);
+const ACTIVE_HISTORY_STATUSES = new Set(['queued', 'preparing', 'running', 'awaiting_consent']);
 export function investigationIsActive(summary: InvestigationSummary): boolean {
   return !TERMINAL.has(summary.status) || summary.invocation_pending;
+}
+export function investigationIsInActiveHistory(summary: InvestigationSummary): boolean {
+  return ACTIVE_HISTORY_STATUSES.has(summary.status);
 }
 
 const LEGACY_SPECIALISTS = new Set<SpecialistId>([
@@ -187,6 +191,7 @@ export interface InvestigationState {
   catalogError: string | null;
   history: InvestigationSummary[];
   historySearch: string;
+  historyActiveOnly: boolean;
   nextCursor: string | null;
   historyLoading: boolean;
   historyError: string | null;
@@ -231,6 +236,7 @@ export interface InvestigationState {
   citationError: string | null;
   loadCatalog: () => Promise<void>;
   loadHistory: (more?: boolean) => Promise<void>;
+  selectHistoryActive: (activeOnly: boolean) => Promise<void>;
   searchHistory: (query: string) => Promise<void>;
   start: (draft: InvestigationDraft) => Promise<string | null>;
   retryStart: () => Promise<string | null>;
@@ -256,22 +262,26 @@ let locationRequest = 0;
 let choicesRequest = 0;
 
 export const useInvestigationStore = create<InvestigationState>((set, get) => {
-  const updateSummary = (summary: InvestigationSummary) => set((state) => {
-    const isSearching = Boolean(normalizedHistorySearch(state.historySearch));
-    const matches = summaryMatchesHistorySearch(summary, state.historySearch);
-    const history = isSearching && !matches
-      ? state.history.filter((item) => item.investigation_id !== summary.investigation_id)
-      : state.history.some((item) => item.investigation_id === summary.investigation_id)
-        ? mergeHistory(state.history, [summary]) : [summary, ...state.history];
-    return {
-      history,
-      // A summary that reports a result is merged into the detail only once that
-      // result is held; otherwise the next consistent refresh supplies both.
-      detail: ![4, 5, 6, 7].includes(summary.schema_version) && state.detail?.investigation_id === summary.investigation_id && summary.revision >= state.detail.revision &&
-        (!summary.has_result || state.result !== null)
-        ? { ...state.detail, ...summary } : state.detail,
-    };
-  });
+  const updateSummary = (summary: InvestigationSummary) => {
+    if (get().historyActiveOnly) ++historyRequest;
+    set((state) => {
+      const matches = (!state.historyActiveOnly || investigationIsInActiveHistory(summary)) &&
+        summaryMatchesHistorySearch(summary, state.historySearch);
+      const history = !matches
+        ? state.history.filter((item) => item.investigation_id !== summary.investigation_id)
+        : state.history.some((item) => item.investigation_id === summary.investigation_id)
+          ? mergeHistory(state.history, [summary]) : [summary, ...state.history];
+      return {
+        history,
+        // A summary that reports a result is merged into the detail only once that
+        // result is held; otherwise the next consistent refresh supplies both.
+        detail: ![4, 5, 6, 7].includes(summary.schema_version) && state.detail?.investigation_id === summary.investigation_id && summary.revision >= state.detail.revision &&
+          (!summary.has_result || state.result !== null)
+          ? { ...state.detail, ...summary } : state.detail,
+        historyLoading: state.historyActiveOnly ? false : state.historyLoading,
+      };
+    });
+  };
 
   const startRequest = async (request: StartInvestigationRequest): Promise<string | null> => {
     if (get().starting) return null;
@@ -382,7 +392,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       if (!known || message.review_revision > known.revision) void get().refreshReviews();
     },
     catalog: null, catalogLoading: false, catalogError: null,
-    history: [], historySearch: '', nextCursor: null, historyLoading: false, historyError: null,
+    history: [], historySearch: '', historyActiveOnly: false, nextCursor: null, historyLoading: false, historyError: null,
     selectedId: null, selectionGeneration: 0, detail: null, result: null, events: [],
     consent: null, consentOpen: false, loading: false, error: null,
     actionBusy: false, actionError: null, pendingStart: null, starting: false, startError: null,
@@ -539,29 +549,45 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       const current = get();
       const cursor = more ? current.nextCursor : null;
       const search = current.historySearch;
+      const activeOnly = current.historyActiveOnly;
       const normalizedSearch = normalizedHistorySearch(search);
       set({ historyLoading: true, historyError: null });
       try {
         const page = await invokeOr<InvestigationPage | null>('list_investigations', null,
-          { ...(cursor ? { cursor } : {}), ...(search ? { search } : {}) });
+          { ...(cursor ? { cursor } : {}), ...(search ? { search } : {}), ...(activeOnly ? { activeOnly: true } : {}) });
         if (!page || !Array.isArray(page.items) || page.items.length > 50 ||
             page.items.some((item) => !validSummary(item)) ||
+            (activeOnly && page.items.some((item) => !investigationIsInActiveHistory(item))) ||
             (normalizedSearch && page.items.some((item) => !summaryMatchesHistorySearch(item, normalizedSearch)))) {
           throw new Error('Invalid history.');
         }
         const incoming = page.items;
         if (request !== historyRequest) return;
-        set((state) => ({ history: more ? mergeHistory(state.history, incoming) : [
-          ...incoming.map((item) => {
+        set((state) => {
+          const exactIncoming = incoming.map((item) => {
             const saved = state.history.find((previous) => previous.investigation_id === item.investigation_id);
-            return saved && saved.revision > item.revision ? saved : item;
-          }),
-          ...state.history.filter((item) => !incoming.some((fresh) => fresh.investigation_id === item.investigation_id)),
-        ],
+            const selectedDetail = state.detail?.investigation_id === item.investigation_id ? state.detail : null;
+            const known = [saved, selectedDetail].filter((value): value is InvestigationSummary => value != null)
+              .reduce<InvestigationSummary | null>((latest, value) => !latest || value.revision > latest.revision ? value : latest, null);
+            return known && known.revision > item.revision ? known : item;
+          });
+          const refreshed = activeOnly
+            ? exactIncoming.filter((item) => investigationIsInActiveHistory(item) &&
+              summaryMatchesHistorySearch(item, state.historySearch))
+            : exactIncoming;
+          const history = more
+            ? mergeHistory(state.history, refreshed).filter((item) =>
+              (!activeOnly || investigationIsInActiveHistory(item)) && summaryMatchesHistorySearch(item, state.historySearch))
+            : activeOnly ? refreshed : [
+              ...refreshed,
+              ...state.history.filter((item) => !incoming.some((fresh) => fresh.investigation_id === item.investigation_id)),
+            ];
+          return ({ history,
         // Background first-page refresh must not discard older explicit pages
         // or move their continuation backwards while another task is active.
-        nextCursor: !more && state.history.length > page.items.length ? state.nextCursor : page.next_cursor,
-        historyLoading: false }));
+        nextCursor: activeOnly || more || state.history.length <= page.items.length ? page.next_cursor : state.nextCursor,
+        historyLoading: false });
+        });
       } catch {
         if (request === historyRequest) set({ historyLoading: false,
           historyError: normalizedSearch ? 'Investigation history search could not be completed.'
@@ -569,7 +595,15 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       }
     },
 
+    selectHistoryActive: async (activeOnly) => {
+      if (get().historyActiveOnly === activeOnly) return;
+      ++historyRequest;
+      set({ historyActiveOnly: activeOnly, history: [], nextCursor: null, historyError: null });
+      await get().loadHistory();
+    },
+
     searchHistory: async (query) => {
+      ++historyRequest;
       set({ historySearch: query, history: [], nextCursor: null, historyError: null });
       await get().loadHistory();
     },
@@ -739,7 +773,11 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       if (message.investigation_id === state.selectedId && !state.loading &&
           (message.revision > (state.detail?.revision ?? -1) ||
             message.last_event_sequence > (state.events.at(-1)?.sequence ?? 0))) void state.refreshSelected();
-      if (message.investigation_id !== state.selectedId && !state.historyLoading &&
+      if (state.historyActiveOnly) {
+        // Membership depends on mutable status. Restart the current selection
+        // even when this task was not in the loaded page or a request is pending.
+        void state.loadHistory();
+      } else if (message.investigation_id !== state.selectedId && !state.historyLoading &&
           message.revision > (state.history.find((item) => item.investigation_id === message.investigation_id)?.revision ?? -1)) {
         void state.loadHistory();
       }
