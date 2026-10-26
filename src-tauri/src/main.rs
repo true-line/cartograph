@@ -1638,6 +1638,7 @@ fn extract_tree_with_registries(
         };
         extraction.nodes.extend(rust.nodes);
         extraction.edges.extend(rust.edges);
+        extraction.fetch_sites.extend(rust.fetch_sites);
     }
     // Java and Kotlin carry server routes and client calls (Retrofit), so a
     // client-only Android or JVM repository runs them too (#757 review).

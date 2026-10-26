@@ -140,8 +140,9 @@ fn strip_generics(text: &str) -> String {
 }
 
 /// Resolve a written path against `use` bindings and external globs in `scopes`,
-/// returning all candidate external paths (`axum::...` / `actix_web::...`) it proves.
-fn resolve_external_paths(
+/// returning all candidate external paths (`axum::...`, `actix_web::...`,
+/// `reqwest::...`, `http::...`) it proves.
+pub(super) fn resolve_external_paths(
     cx: &FileCx<'_>,
     bindings: &Bindings,
     scopes: &[String],
@@ -184,7 +185,7 @@ fn resolve_external_paths(
                 .cloned(),
         );
     }
-    if matches!(name.as_str(), "axum" | "actix_web")
+    if matches!(name.as_str(), "axum" | "actix_web" | "reqwest" | "http")
         && !cx.workspace_crates.contains(name)
         && !cx.declared_mods.contains(name)
     {
@@ -202,7 +203,7 @@ fn resolve_external_paths(
         .collect()
 }
 
-fn unquote_string_literal(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
+pub(super) fn unquote_string_literal(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
     let text = cx.text(&node).trim();
     match node.kind() {
         "string_literal" => text
@@ -272,7 +273,7 @@ fn parse_route_path_arg(cx: &FileCx<'_>, node: TsNode<'_>) -> RoutePathArg {
     }
 }
 
-fn call_arguments<'t>(call: TsNode<'t>) -> Vec<TsNode<'t>> {
+pub(super) fn call_arguments<'t>(call: TsNode<'t>) -> Vec<TsNode<'t>> {
     let Some(args) = call.child_by_field_name("arguments") else {
         return Vec::new();
     };

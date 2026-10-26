@@ -81,6 +81,7 @@ dependencies = [
 name = "adapters-lang-rust"
 version = "0.36.0"
 dependencies = [
+ "adapters-fw",
  "core-graph",
  "core-prov",
  "serde_json",

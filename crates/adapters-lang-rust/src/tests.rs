@@ -1352,3 +1352,99 @@ pub fn app() -> Router {
         ]
     );
 }
+
+// AC-0367: reqwest client calls proven through `use` / qualified paths and
+// a proven Client receiver become fetch sites; literal URLs as written,
+// anything else computed.
+fn reqwest_sites(lib: &str) -> Vec<(String, String, String)> {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    write(dir.path(), "src/lib.rs", lib);
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    x.fetch_sites
+        .iter()
+        .map(|site| {
+            let url = match &site.url {
+                adapters_fw::events::IdentityExpr::Literal(url) => format!("lit {url}"),
+                adapters_fw::events::IdentityExpr::Computed(text) => format!("computed {text}"),
+                adapters_fw::events::IdentityExpr::EnvRef(key) => format!("env {key}"),
+            };
+            let owner = site.symbol.clone().unwrap_or_default();
+            let owner = owner.rsplit('#').next().unwrap().to_string();
+            (site.method.clone(), url, owner)
+        })
+        .collect()
+}
+
+fn site(method: &str, url: &str, owner: &str) -> (String, String, String) {
+    (method.into(), url.into(), owner.into())
+}
+
+#[test]
+fn reqwest_calls_on_proven_clients_become_fetch_sites() {
+    let sites = reqwest_sites(
+        r#"
+use reqwest::{Client, Method};
+use std::sync::Arc;
+
+pub struct Api { http: Client, base: String }
+
+pub async fn free() { reqwest::get("https://api.example.com/health").await; }
+pub fn blocking() { reqwest::blocking::get("http://localhost/ping"); }
+pub async fn chained() { Client::new().post("/users").send().await; }
+pub async fn built() -> Result<(), reqwest::Error> {
+    let client = reqwest::Client::builder().timeout(T).build()?;
+    client.put("/users/1").send().await?;
+    Ok(())
+}
+pub async fn param(client: &Client, id: u32) {
+    client.delete(format!("/users/{id}")).send().await;
+}
+pub async fn shared(client: Arc<Client>) { client.request(Method::PATCH, "/users").send().await; }
+impl Api {
+    pub async fn me(&self) { self.http.get("/me").send().await; }
+}
+"#,
+    );
+    assert_eq!(
+        sites,
+        vec![
+            site("GET", "lit https://api.example.com/health", "free"),
+            site("GET", "lit http://localhost/ping", "blocking"),
+            site("POST", "lit /users", "chained"),
+            site("PUT", "lit /users/1", "built"),
+            site("DELETE", "computed format!(\"/users/{id}\")", "param"),
+            site("PATCH", "lit /users", "shared"),
+            site("GET", "lit /me", "Api.me"),
+        ]
+    );
+}
+
+#[test]
+fn reqwest_lookalikes_and_unproven_receivers_yield_nothing() {
+    let sites = reqwest_sites(
+        r#"
+mod net { pub struct Client; impl Client { pub fn new() -> Self { Client } pub fn get(&self, _: &str) {} } }
+use net::Client;
+pub struct A { http: reqwest::Client }
+pub struct B { http: Client }
+
+pub fn local_client() { Client::new().get("/not-reqwest"); }
+pub fn rebound(other: Client) {
+    let client = reqwest::Client::new();
+    let client = other;
+    client.get("/rebound");
+}
+pub fn untyped(client: Thing) { client.get("/untyped"); }
+pub fn map(m: std::collections::HashMap<u8, u8>) { m.get(&1); }
+pub fn shadowed_get(get: fn(&str)) { get("/shadowed"); }
+impl A { pub fn mixed(&self) { self.http.get("/mixed-field"); } }
+pub fn closure() { let f = |client: Client| client.get("/closure"); }
+"#,
+    );
+    assert!(sites.is_empty(), "{sites:?}");
+}

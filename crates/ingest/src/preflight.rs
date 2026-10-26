@@ -181,7 +181,7 @@ pub const INSTALLED_ADAPTERS: &[AdapterInfo] = &[
         id: "t0.adapter-rust",
         language: "Rust",
         extensions: &["rs"],
-        covers: "imports, call graph, axum and actix-web endpoint registrations",
+        covers: "imports, call graph, axum and actix-web endpoint registrations, reqwest client calls",
     },
     AdapterInfo {
         id: "t0.adapter-java",
