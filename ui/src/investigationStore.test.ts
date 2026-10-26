@@ -1,4 +1,4 @@
-import { queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionChoices, inventoryObligation } from './completionFixtures';
+import { queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionCatalog, completionChoices, inventoryObligation, sourceObligation, specWriterDetail, specWriterResult } from './completionFixtures';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC as mockTauriIPC } from '@tauri-apps/api/mocks';
 import backendInspection from './fixtures/investigation-inspection-backend.json';
@@ -1454,6 +1454,119 @@ it('freezes expanded policy, envelope, generation and nonce across uncertain ret
   expect(requests).toHaveLength(2);
   expect(requests[1]).toEqual(requests[0]);
   expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@8', limitProfile: 'investigation-v2' });
+});
+
+it('uses overlay-local completion choices and preserves the full composer through exact retry (AC-0385)', async () => {
+  const accepted = specWriterDetail('quick-completion');
+  const requests: StartInvestigationRequest[] = [];
+  mockIPC((command, args) => {
+    if (command === 'start_investigation') {
+      requests.push(structuredClone(args?.request as StartInvestigationRequest));
+      if (requests.length === 1) throw new Error('Uncertain start acknowledgement');
+      return accepted;
+    }
+    if (command === 'get_investigation') return accepted;
+    if (command === 'investigation_result') return specWriterResult(accepted.investigation_id);
+    if (command === 'get_investigation_chat' || command === 'investigation_consent') return null;
+    if (command === 'investigation_events') { const items = investigationEvents(accepted.investigation_id);
+      return { investigation_id: accepted.investigation_id, items, next_sequence: items.length, has_more: false }; }
+    throw new Error(`Unexpected command ${command}`);
+  });
+  const initial = useInvestigationStore.getState();
+  const composer = { ...initial.composer, specialistId: 'evidence-auditor@6' as const, limitProfile: 'investigation-v1',
+    providerMode: 'cloud' as const, question: 'Keep this separate composer question.', scopeType: 'neighborhood' as const,
+    anchor: 'business-rule:global', hops: 2, parent: { conversation_id: 'composer-conversation', parent_id: 'composer-parent' } };
+  useInvestigationStore.setState({ catalog: completionCatalog, obligationChoices: null, composer,
+    draftObligations: [sourceObligation], draftInspectionRequirements: [inspectionTarget] });
+  const quickDraft = { specialist_id: 'spec-writer@1' as const, question: 'Draft a bounded proposal.',
+    scope: { type: 'all' as const }, provider_mode: 'local' as const, limit_profile: 'investigation-v1',
+    obligations: { schema_version: 1 as const, contract: 'investigation-completion-obligations@1' as const,
+      obligations: [inventoryObligation] } };
+  const options = { preserveComposer: true, completionChoices };
+  await useInvestigationStore.getState().start(quickDraft, options);
+  const pending = useInvestigationStore.getState().pendingStart;
+  expect(pending).toMatchObject({ schema_version: 4, specialist_id: 'spec-writer@1',
+    expected_graph_revision: completionChoices.graph_snapshot_id, expected_context_id: completionChoices.context_id,
+    conversation_id: null, parent_id: null, obligations: quickDraft.obligations });
+  expect(useInvestigationStore.getState().composer).toEqual(composer);
+  await useInvestigationStore.getState().retryStart();
+  expect(requests).toHaveLength(2);
+  expect(requests[1]).toEqual(requests[0]);
+  expect(requests[0]).not.toHaveProperty('preserveComposer');
+  expect(requests[0]).not.toHaveProperty('completionChoices');
+  const final = useInvestigationStore.getState();
+  expect(final.selectedId).toBe('quick-completion');
+  expect(final.composer).toEqual(composer);
+  expect(final.draftObligations).toEqual([sourceObligation]);
+  expect(final.draftInspectionRequirements).toEqual([inspectionTarget]);
+  expect(final.obligationChoices).toBeNull();
+  const ordinary = investigationDetail('ordinary-after-quick', { status: 'queued', has_result: false,
+    last_event_sequence: 0, actions: { can_cancel: true, can_follow_up: false } });
+  mockIPC((command, args) => {
+    if (command === 'start_investigation') return ordinary;
+    if (command === 'get_investigation') return args?.investigationId === ordinary.investigation_id ? ordinary : accepted;
+    if (command === 'investigation_result' || command === 'get_investigation_chat' || command === 'investigation_consent') return null;
+    if (command === 'investigation_events') return { investigation_id: String(args?.investigationId), items: [], next_sequence: 0, has_more: false };
+    throw new Error(`Unexpected command ${command}`);
+  });
+  await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@3', question: 'A normal composer start.',
+    scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1' });
+  expect(useInvestigationStore.getState().composer.question).toBe('');
+  expect(useInvestigationStore.getState().composer.parent).toBeNull();
+  expect(useInvestigationStore.getState().draftObligations).toEqual([]);
+  expect(useInvestigationStore.getState().draftInspectionRequirements).toEqual([]);
+});
+
+it('clears quick preservation context after definitive refusal before a normal composer start (AC-0385)', async () => {
+  const initial = useInvestigationStore.getState();
+  const composer = { ...initial.composer, question: 'Preserve on quick refusal.',
+    parent: { conversation_id: 'saved-conversation', parent_id: 'saved-parent' } };
+  useInvestigationStore.setState({ composer, catalog: completionCatalog });
+  mockIPC((command) => {
+    if (command === 'start_investigation') throw { code: 'invalid_input', definitive: true, message: 'Fixture refusal' };
+    throw new Error(`Unexpected command ${command}`);
+  });
+  await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@3', question: 'Quick request.',
+    scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1' }, { preserveComposer: true });
+  expect(useInvestigationStore.getState().pendingStart).toBeNull();
+  expect(useInvestigationStore.getState().startRejection).toBe('invalid_input');
+  expect(useInvestigationStore.getState().composer).toEqual(composer);
+  const ordinary = investigationDetail('ordinary-after-refusal', { status: 'queued', has_result: false,
+    last_event_sequence: 0, actions: { can_cancel: true, can_follow_up: false } });
+  mockIPC((command) => {
+    if (command === 'start_investigation' || command === 'get_investigation') return ordinary;
+    if (command === 'investigation_result' || command === 'get_investigation_chat' || command === 'investigation_consent') return null;
+    if (command === 'investigation_events') return { investigation_id: ordinary.investigation_id, items: [], next_sequence: 0, has_more: false };
+    throw new Error(`Unexpected command ${command}`);
+  });
+  await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@3', question: 'Normal start.',
+    scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1' });
+  expect(useInvestigationStore.getState().startRejection).toBeNull();
+  expect(useInvestigationStore.getState().composer.question).toBe('');
+  expect(useInvestigationStore.getState().composer.parent).toBeNull();
+});
+
+it('keeps quick completion size errors out of the full composer (AC-0385)', async () => {
+  let ipcCalls = 0;
+  mockIPC(() => { ipcCalls += 1; throw new Error('Oversized quick request must not reach IPC'); });
+  const initial = useInvestigationStore.getState();
+  const composer = { ...initial.composer, question: 'Full composer draft stays intact.',
+    parent: { conversation_id: 'saved-conversation', parent_id: 'saved-parent' } };
+  const obligations = [inventoryObligation];
+  useInvestigationStore.setState({ catalog: completionCatalog, composer, draftObligations: obligations,
+    obligationChoices: null, obligationDraftError: 'Existing full-composer validation message.', startRejection: 'refresh_required' });
+  await useInvestigationStore.getState().start({ specialist_id: 'spec-writer@1', question: 'q'.repeat(9000),
+    scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1',
+    obligations: { schema_version: 1, contract: 'investigation-completion-obligations@1', obligations } },
+  { preserveComposer: true, completionChoices });
+  const final = useInvestigationStore.getState();
+  expect(ipcCalls).toBe(0);
+  expect(final.pendingStart).toBeNull();
+  expect(final.startRejection).toBeNull();
+  expect(final.startError).toContain('complete request exceeds');
+  expect(final.obligationDraftError).toBe('Existing full-composer validation message.');
+  expect(final.composer).toEqual(composer);
+  expect(final.draftObligations).toEqual(obligations);
 });
 
 it('refuses expanded roles without an eligible policy (AC-0281)', async () => {

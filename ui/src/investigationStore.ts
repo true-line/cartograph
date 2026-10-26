@@ -20,6 +20,11 @@ export interface InvestigationDraft {
   expected_graph_revision?: string; expected_context_id?: string;
   conversation_id?: string; parent_id?: string;
 }
+/** UI-only start context. These values are validated/projected before IPC. */
+export interface InvestigationStartOptions {
+  preserveComposer?: boolean;
+  completionChoices?: InvestigationObligationChoices;
+}
 export interface InvestigationComposer {
   specialistId: SpecialistId;
   limitProfile?: string;
@@ -284,6 +289,7 @@ export interface InvestigationState {
   pendingStart: StartInvestigationRequest | null;
   starting: boolean;
   startError: string | null;
+  startRejection: 'refresh_required' | 'invalid_input' | null;
   composer: InvestigationComposer;
   updateComposer: (patch: Partial<InvestigationComposer>) => void;
   draftInspectionRequirements: InvestigationInspectionTarget[];
@@ -313,7 +319,7 @@ export interface InvestigationState {
   loadHistory: (more?: boolean) => Promise<void>;
   selectHistoryActive: (activeOnly: boolean) => Promise<void>;
   searchHistory: (query: string) => Promise<void>;
-  start: (draft: InvestigationDraft) => Promise<string | null>;
+  start: (draft: InvestigationDraft, options?: InvestigationStartOptions) => Promise<string | null>;
   retryStart: () => Promise<string | null>;
   openConversation: (conversationId: string) => Promise<void>;
   loadConversation: (more?: boolean) => Promise<void>;
@@ -344,6 +350,7 @@ let locationRequest = 0;
 let choicesRequest = 0;
 
 export const useInvestigationStore = create<InvestigationState>((set, get) => {
+  let pendingStartPreservesComposer = false;
   const refreshDirtyConversationPages = async (conversationId: string) => {
     if (conversationDirtyInFlight?.conversationId === conversationId) return;
     const dirtyCursors = [...get().conversationDirtyPages];
@@ -451,9 +458,10 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     });
   };
 
-  const startRequest = async (request: StartInvestigationRequest): Promise<string | null> => {
+  const startRequest = async (request: StartInvestigationRequest, preserveComposer = pendingStartPreservesComposer): Promise<string | null> => {
     if (get().starting) return null;
-    set({ starting: true, pendingStart: request, startError: null });
+    pendingStartPreservesComposer = preserveComposer;
+    set({ starting: true, pendingStart: request, startError: null, startRejection: null });
     let summary: InvestigationSummary;
     try {
       const response = await invokeOr<InvestigationSummary | null>('start_investigation', null, { request });
@@ -462,21 +470,26 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     } catch (error) {
       if (typeof error === 'object' && error !== null && 'code' in error && (error.code === 'refresh_required' || error.code === 'invalid_input') &&
           'definitive' in error && error.definitive === true) {
+        pendingStartPreservesComposer = false;
         set({ starting: false, pendingStart: null,
+          startRejection: error.code,
           startError: error.code === 'refresh_required'
             ? [4, 5, 6, 7].includes(request.schema_version) ? 'The selected evidence or completion context changed before admission. No investigation was started. Refresh choices and remove stale obligations.'
               : 'The selected captured source changed before admission. No investigation was started. Remove the stale requirement and select its source again.'
             : `The request was rejected before admission. No investigation was started.${'message' in error && typeof error.message === 'string' ? ` ${error.message}` : ''}` });
         return null;
       }
-      set({ starting: false, startError: 'The start outcome could not be confirmed. Retry this same request to recover its durable identity; this does not start another investigation.' });
+      set({ starting: false, startRejection: null,
+        startError: 'The start outcome could not be confirmed. Retry this same request to recover its durable identity; this does not start another investigation.' });
       return null;
     }
     updateSummary(summary);
-    set((state) => ({ starting: false, pendingStart: null,
-      composer: { ...state.composer, question: '', parent: null },
-      draftInspectionRequirements: [], inspectionDraftError: null,
-      draftObligations: [], obligationChoices: null, obligationChoicesLoading: false, obligationDraftError: null }));
+    const preserveComposerOnAccept = pendingStartPreservesComposer;
+    pendingStartPreservesComposer = false;
+    set((state) => ({ starting: false, pendingStart: null, startRejection: null,
+      ...(preserveComposerOnAccept ? {} : { composer: { ...state.composer, question: '', parent: null },
+        draftInspectionRequirements: [], inspectionDraftError: null,
+        draftObligations: [], obligationChoices: null, obligationChoicesLoading: false, obligationDraftError: null }) }));
     // Admission is already confirmed. A later detail-load failure must not
     // turn this into an uncertain start or invite a fresh nonce.
     try {
@@ -572,7 +585,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     selectedId: null, selectionGeneration: 0, detail: null, result: null, chat: null,
     chatStatus: 'idle', chatError: null, events: [],
     consent: null, consentOpen: false, loading: false, error: null,
-    actionBusy: false, actionError: null, pendingStart: null, starting: false, startError: null,
+    actionBusy: false, actionError: null, pendingStart: null, starting: false, startError: null, startRejection: null,
     composer: initialComposer,
     draftInspectionRequirements: [], inspectionDraftError: null,
     draftObligations: [], obligationChoices: null, obligationChoicesLoading: false, obligationDraftError: null,
@@ -868,15 +881,18 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         conversationLoading: false, conversationError: null });
     },
 
-    start: async (draft) => {
+    start: async (draft, options = {}) => {
       if (get().pendingStart || get().starting) return null;
+      // A definitive refusal belongs to the prior attempt. Never let it
+      // influence local validation or the next request's recovery behavior.
+      set({ startRejection: null });
       const request_nonce = crypto.randomUUID();
       const { obligations: completionObligations, ...legacyBase } = draft;
       if (isCompletionSpecialist(draft.specialist_id)) {
         const policy = investigationPolicy(get().catalog, draft.limit_profile, draft.specialist_id);
         if (!policy) return null;
-        const choices = get().obligationChoices;
-        if (!choices || !draft.obligations || !validObligationEnvelope(draft.obligations, policy) || draft.inspection_requirements !== undefined ||
+        const choices = options.completionChoices ?? get().obligationChoices;
+        if (!choices || !validObligationChoices(choices) || !draft.obligations || !validObligationEnvelope(draft.obligations, policy) || draft.inspection_requirements !== undefined ||
             draft.obligations.obligations.some((item) => item.kind === 'source' ? item.target.graph_snapshot_id !== choices.graph_snapshot_id : item.target.context_id !== choices.context_id)) return null;
         const request: StartInvestigationRequest = { schema_version: policy.request_schema_version, request_nonce, specialist_id: draft.specialist_id,
           obligations: structuredClone(draft.obligations), question: draft.question, scope: draft.scope,
@@ -884,28 +900,29 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           expected_graph_revision: choices.graph_snapshot_id, expected_context_id: choices.context_id,
           conversation_id: draft.conversation_id ?? null, parent_id: draft.parent_id ?? null };
         if (new TextEncoder().encode(JSON.stringify(request)).length > policy.request_bytes) {
-          set({ obligationDraftError: `This complete request exceeds ${policy.request_bytes.toLocaleString()} bytes. Shorten it or remove an obligation.` });
+          const message = `This complete request exceeds ${policy.request_bytes.toLocaleString()} bytes. Shorten it or remove an obligation.`;
+          set(options.preserveComposer ? { startError: message } : { obligationDraftError: message });
           return null;
         }
-        return startRequest(request);
+        return startRequest(request, options.preserveComposer === true);
       } else if (completionObligations !== undefined) return null;
       else if (draft.specialist_id.endsWith('@6')) {
         const { inspection_requirements: requirements, ...qualified } = legacyBase;
         if (requirements !== undefined && requirements.length === 0) return null;
         return startRequest(structuredClone({ ...qualified, schema_version: 3, request_nonce,
           ...(requirements ? { expected_graph_revision: requirements[0].graph_snapshot_id,
-            inspection_requirements: requirements } : {}) }));
+            inspection_requirements: requirements } : {}) }), options.preserveComposer === true);
       } else if (draft.specialist_id.endsWith('@5')) {
         const { expected_context_id, ...inspectionDraft } = legacyBase;
         if (!draft.inspection_requirements?.length || expected_context_id !== undefined) return null;
         return startRequest(structuredClone({ ...inspectionDraft, schema_version: 2, request_nonce,
           expected_graph_revision: draft.inspection_requirements[0].graph_snapshot_id,
-          inspection_requirements: draft.inspection_requirements }));
+          inspection_requirements: draft.inspection_requirements }), options.preserveComposer === true);
       } else {
         // Preserve legacy schema bytes: requirements are absent, never an empty list.
         const { inspection_requirements: requirements, expected_context_id, ...legacy } = legacyBase;
         if (requirements?.length || expected_context_id !== undefined) return null;
-        return startRequest(structuredClone({ ...legacy, schema_version: 1, request_nonce }));
+        return startRequest(structuredClone({ ...legacy, schema_version: 1, request_nonce }), options.preserveComposer === true);
       }
     },
     retryStart: async () => {
