@@ -35,6 +35,80 @@ pub(crate) struct SpecialistActivityPage {
 }
 
 #[derive(Serialize)]
+struct SavedActivityProviderProjection<'a> {
+    mode: InvestigationProviderMode,
+    provider_id: &'a str,
+    model: &'a str,
+}
+
+#[derive(Serialize)]
+struct SpecialistActivityProjection<'a> {
+    summary: &'a InvestigationSummary,
+    saved_provider: SavedActivityProviderProjection<'a>,
+}
+
+pub(super) fn encode_specialist_activity_item(
+    summary: &InvestigationSummary,
+    provider: &InvestigationProvider,
+) -> Result<Vec<u8>, InvestigationStoreError> {
+    if provider.mode != summary.provider_mode {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    encode(
+        &SpecialistActivityProjection {
+            summary,
+            saved_provider: SavedActivityProviderProjection {
+                mode: provider.mode,
+                provider_id: &provider.provider_id,
+                model: &provider.model,
+            },
+        },
+        4096,
+    )
+}
+
+/// Reject a new task unless its activity identity and a maximum valid mutable
+/// summary still fit the existing 4 KiB per-item projection bound.
+pub(super) fn specialist_activity_admission_bytes(
+    task: &StoredTask,
+) -> Result<Vec<u8>, InvestigationStoreError> {
+    let mut summary = task.detail.summary.clone();
+    // Reserve the largest individually valid wire values. The combined sizing
+    // envelope is intentionally conservative; it need not be a reachable state.
+    summary.status = InvestigationStatus::AwaitingConsent;
+    summary.revision = i64::MAX as u64;
+    // JSON `false` occupies five bytes; `true` occupies four.
+    summary.cancel_requested = false;
+    summary.invocation_pending = false;
+    summary.actions.can_cancel = false;
+    summary.actions.can_follow_up = true;
+    summary.graph_snapshot_id = Some(format!("context-v1:{}", "f".repeat(64)));
+    summary.last_event_sequence = journal_event_limit(task)?;
+    summary.has_result = false;
+    if task.detail.inspection_requirements.is_some() {
+        summary.inspection_status = Some(InvestigationInspectionStatus::NotAssessed);
+        let max_requirements = InvestigationPolicy::for_limits(&task.detail.limits)
+            .ok_or(InvestigationStoreError::Invalid)?
+            .max_completion_obligations();
+        summary.inspection_requirement_count = Some(max_requirements);
+    }
+    if task.completion_intent.is_some() {
+        summary.completion_outcome = Some(InvestigationCompletionOutcome::InsufficientEvidence);
+        summary.obligation_status = Some(CompletionStatus::NotAssessed);
+    }
+    // Host-generated timestamps use a fixed 20-byte UTC form. Keep admission
+    // tied to that emitted form rather than the looser legacy read validator.
+    summary.updated_at = "9".repeat(20);
+    encode_specialist_activity_item(&summary, &task.detail.provider)
+}
+
+pub(super) fn validate_specialist_activity_admission(
+    task: &StoredTask,
+) -> Result<(), InvestigationStoreError> {
+    specialist_activity_admission_bytes(task).map(|_| ())
+}
+
+#[derive(Serialize)]
 struct HistoryProjectionPage<T> {
     items: Vec<T>,
     next_cursor: Option<String>,

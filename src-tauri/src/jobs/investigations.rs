@@ -700,6 +700,7 @@ impl JobStore {
             approved: false,
             action_tool: None,
         };
+        reads::validate_specialist_activity_admission(&record)?;
         if next_prompt {
             insert_next_prompt_task(&tx, &record)?;
         } else {

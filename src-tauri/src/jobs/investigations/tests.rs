@@ -1567,27 +1567,218 @@ fn investigation_specialist_activity_rejects_malformed_and_oversized_identity() 
         Err(InvestigationStoreError::Invalid),
     ));
 
-    let mut oversized_fixture = Fixture::new();
-    let mut oversized_provider = provider(InvestigationProviderMode::Local);
-    oversized_provider.provider_id = "p".repeat(2048);
-    oversized_provider.model = "m".repeat(2048);
-    oversized_fixture
+    // Existing tasks can predate this projection admission check. Ordinary
+    // history remains readable while the app-only activity feed fails closed.
+    let mut legacy_fixture = Fixture::new();
+    let (legacy_id, _) =
+        legacy_fixture.start("legacy-large-provider", InvestigationProviderMode::Local);
+    let mut legacy = load_task(&legacy_fixture.store.conn, &legacy_id).unwrap();
+    legacy.detail.provider.provider_id = "p".repeat(2048);
+    legacy.detail.provider.model = "m".repeat(2048);
+    let bytes = storage::encode(&legacy, MAX_RECORD_BYTES).unwrap();
+    let record_hash = core_prov::content_hash(&bytes);
+    legacy_fixture
         .store
-        .start_investigation(
-            &request("provider-item-too-large", InvestigationProviderMode::Local),
-            Some(&oversized_provider),
+        .conn
+        .execute(
+            "UPDATE investigation_tasks SET record=?1,record_hash=?2 WHERE id=?3",
+            rusqlite::params![bytes, record_hash, legacy_id],
         )
         .unwrap();
     assert!(
-        oversized_fixture
+        legacy_fixture
             .store
             .investigation_history(None, None)
             .is_ok()
     );
     assert!(matches!(
-        oversized_fixture.store.specialist_task_activity(None),
+        legacy_fixture.store.specialist_task_activity(None),
         Err(InvestigationStoreError::Capacity),
     ));
+}
+
+#[test]
+fn investigation_specialist_activity_admission_charges_exact_escaped_projection() {
+    let mut fixture = Fixture::new();
+    let mut saved = provider(InvestigationProviderMode::Local);
+    saved.provider_id = "provider-quote\"-slash\\-雪".into();
+    saved.model = "model-λ\\\"".into();
+    let detail = fixture
+        .store
+        .start_investigation(
+            &request(
+                "escaped-provider-identity",
+                InvestigationProviderMode::Local,
+            ),
+            Some(&saved),
+        )
+        .unwrap()
+        .detail;
+    let item = fixture
+        .store
+        .specialist_task_activity(None)
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|item| item.summary.investigation_id == detail.summary.investigation_id)
+        .unwrap();
+    let task = load_task(&fixture.store.conn, &detail.summary.investigation_id).unwrap();
+    let exact_projection =
+        reads::encode_specialist_activity_item(&item.summary, &task.detail.provider).unwrap();
+    assert_eq!(exact_projection, serde_json::to_vec(&item).unwrap());
+    assert!(exact_projection.windows(2).any(|bytes| bytes == b"\\\""));
+    assert!(
+        std::str::from_utf8(&exact_projection)
+            .unwrap()
+            .contains("雪")
+    );
+}
+
+#[test]
+fn investigation_specialist_activity_admission_reserves_mutable_growth_through_transitions() {
+    let mut probe = Fixture::new();
+    let mut saved = provider(InvestigationProviderMode::Local);
+    saved.provider_id = "p".into();
+    saved.model = "m".into();
+    let probe_detail = probe
+        .store
+        .start_investigation(
+            &request(
+                "provider-item-sizing-probe",
+                InvestigationProviderMode::Local,
+            ),
+            Some(&saved),
+        )
+        .unwrap()
+        .detail;
+    let probe_record =
+        load_task(&probe.store.conn, &probe_detail.summary.investigation_id).unwrap();
+    let probe_size = reads::specialist_activity_admission_bytes(&probe_record)
+        .unwrap()
+        .len();
+    assert!(probe_size < 4096);
+    let mut growth = 4096 - probe_size;
+    let provider_growth = growth.min(2048 - saved.provider_id.len());
+    saved.provider_id.push_str(&"p".repeat(provider_growth));
+    growth -= provider_growth;
+    let model_growth = growth.min(2048 - saved.model.len());
+    saved.model.push_str(&"m".repeat(model_growth));
+    growth -= model_growth;
+    assert_eq!(
+        growth, 0,
+        "existing provider limits cannot approach the item bound"
+    );
+    let mut boundary_record = probe_record.clone();
+    boundary_record.detail.provider = saved.clone();
+    assert_eq!(
+        reads::specialist_activity_admission_bytes(&boundary_record)
+            .unwrap()
+            .len(),
+        4096,
+    );
+
+    let mut fixture = Fixture::new();
+    let detail = fixture
+        .store
+        .start_investigation(
+            &request("provider-item-near-limit", InvestigationProviderMode::Local),
+            Some(&saved),
+        )
+        .unwrap()
+        .detail;
+    let id = detail.summary.investigation_id;
+    let stored = load_task(&fixture.store.conn, &id).unwrap();
+    let reserved = reads::specialist_activity_admission_bytes(&stored)
+        .unwrap()
+        .len();
+    assert_eq!(reserved, 4096);
+
+    let page = fixture.store.specialist_task_activity(None).unwrap();
+    assert_eq!(page.items[0].summary.status, InvestigationStatus::Queued);
+    let actual = serde_json::to_vec(&page.items[0]).unwrap();
+    assert!(actual.len() <= reserved);
+    let plan = fixture
+        .store
+        .claim_plan(detail.summary.job_id, ClaimMode::StartQueued)
+        .unwrap();
+    let reservation = fixture.locks.try_reserve(plan.lock_target()).unwrap();
+    let (_, execution) = fixture.store.claim_execution(&plan, reservation).unwrap();
+    let preparing = fixture.store.specialist_task_activity(None).unwrap();
+    assert_eq!(
+        preparing.items[0].summary.status,
+        InvestigationStatus::Preparing,
+    );
+    assert!(serde_json::to_vec(&preparing.items[0]).unwrap().len() <= reserved);
+    let ledger = fixture.prepare(&id, &execution, true);
+    begin(&mut fixture, &id, &execution, step(&ledger, 1));
+    let running = fixture.store.specialist_task_activity(None).unwrap();
+    assert_eq!(
+        running.items[0].summary.status,
+        InvestigationStatus::Running,
+    );
+    assert!(serde_json::to_vec(&running.items[0]).unwrap().len() <= reserved);
+    let cancelled = fixture.store.cancel_investigation(&id).unwrap();
+    assert!(cancelled.summary.cancel_requested);
+    let requested = fixture.store.specialist_task_activity(None).unwrap();
+    assert!(requested.items[0].summary.cancel_requested);
+    assert!(serde_json::to_vec(&requested.items[0]).unwrap().len() <= reserved);
+
+    // One more ASCII identity byte crosses the exact preflight boundary.
+    let mut over = saved;
+    if over.provider_id.len() < 2048 {
+        over.provider_id.push('p');
+    } else {
+        over.model.push('m');
+    }
+    let mut rejected = Fixture::new();
+    assert!(matches!(
+        rejected.store.start_investigation(
+            &request("provider-item-over-limit", InvestigationProviderMode::Local),
+            Some(&over),
+        ),
+        Err(InvestigationStoreError::Capacity),
+    ));
+    for table in [
+        "investigation_tasks",
+        "investigation_conversations",
+        "jobs",
+        "job_attempts",
+    ] {
+        let count: i64 = rejected
+            .store
+            .conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "oversized activity admission left rows in {table}"
+        );
+    }
+}
+
+#[test]
+fn investigation_specialist_activity_capacity_rejection_does_not_change_nonce_replay() {
+    let mut fixture = Fixture::new();
+    let request = request("activity-capacity-replay", InvestigationProviderMode::Local);
+    let first = fixture
+        .store
+        .start_investigation(&request, Some(&provider(InvestigationProviderMode::Local)))
+        .unwrap();
+    let mut excessive = provider(InvestigationProviderMode::Local);
+    excessive.provider_id = "p".repeat(2048);
+    excessive.model = "m".repeat(2048);
+    let replay = fixture
+        .store
+        .start_investigation(&request, Some(&excessive))
+        .unwrap();
+    assert!(first.created);
+    assert!(!replay.created);
+    assert_eq!(
+        first.detail.summary.investigation_id,
+        replay.detail.summary.investigation_id,
+    );
 }
 
 #[test]
