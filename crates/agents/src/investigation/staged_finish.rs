@@ -276,13 +276,14 @@ pub fn admit_finish_with_policy(
     if request.limit_profile != policy.profile() {
         return Err(InvestigationError::InvalidInput);
     }
-    if request.specialist_id == "spec-writer@1"
-        && matches!(
-            &finish.action,
-            InvestigationAction::Finish { findings, .. }
-                if findings.iter().any(|finding| finding.claim_kind != InvestigationClaimKind::ProposedDesign)
-        )
-    {
+    if matches!(
+        request.specialist_id.as_str(),
+        "spec-writer@1" | "gap-triager@1"
+    ) && matches!(
+        &finish.action,
+        InvestigationAction::Finish { findings, .. }
+            if findings.iter().any(|finding| finding.claim_kind != InvestigationClaimKind::ProposedDesign)
+    ) {
         return Err(InvestigationError::InvalidAction);
     }
     let ledger = input.ledger();

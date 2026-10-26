@@ -275,6 +275,42 @@ fn spec_writer_v1_is_admitted_only_in_the_exact_standard_schema_four_family() {
 }
 
 #[test]
+fn gap_triager_v1_is_admitted_only_in_the_exact_standard_schema_four_family() {
+    // AC-0384: the new role preserves the v4 intent domain and does not enroll elsewhere.
+    let policy = &INVESTIGATION_V1_POLICY;
+    let mut request = request("gap-triager@1");
+    request.schema_version = 4;
+    request.obligations.schema_version = 1;
+    request.obligations.contract = CONTRACT.into();
+    request.limit_profile = "investigation-v1".into();
+    let raw = serde_json::to_string(&request).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&StagedObligationRequest::decode(&raw).unwrap()).unwrap(),
+        serde_json::to_vec(&request).unwrap()
+    );
+    assert!(matches!(
+        InvestigationStartRequest::decode(&raw).unwrap(),
+        InvestigationStartRequest::Completion(_)
+    ));
+    assert_eq!(
+        request.intent_hash_with_policy(policy).unwrap(),
+        crate::source_basis::domain_hash(
+            b"cartograph:investigation-client-intent:v4\0",
+            &serde_json::to_vec(&request).unwrap()
+        )
+    );
+    let mut wrong_role = request.clone();
+    wrong_role.specialist_id = "gap-triager@10".into();
+    assert!(wrong_role.normalized_with_policy(policy).is_err());
+    let mut wrong_profile = request;
+    wrong_profile.limit_profile = "investigation-v2".into();
+    assert!(
+        wrong_profile
+            .normalized_with_policy(&INVESTIGATION_V2_POLICY)
+            .is_err()
+    );
+}
+#[test]
 fn admission_family_specialists_add_only_internal_admission_instructions() {
     // AC-0287 / T-0287: @9 text and operations retain their published meaning.
     for (old, new) in [

@@ -58,9 +58,14 @@ pub(super) fn scripted_action(mode: Mode, call: usize, prompt: &Value) -> Value 
         return json!({"type":"read_coverage_inventory","context_id":target["context_id"],"repo":target["repo"],"inventory_hash":target["inventory_hash"],"max_bytes":1});
     }
     if call == 0 {
+        return json!({"type":"query_context","context_id":prompt["context_id"],"query":{"scope":{"type":"all"},"kind":"node","labels":if matches!(mode, Mode::GapTriagerSupported) { json!(["Gap"]) } else { json!(["BusinessRule"]) },"max_facts":1,"max_bytes":32768,"cursor":null}});
+    }
+    if matches!(mode, Mode::GapTriagerSupported) && call == 1 {
+        // The completion fixture separately admits its caller-selected source
+        // obligation; the Gap result itself is not treated as that source.
         return json!({"type":"query_context","context_id":prompt["context_id"],"query":{"scope":{"type":"all"},"kind":"node","labels":["BusinessRule"],"max_facts":1,"max_bytes":32768,"cursor":null}});
     }
-    let read_call = if matches!(mode, Mode::CompletionRepair) {
+    let read_call = if matches!(mode, Mode::CompletionRepair | Mode::GapTriagerSupported) {
         2
     } else {
         1
@@ -83,8 +88,37 @@ pub(super) fn scripted_action(mode: Mode, call: usize, prompt: &Value) -> Value 
         .iter()
         .find(|citation| citation["origin"]["kind"] == "captured_primary_source")
         .unwrap_or(&citations[0]);
-    let spec_writer = matches!(mode, Mode::SpecWriterSupported);
-    json!({"schema_version":1,"outcome":"supported","action":{"type":"finish","findings":[{"claim_kind":if spec_writer {"proposed_design"} else {"inferred_interpretation"},"title":if spec_writer {"Reject limited inputs before guarded processing"} else {"A bounded guarded path"},"statement":if spec_writer {"Proposal: Reject limited inputs before guarded processing. Acceptance criterion: when limited is true, the operation returns false. Runtime policy and broader behavior remain unresolved."} else {"The scoped observation suggests a conditional exit; broader policy remains unresolved."},"citation_ids":[citation["citation_id"]],"limitations":["Runtime inputs remain unknown."]}],"knowledge_completeness":"partial","limitations":["This scoped result establishes no complete business policy."]}})
+    let design_only = matches!(mode, Mode::SpecWriterSupported | Mode::GapTriagerSupported);
+    let citation = if matches!(mode, Mode::GapTriagerSupported) {
+        let gap_id = prompt["compact_context"]["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|fact| fact["label"] == "Gap")
+            .and_then(|fact| fact["reference"]["id"].as_str())
+            .expect("the worker receives a discovered Gap fact");
+        citations
+            .iter()
+            .find(|item| item["fact"]["id"] == gap_id)
+            .expect("the discovered Gap fact has a graph-metadata citation")
+    } else {
+        citation
+    };
+    let title = if matches!(mode, Mode::GapTriagerSupported) {
+        "Verify the guarded boundary before treating the gap as closed"
+    } else if matches!(mode, Mode::SpecWriterSupported) {
+        "Reject limited inputs before guarded processing"
+    } else {
+        "A bounded guarded path"
+    };
+    let statement = if matches!(mode, Mode::GapTriagerSupported) {
+        "Proposed next step: inspect the admitted source behind this recorded gap and add a test for both outcomes before deciding whether the boundary is closed. The gap remains unresolved here; broader behavior is unknown."
+    } else if matches!(mode, Mode::SpecWriterSupported) {
+        "Proposal: Reject limited inputs before guarded processing. Acceptance criterion: when limited is true, the operation returns false. Runtime policy and broader behavior remain unresolved."
+    } else {
+        "The scoped observation suggests a conditional exit; broader policy remains unresolved."
+    };
+    json!({"schema_version":1,"outcome":"supported","action":{"type":"finish","findings":[{"claim_kind":if design_only {"proposed_design"} else {"inferred_interpretation"},"title":title,"statement":statement,"citation_ids":[citation["citation_id"]],"limitations":["Runtime inputs remain unknown."]}],"knowledge_completeness":"partial","limitations":["This scoped result establishes no complete business policy."]}})
 }
 
 struct CompletionFixture {
@@ -377,6 +411,99 @@ fn spec_writer_scripted_completion_reopens_with_bound_citations() {
             })
     }));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    drop(jobs);
+
+    let reopened = crate::jobs::JobStore::open(fixture.base.app_data.join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&fixture.id).unwrap(), detail);
+    assert_eq!(
+        reopened.investigation_result(&fixture.id).unwrap(),
+        Some(result)
+    );
+}
+
+#[test]
+fn gap_triager_scripted_completion_queries_a_gap_and_reopens_its_cited_proposal() {
+    let provider = Arc::new(Scripted::new(Mode::GapTriagerSupported));
+    let fixture = CompletionFixture::new(&*provider, SpecialistId::GapTriagerV1, true, true, false);
+    fixture.run(provider.clone());
+
+    let state = fixture.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&fixture.id).unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Completed);
+    assert_eq!(detail.summary.schema_version, 4);
+    assert_eq!(detail.summary.specialist_id, SpecialistId::GapTriagerV1);
+    assert_eq!(detail.specialist.version, 1);
+    let result = jobs.investigation_result(&fixture.id).unwrap().unwrap();
+    assert_eq!(result.schema_version, 5);
+    let finding = result
+        .findings
+        .first()
+        .expect("the scripted Gap proposal is saved");
+    assert_eq!(
+        finding.claim_kind,
+        agents::investigation::InvestigationClaimKind::ProposedDesign
+    );
+    assert_eq!(
+        finding.title,
+        "Verify the guarded boundary before treating the gap as closed"
+    );
+    assert!(finding.statement.contains("gap remains unresolved here"));
+    assert_eq!(finding.tier, core_prov::Tier::Agentic);
+    assert_eq!(
+        finding.confidence_tier,
+        core_prov::ConfidenceTier::InferredWeak
+    );
+    let citation = detail
+        .citations
+        .iter()
+        .find(|citation| finding.citation_ids.contains(&citation.citation_id))
+        .unwrap();
+    let prompts = provider.prompts.lock().unwrap();
+    let gap_fact = prompts
+        .iter()
+        .filter_map(|prompt| prompt["compact_context"]["facts"].as_array())
+        .flatten()
+        .find(|fact| fact["label"] == "Gap")
+        .expect("the disposable parser fixture contains a discovered Gap");
+    let gap_id = gap_fact["reference"]["id"].as_str().unwrap();
+    assert_eq!(
+        citation.fact,
+        agents::TaskFactKey::Node { id: gap_id.into() }
+    );
+    let graph_gap = state
+        .graph
+        .lock()
+        .unwrap()
+        .get_node(gap_id)
+        .unwrap()
+        .expect("the finding resolves to the fixture's actual graph Gap");
+    assert_eq!(graph_gap.label, "Gap");
+    assert_eq!(
+        graph_gap.props["reason"],
+        "The caller's interpretation of this local return or throw is unknown."
+    );
+    assert_eq!(graph_gap.props["reason_code"], "consumer_semantics_unknown");
+    assert_eq!(graph_gap.props["prov"]["confidence_tier"], "Gap");
+    assert_eq!(graph_gap.props["prov"]["tier"], "Deterministic");
+    assert_eq!(graph_gap.props["prov"]["extractor_id"], "t0.adapter-ts");
+    assert!(
+        prompts.iter().skip(1).any(|prompt| {
+            prompt["compact_context"]["facts"]
+                .as_array()
+                .is_some_and(|facts| facts.iter().any(|fact| fact["reference"]["id"] == gap_id))
+        }),
+        "the scripted worker must receive the admitted Gap query result"
+    );
+    assert!(
+        prompts.iter().any(|prompt| {
+            prompt["compact_context"]["facts"]
+                .as_array()
+                .is_some_and(|facts| facts.iter().any(|fact| fact["label"] == "BusinessRule"))
+        }),
+        "the selected source obligation must be separately queried before read_evidence"
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 5);
     drop(jobs);
 
     let reopened = crate::jobs::JobStore::open(fixture.base.app_data.join("state.db")).unwrap();

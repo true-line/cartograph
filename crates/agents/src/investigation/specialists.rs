@@ -49,6 +49,8 @@ pub enum SpecialistId {
     EvidenceAuditorV10,
     #[serde(rename = "spec-writer@1")]
     SpecWriterV1,
+    #[serde(rename = "gap-triager@1")]
+    GapTriagerV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,11 +74,27 @@ struct SpecWriterDefinitionData {
     role_prompt: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GapTriagerDefinitionData {
+    name: String,
+    purpose: String,
+    role_prompt: String,
+}
+
 fn spec_writer_definition_data() -> &'static SpecWriterDefinitionData {
     static DATA: OnceLock<SpecWriterDefinitionData> = OnceLock::new();
     DATA.get_or_init(|| {
         serde_json::from_str(include_str!("data/spec-writer-v1.json"))
             .expect("compiled Spec Writer definition is valid")
+    })
+}
+
+fn gap_triager_definition_data() -> &'static GapTriagerDefinitionData {
+    static DATA: OnceLock<GapTriagerDefinitionData> = OnceLock::new();
+    DATA.get_or_init(|| {
+        serde_json::from_str(include_str!("data/gap-triager-v1.json"))
+            .expect("compiled Gap Triager definition is valid")
     })
 }
 
@@ -138,6 +156,7 @@ impl SpecialistId {
         matches!(
             self,
             Self::SpecWriterV1
+                | Self::GapTriagerV1
                 | Self::DomainAnalystV3
                 | Self::EvidenceAuditorV3
                 | Self::DomainAnalystV4
@@ -161,6 +180,7 @@ impl SpecialistId {
         matches!(
             self,
             Self::SpecWriterV1
+                | Self::GapTriagerV1
                 | Self::DomainAnalystV4
                 | Self::EvidenceAuditorV4
                 | Self::DomainAnalystV5
@@ -187,6 +207,7 @@ impl SpecialistId {
         matches!(
             self,
             Self::SpecWriterV1
+                | Self::GapTriagerV1
                 | Self::DomainAnalystV6
                 | Self::EvidenceAuditorV6
                 | Self::DomainAnalystV7
@@ -204,6 +225,7 @@ impl SpecialistId {
         matches!(
             self,
             Self::SpecWriterV1
+                | Self::GapTriagerV1
                 | Self::DomainAnalystV7
                 | Self::EvidenceAuditorV7
                 | Self::DomainAnalystV8
@@ -246,7 +268,10 @@ impl SpecialistId {
 
     fn version(self) -> u32 {
         match self {
-            Self::DomainAnalystV1 | Self::EvidenceAuditorV1 | Self::SpecWriterV1 => 1,
+            Self::DomainAnalystV1
+            | Self::EvidenceAuditorV1
+            | Self::SpecWriterV1
+            | Self::GapTriagerV1 => 1,
             Self::DomainAnalyst | Self::EvidenceAuditor => 2,
             Self::DomainAnalystV3 | Self::EvidenceAuditorV3 => 3,
             Self::DomainAnalystV4 | Self::EvidenceAuditorV4 => 4,
@@ -262,7 +287,7 @@ impl SpecialistId {
     /// Role identity versions are independent from private prompt protocol
     /// generations. Spec Writer reuses the current schema-4 prompt protocol.
     fn prompt_generation(self) -> u32 {
-        if self == Self::SpecWriterV1 {
+        if matches!(self, Self::SpecWriterV1 | Self::GapTriagerV1) {
             7
         } else {
             self.version()
@@ -272,6 +297,7 @@ impl SpecialistId {
     pub fn prompt(self) -> String {
         let role = match self {
             Self::SpecWriterV1 => spec_writer_definition_data().role_prompt.as_str(),
+            Self::GapTriagerV1 => gap_triager_definition_data().role_prompt.as_str(),
             Self::DomainAnalyst
             | Self::DomainAnalystV1
             | Self::DomainAnalystV3
@@ -334,14 +360,21 @@ impl SpecialistId {
                 } else {
                     discovery
                 };
-                // The Spec Writer host admits only proposed_design findings.
+                // Spec Writer and Gap Triager hosts admit only proposed_design findings.
                 // Keep COMMON immutable for every historical role generation.
-                let common = if self == Self::SpecWriterV1 {
-                    common
-                        .replace(
+                let common = if matches!(self, Self::SpecWriterV1 | Self::GapTriagerV1) {
+                    let common = if self == Self::GapTriagerV1 {
+                        common.replace(
+                            "All your findings are Agentic/InferredWeak, including claims about implemented behavior and documented intent.",
+                            "All your findings are Agentic/InferredWeak proposed_design proposals; never report implemented_behavior, documented_intent or inferred_interpretation.",
+                        )
+                    } else {
+                        common
+                    };
+                    common.replace(
                             r#"{"type":"finish","findings":[{"claim_kind":"inferred_interpretation","title":"Short title","statement":"A concise interpretation in your own words.","citation_ids":["an admitted citation ID"],"limitations":["The scope or uncertainty that limits this finding."]}],"knowledge_completeness":"partial","limitations":["Remaining coverage limitations."]}"#,
                             r#"{"type":"finish","findings":[{"claim_kind":"proposed_design","title":"Short proposal","statement":"A bounded proposal grounded in admitted evidence.","citation_ids":["an admitted citation ID"],"limitations":["The scope or uncertainty that limits this proposal."]}],"knowledge_completeness":"partial","limitations":["Remaining coverage limitations."]}"#,
-                        )
+                    )
                         .replace(
                             "Claim kinds are implemented_behavior, documented_intent, inferred_interpretation and proposed_design.",
                             "The only valid claim kind is proposed_design.",
@@ -371,6 +404,10 @@ impl SpecialistId {
         let (name, purpose) = match self {
             Self::SpecWriterV1 => {
                 let data = spec_writer_definition_data();
+                (data.name.as_str(), data.purpose.as_str())
+            }
+            Self::GapTriagerV1 => {
+                let data = gap_triager_definition_data();
                 (data.name.as_str(), data.purpose.as_str())
             }
             Self::DomainAnalyst
@@ -508,7 +545,10 @@ mod policy_tests {
         assert_eq!(definition.name, "Spec Writer");
         assert_eq!(definition.tier, Tier::Agentic);
         assert_eq!(definition.confidence_tier, ConfidenceTier::InferredWeak);
-        assert_eq!(definition.prompt_fingerprint.len(), 64);
+        assert_eq!(
+            definition.prompt_fingerprint,
+            "82f6dd7e22591931a104af4b2d8c11122cf620cde169c5538c254fdd0d79dfe2"
+        );
         assert_eq!(
             definition.operations,
             [
@@ -568,5 +608,61 @@ mod policy_tests {
         assert!(!prompt.contains("finish-only mode"));
         assert_eq!(definition, role.definition().unwrap());
         assert_eq!(definition.id, SpecialistId::SpecWriterV1);
+    }
+
+    #[test]
+    fn gap_triager_v1_uses_generation_seven_and_a_design_only_finish() {
+        let role = SpecialistId::GapTriagerV1;
+        let definition = role.definition().unwrap();
+        assert_eq!(serde_json::to_value(role).unwrap(), "gap-triager@1");
+        assert_eq!(definition.version, 1);
+        assert_eq!(definition.name, "Gap Triager");
+        assert_eq!(definition.tier, Tier::Agentic);
+        assert_eq!(definition.confidence_tier, ConfidenceTier::InferredWeak);
+        assert_eq!(
+            definition.operations,
+            [
+                "query_context",
+                "read_evidence",
+                "read_coverage_inventory",
+                "finish"
+            ]
+        );
+        assert!(role.uses_compact_disclosure());
+        assert!(role.uses_turn_progress());
+        assert!(role.uses_coverage_qualification());
+        assert!(role.uses_completion_obligations());
+        assert!(!role.uses_inspection_requirements());
+        assert!(!role.uses_policy_selection());
+        assert!(!role.uses_query_history_disclosure());
+        assert!(!role.uses_next_prompt_admission());
+        let prompt = role.prompt();
+        assert!(prompt.contains("Query Gap nodes first"));
+        assert!(prompt.contains(
+            "All your findings are Agentic/InferredWeak proposed_design proposals; never report implemented_behavior, documented_intent or inferred_interpretation."
+        ));
+        assert!(prompt.contains("The only valid claim kind is proposed_design."));
+        assert!(!prompt.contains("Claim kinds are implemented_behavior"));
+        assert!(!prompt.contains(r#""claim_kind":"inferred_interpretation""#));
+        let example = prompt
+            .lines()
+            .find(|line| {
+                line.starts_with(
+                    r#"{"schema_version":1,"outcome":"supported","action":{"type":"finish""#,
+                )
+            })
+            .expect("Gap Triager prompt has its versioned finish example");
+        let example: serde_json::Value = serde_json::from_str(example).unwrap();
+        assert_eq!(
+            example["action"]["findings"][0]["claim_kind"],
+            "proposed_design"
+        );
+        assert_ne!(
+            definition.prompt_fingerprint,
+            SpecialistId::SpecWriterV1
+                .definition()
+                .unwrap()
+                .prompt_fingerprint
+        );
     }
 }
