@@ -73,6 +73,21 @@ fn service_task_sessions_follow_host_grant_and_rotation() {
         .unwrap());
     let service = Service::default();
     tauri::async_runtime::block_on(async {
+        let mut insufficient = policy;
+        insufficient.worker.reserved_bytes = nz(policy.worker.reserved_bytes.get() - 1);
+        assert_eq!(
+            service
+                .enable_selected(
+                    app.handle().clone(),
+                    endpoint.path(),
+                    insufficient,
+                    Some((&state.jobs.lock().unwrap(), client.clone(), nz(1))),
+                )
+                .unwrap_err(),
+            ReadError::Limit
+        );
+        assert_eq!(std::fs::read_dir(endpoint.path()).unwrap().count(), 0);
+        assert_eq!(service.owner_status().unwrap()["service"], "disabled");
         let readonly = service
             .enable(app.handle().clone(), endpoint.path(), policy)
             .unwrap();

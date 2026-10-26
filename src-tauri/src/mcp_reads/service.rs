@@ -264,6 +264,25 @@ impl Service {
         rotation: Option<&Arc<()>>,
     ) -> Result<PathBuf, ReadError> {
         policy.validate()?;
+        // Granted activation must be usable before any endpoint is published.
+        let task_session = tasks
+            .owner_snapshot()
+            .map_err(|_| ReadError::Storage)?
+            .map(|_| tasks.session());
+        if task_session.is_some() {
+            use tauri::Manager;
+            let app_state = app
+                .try_state::<crate::AppState>()
+                .ok_or(ReadError::Storage)?;
+            let minimum = super::worker::task_phase_minimum(
+                policy.worker,
+                app_state.primary_sources.retained_app_path_bytes(),
+            )
+            .ok_or(ReadError::Limit)?;
+            if policy.worker.reserved_bytes.get() < minimum {
+                return Err(ReadError::Limit);
+            }
+        }
         let mut state = shared.lock().map_err(|_| ReadError::Storage)?;
         match (&state.rotation, rotation) {
             (None, None) => {}
@@ -289,12 +308,6 @@ impl Service {
         state.cleanup = None;
         let budget = WorkBudget::new(policy.worker_budget()?);
         let factory_budget = budget.clone();
-        // Preserve the read-only worker path for absent/rotated grants. A
-        // captured granted session shares revocation with this activation.
-        let task_session = tasks
-            .owner_snapshot()
-            .map_err(|_| ReadError::Storage)?
-            .map(|_| tasks.session());
         let activation = Activation::start(parent, policy.transport, move || {
             let app = app.clone();
             let budget = factory_budget.clone();
