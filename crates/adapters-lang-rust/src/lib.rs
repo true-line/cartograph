@@ -10,6 +10,7 @@
 use core_graph::placeholder::Boundary;
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
+use http::{ActixAttrRoute, ActixServiceMount, AxumRouterDef, PendingDirectEndpoint};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -48,6 +49,10 @@ pub struct Extraction {
     /// Recovered edges.
     pub edges: Vec<Edge>,
     pending_calls: Vec<PendingCall>,
+    axum_routers: Vec<AxumRouterDef>,
+    actix_attr_routes: Vec<ActixAttrRoute>,
+    actix_service_mounts: Vec<ActixServiceMount>,
+    pending_endpoints: Vec<PendingDirectEndpoint>,
 }
 
 /// How a pending call resolves once every file is known.
@@ -139,6 +144,15 @@ impl FileCx<'_> {
     fn text(&self, node: &TsNode<'_>) -> &str {
         node.utf8_text(self.source).unwrap_or("")
     }
+    fn evidence(&self, node: &TsNode<'_>) -> EvidenceRef {
+        EvidenceRef {
+            repo: self.id.repo.into(),
+            path: self.path.into(),
+            byte_start: node.start_byte() as u64,
+            byte_end: node.end_byte() as u64,
+            commit_sha: self.id.commit.into(),
+        }
+    }
     fn prov(&self, node: &TsNode<'_>, fact: &str) -> serde_json::Value {
         self.prov_with_confidence(node, ConfidenceTier::Confirmed, fact)
     }
@@ -148,22 +162,24 @@ impl FileCx<'_> {
         confidence: ConfidenceTier,
         fact: &str,
     ) -> serde_json::Value {
-        let provenance = Provenance::new(
-            Tier::Deterministic,
-            confidence,
-            vec![EvidenceRef {
-                repo: self.id.repo.into(),
-                path: self.path.into(),
-                byte_start: node.start_byte() as u64,
-                byte_end: node.end_byte() as u64,
-                commit_sha: self.id.commit.into(),
-            }],
-            EXTRACTOR_ID,
-            fact.as_bytes(),
-        )
-        .expect("Deterministic confidence is within its ceiling");
-        serde_json::to_value(provenance).expect("provenance serializes")
+        prov_from_evidence(&self.evidence(node), confidence, fact)
     }
+}
+
+fn prov_from_evidence(
+    evidence: &EvidenceRef,
+    confidence: ConfidenceTier,
+    fact: &str,
+) -> serde_json::Value {
+    let provenance = Provenance::new(
+        Tier::Deterministic,
+        confidence,
+        vec![evidence.clone()],
+        EXTRACTOR_ID,
+        fact.as_bytes(),
+    )
+    .expect("Deterministic confidence is within its ceiling");
+    serde_json::to_value(provenance).expect("provenance serializes")
 }
 
 fn file_id(repo: &str, path: &str) -> String {
@@ -197,6 +213,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         retarget_props_commit(&mut pending.gap_node.props, commit);
         retarget_props_commit(&mut pending.gap_edge.props, commit);
     }
+    http::retarget_commit(extraction, commit);
 }
 
 fn segs(text: &str) -> Vec<String> {
@@ -324,6 +341,11 @@ struct Bindings {
     /// Module scope -> workspace glob import prefixes, tried for names no
     /// `use` binds.
     globs: HashMap<String, Vec<Vec<String>>>,
+    /// Module scope -> external glob import prefixes (`use axum::routing::*`).
+    external_globs: HashMap<String, Vec<Vec<String>>>,
+    /// (visible scope, name) of every item declared there, any kind: a
+    /// nearer item shadows outer `use`s and globs of the same name.
+    items: BTreeSet<(String, String)>,
 }
 
 impl Bindings {
@@ -454,7 +476,13 @@ fn parse_imports(cx: &FileCx<'_>, root: TsNode<'_>, out: &mut Extraction) -> Bin
             };
             if item.glob {
                 props["glob"] = serde_json::json!(true);
-                if !external {
+                if external {
+                    bindings
+                        .external_globs
+                        .entry(scope_key.clone())
+                        .or_default()
+                        .push(resolved);
+                } else {
                     bindings
                         .globs
                         .entry(scope_key.clone())
@@ -480,6 +508,19 @@ fn parse_imports(cx: &FileCx<'_>, root: TsNode<'_>, out: &mut Extraction) -> Bin
                 label: "IMPORTS".into(),
                 props,
             });
+        }
+    }
+    let q = query(
+        "[(function_item) (struct_item) (enum_item) (union_item) (trait_item) (type_item) \
+          (const_item) (static_item) (mod_item) (macro_definition)] @item",
+    );
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(q, root, cx.source);
+    while let Some(found) = matches.next() {
+        let item = found.captures()[0].node;
+        if let Some(name) = item.child_by_field_name("name") {
+            let scope = visible_scopes(cx, item).swap_remove(0);
+            bindings.items.insert((scope, cx.text(&name).to_string()));
         }
     }
     bindings
@@ -753,6 +794,7 @@ fn extract_source_inner(
         "[(function_item) (function_signature_item) (struct_item) (enum_item) (trait_item)] @sym",
     );
     let mut functions_by_start: HashMap<usize, String> = HashMap::new();
+    let mut function_items: Vec<(TsNode<'_>, String)> = Vec::new();
     // (module scope, name) -> free function in that inline or file module.
     let mut locals: HashMap<(String, String), String> = HashMap::new();
     let mut cursor = QueryCursor::new();
@@ -796,6 +838,7 @@ fn extract_source_inner(
         let module = scope_of(&cx, node);
         if node.kind() == "function_item" {
             functions_by_start.insert(node.start_byte(), symbol.clone());
+            function_items.push((node, symbol.clone()));
         }
         // A nested `fn` is visible only inside its enclosing function.
         let visible = visible_scopes(&cx, node);
@@ -831,6 +874,11 @@ fn extract_source_inner(
                 "prov": cx.prov(&node, &format!("DEFINED_IN {symbol}")),
             }),
         });
+    }
+
+    for (fn_node, fn_sym) in &function_items {
+        http::extract_actix_fn_attrs(&cx, *fn_node, fn_sym, &bindings, &mut out);
+        http::extract_function_routes(&cx, *fn_node, fn_sym, &bindings, &locals, &mut out);
     }
 
     // Calls.
@@ -1137,6 +1185,7 @@ fn finalize_single(out: &mut Extraction) {
     for pending in std::mem::take(&mut out.pending_calls) {
         resolve_pending(pending, &index, out);
     }
+    http::finalize_endpoints(out, &index);
     close_imports(out, &index);
 }
 
@@ -1420,11 +1469,17 @@ pub fn extract_dir_incremental_with_progress(
         out.nodes.extend(extraction.nodes);
         out.edges.extend(extraction.edges);
         out.pending_calls.extend(extraction.pending_calls);
+        out.axum_routers.extend(extraction.axum_routers);
+        out.actix_attr_routes.extend(extraction.actix_attr_routes);
+        out.actix_service_mounts
+            .extend(extraction.actix_service_mounts);
+        out.pending_endpoints.extend(extraction.pending_endpoints);
     }
     let index = SymbolIndex::build(&out);
     for pending in std::mem::take(&mut out.pending_calls) {
         resolve_pending(pending, &index, &mut out);
     }
+    http::finalize_endpoints(&mut out, &index);
     close_imports(&mut out, &index);
     Ok((out, stats))
 }
@@ -1434,6 +1489,8 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
     extract_dir_incremental(root, id, &mut IncrementalCache::default())
         .map(|(extraction, _)| extraction)
 }
+
+mod http;
 
 #[cfg(test)]
 mod tests;

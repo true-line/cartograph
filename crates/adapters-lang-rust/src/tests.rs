@@ -649,3 +649,706 @@ fn sibling_block_items_keep_distinct_identities() {
     calls.sort();
     assert_eq!(calls, vec![first, second]);
 }
+
+#[test]
+fn axum_endpoints_chained_nest_merge_params_and_cross_file_handlers() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"svc\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "src/handlers.rs",
+        r#"
+pub async fn list_users() {}
+pub async fn create_user() {}
+pub async fn get_user_v7() {}
+pub async fn get_user_v8() {}
+pub async fn delete_user() {}
+pub async fn patch_item() {}
+pub async fn any_ping() {}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/sub.rs",
+        r#"
+use axum::{routing::{delete, patch}, Router};
+use crate::handlers::{delete_user, patch_item};
+
+pub fn nested_router() -> Router {
+    Router::new()
+        .route("/members/{id}", delete(delete_user))
+}
+
+pub fn merged_router() -> Router {
+    axum::Router::new()
+        .route("/items/:id", patch(patch_item))
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/lib.rs",
+        r#"
+pub mod handlers;
+pub mod sub;
+
+use axum::{
+    routing::{any, get, post},
+    Router,
+};
+use crate::handlers::{any_ping, create_user, get_user_v8, list_users};
+
+pub fn app() -> Router {
+    let inline_sub = Router::new()
+        .route("/legacy/:id", get(handlers::get_user_v7));
+    Router::new()
+        .route("/users", get(list_users).post(create_user))
+        .route("/users/{id}", get(get_user_v8))
+        .route("/ping", any(any_ping))
+        .nest("/v1", inline_sub)
+        .nest("/api", sub::nested_router())
+        .merge(sub::merged_router())
+}
+"#,
+    );
+
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    let expected = [
+        (
+            "ep:local/rust-ws@GET:/users",
+            "GET",
+            "/users",
+            "sym:local/rust-ws@src/handlers.rs#list_users",
+        ),
+        (
+            "ep:local/rust-ws@POST:/users",
+            "POST",
+            "/users",
+            "sym:local/rust-ws@src/handlers.rs#create_user",
+        ),
+        (
+            "ep:local/rust-ws@GET:/users/{id}",
+            "GET",
+            "/users/{id}",
+            "sym:local/rust-ws@src/handlers.rs#get_user_v8",
+        ),
+        (
+            "ep:local/rust-ws@ANY:/ping",
+            "ANY",
+            "/ping",
+            "sym:local/rust-ws@src/handlers.rs#any_ping",
+        ),
+        (
+            "ep:local/rust-ws@GET:/v1/legacy/:id",
+            "GET",
+            "/v1/legacy/:id",
+            "sym:local/rust-ws@src/handlers.rs#get_user_v7",
+        ),
+        (
+            "ep:local/rust-ws@DELETE:/api/members/{id}",
+            "DELETE",
+            "/api/members/{id}",
+            "sym:local/rust-ws@src/handlers.rs#delete_user",
+        ),
+        (
+            "ep:local/rust-ws@PATCH:/items/:id",
+            "PATCH",
+            "/items/:id",
+            "sym:local/rust-ws@src/handlers.rs#patch_item",
+        ),
+    ];
+
+    for (ep_id, method, path, sym) in expected {
+        let ep = x
+            .nodes
+            .iter()
+            .find(|n| n.id == ep_id && n.label == "Endpoint")
+            .unwrap_or_else(|| panic!("missing endpoint {ep_id}; nodes: {:#?}", x.nodes));
+        assert_eq!(ep.props["method"], method);
+        assert_eq!(ep.props["path"], path);
+        assert_eq!(ep.props["framework"], "axum");
+        assert_eq!(ep.props["language"], "rust");
+        assert_eq!(ep.props["handler_sym"], sym);
+        assert!(
+            has_edge(&x, "HANDLES", ep_id, sym),
+            "missing HANDLES {ep_id} -> {sym}"
+        );
+    }
+    // Nested sub-routers are not also emitted unprefixed at root.
+    assert!(
+        !x.nodes
+            .iter()
+            .any(|n| n.id == "ep:local/rust-ws@GET:/legacy/:id")
+    );
+    assert!(
+        !x.nodes
+            .iter()
+            .any(|n| n.id == "ep:local/rust-ws@DELETE:/members/{id}")
+    );
+}
+
+#[test]
+fn actix_web_attributes_route_resource_scope_and_app() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"actix_svc\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "src/handlers.rs",
+        r#"
+use actix_web::{delete, get, post, route};
+
+#[get("/standalone")]
+pub async fn standalone() {}
+
+#[post("/items")]
+pub async fn create_item() {}
+
+#[route("/multi", method = "PUT", method = "PATCH")]
+pub async fn multi_method() {}
+
+#[actix_web::head("/head-check")]
+pub async fn head_check() {}
+
+#[delete("/scoped/{id}")]
+pub async fn delete_scoped() {}
+
+pub async fn res_get() {}
+pub async fn res_all() {}
+pub async fn app_direct() {}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/lib.rs",
+        r#"
+pub mod handlers;
+
+use actix_web::{web, App};
+use crate::handlers::{
+    app_direct, create_item, delete_scoped, multi_method, res_all, res_get,
+};
+
+pub fn configure() {
+    let _app = App::new()
+        .route("/direct", web::get().to(app_direct))
+        .service(
+            web::resource("/res")
+                .route(web::get().to(res_get))
+                .to(res_all),
+        )
+        .service(
+            web::scope("/api")
+                .service(create_item)
+                .service(delete_scoped)
+                .service(
+                    web::resource("/nested-res")
+                        .route(web::post().to(handlers::res_get)),
+                ),
+        )
+        .service(multi_method);
+}
+"#,
+    );
+
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    let expected = [
+        (
+            "ep:local/rust-ws@GET:/standalone",
+            "GET",
+            "/standalone",
+            "sym:local/rust-ws@src/handlers.rs#standalone",
+        ),
+        (
+            "ep:local/rust-ws@POST:/api/items",
+            "POST",
+            "/api/items",
+            "sym:local/rust-ws@src/handlers.rs#create_item",
+        ),
+        (
+            "ep:local/rust-ws@DELETE:/api/scoped/{id}",
+            "DELETE",
+            "/api/scoped/{id}",
+            "sym:local/rust-ws@src/handlers.rs#delete_scoped",
+        ),
+        (
+            "ep:local/rust-ws@PUT:/multi",
+            "PUT",
+            "/multi",
+            "sym:local/rust-ws@src/handlers.rs#multi_method",
+        ),
+        (
+            "ep:local/rust-ws@PATCH:/multi",
+            "PATCH",
+            "/multi",
+            "sym:local/rust-ws@src/handlers.rs#multi_method",
+        ),
+        (
+            "ep:local/rust-ws@HEAD:/head-check",
+            "HEAD",
+            "/head-check",
+            "sym:local/rust-ws@src/handlers.rs#head_check",
+        ),
+        (
+            "ep:local/rust-ws@GET:/direct",
+            "GET",
+            "/direct",
+            "sym:local/rust-ws@src/handlers.rs#app_direct",
+        ),
+        (
+            "ep:local/rust-ws@GET:/res",
+            "GET",
+            "/res",
+            "sym:local/rust-ws@src/handlers.rs#res_get",
+        ),
+        (
+            "ep:local/rust-ws@ANY:/res",
+            "ANY",
+            "/res",
+            "sym:local/rust-ws@src/handlers.rs#res_all",
+        ),
+        (
+            "ep:local/rust-ws@POST:/api/nested-res",
+            "POST",
+            "/api/nested-res",
+            "sym:local/rust-ws@src/handlers.rs#res_get",
+        ),
+    ];
+
+    for (ep_id, method, path, sym) in expected {
+        let ep = x
+            .nodes
+            .iter()
+            .find(|n| n.id == ep_id && n.label == "Endpoint")
+            .unwrap_or_else(|| panic!("missing endpoint {ep_id}; nodes: {:#?}", x.nodes));
+        assert_eq!(ep.props["method"], method);
+        assert_eq!(ep.props["path"], path);
+        assert_eq!(ep.props["framework"], "actix-web");
+        assert_eq!(ep.props["language"], "rust");
+        assert_eq!(ep.props["handler_sym"], sym);
+        assert!(
+            has_edge(&x, "HANDLES", ep_id, sym),
+            "missing HANDLES {ep_id} -> {sym}"
+        );
+    }
+    // Attribute routes mounted under `/api` do not also emit unprefixed.
+    assert!(
+        !x.nodes
+            .iter()
+            .any(|n| n.id == "ep:local/rust-ws@POST:/items")
+    );
+    assert!(
+        !x.nodes
+            .iter()
+            .any(|n| n.id == "ep:local/rust-ws@DELETE:/scoped/{id}")
+    );
+}
+
+#[test]
+fn unproven_lookalikes_yield_nothing() {
+    let x = extract_source(
+        br#"
+struct Router;
+impl Router {
+    fn new() -> Self { Router }
+    fn route(self, _p: &str, _h: ()) -> Self { self }
+    fn nest(self, _p: &str, _s: Self) -> Self { self }
+}
+fn get<F>(_f: F) {}
+pub fn handler() {}
+
+#[get("/unproven-attr")]
+pub fn attr_handler() {}
+
+pub fn main() {
+    let _ = Router::new()
+        .route("/unproven", get(handler))
+        .nest("/api", Router::new().route("/sub", get(handler)));
+}
+"#,
+        "src/lib.rs",
+        &id(),
+    )
+    .unwrap();
+
+    assert!(!x.nodes.iter().any(|n| n.label == "Endpoint"));
+    assert!(!x.edges.iter().any(|e| e.label == "HANDLES"));
+    assert!(!x.nodes.iter().any(|n| n.label == "Gap"));
+}
+
+#[test]
+fn closure_handler_and_computed_path_yield_cited_gaps() {
+    let x = extract_source(
+        br#"
+use axum::{routing::get, Router};
+use actix_web::{post, web, App};
+
+const DYN_PATH: &str = "/dynamic";
+
+pub async fn ok_handler() {}
+
+#[post(DYN_PATH)]
+pub async fn actix_dyn_attr() {}
+
+pub fn build() {
+    let _axum = Router::new()
+        .route("/closure", get(|| async { "hi" }))
+        .route(DYN_PATH, get(ok_handler));
+    let _actix = App::new()
+        .route("/actix-closure", web::get().to(|| async { "yo" }))
+        .route(DYN_PATH, web::get().to(ok_handler));
+}
+"#,
+        "src/lib.rs",
+        &id(),
+    )
+    .unwrap();
+
+    for ep_id in [
+        "ep:local/rust-ws@GET:/closure",
+        "ep:local/rust-ws@GET:/actix-closure",
+    ] {
+        let ep = x
+            .nodes
+            .iter()
+            .find(|n| n.id == ep_id && n.label == "Endpoint")
+            .unwrap_or_else(|| panic!("missing {ep_id}"));
+        let gap_id = ep.props["handler_sym"].as_str().unwrap();
+        assert!(gap_id.starts_with("gap:rust-handler:"), "{gap_id}");
+        let gap = x.nodes.iter().find(|n| n.id == gap_id).unwrap();
+        assert_eq!(gap.label, "Gap");
+        assert_eq!(
+            gap.props["reason"],
+            "unresolved Rust route handler expression"
+        );
+        assert!(has_edge(&x, "HANDLES", ep_id, gap_id));
+    }
+
+    let route_gaps: Vec<_> = x
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap" && n.id.starts_with("gap:route:"))
+        .collect();
+    assert_eq!(route_gaps.len(), 3, "{route_gaps:#?}");
+    for gap in &route_gaps {
+        assert_eq!(gap.props["reason"], "computed Rust route path");
+        assert_eq!(gap.props["expression"], "DYN_PATH");
+    }
+    assert!(route_gaps.iter().any(|g| has_edge(
+        &x,
+        "HANDLES",
+        &g.id,
+        "sym:local/rust-ws@src/lib.rs#actix_dyn_attr"
+    )));
+    assert!(route_gaps.iter().any(|g| has_edge(
+        &x,
+        "HANDLES",
+        &g.id,
+        "sym:local/rust-ws@src/lib.rs#ok_handler"
+    )));
+}
+
+#[test]
+fn endpoint_determinism_across_runs_and_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"det\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "src/b.rs",
+        r#"
+use actix_web::{get, web, App};
+
+#[get("/b")]
+pub async fn b_attr() {}
+
+pub async fn b_direct() {}
+
+pub fn b_app() {
+    let _ = App::new()
+        .service(web::scope("/v1").service(b_attr))
+        .route("/b-direct", web::post().to(b_direct));
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/a.rs",
+        r#"
+use axum::{routing::{get, post}, Router};
+
+pub async fn a_get() {}
+pub async fn a_post() {}
+
+pub fn a_router() -> Router {
+    Router::new()
+        .route("/a", get(a_get).post(a_post))
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/lib.rs",
+        r#"
+pub mod a;
+pub mod b;
+
+use axum::Router;
+
+pub fn root() -> Router {
+    Router::new().nest("/api", a::a_router())
+}
+"#,
+    );
+
+    let mut cache = IncrementalCache::default();
+    let (first, stats1) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+    assert_eq!(stats1.recomputed_files, 3);
+    let (second, stats2) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+    assert_eq!(stats2.reused_files, 3);
+    let third = extract_dir(dir.path(), &id()).unwrap();
+
+    assert_eq!(first.nodes, second.nodes);
+    assert_eq!(first.edges, second.edges);
+    assert_eq!(first.nodes, third.nodes);
+    assert_eq!(first.edges, third.edges);
+}
+
+#[test]
+fn attribute_routes_under_a_computed_scope_are_gaps_not_root_endpoints() {
+    // A handler mounted only under `web::scope(prefix)` with a computed
+    // prefix is served at an unknown path: never claim its bare path.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"actix_svc\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "src/lib.rs",
+        r#"
+use actix_web::{get, web, App};
+
+#[get("/x")]
+pub async fn x() {}
+
+pub fn configure(prefix: &str) {
+    let _app = App::new().service(web::scope(prefix).service(x));
+}
+"#,
+    );
+    let ex = extract_dir(dir.path(), &id()).unwrap();
+    let endpoints: Vec<&str> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Endpoint")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert!(endpoints.is_empty(), "{endpoints:?}");
+    let x_sym = "sym:local/rust-ws@src/lib.rs#x";
+    assert!(
+        ex.edges
+            .iter()
+            .any(|e| e.label == "HANDLES" && e.src.starts_with("gap:route:") && e.dst == x_sym),
+        "the handler is cited by a computed-route Gap"
+    );
+}
+
+fn endpoint_ids(x: &Extraction) -> Vec<&str> {
+    let mut ids: Vec<&str> = x
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Endpoint")
+        .map(|n| n.id.as_str())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn nearer_local_items_shadow_framework_imports_and_globs() {
+    // AC-0364 (#1089): a function-local `fn get` shadows the module's
+    // `use axum::routing::get`, and a same-scope `fn post` shadows a
+    // `routing::*` glob: neither is claimed as an axum route.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"svc\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "src/lib.rs",
+        r#"
+use axum::{Router, routing::get};
+
+pub async fn advertised() {}
+pub async fn actual() {}
+
+pub fn shadowed() -> Router {
+    fn get<H>(_: H) -> axum::routing::MethodRouter {
+        axum::routing::post(actual)
+    }
+    Router::new().route("/x", get(advertised))
+}
+
+pub fn real() -> Router {
+    Router::new().route("/real", get(actual))
+}
+
+pub mod globbed {
+    use axum::routing::*;
+    use axum::Router;
+    fn post<H>(_: H) -> axum::routing::MethodRouter { todo!() }
+    pub async fn h() {}
+    pub fn app() -> Router {
+        Router::new().route("/g", post(h)).route("/p", put(h))
+    }
+}
+"#,
+    );
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        endpoint_ids(&x),
+        ["ep:local/rust-ws@GET:/real", "ep:local/rust-ws@PUT:/p",]
+    );
+}
+
+#[test]
+fn nested_routers_from_another_workspace_crate_keep_their_prefix() {
+    // AC-0364 (#1089): routers are keyed by the defining crate's symbol.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "api/Cargo.toml",
+        "[package]\nname = \"api\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "api/src/lib.rs",
+        r#"
+use axum::{Router, routing::get};
+pub async fn health() {}
+pub fn router() -> Router {
+    Router::new().route("/health", get(health))
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "web/Cargo.toml",
+        "[package]\nname = \"web\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "web/src/lib.rs",
+        r#"
+use axum::Router;
+pub fn app() -> Router {
+    Router::new().nest("/api", api::router())
+}
+"#,
+    );
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(endpoint_ids(&x), ["ep:local/rust-ws@GET:/api/health"]);
+}
+
+#[test]
+fn actix_root_and_scoped_mounts_and_root_route_slashes() {
+    // AC-0364 (#1089): a handler served at the root and under a scope keeps
+    // both paths; actix keeps a scoped `"/"` route's slash and treats `""`
+    // as the scope itself, while an axum nested root route is the prefix.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"svc\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "src/lib.rs",
+        r#"
+use actix_web::{get, web, App};
+use axum::{Router, routing};
+
+#[get("/status")]
+pub async fn status() {}
+pub async fn index() {}
+pub async fn bare() {}
+pub async fn nested() {}
+
+pub fn actix() {
+    let _app = App::new()
+        .service(status)
+        .service(
+            web::scope("/api")
+                .service(status)
+                .route("/", web::get().to(index))
+                .route("", web::post().to(bare)),
+        );
+}
+
+pub fn axum() -> Router {
+    Router::new().nest("/v1", Router::new().route("/", routing::get(nested)))
+}
+"#,
+    );
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        endpoint_ids(&x),
+        [
+            "ep:local/rust-ws@GET:/api/",
+            "ep:local/rust-ws@GET:/api/status",
+            "ep:local/rust-ws@GET:/status",
+            "ep:local/rust-ws@GET:/v1",
+            "ep:local/rust-ws@POST:/api",
+        ]
+    );
+}
+
+#[test]
+fn route_literals_decode_rust_escapes_or_decline() {
+    // AC-0364 (#1089): `"\u{2f}"` is `/` at runtime, raw strings keep their
+    // backslashes, and an escape Rust rejects is not claimed as a path.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"svc\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "src/lib.rs",
+        r###"
+use axum::{Router, routing::get};
+pub async fn h() {}
+pub fn app() -> Router {
+    Router::new()
+        .route("/a\u{2f}b", get(h))
+        .route(r"/raw\d", get(h))
+        .route("/bad\q", get(h))
+        .nest("/n\x2Fm", Router::new().route("/c", get(h)))
+}
+"###,
+    );
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        endpoint_ids(&x),
+        [
+            "ep:local/rust-ws@GET:/a/b",
+            "ep:local/rust-ws@GET:/n/m/c",
+            r"ep:local/rust-ws@GET:/raw\d",
+        ]
+    );
+}
