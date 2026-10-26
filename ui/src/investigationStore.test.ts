@@ -1039,6 +1039,7 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
     const pendingChat = savedChat(pending, null);
     taskTransport(pending, null, pendingChat);
     await useInvestigationStore.getState().open(pending.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
     expect(useInvestigationStore.getState().chatStatus).toBe('saved');
     expect(useInvestigationStore.getState().chat?.messages).toHaveLength(1);
     expect(useInvestigationStore.getState().chat?.messages[0]).toMatchObject({ author: 'user', ordinal: 0,
@@ -1054,6 +1055,7 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
     const completedChat = savedChat(completed, result);
     taskTransport(completed, result, completedChat);
     await useInvestigationStore.getState().open(completed.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
     expect(useInvestigationStore.getState().chatStatus).toBe('saved');
     expect(useInvestigationStore.getState().chat?.messages[1]).toMatchObject({ author: 'specialist', ordinal: 1,
       message: { kind: 'result_reference', task_id: completed.investigation_id, result_id: result.result_id } });
@@ -1068,6 +1070,7 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
     if (reference.message.kind === 'result_reference') reference.message.result_id = 'result:another-task';
     taskTransport(detail, result, mismatched);
     await useInvestigationStore.getState().open(detail.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('error'));
     expect(useInvestigationStore.getState().chatStatus).toBe('error');
     expect(useInvestigationStore.getState().chat).toBeNull();
     expect(useInvestigationStore.getState().result).toEqual(result);
@@ -1075,6 +1078,7 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
 
     taskTransport(detail, result, null);
     await useInvestigationStore.getState().refreshSelected();
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('legacy'));
     expect(useInvestigationStore.getState().chatStatus).toBe('legacy');
     expect(useInvestigationStore.getState().result).toEqual(result);
     expect(useInvestigationStore.getState().error).toBeNull();
@@ -1089,6 +1093,7 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
       return null;
     });
     await useInvestigationStore.getState().refreshSelected();
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('error'));
     expect(useInvestigationStore.getState().chatStatus).toBe('error');
     expect(useInvestigationStore.getState().chatError).toMatch(/could not be read/);
     expect(useInvestigationStore.getState().result).toEqual(result);
@@ -1102,6 +1107,7 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
     let chat: InvestigationChat = { ...admittedChat, messages: [admittedChat.messages[0]] };
     taskTransport(detail, result, () => chat);
     await useInvestigationStore.getState().open(detail.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('error'));
     expect(useInvestigationStore.getState().chatStatus).toBe('error');
     expect(useInvestigationStore.getState().chatError).toMatch(/did not match this task and result/);
     expect(useInvestigationStore.getState().result).toEqual(result);
@@ -1109,6 +1115,7 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
 
     chat = admittedChat;
     await useInvestigationStore.getState().refreshSelected();
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
     expect(useInvestigationStore.getState().chatStatus).toBe('saved');
     expect(useInvestigationStore.getState().chat?.messages).toHaveLength(2);
     expect(useInvestigationStore.getState().result).toEqual(result);
@@ -1132,8 +1139,33 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
 
     delayed.resolve(chat);
     await opening;
-    expect(useInvestigationStore.getState().chatStatus).toBe('saved');
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
     expect(useInvestigationStore.getState().result).toEqual(result);
+  });
+
+  it('returns confirmed start identity before its optional transcript read completes', async () => {
+    const detail = investigationDetail('start-chat-pending', { status: 'running', has_result: false,
+      actions: { can_cancel: true, can_follow_up: false } });
+    const delayed = deferred<InvestigationChat | null>();
+    mockIPC((command, args) => {
+      if (command === 'start_investigation' || command === 'get_investigation') return detail;
+      if (command === 'investigation_result') return null;
+      if (command === 'get_investigation_chat') return delayed.promise;
+      return response(command, args);
+    });
+
+    const id = await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@3',
+      question: 'Inspect the admitted investigation.', scope: { type: 'all' }, provider_mode: 'local',
+      limit_profile: 'investigation-v1' });
+    expect(id).toBe(detail.investigation_id);
+    expect(useInvestigationStore.getState().detail).toEqual(detail);
+    expect(useInvestigationStore.getState().chatStatus).toBe('loading');
+    expect(useInvestigationStore.getState().error).toBeNull();
+
+    delayed.resolve(savedChat(detail, null));
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
+    expect(useInvestigationStore.getState().chat?.task_id).toBe(id);
+    expect(useInvestigationStore.getState().error).toBeNull();
   });
 
   it('rejects saved producer and ordinal mismatches', async () => {
@@ -1147,6 +1179,7 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
       corrupt(chat);
       taskTransport(detail, result, chat);
       await useInvestigationStore.getState().open(detail.investigation_id);
+      await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('error'));
       expect(useInvestigationStore.getState().chatStatus).toBe('error');
       expect(useInvestigationStore.getState().chat).toBeNull();
       expect(useInvestigationStore.getState().result).toEqual(result);
@@ -1160,6 +1193,7 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
     let chat: InvestigationChat = savedChat(detail, null);
     taskTransport(detail, result, () => chat);
     await useInvestigationStore.getState().open(detail.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chat?.messages).toHaveLength(1));
     expect(useInvestigationStore.getState().chat?.messages).toHaveLength(1);
 
     detail = { ...detail, status: 'completed', has_result: true, revision: 11,
@@ -1168,6 +1202,7 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
     chat = savedChat(detail, result);
     taskTransport(detail, result, () => chat);
     await useInvestigationStore.getState().refreshSelected();
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
     expect(useInvestigationStore.getState().chatStatus).toBe('saved');
     expect(useInvestigationStore.getState().chat?.messages).toHaveLength(2);
     expect(useInvestigationStore.getState().chat?.messages[0].message).toEqual({ kind: 'user_question', question: detail.question });
@@ -1207,15 +1242,19 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
 
     const oldA = useInvestigationStore.getState().open(a.investigation_id);
     await useInvestigationStore.getState().open(b.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chat?.task_id).toBe(b.investigation_id));
     delayedA.resolve(aChat);
     await oldA;
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(useInvestigationStore.getState().selectedId).toBe(b.investigation_id);
     expect(useInvestigationStore.getState().chat?.task_id).toBe(b.investigation_id);
 
     const oldSameTask = useInvestigationStore.getState().open(a.investigation_id);
     await useInvestigationStore.getState().open(a.investigation_id);
+    await vi.waitFor(() => expect(useInvestigationStore.getState().chat?.chat_id).toBe(aChat.chat_id));
     delayedReopenA.resolve({ ...aChat, chat_id: 'chat:reopened' });
     await oldSameTask;
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(useInvestigationStore.getState().selectedId).toBe(a.investigation_id);
     expect(useInvestigationStore.getState().chat?.chat_id).toBe(aChat.chat_id);
   });

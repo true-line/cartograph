@@ -816,30 +816,36 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           loading: false, error: null }));
         if (current()) void get().refreshReviews();
 
-        const chatRead = await chatObservation;
-        if (!current()) return;
-        if (get().detail && get().detail!.revision > detail.revision) {
-          set({ chat: null, chatStatus: 'error',
-            chatError: 'The transcript observation was older than this task. Refresh to load a consistent version.' });
-          return;
-        }
-        let chat: InvestigationChat | null = null;
-        let chatStatus: InvestigationChatStatus = 'error';
-        let chatError: string | null = null;
-        if (chatRead.kind === 'error') {
-          chatError = 'The saved transcript could not be read. Refresh the selected investigation to try again.';
-        } else if (chatRead.value === undefined) {
-          // invokeOr uses undefined only for the non-Tauri browser preview; host null is legacy absence.
-          chatStatus = 'preview';
-        } else if (chatRead.value === null) {
-          chatStatus = 'legacy';
-        } else if (validInvestigationChat(chatRead.value, id, detail, result)) {
-          chat = chatRead.value;
-          chatStatus = 'saved';
-        } else {
-          chatError = 'The saved transcript did not match this task and result. Refresh to reconnect.';
-        }
-        set({ chat, chatStatus, chatError });
+        void chatObservation.then((chatRead) => {
+          if (!current()) return;
+          if (get().detail && get().detail!.revision > detail.revision) {
+            set({ chat: null, chatStatus: 'error',
+              chatError: 'The transcript observation was older than this task. Refresh to load a consistent version.' });
+            return;
+          }
+          let chat: InvestigationChat | null = null;
+          let chatStatus: InvestigationChatStatus = 'error';
+          let chatError: string | null = null;
+          if (chatRead.kind === 'error') {
+            chatError = 'The saved transcript could not be read. Refresh the selected investigation to try again.';
+          } else if (chatRead.value === undefined) {
+            // invokeOr uses undefined only for the non-Tauri browser preview; host null is legacy absence.
+            chatStatus = 'preview';
+          } else if (chatRead.value === null) {
+            chatStatus = 'legacy';
+          } else if (validInvestigationChat(chatRead.value, id, detail, result)) {
+            chat = chatRead.value;
+            chatStatus = 'saved';
+          } else {
+            chatError = 'The saved transcript did not match this task and result. Refresh to reconnect.';
+          }
+          set({ chat, chatStatus, chatError });
+        }).catch(() => {
+          // Transcript failures stay local to the transcript; confirmed task and
+          // findings state remains available even if detached validation rejects.
+          if (current()) set({ chat: null, chatStatus: 'error',
+            chatError: 'The saved transcript could not be read. Refresh the selected investigation to try again.' });
+        });
       } catch {
         if (current()) set({ loading: false, chat: null, chatStatus: 'error',
           chatError: 'The transcript is unavailable until this investigation refreshes consistently.', consent: null, consentOpen: false,
