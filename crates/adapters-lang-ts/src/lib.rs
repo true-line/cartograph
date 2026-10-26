@@ -86,7 +86,7 @@ pub struct Extraction {
     client_navigation: client_navigation::Pending,
     /// Literal `navigator.serviceWorker.register(…)` paths, resolved against
     /// the walk's files at directory completion (#1078).
-    service_worker_registrations: Vec<String>,
+    service_worker_registrations: Vec<service_worker::Registration>,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -3054,9 +3054,9 @@ fn extract_source_recording(
     client_routes::extract(&cx, root, &route_proofs, &mut out.client_routes);
     client_navigation::extract(&cx, root, &route_proofs, &mut out.client_navigation);
     rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
-    if service_worker {
+    if let Some(evidence) = service_worker {
         service_worker::mark(
-            &BTreeSet::from([file_id(id.repo, path)]),
+            &BTreeMap::from([(file_id(id.repo, path), vec![evidence])]),
             &mut out.nodes,
             &out.edges,
         );

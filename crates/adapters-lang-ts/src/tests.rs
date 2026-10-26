@@ -4882,6 +4882,53 @@ fn a_registered_path_marks_exactly_one_resolved_file() {
     assert!(runtimes.contains_key("sym:qwtm/example@web/worker.js#boot"));
 }
 
+// AC-0365 (#1085 review): a relative or protocol-relative literal resolves
+// against a base URL the extractor does not know, so it proves nothing.
+#[test]
+fn relative_registration_literals_prove_nothing() {
+    let out = extract_tree(&[
+        (
+            "web/app.js",
+            "navigator.serviceWorker.register('sw.js');\nnavigator.serviceWorker.register('./push.js');\nnavigator.serviceWorker.register('//cdn/x.js');",
+        ),
+        ("web/sw.js", "function a() {}"),
+        ("web/push.js", "function b() {}"),
+        ("cdn/x.js", "function c() {}"),
+    ]);
+    assert!(runtimes(&out).values().all(Option::is_none));
+}
+
+// AC-0365 (#1085 review): the registration call that proves a worker is
+// cited by every node it marks, and the content hash covers it.
+#[test]
+fn registration_evidence_is_cited_by_marked_nodes() {
+    let tree = [
+        (
+            "web/app.js",
+            "navigator.serviceWorker.register('/worker.js');",
+        ),
+        ("web/worker.js", "function boot() {}"),
+    ];
+    let marked = extract_tree(&tree);
+    let unmarked = extract_tree(&[tree[1]]);
+    for id in [
+        "file:qwtm/example@web/worker.js",
+        "sym:qwtm/example@web/worker.js#boot",
+    ] {
+        let node = |out: &Extraction| out.nodes.iter().find(|n| n.id == id).unwrap().props.clone();
+        let (with, without) = (node(&marked), node(&unmarked));
+        let evidence = with["prov"]["evidence"].as_array().unwrap();
+        assert!(
+            evidence.iter().any(|e| e["path"] == "web/app.js"),
+            "{id}: {evidence:?}"
+        );
+        assert_ne!(
+            with["prov"]["content_hash"],
+            without["prov"]["content_hash"]
+        );
+    }
+}
+
 // AC-0365: a shadowed `navigator` registers nothing.
 #[test]
 fn a_shadowed_navigator_register_proves_nothing() {
