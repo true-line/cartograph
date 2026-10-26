@@ -89,3 +89,61 @@ fn merged_resources_keep_a_proven_module() {
         assert_eq!(resource.props["prov"]["confidence_tier"], "Confirmed");
     }
 }
+
+// AC-0376 (#1116): a non-HTTP site whose instance is unresolved keeps its
+// Gap and still proves its provider. Its second `USES` edge names the Gap,
+// and the resource is marked `instance_unresolved` unless an identity-less
+// site also proves it, in either order. A computed HTTP URL proves nothing
+// more than its Gap.
+#[test]
+fn an_unresolved_instance_still_proves_its_provider() {
+    let smtp = |identity: Option<IdentityExpr>, start: u64| ObservedSite {
+        family: ObservedFamily::SdkClient,
+        ..site("smtp", identity, start)
+    };
+    let computed = || Some(IdentityExpr::Computed("random.choice(servers)".into()));
+    let withheld = || Some(IdentityExpr::Literal(String::new()));
+    let source = ObservedSource {
+        repo: "local/p",
+        commit: "abc",
+        extractor: "t0.test",
+    };
+    let provider = "res:local/p@observed:smtp";
+
+    let (nodes, edges) = assemble(
+        &source,
+        &[
+            smtp(computed(), 0),
+            smtp(withheld(), 20),
+            site("fetch", Some(IdentityExpr::Computed("base + p".into())), 40),
+        ],
+    );
+    let gaps: Vec<&Node> = nodes.iter().filter(|n| n.label == "Gap").collect();
+    assert_eq!(gaps.len(), 3);
+    let resources: Vec<&Node> = nodes.iter().filter(|n| n.label == "Resource").collect();
+    assert_eq!(resources.len(), 1, "{resources:?}");
+    assert_eq!(resources[0].id, provider);
+    assert_eq!(resources[0].props["instance_unresolved"], true);
+    assert_eq!(resources[0].props["kind"], "sdk-client");
+    assert!(!resources[0].props.to_string().contains("random.choice"));
+    let to_provider: Vec<&Edge> = edges.iter().filter(|e| e.dst == provider).collect();
+    assert_eq!(to_provider.len(), 2);
+    for edge in &to_provider {
+        assert_eq!(edge.props["instance_unresolved"], true);
+        assert!(gaps.iter().any(|g| g.id == edge.props["gap"]), "{edge:?}");
+    }
+    // Each Gap keeps its own edge; HTTP adds no resource.
+    assert_eq!(edges.len(), 5);
+
+    for sites in [
+        [smtp(None, 0), smtp(computed(), 20)],
+        [smtp(computed(), 0), smtp(None, 20)],
+    ] {
+        let (nodes, _) = assemble(&source, &sites);
+        let resource = nodes.iter().find(|n| n.id == provider).unwrap();
+        assert!(
+            resource.props.get("instance_unresolved").is_none(),
+            "{resource:?}"
+        );
+    }
+}

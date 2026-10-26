@@ -266,7 +266,27 @@ shadowed = create_engine(DB)
         assert!(!gap.props.to_string().contains("pw@"), "{gap:?}");
     }
     assert!(nodes.iter().any(|n| n.id == res("redis")));
-    assert_eq!(edges.len(), 4);
+    // AC-0376: each Gap's site still proves its provider (#1116). Its second
+    // `USES` edge reaches the provider resource and names the Gap.
+    let sql = nodes.iter().find(|n| n.id == res("sql-database")).unwrap();
+    assert_eq!(sql.props["instance_unresolved"], true, "{sql:?}");
+    assert!(!sql.props.to_string().contains("pw@"), "{sql:?}");
+    // The identity-less redis client proves its resource without a marker.
+    let redis = nodes.iter().find(|n| n.id == res("redis")).unwrap();
+    assert!(
+        redis.props.get("instance_unresolved").is_none(),
+        "{redis:?}"
+    );
+    let to_sql: Vec<&Edge> = edges
+        .iter()
+        .filter(|e| e.dst == res("sql-database"))
+        .collect();
+    assert_eq!(to_sql.len(), 3);
+    for edge in &to_sql {
+        assert_eq!(edge.props["instance_unresolved"], true);
+        assert!(gaps.iter().any(|g| g.id == edge.props["gap"]), "{edge:?}");
+    }
+    assert_eq!(edges.len(), 7);
 }
 
 // AC-0318: Redis reached through the `limits` rate-limit storage is the same
@@ -314,6 +334,8 @@ memory = limits.storage.MemoryStorage()
         uses(&edges, "redis_services.py"),
         vec![
             format!("gap:observed:{REPO}@app/redis_services.py@131"),
+            res("redis"),
+            // AC-0376: the Gap's site also proves the provider.
             res("redis"),
             res("redis:redis+cluster://cluster.internal:7000"),
             res("redis:redis+sentinel://sentinel.internal:26379"),
@@ -669,8 +691,11 @@ fn module_constants_fail_closed() {
         let files: Vec<(&str, &str)> = files.into_iter().collect();
         let (nodes, edges) = extract(&files);
         let found = uses(&edges, "app/db.py");
+        // AC-0376: the Gap, plus the provider the client call proves.
         assert!(
-            found.len() == 1 && found[0].starts_with("gap:observed"),
+            found.len() == 2
+                && found[0].starts_with("gap:observed")
+                && found[1] == res("sql-database"),
             "{label}: {found:?}"
         );
         // The Gap keeps the call's own expression, not the module's.
