@@ -1529,6 +1529,7 @@ it('clears quick preservation context after definitive refusal before a normal c
   await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@3', question: 'Quick request.',
     scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1' }, { preserveComposer: true });
   expect(useInvestigationStore.getState().pendingStart).toBeNull();
+  expect(useInvestigationStore.getState().startRejection).toBe('invalid_input');
   expect(useInvestigationStore.getState().composer).toEqual(composer);
   const ordinary = investigationDetail('ordinary-after-refusal', { status: 'queued', has_result: false,
     last_event_sequence: 0, actions: { can_cancel: true, can_follow_up: false } });
@@ -1540,6 +1541,7 @@ it('clears quick preservation context after definitive refusal before a normal c
   });
   await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@3', question: 'Normal start.',
     scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1' });
+  expect(useInvestigationStore.getState().startRejection).toBeNull();
   expect(useInvestigationStore.getState().composer.question).toBe('');
   expect(useInvestigationStore.getState().composer.parent).toBeNull();
 });
@@ -1552,7 +1554,7 @@ it('keeps quick completion size errors out of the full composer (AC-0385)', asyn
     parent: { conversation_id: 'saved-conversation', parent_id: 'saved-parent' } };
   const obligations = [inventoryObligation];
   useInvestigationStore.setState({ catalog: completionCatalog, composer, draftObligations: obligations,
-    obligationChoices: null, obligationDraftError: 'Existing full-composer validation message.' });
+    obligationChoices: null, obligationDraftError: 'Existing full-composer validation message.', startRejection: 'refresh_required' });
   await useInvestigationStore.getState().start({ specialist_id: 'spec-writer@1', question: 'q'.repeat(9000),
     scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1',
     obligations: { schema_version: 1, contract: 'investigation-completion-obligations@1', obligations } },
@@ -1560,6 +1562,7 @@ it('keeps quick completion size errors out of the full composer (AC-0385)', asyn
   const final = useInvestigationStore.getState();
   expect(ipcCalls).toBe(0);
   expect(final.pendingStart).toBeNull();
+  expect(final.startRejection).toBeNull();
   expect(final.startError).toContain('complete request exceeds');
   expect(final.obligationDraftError).toBe('Existing full-composer validation message.');
   expect(final.composer).toEqual(composer);

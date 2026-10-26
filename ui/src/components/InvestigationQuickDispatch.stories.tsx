@@ -12,6 +12,7 @@ let finishStart: (() => void) | undefined;
 let completionRequests: Array<Record<string, unknown>> = [];
 let pendingChoiceResolvers: Array<(value: typeof completionChoices) => void> = [];
 let refreshedCompletionChoices: typeof completionChoices;
+let completionChoiceReads = 0;
 const pressMeta = (key: string, code: string) => fireEvent.keyDown(window, { key, code, metaKey: true, bubbles: true });
 
 const meta = {
@@ -349,6 +350,7 @@ export const DefinitiveContextRefreshRequiresNewSelection: Story = {
     await userEvent.type(canvas.getByLabelText('Question'), 'Recommend the next verification.');
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await expect(await canvas.findByRole('alert')).toHaveTextContent('Refresh choices');
+    await expect(useInvestigationStore.getState().startRejection).toBe('refresh_required');
     await canvas.findByText('acme/refreshed');
     await expect(canvas.getByRole('button', { name: 'Require inventory acme/refreshed' })).toHaveAttribute('aria-pressed', 'false');
     await expect(canvas.queryByRole('button', { name: 'Require inventory acme/api' })).not.toBeInTheDocument();
@@ -359,6 +361,81 @@ export const DefinitiveContextRefreshRequiresNewSelection: Story = {
       obligations: { obligations: [inventoryObligation] } });
     expect(completionRequests[1]).toMatchObject({ expected_context_id: refreshedCompletionChoices.context_id,
       obligations: { obligations: [refreshedCompletionChoices.inventories[0].obligation] } });
+  },
+};
+
+export const DefinitiveInvalidInputKeepsSelection: Story = {
+  // AC-0385: only a stale-context refusal invalidates the explicit inventory selection.
+  beforeEach: () => {
+    completionChoiceReads = 0;
+    mockIPC((command) => {
+      if (command === 'investigation_obligation_choices') { completionChoiceReads += 1; return completionChoices; }
+      if (command === 'start_investigation') throw { code: 'invalid_input', definitive: true, message: 'Question is not acceptable.' };
+      return null;
+    });
+    useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: completionCatalog,
+      startRejection: 'refresh_required' }, true);
+    return () => { clearMocks(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); };
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    pressMeta(' ', 'Space');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'gap-triager@1');
+    await canvas.findByText('acme/api');
+    await userEvent.click(canvas.getByRole('button', { name: 'Require inventory acme/api' }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Keep my explicit selection.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(await canvas.findByRole('alert')).toHaveTextContent('rejected before admission');
+    await expect(canvas.getByRole('button', { name: 'Remove inventory acme/api' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(canvas.getByLabelText('Question')).toHaveValue('Keep my explicit selection.');
+    expect(useInvestigationStore.getState().startRejection).toBe('invalid_input');
+    expect(useInvestigationStore.getState().pendingStart).toBeNull();
+    // The stale reason seeded above is cleared by this attempt; generic input
+    // refusal does not fetch a replacement context behind the user's back.
+    expect(completionChoiceReads).toBe(1);
+  },
+};
+
+export const CompletionSelectionStopsAtPolicyCount: Story = {
+  // AC-0385: the advertised item cap blocks additions while preserving removal.
+  beforeEach: () => {
+    const cappedChoices = structuredClone(completionChoices);
+    cappedChoices.inventories = Array.from({ length: 13 }, (_, index) => {
+      const repo = `acme/cap-${String(index + 1).padStart(2, '0')}`;
+      const hex = (index + 1).toString(16).padStart(64, '0');
+      return { repo, status: 'recorded' as const, obligation: { kind: 'inventory' as const,
+        obligation_id: hex, target: { context_id: cappedChoices.context_id, repo, inventory_hash: hex } } };
+    });
+    const policy = { limits: { ...completionCatalog.limits, profile: 'investigation-v1' as const },
+      request_schema_version: 4 as const, envelope_schema_version: 1 as const,
+      envelope_contract: 'investigation-completion-obligations@1' as const,
+      max_completion_obligations: 12, request_bytes: 8192, envelope_bytes: 8192,
+      specialist_ids: ['gap-triager@1' as const] };
+    mockIPC((command) => command === 'investigation_obligation_choices' ? cappedChoices : null);
+    useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: {
+      ...completionCatalog, policies: [policy],
+    } }, true);
+    return () => { clearMocks(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); };
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    pressMeta(' ', 'Space');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'gap-triager@1');
+    await canvas.findByText('acme/cap-01');
+    await userEvent.type(canvas.getByLabelText('Question'), 'Use exactly the advertised limit.');
+    for (let index = 1; index <= 12; index += 1) {
+      await userEvent.click(canvas.getByRole('button', { name: `Require inventory acme/cap-${String(index).padStart(2, '0')}` }));
+    }
+    await expect(canvas.getByText('Selected 12 / 12 inventory obligations.')).toBeVisible();
+    const cappedChoice = canvas.getByRole('button', { name: 'Require inventory acme/cap-13' });
+    await expect(cappedChoice).toBeDisabled();
+    const remove = canvas.getByRole('button', { name: 'Remove inventory acme/cap-01' });
+    await expect(remove).toBeEnabled();
+    await userEvent.click(remove);
+    await expect(canvas.getByRole('button', { name: 'Require inventory acme/cap-13' })).toBeEnabled();
+    await userEvent.click(canvas.getByRole('button', { name: 'Require inventory acme/cap-13' }));
+    await expect(canvas.getByText('Selected 12 / 12 inventory obligations.')).toBeVisible();
+    await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeEnabled();
   },
 };
 

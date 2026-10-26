@@ -289,6 +289,7 @@ export interface InvestigationState {
   pendingStart: StartInvestigationRequest | null;
   starting: boolean;
   startError: string | null;
+  startRejection: 'refresh_required' | 'invalid_input' | null;
   composer: InvestigationComposer;
   updateComposer: (patch: Partial<InvestigationComposer>) => void;
   draftInspectionRequirements: InvestigationInspectionTarget[];
@@ -460,7 +461,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
   const startRequest = async (request: StartInvestigationRequest, preserveComposer = pendingStartPreservesComposer): Promise<string | null> => {
     if (get().starting) return null;
     pendingStartPreservesComposer = preserveComposer;
-    set({ starting: true, pendingStart: request, startError: null });
+    set({ starting: true, pendingStart: request, startError: null, startRejection: null });
     let summary: InvestigationSummary;
     try {
       const response = await invokeOr<InvestigationSummary | null>('start_investigation', null, { request });
@@ -471,19 +472,21 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           'definitive' in error && error.definitive === true) {
         pendingStartPreservesComposer = false;
         set({ starting: false, pendingStart: null,
+          startRejection: error.code,
           startError: error.code === 'refresh_required'
             ? [4, 5, 6, 7].includes(request.schema_version) ? 'The selected evidence or completion context changed before admission. No investigation was started. Refresh choices and remove stale obligations.'
               : 'The selected captured source changed before admission. No investigation was started. Remove the stale requirement and select its source again.'
             : `The request was rejected before admission. No investigation was started.${'message' in error && typeof error.message === 'string' ? ` ${error.message}` : ''}` });
         return null;
       }
-      set({ starting: false, startError: 'The start outcome could not be confirmed. Retry this same request to recover its durable identity; this does not start another investigation.' });
+      set({ starting: false, startRejection: null,
+        startError: 'The start outcome could not be confirmed. Retry this same request to recover its durable identity; this does not start another investigation.' });
       return null;
     }
     updateSummary(summary);
     const preserveComposerOnAccept = pendingStartPreservesComposer;
     pendingStartPreservesComposer = false;
-    set((state) => ({ starting: false, pendingStart: null,
+    set((state) => ({ starting: false, pendingStart: null, startRejection: null,
       ...(preserveComposerOnAccept ? {} : { composer: { ...state.composer, question: '', parent: null },
         draftInspectionRequirements: [], inspectionDraftError: null,
         draftObligations: [], obligationChoices: null, obligationChoicesLoading: false, obligationDraftError: null }) }));
@@ -582,7 +585,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     selectedId: null, selectionGeneration: 0, detail: null, result: null, chat: null,
     chatStatus: 'idle', chatError: null, events: [],
     consent: null, consentOpen: false, loading: false, error: null,
-    actionBusy: false, actionError: null, pendingStart: null, starting: false, startError: null,
+    actionBusy: false, actionError: null, pendingStart: null, starting: false, startError: null, startRejection: null,
     composer: initialComposer,
     draftInspectionRequirements: [], inspectionDraftError: null,
     draftObligations: [], obligationChoices: null, obligationChoicesLoading: false, obligationDraftError: null,
@@ -880,6 +883,9 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
 
     start: async (draft, options = {}) => {
       if (get().pendingStart || get().starting) return null;
+      // A definitive refusal belongs to the prior attempt. Never let it
+      // influence local validation or the next request's recovery behavior.
+      set({ startRejection: null });
       const request_nonce = crypto.randomUUID();
       const { obligations: completionObligations, ...legacyBase } = draft;
       if (isCompletionSpecialist(draft.specialist_id)) {

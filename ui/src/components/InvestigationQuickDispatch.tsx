@@ -61,6 +61,8 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
   const completionObligations = obligationEnvelope(selectedObligations, policy);
   const validCompletionSelection = Boolean(currentChoices && validObligationChoices(currentChoices) && policy &&
     validObligationEnvelope(completionObligations, policy) && completionObligations.obligations.length <= policy.max_completion_obligations);
+  const maxCompletionObligations = policy?.max_completion_obligations ?? 0;
+  const atCompletionObligationLimit = selectedObligations.length >= maxCompletionObligations;
   const requestBytes = completionRole && policy ? new TextEncoder().encode(JSON.stringify({ schema_version: policy.request_schema_version,
     request_nonce: '0'.repeat(36), specialist_id: specialistId, obligations: completionObligations,
     question, scope, provider_mode: providerMode, limit_profile: 'investigation-v1',
@@ -138,7 +140,8 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
   };
   const refreshAfterStaleCompletion = (requestedSpecialist: SpecialistId | undefined) => {
     const current = useInvestigationStore.getState();
-    if (!requestedSpecialist || !QUICK_COMPLETION_IDS.has(requestedSpecialist) || current.pendingStart || !current.startError) return;
+    if (!requestedSpecialist || !QUICK_COMPLETION_IDS.has(requestedSpecialist) || current.pendingStart ||
+        current.startRejection !== 'refresh_required') return;
     setSpecialistId(requestedSpecialist);
     ++choicesGeneration.current;
     setChoices(null); setChoicesIdentity(null); setSelectedInventoryIds([]); setChoicesError(null); setChoicesErrorIdentity(null);
@@ -212,10 +215,12 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
           {choicesLoading && <p role="status">Resolving recorded inventories for this scope…</p>}
           {currentChoicesError && <p role="alert" className="error-text">{currentChoicesError}</p>}
           {!policy && <p role="status">This specialist has no compatible Standard completion policy in the current catalog.</p>}
+          {currentChoices && <p role="status">Selected {selectedObligations.length} / {maxCompletionObligations} inventory obligations.</p>}
           {currentChoices && <ul>{currentChoices.inventories.map((item) => {
             const obligation = item.status === 'recorded' ? item.obligation : undefined;
             const selected = Boolean(obligation && selectedInventoryIds.includes(obligation.obligation_id));
             return <li key={item.repo}><strong>{item.repo}</strong> · {item.status}{obligation && <button type="button"
+              disabled={!selected && atCompletionObligationLimit}
               aria-pressed={selected} aria-label={`${selected ? 'Remove' : 'Require'} inventory ${item.repo}`}
               onClick={() => setSelectedInventoryIds((current) => selected ? current.filter((id) => id !== obligation.obligation_id) : [...current, obligation.obligation_id])}>
               {selected ? 'Remove selection' : 'Require inventory'}</button>}
