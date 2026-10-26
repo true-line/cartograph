@@ -61,6 +61,140 @@ afterEach(() => {
 });
 
 describe('durable investigation observations (AC-0190)', () => {
+  it('loads conversation pages without fetching sibling detail and rejects stale conversation responses (AC-0374)', async () => {
+    const first = investigationDetail('turn-first', { conversation_id: 'conversation-a', parent_id: null });
+    const second = investigationDetail('turn-second', { conversation_id: 'conversation-b', parent_id: 'turn-first' });
+    const pendingA = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const calls: string[] = [];
+    mockIPC((command, args) => {
+      calls.push(command);
+      if (command !== 'list_investigation_conversation') throw new Error(`Unexpected ${command}`);
+      if (args?.conversationId === 'conversation-a') return pendingA.promise;
+      return { items: [second], next_cursor: null };
+    });
+    const loadA = useInvestigationStore.getState().openConversation('conversation-a');
+    useInvestigationStore.setState({ conversationPinned: first });
+    await useInvestigationStore.getState().openConversation('conversation-b');
+    expect(useInvestigationStore.getState().conversationPinned).toBeNull();
+    expect(useInvestigationStore.getState().conversationItems.map((item) => item.investigation_id)).toEqual(['turn-second']);
+    pendingA.resolve({ items: [first], next_cursor: null });
+    await loadA;
+    expect(useInvestigationStore.getState().conversationItems.map((item) => item.investigation_id)).toEqual(['turn-second']);
+    expect(calls).toEqual(['list_investigation_conversation', 'list_investigation_conversation']);
+  });
+
+  it('keeps the newer selected terminal revision when a delayed conversation page is stale (AC-0374)', async () => {
+    const stale = investigationDetail('terminal-turn', { conversation_id: 'conversation-terminal', revision: 3,
+      status: 'running', has_result: false });
+    const terminal = investigationDetail('terminal-turn', { conversation_id: 'conversation-terminal', revision: 9,
+      status: 'completed', has_result: true });
+    const pending = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    mockIPC((command) => command === 'list_investigation_conversation' ? pending.promise : null);
+    useInvestigationStore.setState({ selectedId: terminal.investigation_id, detail: terminal, history: [terminal],
+      conversationId: terminal.conversation_id, conversationItems: [], conversationPinned: terminal });
+
+    const loading = useInvestigationStore.getState().loadConversation();
+    pending.resolve({ items: [stale], next_cursor: null });
+    await loading;
+
+    expect(useInvestigationStore.getState().conversationItems.map((item) => ({
+      id: item.investigation_id, status: item.status, revision: item.revision,
+    }))).toEqual([{ id: terminal.investigation_id, status: 'completed', revision: 9 }]);
+  });
+
+  it('opens a parent outside the loaded page, binds its citation, then clears on a foreign conversation (AC-0374)', async () => {
+    const child = investigationDetail('selected-child', { conversation_id: 'conversation-pinned', parent_id: 'selected-parent' });
+    const parent = investigationDetail('selected-parent', { conversation_id: 'conversation-pinned' });
+    const loadedSibling = investigationDetail('loaded-sibling', { conversation_id: 'conversation-pinned', parent_id: 'selected-parent' });
+    const foreign = investigationDetail('foreign-turn', { conversation_id: 'different-conversation' });
+    const pendingParent = deferred<InvestigationDetail>();
+    const citationReads: unknown[] = [];
+    mockIPC((command, args) => {
+      const id = args?.investigationId as string;
+      if (command === 'get_investigation') return id === parent.investigation_id ? pendingParent.promise : foreign;
+      if (command === 'investigation_result') return investigationResult(id);
+      if (command === 'investigation_consent') return null;
+      if (command === 'investigation_events') return { investigation_id: id, items: investigationEvents(id), next_sequence: 9, has_more: false };
+      if (command === 'read_investigation_citation') { citationReads.push(args); return { investigation_id: id, citation_id: 'C1',
+        citation: investigationCitations[0], status: 'available', text: 'Saved parent evidence' };
+      }
+      throw new Error(`Unexpected ${command}`);
+    });
+    useInvestigationStore.setState({ selectedId: child.investigation_id, detail: child,
+      history: [child], conversationId: child.conversation_id, conversationItems: [loadedSibling], conversationPinned: child });
+    const opening = useInvestigationStore.getState().open(parent.investigation_id);
+    expect(useInvestigationStore.getState().detail).toBeNull();
+    expect(useInvestigationStore.getState().conversationId).toBe(child.conversation_id);
+    expect(useInvestigationStore.getState().conversationItems.map((item) => item.investigation_id)).toEqual(['loaded-sibling']);
+    expect(useInvestigationStore.getState().conversationPinned).toBeNull();
+    pendingParent.resolve(parent);
+    await opening;
+    expect(useInvestigationStore.getState().conversationPinned?.investigation_id).toBe(parent.investigation_id);
+    expect(useInvestigationStore.getState().result?.investigation_id).toBe(parent.investigation_id);
+    await useInvestigationStore.getState().readCitation('C1');
+    expect(citationReads).toEqual([{ investigationId: 'selected-parent', citationId: 'C1' }]);
+    expect(useInvestigationStore.getState().citationRead?.investigation_id).toBe(parent.investigation_id);
+    expect(useInvestigationStore.getState().citationRead?.text).toBe('Saved parent evidence');
+    await useInvestigationStore.getState().open(foreign.investigation_id);
+    expect(useInvestigationStore.getState().conversationId).toBeNull();
+    expect(useInvestigationStore.getState().conversationPinned).toBeNull();
+    expect(useInvestigationStore.getState().result?.investigation_id).toBe(foreign.investigation_id);
+    expect(useInvestigationStore.getState().citationRead).toBeNull();
+    expect(useInvestigationStore.getState().citationId).toBeNull();
+  });
+
+  it('refreshes the open conversation after a successfully admitted follow-up (AC-0374)', async () => {
+    const parent = investigationDetail('follow-up-parent', { conversation_id: 'follow-up-conversation' });
+    const child = investigationDetail('follow-up-child', { conversation_id: parent.conversation_id,
+      parent_id: parent.investigation_id, status: 'preparing', has_result: false, last_event_sequence: 1 });
+    const pendingPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    const pageCalls: unknown[] = [];
+    let started: StartInvestigationRequest | null = null;
+    mockIPC((command, args) => {
+      const id = args?.investigationId as string;
+      if (command === 'start_investigation') { started = args?.request as StartInvestigationRequest; return child; }
+      if (command === 'get_investigation') return child;
+      if (command === 'investigation_result') return null;
+      if (command === 'investigation_consent') return null;
+      if (command === 'investigation_events') return { investigation_id: id, items: investigationEvents(id).slice(0, 1), next_sequence: 1, has_more: false };
+      if (command === 'list_investigation_conversation') {
+        pageCalls.push(args);
+        return pendingPage.promise;
+      }
+      throw new Error(`Unexpected ${command}`);
+    });
+    useInvestigationStore.setState({ selectedId: parent.investigation_id, detail: parent,
+      history: [parent], conversationId: parent.conversation_id, conversationItems: [parent], conversationPinned: parent });
+
+    const admittedId = await useInvestigationStore.getState().start({ specialist_id: 'domain-analyst@3', question: 'Follow the saved result.',
+      scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1',
+      conversation_id: parent.conversation_id, parent_id: parent.investigation_id });
+
+    expect(admittedId).toBe(child.investigation_id);
+    expect(started).toMatchObject({ conversation_id: parent.conversation_id, parent_id: parent.investigation_id });
+    expect(useInvestigationStore.getState().selectedId).toBe(child.investigation_id);
+    expect(useInvestigationStore.getState().detail?.investigation_id).toBe(child.investigation_id);
+    expect(useInvestigationStore.getState().conversationLoading).toBe(true);
+    pendingPage.resolve({ items: [child, parent], next_cursor: null });
+    await vi.waitFor(() => expect(useInvestigationStore.getState().conversationItems.map((item) => item.investigation_id))
+      .toEqual([child.investigation_id, parent.investigation_id]));
+    expect(useInvestigationStore.getState().conversationItems.map((item) => item.investigation_id))
+      .toEqual([child.investigation_id, parent.investigation_id]);
+    expect(useInvestigationStore.getState().conversationPinned?.investigation_id).toBe(child.investigation_id);
+    expect(pageCalls).toEqual([{ conversationId: parent.conversation_id }]);
+  });
+
+  it('rejects a conversation page containing a summary from another conversation (AC-0374)', async () => {
+    const wrong = investigationDetail('wrong-turn', { conversation_id: 'other-conversation' });
+    mockIPC((command) => {
+      if (command === 'list_investigation_conversation') return { items: [wrong], next_cursor: null };
+      throw new Error(`Unexpected ${command}`);
+    });
+    await useInvestigationStore.getState().openConversation('expected-conversation');
+    expect(useInvestigationStore.getState().conversationItems).toEqual([]);
+    expect(useInvestigationStore.getState().conversationError).toContain('could not be loaded');
+  });
+
   it('rejects a server search page containing a nonmatching summary (AC-0368)', async () => {
     const nonmatch = investigationDetail('wrong-search-result', { question: 'Unrelated history' });
     mockIPC((command) => command === 'list_investigations'
@@ -190,6 +324,35 @@ describe('durable investigation observations (AC-0190)', () => {
     pendingPage.resolve({ items: [active], next_cursor: null });
     await oldPage;
     expect(useInvestigationStore.getState().history).toEqual([]);
+    expect(useInvestigationStore.getState().historyLoading).toBe(false);
+  });
+
+  it('removes a terminal task from active history while updating its conversation pin and rejecting a stale page (AC-0372, AC-0374)', async () => {
+    const active = investigationDetail('active-pinned-race', { conversation_id: 'conversation-active', status: 'running',
+      has_result: false, actions: { can_cancel: true, can_follow_up: false }, revision: 2 });
+    const terminal = investigationDetail('active-pinned-race', { conversation_id: 'conversation-active', status: 'cancelled',
+      has_result: false, actions: { can_cancel: false, can_follow_up: false }, revision: 3 });
+    const pendingPage = deferred<{ items: InvestigationDetail[]; next_cursor: string | null }>();
+    mockIPC((command) => {
+      if (command === 'list_investigations') return pendingPage.promise;
+      if (command === 'cancel_investigation') return terminal;
+      throw new Error(`Unexpected ${command}`);
+    });
+    useInvestigationStore.setState({ historyActiveOnly: true, history: [active], selectedId: 'another-task',
+      conversationId: active.conversation_id, conversationItems: [active], conversationPinned: active });
+
+    const oldPage = useInvestigationStore.getState().loadHistory();
+    await useInvestigationStore.getState().cancel(active.investigation_id);
+
+    expect(useInvestigationStore.getState().history).toEqual([]);
+    expect(useInvestigationStore.getState().conversationPinned).toMatchObject({
+      investigation_id: active.investigation_id, conversation_id: active.conversation_id,
+      status: 'cancelled', revision: 3,
+    });
+    pendingPage.resolve({ items: [active], next_cursor: null });
+    await oldPage;
+    expect(useInvestigationStore.getState().history).toEqual([]);
+    expect(useInvestigationStore.getState().conversationPinned?.revision).toBe(3);
     expect(useInvestigationStore.getState().historyLoading).toBe(false);
   });
 
