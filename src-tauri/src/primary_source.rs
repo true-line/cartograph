@@ -371,6 +371,11 @@ fn rebuild_normalized_receipt(
         return Err(storage_error("receipt header ownership"));
     }
     let body: ReceiptBody = serde_json::from_str(body_json).map_err(storage_error)?;
+    // The header is bound by its id; the body must be bound by its bytes, so a
+    // representation-only edit (whitespace, key order) fails closed too.
+    if serde_json::to_string(&body).map_err(storage_error)? != body_json {
+        return Err(storage_error("receipt body not canonical"));
+    }
     let path = &header.file.path;
     let fact_key = match (body.k, body.verbatim_k, body.e, body.verbatim_e) {
         (Some(compact), None, None, None) => {
@@ -3747,7 +3752,22 @@ mod tests {
                     .unwrap();
                 }
             }),
-            // 11. Corrupt body: altered range span.
+            // 11. Corrupt body: representation-only edits (whitespace, key order).
+            Box::new(|conn| {
+                conn.execute(
+                    "UPDATE receipts SET payload = payload || ' ' WHERE id = ?1",
+                    [target_id],
+                )
+                .unwrap();
+            }),
+            Box::new(|conn| {
+                conn.execute(
+                    "UPDATE receipts SET payload = json_set(json_remove(payload, '$.d'), '$.d', json_extract(payload, '$.d')) WHERE id = ?1",
+                    [target_id],
+                )
+                .unwrap();
+            }),
+            // 12. Corrupt body: altered range span.
             Box::new(|conn| {
                 conn.execute(
                     "UPDATE receipts SET payload = json_set(payload, '$.r[0][3]', 999999) WHERE id = ?1",
