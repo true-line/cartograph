@@ -112,6 +112,8 @@ export default function App() {
   const investigations = useInvestigationStore();
   const specialistActivity = useSpecialistActivityStore();
   const noticeCorner = useSavedResultNoticeStore((state) => state.corner);
+  const knownUnreadSavedResults = useSavedResultNoticeStore((state) => state.unread.length);
+  const unreadChecksIncomplete = useSavedResultNoticeStore((state) => state.incomplete);
   const {
     view,
     recoverJobId,
@@ -897,6 +899,8 @@ export default function App() {
       <GlobalProgress active={busy} />
       <NavRail
         active={railSurface(view)}
+        knownUnreadSavedResults={knownUnreadSavedResults}
+        unreadChecksIncomplete={unreadChecksIncomplete}
         onNavigate={navigate}
         onOpenPalette={() => setPaletteOpen(true)}
       />
