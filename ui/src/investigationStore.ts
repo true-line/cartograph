@@ -334,7 +334,7 @@ export interface InvestigationState {
   approve: () => Promise<void>;
   decline: () => Promise<void>;
   cancel: (id?: string) => Promise<void>;
-  readCitation: (citationId: string) => Promise<void>;
+  readCitation: (citationId: string, options?: { signal?: AbortSignal }) => Promise<void>;
   clearCitation: () => void;
 }
 
@@ -347,6 +347,7 @@ let conversationRefreshFirstPagePending = false;
 let conversationDirtyInFlight: { conversationId: string; cursor: string; request: number } | null = null;
 let detailRequest = 0;
 let citationRequest = 0;
+let citationOwnerCleanup: (() => void) | undefined;
 let actionRequest = 0;
 let locationRequest = 0;
 let choicesRequest = 0;
@@ -951,6 +952,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       ++detailRequest;
       ++reviewRequest;
       set({ findingReviews: [], reviewLoading: false, reviewBusy: false, reviewError: null });
+      citationOwnerCleanup?.(); citationOwnerCleanup = undefined;
       ++citationRequest;
       ++actionRequest;
       ++locationRequest;
@@ -1180,13 +1182,24 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       }
     },
 
-    readCitation: async (citationId) => {
+    readCitation: async (citationId, options) => {
+      if (options?.signal?.aborted) return;
       const { selectedId: id, selectionGeneration, detail } = get();
       const citation = detail?.citations.find((item) => item.citation_id === citationId);
       if (!id || !citation) return;
+      citationOwnerCleanup?.(); citationOwnerCleanup = undefined;
       const request = ++citationRequest;
       const current = () => get().selectedId === id && get().selectionGeneration === selectionGeneration && request === citationRequest;
       set({ citationId, citationRead: null, citationLoading: true, citationError: null });
+      if (!current()) return;
+      if (options?.signal) {
+        const signal = options.signal;
+        // Release this UI reader only; a newer shared reader owns its own request.
+        const release = () => { if (current()) get().clearCitation(); };
+        signal.addEventListener('abort', release, { once: true });
+        citationOwnerCleanup = () => signal.removeEventListener('abort', release);
+        if (signal.aborted) { release(); return; }
+      }
       try {
         const read = await invokeOr<InvestigationCitationRead | null>('read_investigation_citation', null,
           { investigationId: id, citationId });
@@ -1201,6 +1214,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       }
     },
     clearCitation: () => {
+      citationOwnerCleanup?.(); citationOwnerCleanup = undefined;
       ++citationRequest;
       set({ citationId: null, citationRead: null, citationLoading: false, citationError: null });
     },
