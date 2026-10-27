@@ -106,3 +106,7 @@ Use **Search open + saved chats** or **Cmd/Ctrl+F** in Agent Chats. Submit a lit
 ## Pane layout
 
 Choose **Pane layout** 1, 2, 3 or 4 to arrange that many slots. Three slots offer a **Wide row** at the Top or Bottom; narrow windows stack slots in one column. Empty slots use **Choose saved chat** to open the existing search palette. Close panes first to select fewer slots than loaded chats: layout never silently closes or hides a chat. Opening more chats expands the arrangement up to the existing four-pane bound. These choices change presentation only and preserve replies and pending requests.
+
+## Known unread saved results
+
+The Agent Chats rail badge shows saved results the app has observed as unread in this session. A **?** beside the count, or **?** alone, means checks are incomplete; it is not a complete historical unread total. Dismissing a toast or opening its chat does not clear this existing inbox. Opening the exact validated findings does. The badge adds no background reads and does not change replies or pending requests.

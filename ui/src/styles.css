@@ -2006,6 +2006,9 @@ button.flow-hop-card:hover {
   background: var(--accent);
 }
 
+.nav-saved-result-badge { position: absolute; top: 0; right: 0; min-width: 16px; padding: 1px 3px; border-radius: var(--radius-badge); background: var(--tier-gap); color: var(--bg); font-size: 10px; font-weight: 700; line-height: 14px; }
+.nav-unread-description { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
 .nav-palette {
   margin-top: auto;
 }

@@ -1588,6 +1588,9 @@ export const SavedResultNoticeOpensExactChatWithoutChangingComposer: Story = {
     savedNoticeChat: savedNoticeChat(noticedTaskId, noticedQuestion) }),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const rail = () => canvas.getByRole('button', { name: 'Agent Chats' });
+    const badge = () => rail().querySelector('.nav-saved-result-badge');
+    await expect(badge()).toBeNull();
     const initial = useInvestigationStore.getState();
     const composer = { ...initial.composer, question: 'Preserve this unrelated draft.' };
     const pendingStart = { schema_version: 1 as const, request_nonce: 'notice-chat-preserved-nonce',
@@ -1605,6 +1608,18 @@ export const SavedResultNoticeOpensExactChatWithoutChangingComposer: Story = {
     const openChat = () => canvas.getByRole('button', { name: `Open chat for ${noticedTaskId}: ${noticedQuestion}` });
     await waitFor(() => expect(openChat()).toBeInTheDocument());
     expect(useSavedResultNoticeStore.getState().unread).toHaveLength(1);
+    await expect(badge()?.textContent).toBe('1');
+    await expect(rail()).toHaveAccessibleDescription('Known unread saved results: 1.');
+    const beforeBadgeChanges = [...investigationRequests];
+    useSavedResultNoticeStore.setState({ incomplete: true });
+    await waitFor(() => expect(badge()?.textContent).toBe('1?'));
+    useSavedResultNoticeStore.setState({ incomplete: false });
+    await waitFor(() => expect(badge()?.textContent).toBe('1'));
+    await userEvent.click(canvas.getByRole('button', { name: 'Dismiss saved result notice' }));
+    await expect(badge()?.textContent).toBe('1');
+    expect(useSavedResultNoticeStore.getState().unread).toHaveLength(1);
+    await userEvent.click(canvas.getByRole('button', { name: /New results/ }));
+    expect(investigationRequests).toEqual(beforeBadgeChanges); // badge state and dismissal add no IPC
 
     await userEvent.click(openChat());
     await waitFor(() => expect(canvas.getByRole('heading', { name: 'Agent Chats' })).toBeVisible());
@@ -1615,12 +1630,16 @@ export const SavedResultNoticeOpensExactChatWithoutChangingComposer: Story = {
     expect(investigationRequests.some((request) => ['start_investigation', 'cancel_investigation', 'delete_investigation']
       .includes(request.command))).toBe(false);
     expect(useSavedResultNoticeStore.getState().unread).toHaveLength(1); // transcript open is not findings-read
+    await expect(badge()?.textContent).toBe('1');
+    await expect(rail()).toHaveAttribute('aria-current', 'page');
     expect(useInvestigationStore.getState().composer).toEqual(composer);
     expect(useInvestigationStore.getState().pendingStart).toEqual(pendingStart);
 
     await userEvent.click(canvas.getByRole('button', { name: `Open findings for ${noticedTaskId}: ${noticedQuestion}` }));
     await waitFor(() => expect(canvas.getByRole('heading', { name: 'Investigations' })).toBeVisible());
     await waitFor(() => expect(useSavedResultNoticeStore.getState().unread).toEqual([]));
+    await expect(badge()).toBeNull();
+    await expect(rail()).not.toHaveAttribute('aria-describedby');
     expect(useInvestigationStore.getState().composer).toEqual(composer);
     expect(useInvestigationStore.getState().pendingStart).toEqual(pendingStart);
   },
