@@ -72,23 +72,39 @@ test('a showcase output is summarized into sorted deterministic counts', async (
   assert.equal(summarize(output, () => null).receipts, null);
 });
 
-test('comparison reports measurement deltas and flags counts that differ on one commit', () => {
-  const repo = (wall, nodes, commit = sha) => ({
-    name: 'one', commit, measurements: { wall_seconds: wall, max_rss_bytes: null, peak_footprint_bytes: 100 },
-    counts: { nodes } });
-  const run = (commit, ...repos) => ({ cartograph_commit: commit, repos });
+test('comparison reports measurement deltas and flags counts that differ for one build and source', () => {
+  const repo = (wall, nodes, fields = {}) => ({
+    name: 'one', url: 'https://example.com/one', commit: sha, measurements: { wall_seconds: wall, max_rss_bytes: null, peak_footprint_bytes: 100 },
+    counts: { nodes }, ...fields });
+  const run = (commit, ...repos) => ({ cartograph_commit: commit, build: 'cargo', repos });
   assert.deepEqual(compare(run('c1', repo(100, 5)), run('c1', repo(90, 5))),
-    { lines: ['one: wall_seconds 100 -> 90 (-10.0%)', 'one: peak_footprint_bytes 100 -> 100 (0.0%)'], countsDiffer: false });
+    { lines: ['one: wall_seconds 100 -> 90 (-10.0%)', 'one: peak_footprint_bytes 100 -> 100 (0.0%)'], countsDiffer: false, nondeterministic: false });
   const same = compare(run('c1', repo(100, 5)), run('c1', repo(100, 6)));
-  assert.equal(same.countsDiffer, true);
-  assert.equal(same.lines.at(-1), 'determinism: counts differ between two runs of the same Cartograph commit');
-  const changed = compare(run('c1', repo(100, 5)), run('c2', repo(100, 6, 'b'.repeat(40))));
-  assert.equal(changed.countsDiffer, true);
-  assert.ok(changed.lines.includes(`one: pin moved ${sha} -> ${'b'.repeat(40)}`));
-  assert.ok(!changed.lines.some((line) => line.startsWith('determinism')));
+  assert.equal(same.nondeterministic, true);
+  assert.equal(same.lines.at(-1), 'determinism: counts differ between two runs of the same build and source');
+  // A moved pin, url or path selects other source: its counts may differ.
+  for (const [fields, line] of [
+    [{ commit: 'b'.repeat(40) }, `one: commit moved ${sha} -> ${'b'.repeat(40)}`],
+    [{ url: 'https://example.com/two' }, 'one: url moved https://example.com/one -> https://example.com/two'],
+    [{ path: 'packages/core' }, 'one: path moved (none) -> packages/core'],
+  ]) {
+    const moved = compare(run('c1', repo(100, 5)), run('c1', repo(100, 6, fields)));
+    assert.equal(moved.countsDiffer, true);
+    assert.equal(moved.nondeterministic, false);
+    assert.ok(moved.lines.includes(line), line);
+    assert.ok(!moved.lines.some((entry) => entry.startsWith('determinism')));
+  }
+  // Membership changes are reported both ways.
   assert.deepEqual(compare(run('c1'), run('c1', repo(1, 1))).lines, ['one: new']);
-  // An uncommitted tree is not the same build, even at one commit.
-  const dirty = compare(run('c1', repo(100, 5)), { ...run('c1', repo(100, 6)), cartograph_dirty: true });
-  assert.equal(dirty.countsDiffer, true);
-  assert.ok(!dirty.lines.some((line) => line.startsWith('determinism')));
+  assert.deepEqual(compare(run('c1', repo(1, 1)), run('c1')).lines, ['one: removed']);
+  // An uncommitted tree, another commit or a supplied binary is not the same build.
+  for (const after of [
+    { ...run('c1', repo(100, 6)), cartograph_dirty: true },
+    run('c2', repo(100, 6)),
+    { ...run('c1', repo(100, 6)), build: 'supplied' },
+  ]) {
+    const other = compare(run('c1', repo(100, 5)), after);
+    assert.equal(other.countsDiffer, true);
+    assert.equal(other.nondeterministic, false);
+  }
 });

@@ -4,8 +4,9 @@
 // the production ingest path, and writes one JSON result per run: wall time
 // and peak memory as measurements, and graph, endpoint and receipt counts as
 // deterministic facts. Local only: never run in CI. It reports and never
-// fails on a threshold; a counts difference between two runs of one commit
-// is the only finding `--compare` treats as a determinism failure.
+// fails on a threshold; a counts difference between two runs this script built
+// from one clean commit, for the same url, commit and path, is the only finding
+// `--compare` treats as a determinism failure.
 //
 //   node scripts/bench-ingest.mjs --work <dir> [--manifest bench/repos.toml] [--bin <app test binary>] [--only <name>]
 //   node scripts/bench-ingest.mjs --compare <before.json> <after.json>
@@ -103,33 +104,50 @@ function sorted(object) {
   return Object.fromEntries(Object.entries(object).sort(([a], [b]) => a.localeCompare(b)));
 }
 
-/** Two results of one committed Cartograph build: only then must counts match. */
+/**
+ * Two results this script built from one clean Cartograph commit: only then
+ * must counts match. A `--bin` binary has no verified provenance.
+ */
 function sameBuild(before, after) {
-  return before.cartograph_commit === after.cartograph_commit && !before.cartograph_dirty && !after.cartograph_dirty;
+  return before.cartograph_commit === after.cartograph_commit && !before.cartograph_dirty && !after.cartograph_dirty
+    && before.build === 'cargo' && after.build === 'cargo';
 }
 
-/** Lines describing how `after` differs from `before`, and whether any count differs. */
+/** The fields that select what a repository result recovered. */
+const SOURCE = ['url', 'commit', 'path'];
+
+/**
+ * Lines describing how `after` differs from `before`, whether any count
+ * differs, and whether one does for the same build and the same source.
+ */
 export function compare(before, after) {
   const lines = [];
   let countsDiffer = false;
+  let nondeterministic = false;
+  const build = sameBuild(before, after);
   const byName = new Map(before.repos.map((repo) => [repo.name, repo]));
   for (const repo of after.repos) {
     const old = byName.get(repo.name);
+    byName.delete(repo.name);
     if (!old) { lines.push(`${repo.name}: new`); continue; }
-    if (old.commit !== repo.commit) lines.push(`${repo.name}: pin moved ${old.commit} -> ${repo.commit}`);
+    for (const key of SOURCE) {
+      if (old[key] !== repo[key]) lines.push(`${repo.name}: ${key} moved ${old[key] ?? '(none)'} -> ${repo[key] ?? '(none)'}`);
+    }
     for (const key of ['wall_seconds', 'max_rss_bytes', 'peak_footprint_bytes']) {
       const [a, b] = [old.measurements[key], repo.measurements[key]];
       if (a !== null && b !== null && a > 0) lines.push(`${repo.name}: ${key} ${a} -> ${b} (${((b - a) / a * 100).toFixed(1)}%)`);
     }
     if (JSON.stringify(old.counts) !== JSON.stringify(repo.counts)) {
       countsDiffer = true;
+      if (build && SOURCE.every((key) => old[key] === repo[key])) nondeterministic = true;
       lines.push(`${repo.name}: counts differ ${JSON.stringify(old.counts)} -> ${JSON.stringify(repo.counts)}`);
     }
   }
-  if (sameBuild(before, after) && countsDiffer) {
-    lines.push('determinism: counts differ between two runs of the same Cartograph commit');
+  for (const name of byName.keys()) lines.push(`${name}: removed`);
+  if (nondeterministic) {
+    lines.push('determinism: counts differ between two runs of the same build and source');
   }
-  return { lines, countsDiffer };
+  return { lines, countsDiffer, nondeterministic };
 }
 
 function run(command, args, options = {}) {
@@ -175,20 +193,23 @@ function main() {
   const options = parseArguments(process.argv.slice(2));
   if (options.compare) {
     const [before, after] = options.compare.map((file) => JSON.parse(readFileSync(file, 'utf8')));
-    const { lines, countsDiffer } = compare(before, after);
+    const { lines, nondeterministic } = compare(before, after);
     console.log(lines.join('\n'));
-    process.exitCode = countsDiffer && sameBuild(before, after) ? 1 : 0;
+    process.exitCode = nondeterministic ? 1 : 0;
     return;
   }
   if (!['darwin', 'linux'].includes(process.platform)) throw new Error('the benchmark supports macOS and Linux only');
   const repos = parseManifest(readFileSync(options.manifest, 'utf8')).filter((repo) => !options.only || repo.name === options.only);
   const work = path.resolve(options.work);
+  // Results from an uncommitted tree, or one that changed during the build,
+  // are not comparable by commit.
+  const tree = () => [run('git', ['rev-parse', 'HEAD'], { cwd: ROOT }).stdout.trim(),
+    run('git', ['status', '--porcelain'], { cwd: ROOT }).stdout.trim()];
+  const [commit, status] = tree();
   const binary = options.bin ? path.resolve(options.bin) : build();
-  const commit = run('git', ['rev-parse', 'HEAD'], { cwd: ROOT }).stdout.trim();
-  // Results from an uncommitted tree are not comparable by commit.
-  const dirty = run('git', ['status', '--porcelain'], { cwd: ROOT }).stdout.trim() !== '';
+  const dirty = status !== '' || tree().join('\n') !== [commit, status].join('\n');
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const result = { schema_version: 1, cartograph_commit: commit, cartograph_dirty: dirty, platform: `${process.platform}-${process.arch}`, started_at: stamp, repos: [] };
+  const result = { schema_version: 1, cartograph_commit: commit, cartograph_dirty: dirty, build: options.bin ? 'supplied' : 'cargo', platform: `${process.platform}-${process.arch}`, started_at: stamp, repos: [] };
   for (const repo of repos) {
     const source = checkout(repo, work);
     const output = path.join(work, 'runs', stamp, repo.name);
