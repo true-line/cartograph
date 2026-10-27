@@ -381,7 +381,7 @@ mod boundary_tests {
         let first_refusal: Value =
             serde_json::from_str(receipt["capacity_refusals"][0].as_str().unwrap()).unwrap();
         let before_refusal = &first_refusal["call"]["admission"]["consumed_budgets"];
-        assert!(usage["evidence_items"].as_u64().unwrap() > 0);
+        assert_eq!(usage["evidence_items"], 2);
         for debit in [
             "evidence_requests",
             "evidence_items",
@@ -412,6 +412,7 @@ mod boundary_tests {
                 )
             })
             .count();
+        assert_eq!(source_citations, 2);
         assert_eq!(
             source_citations as u64,
             usage["evidence_items"].as_u64().unwrap()
@@ -438,7 +439,8 @@ mod boundary_tests {
                         .generated_tokens_per_invocation
                 )
         );
-        assert!(calls.len() <= INVESTIGATION_V2_POLICY.limits().model_invocations as usize);
+        assert_eq!(calls.len(), 63);
+        assert_eq!(usage["model_invocations"], 63);
         for (ordinal, call) in calls.iter().enumerate() {
             assert!(
                 call.input_bytes > 0
@@ -456,6 +458,9 @@ mod boundary_tests {
                 admission.consumed_budgets.model_invocations as usize,
                 ordinal
             );
+            if ordinal + 1 == calls.len() {
+                assert_eq!(admission.consumed_budgets.model_invocations, 62);
+            }
             assert_eq!(
                 admission.mode,
                 if ordinal + 1 == calls.len() {
