@@ -682,8 +682,29 @@ impl InvestigationInput {
             Some(completion),
             policy,
         )?;
+        let result = self.admit_narrative(result, finish)?;
         result.validate_with_disclosure_and_policy(&self.ledger, step, disclosure, policy)?;
         Ok(Ok(result))
+    }
+
+    pub(super) fn admit_narrative(
+        &self,
+        result: InvestigationResult,
+        finish: &staged_finish::StagedFinish,
+    ) -> Result<InvestigationResult, InvestigationError> {
+        if finish.schema_version != 2 {
+            return Ok(result);
+        }
+        let result = result.with_narrative(finish.narrative.clone())?;
+        super::privacy::reject_prose_replay(
+            result.authored_prose(),
+            self.supplied_strings.iter().map(String::as_str),
+        )?;
+        super::privacy::reject_metadata_replay(
+            result.authored_prose(),
+            self.graph_strings.iter().map(String::as_str),
+        )?;
+        Ok(result)
     }
 
     pub fn admit_result_for_step(

@@ -111,7 +111,7 @@ pub fn completion_result_validation_workspace(
         json_bytes(result_bytes)?,
         12 * "finding-12".len(),
         slots::<Vec<InvestigationFinding>>(1)?,
-        slots::<&str>(12 * (2 + 8) + 8)?,
+        slots::<&str>(12 * (2 + 8) + 8 + 2)?,
         MAX_INPUT_BYTES,
         slots::<String>(1)?,
         slots::<char>(MAX_INPUT_BYTES)?,
@@ -128,6 +128,7 @@ pub fn completion_result_validation_workspace(
         set::<String>(citations)?,
         ledger_bytes, // eligible citation IDs
         set::<&String>(result_bytes)?,
+        set::<&String>(12)?, // narrative finding membership
         64,
         slots::<String>(1)?,
         result_copy.max(finish),

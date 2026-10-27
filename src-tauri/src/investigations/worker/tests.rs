@@ -37,6 +37,8 @@ enum Mode {
     WrongQualifiedContext,
     CompletionSupported,
     SpecWriterSupported,
+    SpecWriterMessage,
+    SpecWriterMessageInsufficient,
     GapTriagerSupported,
     CompletionRepair,
     CompletionCap,
@@ -286,6 +288,9 @@ impl LlmProvider for Scripted {
             };
         }
         if (matches!(self.mode, Mode::MetadataReplayCancelled) && call == 1)
+            || (matches!(self.mode, Mode::SpecWriterMessage)
+                && call == 3
+                && self.cancel.lock().unwrap().is_some())
             || (matches!(self.mode, Mode::CancelFinish) && call == 2)
             || (matches!(self.mode, Mode::CancelTool | Mode::CompletionCancelRefused) && call == 1)
         {

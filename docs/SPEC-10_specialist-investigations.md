@@ -965,3 +965,15 @@ capacity ceilings and terminal reserve. Persisted chats do not become model
 input automatically. Reply streaming, generated assistant text, UI/IPC
 presentation, chat search, deletion/forget policy and memory admission remain
 separate work.
+
+### Spec Writer final message (#1179, AC-0404)
+`spec-writer@2` retains Standard request/disclosure4 and investigation-v1 limits.
+Its closed finish envelope2 and result8 add an optional, omitted-when-absent
+`narrative` containing authored `text` and local `finding_ids`. Supported finishes
+require it; insufficient evidence forbids it. References resolve only to admitted
+proposed-design findings and their citations; membership does not prove entailment.
+The body reuses the existing finding-statement bound (2048 UTF-8 bytes) and shares
+existing joined prose/privacy and encoded capacity limits. Result identity
+covers it, and the existing atomic chat result reference remains its only publication
+owner. Historical roles keep their exact wire/prompt/definition contracts. This adds
+no streaming, new provider call, source authority, or full-conversation model memory.

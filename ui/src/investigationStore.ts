@@ -119,7 +119,8 @@ function validCoverageContext(value: InvestigationDetail['coverage_context']): b
 
 /** Host validates result content; the UI rejects incompatible version bindings. */
 function validResultBinding(result: InvestigationResult, maximum = 12): boolean {
-  if (result.schema_version === 5 || result.schema_version === 6 || result.schema_version === 7) return validCompletionResult(result.completion, result, maximum) &&
+  if (result.schema_version !== 8 && 'narrative' in result) return false;
+  if (result.schema_version === 5 || result.schema_version === 6 || result.schema_version === 7 || result.schema_version === 8) return validCompletionResult(result.completion, result, maximum) &&
     typeof result.invocation_step_id === 'string' && /^[A-Za-z0-9_:-]{1,128}$/.test(result.invocation_step_id) &&
     isCompletionDisclosure(result.disclosure_hash, result.schema_version) &&
     Boolean(result.coverage && CONTEXT_ID.test(result.coverage.context_id) && COVERAGE_ID.test(result.coverage.coverage_id) && hash(result.coverage.representation_hash));

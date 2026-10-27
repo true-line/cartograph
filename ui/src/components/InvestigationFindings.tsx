@@ -17,6 +17,7 @@ const READ_STATUS: Record<InvestigationCitationRead['status'], string> = {
 
 export interface InvestigationFindingsProps {
   readOnly?: boolean;
+  producerId?: string;
   sectionId?: string;
   reviews?: FindingReview[];
   reviewLoading?: boolean;
@@ -34,13 +35,24 @@ export interface InvestigationFindingsProps {
   onClose: () => void;
 }
 
-export function InvestigationFindings({ result, citations, citationId, read, loading, error, onRead, onClose, reviews = [], reviewLoading = false, reviewBusy = false, reviewError, onRefreshReviews, onReview, readOnly = false, sectionId = 'investigation-findings' }: InvestigationFindingsProps) {
+export function InvestigationFindings({ result, citations, citationId, read, loading, error, onRead, onClose, reviews = [], reviewLoading = false, reviewBusy = false, reviewError, onRefreshReviews, onReview, readOnly = false, producerId, sectionId = 'investigation-findings' }: InvestigationFindingsProps) {
   const selected = citations.find((citation) => citation.citation_id === citationId);
   return <section id={sectionId} className="investigation-section" aria-label="Investigation findings">
     <h3>Findings <TierBadge tier="InferredWeak" /></h3>
     <p className="muted">Every specialist finding is T3 / InferredWeak, including statements about implemented behavior.
       Findings do not change confirmed facts, accepted proposals, context or exports.</p>
     {!result ? <p className="muted">No admitted result is available yet.</p> : <>
+      {result.narrative && <article aria-label="Specialist final message">
+        <h4>Spec Writer final message · {producerId}</h4>
+        <p className="muted">Proposed design · T3 / InferredWeak · saved final output</p>
+        <p className="investigation-statement">{result.narrative.text}</p>
+        {result.findings.filter((finding) => result.narrative!.finding_ids.includes(finding.finding_id)).map((finding) =>
+          <div key={finding.finding_id} aria-label={`Message support ${finding.finding_id}`}>
+            <span>{finding.title} · {finding.finding_id}</span>
+            {finding.citation_ids.map((id) => <button key={id} type="button" className="secondary-button"
+              disabled={!citations.some((citation) => citation.citation_id === id)} onClick={() => onRead(id)}>Inspect message citation {id}</button>)}
+          </div>)}
+      </article>}
       <p>{result.knowledge_completeness === 'insufficient_evidence'
         ? 'Insufficient evidence to support an answer.' : 'Findings cover the inspected scope; knowledge remains partial.'}</p>
       <ul className="investigation-limitations">{result.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul>

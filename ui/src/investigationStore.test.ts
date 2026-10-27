@@ -1064,6 +1064,17 @@ describe('versioned investigation history (AC-0180/0190/0235)', () => {
     expect(result).not.toHaveProperty('disclosure_hash');
   });
 
+  it('rejects a narrative attached to a legacy result on the saved-result IPC path (AC-0404)', async () => {
+    const detail = legacyInvestigationDetail(1, 'legacy-narrative');
+    const result = { ...legacyInvestigationResult(detail.investigation_id), narrative: {
+      text: 'This result predates the authored-message contract.', finding_ids: ['finding:legacy'],
+    } };
+    mockIPC((command, args) => command === 'get_investigation' ? detail : command === 'investigation_result' ? result : response(command, args));
+    await useInvestigationStore.getState().open(detail.investigation_id);
+    expect(useInvestigationStore.getState().result).toBeNull();
+    expect(useInvestigationStore.getState().error).toContain('consistently');
+  });
+
   it('keeps current specialist and result disclosure bindings on refresh', async () => {
     mockIPC(response);
     await useInvestigationStore.getState().open('current');

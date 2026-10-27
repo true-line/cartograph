@@ -49,6 +49,8 @@ pub enum SpecialistId {
     EvidenceAuditorV10,
     #[serde(rename = "spec-writer@1")]
     SpecWriterV1,
+    #[serde(rename = "spec-writer@2")]
+    SpecWriterV2,
     #[serde(rename = "gap-triager@1")]
     GapTriagerV1,
 }
@@ -86,6 +88,14 @@ fn spec_writer_definition_data() -> &'static SpecWriterDefinitionData {
     static DATA: OnceLock<SpecWriterDefinitionData> = OnceLock::new();
     DATA.get_or_init(|| {
         serde_json::from_str(include_str!("data/spec-writer-v1.json"))
+            .expect("compiled Spec Writer definition is valid")
+    })
+}
+
+fn spec_writer_v2_definition_data() -> &'static SpecWriterDefinitionData {
+    static DATA: OnceLock<SpecWriterDefinitionData> = OnceLock::new();
+    DATA.get_or_init(|| {
+        serde_json::from_str(include_str!("data/spec-writer-v2.json"))
             .expect("compiled Spec Writer definition is valid")
     })
 }
@@ -156,6 +166,7 @@ impl SpecialistId {
         matches!(
             self,
             Self::SpecWriterV1
+                | Self::SpecWriterV2
                 | Self::GapTriagerV1
                 | Self::DomainAnalystV3
                 | Self::EvidenceAuditorV3
@@ -180,6 +191,7 @@ impl SpecialistId {
         matches!(
             self,
             Self::SpecWriterV1
+                | Self::SpecWriterV2
                 | Self::GapTriagerV1
                 | Self::DomainAnalystV4
                 | Self::EvidenceAuditorV4
@@ -207,6 +219,7 @@ impl SpecialistId {
         matches!(
             self,
             Self::SpecWriterV1
+                | Self::SpecWriterV2
                 | Self::GapTriagerV1
                 | Self::DomainAnalystV6
                 | Self::EvidenceAuditorV6
@@ -225,6 +238,7 @@ impl SpecialistId {
         matches!(
             self,
             Self::SpecWriterV1
+                | Self::SpecWriterV2
                 | Self::GapTriagerV1
                 | Self::DomainAnalystV7
                 | Self::EvidenceAuditorV7
@@ -272,7 +286,7 @@ impl SpecialistId {
             | Self::EvidenceAuditorV1
             | Self::SpecWriterV1
             | Self::GapTriagerV1 => 1,
-            Self::DomainAnalyst | Self::EvidenceAuditor => 2,
+            Self::DomainAnalyst | Self::EvidenceAuditor | Self::SpecWriterV2 => 2,
             Self::DomainAnalystV3 | Self::EvidenceAuditorV3 => 3,
             Self::DomainAnalystV4 | Self::EvidenceAuditorV4 => 4,
             Self::DomainAnalystV5 | Self::EvidenceAuditorV5 => 5,
@@ -287,7 +301,10 @@ impl SpecialistId {
     /// Role identity versions are independent from private prompt protocol
     /// generations. Spec Writer reuses the current schema-4 prompt protocol.
     fn prompt_generation(self) -> u32 {
-        if matches!(self, Self::SpecWriterV1 | Self::GapTriagerV1) {
+        if matches!(
+            self,
+            Self::SpecWriterV1 | Self::SpecWriterV2 | Self::GapTriagerV1
+        ) {
             7
         } else {
             self.version()
@@ -296,6 +313,7 @@ impl SpecialistId {
 
     pub fn prompt(self) -> String {
         let role = match self {
+            Self::SpecWriterV2 => spec_writer_v2_definition_data().role_prompt.as_str(),
             Self::SpecWriterV1 => spec_writer_definition_data().role_prompt.as_str(),
             Self::GapTriagerV1 => gap_triager_definition_data().role_prompt.as_str(),
             Self::DomainAnalyst
@@ -362,7 +380,10 @@ impl SpecialistId {
                 };
                 // Spec Writer and Gap Triager hosts admit only proposed_design findings.
                 // Keep COMMON immutable for every historical role generation.
-                let common = if matches!(self, Self::SpecWriterV1 | Self::GapTriagerV1) {
+                let common = if matches!(
+                    self,
+                    Self::SpecWriterV1 | Self::SpecWriterV2 | Self::GapTriagerV1
+                ) {
                     let common = if self == Self::GapTriagerV1 {
                         common.replace(
                             "All your findings are Agentic/InferredWeak, including claims about implemented behavior and documented intent.",
@@ -383,6 +404,13 @@ impl SpecialistId {
                     common
                 };
                 let common = common.replace(r#"{"type":"finish","findings"# , r#"{"schema_version":1,"outcome":"supported","action":{"type":"finish","findings"#).replace(r#"["Remaining coverage limitations."]}"#, r#"["Remaining coverage limitations."]}}"#);
+                let common = if self == Self::SpecWriterV2 {
+                    common.replace(r#"{"schema_version":1,"outcome":"supported","action"#,
+                        r#"{"schema_version":2,"outcome":"supported","narrative":{"text":"A distinct concise proposed answer in your own words.","finding_ids":["finding-1"]},"action"#)
+                        + "\nFor supported finishes, narrative is mandatory: text (at most 2048 UTF-8 bytes) is your final answer, with 1..12 unique finding_ids naming your findings in order as finding-1, finding-2, etc. Cite only proposed-design findings and their admitted citations. Paraphrase all input; narrative participates in the same joined source-replay and sensitive-output checks as findings and limitations. For insufficient_evidence use schema_version 2 with no narrative field and no findings. The complete response shares the existing capacity; never emit private reasoning."
+                } else {
+                    common
+                };
                 let admission = if self.uses_next_prompt_admission() {
                     NEXT_PROMPT_ADMISSION_V10
                 } else {
@@ -402,6 +430,10 @@ impl SpecialistId {
     pub fn definition(self) -> Result<InvestigationSpecialist, InvestigationError> {
         let prompt = self.prompt();
         let (name, purpose) = match self {
+            Self::SpecWriterV2 => {
+                let data = spec_writer_v2_definition_data();
+                (data.name.as_str(), data.purpose.as_str())
+            }
             Self::SpecWriterV1 => {
                 let data = spec_writer_definition_data();
                 (data.name.as_str(), data.purpose.as_str())

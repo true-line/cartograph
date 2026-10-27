@@ -91,3 +91,5 @@ findings and citations. This does not search arbitrary multi-message chat prose.
 Choose **Saved result notice position** to place existing saved-result notices
 in any corner. The choice is stored locally; when local storage is unavailable,
 notices use the default top-right position.
+
+Spec Writer @2 can return a saved, cited final message with its proposed design. Its text is provider-authored and admitted with the result, labeled T3 / InferredWeak. Insufficient evidence has no invented message. This is final output, not token streaming; follow-ups still receive only the bounded selected-parent result.

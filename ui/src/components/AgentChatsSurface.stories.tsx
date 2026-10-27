@@ -3,6 +3,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { investigationCatalog, investigationCitations, investigationDetail, investigationEvents, investigationResult } from '../investigationFixtures';
+import { specWriterV2Detail, specWriterV2Result } from '../completionFixtures';
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
 import type { InvestigationChat, InvestigationDetail } from '../investigationTypes';
 import { useAgentChatDockStore } from '../agentChatDockStore';
@@ -354,13 +355,16 @@ export const ConversationOwnershipAcrossVisits: Story = {
 let savedAnswerCitationReads: string[];
 let releaseSavedAnswerCitation: (() => void) | undefined;
 
-// AC-0397: actual validated saved answers and nonselected-pane historical inspection.
+// AC-0397/0404: validated saved answers stay with their task and cited proposal.
 export const SavedAnswersStayWithTheirPane: Story = {
   beforeEach: () => {
     savedAnswerCitationReads = []; releaseSavedAnswerCitation = undefined;
-    const details = ['answer-a', 'answer-b'].map((id) => investigationDetail(id, { question: `Question for ${id}` }));
-    const results = details.map((detail) => {
-      const result = investigationResult(detail.investigation_id);
+    const details = [
+      { ...specWriterV2Detail('answer-a'), question: 'Question for answer-a' },
+      investigationDetail('answer-b', { question: 'Question for answer-b' }),
+    ];
+    const results = details.map((detail, index) => {
+      const result = index === 0 ? specWriterV2Result(detail.investigation_id) : investigationResult(detail.investigation_id);
       result.findings[0].statement = `Saved finding only for ${detail.investigation_id}`;
       return result;
     });
@@ -408,12 +412,18 @@ export const SavedAnswersStayWithTheirPane: Story = {
     await expect(paneA.getByText('Saved finding only for answer-a')).toBeVisible();
     await expect(paneA.queryByText('Saved finding only for answer-b')).not.toBeInTheDocument();
     await expect(paneB.getByText('Saved finding only for answer-b')).toBeVisible();
-    await expect(paneA.getByText('Implemented behavior')).toBeVisible();
+    const message = paneA.getByRole('article', { name: 'Specialist final message' });
+    await expect(message).toHaveTextContent('Spec Writer final message · spec-writer@2');
+    await expect(message).toHaveTextContent('Proposed design · T3 / InferredWeak');
+    await expect(message).toHaveTextContent('Validate the caller limit before invoking processing; refuse an oversized request without starting the operation.');
+    await expect(message).not.toHaveTextContent('Saved finding only for answer-a');
+    await expect(paneA.getByRole('button', { name: 'Inspect citation C1' })).toBeVisible();
     await expect(paneA.getByText('Proposed design')).toBeVisible();
+    await expect(paneB.getByText('Implemented behavior')).toBeVisible();
     await expect(paneA.queryByText(/Review state unavailable|Follow-up selection is a human opinion/)).not.toBeInTheDocument();
     await expect(canvasElement.querySelectorAll('[id^="saved-chat-findings-"]')).toHaveLength(2);
     await expect(canvasElement.querySelector('#investigation-findings')).toBeNull();
-    await userEvent.click(paneA.getByRole('button', { name: 'Inspect citation C1' }));
+    await userEvent.click(within(message).getByRole('button', { name: 'Inspect message citation C1' }));
     await waitFor(() => expect(savedAnswerCitationReads).toEqual(['answer-a:C1']));
     await expect(paneA.getByText('Reading historical citation…')).toBeVisible();
     await expect(paneB.queryByRole('complementary', { name: 'Historical citation' })).not.toBeInTheDocument();

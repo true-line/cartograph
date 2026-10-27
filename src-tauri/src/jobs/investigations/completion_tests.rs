@@ -258,6 +258,7 @@ impl Fixture {
     }
     fn finish() -> StagedFinish {
         StagedFinish {
+            narrative: None,
             schema_version: 1,
             outcome: CompletionOutcome::InsufficientEvidence,
             action: InvestigationAction::Finish {

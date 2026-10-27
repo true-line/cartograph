@@ -1538,6 +1538,7 @@ pub(super) fn validate_result(
     step: &PendingInvestigationStep,
 ) -> Result<(), InvestigationStoreError> {
     let policy = saved_policy(task)?;
+    result.validate_specialist(task.detail.specialist.id)?;
     let Some(intent) = &task.completion_intent else {
         if result.completion.is_some() {
             return Err(InvestigationStoreError::Invalid);

@@ -6,7 +6,7 @@ import type { EgressPreview } from './components/EgressConsentDialog';
 import type { FactKey } from './primarySourceStore';
 import type { EvidenceRef, TaskSourceBasisV2 } from './store';
 
-export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5' | 'domain-analyst@6' | 'evidence-auditor@6' | 'domain-analyst@7' | 'evidence-auditor@7' | 'domain-analyst@8' | 'evidence-auditor@8' | 'domain-analyst@9' | 'evidence-auditor@9' | 'domain-analyst@10' | 'evidence-auditor@10' | 'spec-writer@1' | 'gap-triager@1';
+export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5' | 'domain-analyst@6' | 'evidence-auditor@6' | 'domain-analyst@7' | 'evidence-auditor@7' | 'domain-analyst@8' | 'evidence-auditor@8' | 'domain-analyst@9' | 'evidence-auditor@9' | 'domain-analyst@10' | 'evidence-auditor@10' | 'spec-writer@1' | 'spec-writer@2' | 'gap-triager@1';
 export type InvestigationProviderMode = 'local' | 'cloud';
 /** The existing context-hub QueryScope wire shape, not a filesystem scope. */
 export type InvestigationScope = { type: 'all' } |
@@ -318,7 +318,8 @@ export interface InvestigationFinding {
 }
 
 export interface InvestigationResult {
-  schema_version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  schema_version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+  narrative?: { text: string; finding_ids: string[] };
   completion?: InvestigationCompletionResult;
   coverage?: InvestigationCoverageAttestation;
   investigation_id: string;

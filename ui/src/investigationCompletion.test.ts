@@ -5,7 +5,7 @@ import terminalWire from './fixtures/completion-v7-terminal.json';
 import insufficientWire from './fixtures/completion-v7-insufficient.json';
 import type { InvestigationDetail, InvestigationResult } from './investigationTypes';
 import { queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionDetail, completionResult,
-  gapTriagerDetail, gapTriagerResult, specWriterDetail, specWriterResult } from './completionFixtures';
+  gapTriagerDetail, gapTriagerResult, specWriterDetail, specWriterResult, specWriterV2Detail, specWriterV2Result } from './completionFixtures';
 import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
 
 describe('V7 completion wire coherence (AC-0266)', () => {
@@ -96,6 +96,33 @@ describe('V7 completion wire coherence (AC-0266)', () => {
   });
 });
 
+// AC-0404: authored messages require the supported saved-result contract and cited proposals.
+it('accepts only a supported Spec Writer v2 narrative bound to its cited proposal', () => {
+  const detail = specWriterV2Detail(); const result = specWriterV2Result();
+  expect(validCompletionSummary(detail)).toBe(true);
+  expect(validCompletionResult(result.completion, result)).toBe(true);
+  expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
+
+  const missing = structuredClone(result); delete missing.narrative;
+  expect(validCompletionResult(missing.completion, missing)).toBe(false);
+  const foreign = structuredClone(result); foreign.narrative!.finding_ids = ['foreign-finding'];
+  expect(validCompletionResult(foreign.completion, foreign)).toBe(false);
+  const duplicate = structuredClone(result); duplicate.narrative!.finding_ids = [result.findings[0].finding_id, result.findings[0].finding_id];
+  expect(validCompletionResult(duplicate.completion, duplicate)).toBe(false);
+  const uncited = structuredClone(result); uncited.findings[0].citation_ids = [];
+  expect(validCompletionResult(uncited.completion, uncited)).toBe(false);
+
+  const insufficient = structuredClone(result);
+  insufficient.completion!.outcome = 'insufficient_evidence'; insufficient.findings = [];
+  insufficient.knowledge_completeness = 'insufficient_evidence';
+  expect(validCompletionResult(insufficient.completion, insufficient)).toBe(false);
+  delete insufficient.narrative;
+  expect(validCompletionResult(insufficient.completion, insufficient)).toBe(true);
+
+  const oldRoleNarrative = { ...specWriterResult(), narrative: { text: 'unsupported', finding_ids: ['F1'] } };
+  expect(validCompletionResult(oldRoleNarrative.completion, oldRoleNarrative)).toBe(false);
+});
+
 it('accepts Spec Writer only as its exact schema-four completion identity (AC-0382)', () => {
   const detail = specWriterDetail();
   const result = specWriterResult();
@@ -103,7 +130,7 @@ it('accepts Spec Writer only as its exact schema-four completion identity (AC-03
   expect(validCompletionResult(result.completion, result)).toBe(true);
   expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
   expect(result.findings.every((finding) => finding.claim_kind === 'proposed_design')).toBe(true);
-  expect(validCompletionSummary({ ...detail, specialist_id: 'spec-writer@2' as InvestigationDetail['specialist_id'] })).toBe(false);
+  expect(validCompletionSummary({ ...detail, specialist_id: 'spec-writer@3' as InvestigationDetail['specialist_id'] })).toBe(false);
   expect(validCompletionSummary({ ...detail, schema_version: 5 })).toBe(false);
   expect(validCompletionSummary({ ...detail, specialist_id: 'domain-analyst@8' })).toBe(false);
 });

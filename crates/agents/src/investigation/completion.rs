@@ -195,6 +195,15 @@ pub enum CompletionInvestigationAction {
     Finish(super::staged_finish::StagedFinish),
 }
 impl CompletionInvestigationAction {
+    pub fn decode_message(raw: &str, context_id: &str) -> Result<Self, InvestigationError> {
+        strict::preflight(raw, MAX_ACTION_BYTES, 32, 4096, 32)?;
+        let value: serde_json::Value =
+            serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidAction)?;
+        if value.get("schema_version").is_some() {
+            return super::staged_finish::StagedFinish::decode_message(raw).map(Self::Finish);
+        }
+        Self::decode(raw, context_id)
+    }
     pub fn decode(raw: &str, context_id: &str) -> Result<Self, InvestigationError> {
         strict::preflight(raw, MAX_ACTION_BYTES, 32, 4096, 32)?;
         let value: serde_json::Value =
@@ -452,6 +461,7 @@ impl InvestigationResult {
         let request = request.normalized_with_policy(policy)?;
         request.validate_ledger_with_policy(ledger, policy)?;
         let (disclosure_schema, result_schema) = match request.schema_version {
+            4 if request.specialist_id == "spec-writer@2" => (4, 8),
             7 => (6, 7),
             6 => (5, 6),
             _ => (4, 5),

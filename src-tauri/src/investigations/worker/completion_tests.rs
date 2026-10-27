@@ -14,6 +14,17 @@ fn export_wire(name: &str, detail: &InvestigationDetail, result: Option<&Investi
 }
 
 pub(super) fn scripted_action(mode: Mode, call: usize, prompt: &Value) -> Value {
+    let message = matches!(
+        mode,
+        Mode::SpecWriterMessage | Mode::SpecWriterMessageInsufficient
+    );
+    let mode = if matches!(mode, Mode::SpecWriterMessageInsufficient) {
+        Mode::CompletionInventoryUnavailable
+    } else if message {
+        Mode::SpecWriterSupported
+    } else {
+        mode
+    };
     let progressive = matches!(
         mode,
         Mode::ProgressiveReplay
@@ -51,7 +62,7 @@ pub(super) fn scripted_action(mode: Mode, call: usize, prompt: &Value) -> Value 
         || (matches!(mode, Mode::CompletionInventoryUnavailable) && call > 0)
         || (matches!(mode, Mode::CompletionRedacted) && call == 3);
     if insufficient {
-        return json!({"schema_version":1,"outcome":"insufficient_evidence","action":{"type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence","limitations":["The completed bounded read cannot establish source behavior."]}});
+        return json!({"schema_version":if message {2} else {1},"outcome":"insufficient_evidence","action":{"type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence","limitations":["The completed bounded read cannot establish source behavior."]}});
     }
     if matches!(mode, Mode::CompletionInventoryUnavailable) {
         let target = &inventory.unwrap()["target"];
@@ -118,7 +129,12 @@ pub(super) fn scripted_action(mode: Mode, call: usize, prompt: &Value) -> Value 
     } else {
         "The scoped observation suggests a conditional exit; broader policy remains unresolved."
     };
-    json!({"schema_version":1,"outcome":"supported","action":{"type":"finish","findings":[{"claim_kind":if design_only {"proposed_design"} else {"inferred_interpretation"},"title":title,"statement":statement,"citation_ids":[citation["citation_id"]],"limitations":["Runtime inputs remain unknown."]}],"knowledge_completeness":"partial","limitations":["This scoped result establishes no complete business policy."]}})
+    let mut finish = json!({"schema_version":1,"outcome":"supported","action":{"type":"finish","findings":[{"claim_kind":if design_only {"proposed_design"} else {"inferred_interpretation"},"title":title,"statement":statement,"citation_ids":[citation["citation_id"]],"limitations":["Runtime inputs remain unknown."]}],"knowledge_completeness":"partial","limitations":["This scoped result establishes no complete business policy."]}});
+    if message {
+        finish["schema_version"] = json!(2);
+        finish["narrative"] = json!({"text":"Proposed specification: gate the bounded operation explicitly and test its rejected and accepted paths; broader policy remains unresolved.","finding_ids":["finding-1"]});
+    }
+    finish
 }
 
 struct CompletionFixture {
@@ -1177,4 +1193,140 @@ fn completion_worker_preserves_admitted_source_limit_before_provider() {
     assert!(!detail.summary.has_result);
     assert_eq!(detail.usage.model_invocations, 0);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+// AC-0404: genuine scripted response, atomic reference, reopen, nonce and late cancel.
+#[test]
+fn spec_writer_message_worker_reopens_and_accepts_a_valid_late_cancel() {
+    let mut capacity_headroom = 0;
+    for (cancel, insufficient, capacity) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        let provider = Arc::new(Scripted::new(if insufficient {
+            Mode::SpecWriterMessageInsufficient
+        } else {
+            Mode::SpecWriterMessage
+        }));
+        let fixture = CompletionFixture::new(
+            &*provider,
+            SpecialistId::SpecWriterV2,
+            !insufficient,
+            true,
+            false,
+        );
+        let prior_usage = Arc::new(Mutex::new(None));
+        if cancel || capacity {
+            let prior_usage = prior_usage.clone();
+            let app = fixture.base.app.handle().clone();
+            let id = fixture.id.clone();
+            *provider.cancel.lock().unwrap() = Some(Box::new(move || {
+                let state = app.state::<AppState>();
+                let mut jobs = state.jobs.lock().unwrap();
+                *prior_usage.lock().unwrap() = Some(jobs.investigation(&id).unwrap().usage);
+                if capacity {
+                    jobs.fill_test_finish_capacity(&id, capacity_headroom);
+                } else {
+                    jobs.cancel_investigation(&id).unwrap();
+                }
+            }));
+        }
+        fixture.run(provider.clone());
+        let state = fixture.base.app.state::<AppState>();
+        let jobs = state.jobs.lock().unwrap();
+        let detail = jobs.investigation(&fixture.id).unwrap();
+        if capacity {
+            jobs.assert_test_finish_padding_rolled_back(&fixture.id);
+            assert_eq!(detail.summary.status, InvestigationStatus::OutcomeUnknown);
+            assert!(jobs.investigation_result(&fixture.id).unwrap().is_none());
+            assert_eq!(
+                jobs.investigation_chat(&fixture.id)
+                    .unwrap()
+                    .unwrap()
+                    .messages
+                    .len(),
+                1
+            );
+            let prior = prior_usage.lock().unwrap();
+            let prior = prior.as_ref().unwrap();
+            assert_eq!(
+                (prior.reported_input_tokens, prior.reported_output_tokens),
+                (Some(300), Some(120))
+            );
+            assert_eq!(
+                (
+                    detail.usage.reported_input_tokens,
+                    detail.usage.reported_output_tokens
+                ),
+                (None, None)
+            );
+            assert_eq!(detail.usage.model_invocations, prior.model_invocations);
+            assert_eq!(
+                detail.usage.generated_token_reservations,
+                prior.generated_token_reservations
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+            continue;
+        }
+        assert_eq!(
+            detail.summary.status,
+            InvestigationStatus::Completed,
+            "{:?}",
+            detail.error
+        );
+        assert_eq!(detail.summary.cancel_requested, cancel);
+        let result = jobs.investigation_result(&fixture.id).unwrap().unwrap();
+        assert_eq!(result.schema_version, 8);
+        if !cancel && !insufficient {
+            capacity_headroom = serde_json::to_vec(&result).unwrap().len() / 4;
+        }
+        if insufficient {
+            assert!(result.narrative.is_none() && result.findings.is_empty());
+            assert_eq!(
+                result.knowledge_completeness,
+                KnowledgeCompleteness::InsufficientEvidence
+            );
+        } else {
+            let message = result.narrative.as_ref().unwrap();
+            assert_ne!(message.text, result.findings[0].statement);
+            assert_eq!(message.finding_ids, [result.findings[0].finding_id.clone()]);
+            assert!(
+                result.findings[0]
+                    .citation_ids
+                    .iter()
+                    .all(|id| detail.citations.iter().any(|row| &row.citation_id == id))
+            );
+        }
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            if insufficient { 2 } else { 4 }
+        );
+        drop(jobs);
+        let mut reopened =
+            crate::jobs::JobStore::open(fixture.base.app_data.join("state.db")).unwrap();
+        assert_eq!(
+            reopened.investigation_result(&fixture.id).unwrap(),
+            Some(result.clone())
+        );
+        let history = reopened
+            .investigation_next_parent_history(&fixture.id, &detail.summary.conversation_id)
+            .unwrap()
+            .into_history();
+        let parent: Value = serde_json::from_str(&history[0]).unwrap();
+        assert_eq!(
+            parent["saved_result"],
+            serde_json::to_value(&result).unwrap()
+        );
+        assert_eq!(
+            reopened
+                .start_completion_investigation(&fixture.request, Some(&detail.provider))
+                .unwrap()
+                .detail
+                .summary
+                .investigation_id,
+            fixture.id
+        );
+    }
 }
