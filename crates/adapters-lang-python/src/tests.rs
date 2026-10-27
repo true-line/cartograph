@@ -6602,6 +6602,70 @@ plain = Admin(app, url="/plain", endpoint="plain")
         );
         assert_eq!(gaps, vec![reason.to_string(); 3], "{uv}");
     }
+    // A root lockfile that cannot be read may pin anything: a symlink here.
+    let unread = tempfile::tempdir().unwrap();
+    write(unread.path(), "app.py", app);
+    write(
+        unread.path(),
+        "uv.lock",
+        "[[package]]\nname = \"flask-admin\"\nversion = \"1.5.7\"\n",
+    );
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            unread.path().join("uv.lock"),
+            unread.path().join("requirements.txt"),
+        )
+        .unwrap();
+        let (_, gaps, _) = rows(unread.path());
+        assert_eq!(
+            gaps,
+            vec!["flask_admin_lockfile_not_inspected:requirements.txt"; 3]
+        );
+    }
+    // A repository mixin after the library base in C3 order does not
+    // replace the library's routed methods.
+    let late = tempfile::tempdir().unwrap();
+    write(
+        late.path(),
+        "app.py",
+        r#"
+from flask import Flask
+from flask_admin import Admin
+from flask_admin.contrib.sqla import ModelView
+
+class User:
+    pass
+
+class LateMixin:
+    def delete_view(self):
+        return "never routed"
+
+class UserAdmin(ModelView, LateMixin):
+    pass
+
+class EarlyAdmin(LateMixin, ModelView):
+    pass
+
+app = Flask(__name__)
+admin = Admin(app, url="/back")
+admin.add_view(UserAdmin(User, None))
+admin.add_view(EarlyAdmin(User, None, endpoint="early"))
+"#,
+    );
+    write(
+        late.path(),
+        "uv.lock",
+        "[[package]]\nname = \"flask-admin\"\nversion = \"1.5.7\"\n",
+    );
+    let (endpoints, gaps, _) = rows(late.path());
+    assert!(gaps.is_empty(), "{gaps:?}");
+    let deletes = endpoints
+        .iter()
+        .filter(|row| row.contains("delete_view"))
+        .map(|row| row.split(' ').take(3).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>();
+    assert_eq!(deletes, vec!["POST /back/user/delete/ user.delete_view"]);
     let unpinned = tempfile::tempdir().unwrap();
     write(unpinned.path(), "app.py", app);
     let (_, gaps, _) = rows(unpinned.path());

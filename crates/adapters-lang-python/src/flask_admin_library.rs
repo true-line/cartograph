@@ -5,8 +5,9 @@
 //! `index`, are routed by methods Flask-Admin itself `@expose`s. Those rules
 //! are fixed by the release, so they are projected only when every exact
 //! `flask-admin` pin the repository's root lockfiles declare names a release
-//! in [`RELEASES`], whose tables agree. No pin, an inexact requirement or an
-//! unchecked release keeps the existing Gap, naming why.
+//! in [`RELEASES`], whose tables agree. No pin, an inexact requirement, an
+//! unchecked release or a lockfile that cannot be read keeps the existing
+//! Gap, naming why.
 //!
 //! The tables are read from the released sdists (`flask_admin/model/base.py`
 //! and `flask_admin/base.py`); 1.5.7 and 1.5.8 expose the same methods with
@@ -82,14 +83,14 @@ pub(crate) fn pins(root: &Path, repo: &str, commit: &str) -> Pins {
     let mut evidence = Vec::new();
     for name in names {
         let path = root.join(&name);
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !meta.is_file() || meta.len() > MAX_LOCK_BYTES {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
+        // A lockfile that cannot be read (a symlink, a directory, too large,
+        // not UTF-8) may pin anything, so it refuses rather than being skipped.
+        let text = std::fs::symlink_metadata(&path)
+            .ok()
+            .filter(|meta| meta.is_file() && meta.len() <= MAX_LOCK_BYTES)
+            .and_then(|_| std::fs::read_to_string(&path).ok());
+        let Some(text) = text else {
+            return Pins::Unchecked(format!("flask_admin_lockfile_not_inspected:{name}"));
         };
         let found = if name.ends_with(".lock") && !name.starts_with("requirements") {
             let Some(found) = package_table_pins(&text) else {
@@ -242,8 +243,8 @@ fn toml_string(value: &str) -> Option<String> {
     (!value.contains(['"', '\\'])).then(|| value.to_string())
 }
 
-/// `flask-admin==X` requirement lines: `Some(X)` for an exact pin, `None`
-/// for any other specifier (or none).
+/// `flask-admin==X` requirement lines: `Some(X)` for an exact pin, with
+/// only `--hash=` options after it, `None` for any other specifier (or none).
 fn requirement_pins(text: &str) -> Vec<(Option<String>, usize, usize)> {
     let mut found = Vec::new();
     for (start, line) in lines(text) {
@@ -269,16 +270,17 @@ fn requirement_pins(text: &str) -> Vec<(Option<String>, usize, usize)> {
             };
             rest = after.trim_start();
         }
-        let version = rest
-            .strip_prefix("==")
-            .map(str::trim)
-            .filter(|version| {
-                !version.is_empty()
-                    && version
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '.')
-            })
-            .map(str::to_string);
+        // `==X` may be followed only by `--hash=` options and a `\`
+        // continuation, as pip-compile writes them.
+        let version = rest.strip_prefix("==").and_then(|pinned| {
+            let mut tokens = pinned.split_whitespace();
+            let version = tokens.next()?;
+            let exact = version
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.')
+                && tokens.all(|token| token == "\\" || token.starts_with("--hash="));
+            exact.then(|| version.to_string())
+        });
         found.push((version, start, start + line.len()));
     }
     found
@@ -313,6 +315,16 @@ mod tests {
         ] {
             assert_eq!(package_table_pins(escaped), None, "{escaped}");
         }
+        // pip-compile's hash options, inline or continued, keep a pin exact.
+        let hashed = "flask-admin==1.5.8 \\\n    --hash=sha256:aa \\\n    --hash=sha256:bb\nflask-admin==1.5.8 --hash=sha256:aa\nflask-admin==1.5.8 --pre\n";
+        assert_eq!(
+            requirement_pins(hashed),
+            vec![
+                (Some("1.5.8".into()), 0, 20),
+                (Some("1.5.8".into()), 65, 100),
+                (None, 101, 125),
+            ]
+        );
         let requirements = "Flask_Admin[sqla]==1.5.8 ; python_version > '3'\nflask-admin>=1.5\nflask-adminx==1\n# flask-admin==0\n";
         assert_eq!(
             requirement_pins(requirements),

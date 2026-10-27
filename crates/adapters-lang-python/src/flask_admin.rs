@@ -757,10 +757,12 @@ struct Chain<'f> {
     exposed: Vec<&'f Exposed>,
     /// The first class in the chain defining `is_accessible`.
     access: Option<String>,
-    /// Some repository class in the chain defines `index`.
+    /// A repository class owns `index`: it defines it before any library base
+    /// that does.
     defines_index: bool,
-    /// Every name a repository class in the chain defines: a library
-    /// method of that name is no longer Flask-Admin's.
+    /// Every name a repository class owns, defining it before any library
+    /// base that routes it: a library method of that name is no longer
+    /// Flask-Admin's.
     defined: BTreeSet<String>,
 }
 
@@ -869,7 +871,7 @@ fn chain<'f>(
     };
     let mro = linearize(key, text, 0, classes, &mut HashMap::new())?;
     let (mut order, mut libraries) = (Vec::new(), Vec::new());
-    for entry in mro {
+    for entry in mro.iter().copied() {
         match entry {
             Mro::Class(class) => order.push(class),
             Mro::Library(library) => libraries.push(library),
@@ -887,14 +889,32 @@ fn chain<'f>(
             return Err(format!("flask_admin_view_overrides:{name}:{}", class.key.1));
         }
     }
+    // Each name belongs to the first entry in C3 order defining it: a
+    // library base owns the routed methods it defines, so a repository
+    // class after it (`class V(ModelView, LateMixin)`) does not replace them.
     let mut seen = BTreeSet::new();
     let mut found = Vec::new();
-    for class in &order {
-        for name in &class.defines {
-            if seen.insert(name.as_str())
-                && let Some(list) = exposed.get(&class.key)
-            {
-                found.extend(list.iter().filter(|exposed| &exposed.method == name));
+    let mut defined = BTreeSet::new();
+    for entry in &mro {
+        match entry {
+            Mro::Library(library) => {
+                let routes = match library {
+                    Library::Model(_) => library::MODEL_ROUTES,
+                    Library::Index => library::INDEX_ROUTES,
+                    Library::View => &[],
+                };
+                seen.extend(routes.iter().map(|(name, _, _)| name.to_string()));
+            }
+            Mro::Class(class) => {
+                for name in &class.defines {
+                    if !seen.insert(name.clone()) {
+                        continue;
+                    }
+                    defined.insert(name.clone());
+                    if let Some(list) = exposed.get(&class.key) {
+                        found.extend(list.iter().filter(|exposed| &exposed.method == name));
+                    }
+                }
             }
         }
     }
@@ -906,11 +926,8 @@ fn chain<'f>(
             .iter()
             .find(|class| class.defines.contains("is_accessible"))
             .map(|class| class.key.1.clone()),
-        defines_index: order.iter().any(|class| class.defines.contains("index")),
-        defined: order
-            .iter()
-            .flat_map(|class| class.defines.iter().cloned())
-            .collect(),
+        defines_index: defined.contains("index"),
+        defined,
     })
 }
 
