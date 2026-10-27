@@ -1,11 +1,11 @@
 import { create } from 'zustand';
 import { useInvestigationStore, type InvestigationState } from './investigationStore';
-import type { InvestigationChat, InvestigationSummary, InvestigationResult, InvestigationCitation, InvestigationCitationRead } from './investigationTypes';
+import type { InvestigationChat, InvestigationSummary, InvestigationResult, InvestigationCitation, InvestigationCitationRead, InvestigationScope } from './investigationTypes';
 
 export type ChatTurn = Pick<InvestigationSummary, 'investigation_id' | 'conversation_id' | 'parent_id' |
   'question' | 'specialist_id' | 'status' | 'updated_at' | 'revision'>;
 interface ChatDock {
-  chat: InvestigationChat; question: string; turn: ChatTurn;
+  chat: InvestigationChat; question: string; turn: ChatTurn; scope: InvestigationScope;
   answer: { result: InvestigationResult; citations: InvestigationCitation[] } | null;
 }
 interface CitationInspection {
@@ -14,6 +14,7 @@ interface CitationInspection {
 interface DockState {
   docks: ChatDock[];
   focusedTask: string | null;
+  focusedGeneration: number | null;
   citation: CitationInspection | null;
   readCitation: (taskId: string, citationId: string) => Promise<void>;
   clearCitation: () => void;
@@ -28,6 +29,46 @@ interface DockState {
   close: (taskId: string) => void;
 }
 
+/** Normalize the closed host scope shapes without changing exact neighborhood identity. */
+function normalizedScope(scope: InvestigationScope): InvestigationScope | null {
+  if (!scope || typeof scope !== 'object') return null;
+  if (scope.type === 'all') return { type: 'all' };
+  // Matches the existing UI validation and context_hub::MAX_NEIGHBORHOOD_HOPS.
+  if (scope.type === 'neighborhood' && typeof scope.anchor === 'string' && scope.anchor.trim().length > 0 &&
+      Number.isSafeInteger(scope.hops) && scope.hops >= 1 && scope.hops <= 3) {
+    return { type: 'neighborhood', anchor: scope.anchor, hops: scope.hops };
+  }
+  return null;
+}
+
+function sameScope(left: InvestigationScope, right: InvestigationScope): boolean {
+  return left.type === right.type && (left.type === 'all' ||
+    (right.type === 'neighborhood' && left.anchor === right.anchor && left.hops === right.hops));
+}
+
+/** Capture only a settled coordinator observation; cached immutable identity survives reopen. */
+function captureDock(state: InvestigationState, taskId: string, previous?: ChatDock): ChatDock | null {
+  const { detail, chat, result } = state;
+  if (state.loading || state.error || state.chatError || state.chatStatus !== 'saved' ||
+      state.selectedId !== taskId || detail?.investigation_id !== taskId || chat?.task_id !== taskId) return null;
+  const scope = normalizedScope(detail.scope);
+  if (!scope) return null;
+  const reference = chat.messages.find((entry) => entry.message.kind === 'result_reference')?.message;
+  if (result ? result.investigation_id !== taskId || reference?.kind !== 'result_reference' ||
+      reference.task_id !== taskId || reference.result_id !== result.result_id : reference !== undefined) return null;
+  const { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } = detail;
+  const referenced = new Set(result?.findings.flatMap((finding) => finding.citation_ids));
+  const answer = result ? { result, citations: detail.citations.filter((citation) => referenced.has(citation.citation_id)) } : null;
+  if (previous && (revision < previous.turn.revision || chat.chat_id !== previous.chat.chat_id ||
+      question !== previous.question || conversation_id !== previous.turn.conversation_id || parent_id !== previous.turn.parent_id ||
+      specialist_id !== previous.turn.specialist_id || !sameScope(scope, previous.scope) ||
+      JSON.stringify(chat.producer) !== JSON.stringify(previous.chat.producer) ||
+      (previous.answer && (JSON.stringify(answer) !== JSON.stringify(previous.answer) ||
+        JSON.stringify(chat) !== JSON.stringify(previous.chat))))) return null;
+  return { chat, question, answer, scope,
+    turn: { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } };
+}
+
 /** Session snapshots only. The existing coordinator owns all validation and I/O. */
 export function createAgentChatDockStore(coordinator = useInvestigationStore) {
   let connected = false;
@@ -37,6 +78,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
   let adoptedInitialSelection = false;
   let intent = 0;
   let unsubscribe: (() => void) | undefined;
+  let liveUnsubscribe: (() => void) | undefined;
   let reading = false;
   let requestedGeneration = 0;
   let navigationIntent: string | null = null;
@@ -63,7 +105,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
       const taskId = get().pendingTask;
       if (reading || !connected || !taskId) return;
       if (coordinator.getState().selectionGeneration !== requestedGeneration) {
-        stop(); set({ pendingTask: null }); return;
+        stop(); set({ pendingTask: null, focusedGeneration: null }); return;
       }
       reading = true;
       const request = intent;
@@ -74,31 +116,21 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         if (!connected || intent !== request) return;
         const state = coordinator.getState();
         if (state.selectionGeneration !== generation || state.selectedId !== taskId) {
-          if (state.selectionGeneration >= generation) { stop(); set({ pendingTask: null }); }
+          if (state.selectionGeneration >= generation) { stop(); set({ pendingTask: null, focusedGeneration: null }); }
           return;
         }
         if (state.loading || state.chatStatus === 'loading' || state.chatStatus === 'idle') return;
-        if (state.chatStatus === 'saved' && state.chat?.task_id === taskId &&
-            state.detail?.investigation_id === taskId) {
-          // Capture navigation identity only from this same validated task detail.
-          const { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } = state.detail;
-          const result = state.result;
-          const reference = state.chat.messages.find((entry) => entry.message.kind === 'result_reference')?.message;
-          const referenced = new Set(result?.findings.flatMap((finding) => finding.citation_ids));
-          const answer = result?.investigation_id === taskId && reference?.kind === 'result_reference' &&
-            reference.task_id === taskId && reference.result_id === result.result_id
-            ? { result, citations: state.detail.citations.filter((citation) => referenced.has(citation.citation_id)) } : null;
-          const dock = { chat: state.chat, question, answer,
-            turn: { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } };
+        const dock = captureDock(state, taskId, get().docks.find((item) => item.chat.task_id === taskId));
+        if (dock) {
           set(({ docks }) => {
             const existing = docks.findIndex((item) => item.chat.chat_id === dock.chat.chat_id);
             return { docks: existing < 0 ? [...docks.slice(-3), dock]
-              : docks.map((item, index) => index === existing ? dock : item), pendingTask: null };
+              : docks.map((item, index) => index === existing ? dock : item), pendingTask: null, focusedGeneration: generation };
           });
-        } else set({ pendingTask: null, fallbackTask: state.chatStatus === 'legacy' ? taskId : null,
+        } else set({ pendingTask: null, focusedGeneration: null, fallbackTask: state.chatStatus === 'legacy' ? taskId : null,
           error: state.chatError ?? state.error ?? (state.chatStatus === 'legacy'
-            ? 'No saved conversation is available for this older investigation.' : 'Saved chat unavailable. Try opening it again.') });
-        finishWaiters(state, request, taskId);
+            ? 'No saved conversation is available for this older investigation.' : 'Saved chat observation did not match the retained task. Try opening it again.') });
+        finishWaiters(dock ? state : null, request, taskId);
         unsubscribe?.(); unsubscribe = undefined;
       };
       unsubscribe = coordinator.subscribe(observe);
@@ -120,7 +152,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
       stop();
       requestedGeneration = coordinator.getState().selectionGeneration;
       if (resolve) waiters[consumer] = { intent, taskId, resolve };
-      set({ focusedTask: taskId, pendingTask: taskId, error: null, fallbackTask: null });
+      set({ focusedTask: taskId, focusedGeneration: null, pendingTask: taskId, error: null, fallbackTask: null });
       run();
     };
     const awaitOpen = (taskId: string, consumer: Consumer) => new Promise<InvestigationState | null>((resolve) => {
@@ -133,7 +165,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
       beginOpen(taskId, resolve, consumer);
     });
     return {
-      docks: [], focusedTask: null, citation: null, pendingTask: null, error: null, fallbackTask: null,
+      docks: [], focusedTask: null, focusedGeneration: null, citation: null, pendingTask: null, error: null, fallbackTask: null,
       clearCitation: () => {
         ++citationRequest; citationUnsubscribe?.(); citationUnsubscribe = undefined;
         const owner = citationOwner; citationOwner = undefined;
@@ -171,12 +203,23 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
       },
       connect: () => {
         connected = true;
+        liveUnsubscribe?.();
+        liveUnsubscribe = coordinator.subscribe((state) => {
+          const { focusedTask, focusedGeneration, pendingTask, docks } = get();
+          if (!connected || pendingTask || !focusedTask || focusedGeneration !== state.selectionGeneration) return;
+          const previous = docks.find((item) => item.chat.task_id === focusedTask);
+          if (!previous || (state.chat === previous.chat && state.detail?.revision === previous.turn.revision &&
+              state.result === (previous.answer?.result ?? null))) return;
+          const updated = captureDock(state, focusedTask, previous);
+          if (updated) set({ docks: docks.map((item) => item === previous ? updated : item) });
+        });
         const requested = navigationIntent;
         navigationIntent = null;
         const selected = requested ?? get().focusedTask ?? (!adoptedInitialSelection ? coordinator.getState().selectedId : null);
         adoptedInitialSelection = true;
         if (selected) get().open(selected);
-        return () => { connected = false; get().clearCitation(); navigationIntent = null; stop(true); set({ pendingTask: null }); };
+        return () => { connected = false; liveUnsubscribe?.(); liveUnsubscribe = undefined;
+          get().clearCitation(); navigationIntent = null; stop(true); set({ pendingTask: null, focusedGeneration: null }); };
       },
       open: (taskId) => {
         if (!connected || get().pendingTask === taskId) return;
@@ -194,6 +237,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         set((state) => ({ docks: state.docks.filter((dock) => dock.chat.task_id !== taskId),
           pendingTask: state.pendingTask === taskId ? null : state.pendingTask,
           focusedTask: state.focusedTask === taskId ? null : state.focusedTask,
+          focusedGeneration: state.focusedTask === taskId ? null : state.focusedGeneration,
           fallbackTask: state.fallbackTask === taskId ? null : state.fallbackTask }));
       },
     };

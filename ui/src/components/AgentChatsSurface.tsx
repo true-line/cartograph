@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useAgentChatDockStore, type ChatTurn } from '../agentChatDockStore';
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
 import { InvestigationFindings } from './InvestigationFindings';
+import { InvestigationActivity } from './InvestigationActivity';
 import { InvestigationChatTranscript } from './InvestigationChatTranscript';
 
 export interface AgentChatsSurfaceProps {
@@ -153,6 +154,13 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
               <p className="muted">Loaded saved exchanges only · parent links show branches, not complete history.</p>
             </header>;
             const { chat, question, turn, answer } = entry;
+            const focused = dock.focusedTask === chat.task_id;
+            const settled = focused && dock.focusedGeneration === state.selectionGeneration &&
+              state.selectedId === chat.task_id && state.detail?.investigation_id === chat.task_id &&
+              state.detail.revision === turn.revision && state.chat === chat && state.result === (answer?.result ?? null) &&
+              !state.loading && !state.error && !state.chatError && state.chatStatus === 'saved' &&
+              (state.events.at(-1)?.sequence ?? 0) === state.detail.last_event_sequence &&
+              state.events.every((event) => event.investigation_id === chat.task_id && event.revision <= turn.revision);
             const parent = dock.docks.find((item) => item.chat.task_id === turn.parent_id &&
               item.turn.conversation_id === turn.conversation_id);
             const parentInAnotherConversation = parent ? null : dock.docks.find((item) => item.chat.task_id === turn.parent_id);
@@ -161,7 +169,9 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
             return <section className="agent-chat-pane" key={`chat:${chat.chat_id}`}
             aria-label={`Saved chat ${chat.task_id}`}>
             <header><h3>{question}</h3><code>{chat.task_id}</code>
-              <p className="muted">Last observed snapshot · {chat.chat_id}</p>
+              <p className="muted">{statusLabel(turn.status)} · Last observed snapshot · {chat.chat_id}</p>
+              {focused && !settled && <p role="status" className="muted">{state.loading || state.chatStatus === 'loading'
+                ? 'Refreshing focused task; retained snapshot shown.' : 'Current task progress unavailable; retained snapshot shown.'}</p>}
               {turn.parent_id === null ? <p className="muted">Root exchange (no saved parent)</p>
                 : turn.parent_id === chat.task_id ? <p className="muted">Invalid self-parent link · {turn.parent_id}</p>
                 : <div className="agent-chat-parent-link">
@@ -183,6 +193,7 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
             </header>
             <InvestigationChatTranscript chat={chat} status="saved" error={null}
               onRefresh={() => dock.open(chat.task_id)} onOpenResult={onOpenResult} />
+            {settled && <InvestigationActivity events={state.events} />}
             {onReplyHost && <ReplyHost taskId={chat.task_id} onHost={onReplyHost} />}
             {answer && <InvestigationFindings readOnly sectionId={`saved-chat-findings-${chat.chat_id}`}
               result={answer.result} citations={answer.citations}

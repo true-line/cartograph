@@ -69,3 +69,12 @@ which may evict the oldest loaded exchange. No related details load automaticall
 These last-observed groups are not complete history: use **Conversation turns**
 for bounded saved-turn pages. Replies still receive only the selected parent
 result as context, not every visible exchange or full ancestral dialogue.
+
+## Focused task progress
+
+The focused pane reconciles its saved status and committed findings from the
+existing task refresh. Its Activity section shows actual recorded host events
+only after the matching task and transcript settle. During refresh or errors,
+retained content remains a last-observed snapshot. Other panes update when
+focused or refreshed. This is durable execution progress, not generated tokens
+or a streaming assistant reply.

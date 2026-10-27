@@ -259,11 +259,14 @@ export const ConversationTurnsFromCapturedPane: Story = {
     await waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
     await expect(pinned.getByRole('button', { name: /Saved question child/ })).toHaveTextContent('Failed');
     await expect(pinned.getByText('2026-09-10T10:01:00Z')).toBeVisible();
+    await expect(useAgentChatDockStore.getState().docks.find((item) => item.chat.task_id === 'child')?.turn)
+      .toMatchObject({ investigation_id: 'child', conversation_id: 'family-a', revision: 5, status: 'failed' });
     const freshPin = useInvestigationStore.getState().conversationPinned!;
     for (const foreign of [{ ...freshPin, investigation_id: 'other' }, { ...freshPin, conversation_id: 'family-b' },
       { ...freshPin, revision: 3 }]) {
       useInvestigationStore.setState({ conversationPinned: foreign });
-      await waitFor(() => expect(pinned.getByRole('button', { name: /Saved question child/ })).toHaveTextContent('Running'));
+      await waitFor(() => expect(pinned.getByRole('button', { name: /Saved question child/ })).toHaveTextContent('Failed'));
+      await expect(pinned.getByText('2026-09-10T10:01:00Z')).toBeVisible();
       await expect(useInvestigationStore.getState().conversationPinned).toEqual(foreign);
     }
     useInvestigationStore.setState({ conversationPinned: freshPin });
@@ -490,5 +493,58 @@ export const LoadedConversationBranches: Story = {
     await expect(cycle.getByText(/Follow-up to cycle-a.*loaded in this conversation/)).toBeVisible();
     await expect(canvas.getAllByRole('heading', { name: 'Conversation cycle' })).toHaveLength(1);
     await expect(canvas.getAllByRole('region', { name: /^Saved chat cycle-/ })).toHaveLength(2);
+  },
+};
+
+let completeProgress = () => {};
+let releaseProgressChat = () => {};
+// AC-0401: real host events and committed typed findings, never simulated streaming.
+export const FocusedDurableProgress: Story = {
+  beforeEach: () => {
+    let complete = false; const id = 'progress-task'; const calls: string[] = [];
+    completeProgress = () => { complete = true; };
+    const detail = () => investigationDetail(id, { has_result: complete, status: complete ? 'completed' : 'running',
+      revision: complete ? 9 : 4, last_event_sequence: complete ? 9 : 4 });
+    mockIPC((command, payload) => {
+      calls.push(command);
+      if (command === 'get_investigation') return detail();
+      if (command === 'investigation_result') return complete ? investigationResult(id) : null;
+      if (command === 'investigation_events') return { investigation_id: id,
+        items: investigationEvents(id).filter((event) => event.sequence > ((payload as { afterSequence: number }).afterSequence) &&
+          event.sequence <= detail().last_event_sequence), next_sequence: detail().last_event_sequence, has_more: false };
+      if (command === 'get_investigation_chat') {
+        const saved = detail(); const producer = saved.specialist; const provider = saved.provider;
+        const chat: InvestigationChat = { chat_id: 'chat:progress', task_id: id,
+          producer: { specialist_id: producer.id, specialist_version: producer.version, prompt_fingerprint: producer.prompt_fingerprint,
+            tier: producer.tier, confidence_tier: producer.confidence_tier, provider_mode: provider.mode,
+            provider_id: provider.provider_id, model: provider.model, protocol_version: null },
+          messages: [{ id: 'progress-question', ordinal: 0, author: 'user', message: { kind: 'user_question', question: saved.question } }] };
+        if (complete) {
+          chat.messages.push({ id: 'progress-answer', ordinal: 1, author: 'specialist', message: {
+            kind: 'result_reference', task_id: id, result_id: `result:${id}`, result_hash: 'e'.repeat(64) } });
+          return new Promise((resolve) => { releaseProgressChat = () => resolve(chat); });
+        }
+        return chat;
+      }
+      return null;
+    });
+    useInvestigationStore.setState(state({ history: [detail()] }), true);
+    return () => { releaseProgressChat(); clearMocks(); expect(calls.filter((command) => command === 'get_investigation_chat')).toHaveLength(2); };
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: /What stock behavior/ }));
+    const pane = within(await canvas.findByRole('region', { name: 'Saved chat progress-task' }));
+    await expect(pane.getByRole('region', { name: 'Investigation activity' })).toHaveTextContent('Model request started');
+    completeProgress();
+    useInvestigationStore.getState().invalidate({ investigation_id: 'progress-task', revision: 9, last_event_sequence: 9 });
+    await waitFor(() => expect(useInvestigationStore.getState().detail?.revision).toBe(9));
+    await expect(pane.queryByRole('region', { name: 'Investigation activity' })).not.toBeInTheDocument();
+    await expect(pane.getByText('Refreshing focused task; retained snapshot shown.')).toBeVisible();
+    await expect(pane.queryByText('A local stock guard is present')).not.toBeInTheDocument();
+    releaseProgressChat();
+    await expect(await pane.findByText('A local stock guard is present')).toBeVisible();
+    await expect(pane.getByRole('region', { name: 'Investigation activity' })).toHaveTextContent('Findings saved');
+    await expect(pane.getByRole('listitem', { name: 'Specialist result reference' })).toHaveTextContent('result:progress-task');
   },
 };
