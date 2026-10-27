@@ -53,7 +53,14 @@ model-call charge. The host never synthesizes a successful insufficient-evidence
 
 Bytes, provider framing, generated-token reservations and unknown tokenizer or
 provider-context capacity remain separate. Component bounds and early refusal
-are not the full-budget acceptance certificate required by #598.
+do not prove full-budget fit or successful #598 acceptance.
+
+Owner amendment, 2026-10-27 (#716): verified conditional safety of each admitted
+prompt and its finish/refusal path replaces the full-budget-fit prerequisite.
+The versioned [revision 4 supplement](../acceptance/expanded-conditional-safety-v4.md)
+records verification requirements and outstanding evidence. Refused or partial
+completion remains insufficient for #598 acceptance; existing limits and separate
+execution authorization remain unchanged.
 
 Storage admission uses a transaction-scoped preflight and one coherent capacity
 snapshot, invalidated after any reservation, validation-charge or disposition
