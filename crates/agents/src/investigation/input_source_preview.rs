@@ -189,6 +189,7 @@ pub(super) fn disclosure_upper_bound(
         generated_token_reservations: u32::MAX,
         reported_input_tokens: Some(u64::MAX),
         reported_output_tokens: Some(u64::MAX),
+        reported_cache_read_tokens: Some(u64::MAX),
         active_milliseconds: u64::MAX,
     };
     for source in &mut sizing.sources {

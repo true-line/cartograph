@@ -841,6 +841,7 @@ fn response_usage_matches(
     }
     let mut input = None;
     let mut output = None;
+    let mut cache_read = None;
     for (ordinal, step) in steps.iter().enumerate() {
         let Some(response) = responses
             .iter()
@@ -866,8 +867,14 @@ fn response_usage_matches(
             return false;
         };
         output = next;
+        let Some(next) = add(cache_read, response.reported_cache_read_tokens) else {
+            return false;
+        };
+        cache_read = next;
     }
-    input == usage.reported_input_tokens && output == usage.reported_output_tokens
+    input == usage.reported_input_tokens
+        && output == usage.reported_output_tokens
+        && cache_read == usage.reported_cache_read_tokens
 }
 
 #[cfg(test)]

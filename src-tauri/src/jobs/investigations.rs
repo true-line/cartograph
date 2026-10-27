@@ -232,6 +232,8 @@ pub(crate) struct InvestigationResponseMeta {
     pub observed_model: Option<String>,
     pub reported_input_tokens: Option<u64>,
     pub reported_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_cache_read_tokens: Option<u64>,
     pub active_milliseconds: u64,
 }
 
@@ -260,6 +262,7 @@ pub(crate) enum InvestigationTransition {
         step_id: String,
         reported_input_tokens: Option<u64>,
         reported_output_tokens: Option<u64>,
+        reported_cache_read_tokens: Option<u64>,
         active_milliseconds: u64,
     },
     FinishRefused {

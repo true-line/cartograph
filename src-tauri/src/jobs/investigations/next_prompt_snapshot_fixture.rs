@@ -129,6 +129,7 @@ impl Fixture {
             observed_model: None,
             reported_input_tokens: Some(10),
             reported_output_tokens: Some(5),
+            reported_cache_read_tokens: None,
             active_milliseconds: self.f.task.detail.usage.active_milliseconds + 1,
         }
     }

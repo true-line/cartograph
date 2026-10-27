@@ -712,6 +712,10 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .usage
                     .as_ref()
                     .and_then(|usage| usage.output_tokens),
+                reported_cache_read_tokens: completion
+                    .usage
+                    .as_ref()
+                    .and_then(|usage| usage.cache_read_input_tokens),
                 active_milliseconds: self.clock.active_milliseconds(),
             };
             if let Some(finish) = completion_finish {
@@ -1068,6 +1072,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                         step_id: response.step_id.clone(),
                         reported_input_tokens: response.reported_input_tokens,
                         reported_output_tokens: response.reported_output_tokens,
+                        reported_cache_read_tokens: response.reported_cache_read_tokens,
                         active_milliseconds: response.active_milliseconds,
                     },
                 )

@@ -222,6 +222,11 @@ pub(super) fn validate_saved_pending(
         response.reported_output_tokens,
         base.model_invocations == 1,
     )?;
+    base.reported_cache_read_tokens = transitions::add_reported(
+        base.reported_cache_read_tokens,
+        response.reported_cache_read_tokens,
+        base.model_invocations == 1,
+    )?;
     base.active_milliseconds = response.active_milliseconds;
     if base != b.base_usage {
         return Err(InvestigationStoreError::Invalid);

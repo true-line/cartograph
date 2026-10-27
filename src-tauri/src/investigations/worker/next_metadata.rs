@@ -69,6 +69,10 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .usage
                 .as_ref()
                 .and_then(|usage| usage.output_tokens),
+            reported_cache_read_tokens: completion
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.cache_read_input_tokens),
             active_milliseconds: self.clock.active_milliseconds(),
         };
         let active_milliseconds = self.clock.active_milliseconds();

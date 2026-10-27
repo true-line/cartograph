@@ -216,6 +216,7 @@ fn response(step_id: &str, active_milliseconds: u64) -> InvestigationResponseMet
         observed_model: Some("fixture-model".into()),
         reported_input_tokens: None,
         reported_output_tokens: None,
+        reported_cache_read_tokens: None,
         active_milliseconds,
     }
 }
@@ -1717,6 +1718,7 @@ fn investigation_specialist_activity_projects_saved_provider_within_existing_bou
         let mut task = load_task(&fixture.store.conn, &summary.investigation_id).unwrap();
         task.detail.usage.reported_input_tokens = (index == 0).then_some(u64::MAX);
         task.detail.usage.reported_output_tokens = (index == 1).then_some(0);
+        task.detail.usage.reported_cache_read_tokens = (index == 0).then_some(u64::MAX);
         storage::save_task(&fixture.store.conn, &task, summary.revision, false).unwrap();
         ids.push((summary.investigation_id, mode, provider_id, model));
     }
@@ -1733,6 +1735,10 @@ fn investigation_specialist_activity_projects_saved_provider_within_existing_bou
         assert_eq!(item.saved_provider.mode, mode);
         assert_eq!(item.saved_provider.provider_id, provider_id);
         assert_eq!(item.saved_provider.model, model);
+        assert_eq!(
+            item.reported_cache_read_tokens.as_ref().unwrap().as_deref(),
+            (mode == InvestigationProviderMode::Local).then_some("18446744073709551615")
+        );
         let usage = item.reported_usage.as_ref().unwrap();
         assert_eq!(
             usage.input_tokens.as_deref(),
@@ -1844,7 +1850,28 @@ fn investigation_specialist_activity_usage_fits_exactly_or_keeps_legacy_base_byt
     let exact = fixture.store.specialist_task_activity(None).unwrap();
     assert!(exact.items[0].reported_usage.is_some());
     assert_eq!(serde_json::to_vec(&exact.items[0]).unwrap().len(), 4096);
+    assert!(exact.items[0].reported_cache_read_tokens.is_some());
     task.detail.provider.model.push('m');
+    storage::save_task(
+        &fixture.store.conn,
+        &task,
+        task.detail.summary.revision,
+        false,
+    )
+    .unwrap();
+    let cache_omitted = fixture.store.specialist_task_activity(None).unwrap();
+    assert!(cache_omitted.items[0].reported_cache_read_tokens.is_none());
+    assert!(cache_omitted.items[0].reported_usage.is_some());
+    let mut without_cache = exact.items[0].clone();
+    without_cache.reported_cache_read_tokens = None;
+    without_cache.saved_provider.model.push('m');
+    assert_eq!(
+        serde_json::to_vec(&cache_omitted.items[0]).unwrap(),
+        serde_json::to_vec(&without_cache).unwrap()
+    );
+    // Consume the room recovered by omitting cache, then cross the old boundary.
+    let extra = 4097 - serde_json::to_vec(&cache_omitted.items[0]).unwrap().len();
+    task.detail.provider.model.push_str(&"m".repeat(extra));
     storage::save_task(
         &fixture.store.conn,
         &task,
@@ -1953,6 +1980,7 @@ fn investigation_specialist_activity_admission_charges_exact_escaped_projection(
     let current = serde_json::to_value(&item).unwrap();
     assert!(current["reported_usage"]["input_tokens"].is_null());
     item.reported_usage = None;
+    item.reported_cache_read_tokens = None;
     assert_eq!(exact_projection, serde_json::to_vec(&item).unwrap());
     assert!(exact_projection.windows(2).any(|bytes| bytes == b"\\\""));
     assert!(
@@ -2316,6 +2344,7 @@ fn investigation_failed_invocation_retains_elapsed_and_marks_aggregate_usage_unk
         let mut measured = response("step:1", 100);
         measured.reported_input_tokens = Some(120);
         measured.reported_output_tokens = Some(24);
+        measured.reported_cache_read_tokens = Some(7);
         let action = fixture
             .store
             .advance_investigation(
@@ -2352,6 +2381,7 @@ fn investigation_failed_invocation_retains_elapsed_and_marks_aggregate_usage_unk
             .unwrap();
         let pending = begin(&mut fixture, &id, &execution, step(&ledger, 2));
         assert_eq!(pending.usage.reported_input_tokens, Some(120));
+        assert_eq!(pending.usage.reported_cache_read_tokens, Some(7));
         assert_eq!(
             fixture
                 .store
@@ -2381,6 +2411,7 @@ fn investigation_failed_invocation_retains_elapsed_and_marks_aggregate_usage_unk
         assert_eq!(stopped.usage.active_milliseconds, 600_123);
         assert_eq!(stopped.usage.reported_input_tokens, None);
         assert_eq!(stopped.usage.reported_output_tokens, None);
+        assert_eq!(stopped.usage.reported_cache_read_tokens, None);
         assert_eq!(stopped.usage.model_invocations, 2);
         assert_eq!(
             stopped.summary.status,

@@ -415,6 +415,8 @@ fn admission_prompt_reserve_dominates_actual_simultaneous_feedback_in_both_modes
             }
             consumed.reported_input_tokens = Some(u64::MAX);
             consumed.reported_output_tokens = Some(u64::MAX);
+            // AC-0418: reserve a present cache key even when the baseline omits it.
+            consumed.reported_cache_read_tokens = Some(u64::MAX);
             for reason in [
                 CapacityRefusalReason::PromptCapacity,
                 CapacityRefusalReason::FinishCallReserve,

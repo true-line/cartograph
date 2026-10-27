@@ -276,6 +276,7 @@ impl Fixture {
             observed_model: Some("test-model".into()),
             reported_input_tokens: Some(10),
             reported_output_tokens: Some(5),
+            reported_cache_read_tokens: None,
             active_milliseconds: 1,
         }
     }

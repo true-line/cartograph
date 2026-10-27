@@ -286,6 +286,7 @@ fn measured_response(f: &InitialFixture, action: &serde_json::Value) -> Investig
         observed_model: None,
         reported_input_tokens: Some(11),
         reported_output_tokens: Some(3),
+        reported_cache_read_tokens: None,
         active_milliseconds: f.task.detail.usage.active_milliseconds + 1,
     }
 }

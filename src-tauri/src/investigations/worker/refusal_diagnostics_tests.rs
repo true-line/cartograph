@@ -235,6 +235,8 @@ fn investigation_source_replay_cancellation_race_retains_refusal_and_measured_us
         assert_eq!(detail.usage.model_invocations, 2);
         assert_eq!(detail.usage.reported_input_tokens, Some(200));
         assert_eq!(detail.usage.reported_output_tokens, Some(80));
+        // AC-0418: cancellation retains both real reports, including refused finish.
+        assert_eq!(detail.usage.reported_cache_read_tokens, Some(14));
         let events = super::acceptance::ordered_events(&jobs, &fixture.id);
         let refusals: Vec<_> = events
             .iter()
