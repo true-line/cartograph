@@ -1,8 +1,10 @@
 import { create } from 'zustand';
 import { useInvestigationStore, type InvestigationState } from './investigationStore';
-import type { InvestigationChat } from './investigationTypes';
+import type { InvestigationChat, InvestigationSummary } from './investigationTypes';
 
-interface ChatDock { chat: InvestigationChat; question: string }
+export type ChatTurn = Pick<InvestigationSummary, 'investigation_id' | 'conversation_id' | 'parent_id' |
+  'question' | 'specialist_id' | 'status' | 'updated_at' | 'revision'>;
+interface ChatDock { chat: InvestigationChat; question: string; turn: ChatTurn }
 interface DockState {
   docks: ChatDock[];
   focusedTask: string | null;
@@ -56,7 +58,10 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         if (state.loading || state.chatStatus === 'loading' || state.chatStatus === 'idle') return;
         if (state.chatStatus === 'saved' && state.chat?.task_id === taskId &&
             state.detail?.investigation_id === taskId) {
-          const dock = { chat: state.chat, question: state.detail.question };
+          // Capture navigation identity only from this same validated task detail.
+          const { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } = state.detail;
+          const dock = { chat: state.chat, question,
+            turn: { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } };
           set(({ docks }) => {
             const existing = docks.findIndex((item) => item.chat.chat_id === dock.chat.chat_id);
             return { docks: existing < 0 ? [...docks.slice(-3), dock]
