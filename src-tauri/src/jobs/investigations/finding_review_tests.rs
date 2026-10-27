@@ -222,6 +222,15 @@ fn finding_review_two_connections_cas_returns_one_durable_winner() {
     let first_request = review_request(&initial, FindingReviewDecision::AcceptedForFollowUp);
     let second_request = review_request(&initial, FindingReviewDecision::RejectedForFollowUp);
     let mut other = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    // The contract is the CAS outcome, not lock-wait timing: a loaded runner
+    // may hold the winner's write lock past the store's 1 s busy timeout
+    // (#1246), so the race waits for the lock instead of failing on it.
+    for store in [&fixture.store, &other] {
+        store
+            .conn
+            .busy_timeout(std::time::Duration::from_secs(60))
+            .unwrap();
+    }
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let second_barrier = barrier.clone();
     let thread = std::thread::spawn(move || {
