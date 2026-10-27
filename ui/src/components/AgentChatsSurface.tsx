@@ -62,6 +62,13 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
     {turn.parent_id && <button type="button" className="secondary-button"
       onClick={() => dock.open(turn.parent_id!)}>Open parent {turn.parent_id}</button>}
   </>;
+  // One flat keyed sibling list: grouping never reparents a pane or its reply host.
+  const conversationIds = [...new Set(dock.docks.map((item) => item.turn.conversation_id))];
+  const exchanges = conversationIds.flatMap((id) => [
+    { kind: 'heading' as const, id },
+    ...dock.docks.filter((item) => item.turn.conversation_id === id)
+      .map((item) => ({ kind: 'exchange' as const, ...item })),
+  ]);
   const connect = dock.connect;
   useEffect(() => connect(), [connect]);
   const submitSearch = (event: FormEvent) => {
@@ -140,11 +147,29 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
               onClick={() => void state.loadConversation(true)}>Load older turns</button></>}
         </section>}
         <div className={`agent-chat-docks agent-chat-docks-${dock.docks.length}`}>
-          {dock.docks.map(({ chat, question, turn, answer }) => <section className="agent-chat-pane" key={chat.chat_id}
+          {exchanges.map((entry) => {
+            if (entry.kind === 'heading') return <header className="agent-chat-conversation-heading" key={`conversation-${entry.id}`}>
+              <h3>Conversation <code>{entry.id}</code></h3>
+              <p className="muted">Loaded saved exchanges only · parent links show branches, not complete history.</p>
+            </header>;
+            const { chat, question, turn, answer } = entry;
+            const parent = dock.docks.find((item) => item.chat.task_id === turn.parent_id &&
+              item.turn.conversation_id === turn.conversation_id);
+            const siblings = turn.parent_id === null ? [] : dock.docks.filter((item) =>
+              item.turn.conversation_id === turn.conversation_id && item.turn.parent_id === turn.parent_id);
+            return <section className="agent-chat-pane" key={chat.chat_id}
             aria-label={`Saved chat ${chat.task_id}`}>
             <header><h3>{question}</h3><code>{chat.task_id}</code>
               <p className="muted">Last observed snapshot · {chat.chat_id}</p>
-              {turn.parent_id && <p className="muted">Follow-up to {turn.parent_id} · conversation {turn.conversation_id}</p>}
+              {turn.parent_id === null ? <p className="muted">Root exchange (no saved parent)</p>
+                : turn.parent_id === chat.task_id ? <p className="muted">Invalid self-parent link · {turn.parent_id}</p>
+                : <div className="agent-chat-parent-link">
+                  <p className="muted">Follow-up to {turn.parent_id} · {parent ? 'loaded in this conversation' : 'unloaded in this conversation'}
+                    {siblings.length > 1 && ` · ${siblings.length} loaded sibling forks`}</p>
+                  <button type="button" className="secondary-button" onClick={() => dock.open(turn.parent_id!)}>
+                    {parent ? 'Focus / refresh parent' : 'Open unloaded parent'} {turn.parent_id}
+                  </button>
+                </div>}
               <button type="button" className="secondary-button" aria-pressed={dock.focusedTask === chat.task_id}
                 onClick={() => dock.open(chat.task_id)}>Focus / refresh {chat.task_id}</button>
               <button type="button" className="secondary-button" onClick={() => showConversation(turn)}>Conversation turns</button>
@@ -164,7 +189,8 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
               loading={dock.citation?.taskId === chat.task_id && dock.citation.loading}
               error={dock.citation?.taskId === chat.task_id ? dock.citation.error : null}
               onRead={(citationId) => void dock.readCitation(chat.task_id, citationId)} onClose={dock.clearCitation} />}
-          </section>)}
+          </section>;
+          })}
         </div>
       </div>
     </div>

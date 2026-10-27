@@ -406,3 +406,80 @@ export const SavedAnswersStayWithTheirPane: Story = {
     await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
   },
 };
+
+// AC-0400: actual coordinator reads, exact answers, persisted edges and unchanged four-slot admission.
+export const LoadedConversationBranches: Story = {
+  beforeEach: () => {
+    const links = [ ['root', null, 'branch'], ['left', 'root', 'branch'], ['right', 'root', 'branch'],
+      ['leaf', 'left', 'branch'], ['other', null, 'other-conversation'],
+      ['cross', 'root', 'cross-conversation'], ['self', 'self', 'malformed'],
+      ['cycle-a', 'cycle-b', 'cycle'], ['cycle-b', 'cycle-a', 'cycle'] ] as const;
+    const details = links.map(([id, parent_id, conversation_id]) => investigationDetail(id, {
+      question: `Saved question ${id}`, parent_id, conversation_id,
+    }));
+    mockIPC((command, payload) => {
+      const args = (payload ?? {}) as { investigationId?: string; citationId?: string; afterSequence?: number };
+      const detail = details.find((item) => item.investigation_id === args.investigationId);
+      if (command === 'get_investigation') return detail;
+      if (command === 'investigation_result' && detail) {
+        const result = investigationResult(detail.investigation_id);
+        result.findings[0].statement = `Exact finding ${detail.investigation_id}`; return result;
+      }
+      if (command === 'investigation_events' && detail) return { investigation_id: detail.investigation_id,
+        items: investigationEvents(detail.investigation_id).filter((event) => event.sequence > (args.afterSequence ?? 0)), next_sequence: 9, has_more: false };
+      if (command === 'get_investigation_chat' && detail) return {
+        chat_id: `chat:${detail.investigation_id}`, task_id: detail.investigation_id,
+        producer: { specialist_id: detail.specialist.id, specialist_version: detail.specialist.version,
+          prompt_fingerprint: detail.specialist.prompt_fingerprint, tier: detail.specialist.tier,
+          confidence_tier: detail.specialist.confidence_tier, provider_mode: detail.provider.mode,
+          provider_id: detail.provider.provider_id, model: detail.provider.model, protocol_version: null },
+        messages: [{ id: `q:${detail.investigation_id}`, ordinal: 0, author: 'user', message: { kind: 'user_question', question: detail.question } },
+          { id: `r:${detail.investigation_id}`, ordinal: 1, author: 'specialist', message: { kind: 'result_reference',
+            task_id: detail.investigation_id, result_id: `result:${detail.investigation_id}`, result_hash: 'e'.repeat(64) } }],
+      };
+      if (command === 'read_investigation_citation') return { investigation_id: args.investigationId,
+        citation_id: args.citationId, citation: investigationCitations[0], status: 'available', text: `Exact source ${args.investigationId}` };
+      if (command === 'investigation_consent' || command === 'get_investigation_finding_reviews') return null;
+      throw new Error(`Unexpected branch fixture command ${command}`);
+    });
+    useInvestigationStore.setState(state({ history: details }), true);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const open = async (id: string) => {
+      await userEvent.click(canvas.getByRole('button', { name: new RegExp(`^Saved question ${id}`) }));
+      return within(await canvas.findByRole('region', { name: `Saved chat ${id}` }));
+    };
+    const left = await open('left');
+    await expect(left.getByText(/unloaded in this conversation/)).toBeVisible();
+    await open('right'); await open('leaf');
+    await userEvent.click(left.getByRole('button', { name: 'Open unloaded parent root' }));
+    await canvas.findByRole('region', { name: 'Saved chat root' });
+    await expect(canvas.getAllByRole('heading', { name: 'Conversation branch' })).toHaveLength(1);
+    for (const id of ['root', 'left', 'right', 'leaf']) {
+      const pane = within(canvas.getByRole('region', { name: `Saved chat ${id}` }));
+      await expect(pane.getByRole('listitem', { name: 'User question' })).toHaveTextContent(`Saved question ${id}`);
+      await expect(pane.getByText(`Exact finding ${id}`)).toBeVisible();
+      await expect(pane.getByText(/domain-analyst@3/)).toBeVisible();
+    }
+    await expect(left.getByText(/2 loaded sibling forks/)).toBeVisible();
+    await expect(within(canvas.getByRole('region', { name: 'Saved chat leaf' })).getByText(/Follow-up to left/)).toBeVisible();
+    await userEvent.click(left.getByRole('button', { name: 'Inspect citation C1' }));
+    await expect(await left.findByText('Exact source left')).toBeVisible();
+    await open('other');
+    await expect(canvas.queryByRole('region', { name: 'Saved chat left' })).not.toBeInTheDocument();
+    await expect(canvas.getAllByRole('region', { name: /^Saved chat / })).toHaveLength(4);
+    const cross = await open('cross');
+    await expect(cross.getByText(/unloaded in this conversation/)).toBeVisible();
+    await expect(canvas.getByRole('region', { name: 'Saved chat root' })).toBeVisible();
+    const self = await open('self');
+    await expect(self.getByText('Invalid self-parent link · self')).toBeVisible();
+    await expect(self.queryByRole('button', { name: /parent self/ })).not.toBeInTheDocument();
+    await userEvent.click(self.getByRole('button', { name: 'Close self' }));
+    await expect(canvas.queryByRole('heading', { name: 'Conversation malformed' })).not.toBeInTheDocument();
+    await open('cycle-a'); const cycle = await open('cycle-b');
+    await expect(cycle.getByText(/Follow-up to cycle-a.*loaded in this conversation/)).toBeVisible();
+    await expect(canvas.getAllByRole('heading', { name: 'Conversation cycle' })).toHaveLength(1);
+    await expect(canvas.getAllByRole('region', { name: /^Saved chat cycle-/ })).toHaveLength(2);
+  },
+};
