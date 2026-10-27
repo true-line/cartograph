@@ -1348,6 +1348,33 @@ fn investigation_history_conversation_keeps_forks_as_siblings() {
     );
 }
 
+// AC-0408: the validated saved display name works without a completed answer.
+#[test]
+fn investigation_history_search_matches_saved_specialist_names() {
+    let mut fixture = Fixture::new();
+    let detail = fixture
+        .store
+        .start_investigation(
+            &request("name-only", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap()
+        .detail;
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    let found = reopened
+        .search_investigation_history("  DOMAIN ANALYST  ", None)
+        .unwrap();
+    assert_eq!(found.name_match_ids, [detail.summary.investigation_id]);
+    assert!(found.answer_match_ids.is_empty() && !found.items[0].has_result);
+    assert!(
+        reopened
+            .search_investigation_history("Domain analyst%", None)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+}
+
 #[test]
 fn investigation_history_search_finds_persisted_legacy_rows_beyond_first_page() {
     // AC-0368: search traverses retained summaries outside the loaded first page
@@ -1406,6 +1433,35 @@ fn investigation_history_search_finds_persisted_legacy_rows_beyond_first_page() 
         .search_investigation_history("\u{000b}Needle\u{000b}", None)
         .unwrap();
     assert_eq!(vertical_tab.items[0].investigation_id, oldest_id);
+    // AC-0408: saved names remain searchable beyond the first loaded page.
+    let names = fixture
+        .store
+        .search_investigation_history("Evidence auditor", None)
+        .unwrap();
+    assert_eq!(names.name_match_ids, [oldest_id.clone()]);
+    let names = fixture
+        .store
+        .search_investigation_history("Domain analyst", None)
+        .unwrap();
+    assert_eq!(names.items.len(), 50);
+    assert_eq!(names.name_match_ids.len(), 50);
+    assert!(
+        names
+            .name_match_ids
+            .iter()
+            .all(|id| names.items.iter().any(|item| &item.investigation_id == id))
+    );
+    let rest = fixture
+        .store
+        .search_investigation_history("Domain analyst", names.next_cursor.as_deref())
+        .unwrap();
+    assert_eq!(rest.items.len(), 9);
+    assert_eq!(rest.name_match_ids.len(), 9);
+    assert!(
+        rest.name_match_ids
+            .iter()
+            .all(|id| !names.name_match_ids.contains(id))
+    );
     let role = fixture
         .store
         .search_investigation_history("EVIDENCE-AUDITOR@1", None)
@@ -2686,6 +2742,12 @@ fn investigation_history_search_answers_and_corruption() {
             },
         )
         .unwrap();
+    let named = f
+        .store
+        .search_investigation_history("Domain analyst", None)
+        .unwrap();
+    assert_eq!(named.name_match_ids, std::slice::from_ref(&id));
+    assert!(named.items[0].has_result && named.answer_match_ids.is_empty());
     for index in 0..51 {
         let mut requested = request(
             &format!("answer-search:{index}"),
@@ -2790,6 +2852,17 @@ fn investigation_history_search_answers_and_corruption() {
     assert!(
         f.store
             .search_investigation_history("responsibility", None)
+            .is_err()
+    );
+    let name_cursor = f
+        .store
+        .search_investigation_history("Domain analyst", None)
+        .unwrap()
+        .next_cursor
+        .expect("the corrupt older task is beyond the first name page");
+    assert!(
+        f.store
+            .search_investigation_history("Domain analyst", Some(&name_cursor))
             .is_err()
     );
     // Existing task validation already rejects corrupt saved results, even without answer matching.

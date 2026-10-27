@@ -1926,16 +1926,19 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
 });
 
 // AC-0402: match metadata is bounded and owned by the exact selected query and winning row.
-describe('saved answer history search', () => {
-  it.each([null, ['a', 'a'], ['foreign'], ['a'], 42])('rejects invalid answer markers %j', async (markers) => {
+// AC-0408: both evidence kinds follow the exact query and winning row.
+describe.each(['answer', 'name'] as const)('saved %s history search', (kind) => {
+  const wireKey = `${kind}_match_ids`;
+  const stateKey = kind === 'answer' ? 'historyAnswerMatchIds' : 'historyNameMatchIds';
+  it.each([null, ['a', 'a'], ['foreign'], 42, ...(kind === 'answer' ? [['a']] : [])])('rejects invalid markers %j', async (markers) => {
     const detail = investigationDetail('a', { has_result: false, question: 'Needle metadata' });
-    mockIPC(() => ({ items: [detail], next_cursor: null, answer_match_ids: markers }));
+    mockIPC(() => ({ items: [detail], next_cursor: null, [wireKey]: markers }));
     await useInvestigationStore.getState().searchHistory('needle');
     expect(useInvestigationStore.getState().historyError).toBeTruthy();
-    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual([]);
+    expect(useInvestigationStore.getState()[stateKey]).toEqual([]);
   });
   it('rejects nonquery markers including ASCII-whitespace-only queries', async () => {
-    mockIPC(() => ({ items: [investigationDetail('a')], next_cursor: null, answer_match_ids: ['a'] }));
+    mockIPC(() => ({ items: [investigationDetail('a')], next_cursor: null, [wireKey]: ['a'] }));
     for (const query of ['', ' \t']) {
       await useInvestigationStore.getState().searchHistory(query);
       expect(useInvestigationStore.getState().historyError).toBeTruthy();
@@ -1943,32 +1946,51 @@ describe('saved answer history search', () => {
   });
   it('keeps established markers with newer retained rows but never imports evidence into unrelated newer detail', async () => {
     const saved = investigationDetail('a', { question: 'Unrelated saved question', revision: 9 });
-    let page = { items: [saved], next_cursor: 'next', answer_match_ids: ['a'] };
+    let page = { items: [saved], next_cursor: 'next', [wireKey]: ['a'] };
     mockIPC(() => page);
     await useInvestigationStore.getState().searchHistory('needle');
-    page = { items: [investigationDetail('a', { question: 'Needle stale metadata', revision: 8, has_result: false })], next_cursor: 'next', answer_match_ids: [] };
+    page = { items: [investigationDetail('a', { question: 'Needle stale metadata', revision: 8, has_result: false })], next_cursor: 'next', [wireKey]: [] };
     await useInvestigationStore.getState().loadHistory();
     expect(useInvestigationStore.getState().history[0].revision).toBe(9);
-    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual(['a']);
+    expect(useInvestigationStore.getState()[stateKey]).toEqual(['a']);
     await useInvestigationStore.getState().loadHistory(true);
-    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual(['a']);
-    useInvestigationStore.setState({ history: [], historyAnswerMatchIds: [], detail: saved });
-    page = { items: [investigationDetail('a', { revision: 8 })], next_cursor: 'next', answer_match_ids: ['a'] };
+    expect(useInvestigationStore.getState()[stateKey]).toEqual(['a']);
+    useInvestigationStore.setState({ history: [], [stateKey]: [], detail: saved });
+    page = { items: [investigationDetail('a', { revision: 8 })], next_cursor: 'next', [wireKey]: ['a'] };
     await useInvestigationStore.getState().loadHistory();
     expect(useInvestigationStore.getState().history).toEqual([]);
-    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual([]);
+    expect(useInvestigationStore.getState()[stateKey]).toEqual([]);
   });
   it('ignores stale query markers and clears them on search/active selection', async () => {
-    const old = deferred<{ items: InvestigationDetail[]; next_cursor: null; answer_match_ids: string[] }>();
+    const old = deferred<unknown>();
     mockIPC((_command, args) => args?.search === 'old' ? old.promise
-      : { items: [investigationDetail('a')], next_cursor: null, answer_match_ids: ['a'] });
+      : { items: [investigationDetail('a')], next_cursor: null, [wireKey]: ['a'] });
     const pending = useInvestigationStore.getState().searchHistory('old');
     await useInvestigationStore.getState().searchHistory('new');
-    old.resolve({ items: [investigationDetail('old')], next_cursor: null, answer_match_ids: ['old'] }); await pending;
-    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual(['a']);
+    old.resolve({ items: [investigationDetail('old')], next_cursor: null, [wireKey]: ['old'] }); await pending;
+    expect(useInvestigationStore.getState()[stateKey]).toEqual(['a']);
     await useInvestigationStore.getState().selectHistoryActive(true);
-    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual([]);
+    expect(useInvestigationStore.getState()[stateKey]).toEqual([]);
     await useInvestigationStore.getState().searchHistory('');
-    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual([]);
+    expect(useInvestigationStore.getState()[stateKey]).toEqual([]);
   });
+});
+
+// AC-0408: name evidence is not an answer and survives a pending status refresh.
+it('retains pending name hits across status and active-filter refresh, rejecting overlap', async () => {
+  let pending = investigationDetail('pending-name', { question: 'Unrelated question', has_result: false, status: 'running' });
+  mockIPC((command) => command === 'cancel_investigation' ? pending
+    : { items: [pending], next_cursor: null, name_match_ids: [pending.investigation_id] });
+  await useInvestigationStore.getState().searchHistory('Domain analyst');
+  pending = { ...pending, revision: 10 };
+  await useInvestigationStore.getState().cancel(pending.investigation_id);
+  expect(useInvestigationStore.getState().historyNameMatchIds).toEqual([pending.investigation_id]);
+  expect(useInvestigationStore.getState().history[0].has_result).toBe(false);
+  await useInvestigationStore.getState().selectHistoryActive(true);
+  expect(useInvestigationStore.getState().historyNameMatchIds).toEqual([pending.investigation_id]);
+  mockIPC(() => ({ items: [investigationDetail('a')], next_cursor: null, name_match_ids: ['a'], answer_match_ids: ['a'] }));
+  await useInvestigationStore.getState().selectHistoryActive(false);
+  await useInvestigationStore.getState().searchHistory('overlap');
+  expect(useInvestigationStore.getState().historyError).toBeTruthy();
+  expect(useInvestigationStore.getState().historyNameMatchIds).toEqual([]);
 });

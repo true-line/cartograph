@@ -628,6 +628,13 @@ fn history_answer_search_markers_keep_legacy_empty_page_bytes() {
     let raw = r#"{"items":[],"next_cursor":null}"#;
     let mut page: InvestigationPage = serde_json::from_str(raw).unwrap();
     assert_eq!(serde_json::to_string(&page).unwrap(), raw);
+    // AC-0408: optional name metadata also preserves historical absent-field bytes.
+    assert!(page.name_match_ids.is_empty());
+    page.name_match_ids.push("pending-task".into());
+    assert_eq!(
+        serde_json::to_value(&page).unwrap()["name_match_ids"],
+        json!(["pending-task"])
+    );
     page.answer_match_ids.push("saved-task".into());
     assert_eq!(
         serde_json::to_value(page).unwrap()["answer_match_ids"],

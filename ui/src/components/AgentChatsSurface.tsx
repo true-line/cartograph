@@ -107,7 +107,7 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
             onClick={() => void state.selectHistoryActive(true)}>Active tasks</button>
         </div>
         <form aria-label="Search saved chats" onSubmit={submitSearch}>
-          <label>Search saved questions, specialists, and answers
+          <label>Search saved questions, specialist names or IDs, and answers
             <input type="search" value={searchText} onChange={(event) => setSearchText(event.target.value)} />
           </label>
           <button type="submit" className="secondary-button">Search history</button>
@@ -125,7 +125,7 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
         <ul>{state.history.map((item) => <li key={item.investigation_id}>
           <button type="button" className={`agent-chat-history-item${item.investigation_id === dock.focusedTask ? ' selected' : ''}`}
             aria-pressed={item.investigation_id === dock.focusedTask} onClick={() => dock.open(item.investigation_id)}>
-            <strong>{item.question}</strong>{state.historyAnswerMatchIds.includes(item.investigation_id) && <span>Answer match</span>}
+            <strong>{item.question}</strong>{state.historyAnswerMatchIds.includes(item.investigation_id) && <span>Answer match</span>}{state.historyNameMatchIds.includes(item.investigation_id) && <span>Name match</span>}
             <span>{item.specialist_id} · {statusLabel(item.status)}</span>
             <time>{item.updated_at}</time>
           </button>
