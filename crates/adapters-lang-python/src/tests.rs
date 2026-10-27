@@ -2719,6 +2719,186 @@ def unrelated(other):
 }
 
 #[test]
+fn flask_handlers_follow_returned_helpers_that_cannot_return_none() {
+    // AC-0407 (#1187): a handler's `return helper(…)` adds the repository
+    // function's responses when it cannot return `None`; the builtin
+    // `str(…)` is a `text` body.
+    let dir = tempfile::tempdir().unwrap();
+    let utils = r#"
+from flask import make_response, redirect, url_for
+
+def after_login(user, next_url):
+    if user.mfa:
+        return redirect(url_for("auth.mfa"))
+    # the dashboard unless the user came from another page
+    if next_url:
+        return redirect(next_url)
+    elif user.new:
+        return redirect(url_for("onboarding"), code=303)
+    else:
+        return redirect(url_for("dashboard.index"))
+
+def maybe(user):
+    if user:
+        return redirect("/")
+    return None
+
+def falls(user):
+    if user:
+        return redirect("/")
+
+def bare(user):
+    if user:
+        return
+    return redirect("/")
+
+def chained(user):
+    return maybe(user)
+
+def chained_ok(user):
+    return after_login(user, None)
+
+def export(user):
+    output = make_response("csv")
+    output.headers["Content-Disposition"] = "attachment"
+    return output
+"#;
+    let views = r#"
+from flask import Blueprint, render_template
+from app.utils import after_login, bare, chained, chained_ok, export, falls, maybe
+
+bp = Blueprint("auth", __name__)
+
+@bp.route("/login")
+def login():
+    if form.ok():
+        return after_login(user, next_url)
+    return render_template("login.html")
+
+@bp.route("/chained-ok")
+def chained_ok_view():
+    return chained_ok(user)
+
+@bp.route("/export")
+def export_view():
+    return export(user)
+
+@bp.route("/sms")
+def sms():
+    resp = build()
+    return str(resp)
+
+@bp.route("/maybe")
+def maybe_view():
+    return maybe(user)
+
+@bp.route("/falls")
+def falls_view():
+    return falls(user)
+
+@bp.route("/bare")
+def bare_view():
+    return bare(user)
+
+@bp.route("/chained")
+def chained_view():
+    return chained(user)
+
+@bp.route("/shadow")
+def shadow():
+    str = lambda value: value
+    return str(1)
+"#;
+    write(dir.path(), "app/utils.py", utils);
+    write(dir.path(), "app/views.py", views);
+    write(
+        dir.path(),
+        "app/main.py",
+        "from flask import Flask\nfrom app.views import bp\napp = Flask(__name__)\napp.register_blueprint(bp)\n",
+    );
+    let sources = [("app/utils.py", utils), ("app/views.py", views)];
+    let mut cache = IncrementalCache::default();
+    let (extraction, _) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+    let responses = |path: &str| {
+        let mut responses = extraction
+            .nodes
+            .iter()
+            .find(|node| node.label == "Endpoint" && node.props["path"] == path)
+            .unwrap_or_else(|| panic!("{path}"))
+            .props["responses"]
+            .clone();
+        // A response with nothing proven carries no provenance.
+        let prov = responses.as_object_mut().unwrap().remove("prov");
+        let cited = prov
+            .iter()
+            .flat_map(|prov| prov["evidence"].as_array().unwrap())
+            .map(|span| {
+                let (_, source) = sources
+                    .iter()
+                    .find(|(file, _)| span["path"] == *file)
+                    .unwrap();
+                source[span["byte_start"].as_u64().unwrap() as usize
+                    ..span["byte_end"].as_u64().unwrap() as usize]
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        (responses, cited)
+    };
+    let (login, cited) = responses("/login");
+    assert_eq!(
+        login,
+        serde_json::json!({
+            "kinds": ["html", "redirect"],
+            "statuses": [200, 302, 303],
+            "followed": ["sym:local/python-service@app/utils.py#after_login"],
+            "scope": "handler_body_and_followed",
+        })
+    );
+    assert!(cited.contains(&"return after_login(user, next_url)".to_string()));
+    assert_eq!(cited.len(), 6, "{cited:?}");
+    let (chained_ok, _) = responses("/chained-ok");
+    assert_eq!(
+        chained_ok,
+        serde_json::json!({
+            "kinds": ["redirect"],
+            "statuses": [302, 303],
+            "followed": [
+                "sym:local/python-service@app/utils.py#after_login",
+                "sym:local/python-service@app/utils.py#chained_ok",
+            ],
+            "scope": "handler_body_and_followed",
+        })
+    );
+    let (export, _) = responses("/export");
+    assert_eq!(
+        export,
+        serde_json::json!({
+            "kinds": ["text"],
+            "statuses": [200],
+            "followed": ["sym:local/python-service@app/utils.py#export"],
+            "scope": "handler_body_and_followed",
+        })
+    );
+    let (sms, cited) = responses("/sms");
+    assert_eq!(
+        sms,
+        serde_json::json!({ "kinds": ["text"], "statuses": [200], "scope": "handler_body" })
+    );
+    assert_eq!(cited, ["return str(resp)"]);
+    // A helper that can return `None` (explicitly, bare, by falling off its
+    // end, or through a check that can) is not proven; nor is a rebound `str`.
+    for path in ["/maybe", "/falls", "/bare", "/chained", "/shadow"] {
+        let (responses, _) = responses(path);
+        assert_eq!(
+            responses["partial"],
+            serde_json::json!(["response_not_proven"]),
+            "{path}"
+        );
+        assert!(responses.get("kinds").is_none(), "{path}");
+    }
+}
+
+#[test]
 fn responses_need_flask_and_an_unshadowed_jsonify() {
     let fastapi = br#"
 from fastapi import FastAPI

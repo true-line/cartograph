@@ -7,7 +7,8 @@
 //!   or the literal keys of one dict argument) or a dict literal, which Flask
 //!   serializes; its literal string keys are recorded. A call of Flask's
 //!   `render_template` is `html`, and of `redirect` is `redirect`. A `str`
-//!   (literal, f-string or implicit concatenation) is `text` (#1182).
+//!   (literal, f-string or implicit concatenation) is `text` (#1182), as is
+//!   a call of the builtin `str` (#1187).
 //! - `make_response(body[, status[, headers]])` is read as `(body, status)`,
 //!   returned directly or through a local bound once to it and otherwise only
 //!   returned or given cookies or headers; a tuple's own status wins.
@@ -31,6 +32,10 @@
 //!   `x = check(…); … return x` adds `check`'s responses. A decorator outside
 //!   the repository, or a call such as `@limiter.limit("2/minute")`, is not
 //!   followed.
+//! - A handler's `return helper(…)` adds the repository `helper`'s responses
+//!   when it cannot return `None`: no `return None` or bare `return`, a body
+//!   that cannot end without returning, and no followed check that can
+//!   (#1187). Otherwise it is `response_not_proven`.
 //! - A dict is built by a local bound once to a dict literal and extended
 //!   only with literal-key subscript assignments (`ret["k"] = …`). Its keys
 //!   are read from `jsonify(ret)` / `return ret`, and from
@@ -151,6 +156,9 @@ pub(crate) enum Follow {
     Delegate(FnKey),
     /// `jsonify(helper(…))`: the keys of the dict `helper` builds.
     Built(FnKey),
+    /// `return helper(…)` in a handler: `helper`'s responses, when it
+    /// cannot return `None`.
+    Returned(FnKey),
 }
 
 /// Responses read from one function, before its follows are resolved.
@@ -158,6 +166,9 @@ pub(crate) enum Follow {
 pub(crate) struct Facts {
     pub responses: Responses,
     pub follows: Vec<Follow>,
+    /// Read as a check: whether it can return `None` (`return None`, a bare
+    /// `return`, or a body that can end without returning).
+    pub may_return_none: bool,
 }
 
 /// What a top-level function proves when another one follows it.
@@ -429,6 +440,7 @@ fn read_function(
         mode,
     };
     let checks = !matches!(reader.mode, Mode::Handler);
+    facts.may_return_none = checks && !ends(body);
     visit_scope(body, &mut |node| match node.kind() {
         "return_statement" => reader.read_return(node, &mut facts),
         "call" if checks => {
@@ -445,11 +457,23 @@ impl<'t> Reader<'_, '_, 't> {
     fn read_return(&self, statement: TsNode<'_>, facts: &mut Facts) {
         let cx = self.cx;
         let Some(value) = statement.named_child(0) else {
-            return; // a bare `return` is not a Flask response
+            // A bare `return` is not a Flask response.
+            facts.may_return_none |= !matches!(self.mode, Mode::Handler);
+            return;
         };
         let value = unparenthesize(value);
-        if !matches!(self.mode, Mode::Handler) {
+        if matches!(self.mode, Mode::Handler) {
+            // `return helper(…)`: the repository function's own responses.
+            if value.kind() == "call"
+                && let Some(helper) = self.delegate(value)
+            {
+                facts.follows.push(Follow::Returned(helper));
+                facts.responses.cite(cx.evidence(&statement));
+                return;
+            }
+        } else {
             if value.kind() == "none" {
+                facts.may_return_none = true;
                 return;
             }
             if let Mode::Wrapper { wrapped } = self.mode
@@ -569,7 +593,7 @@ impl<'t> Reader<'_, '_, 't> {
         let mut bound = self.bound.clone();
         bound.remove(name);
         let function = call.child_by_field_name("function")?;
-        if self.enclosed(function) {
+        if self.helpers.contains_key(self.cx.text(&function)) || self.enclosed(function) {
             return None;
         }
         self.resolver.target(self.cx, function, &bound)
@@ -747,11 +771,20 @@ impl<'t> Reader<'_, '_, 't> {
             }
             _ => {}
         }
-        let helper = (body.kind() == "call")
+        let function = (body.kind() == "call")
             .then(|| body.child_by_field_name("function"))
             .flatten()
-            .filter(|function| !self.enclosed(*function))
-            .and_then(|function| self.helpers.get(cx.text(&function)));
+            .filter(|function| !self.enclosed(*function));
+        // The builtin `str(…)` is a `str`, unless the name is the module's.
+        if function.is_some_and(|function| {
+            cx.text(&function) == "str"
+                && !self.bound.contains("str")
+                && !self.resolver.locals.contains_key("str")
+                && !self.resolver.bindings.contains_key("str")
+        }) {
+            return Body::Text;
+        }
+        let helper = function.and_then(|function| self.helpers.get(cx.text(&function)));
         match helper {
             Some(Helper::Jsonify) => self.jsonify_keys(body),
             Some(Helper::RenderTemplate) => Body::Html,
@@ -943,10 +976,10 @@ pub(crate) fn decorator_responses(
     repo: &str,
 ) -> Responses {
     let facts = Facts {
-        responses: Responses::default(),
         follows: vec![Follow::Decorator(key.clone())],
+        ..Facts::default()
     };
-    merge(&facts, functions, repo, 0)
+    merge(&facts, functions, repo, 0, false)
 }
 
 /// Merge every handler's follows into its Flask endpoints, once all files
@@ -964,7 +997,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) -> HashMap<FnKey, Functi
     let resolved = handlers
         .into_iter()
         .map(|handler| {
-            let responses = merge(&handler.facts, &functions, repo, 0);
+            let responses = merge(&handler.facts, &functions, repo, 0, false);
             (handler.handler, responses)
         })
         .collect::<HashMap<_, _>>();
@@ -1000,11 +1033,14 @@ fn lookup<'f>(
     })
 }
 
+/// `strict` once a handler's `return helper(…)` is followed: a function that
+/// can return `None` is then not proven, since Flask cannot serve it.
 fn merge(
     facts: &Facts,
     functions: &HashMap<FnKey, FunctionFacts>,
     repo: &str,
     depth: usize,
+    strict: bool,
 ) -> Responses {
     let mut responses = facts.responses.clone();
     for follow in &facts.follows {
@@ -1016,9 +1052,13 @@ fn merge(
                 };
                 (key, Some(wrapper), "response_not_proven")
             }
-            Follow::Delegate(key) => (
+            Follow::Delegate(key) | Follow::Returned(key) => (
                 key,
-                lookup(functions, key).and_then(|f| f.returns.as_ref()),
+                lookup(functions, key)
+                    .and_then(|f| f.returns.as_ref())
+                    .filter(|found| {
+                        !found.may_return_none || !(strict || matches!(follow, Follow::Returned(_)))
+                    }),
                 "response_not_proven",
             ),
             Follow::Built(key) => {
@@ -1039,7 +1079,8 @@ fn merge(
         };
         match found.filter(|_| depth < MAX_DEPTH) {
             Some(found) => {
-                responses.absorb(merge(found, functions, repo, depth + 1));
+                let strict = strict || matches!(follow, Follow::Returned(_));
+                responses.absorb(merge(found, functions, repo, depth + 1, strict));
                 responses.followed.insert(symbol_id(repo, &key.0, &key.1));
             }
             None => {
@@ -1151,4 +1192,37 @@ fn str_literal(cx: &FileCx<'_>, literal: TsNode<'_>) -> bool {
                 start.kind() == "string_start" && !cx.text(&start).contains(['b', 'B'])
             })
     })
+}
+
+/// Whether `block` cannot end without returning: its last statement is a
+/// `return` or `raise`, or an `if` with an `else` whose every branch ends.
+fn ends(block: TsNode<'_>) -> bool {
+    let Some(last) = named(block)
+        .into_iter()
+        .rfind(|statement| statement.kind() != "comment")
+    else {
+        return false;
+    };
+    match last.kind() {
+        "return_statement" | "raise_statement" => true,
+        "if_statement" => {
+            let mut branches = vec![last.child_by_field_name("consequence")];
+            let mut cursor = last.walk();
+            let mut otherwise = false;
+            for clause in last.children_by_field_name("alternative", &mut cursor) {
+                if clause.kind() == "else_clause" {
+                    otherwise = true;
+                }
+                branches.push(
+                    clause.child_by_field_name(if clause.kind() == "else_clause" {
+                        "body"
+                    } else {
+                        "consequence"
+                    }),
+                );
+            }
+            otherwise && branches.into_iter().all(|branch| branch.is_some_and(ends))
+        }
+        _ => false,
+    }
 }
