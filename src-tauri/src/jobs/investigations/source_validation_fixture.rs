@@ -160,6 +160,7 @@ fn reserve_fixture(
         observed_model: Some("scripted-model".into()),
         reported_input_tokens: Some(10),
         reported_output_tokens: Some(5),
+        reported_cache_read_tokens: None,
         active_milliseconds: f.task.detail.usage.active_milliseconds + 2,
     };
     let tx = f.store.conn.transaction().unwrap();

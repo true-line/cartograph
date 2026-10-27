@@ -264,6 +264,7 @@ fn prospective_attempt_zero_matches_preserve_no_ledger_incidental_reads() {
         observed_model: None,
         reported_input_tokens: None,
         reported_output_tokens: None,
+        reported_cache_read_tokens: None,
         active_milliseconds: 0,
     };
     let outcome = AttemptOutcome::Unavailable {

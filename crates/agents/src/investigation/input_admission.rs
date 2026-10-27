@@ -229,16 +229,21 @@ impl InvestigationInput {
             .map_err(|_| InvestigationError::InvalidInput)?,
         );
         // Numeric width, not invented usage authority. The actual usage DTO
-        // admits two optional token counters which may become present without
+        // admits optional token counters which may become present without
         // acquisition; unknown optional/structured fields fail closed.
         let usage = reserved["consumed_budgets"]
             .as_object_mut()
             .ok_or(InvestigationError::InvalidInput)?;
+        // This counter is absent from legacy/unknown serialization, but can
+        // become known after the admitted response. Reserve it explicitly.
+        usage.insert("reported_cache_read_tokens".into(), u64::MAX.into());
         for (key, value) in usage {
             if value.is_number()
                 || matches!(
                     key.as_str(),
-                    "reported_input_tokens" | "reported_output_tokens"
+                    "reported_input_tokens"
+                        | "reported_output_tokens"
+                        | "reported_cache_read_tokens"
                 )
             {
                 *value = u64::MAX.into();

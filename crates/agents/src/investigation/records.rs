@@ -312,6 +312,8 @@ pub struct InvestigationUsage {
     pub generated_token_reservations: u32,
     pub reported_input_tokens: Option<u64>,
     pub reported_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_cache_read_tokens: Option<u64>,
     pub active_milliseconds: u64,
 }
 

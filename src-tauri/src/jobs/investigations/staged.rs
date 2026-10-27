@@ -520,6 +520,7 @@ struct ResponseUsage {
     invocations: u32,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
 }
 
 // Invocation order is authoritative: a missing response cannot be skipped to
@@ -578,6 +579,7 @@ fn response_usage_from_steps(
     }
     let count = u32::try_from(steps.len()).map_err(|_| InvestigationStoreError::Invalid)?;
     let (mut input_tokens, mut output_tokens) = (None, None);
+    let mut cache_read_tokens = None;
     let mut last = None;
     for (ordinal, step) in steps.into_iter().enumerate() {
         let step = step.ok_or(InvestigationStoreError::Invalid)?;
@@ -598,6 +600,11 @@ fn response_usage_from_steps(
             response.reported_output_tokens,
             ordinal == 0,
         )?;
+        cache_read_tokens = transitions::add_reported(
+            cache_read_tokens,
+            response.reported_cache_read_tokens,
+            ordinal == 0,
+        )?;
         last = Some(response);
     }
     Ok(ResponseUsage {
@@ -605,6 +612,7 @@ fn response_usage_from_steps(
         invocations: count,
         input_tokens,
         output_tokens,
+        cache_read_tokens,
     })
 }
 
@@ -755,6 +763,7 @@ pub(super) fn load_for_task(
             || replay.invocations != entry.usage.model_invocations
             || replay.input_tokens != entry.usage.reported_input_tokens
             || replay.output_tokens != entry.usage.reported_output_tokens
+            || replay.cache_read_tokens != entry.usage.reported_cache_read_tokens
         {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -775,6 +784,10 @@ pub(super) fn load_for_task(
                     (
                         &previous.usage.reported_output_tokens,
                         &entry.usage.reported_output_tokens,
+                    ),
+                    (
+                        &previous.usage.reported_cache_read_tokens,
+                        &entry.usage.reported_cache_read_tokens,
                     ),
                 ]
                 .iter()
@@ -835,6 +848,7 @@ fn validate_next_prompt_refusal_basis(
         .ok_or(InvestigationStoreError::Invalid)?;
     expected.reported_input_tokens = entry.usage.reported_input_tokens;
     expected.reported_output_tokens = entry.usage.reported_output_tokens;
+    expected.reported_cache_read_tokens = entry.usage.reported_cache_read_tokens;
     expected.active_milliseconds = entry.response.active_milliseconds;
     if call.admission.capacity_refusal_count != capacity.count
         || call.admission.capacity_feedback != capacity.feedback
@@ -1021,6 +1035,7 @@ pub(super) fn append_for_task(
         || replay.invocations != entry.usage.model_invocations
         || replay.input_tokens != entry.usage.reported_input_tokens
         || replay.output_tokens != entry.usage.reported_output_tokens
+        || replay.cache_read_tokens != entry.usage.reported_cache_read_tokens
     {
         return Err(InvestigationStoreError::Invalid);
     }

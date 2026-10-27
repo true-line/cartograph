@@ -312,7 +312,7 @@ impl LlmProvider for Scripted {
             usage: Some(ReportedUsage {
                 input_tokens: Some(100),
                 output_tokens: Some(40),
-                cache_read_input_tokens: None,
+                cache_read_input_tokens: Some(7),
                 cache_creation_input_tokens: None,
             }),
             request_bytes: 100,
@@ -794,6 +794,8 @@ fn assert_worker_cited_finish(specialist: SpecialistId) {
         ORIGINAL.len() as u64
     );
     assert_eq!(detail.usage.reported_input_tokens, Some(300));
+    // AC-0418: real provider reports survive exact saved-task reopen below.
+    assert_eq!(detail.usage.reported_cache_read_tokens, Some(21));
     let result = jobs.investigation_result(&fixture.id).unwrap().unwrap();
     assert_eq!(
         result.schema_version,
@@ -977,6 +979,7 @@ fn investigation_worker_records_unknown_transport_outcome_without_replay() {
         assert_eq!(detail.usage.model_invocations, 1);
         assert_eq!(detail.usage.generated_token_reservations, 2048);
         assert_eq!(detail.usage.reported_input_tokens, None);
+        assert_eq!(detail.usage.reported_cache_read_tokens, None);
         assert!(!detail.summary.has_result);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         let reopened = crate::jobs::JobStore::open(fixture.app_data.join("state.db")).unwrap();

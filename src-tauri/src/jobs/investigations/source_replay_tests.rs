@@ -16,6 +16,7 @@ fn refusal() -> InvestigationTransition {
         step_id: "step:1".into(),
         reported_input_tokens: Some(10),
         reported_output_tokens: Some(20),
+        reported_cache_read_tokens: Some(7),
         active_milliseconds: 100,
     }
 }
@@ -70,6 +71,7 @@ fn source_replay_transaction_consumes_once_and_reopens_without_response_hashes()
     let ready = refuse(&mut fixture, &id, &execution).unwrap();
     assert_eq!(ready.summary.status, InvestigationStatus::Running);
     assert_eq!(ready.usage.reported_input_tokens, Some(10));
+    assert_eq!(ready.usage.reported_cache_read_tokens, Some(7));
     for table in ["investigation_responses", "investigation_results"] {
         let count: i64 = fixture
             .store

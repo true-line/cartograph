@@ -416,6 +416,7 @@ impl JobStore {
                 step_id,
                 reported_input_tokens,
                 reported_output_tokens,
+                reported_cache_read_tokens,
                 active_milliseconds,
             } => {
                 if task.phase != Phase::Invocation
@@ -449,6 +450,11 @@ impl JobStore {
                 usage.reported_output_tokens = add_reported(
                     usage.reported_output_tokens,
                     reported_output_tokens,
+                    usage.model_invocations == 1,
+                )?;
+                usage.reported_cache_read_tokens = add_reported(
+                    usage.reported_cache_read_tokens,
+                    reported_cache_read_tokens,
                     usage.model_invocations == 1,
                 )?;
                 usage.active_milliseconds = active_milliseconds;
@@ -1024,6 +1030,7 @@ pub(super) fn validate_input_candidate(
         || usage.generated_token_reservations != prior.generated_token_reservations
         || usage.reported_input_tokens != prior.reported_input_tokens
         || usage.reported_output_tokens != prior.reported_output_tokens
+        || usage.reported_cache_read_tokens != prior.reported_cache_read_tokens
         || usage.active_milliseconds < prior.active_milliseconds
         || usage.selected_facts < prior.selected_facts
         || usage.evidence_items < prior.evidence_items
@@ -1237,6 +1244,7 @@ fn clear_unmeasured_usage(task: &mut StoredTask) {
     // later invocation has no admitted usage report, including owner death.
     task.detail.usage.reported_input_tokens = None;
     task.detail.usage.reported_output_tokens = None;
+    task.detail.usage.reported_cache_read_tokens = None;
 }
 
 fn request_cancel(
@@ -1417,6 +1425,11 @@ pub(super) fn validate_response(
     usage.reported_output_tokens = add_reported(
         usage.reported_output_tokens,
         response.reported_output_tokens,
+        usage.model_invocations == 1,
+    )?;
+    usage.reported_cache_read_tokens = add_reported(
+        usage.reported_cache_read_tokens,
+        response.reported_cache_read_tokens,
         usage.model_invocations == 1,
     )?;
     usage.active_milliseconds = response.active_milliseconds;

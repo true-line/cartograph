@@ -48,3 +48,5 @@ investigation. Dismissing the toast keeps it in the session-only **New results**
 list; the notice is consumed only after the matching saved result and transcript
 are visible. This checks persisted task-bound result references only. It does
 not recover unread state after restart or create assistant messages.
+
+The app activity read also exposes provider-reported cache-read input tokens as optional backend metadata. Missing or uncertain reports remain unknown; reports are not a price or a complete lifetime bill. The activity screen does not yet display this counter. Existing byte limits apply, so optional projection metadata can be unavailable.

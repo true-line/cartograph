@@ -28,6 +28,7 @@ pub(in crate::jobs::investigations) fn response(
         observed_model: None,
         reported_input_tokens: None,
         reported_output_tokens: None,
+        reported_cache_read_tokens: None,
         active_milliseconds: f.task.detail.usage.active_milliseconds + 1,
     }
 }

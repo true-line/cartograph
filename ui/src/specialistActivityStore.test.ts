@@ -167,7 +167,8 @@ describe('separate specialist task activity projection (AC-0379, AC-0381)', () =
       { input_tokens: '18446744073709551615', output_tokens: null },
       { input_tokens: null, output_tokens: '0' },
     ]) {
-      row = { ...item, reported_usage: usage }; await store.getState().refresh();
+      // AC-0418: the existing consumer accepts additive outer backend telemetry.
+      row = { ...item, reported_usage: usage, reported_cache_read_tokens: '18446744073709551615' }; await store.getState().refresh();
       expect(store.getState().status).toBe('ready');
       expect(store.getState().tasks[0].reported_usage).toEqual(usage);
     }

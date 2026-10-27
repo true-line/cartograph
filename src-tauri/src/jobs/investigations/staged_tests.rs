@@ -223,6 +223,7 @@ impl Fixture {
             observed_model: Some("test-model".into()),
             reported_input_tokens: Some(10),
             reported_output_tokens: Some(5),
+            reported_cache_read_tokens: None,
             active_milliseconds: 1,
         };
         let mut obligation = Obligation::Inventory {
@@ -549,6 +550,8 @@ fn staged_refusal_journal_rejects_response_usage_tampering() {
         "observed_model",
         "reported_tokens",
         "response_and_reported_tokens",
+        "cache_aggregate",
+        "cache_response_and_aggregate",
         "active_time",
     ] {
         let mut fixture = Fixture::new();
@@ -573,6 +576,11 @@ fn staged_refusal_journal_rejects_response_usage_tampering() {
             "action_hash" => entry.response.action_hash = "a".repeat(64),
             "observed_model" => entry.response.observed_model = Some("changed-model".into()),
             "reported_tokens" => entry.usage.reported_input_tokens = Some(11),
+            "cache_aggregate" => entry.usage.reported_cache_read_tokens = Some(7),
+            "cache_response_and_aggregate" => {
+                entry.response.reported_cache_read_tokens = Some(7);
+                entry.usage.reported_cache_read_tokens = Some(7);
+            }
             "response_and_reported_tokens" => {
                 entry.response.reported_input_tokens = Some(11);
                 entry.usage.reported_input_tokens = Some(11);
@@ -1130,6 +1138,7 @@ fn staged_refusal_response_replay_requires_complete_history_and_preserves_unknow
                 Some(10 * (ordinal as u64 + 1))
             };
             response.reported_output_tokens = Some(ordinal as u64 + 1);
+            response.reported_cache_read_tokens = (unknown_at != Some(ordinal)).then_some(7);
             insert_body(
                 &tx,
                 "investigation_responses",
@@ -1147,6 +1156,10 @@ fn staged_refusal_response_replay_requires_complete_history_and_preserves_unknow
             if unknown_at.is_some() { None } else { Some(60) }
         );
         assert_eq!(replay.output_tokens, Some(6));
+        assert_eq!(
+            replay.cache_read_tokens,
+            if unknown_at.is_some() { None } else { Some(21) }
+        );
         assert!(
             insert_body(
                 &tx,
@@ -1215,4 +1228,164 @@ fn staged_binding_row_caps_preserve_semantic_field_validation() {
     )
     .unwrap();
     tx.rollback().unwrap();
+}
+
+// AC-0418: absent extensions preserve canonical bytes and content IDs; null is not absence.
+#[test]
+fn cache_usage_legacy_bytes_and_present_widths_are_canonical() {
+    let mut fixture = Fixture::new();
+    let legacy = encode(&fixture.response, 4096).unwrap();
+    let expected = format!(
+        "{{\"step_id\":\"finish-step\",\"response_hash\":\"{}\",\"action_hash\":\"{}\",\"observed_model\":\"test-model\",\"reported_input_tokens\":10,\"reported_output_tokens\":5,\"active_milliseconds\":1}}",
+        fixture.response.response_hash, fixture.response.action_hash
+    );
+    assert_eq!(legacy, expected.as_bytes());
+    assert_eq!(
+        decode::<InvestigationResponseMeta>(&legacy, &core_prov::content_hash(expected.as_bytes()))
+            .unwrap(),
+        fixture.response
+    );
+    let usage = InvestigationUsage::default();
+    let body = encode(&usage, 4096).unwrap();
+    assert!(
+        !String::from_utf8(body.clone())
+            .unwrap()
+            .contains("cache_read")
+    );
+    assert_eq!(
+        decode::<InvestigationUsage>(&body, &core_prov::content_hash(&body)).unwrap(),
+        usage
+    );
+    for value in [serde_json::Value::Null, json!(0), json!(u64::MAX)] {
+        for response in [false, true] {
+            // Keep struct field order, inserting immediately before the final active counter.
+            let original = if response { &legacy } else { &body };
+            let wire = String::from_utf8(original.clone()).unwrap().replace(
+                "\"active_milliseconds\":",
+                &format!("\"reported_cache_read_tokens\":{value},\"active_milliseconds\":"),
+            );
+            let hash = core_prov::content_hash(wire.as_bytes());
+            let accepted = if response {
+                decode::<InvestigationResponseMeta>(wire.as_bytes(), &hash).is_ok()
+            } else {
+                decode::<InvestigationUsage>(wire.as_bytes(), &hash).is_ok()
+            };
+            assert_eq!(accepted, !value.is_null());
+        }
+    }
+    let namespace = fixture.store.namespace.clone();
+    let tx = fixture.store.conn.transaction().unwrap();
+    append(
+        &tx,
+        &namespace,
+        &fixture.execution,
+        &fixture.request,
+        &fixture.input,
+        &fixture.finish,
+        fixture.response.clone(),
+        &[],
+    )
+    .unwrap();
+    let entry = load(&tx, &fixture.id).unwrap().remove(0);
+    let body = encode(&entry, MAX_RECORD_BYTES).unwrap();
+    assert!(
+        !String::from_utf8(body.clone())
+            .unwrap()
+            .contains("cache_read")
+    );
+    let decoded: JournalEntry = decode(&body, &core_prov::content_hash(&body)).unwrap();
+    assert_eq!(decoded.content_id().unwrap(), entry.entry_id);
+    tx.commit().unwrap();
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(
+        load(&reopened.conn, &fixture.id).unwrap()[0].entry_id,
+        entry.entry_id
+    );
+    assert_eq!(
+        transitions::add_reported(Some(u64::MAX), Some(1), false),
+        Err(InvestigationStoreError::Capacity)
+    );
+    assert_eq!(
+        transitions::add_reported(None, Some(7), false).unwrap(),
+        None
+    );
+}
+
+// AC-0418: maximum reported metadata consumes existing admission capacity atomically.
+#[test]
+fn cache_usage_refusal_capacity_exact_and_one_short_rollback() {
+    for deficit in [0, 1] {
+        let mut fixture = Fixture::new();
+        fixture.response.reported_cache_read_tokens = Some(u64::MAX);
+        let namespace = fixture.store.namespace.clone();
+        // Establish the existing binding before measuring response admission.
+        let tx = fixture.store.conn.transaction().unwrap();
+        let task = load_task_base(&tx, &fixture.id).unwrap();
+        bind(&tx, &task, &fixture.request).unwrap();
+        tx.commit().unwrap();
+        let tx = fixture.store.conn.transaction().unwrap();
+        append(
+            &tx,
+            &namespace,
+            &fixture.execution,
+            &fixture.request,
+            &fixture.input,
+            &fixture.finish,
+            fixture.response.clone(),
+            &[],
+        )
+        .unwrap();
+        let entry = load(&tx, &fixture.id).unwrap().remove(0);
+        let charge = encode(&entry, MAX_RECORD_BYTES).unwrap().len()
+            + entry
+                .record
+                .feedback
+                .bytes_with_policy(&agents::investigation::INVESTIGATION_V1_POLICY)
+                .unwrap()
+                .len()
+            + 1024
+            + encode(&entry.response, 4096).unwrap().len()
+            + 64
+            + 256;
+        tx.rollback().unwrap();
+        let before = stored_bytes(&fixture.store.conn, Some(&fixture.id)).unwrap();
+        let padding = TASK_CAPACITY - TERMINAL_RESERVE - before - charge - 64 - 256 + deficit;
+        // Disposable ordinary-body padding exercises the real admission check; it is not read as a journal event.
+        fixture.store.conn.execute("INSERT INTO investigation_responses VALUES (?1,'capacity-padding',zeroblob(?2),?3)", params![fixture.id, i64::try_from(padding).unwrap(), "0".repeat(64)]).unwrap();
+        let tx = fixture.store.conn.transaction().unwrap();
+        let before_task = load_task_base(&tx, &fixture.id).unwrap();
+        let result = append(
+            &tx,
+            &namespace,
+            &fixture.execution,
+            &fixture.request,
+            &fixture.input,
+            &fixture.finish,
+            fixture.response.clone(),
+            &[],
+        );
+        if deficit == 0 {
+            assert_eq!(result.unwrap(), RefusalDisposition::Continue);
+            assert_eq!(
+                load(&tx, &fixture.id).unwrap()[0]
+                    .usage
+                    .reported_cache_read_tokens,
+                Some(u64::MAX)
+            );
+        } else {
+            assert_eq!(result.unwrap_err(), InvestigationStoreError::Capacity);
+        }
+        tx.rollback().unwrap();
+        let tx = fixture.store.conn.transaction().unwrap();
+        assert_eq!(
+            load_task_base(&tx, &fixture.id).unwrap().detail,
+            before_task.detail
+        );
+        tx.rollback().unwrap();
+        assert_eq!(
+            stored_bytes(&fixture.store.conn, Some(&fixture.id)).unwrap(),
+            before + padding + 64 + 256
+        );
+        assert_eq!(fixture.store.conn.query_row("SELECT count(*) FROM investigation_responses WHERE task_id=?1 AND step_id='finish-step'", [&fixture.id], |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
 }

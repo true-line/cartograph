@@ -203,6 +203,7 @@ impl Proposal {
             observed_model: None,
             reported_input_tokens: Some(17),
             reported_output_tokens: Some(3),
+            reported_cache_read_tokens: None,
             active_milliseconds: usage.active_milliseconds + 1,
         };
         self.f.begin();

@@ -273,6 +273,10 @@ fn validate_usage_delta(
             before.reported_output_tokens,
             admitted.reported_output_tokens,
         ),
+        (
+            before.reported_cache_read_tokens,
+            admitted.reported_cache_read_tokens,
+        ),
     ] {
         if old.zip(new).is_some_and(|(a, b)| b < a) {
             return Err(InvestigationError::InvalidInput);
@@ -280,6 +284,7 @@ fn validate_usage_delta(
     }
     expected.reported_input_tokens = admitted.reported_input_tokens;
     expected.reported_output_tokens = admitted.reported_output_tokens;
+    expected.reported_cache_read_tokens = admitted.reported_cache_read_tokens;
     expected.active_milliseconds = admitted.active_milliseconds;
     if expected != *admitted || admitted.active_milliseconds < before.active_milliseconds {
         return Err(InvestigationError::InvalidInput);

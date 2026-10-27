@@ -35,6 +35,8 @@ pub(crate) struct SpecialistActivityItem {
     pub(crate) saved_provider: SavedActivityProvider,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reported_usage: Option<ReportedActivityUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reported_cache_read_tokens: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,6 +197,11 @@ impl JobStore {
                     .reported_output_tokens
                     .map(|value| value.to_string()),
             };
+            let cache_read = task
+                .detail
+                .usage
+                .reported_cache_read_tokens
+                .map(|value| value.to_string());
             let provider = task.detail.provider;
             let mut item = SpecialistActivityItem {
                 summary: task.detail.summary,
@@ -204,10 +211,20 @@ impl JobStore {
                     model: provider.model,
                 },
                 reported_usage: Some(reported_usage),
+                reported_cache_read_tokens: Some(cache_read),
             };
+            // Preserve existing input/output metadata before omitting it: the
+            // additive cache projection is the first optional capacity fallback.
             match encode(&item, 4096) {
                 Ok(_) => {}
-                Err(InvestigationStoreError::Capacity) => item.reported_usage = None,
+                Err(InvestigationStoreError::Capacity) => {
+                    item.reported_cache_read_tokens = None;
+                    match encode(&item, 4096) {
+                        Ok(_) => {}
+                        Err(InvestigationStoreError::Capacity) => item.reported_usage = None,
+                        Err(error) => return Err(error),
+                    }
+                }
                 Err(error) => return Err(error),
             }
             Ok(item)
