@@ -409,6 +409,7 @@ export const SavedAnswersStayWithTheirPane: Story = {
 
 // AC-0400: actual coordinator reads, exact answers, persisted edges and unchanged four-slot admission.
 export const LoadedConversationBranches: Story = {
+  args: { onReplyHost: fn() },
   beforeEach: () => {
     const links = [ ['root', null, 'branch'], ['left', 'root', 'branch'], ['right', 'root', 'branch'],
       ['leaf', 'left', 'branch'], ['other', null, 'other-conversation'],
@@ -428,7 +429,8 @@ export const LoadedConversationBranches: Story = {
       if (command === 'investigation_events' && detail) return { investigation_id: detail.investigation_id,
         items: investigationEvents(detail.investigation_id).filter((event) => event.sequence > (args.afterSequence ?? 0)), next_sequence: 9, has_more: false };
       if (command === 'get_investigation_chat' && detail) return {
-        chat_id: `chat:${detail.investigation_id}`, task_id: detail.investigation_id,
+        chat_id: detail.investigation_id === 'root' ? 'conversation-branch' : `chat:${detail.investigation_id}`,
+        task_id: detail.investigation_id,
         producer: { specialist_id: detail.specialist.id, specialist_version: detail.specialist.version,
           prompt_fingerprint: detail.specialist.prompt_fingerprint, tier: detail.specialist.tier,
           confidence_tier: detail.specialist.confidence_tier, provider_mode: detail.provider.mode,
@@ -466,11 +468,18 @@ export const LoadedConversationBranches: Story = {
     await expect(within(canvas.getByRole('region', { name: 'Saved chat leaf' })).getByText(/Follow-up to left/)).toBeVisible();
     await userEvent.click(left.getByRole('button', { name: 'Inspect citation C1' }));
     await expect(await left.findByText('Exact source left')).toBeVisible();
+    // The root chat ID deliberately collides with the old conversation-heading key.
+    const rootPaneElement = canvas.getByRole('region', { name: 'Saved chat root' });
+    const rootReplyHost = rootPaneElement.querySelector('[data-reply-task="root"]');
+    expect(rootReplyHost).toBeInTheDocument();
     await open('other');
+    expect(canvas.getByRole('region', { name: 'Saved chat root' }).querySelector('[data-reply-task="root"]')).toBe(rootReplyHost);
     await expect(canvas.queryByRole('region', { name: 'Saved chat left' })).not.toBeInTheDocument();
     await expect(canvas.getAllByRole('region', { name: /^Saved chat / })).toHaveLength(4);
     const cross = await open('cross');
-    await expect(cross.getByText(/unloaded in this conversation/)).toBeVisible();
+    await expect(cross.getByText(/parent is docked in another conversation/))
+      .toHaveTextContent(/Follow-up to root.*parent is docked in another conversation/);
+    await expect(cross.getByRole('button', { name: 'Focus / refresh parent root' })).toBeVisible();
     await expect(canvas.getByRole('region', { name: 'Saved chat root' })).toBeVisible();
     const self = await open('self');
     await expect(self.getByText('Invalid self-parent link · self')).toBeVisible();

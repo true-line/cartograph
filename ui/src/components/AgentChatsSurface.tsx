@@ -148,26 +148,28 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
         </section>}
         <div className={`agent-chat-docks agent-chat-docks-${dock.docks.length}`}>
           {exchanges.map((entry) => {
-            if (entry.kind === 'heading') return <header className="agent-chat-conversation-heading" key={`conversation-${entry.id}`}>
+            if (entry.kind === 'heading') return <header className="agent-chat-conversation-heading" key={`conversation:${entry.id}`}>
               <h3>Conversation <code>{entry.id}</code></h3>
               <p className="muted">Loaded saved exchanges only · parent links show branches, not complete history.</p>
             </header>;
             const { chat, question, turn, answer } = entry;
             const parent = dock.docks.find((item) => item.chat.task_id === turn.parent_id &&
               item.turn.conversation_id === turn.conversation_id);
+            const parentInAnotherConversation = parent ? null : dock.docks.find((item) => item.chat.task_id === turn.parent_id);
             const siblings = turn.parent_id === null ? [] : dock.docks.filter((item) =>
               item.turn.conversation_id === turn.conversation_id && item.turn.parent_id === turn.parent_id);
-            return <section className="agent-chat-pane" key={chat.chat_id}
+            return <section className="agent-chat-pane" key={`chat:${chat.chat_id}`}
             aria-label={`Saved chat ${chat.task_id}`}>
             <header><h3>{question}</h3><code>{chat.task_id}</code>
               <p className="muted">Last observed snapshot · {chat.chat_id}</p>
               {turn.parent_id === null ? <p className="muted">Root exchange (no saved parent)</p>
                 : turn.parent_id === chat.task_id ? <p className="muted">Invalid self-parent link · {turn.parent_id}</p>
                 : <div className="agent-chat-parent-link">
-                  <p className="muted">Follow-up to {turn.parent_id} · {parent ? 'loaded in this conversation' : 'unloaded in this conversation'}
+                  <p className="muted">Follow-up to {turn.parent_id} · {parent ? 'loaded in this conversation'
+                    : parentInAnotherConversation ? 'parent is docked in another conversation' : 'unloaded in this conversation'}
                     {siblings.length > 1 && ` · ${siblings.length} loaded sibling forks`}</p>
                   <button type="button" className="secondary-button" onClick={() => dock.open(turn.parent_id!)}>
-                    {parent ? 'Focus / refresh parent' : 'Open unloaded parent'} {turn.parent_id}
+                    {parent || parentInAnotherConversation ? 'Focus / refresh parent' : 'Open unloaded parent'} {turn.parent_id}
                   </button>
                 </div>}
               <button type="button" className="secondary-button" aria-pressed={dock.focusedTask === chat.task_id}
