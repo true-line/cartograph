@@ -68,6 +68,35 @@ pub(crate) enum Pins {
 
 /// Read every root lockfile's `flask-admin` pins.
 pub(crate) fn pins(root: &Path, repo: &str, commit: &str) -> Pins {
+    package_pins(root, repo, commit, "flask-admin", |version| {
+        RELEASES.contains(&version)
+    })
+}
+
+/// Read every root lockfile's `flask-login` pins: 0.3 made
+/// `is_authenticated` a property, false for `AnonymousUserMixin`, and it
+/// still is through 0.6.
+pub(crate) fn login_pins(root: &Path, repo: &str, commit: &str) -> Pins {
+    package_pins(root, repo, commit, "flask-login", |version| {
+        let mut parts = version.split('.');
+        parts.next() == Some("0")
+            && parts
+                .next()
+                .is_some_and(|minor| matches!(minor, "3" | "4" | "5" | "6"))
+            && parts.all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// Every root lockfile's exact pins of `package`, each a release `checked`
+/// accepts. Gap reasons name the package as `flask_admin` / `flask_login`.
+fn package_pins(
+    root: &Path,
+    repo: &str,
+    commit: &str,
+    package: &str,
+    checked: impl Fn(&str) -> bool,
+) -> Pins {
+    let prefix = package.replace('-', "_");
     let Ok(entries) = std::fs::read_dir(root) else {
         return Pins::Absent;
     };
@@ -90,22 +119,22 @@ pub(crate) fn pins(root: &Path, repo: &str, commit: &str) -> Pins {
             .filter(|meta| meta.is_file() && meta.len() <= MAX_LOCK_BYTES)
             .and_then(|_| std::fs::read_to_string(&path).ok());
         let Some(text) = text else {
-            return Pins::Unchecked(format!("flask_admin_lockfile_not_inspected:{name}"));
+            return Pins::Unchecked(format!("{prefix}_lockfile_not_inspected:{name}"));
         };
         let found = if name.ends_with(".lock") && !name.starts_with("requirements") {
-            let Some(found) = package_table_pins(&text) else {
-                return Pins::Unchecked(format!("flask_admin_lockfile_syntax_not_modelled:{name}"));
+            let Some(found) = package_table_pins(&text, package) else {
+                return Pins::Unchecked(format!("{prefix}_lockfile_syntax_not_modelled:{name}"));
             };
             found
         } else {
-            requirement_pins(&text)
+            requirement_pins(&text, package)
         };
         for (version, start, end) in found {
             let Some(version) = version else {
-                return Pins::Unchecked(format!("flask_admin_version_not_exact:{name}"));
+                return Pins::Unchecked(format!("{prefix}_version_not_exact:{name}"));
             };
-            if !RELEASES.contains(&version.as_str()) {
-                return Pins::Unchecked(format!("flask_admin_version_not_modelled:{version}"));
+            if !checked(&version) {
+                return Pins::Unchecked(format!("{prefix}_version_not_modelled:{version}"));
             }
             evidence.push(EvidenceRef {
                 repo: repo.into(),
@@ -124,8 +153,8 @@ pub(crate) fn pins(root: &Path, repo: &str, commit: &str) -> Pins {
 }
 
 /// PEP 503 normalization: `Flask_Admin` and `flask.admin` are `flask-admin`.
-fn is_flask_admin(name: &str) -> bool {
-    name.to_ascii_lowercase().replace(['_', '.'], "-") == "flask-admin"
+fn is_package(name: &str, package: &str) -> bool {
+    name.to_ascii_lowercase().replace(['_', '.'], "-") == package
 }
 
 /// Lines with their byte offsets.
@@ -138,25 +167,25 @@ fn lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
 }
 
 /// `[[package]]` tables (`uv.lock`, `poetry.lock`, `pdm.lock`): for each
-/// table named `flask-admin`, in whatever key order, its `version` and that
+/// table named `package`, in whatever key order, its `version` and that
 /// line's span. A table whose `name` or `version` is not a plain string
 /// (another syntax, a repeated key) yields `None`, refusing rather than
 /// skipping it. An escaped key or header, or an inline `package` array,
 /// could name a table this reader cannot see, so the whole file is refused
 /// (`None`).
-fn package_table_pins(text: &str) -> Option<Vec<(Option<String>, usize, usize)>> {
+fn package_table_pins(text: &str, package: &str) -> Option<Vec<(Option<String>, usize, usize)>> {
     #[derive(Default)]
     struct Table {
         names: Vec<Option<String>>,
         versions: Vec<(Option<String>, usize, usize)>,
         start: usize,
     }
-    fn close(table: Option<Table>, found: &mut Vec<(Option<String>, usize, usize)>) {
+    fn close(table: Option<Table>, package: &str, found: &mut Vec<(Option<String>, usize, usize)>) {
         let Some(table) = table else { return };
         let named = table
             .names
             .iter()
-            .any(|name| name.as_deref().is_none_or(is_flask_admin));
+            .any(|name| name.as_deref().is_none_or(|name| is_package(name, package)));
         if !named {
             return;
         }
@@ -176,7 +205,7 @@ fn package_table_pins(text: &str) -> Option<Vec<(Option<String>, usize, usize)>>
             return None;
         }
         if code.starts_with('[') {
-            close(table.take(), &mut found);
+            close(table.take(), package, &mut found);
             if code.replace([' ', '\t', '"', '\''], "") == "[[package]]" {
                 table = Some(Table {
                     start,
@@ -205,7 +234,7 @@ fn package_table_pins(text: &str) -> Option<Vec<(Option<String>, usize, usize)>>
             _ => {}
         }
     }
-    close(table.take(), &mut found);
+    close(table.take(), package, &mut found);
     Some(found)
 }
 
@@ -243,9 +272,9 @@ fn toml_string(value: &str) -> Option<String> {
     (!value.contains(['"', '\\'])).then(|| value.to_string())
 }
 
-/// `flask-admin==X` requirement lines: `Some(X)` for an exact pin, with
+/// `<package>==X` requirement lines: `Some(X)` for an exact pin, with
 /// only `--hash=` options after it, `None` for any other specifier (or none).
-fn requirement_pins(text: &str) -> Vec<(Option<String>, usize, usize)> {
+fn requirement_pins(text: &str, package: &str) -> Vec<(Option<String>, usize, usize)> {
     let mut found = Vec::new();
     for (start, line) in lines(text) {
         let requirement = line
@@ -259,7 +288,7 @@ fn requirement_pins(text: &str) -> Vec<(Option<String>, usize, usize)> {
         let end = requirement
             .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
             .unwrap_or(requirement.len());
-        if end == 0 || !is_flask_admin(&requirement[..end]) {
+        if end == 0 || !is_package(&requirement[..end], package) {
             continue;
         }
         let mut rest = requirement[end..].trim_start();
@@ -294,13 +323,13 @@ mod tests {
     fn package_tables_and_requirements_yield_exact_pins_only() {
         let lock = "[[package]]\nname = \"flask\"\nversion = \"2.0\"\n\n[[package]]\nname = \"flask-admin\"\nversion = \"1.5.7\"\ndependencies = [\n    { name = \"flask-admin\" },\n]\n\n[package.optional-dependencies]\nname = \"flask-admin\"\nversion = \"9\"\n";
         assert_eq!(
-            package_table_pins(lock),
+            package_table_pins(lock, "flask-admin"),
             Some(vec![(Some("1.5.7".into()), 77, 94)])
         );
         assert_eq!(&lock[77..94], "version = \"1.5.7\"");
         let reordered = "[[package]]\nversion = \"1.5.8\" # x\n  name = \"Flask_Admin\"\n\n[[package]]\nname = \"flask-admin\"\nversion = '1'\n\n[[package]]\nname = \"flask-admin\"\n";
         assert_eq!(
-            package_table_pins(reordered),
+            package_table_pins(reordered, "flask-admin"),
             Some(vec![
                 (Some("1.5.8".into()), 12, 33),
                 (None, 91, 104),
@@ -313,12 +342,16 @@ mod tests {
             "[[\"p\\u0061ckage\"]]\nname = \"flask-admin\"\nversion = \"1.6.0\"\n",
             "package = [{ name = \"flask-admin\", version = \"1.6.0\" }]\n",
         ] {
-            assert_eq!(package_table_pins(escaped), None, "{escaped}");
+            assert_eq!(
+                package_table_pins(escaped, "flask-admin"),
+                None,
+                "{escaped}"
+            );
         }
         // pip-compile's hash options, inline or continued, keep a pin exact.
         let hashed = "flask-admin==1.5.8 \\\n    --hash=sha256:aa \\\n    --hash=sha256:bb\nflask-admin==1.5.8 --hash=sha256:aa\nflask-admin==1.5.8 --pre\n";
         assert_eq!(
-            requirement_pins(hashed),
+            requirement_pins(hashed, "flask-admin"),
             vec![
                 (Some("1.5.8".into()), 0, 20),
                 (Some("1.5.8".into()), 65, 100),
@@ -327,7 +360,7 @@ mod tests {
         );
         let requirements = "Flask_Admin[sqla]==1.5.8 ; python_version > '3'\nflask-admin>=1.5\nflask-adminx==1\n# flask-admin==0\n";
         assert_eq!(
-            requirement_pins(requirements),
+            requirement_pins(requirements, "flask-admin"),
             vec![(Some("1.5.8".into()), 0, 47), (None, 48, 64)]
         );
     }

@@ -18,6 +18,7 @@ mod alembic;
 mod app_scope;
 mod auth_guards;
 mod flask_admin;
+mod flask_admin_access;
 mod flask_admin_library;
 pub mod observed_infra;
 mod request_inputs;
