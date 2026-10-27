@@ -345,7 +345,7 @@ export const SavedAnswersStayWithTheirPane: Story = {
       return result;
     });
     mockIPC((command, payload) => {
-      const args = (payload ?? {}) as { investigationId?: string; citationId?: string; afterSequence?: number };
+      const args = (payload ?? {}) as { investigationId?: string; citationId?: string; afterSequence?: number; search?: string };
       const index = details.findIndex((detail) => detail.investigation_id === args.investigationId);
       const detail = details[index]; const result = results[index];
       if (command === 'get_investigation') return detail;
@@ -367,7 +367,8 @@ export const SavedAnswersStayWithTheirPane: Story = {
         return new Promise((resolve) => { releaseSavedAnswerCitation = () => resolve({ investigation_id: args.investigationId,
           citation_id: args.citationId, citation: investigationCitations[0], status: 'available', text: `Retained source for ${args.investigationId}` }); });
       }
-      if (command === 'list_investigations') return { items: details, next_cursor: null };
+      if (command === 'list_investigations') return { items: details, next_cursor: null,
+        ...(args.search ? { answer_match_ids: details.map((item) => item.investigation_id) } : {}) };
       if (/^(start|cancel|delete)_investigation$/.test(command)) throw new Error('Read-only saved answers must not dispatch');
       return null;
     });
@@ -546,5 +547,20 @@ export const FocusedDurableProgress: Story = {
     await expect(await pane.findByText('A local stock guard is present')).toBeVisible();
     await expect(pane.getByRole('region', { name: 'Investigation activity' })).toHaveTextContent('Findings saved');
     await expect(pane.getByRole('listitem', { name: 'Specialist result reference' })).toHaveTextContent('result:progress-task');
+  },
+};
+
+// AC-0402: answer-only search opens the actual validated saved chat/findings.
+export const SavedAnswerHistorySearch: Story = {
+  ...SavedAnswersStayWithTheirPane,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.type(canvas.getByRole('searchbox'), 'Saved finding');
+    await userEvent.click(canvas.getByRole('button', { name: 'Search history' }));
+    await expect(canvas.getAllByText('Answer match')).toHaveLength(2);
+    await userEvent.click(canvas.getByRole('button', { name: /Question for answer-a/ }));
+    const pane = within(await canvas.findByRole('region', { name: 'Saved chat answer-a' }));
+    await expect(pane.getByText('Saved finding only for answer-a')).toBeVisible();
+    await expect(pane.getByRole('button', { name: 'Inspect citation C1' })).toBeVisible();
   },
 };

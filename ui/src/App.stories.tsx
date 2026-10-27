@@ -2184,7 +2184,7 @@ export const InlineReplyUsesItsValidatedPane: Story = {
     let reply = within(await pane.findByRole('region', { name: 'Reply to inv-inline-parent' }));
     await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument();
     await userEvent.type(reply.getByLabelText('Question'), 'This canceled reply must not dispatch.');
-    const search = canvas.getByLabelText('Search saved questions or specialist IDs');
+    const search = canvas.getByLabelText('Search saved questions, specialists, and answers');
     search.focus();
     fireEvent.keyDown(search, { key: 'Escape', code: 'Escape', bubbles: true });
     await expect(reply.getByLabelText('Question')).toHaveValue('This canceled reply must not dispatch.');

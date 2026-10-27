@@ -112,6 +112,8 @@ pub(super) fn validate_specialist_activity_admission(
 struct HistoryProjectionPage<T> {
     items: Vec<T>,
     next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    answer_match_ids: Vec<String>,
 }
 
 impl JobStore {
@@ -204,6 +206,7 @@ impl JobStore {
         Ok(InvestigationPage {
             items: page.items,
             next_cursor: page.next_cursor,
+            answer_match_ids: page.answer_match_ids,
         })
     }
 
@@ -278,6 +281,7 @@ impl JobStore {
             return Err(InvestigationStoreError::Capacity);
         }
         let mut items = Vec::new();
+        let mut answer_match_ids = Vec::new();
         let mut remaining = 256 * 1024 - 4096;
         let mut before = selection.before;
         let mut more = false;
@@ -288,22 +292,51 @@ impl JobStore {
             }
             let task = load_execution_task(&tx, &id)?;
             let summary = &task.detail.summary;
-            let query_matches = query
-                .map(|query| history_summary_matches(summary, query))
-                .transpose()?
-                .unwrap_or(true);
-            if (active_only && !investigation_status_is_active(summary.status)) || !query_matches {
+            if active_only && !investigation_status_is_active(summary.status) {
                 if items.len() < 50 {
                     before = ordinal;
                 }
                 continue;
             }
+            // Additional answer matching is only needed for actual search metadata misses.
+            // Existing task validation (including its saved-result reads) is unchanged.
+            // Each result and its validation owners are released before the next task.
+            let answer_match = if let Some(query) = query {
+                if history_summary_matches(summary, query)? {
+                    false
+                } else {
+                    let matches = load_result(&tx, &task)?.is_some_and(|result| {
+                        result.findings.iter().any(|finding| {
+                            ascii_case_insensitive_contains(finding.title.as_bytes(), query)
+                                || ascii_case_insensitive_contains(
+                                    finding.statement.as_bytes(),
+                                    query,
+                                )
+                        })
+                    });
+                    if !matches {
+                        if items.len() < 50 {
+                            before = ordinal;
+                        }
+                        continue;
+                    }
+                    true
+                }
+            } else {
+                false
+            };
             if query.is_some() && items.len() == 50 {
                 more = true;
                 break;
             }
             let item = project(task)?;
-            let size = encode(&item, 4096)?.len() + 1;
+            let size = encode(&item, 4096)?.len()
+                + 1
+                + if answer_match {
+                    encode(&id, 4096)?.len() + 1
+                } else {
+                    0
+                };
             if items.len() == 50 || size > remaining {
                 more = true;
                 break;
@@ -311,6 +344,9 @@ impl JobStore {
             remaining -= size;
             before = ordinal;
             items.push(item);
+            if answer_match {
+                answer_match_ids.push(id);
+            }
         }
         let next_cursor = if more {
             Some(
@@ -326,7 +362,11 @@ impl JobStore {
         } else {
             None
         };
-        let page = HistoryProjectionPage { items, next_cursor };
+        let page = HistoryProjectionPage {
+            items,
+            next_cursor,
+            answer_match_ids,
+        };
         encode(&page, 256 * 1024)?;
         tx.commit()?;
         Ok(page)

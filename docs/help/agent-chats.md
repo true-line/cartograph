@@ -78,3 +78,10 @@ only after the matching task and transcript settle. During refresh or errors,
 retained content remains a last-observed snapshot. Other panes update when
 focused or refreshed. This is durable execution progress, not generated tokens
 or a streaming assistant reply.
+
+## Saved answer search
+
+Saved history search includes accepted finding titles and statements alongside
+questions and specialist IDs. **Answer match** marks an answer-only hit. No
+answer or source excerpt is returned in history; open the task for its validated
+findings and citations. This does not search arbitrary multi-message chat prose.

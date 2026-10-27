@@ -249,6 +249,7 @@ export interface InvestigationDetail extends InvestigationSummary {
 export interface InvestigationPage {
   items: InvestigationSummary[];
   next_cursor: string | null;
+  answer_match_ids?: string[];
 }
 
 /** Saved provider attribution for the app-only active specialist activity view. */
