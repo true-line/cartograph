@@ -12,9 +12,10 @@ export interface InvestigationQuickDispatchProps {
   fallbackEnabled: boolean;
   openRequest: number;
   onNavigate: (view: 'investigations') => void;
+  onAcceptedTask: (taskId: string) => void;
 }
 
-export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNavigate }: InvestigationQuickDispatchProps) {
+export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNavigate, onAcceptedTask }: InvestigationQuickDispatchProps) {
   const state = useInvestigationStore();
   const [open, setOpen] = useState(false);
   const [question, setQuestion] = useState('');
@@ -134,7 +135,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
 
   const accepted = (id: string | null) => {
     if (id === null) return;
-    onNavigate('investigations');
+    onAcceptedTask(id);
     close(true);
     setQuestion('');
   };
@@ -161,7 +162,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
     };
     setBusy(true);
     try {
-      const id = await state.start(draft, { preserveComposer: true,
+      const id = await state.start(draft, { preserveComposer: true, deferOpen: true,
         ...(completionRole && currentChoices ? { completionChoices: currentChoices } : {}) });
       if (id) accepted(id);
       else refreshAfterStaleCompletion(specialistId);
@@ -172,7 +173,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
     const requestedSpecialist = state.pendingStart.specialist_id;
     setBusy(true);
     try {
-      const id = await state.retryStart();
+      const id = await state.retryStart({ deferOpen: true });
       if (id) accepted(id);
       else refreshAfterStaleCompletion(requestedSpecialist);
     } finally { setBusy(false); }

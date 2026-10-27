@@ -835,7 +835,11 @@ export default function App() {
         onClose={() => setPaletteOpen(false)}
         onNavigate={navigate}
       />
-      <InvestigationQuickDispatch fallbackEnabled={quickDispatchFallbackEnabled} openRequest={quickDispatchOpenRequest} onNavigate={navigate} />
+      <InvestigationQuickDispatch fallbackEnabled={quickDispatchFallbackEnabled} openRequest={quickDispatchOpenRequest}
+        onNavigate={navigate} onAcceptedTask={(taskId) => {
+          useAgentChatDockStore.getState().requestOpenFromNotice(taskId);
+          navigate('agent-chats');
+        }} />
       <SavedResultNotices view={view} onOpenChat={(taskId) => {
         useAgentChatDockStore.getState().requestOpenFromNotice(taskId);
         navigate('agent-chats');

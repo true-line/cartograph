@@ -18,7 +18,7 @@ const pressMeta = (key: string, code: string) => fireEvent.keyDown(window, { key
 const meta = {
   title: 'InvestigationQuickDispatch',
   component: InvestigationQuickDispatch,
-  args: { fallbackEnabled: true, openRequest: 0, onNavigate: fn() },
+  args: { fallbackEnabled: true, openRequest: 0, onNavigate: fn(), onAcceptedTask: fn() },
   beforeEach: () => {
     useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: investigationCatalog,
       startError: null, pendingStart: null, starting: false, composer: { ...useInvestigationStore.getInitialState().composer,
@@ -51,8 +51,9 @@ export const KeyboardAndDispatchLifecycle: Story = {
     await expect(useInvestigationStore.getState().start).toHaveBeenCalledWith({
       specialist_id: 'domain-analyst@3', question: 'Explain the recovered behavior.',
       scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1',
-    }, { preserveComposer: true });
-    await expect(args.onNavigate).toHaveBeenCalledWith('investigations');
+    }, { preserveComposer: true, deferOpen: true });
+    await expect(args.onAcceptedTask).toHaveBeenCalledWith('inv-confirmed');
+    await expect(args.onNavigate).not.toHaveBeenCalled();
     await expect(canvas.queryByRole('dialog', { name: 'Quick investigation dispatch' })).not.toBeInTheDocument();
     await expect(launcher).toHaveFocus();
     launcher.remove();
@@ -90,12 +91,31 @@ export const UnavailableRuntimeAndSameRequestRetry: Story = {
     await expect(useInvestigationStore.getState().selectedId).toBe('retry-confirmed');
     await expect(useInvestigationStore.getState().pendingStart).toBeNull();
     await expect(retriedNonce).toBe('a'.repeat(36));
-    await expect(args.onNavigate).toHaveBeenCalledWith('investigations');
+    await expect(args.onAcceptedTask).toHaveBeenCalledWith('retry-confirmed');
+    await expect(args.onNavigate).not.toHaveBeenCalled();
     await expect(canvas.queryByRole('dialog', { name: 'Quick investigation dispatch' })).not.toBeInTheDocument();
     // The actual store reused the retained nonce when retrying admission.
     await expect(useInvestigationStore.getState().pendingStart).toBeNull();
     fireEvent.keyDown(window, { key: 'Escape', code: 'Escape', bubbles: true });
     await expect(canvas.queryByRole('dialog', { name: 'Quick investigation dispatch' })).not.toBeInTheDocument();
+  },
+};
+
+export const UnrelatedPendingRequestKeepsInvestigationsRecovery: Story = {
+  beforeEach: () => {
+    const initial = useInvestigationStore.getInitialState();
+    useInvestigationStore.setState({ ...initial, catalog: investigationCatalog, pendingStart: {
+      schema_version: 1, request_nonce: 'unrelated-pending-nonce', specialist_id: 'domain-analyst@2',
+      question: 'Recover this unrelated request.', scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1',
+    } }, true);
+    return () => useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    pressMeta(' ', 'Space');
+    await userEvent.click(canvas.getByRole('button', { name: 'Open Investigations' }));
+    await expect(args.onNavigate).toHaveBeenCalledWith('investigations');
+    await expect(args.onAcceptedTask).not.toHaveBeenCalled();
   },
 };
 
@@ -114,6 +134,7 @@ export const DefinitiveRejectionPreservesQuestion: Story = {
     await expect(canvas.getByRole('alert')).toHaveTextContent('No investigation was started');
     await expect(input).toHaveValue('Keep my question after a definitive rejection.');
     await expect(args.onNavigate).not.toHaveBeenCalled();
+    await expect(args.onAcceptedTask).not.toHaveBeenCalled();
   },
 };
 
@@ -262,7 +283,7 @@ export const CompletionDispatchUsesOnlyLocalRecordedChoices: Story = {
     pressMeta(' ', 'Space');
     await expect(canvas.getByRole('button', { name: 'Retry same request' })).toBeVisible();
     await userEvent.click(canvas.getByRole('button', { name: 'Retry same request' }));
-    await waitFor(() => expect(useInvestigationStore.getState().selectedId).toBe('quick-completion-confirmed'));
+    await waitFor(() => expect(useInvestigationStore.getState().selectedId).toBeNull());
     const state = useInvestigationStore.getState();
     expect(completionRequests).toHaveLength(2);
     expect(completionRequests[1]).toEqual(completionRequests[0]);
@@ -275,7 +296,8 @@ export const CompletionDispatchUsesOnlyLocalRecordedChoices: Story = {
     await expect(state.composer.question).toBe('Preserve the full composer question.');
     await expect(state.composer.parent).toEqual({ conversation_id: 'full-composer-conversation', parent_id: 'full-composer-parent' });
     await expect(state.draftObligations[0].obligation_id).toBe('full-composer-obligation');
-    await expect(args.onNavigate).toHaveBeenCalledWith('investigations');
+    await expect(args.onAcceptedTask).toHaveBeenCalledWith('quick-completion-confirmed');
+    await expect(args.onNavigate).not.toHaveBeenCalled();
   },
 };
 
