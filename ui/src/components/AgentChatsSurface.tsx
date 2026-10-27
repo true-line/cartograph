@@ -208,7 +208,7 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
               <h3>Conversation <code>{entry.id}</code></h3>
               <p className="muted">Loaded saved exchanges only · parent links show branches, not complete history.</p>
             </header>;
-            const { chat, question, turn, answer } = entry;
+            const { chat, question, specialistName, turn, answer } = entry;
             const focused = dock.focusedTask === chat.task_id;
             const settled = focused && dock.focusedGeneration === state.selectionGeneration &&
               state.selectedId === chat.task_id && state.detail?.investigation_id === chat.task_id &&
@@ -224,6 +224,14 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
             return <section className={`agent-chat-pane${paneIds.indexOf(chat.task_id) === wideSlot ? ' agent-chat-slot-wide' : ''}`} key={`chat:${chat.chat_id}`}
             aria-label={`Saved chat ${chat.task_id}`}>
             <header><h3>{question}</h3><code>{chat.task_id}</code>
+              <div className="agent-chat-attribution" role="group" aria-label="Saved pane attribution">
+                <strong>{specialistName}</strong>
+                <span><code>{chat.producer.specialist_id}</code> · version {chat.producer.specialist_version}</span>
+                <span className="agent-chat-model">
+                  <span className="material-symbols-outlined" aria-hidden="true">{chat.producer.provider_mode === 'local' ? 'computer' : 'cloud'}</span>
+                  Saved request · {chat.producer.provider_mode === 'local' ? 'Local' : 'Cloud'} · {chat.producer.provider_id}/{chat.producer.model}
+                </span>
+              </div>
               <p className="muted">Conversation <code>{turn.conversation_id}</code></p>
               <p className="muted">{statusLabel(turn.status)} · Last observed snapshot · {chat.chat_id}</p>
               {focused && !settled && <p role="status" className="muted">{state.loading || state.chatStatus === 'loading'

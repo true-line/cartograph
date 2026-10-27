@@ -110,3 +110,7 @@ Choose **Pane layout** 1, 2, 3 or 4 to arrange that many slots. Three slots offe
 ## Known unread saved results
 
 The Agent Chats rail badge shows saved results the app has observed as unread in this session. A **?** beside the count, or **?** alone, means checks are incomplete; it is not a complete historical unread total. Dismissing a toast or opening its chat does not clear this existing inbox. Opening the exact validated findings does. The badge adds no background reads and does not change replies or pending requests.
+
+## Saved pane attribution
+
+Each pane header shows its saved specialist name and version, with its saved requested provider/model and Local or Cloud mode. These labels belong to that pane’s validated snapshot, not the current catalog or another selected task. A requested model is not a separately observed response model, and Local mode alone does not guarantee zero egress. The existing last-observed caveat still applies.

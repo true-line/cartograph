@@ -2184,6 +2184,7 @@ export const NextPromptCapturedSourceBecomesCompletionObligation: Story = {
 };
 
 // AC-0398: actual parent capture, inline cancellation, exact retry and serialized child landing.
+// AC-0413: pane attribution does not remount the reply or mutate its durable request.
 export const InlineReplyUsesItsValidatedPane: Story = {
   beforeEach: () => {
     const id = 'inv-inline-parent'; const parent = investigationDetail(id, { question: 'Parent for inline reply' });
@@ -2223,11 +2224,21 @@ export const InlineReplyUsesItsValidatedPane: Story = {
     await userEvent.click(pane.getByRole('button', { name: 'Reply here' }));
     reply = within(await pane.findByRole('region', { name: 'Reply to inv-inline-parent' }));
     await expect(reply.getByLabelText('Question')).toHaveFocus();
+    const replyHost = canvasElement.querySelector('[data-reply-task="inv-inline-parent"]');
+    const attribution = pane.getByRole('group', { name: 'Saved pane attribution' }).textContent;
     await useInvestigationStore.getState().open('unrelated-selection');
+    expect(pane.getByRole('group', { name: 'Saved pane attribution' }).textContent).toBe(attribution);
+    expect(canvasElement.querySelector('[data-reply-task="inv-inline-parent"]')).toBe(replyHost);
     await userEvent.type(reply.getByLabelText('Question'), 'Continue from the saved parent result.');
+    await expect(reply.getByLabelText('Question')).toHaveValue('Continue from the saved parent result.');
     fireEvent.keyDown(reply.getByLabelText('Question'), { key: 'Enter', ctrlKey: true, bubbles: true });
     await waitFor(() => expect(useInvestigationStore.getState().pendingStart).not.toBeNull());
     const pending = structuredClone(useInvestigationStore.getState().pendingStart!);
+    const reads = investigationRequests.length;
+    await expect(pane.getByRole('group', { name: 'Saved pane attribution' })).toHaveTextContent('Saved request · Local');
+    expect(investigationRequests).toHaveLength(reads);
+    expect(canvasElement.querySelector('[data-reply-task="inv-inline-parent"]')).toBe(replyHost);
+    expect(pending.question).toBe('Continue from the saved parent result.');
     await expect(reply.getByRole('button', { name: 'Retry same request' })).toBeEnabled();
     fireEvent.keyDown(reply.getByRole('button', { name: 'Retry same request' }), { key: ' ', code: 'Space', metaKey: true, bubbles: true });
     const dialog = within(await canvas.findByRole('dialog', { name: 'Quick investigation dispatch' }));
