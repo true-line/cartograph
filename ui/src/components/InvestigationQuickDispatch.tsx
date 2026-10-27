@@ -129,7 +129,12 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
   }, [close, dialogParent, followUpCancelRequest, inFlight]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && open) { event.preventDefault(); close(); return; }
+      if (event.key === 'Escape' && open) {
+        const target = event.target;
+        const insideInline = target instanceof Node && Boolean(dialogRef.current?.contains(target));
+        if (!inline || insideInline) { event.preventDefault(); close(); }
+        return;
+      }
       if (event.altKey || event.ctrlKey || event.shiftKey || !event.metaKey) return;
       if (event.code === 'Space' || (event.key.toLowerCase() === 'j' && fallbackEnabled)) {
         event.preventDefault();
@@ -139,7 +144,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [close, fallbackEnabled, onStandalone, open, openDialog]);
+  }, [close, fallbackEnabled, inline, onStandalone, open, openDialog]);
   useEffect(() => {
     if (!open) return;
     if (questionRef.current) questionRef.current.focus();

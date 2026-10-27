@@ -2181,6 +2181,17 @@ export const InlineReplyUsesItsValidatedPane: Story = {
     let reply = within(await pane.findByRole('region', { name: 'Reply to inv-inline-parent' }));
     await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument();
     await userEvent.type(reply.getByLabelText('Question'), 'This canceled reply must not dispatch.');
+    const search = canvas.getByLabelText('Search saved questions or specialist IDs');
+    search.focus();
+    fireEvent.keyDown(search, { key: 'Escape', code: 'Escape', bubbles: true });
+    await expect(reply.getByLabelText('Question')).toHaveValue('This canceled reply must not dispatch.');
+    await expect(reply.getByRole('button', { name: 'Send reply task' })).toBeInTheDocument();
+    reply.getByLabelText('Question').focus();
+    fireEvent.keyDown(reply.getByLabelText('Question'), { key: 'Escape', code: 'Escape', bubbles: true });
+    await waitFor(() => expect(canvas.queryByRole('region', { name: 'Reply to inv-inline-parent' })).not.toBeInTheDocument());
+    await expect(investigationRequests.filter((request) => request.command === 'start_investigation')).toHaveLength(0);
+    await userEvent.click(pane.getByRole('button', { name: 'Reply here' }));
+    reply = within(await pane.findByRole('region', { name: 'Reply to inv-inline-parent' }));
     const canceledStart = reply.getByRole('button', { name: 'Send reply task' });
     fireEvent.click(pane.getByRole('button', { name: 'Close inv-inline-parent' }));
     fireEvent.click(canceledStart);
