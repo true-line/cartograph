@@ -25,7 +25,7 @@
 //! url)`) becomes a [`FetchSite`] with its URL classified as above, but
 //! followed only within the file.
 
-use adapters_fw::client::FetchSite;
+use adapters_fw::client::{BaseJoin, FetchBase, FetchSite};
 use adapters_fw::events::{ClientForm, Ecosystem, IdentityArg, IdentityExpr, Registries};
 use adapters_fw::observed::{ObservedSite, ObservedSource, assemble};
 use core_graph::{Edge, Node};
@@ -43,6 +43,148 @@ const EXTRACTOR_ID: &str = "t0.observed-infra-python";
 
 /// HTTP client modules whose module functions are fetch sites (AC-0424).
 const HTTP_MODULES: &[&str] = &["requests", "httpx"];
+
+/// Client constructors whose instances' verb methods are fetch sites
+/// (#1240, AC-0425).
+const HTTP_CONSTRUCTORS: &[(&str, &str)] = &[
+    ("requests", "Session"),
+    ("httpx", "Client"),
+    ("httpx", "AsyncClient"),
+];
+
+/// A name proven bound to one client instance (AC-0425).
+struct Receiver {
+    /// The constructor's dotted path (`requests.Session`), for patches.
+    constructor: String,
+    /// Start byte of the function the binding is in; `None` at module level.
+    function: Option<usize>,
+    /// An httpx `base_url=`, joined under (`BaseJoin::Merge`).
+    base: Option<FetchBase>,
+}
+
+/// The function a binding or call belongs to: `Some(None)` at module level,
+/// `Some(Some(start))` in a function, `None` in a class body or lambda.
+fn binding_scope(mut node: TsNode) -> Option<Option<usize>> {
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            "function_definition" => return Some(Some(parent.start_byte())),
+            "class_definition" | "lambda" => return None,
+            _ => node = parent,
+        }
+    }
+    Some(None)
+}
+
+/// Client attributes whose writes change neither where a request goes nor
+/// which method it uses (`session.headers[...] = ...`).
+const CLIENT_SETTINGS: &[&str] = &[
+    "auth",
+    "cert",
+    "cookies",
+    "headers",
+    "max_redirects",
+    "params",
+    "proxies",
+    "timeout",
+    "trust_env",
+    "verify",
+];
+
+/// Whether the file writes any member of a client other than a setting:
+/// `base_url`, a verb, a transport, a computed member or a patch target.
+fn reconfigured(scope: &Scope, name: &str) -> bool {
+    scope.members.get(name).is_some_and(|written| {
+        written.iter().any(|path| {
+            !matches!(path.first(), Some(Some(member)) if CLIENT_SETTINGS.contains(&member.as_str()))
+        })
+    })
+}
+
+/// Names bound exactly once, by `x = <client>()` or `with <client>() as x`,
+/// to a proven client constructor, and never otherwise written.
+fn receivers(
+    cx: &FileCx,
+    root: TsNode,
+    scope: &Scope,
+    clients: &[&str],
+) -> HashMap<String, Receiver> {
+    let mut out = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+        let (name, value) = match node.kind() {
+            "assignment" => (
+                node.child_by_field_name("left"),
+                node.child_by_field_name("right"),
+            ),
+            "as_pattern" => {
+                let mut walk = node.walk();
+                let target = node
+                    .named_children(&mut walk)
+                    .find(|child| child.kind() == "as_pattern_target")
+                    .and_then(|target| target.named_child(0));
+                (target, node.named_child(0))
+            }
+            _ => continue,
+        };
+        let (Some(name), Some(value)) = (name, value) else {
+            continue;
+        };
+        let text = cx.text(&name);
+        if name.kind() != "identifier"
+            || value.kind() != "call"
+            || scope.writes.get(text) != Some(&1)
+            || scope.imports.contains_key(text)
+            || reconfigured(scope, text)
+        {
+            continue;
+        }
+        let (Some(callee), Some(args)) = (
+            value.child_by_field_name("function"),
+            value.child_by_field_name("arguments"),
+        ) else {
+            continue;
+        };
+        let Some((module, export)) = callee_export(cx, callee, scope) else {
+            continue;
+        };
+        if !clients.contains(&module.as_str())
+            || !HTTP_CONSTRUCTORS.contains(&(module.as_str(), export.as_str()))
+        {
+            continue;
+        }
+        let Some(function) = binding_scope(node) else {
+            continue;
+        };
+        // A splat may carry `base_url`, or anything else: no proven client.
+        let mut walk = args.walk();
+        if args
+            .named_children(&mut walk)
+            .any(|arg| matches!(arg.kind(), "list_splat" | "dictionary_splat"))
+        {
+            continue;
+        }
+        let base = (module == "httpx")
+            .then(|| keyword(cx, args, "base_url"))
+            .flatten()
+            .map(|base| FetchBase {
+                url: classify_with(cx, root, base, scope, true, exact_string),
+                join: BaseJoin::Merge,
+                path: cx.path.to_string(),
+                byte_start: base.start_byte() as u64,
+            });
+        out.insert(
+            text.to_string(),
+            Receiver {
+                constructor: format!("{module}.{export}"),
+                function,
+                base,
+            },
+        );
+    }
+    out
+}
 
 /// The client modules no repository module or package of the same name
 /// may shadow: any `requests.py` or `requests/` anywhere refuses `requests`.
@@ -103,9 +245,18 @@ fn http_call<'t>(
     export: &str,
     args: TsNode<'t>,
 ) -> Option<(String, Option<TsNode<'t>>)> {
-    if !clients.contains(&module) {
-        return None;
-    }
+    clients
+        .contains(&module)
+        .then(|| verb_call(cx, export, args))
+        .flatten()
+}
+
+/// The method and URL argument of a verb call, on a module or a receiver.
+fn verb_call<'t>(
+    cx: &FileCx,
+    export: &str,
+    args: TsNode<'t>,
+) -> Option<(String, Option<TsNode<'t>>)> {
     let positional = positional(args);
     let (method, url) = if HTTP_VERBS.contains(&export) {
         (export.to_ascii_uppercase(), positional.first().copied())
@@ -1095,6 +1246,7 @@ fn extract_file(
         return Ok(());
     }
     collect_references(&cx, root, &scope, follows);
+    let receivers = receivers(&cx, root, &scope, &fetches.clients);
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut walk = node.walk();
@@ -1108,6 +1260,40 @@ fn extract_file(
         ) else {
             continue;
         };
+        // `x.get(url)` on a proven client instance (AC-0425): only where the
+        // binding is in scope, never inside a nested function or class.
+        if callee.kind() == "attribute"
+            && let (Some(object), Some(attribute)) = (
+                callee.child_by_field_name("object"),
+                callee.child_by_field_name("attribute"),
+            )
+            && let Some(receiver) = receivers.get(cx.text(&object))
+            && binding_scope(node).is_some_and(|function| {
+                receiver.function.is_none() || function == receiver.function
+            })
+        {
+            let verb = cx.text(&attribute);
+            if let Some((method, url)) = verb_call(&cx, verb, args)
+                && !patched(&scope, &receiver.constructor, verb, cx.text(&callee))
+            {
+                fetches.sites.push(FetchSite {
+                    method,
+                    url: url.map_or_else(
+                        || IdentityExpr::Computed(cx.text(&node).to_string()),
+                        |url| classify_with(&cx, root, url, &scope, true, exact_string),
+                    ),
+                    symbol: enclosing_function_node(node)
+                        .and_then(|function| qualified_function_name(&cx, function))
+                        .map(|name| symbol_id(id.repo, path, &name)),
+                    path: path.to_string(),
+                    byte_start: node.start_byte() as u64,
+                    byte_end: node.end_byte() as u64,
+                    base: receiver.base.clone(),
+                    entry: None,
+                });
+            }
+            continue;
+        }
         let Some((module, export)) = callee_export(&cx, callee, &scope) else {
             continue;
         };
