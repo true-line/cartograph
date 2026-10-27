@@ -1155,6 +1155,7 @@ fn proven_client_receivers_become_fetch_sites() {
 import os
 import requests
 import httpx
+from requests import Session as S
 
 API = os.getenv("API_URL")
 shared = requests.Session()
@@ -1175,6 +1176,10 @@ async def fetch():
 def env_base():
     with httpx.Client(base_url=API) as client:
         client.put("e")
+
+def aliased_constructor():
+    plain = S()
+    plain.get("/f")
 "#,
     )]);
     let owner = |name: &str| format!("sym:{REPO}@app/svc.py#{name}");
@@ -1192,19 +1197,45 @@ def env_base():
                 "app/svc.py PUT lit:e {} base=env:API_URL Merge",
                 owner("env_base")
             ),
+            format!("app/svc.py GET lit:/f {}", owner("aliased_constructor")),
         ]
     );
 }
 
 // AC-0425: receivers that are rebound, parameters, attributes, factory
 // results, used outside their binding's function, bound in a class body,
-// shadowed by a local module or mocked by a patch, built from a splat, or
-// whose base, verbs or transport the file rewrites yield nothing. (T-0425)
+// shadowed by a local module or mocked by a patch (also of a locally aliased
+// constructor), built from a splat, read other than through a member (an
+// alias may rewrite them), or whose base, verbs or transport the file
+// rewrites yield nothing. (T-0425)
 #[test]
 fn unproven_client_receivers_are_not_fetch_sites() {
-    let sites = fetches(&[(
-        "app/bad.py",
-        r#"
+    let sites = fetches(&[
+        (
+            "app/alias.py",
+            r#"
+import httpx
+from requests import Session as S
+from unittest.mock import patch
+
+c = httpx.Client(base_url="https://h/api")
+alias = c
+alias.base_url = "https://h/v2"
+c.get("/aliased")
+
+passed = httpx.Client()
+passed.get("/passed")
+print(passed)
+
+@patch("app.alias.S")
+def test_aliased_constructor(_):
+    mocked = S()
+    mocked.get("/mocked-alias")
+"#,
+        ),
+        (
+            "app/bad.py",
+            r#"
 import requests
 import httpx
 from unittest.mock import patch
@@ -1269,7 +1300,8 @@ captured = requests.Session()
 def parameter(captured):
     captured.get("/parameter")
 "#,
-    )]);
+        ),
+    ]);
     assert!(
         sites.is_empty(),
         "{:?}",

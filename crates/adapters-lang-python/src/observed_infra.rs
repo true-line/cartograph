@@ -56,6 +56,9 @@ const HTTP_CONSTRUCTORS: &[(&str, &str)] = &[
 struct Receiver {
     /// The constructor's dotted path (`requests.Session`), for patches.
     constructor: String,
+    /// The constructor as this file spells it (`S` after `from requests
+    /// import Session as S`), for patches of the local name.
+    spelling: String,
     /// Start byte of the function the binding is in; `None` at module level.
     function: Option<usize>,
     /// An httpx `base_url=`, joined under (`BaseJoin::Merge`).
@@ -100,8 +103,38 @@ fn reconfigured(scope: &Scope, name: &str) -> bool {
     })
 }
 
+/// Whether `name` is read anywhere but as the object of `name.member`: an
+/// alias (`alias = c`), an argument (`patch.object(c, "get")`) or a return
+/// may reconfigure the instance under another spelling.
+fn escapes(cx: &FileCx, root: TsNode, name: &str) -> bool {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+        if node.kind() != "identifier" || cx.text(&node) != name {
+            continue;
+        }
+        let Some(parent) = node.parent() else {
+            continue;
+        };
+        let field = |field: &str| parent.child_by_field_name(field) == Some(node);
+        let allowed = match parent.kind() {
+            "attribute" => field("object") || field("attribute"),
+            "assignment" => field("left"),
+            "keyword_argument" => field("name"),
+            "as_pattern_target" => true,
+            _ => false,
+        };
+        if !allowed {
+            return true;
+        }
+    }
+    false
+}
+
 /// Names bound exactly once, by `x = <client>()` or `with <client>() as x`,
-/// to a proven client constructor, and never otherwise written.
+/// to a proven client constructor, never otherwise written and never read
+/// except through a member.
 fn receivers(
     cx: &FileCx,
     root: TsNode,
@@ -137,6 +170,7 @@ fn receivers(
             || scope.writes.get(text) != Some(&1)
             || scope.imports.contains_key(text)
             || reconfigured(scope, text)
+            || escapes(cx, root, text)
         {
             continue;
         }
@@ -178,6 +212,7 @@ fn receivers(
             text.to_string(),
             Receiver {
                 constructor: format!("{module}.{export}"),
+                spelling: cx.text(&callee).to_string(),
                 function,
                 base,
             },
@@ -1275,6 +1310,7 @@ fn extract_file(
             let verb = cx.text(&attribute);
             if let Some((method, url)) = verb_call(&cx, verb, args)
                 && !patched(&scope, &receiver.constructor, verb, cx.text(&callee))
+                && !patched(&scope, &receiver.constructor, verb, &receiver.spelling)
             {
                 fetches.sites.push(FetchSite {
                     method,

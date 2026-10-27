@@ -102,7 +102,7 @@ pub fn join_base(base: &str, path: &str, join: BaseJoin) -> String {
                 None => ("", rest),
             };
             if scheme.is_some() && !host.is_empty() {
-                return path.to_string();
+                return without_dot_segments(path);
             }
             let base = base.split('#').next().unwrap_or(base);
             let start = base.find("://").map_or(0, |i| i + 3);
@@ -117,10 +117,10 @@ pub fn join_base(base: &str, path: &str, join: BaseJoin) -> String {
                 format!("/{base_raw}")
             };
             let slash = if base_raw.ends_with('/') { "" } else { "/" };
-            format!(
+            without_dot_segments(&format!(
                 "{origin}{base_raw}{slash}{}",
                 reference.trim_start_matches('/')
-            )
+            ))
         }
         BaseJoin::Resolve => {
             if path.starts_with("http://") || path.starts_with("https://") {
@@ -153,6 +153,43 @@ pub fn join_base(base: &str, path: &str, join: BaseJoin) -> String {
 
 /// Whether `scheme` is an RFC 3986 scheme: a letter, then letters, digits,
 /// `+`, `-` or `.`.
+/// httpx's `normalize_path` on an absolute URL: `.` and `..` segments of
+/// the path (before any `?`) are dropped, never climbing above the root.
+fn without_dot_segments(url: &str) -> String {
+    let start = url.find("://").map_or(0, |i| i + 3);
+    let end = url[start..]
+        .find(['/', '?'])
+        .map_or(url.len(), |i| start + i);
+    let query = url[end..].find('?').map_or(url.len(), |i| end + i);
+    let (origin, rest) = url.split_at(end);
+    let (path, query) = rest.split_at(query - end);
+    let segments: Vec<&str> = path.split('/').collect();
+    if !segments
+        .iter()
+        .any(|segment| matches!(*segment, "." | ".."))
+    {
+        return url.to_string();
+    }
+    let mut out: Vec<&str> = Vec::new();
+    for segment in segments {
+        match segment {
+            "." => {}
+            ".." => {
+                if out.len() > 1 || out.first().is_some_and(|first| !first.is_empty()) {
+                    out.pop();
+                }
+            }
+            _ => out.push(segment),
+        }
+    }
+    // An emptied path is the root.
+    let path = match out.join("/") {
+        path if path.is_empty() => "/".to_string(),
+        path => path,
+    };
+    format!("{origin}{path}{query}")
+}
+
 fn is_scheme(scheme: &str) -> bool {
     scheme.starts_with(|c: char| c.is_ascii_alphabetic())
         && scheme
@@ -263,6 +300,23 @@ mod tests {
         );
         assert_eq!(join_base("https://h.io", "", m), "https://h.io/");
         assert_eq!(join_base("https://h.io/", "//x", m), "https://h.io/");
+        // httpx drops dot segments of the merged path, never above the root.
+        assert_eq!(
+            join_base("https://h/api/", "../users", m),
+            "https://h/users"
+        );
+        assert_eq!(join_base("https://h/api", "./a/../b", m), "https://h/api/b");
+        assert_eq!(join_base("https://h/api", "../../x", m), "https://h/x");
+        assert_eq!(join_base("https://h/a/./b", "c/..", m), "https://h/a/b");
+        assert_eq!(join_base("https://h/a", "..", m), "https://h/");
+        assert_eq!(
+            join_base("https://h/api", "../u?next=../x", m),
+            "https://h/u?next=../x"
+        );
+        assert_eq!(
+            join_base("https://h/api", "https://o.io/a/../b", m),
+            "https://o.io/b"
+        );
         // httpx appends to the raw path, so a base query swallows the path.
         assert_eq!(
             join_base("https://h.io/api?k=1", "users?a=2", m),
