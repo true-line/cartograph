@@ -149,7 +149,9 @@ const fn cell(
 use Capability::*;
 use Support::*;
 
-const NO_CLIENT: &str = "outbound HTTP client calls are recognized only in TypeScript/JavaScript";
+const NO_CLIENT: &str = "no Go HTTP client library is recognized";
+/// What the Python HTTP client cells read (AC-0424).
+const PY_CLIENT: &str = "module functions only (`get`, `post`, … `request`); `Session`/`Client` receivers are not read and a URL is followed only within its file";
 const NO_JVM_CLIENT: &str =
     "outbound HTTP client calls are recognized only through Retrofit interfaces";
 const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript";
@@ -245,7 +247,8 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
         Partial,
         "module-level imports only; an identity imported from another module is a Gap",
     ),
-    cell("Python", CORE, HttpClientCalls, Unsupported, NO_CLIENT),
+    cell("Python", "requests", HttpClientCalls, Partial, PY_CLIENT),
+    cell("Python", "httpx", HttpClientCalls, Partial, PY_CLIENT),
     cell("Python", CORE, EventSites, Unsupported, NO_EVENTS),
     cell("Go", CORE, Imports, Supported, ""),
     cell("Go", CORE, Calls, Supported, ""),

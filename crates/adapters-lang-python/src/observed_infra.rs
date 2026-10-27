@@ -19,7 +19,13 @@
 //! is followed to the argument of that function's one caller under the
 //! rules `follow_parameter` documents; anything else is a Gap naming the
 //! site.
+//!
+//! The same proof admits HTTP client calls (#1238, AC-0424): a module
+//! function of `requests` or `httpx` (`get`, `post`, … or `request(method,
+//! url)`) becomes a [`FetchSite`] with its URL classified as above, but
+//! followed only within the file.
 
+use adapters_fw::client::FetchSite;
 use adapters_fw::events::{ClientForm, Ecosystem, IdentityArg, IdentityExpr, Registries};
 use adapters_fw::observed::{ObservedSite, ObservedSource, assemble};
 use core_graph::{Edge, Node};
@@ -27,12 +33,96 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tree_sitter::{Node as TsNode, Parser};
 
+use crate::alembic::exact_string;
 use crate::{
     ExtractError, FileCx, SourceId, collect_python_files, enclosing_function_node, literal_string,
     qualified_function_name, symbol_id,
 };
 
 const EXTRACTOR_ID: &str = "t0.observed-infra-python";
+
+/// HTTP client modules whose module functions are fetch sites (AC-0424).
+const HTTP_MODULES: &[&str] = &["requests", "httpx"];
+
+/// The client modules no repository module or package of the same name
+/// may shadow: any `requests.py` or `requests/` anywhere refuses `requests`.
+fn unshadowed_clients(files: &[String]) -> Vec<&'static str> {
+    HTTP_MODULES
+        .iter()
+        .copied()
+        .filter(|module| {
+            let file_name = format!("{module}.py");
+            !files.iter().any(|file| {
+                let parts: Vec<&str> = file.split('/').collect();
+                let (name, dirs) = parts.split_last().expect("split yields one part");
+                *name == file_name || dirs.contains(module)
+            })
+        })
+        .collect()
+}
+
+/// The fetch sites of a pass and the client modules it may read.
+struct Fetches {
+    clients: Vec<&'static str>,
+    sites: Vec<FetchSite>,
+}
+
+/// Whether a file's `patch("…")`/`monkeypatch.setattr("…")` targets may
+/// mock a call of `module.export` spelled `local` in this file (`r.get`
+/// after `import requests as r`, `fetch` after `from requests import get as
+/// fetch`): a target overlapping the canonical path, or one ending in the
+/// canonical module or path, or in the local spelling or any prefix of it
+/// (`app.client.requests.get`, `app.client.r`, `app.client.fetch`).
+fn patched(scope: &Scope, module: &str, export: &str, local: &str) -> bool {
+    let segments = |path: &str| -> MemberPath {
+        path.split('.')
+            .map(|segment| Some(segment.to_string()))
+            .collect()
+    };
+    let call = segments(&format!("{module}.{export}"));
+    let local = segments(local);
+    scope.patches.iter().any(|patch| {
+        patch
+            .iter()
+            .zip(&call)
+            .all(|(segment, read)| segment.is_none() || segment == read)
+            || (1..=call.len()).any(|len| patch.ends_with(&call[..len]))
+            || (1..=local.len()).any(|len| patch.ends_with(&local[..len]))
+    })
+}
+/// Module functions named for the verb they send.
+const HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
+
+/// The method and URL argument of a proven `requests`/`httpx` module call:
+/// a verb function, or `request(method, url)` with `?` for a method that is
+/// not a string literal.
+fn http_call<'t>(
+    cx: &FileCx,
+    clients: &[&str],
+    module: &str,
+    export: &str,
+    args: TsNode<'t>,
+) -> Option<(String, Option<TsNode<'t>>)> {
+    if !clients.contains(&module) {
+        return None;
+    }
+    let positional = positional(args);
+    let (method, url) = if HTTP_VERBS.contains(&export) {
+        (export.to_ascii_uppercase(), positional.first().copied())
+    } else if export == "request" {
+        let method = positional
+            .first()
+            .copied()
+            .or_else(|| keyword(cx, args, "method"))
+            .and_then(|method| exact_string(cx, method))
+            .filter(|method| !method.is_empty() && method.bytes().all(|b| b.is_ascii_alphabetic()))
+            .map_or_else(|| "?".to_string(), |method| method.to_ascii_uppercase());
+        (method, positional.get(1).copied())
+    } else {
+        return None;
+    };
+    Some((method, url.or_else(|| keyword(cx, args, "url"))))
+}
 
 /// What a module-level import binds a name to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -706,7 +796,13 @@ fn keyword<'t>(cx: &FileCx, args: TsNode<'t>, key: &str) -> Option<TsNode<'t>> {
 
 /// The env variable an `os.environ[...]`, `os.environ.get(...)` or
 /// `os.getenv(...)` read names, through a proven `os` import.
-fn env_key(cx: &FileCx, node: TsNode, scope: &Scope) -> Option<String> {
+/// The name is read with `literal`.
+fn env_key(
+    cx: &FileCx,
+    node: TsNode,
+    scope: &Scope,
+    literal: fn(&FileCx, TsNode) -> Option<String>,
+) -> Option<String> {
     let names = |target: TsNode, attribute: &str| {
         callee_export(cx, target, scope).is_some_and(|(m, a)| m == "os" && a == attribute)
     };
@@ -718,7 +814,7 @@ fn env_key(cx: &FileCx, node: TsNode, scope: &Scope) -> Option<String> {
                 .children_by_field_name("subscript", &mut walk)
                 .collect();
             match index.as_slice() {
-                [key] if names(value, "environ") => literal_string(cx, *key),
+                [key] if names(value, "environ") => literal(cx, *key),
                 _ => None,
             }
         }
@@ -735,7 +831,7 @@ fn env_key(cx: &FileCx, node: TsNode, scope: &Scope) -> Option<String> {
             let reads_env = environ_get || names(callee, "getenv");
             let args = node.child_by_field_name("arguments")?;
             match (reads_env, positional(args).first()) {
-                (true, Some(key)) => literal_string(cx, *key),
+                (true, Some(key)) => literal(cx, *key),
                 _ => None,
             }
         }
@@ -745,10 +841,23 @@ fn env_key(cx: &FileCx, node: TsNode, scope: &Scope) -> Option<String> {
 }
 
 fn classify(cx: &FileCx, root: TsNode, node: TsNode, scope: &Scope, follow: bool) -> IdentityExpr {
-    if let Some(value) = literal_string(cx, node) {
+    classify_with(cx, root, node, scope, follow, literal_string)
+}
+
+/// [`classify`] reading string literals with `literal`: a string it refuses
+/// is computed, never another reading.
+fn classify_with(
+    cx: &FileCx,
+    root: TsNode,
+    node: TsNode,
+    scope: &Scope,
+    follow: bool,
+    literal: fn(&FileCx, TsNode) -> Option<String>,
+) -> IdentityExpr {
+    if let Some(value) = literal(cx, node) {
         return IdentityExpr::Literal(value);
     }
-    if let Some(key) = env_key(cx, node, scope) {
+    if let Some(key) = env_key(cx, node, scope, literal) {
         return IdentityExpr::EnvRef(key);
     }
     let text = cx.text(&node);
@@ -760,7 +869,7 @@ fn classify(cx: &FileCx, root: TsNode, node: TsNode, scope: &Scope, follow: bool
         && let Some(&(start, end)) = scope.assigned.get(text)
         && let Some(right) = root.descendant_for_byte_range(start, end)
     {
-        return match classify(cx, root, right, scope, false) {
+        return match classify_with(cx, root, right, scope, false, literal) {
             IdentityExpr::Computed(_) => IdentityExpr::Computed(text.to_string()),
             known => known,
         };
@@ -922,6 +1031,7 @@ fn extract_file(
     registries: &Registries,
     sites: &mut Vec<ObservedSite>,
     follows: &mut Follows,
+    fetches: &mut Fetches,
 ) -> Result<(), ExtractError> {
     let language: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
@@ -1001,6 +1111,28 @@ fn extract_file(
         let Some((module, export)) = callee_export(&cx, callee, &scope) else {
             continue;
         };
+        if let Some((method, url)) = http_call(&cx, &fetches.clients, &module, &export, args) {
+            if patched(&scope, &module, &export, cx.text(&callee)) {
+                continue;
+            }
+            fetches.sites.push(FetchSite {
+                method,
+                url: url.map_or_else(
+                    || IdentityExpr::Computed(cx.text(&node).to_string()),
+                    // Exact text only: a URL is matched to routes (AC-0424).
+                    |url| classify_with(&cx, root, url, &scope, true, exact_string),
+                ),
+                symbol: enclosing_function_node(node)
+                    .and_then(|function| qualified_function_name(&cx, function))
+                    .map(|name| symbol_id(id.repo, path, &name)),
+                path: path.to_string(),
+                byte_start: node.start_byte() as u64,
+                byte_end: node.end_byte() as u64,
+                base: None,
+                entry: None,
+            });
+            continue;
+        }
         let first = positional(args).first().copied();
         let Some(client) = registries.clients.iter().find(|c| {
             c.ecosystem == Ecosystem::Pypi
@@ -1337,14 +1469,41 @@ pub fn extract_dir(
     id: &SourceId,
     registries: &Registries,
 ) -> Result<(Vec<Node>, Vec<Edge>), ExtractError> {
+    extract_dir_with_fetches(root, id, registries).map(|(nodes, edges, _)| (nodes, edges))
+}
+
+/// Observed nodes and edges, and the fetch sites of the same pass.
+pub type ObservedWithFetches = (Vec<Node>, Vec<Edge>, Vec<FetchSite>);
+
+/// [`extract_dir`] plus the `requests`/`httpx` fetch sites the same import
+/// proofs admit (AC-0424), in file then call order.
+pub fn extract_dir_with_fetches(
+    root: &Path,
+    id: &SourceId,
+    registries: &Registries,
+) -> Result<ObservedWithFetches, ExtractError> {
     let mut files = Vec::new();
     collect_python_files(root, &mut files)?;
     files.sort(); // deterministic order (US-0014)
     let mut sites = Vec::new();
     let mut follows = Follows::default();
+    let mut fetches = Fetches {
+        clients: unshadowed_clients(&files),
+        sites: Vec::new(),
+    };
     for rel in &files {
         let source = std::fs::read(root.join(rel))?;
-        extract_file(&source, rel, id, registries, &mut sites, &mut follows)?;
+        let first = fetches.sites.len();
+        extract_file(
+            &source,
+            rel,
+            id,
+            registries,
+            &mut sites,
+            &mut follows,
+            &mut fetches,
+        )?;
+        fetches.sites[first..].sort_by_key(|site: &FetchSite| site.byte_start);
     }
     let known: HashSet<&str> = files.iter().map(String::as_str).collect();
     let mut modules: HashMap<String, Option<ModuleFile>> = HashMap::new();
@@ -1377,14 +1536,15 @@ pub fn extract_dir(
             .concat();
         }
     }
-    Ok(assemble(
+    let (nodes, edges) = assemble(
         &ObservedSource {
             repo: id.repo,
             commit: id.commit,
             extractor: EXTRACTOR_ID,
         },
         &sites,
-    ))
+    );
+    Ok((nodes, edges, fetches.sites))
 }
 
 #[cfg(test)]

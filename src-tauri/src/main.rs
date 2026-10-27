@@ -1581,10 +1581,14 @@ fn extract_tree_with_registries(
         extraction.nodes.extend(python.nodes);
         extraction.edges.extend(python.edges);
         // Observed infrastructure from Python (#734): registry clients the
-        // code proves it talks to (boto3, redis, smtplib, SQLAlchemy).
-        let (observed_nodes, observed_edges) =
-            adapters_lang_python::observed_infra::extract_dir(root, &python_id, registries)
-                .map_err(|error| error.to_string())?;
+        // code proves it talks to (boto3, redis, smtplib, SQLAlchemy), and
+        // `requests`/`httpx` calls as fetch sites (AC-0424).
+        let (observed_nodes, observed_edges, python_fetches) =
+            adapters_lang_python::observed_infra::extract_dir_with_fetches(
+                root, &python_id, registries,
+            )
+            .map_err(|error| error.to_string())?;
+        extraction.fetch_sites.extend(python_fetches);
         layers.python.nodes += distinct_node_count(&observed_nodes);
         layers.python.edges += distinct_edge_count(&observed_edges);
         extraction.nodes.extend(observed_nodes);

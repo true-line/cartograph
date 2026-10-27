@@ -953,7 +953,7 @@ fn sql_literal(cx: &FileCx<'_>, arg: TsNode<'_>) -> Option<String> {
 
 /// A plain string literal's exact text: its own delimiters removed, quotes
 /// inside kept. Escapes, byte strings and f-strings are not read.
-fn exact_string(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
+pub(crate) fn exact_string(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
     if node.kind() != "string" {
         return None;
     }
