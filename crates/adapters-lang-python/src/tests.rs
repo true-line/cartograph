@@ -5072,3 +5072,156 @@ def imported():
         }
     }
 }
+
+/// A Flask app whose `/x` route carries `decorator`, with a flask-limiter
+/// `Limiter` in `extensions.py` (`extensions` replaces it when given).
+fn decorated_route(
+    decorator: &str,
+    extensions: Option<&str>,
+    extra: &[(&str, &str)],
+) -> Extraction {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "extensions.py",
+        extensions.unwrap_or(
+            "from flask_limiter import Limiter\n\nlimiter = Limiter(key_func=lambda: \"k\")\n",
+        ),
+    );
+    write(
+        dir.path(),
+        "views.py",
+        &format!(
+            r#"from flask import Flask, g
+from flask_cors import cross_origin
+from flask_login import login_required
+from extensions import limiter
+
+app = Flask(__name__)
+
+@app.route("/x")
+{decorator}
+def x():
+    return "ok"
+
+@app.route("/me")
+@login_required
+@limiter.limit("1/second")
+def me():
+    return "ok"
+"#
+        ),
+    );
+    for (path, source) in extra {
+        write(dir.path(), path, source);
+    }
+    extract_dir(dir.path(), &id()).unwrap()
+}
+
+#[test]
+fn rate_limit_and_cors_decorators_do_not_authenticate() {
+    // AC-0387 (T-0387): an import-proven flask-cors `cross_origin` and a
+    // proven flask-limiter `Limiter`'s `limit` / `shared_limit` with inert
+    // arguments neither guard nor make the state unknown.
+    for decorator in [
+        "@limiter.limit(\"10/minute\", deduct_when=lambda r: hasattr(g, \"deduct\") and g.deduct)",
+        "@limiter.shared_limit(\"5/hour\", scope=\"auth\")",
+        "@cross_origin()",
+        "@cross_origin(origins=[\"https://example.com\"], supports_credentials=True)",
+        "@cross_origin()\n@limiter.limit(\"3/hour\")",
+    ] {
+        let extraction = decorated_route(decorator, None, &[]);
+        let auth = auth_at(&extraction, "/x");
+        assert_eq!(auth["state"], "none", "{decorator}: {auth}");
+        assert!(
+            auth["assumptions"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(
+                    "rate_limit_and_cors_decorators_do_not_authenticate"
+                )),
+            "{decorator}"
+        );
+        assert!(!auth["non_auth_decorators"].as_array().unwrap().is_empty());
+        // A guard beside a limiter still requires authentication.
+        assert_eq!(auth_at(&extraction, "/me")["state"], "required");
+    }
+}
+
+/// A route decorator, an `extensions.py` override and extra files.
+type DecoratedCase = (
+    &'static str,
+    Option<&'static str>,
+    &'static [(&'static str, &'static str)],
+);
+
+#[test]
+fn an_unproven_limiter_or_cors_decorator_stays_unknown() {
+    // AC-0387 (T-0387): every form short of the proof stays
+    // `unclassified_decorator`.
+    let cases: [DecoratedCase; 9] = [
+        // A call argument may do anything when the decorator is built.
+        ("@limiter.limit(get_limit())", None, &[]),
+        ("@limiter.limit(f\"{N}/minute\")", None, &[]),
+        // A lambda calling a repository function may abort.
+        (
+            "@limiter.limit(\"1/s\", exempt_when=lambda: check())",
+            None,
+            &[],
+        ),
+        // `limit` on something that is not a flask-limiter `Limiter`.
+        (
+            "@limiter.limit(\"1/s\")",
+            Some("from other import Thing\n\nlimiter = Thing()\n"),
+            &[],
+        ),
+        // A rebound limiter name.
+        (
+            "@limiter.limit(\"1/s\")",
+            Some(
+                "from flask_limiter import Limiter\n\nlimiter = Limiter()\nlimiter = wrap(limiter)\n",
+            ),
+            &[],
+        ),
+        // Assigned through an imported module.
+        (
+            "@limiter.limit(\"1/s\")",
+            None,
+            &[(
+                "patch.py",
+                "import extensions\n\nextensions.limiter = other\n",
+            )],
+        ),
+        // A function-local limiter proves nothing at module level.
+        (
+            "@limiter.limit(\"1/s\")",
+            Some(
+                "from flask_limiter import Limiter\n\ndef make():\n    limiter = Limiter()\n    return limiter\n\nlimiter = make()\n",
+            ),
+            &[],
+        ),
+        // A `cross_origin` that is not flask-cors's.
+        ("@cors.cross_origin()", None, &[]),
+        // A spread argument.
+        ("@cross_origin(**OPTIONS)", None, &[]),
+    ];
+    for (decorator, extensions, extra) in cases {
+        let extraction = decorated_route(decorator, extensions, extra);
+        let auth = auth_at(&extraction, "/x");
+        assert_eq!(
+            auth["state"], "unknown",
+            "{decorator} {extensions:?} {extra:?}: {auth}"
+        );
+        assert!(
+            auth["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason
+                    .as_str()
+                    .unwrap()
+                    .starts_with("unclassified_decorator:")),
+            "{decorator}"
+        );
+    }
+}

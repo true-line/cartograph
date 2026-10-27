@@ -39,7 +39,12 @@
 //!
 //! A `jwt_required` call with any argument, a call decorator such as
 //! `@limiter.limit("2/minute")`, and a hook registered by a call whose
-//! argument does not resolve to a repository function are never guards. A
+//! argument does not resolve to a repository function are never guards.
+//! An import-proven flask-cors `cross_origin(…)`, or `limit(…)` /
+//! `shared_limit(…)` on a proven module-level flask-limiter `Limiter`, with
+//! inert arguments (literals, or a `lambda` calling only `hasattr`,
+//! `getattr` or `isinstance`), is non-authenticating: it is listed in
+//! `non_auth_decorators` instead of making the state `unknown` (#1157). A
 //! hook's call into a repository file where no function of that name was
 //! recovered (a re-export, a class) is blocking.
 //! A function carrying any decorator other than a hook registration is
@@ -82,6 +87,16 @@ pub(crate) enum DecoratorFact {
         key: FnKey,
         evidence: EvidenceRef,
         text: String,
+    },
+    /// A decorator that never authenticates: an import-proven
+    /// `flask_cors.cross_origin(…)` with inert arguments (#1157).
+    NonAuth { text: String, evidence: EvidenceRef },
+    /// `<name>.limit(…)` / `.shared_limit(…)` with inert arguments: non-
+    /// authenticating once resolve proves `key` a flask-limiter `Limiter`.
+    Limit {
+        key: (String, String),
+        text: String,
+        evidence: EvidenceRef,
     },
     /// Anything else, with its `unknown` reason.
     Unclassified { reason: String },
@@ -300,8 +315,22 @@ fn classify(
                         && !rebound(cx, root, &root_name, Some(handler)))
                     .then(|| "flask_jwt_extended.jwt_required".to_string())
                 });
-            match guard {
-                Some(name) => DecoratorFact::Framework { name, evidence },
+            if let Some(name) = guard {
+                return DecoratorFact::Framework { name, evidence };
+            }
+            let text = truncated(cx.text(&expression));
+            match callee.filter(|_| inert_arguments(cx, root, expression)) {
+                Some(callee) if cors_decorator(cx, root, callee, handler, bindings) => {
+                    DecoratorFact::NonAuth { text, evidence }
+                }
+                Some(callee) => match limit_receiver(cx, callee, bindings) {
+                    Some(key) => DecoratorFact::Limit {
+                        key,
+                        text,
+                        evidence,
+                    },
+                    None => unclassified(),
+                },
                 None => unclassified(),
             }
         }
@@ -326,6 +355,101 @@ fn classify(
             }
         }
         _ => unclassified(),
+    }
+}
+
+/// Whether call decorator `callee` is flask-cors's `cross_origin`, its local
+/// name not rebound.
+fn cors_decorator(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    callee: TsNode<'_>,
+    handler: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> bool {
+    import_dotted(cx, callee, bindings).is_some_and(|dotted| {
+        matches!(
+            dotted.as_str(),
+            "flask_cors.cross_origin" | "flask_cors.decorator.cross_origin"
+        )
+    }) && dotted_parts(cx, callee)
+        .and_then(|parts| parts.into_iter().next())
+        .is_some_and(|name| !rebound(cx, root, &name, Some(handler)))
+}
+
+/// The definition key of `<name>` in `<name>.limit` / `<name>.shared_limit`,
+/// a module-level name not rebound where it is read.
+fn limit_receiver(
+    cx: &FileCx<'_>,
+    callee: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> Option<(String, String)> {
+    let attribute = callee.child_by_field_name("attribute")?;
+    if callee.kind() != "attribute" || !matches!(cx.text(&attribute), "limit" | "shared_limit") {
+        return None;
+    }
+    match app_scope::app_ref(cx, callee.child_by_field_name("object")?, bindings) {
+        AppRef::Def(key) => Some(key),
+        _ => None,
+    }
+}
+
+/// Builtins an inert `lambda` may call.
+const INERT_BUILTINS: [&str; 3] = ["hasattr", "getattr", "isinstance"];
+
+/// Whether every argument of `call` is a literal, a container of literals,
+/// or a `lambda` that calls nothing but unbound `INERT_BUILTINS`.
+fn inert_arguments(cx: &FileCx<'_>, root: TsNode<'_>, call: TsNode<'_>) -> bool {
+    let Some(arguments) = call.child_by_field_name("arguments") else {
+        return false;
+    };
+    arguments.kind() == "argument_list"
+        && named(arguments)
+            .into_iter()
+            .all(|argument| match argument.kind() {
+                "comment" => true,
+                "keyword_argument" => argument
+                    .child_by_field_name("value")
+                    .is_some_and(|value| inert(cx, root, value)),
+                _ => inert(cx, root, argument),
+            })
+}
+
+fn inert(cx: &FileCx<'_>, root: TsNode<'_>, value: TsNode<'_>) -> bool {
+    match value.kind() {
+        "integer" | "float" | "true" | "false" | "none" => true,
+        "string" | "concatenated_string" => {
+            let mut interpolated = false;
+            every_descendant(value, &mut |node| {
+                interpolated |= node.kind() == "interpolation";
+            });
+            !interpolated
+        }
+        "unary_operator"
+        | "parenthesized_expression"
+        | "list"
+        | "tuple"
+        | "set"
+        | "dictionary"
+        | "pair" => named(value)
+            .into_iter()
+            .filter(|child| child.kind() != "comment")
+            .all(|child| inert(cx, root, child)),
+        "lambda" => {
+            let mut calls_only_builtins = true;
+            every_descendant(value, &mut |node| {
+                if node.kind() != "call" {
+                    return;
+                }
+                calls_only_builtins &= node.child_by_field_name("function").is_some_and(|callee| {
+                    callee.kind() == "identifier"
+                        && INERT_BUILTINS.contains(&cx.text(&callee))
+                        && module_binding(cx, root, cx.text(&callee)).writes.is_empty()
+                });
+            });
+            calls_only_builtins
+        }
+        _ => false,
     }
 }
 
@@ -682,6 +806,9 @@ pub(crate) fn collect(
                 && left
                     .child_by_field_name("attribute")
                     .is_some_and(|attribute| cx.text(&attribute) == "wsgi_app");
+            if let Some(name) = limiter_def(cx, root, node, left, right, bindings) {
+                out.limiter_defs.push((cx.path.to_string(), name));
+            }
             if wsgi {
                 out.wsgi_facts.push(WsgiFact {
                     proxy_fix: is_proxy_fix(cx, root, left, right, bindings),
@@ -695,6 +822,35 @@ pub(crate) fn collect(
         }
         _ => {}
     });
+}
+
+/// The name `assignment` binds when it is a module-level
+/// `name = flask_limiter.Limiter(…)` and the module's only binding of it.
+fn limiter_def(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    assignment: TsNode<'_>,
+    left: TsNode<'_>,
+    right: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> Option<String> {
+    let at_module = assignment
+        .parent()
+        .and_then(|statement| statement.parent())
+        .is_some_and(|parent| parent.kind() == "module");
+    if !at_module || left.kind() != "identifier" || right.kind() != "call" {
+        return None;
+    }
+    let dotted = import_dotted(cx, right.child_by_field_name("function")?, bindings)?;
+    if !matches!(
+        dotted.as_str(),
+        "flask_limiter.Limiter" | "flask_limiter.extension.Limiter"
+    ) {
+        return None;
+    }
+    let name = cx.text(&left);
+    let writes = module_binding(cx, root, name).writes;
+    (writes.len() == 1 && writes[0] == assignment).then(|| name.to_string())
 }
 
 /// Effects by key, with the package fallback `responses` uses.
@@ -779,6 +935,11 @@ pub(crate) fn resolve(
         &out.module_attr_writes,
     ));
     let scope = app_scope::Scope::new(&calls, &used, &app_defs);
+    // A limiter assigned through an imported module may be anything.
+    let limiters = std::mem::take(&mut out.limiter_defs)
+        .into_iter()
+        .filter(|(_, name)| !out.module_attr_writes.contains(name))
+        .collect::<HashSet<_>>();
     let mut handler_apps: HashMap<String, Apps> = HashMap::new();
     for (handler, app) in std::mem::take(&mut out.endpoint_apps) {
         let apps = scope.apps(&app);
@@ -882,8 +1043,30 @@ pub(crate) fn resolve(
         let mut reasons = BTreeSet::new();
         let mut evidence = Vec::new();
         let mut framework = false;
+        // Decorators proven not to authenticate, cited on a `none` fact.
+        let mut non_auth = BTreeSet::new();
+        let mut non_auth_evidence = Vec::new();
         for decorator in &facts.decorators {
             match decorator {
+                DecoratorFact::NonAuth {
+                    text,
+                    evidence: span,
+                } => {
+                    non_auth.insert(text.clone());
+                    non_auth_evidence.push(span.clone());
+                }
+                DecoratorFact::Limit {
+                    key,
+                    text,
+                    evidence: span,
+                } => {
+                    if limiters.contains(key) {
+                        non_auth.insert(text.clone());
+                        non_auth_evidence.push(span.clone());
+                    } else {
+                        reasons.insert(format!("unclassified_decorator:{text}"));
+                    }
+                }
                 DecoratorFact::Framework { name, .. } if patched.contains(name) => {
                     // The module attribute is reassigned somewhere in the
                     // repository, so the decorator may not be the guard.
@@ -945,15 +1128,19 @@ pub(crate) fn resolve(
                     &format!("Auth of {handler}"),
                 ),
             })
-        } else if facts.decorators.is_empty() && repo_reasons.is_empty() && reaching.is_empty() {
+        } else if reasons.is_empty() && repo_reasons.is_empty() && reaching.is_empty() {
             let mut evidence = facts.route_evidence.clone();
+            evidence.extend(non_auth_evidence);
             evidence.extend(hook_evidence.iter().cloned());
             evidence.extend(wsgi.iter().map(|fact| fact.evidence.clone()));
             let mut assumptions = vec!["non_repository_calls_in_request_hooks_do_not_abort"];
             if scoped_out {
                 assumptions.push("request_hooks_reach_only_their_application");
             }
-            serde_json::json!({
+            if !non_auth.is_empty() {
+                assumptions.push("rate_limit_and_cors_decorators_do_not_authenticate");
+            }
+            let mut value = serde_json::json!({
                 "state": "none",
                 "authenticated": false,
                 "basis": "no_guard_decorator_or_blocking_request_hook",
@@ -963,7 +1150,11 @@ pub(crate) fn resolve(
                     ConfidenceTier::InferredStrong,
                     &format!("Auth of {handler}"),
                 ),
-            })
+            });
+            if !non_auth.is_empty() {
+                value["non_auth_decorators"] = serde_json::json!(non_auth);
+            }
+            value
         } else {
             reasons.extend(repo_reasons.iter().cloned());
             if !reaching.is_empty() {
@@ -1012,7 +1203,9 @@ pub(crate) fn retarget(extraction: &mut Extraction, commit: &str) {
         for decorator in &mut facts.decorators {
             match decorator {
                 DecoratorFact::Framework { evidence, .. }
-                | DecoratorFact::Repository { evidence, .. } => {
+                | DecoratorFact::Repository { evidence, .. }
+                | DecoratorFact::NonAuth { evidence, .. }
+                | DecoratorFact::Limit { evidence, .. } => {
                     evidence.commit_sha = commit.into();
                 }
                 DecoratorFact::Unclassified { .. } => {}
