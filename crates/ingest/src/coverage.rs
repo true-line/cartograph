@@ -21,6 +21,8 @@ pub const RECEIPT_OMISSION_CAPABILITY: &str = "ts-declaration-receipts";
 pub const RULE_RECEIPT_OMISSION_CAPABILITY: &str = "ts-rule-receipts";
 /// Capability naming receipts the app's receipt store had no room to keep.
 pub const STORED_RECEIPT_OMISSION_CAPABILITY: &str = "receipt-store-capacity";
+/// Capability naming symlinks the captured TypeScript selection did not follow (#1229).
+pub const UNFOLLOWED_LINK_CAPABILITY: &str = "symlink-not-followed";
 
 /// Why a recovered fact has no retained primary receipt. Each kind is a tool
 /// limitation named in coverage, never a gap in the system under study.
@@ -493,6 +495,27 @@ impl RepoCoverage {
                 occurrences,
                 first_site: first.clone(),
                 reason: kind.reason(occurrences, omitted.len()),
+            });
+            self.refresh_limited();
+        }
+        self
+    }
+
+    /// Add the symlinks the captured TypeScript producer did not follow
+    /// (#1229), so whatever they point at is a named limitation, never
+    /// silently treated as covered. `unfollowed` is sorted. Apply after
+    /// [`RepoCoverage::with_unsupported`], which replaces the list.
+    pub fn with_unfollowed_links(mut self, unfollowed: &[String]) -> Self {
+        if let Some(first) = unfollowed.first() {
+            let count = unfollowed.len();
+            self.unsupported.push(UnsupportedCapability {
+                capability: UNFOLLOWED_LINK_CAPABILITY.into(),
+                occurrences: count as u64,
+                first_site: first.clone(),
+                reason: format!(
+                    "{count} symlink(s) in the selected tree were not followed or read; \
+                     sources they point to are not covered unless also present in the tree"
+                ),
             });
             self.refresh_limited();
         }

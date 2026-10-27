@@ -1856,14 +1856,18 @@ impl PrimarySourceStore {
         if !wanted {
             return Ok(PrimaryInput {
                 capture: None,
+                unfollowed: Vec::new(),
                 _guard: None,
             });
         }
         let guard = self.guard(&source.source_id, false)?;
-        let paths = captured::enumerate_paths(root).map_err(|_| "Selected TS/JS source could not be captured safely within the supported path and size limits.".to_string())?;
-        let capture = source_capture::capture_working_tree(root, &source_id(&source.source_id)?, &paths, CaptureLimits::default()).map_err(|_| "Selected TS/JS source could not be retained within the capture limits; recovery was not published.".to_string())?;
+        // CapturedError's diagnostics are fixed strings that never carry
+        // source contents, so the reason is safe to name (#1229).
+        let selection = captured::enumerate_selection(root).map_err(|error| format!("Selected TS/JS source could not be captured safely ({error}); recovery was not published."))?;
+        let capture = source_capture::capture_working_tree(root, &source_id(&source.source_id)?, &selection.files, CaptureLimits::default()).map_err(|_| "Selected TS/JS source could not be retained within the capture limits; recovery was not published.".to_string())?;
         Ok(PrimaryInput {
             capture: Some(capture),
+            unfollowed: selection.unfollowed,
             _guard: Some(guard),
         })
     }
@@ -1917,6 +1921,8 @@ impl RetainedReceipts {
 
 pub(crate) struct PrimaryInput {
     pub capture: Option<Capture>,
+    /// Symlinks the capture did not follow, reported in coverage (#1229).
+    pub unfollowed: Vec<String>,
     _guard: Option<RetentionGuard>,
 }
 

@@ -115,14 +115,26 @@ fn valid_path(path: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-/// Enumerate the ordinary TS/JS selection without following directory symlinks.
+/// The selected TS/JS files of a tree, and the symlinks it did not follow.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Selection {
+    /// Selected source paths, sorted.
+    pub files: Vec<String>,
+    /// Non-ignored, non-excluded symlinks, sorted. None is followed or
+    /// opened, as in the ordinary walk (ADR-0030); callers report them so
+    /// what they might hold is never claimed as covered (#1229).
+    pub unfollowed: Vec<String>,
+}
+
+/// Enumerate the ordinary TS/JS selection without following any symlink.
 /// The selection honors the tree's own `.gitignore` files through the same
 /// matcher as the ordinary walk (#248), so both lanes select identical files.
 /// Each descent uses a rooted no-follow handle, including after a concurrent
 /// entry replacement. The subsequent capture independently confines acquisition.
-/// Unsupported encodings, nonexcluded symlinks and selected special files fail;
-/// no partial selection is returned. This is not a filesystem snapshot.
-pub fn enumerate_paths(root: &Path) -> Result<Vec<String>, CapturedError> {
+/// Symlinks are skipped and listed in [`Selection::unfollowed`]; unsupported
+/// encodings and selected special files fail, and no partial selection is
+/// returned. This is not a filesystem snapshot.
+pub fn enumerate_selection(root: &Path) -> Result<Selection, CapturedError> {
     let directory = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
     enumerate_with_limits(
         &directory,
@@ -132,14 +144,20 @@ pub fn enumerate_paths(root: &Path) -> Result<Vec<String>, CapturedError> {
     )
 }
 
+/// The selected files of [`enumerate_selection`].
+pub fn enumerate_paths(root: &Path) -> Result<Vec<String>, CapturedError> {
+    Ok(enumerate_selection(root)?.files)
+}
+
 fn enumerate_with_limits(
     directory: &Dir,
     max_entries: usize,
     max_depth: usize,
     max_files: usize,
-) -> Result<Vec<String>, CapturedError> {
+) -> Result<Selection, CapturedError> {
     struct Walk {
         files: Vec<String>,
+        unfollowed: Vec<String>,
         visited: usize,
         max_entries: usize,
         max_depth: usize,
@@ -181,8 +199,14 @@ fn enumerate_with_limits(
                 if rules.is_ignored(&path, kind.is_dir()) {
                     continue;
                 }
+                // Never followed, opened or resolved; recorded under the same
+                // path validation as a selected file.
                 if kind.is_symlink() {
-                    return Err(CapturedError::Invalid("symlink in selected tree"));
+                    if !valid_path(&path) {
+                        return Err(CapturedError::Invalid("symlink path"));
+                    }
+                    self.unfollowed.push(path);
+                    continue;
                 }
                 if kind.is_dir() && excluded_directory(name) {
                     continue;
@@ -211,6 +235,7 @@ fn enumerate_with_limits(
     }
     let mut walk = Walk {
         files: Vec::new(),
+        unfollowed: Vec::new(),
         visited: 0,
         max_entries,
         max_depth,
@@ -218,7 +243,11 @@ fn enumerate_with_limits(
     };
     walk.visit(directory, "", &IgnoreRules::default(), 0)?;
     walk.files.sort();
-    Ok(walk.files)
+    walk.unfollowed.sort();
+    Ok(Selection {
+        files: walk.files,
+        unfollowed: walk.unfollowed,
+    })
 }
 
 /// Parse precisely this immutable retained buffer, recording only direct lexical

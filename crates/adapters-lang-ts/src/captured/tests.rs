@@ -509,23 +509,62 @@ fn captured_and_ordinary_walks_select_the_same_gitignore_filtered_files() {
 
 #[cfg(unix)]
 #[test]
-fn captured_enumeration_rejects_symlinks_and_non_utf8_paths() {
-    // AC-0148: no-follow handles prevent traversal into a substituted directory;
-    // lossy path conversion may never collapse two primary source identities.
+fn captured_enumeration_skips_symlinks_and_rejects_non_utf8_paths() {
+    // AC-0148 (#1229): no symlink is followed, opened or resolved, so nothing
+    // outside the tree is read; each one is listed instead of failing the
+    // whole selection, as the ordinary walk skips it (ADR-0030). Lossy path
+    // conversion may never collapse two primary source identities.
     use std::os::unix::fs::symlink;
     let directory = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     fs::write(outside.path().join("hidden.ts"), b"external source").unwrap();
-    symlink(outside.path(), directory.path().join("linked")).unwrap();
-    assert!(enumerate_paths(directory.path()).is_err());
-    fs::remove_file(directory.path().join("linked")).unwrap();
-    symlink(
-        outside.path().join("hidden.ts"),
-        directory.path().join("source.ts"),
-    )
-    .unwrap();
-    assert!(enumerate_paths(directory.path()).is_err());
-    fs::remove_file(directory.path().join("source.ts")).unwrap();
+    for (path, body) in [
+        ("AGENTS.md", "notes"),
+        ("src/app.ts", "export function app() { return 1; }"),
+        ("lib/util.ts", "export function util() {}"),
+        (".gitignore", "ignored-link\n"),
+    ] {
+        let file = directory.path().join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, body).unwrap();
+    }
+    let root = directory.path();
+    // A documentation link, a supported-name link outside the tree, a
+    // directory link outside it, an in-tree directory link, a dangling link,
+    // an ignored link and a link named like an excluded directory.
+    symlink(root.join("AGENTS.md"), root.join("CLAUDE.md")).unwrap();
+    symlink(outside.path().join("hidden.ts"), root.join("src/source.ts")).unwrap();
+    symlink(outside.path(), root.join("linked")).unwrap();
+    symlink(root.join("lib"), root.join("src/lib")).unwrap();
+    symlink(root.join("missing.ts"), root.join("dangling.ts")).unwrap();
+    symlink(outside.path(), root.join("ignored-link")).unwrap();
+    symlink(outside.path(), root.join("node_modules")).unwrap();
+    let selection = enumerate_selection(root).unwrap();
+    assert_eq!(selection.files, ["lib/util.ts", "src/app.ts"]);
+    assert_eq!(
+        selection.unfollowed,
+        [
+            "CLAUDE.md",
+            "dangling.ts",
+            "linked",
+            "src/lib",
+            "src/source.ts"
+        ]
+    );
+    assert_eq!(enumerate_paths(root).unwrap(), selection.files);
+    // The ordinary walk selects the same files.
+    let mut ordinary = Vec::new();
+    crate::collect_ts_files(root, &mut ordinary).unwrap();
+    assert_eq!(ordinary, selection.files);
+    // A tree without symlinks reports none.
+    let plain = tempfile::tempdir().unwrap();
+    fs::write(plain.path().join("a.ts"), b"").unwrap();
+    assert!(
+        enumerate_selection(plain.path())
+            .unwrap()
+            .unfollowed
+            .is_empty()
+    );
     // macOS rejects creation of this filename with EILSEQ. Linux permits the
     // raw directory entry, so it exercises the adapter's exact-UTF-8 rejection.
     #[cfg(target_os = "linux")]

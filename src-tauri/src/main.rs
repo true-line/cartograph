@@ -1109,6 +1109,8 @@ struct ProducerReads {
     omitted_receipt_facts_complete: bool,
     /// Whether the captured TypeScript producer ran (#725).
     captured_ts_ran: bool,
+    /// Symlinks the captured TypeScript selection did not follow (#1229).
+    unfollowed_links: Vec<String>,
 }
 
 impl Default for ProducerReads {
@@ -1122,6 +1124,7 @@ impl Default for ProducerReads {
             omitted_receipt_facts: Vec::new(),
             omitted_receipt_facts_complete: true,
             captured_ts_ran: false,
+            unfollowed_links: Vec::new(),
         }
     }
 }
@@ -4233,7 +4236,10 @@ fn run_ingest<R: tauri::Runtime>(
         .prepare(source, root, &[])
         .map_err(&fail)?;
     let mut receipts = Vec::new();
-    let mut reads = ProducerReads::default();
+    let mut reads = ProducerReads {
+        unfollowed_links: primary.unfollowed.clone(),
+        ..ProducerReads::default()
+    };
     let (extraction, layers, delta) = {
         let mut caches = state
             .extraction_caches
@@ -4305,7 +4311,8 @@ fn run_ingest<R: tauri::Runtime>(
     .with_receipt_omissions(
         ingest::coverage::ReceiptOmission::StoreCapacity,
         &reads.omitted_stored_receipts,
-    );
+    )
+    .with_unfollowed_links(&reads.unfollowed_links);
     let record =
         coverage_record(&coverage, source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let omission_records = reads.source_omissions();
@@ -4672,7 +4679,10 @@ fn add_repo_blocking<R: tauri::Runtime>(
         .prepare(&source, root, &[])
         .map_err(&fail)?;
     let mut receipts = Vec::new();
-    let mut reads = ProducerReads::default();
+    let mut reads = ProducerReads {
+        unfollowed_links: primary.unfollowed.clone(),
+        ..ProducerReads::default()
+    };
     let (extraction, layers, delta) = {
         let mut caches = state
             .extraction_caches
@@ -4744,7 +4754,8 @@ fn add_repo_blocking<R: tauri::Runtime>(
     .with_receipt_omissions(
         ingest::coverage::ReceiptOmission::StoreCapacity,
         &reads.omitted_stored_receipts,
-    );
+    )
+    .with_unfollowed_links(&reads.unfollowed_links);
     let record =
         coverage_record(&coverage, &source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let omission_records = reads.source_omissions();
@@ -4973,7 +4984,10 @@ fn add_system_blocking<R: tauri::Runtime>(
             .prepare(source, root, &entry.layers)
             .map_err(&fail)?;
         let mut receipts = Vec::new();
-        let mut reads = ProducerReads::default();
+        let mut reads = ProducerReads {
+            unfollowed_links: primary.unfollowed.clone(),
+            ..ProducerReads::default()
+        };
         let (extraction, repo_layers, repo_delta) = {
             let mut caches = state
                 .extraction_caches
@@ -5048,7 +5062,8 @@ fn add_system_blocking<R: tauri::Runtime>(
         .with_receipt_omissions(
             ingest::coverage::ReceiptOmission::StoreCapacity,
             &reads.omitted_stored_receipts,
-        );
+        )
+        .with_unfollowed_links(&reads.unfollowed_links);
         let record = coverage_record(&coverage, source, job_id, &active_plugins, &registries)
             .map_err(&fail)?;
         let omission_records = reads.source_omissions();

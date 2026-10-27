@@ -1769,6 +1769,59 @@ fn captured_ingest_names_declaration_receipt_omissions_in_coverage() {
     assert!(inventory.limited);
 }
 
+// AC-0148 (#1229): a symlink in the tree, such as CLAUDE.md -> AGENTS.md,
+// no longer fails captured recovery; it is skipped unread and named in
+// coverage, and the tree's sources are still captured.
+#[cfg(unix)]
+#[test]
+fn captured_ingest_skips_symlinks_and_names_them_in_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("AGENTS.md"), "notes").unwrap();
+    std::fs::write(root.join("app.ts"), "export function app() { return 1; }\n").unwrap();
+    std::os::unix::fs::symlink(root.join("AGENTS.md"), root.join("CLAUDE.md")).unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+    let ((nodes, _), coverage) = state
+        .graph
+        .lock()
+        .unwrap()
+        .read_snapshot_with_coverage_bounded(
+            core_graph::SnapshotReadLimits::default(),
+            core_graph::coverage::CoverageReadLimits {
+                max_records: 1,
+                max_bytes: 2 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+    assert!(
+        nodes
+            .iter()
+            .any(|node| node.label == "File" && node.id.ends_with("app.ts"))
+    );
+    let inventory: ingest::coverage::RepoCoverage =
+        serde_json::from_str(&coverage[0].record.inventory_json).unwrap();
+    let skipped = inventory
+        .unsupported
+        .iter()
+        .find(|entry| entry.capability == ingest::coverage::UNFOLLOWED_LINK_CAPABILITY)
+        .expect("unfollowed symlinks are named");
+    assert_eq!(
+        (skipped.occurrences, skipped.first_site.as_str()),
+        (1, "CLAUDE.md")
+    );
+    assert!(inventory.limited);
+}
+
 // AC-0314: when receipt store capacity omits receipts during recovery,
 // publication records per-fact StoreCapacity omissions while keeping the
 // retained fact's source binding intact. (T-0314)
