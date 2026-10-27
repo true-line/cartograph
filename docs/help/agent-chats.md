@@ -50,3 +50,11 @@ InferredWeak attribution and do not change confirmed facts. **Inspect citation**
 refreshes that exact task before reading its retained historical evidence;
 switching or closing cancels presentation of late evidence. No current checkout
 source is substituted. Pending or unavailable chats have no admitted answer.
+
+Choose **Reply here** to use the same supported follow-up form inside a saved
+pane. Send creates a separate child task in the same conversation; its actual
+saved answer opens using the normal four-pane rule. The selected parent result
+is supplied as bounded T3 history, not all earlier questions or answers. Closing
+before submission cancels this input; submitted or uncertain work retains its
+existing durable request and retry identity. The summon shortcut opens the
+standalone dialog instead.

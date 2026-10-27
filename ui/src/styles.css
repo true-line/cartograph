@@ -4466,3 +4466,5 @@ details.investigation-section { display: block; }
 .agent-chat-pane header { display: grid; gap: .5rem; }
 .agent-chat-pane code { overflow-wrap: anywhere; }
 @media (max-width: 1100px) { .agent-chat-docks { grid-template-columns: 1fr; } .agent-chat-docks-3 > :first-child { grid-column: auto; } }
+
+.quick-dispatch-inline .quick-dispatch-dialog { width: 100%; max-height: none; box-shadow: none; }

@@ -213,6 +213,9 @@ export default function App() {
   const [followUpCancelRequest, setFollowUpCancelRequest] = useState(0);
   const [followUpContext, setFollowUpContext] = useState<InvestigationFollowUpContext | null>(null);
   const [preparingFollowUpTask, setPreparingFollowUpTask] = useState<string | null>(null);
+  const replyHosts = useRef(new Map<string, HTMLDivElement>());
+  const inlineReplyTask = useRef<string | null>(null);
+  const [inlineReply, setInlineReply] = useState<{ taskId: string; host: HTMLDivElement } | null>(null);
   const [followUpError, setFollowUpError] = useState<string | null>(null);
   const followUpCaptureGeneration = useRef(0);
   const preparingFollowUpTaskRef = useRef<string | null>(null);
@@ -225,20 +228,25 @@ export default function App() {
     activeFollowUpParentRef.current = null;
     setPreparingFollowUpTask(null);
     setFollowUpContext(null);
+    inlineReplyTask.current = null; setInlineReply(null);
     setFollowUpCancelRequest((request) => request + 1);
   }, []);
 
+  const registerReplyHost = useCallback((taskId: string, host: HTMLDivElement | null) => {
+    if (host) replyHosts.current.set(taskId, host);
+    else replyHosts.current.delete(taskId);
+    if (!host && inlineReplyTask.current === taskId) {
+      cancelFollowUpCapture(taskId); inlineReplyTask.current = null; setInlineReply(null);
+    }
+  }, [cancelFollowUpCapture]);
+
   const openStandaloneQuickDispatch = useCallback(() => {
-    ++followUpCaptureGeneration.current;
-    preparingFollowUpTaskRef.current = null;
-    activeFollowUpParentRef.current = null;
-    setPreparingFollowUpTask(null);
-    setFollowUpContext(null);
+    cancelFollowUpCapture();
     setFollowUpError(null);
     setQuickDispatchOpenRequest((request) => request + 1);
-  }, []);
+  }, [cancelFollowUpCapture]);
 
-  const prepareParentFollowUp = useCallback((taskId: string) => {
+  const prepareParentFollowUp = useCallback((taskId: string, inline = false) => {
     const currentStore = useInvestigationStore.getState();
     if (currentStore.pendingStart) {
       setFollowUpError('Recover the pending investigation request before starting a follow-up.');
@@ -249,6 +257,10 @@ export default function App() {
       setFollowUpError('Reopen this saved chat before preparing a follow-up.');
       return;
     }
+    const host = inline ? replyHosts.current.get(taskId) : undefined;
+    if (inline && !host?.isConnected) return;
+    cancelFollowUpCapture();
+    if (host) { inlineReplyTask.current = taskId; setInlineReply({ taskId, host }); }
     const generation = ++followUpCaptureGeneration.current;
     setFollowUpError(null);
     activeFollowUpParentRef.current = null;
@@ -268,6 +280,7 @@ export default function App() {
           !result || result.investigation_id !== taskId || !chat || chat.task_id !== taskId ||
           !detail.conversation_id || chat.messages.length !== 2 || reference?.kind !== 'result_reference' ||
           reference.task_id !== taskId || reference.result_id !== result.result_id || chat.messages[0]?.message.kind !== 'user_question') {
+        cancelFollowUpCapture();
         setFollowUpError(state?.error ?? state?.chatError ?? 'Refresh this completed saved task before starting a follow-up.');
         return;
       }
@@ -283,9 +296,10 @@ export default function App() {
       if (generation !== followUpCaptureGeneration.current) return;
       preparingFollowUpTaskRef.current = null;
       setPreparingFollowUpTask(null);
+      cancelFollowUpCapture();
       setFollowUpError('The saved parent task could not be refreshed. Try again before starting a follow-up.');
     });
-  }, []);
+  }, [cancelFollowUpCapture]);
 
   useEffect(() => {
     void refresh();
@@ -646,7 +660,7 @@ export default function App() {
         return <AgentChatsSurface state={investigations} onOpenResult={(id) => {
           navigate('investigations');
           void useInvestigationStore.getState().open(id);
-        }} onFollowUp={prepareParentFollowUp} onCancelFollowUp={cancelFollowUpCapture}
+        }} onFollowUp={prepareParentFollowUp} onReplyHost={registerReplyHost} onCancelFollowUp={cancelFollowUpCapture}
         preparingFollowUpTask={preparingFollowUpTask} followUpError={followUpError} />;
       case 'atlas':
         return (
@@ -914,11 +928,13 @@ export default function App() {
         onNavigate={navigate}
       />
       <InvestigationQuickDispatch fallbackEnabled={quickDispatchFallbackEnabled} openRequest={quickDispatchOpenRequest}
-        followUpContext={followUpContext}
+        followUpContext={followUpContext} inlineReply={inlineReply}
+        onStandalone={openStandaloneQuickDispatch} onCloseParent={cancelFollowUpCapture}
         followUpCancelRequest={followUpCancelRequest}
         onNavigate={navigate} onAcceptedTask={(taskId) => {
           activeFollowUpParentRef.current = null;
           setFollowUpContext(null);
+          inlineReplyTask.current = null; setInlineReply(null);
           useAgentChatDockStore.getState().requestOpenFromNotice(taskId);
           navigate('agent-chats');
         }} />

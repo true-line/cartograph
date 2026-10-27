@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fireEvent, fn, userEvent, waitFor, within } from 'storybook/test';
@@ -632,5 +633,77 @@ export const CompletionRolesRequireHostCatalogSupport: Story = {
     pressMeta(' ', 'Space');
     await expect(canvas.queryByRole('option', { name: /spec-writer@1/ })).not.toBeInTheDocument();
     await expect(canvas.queryByRole('option', { name: /gap-triager@1/ })).not.toBeInTheDocument();
+  },
+};
+
+// AC-0398: one instance moves portal placement, preserves real completion retry and rejects detached hosts.
+export const InlineReplyPlacementAndCancellation: Story = {
+  ...ParentBoundFollowUpUsesFreshChoices,
+  render: function InlinePlacement(args) {
+    const [a, setA] = useState<HTMLDivElement | null>(null);
+    const [b, setB] = useState<HTMLDivElement | null>(null);
+    const [request, setRequest] = useState(1);
+    const [second, setSecond] = useState(false);
+    const parent = { ...args.followUpContext!, ...(second ? { parent_id: 'second-parent', conversation_id: 'second-conversation' } : {}) };
+    return <><div ref={setA} data-testid="inline-a" /><div ref={setB} data-testid="inline-b" />
+      <button type="button" onClick={() => { setSecond(true); setRequest((value) => value + 1); }}>Open second pane</button>
+      <button type="button" onClick={() => { setSecond(false); setRequest((value) => value + 1); }}>Open first pane</button>
+      {a && b && <InvestigationQuickDispatch {...args} followUpContext={parent} openRequest={request}
+        inlineReply={{ taskId: parent.parent_id, host: second ? b : a }} />}</>;
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const hostA = canvas.getByTestId('inline-a'); const hostB = canvas.getByTestId('inline-b');
+    let reply = within(await within(hostA).findByRole('region', { name: 'Reply to saved-parent' }));
+    await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument();
+    await expect(reply.getByLabelText('Question')).toHaveFocus();
+    await expect(reply.getByText(/not all earlier questions or answers/)).toBeVisible();
+    await reply.findByText('acme/api');
+    await expect(completionChoiceReads).toBe(1);
+    await userEvent.click(reply.getByRole('button', { name: 'Require inventory acme/api' }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Open second pane' }));
+    await expect(await within(hostB).findByLabelText('Question')).toHaveFocus();
+    await within(hostB).findByText('acme/api');
+    await expect(completionChoiceReads).toBe(2);
+    await expect(within(hostB).getByRole('button', { name: 'Require inventory acme/api' })).toHaveAttribute('aria-pressed', 'false');
+    await userEvent.click(canvas.getByRole('button', { name: 'Open first pane' }));
+    reply = within(await within(hostA).findByRole('region', { name: 'Reply to saved-parent' }));
+    await expect(reply.getByLabelText('Question')).toHaveFocus();
+    await reply.findByText('acme/api');
+    await expect(completionChoiceReads).toBe(3);
+    await userEvent.click(reply.getByRole('button', { name: 'Require inventory acme/api' }));
+    await userEvent.type(reply.getByLabelText('Question'), 'A real completion reply.');
+    await userEvent.click(reply.getByRole('button', { name: 'Send reply task' }));
+    await waitFor(() => expect(completionRequests).toHaveLength(1));
+    await waitFor(() => expect(reply.getByRole('button', { name: 'Require inventory acme/api' })).toBeEnabled());
+    await userEvent.click(reply.getByRole('button', { name: 'Require inventory acme/api' }));
+    await userEvent.click(reply.getByRole('button', { name: 'Send reply task' }));
+    await waitFor(() => expect(completionRequests).toHaveLength(2));
+    const pending = structuredClone(useInvestigationStore.getState().pendingStart);
+    const retry = reply.getByRole('button', { name: 'Retry same request' });
+    await expect(retry).toBeEnabled();
+    const container = hostA.parentElement!;
+    hostA.remove(); fireEvent.click(retry);
+    await expect(completionRequests).toHaveLength(2);
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
+    container.prepend(hostA);
+    await userEvent.click(retry);
+    await waitFor(() => expect(completionRequests).toHaveLength(3));
+    expect(completionRequests[2]).toEqual(completionRequests[1]);
+    await expect(args.onAcceptedTask).toHaveBeenCalledWith('follow-up-child');
+    await userEvent.click(canvas.getByRole('button', { name: 'Open second pane' }));
+    const second = within(await within(hostB).findByRole('region', { name: 'Reply to second-parent' }));
+    await expect(second.getByLabelText('Question')).toHaveFocus();
+    await second.findByText('acme/api');
+    await userEvent.click(second.getByRole('button', { name: 'Require inventory acme/api' }));
+    await userEvent.type(second.getByLabelText('Question'), 'Do not submit from a detached host.');
+    const send = second.getByRole('button', { name: 'Send reply task' });
+    await expect(send).toBeEnabled();
+    hostB.remove(); fireEvent.click(send);
+    await expect(completionRequests).toHaveLength(3); container.append(hostB);
+    pressMeta(' ', 'Space');
+    await expect(await canvas.findByRole('dialog', { name: 'Quick investigation dispatch' })).toBeVisible();
+    await expect(canvas.getAllByRole('dialog')).toHaveLength(1);
+    await expect(canvas.queryByRole('region', { name: 'Reply to second-parent' })).not.toBeInTheDocument();
   },
 };

@@ -7,10 +7,16 @@ import { InvestigationChatTranscript } from './InvestigationChatTranscript';
 export interface AgentChatsSurfaceProps {
   state: InvestigationState;
   onOpenResult: (investigationId: string) => void;
-  onFollowUp: (taskId: string) => void;
+  onFollowUp: (taskId: string, inline?: boolean) => void;
+  onReplyHost?: (taskId: string, host: HTMLDivElement | null) => void;
   onCancelFollowUp: (taskId: string) => void;
   preparingFollowUpTask: string | null;
   followUpError: string | null;
+}
+
+function ReplyHost({ taskId, onHost }: { taskId: string; onHost: NonNullable<AgentChatsSurfaceProps['onReplyHost']> }) {
+  const assign = useCallback((node: HTMLDivElement | null) => onHost(taskId, node), [taskId, onHost]);
+  return <div ref={assign} data-reply-task={taskId} />;
 }
 
 function statusLabel(status: string) {
@@ -19,7 +25,7 @@ function statusLabel(status: string) {
 
 /** A saved task-chat destination; all history and transcript reads use the
  * existing investigation coordinator and its task/result binding checks. */
-export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onCancelFollowUp, preparingFollowUpTask, followUpError }: AgentChatsSurfaceProps) {
+export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost, onCancelFollowUp, preparingFollowUpTask, followUpError }: AgentChatsSurfaceProps) {
   const [searchText, setSearchText] = useState(state.historySearch);
   const dock = useAgentChatDockStore();
   const [conversation, setConversation] = useState<ChatTurn | null>(null);
@@ -138,15 +144,19 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onCancelFol
             aria-label={`Saved chat ${chat.task_id}`}>
             <header><h3>{question}</h3><code>{chat.task_id}</code>
               <p className="muted">Last observed snapshot · {chat.chat_id}</p>
+              {turn.parent_id && <p className="muted">Follow-up to {turn.parent_id} · conversation {turn.conversation_id}</p>}
               <button type="button" className="secondary-button" aria-pressed={dock.focusedTask === chat.task_id}
                 onClick={() => dock.open(chat.task_id)}>Focus / refresh {chat.task_id}</button>
               <button type="button" className="secondary-button" onClick={() => showConversation(turn)}>Conversation turns</button>
               <button type="button" className="secondary-button" disabled={preparingFollowUpTask !== null}
                 onClick={() => onFollowUp(chat.task_id)}>Follow-up task</button>
+              {onReplyHost && <button type="button" className="secondary-button" disabled={preparingFollowUpTask !== null}
+                onClick={() => onFollowUp(chat.task_id, true)}>Reply here</button>}
               <button type="button" className="secondary-button" onClick={() => { onCancelFollowUp(chat.task_id); dock.close(chat.task_id); if (conversation?.investigation_id === chat.task_id) closeTurns(); }}>Close {chat.task_id}</button>
             </header>
             <InvestigationChatTranscript chat={chat} status="saved" error={null}
               onRefresh={() => dock.open(chat.task_id)} onOpenResult={onOpenResult} />
+            {onReplyHost && <ReplyHost taskId={chat.task_id} onHost={onReplyHost} />}
             {answer && <InvestigationFindings readOnly sectionId={`saved-chat-findings-${chat.chat_id}`}
               result={answer.result} citations={answer.citations}
               citationId={dock.citation?.taskId === chat.task_id ? dock.citation.citationId : null}
