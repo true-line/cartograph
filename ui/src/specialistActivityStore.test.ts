@@ -171,13 +171,27 @@ describe('separate specialist task activity projection (AC-0379, AC-0381)', () =
       row = { ...item, reported_usage: usage, reported_cache_read_tokens: '18446744073709551615' }; await store.getState().refresh();
       expect(store.getState().status).toBe('ready');
       expect(store.getState().tasks[0].reported_usage).toEqual(usage);
+      expect(store.getState().tasks[0].reported_cache_read_tokens).toBe('18446744073709551615');
     }
     for (const usage of [null, {}, { input_tokens: null, output_tokens: null, extra: true },
       ...['01', '-1', '1.5', '1e3', '18446744073709551616', '9'.repeat(21), 1].map((input_tokens) => ({ input_tokens, output_tokens: null }))]) {
       row = { ...item, reported_usage: usage }; await store.getState().refresh();
       expect(store.getState().status).toBe('error');
     }
+    // AC-0419: cache availability is independent of absent/unknown input-output reports.
+    for (const cache of [null, '0', '18446744073709551615']) {
+      for (const usage of [{}, { reported_usage: { input_tokens: null, output_tokens: null } }]) {
+        row = { ...item, ...usage, reported_cache_read_tokens: cache }; await store.getState().refresh();
+        expect(store.getState().status).toBe('ready');
+        expect(store.getState().tasks[0].reported_cache_read_tokens).toBe(cache);
+      }
+    }
+    for (const cache of [undefined, 0, -1, {}, [], '', '01', '-1', '1.5', '1e3', '18446744073709551616', '9'.repeat(21)]) {
+      row = { ...item, reported_usage: { input_tokens: '1', output_tokens: '2' }, reported_cache_read_tokens: cache };
+      await store.getState().refresh(); expect(store.getState().status).toBe('error');
+    }
     row = item; await store.getState().refresh(); expect(store.getState().status).toBe('ready');
+    expect('reported_cache_read_tokens' in store.getState().tasks[0]).toBe(false);
   });
 
 });

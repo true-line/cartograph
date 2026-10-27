@@ -441,7 +441,8 @@ function SpecialistTaskRow({ task, onOpen }: { task: SpecialistActivityItem; onO
     <p className="muted">{status} · Saved provider: {task.saved_provider.mode} / {task.saved_provider.provider_id} · {task.saved_provider.model}</p>
     <p className="muted">{task.reported_usage
       ? `Reported tokens so far: input ${task.reported_usage.input_tokens ?? 'Unknown'}; output ${task.reported_usage.output_tokens ?? 'Unknown'}.`
-      : 'Reported tokens unavailable.'} May be incomplete; not a cost estimate.</p>
+      : 'Reported tokens unavailable.'} Provider-reported cache-read tokens so far: {task.reported_cache_read_tokens === undefined
+        ? 'Unavailable' : task.reported_cache_read_tokens ?? 'Unknown'}. May be incomplete; not a cost estimate.</p>
     <button type="button" className="secondary-button" aria-label={`Open investigation: ${summary.question}`}
       onClick={() => onOpen(summary.investigation_id)}>Open investigation</button>
   </article>;

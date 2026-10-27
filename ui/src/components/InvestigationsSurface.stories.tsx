@@ -228,6 +228,9 @@ export const SpecialistTaskActivity: Story = {
       if (command === 'list_specialist_task_activity') {
         expect(args).toEqual({ cursor: null });
         const page = { items: active.map((summary, index) => ({ summary,
+          ...(index === 0 ? { reported_cache_read_tokens: '18446744073709551615' }
+            : index === 1 ? { reported_cache_read_tokens: '0' }
+              : index === 2 ? { reported_cache_read_tokens: null } : {}),
           ...(index === 0 ? { reported_usage: { input_tokens: '18446744073709551615', output_tokens: null } }
             : index === 3 ? { reported_usage: { input_tokens: null, output_tokens: '42' } } : {}), saved_provider: {
           mode: summary.provider.mode, provider_id: summary.provider.provider_id, model: summary.provider.model,
@@ -267,6 +270,11 @@ export const SpecialistTaskActivity: Story = {
     await expect(auditor).toHaveTextContent('Reported tokens so far: input Unknown; output 42.');
     await expect(activityPanel.getAllByText(/Reported tokens unavailable/)).toHaveLength(2);
     await expect(domain).toHaveTextContent('May be incomplete; not a cost estimate.');
+    // AC-0419: different saved tasks retain exact cache values, unknown and absence.
+    await expect(domain).toHaveTextContent('Provider-reported cache-read tokens so far: 18446744073709551615.');
+    await expect(domain).toHaveTextContent('Provider-reported cache-read tokens so far: 0.');
+    await expect(auditor).toHaveTextContent('Provider-reported cache-read tokens so far: Unknown.');
+    await expect(auditor).toHaveTextContent('Provider-reported cache-read tokens so far: Unavailable.');
     await expect(activityPanel.getByText('Partial activity counts: queued 1, preparing 1, running 1, awaiting consent 1; cancellation requested 1 of 4 active tasks shown. More active tasks may exist.')).toBeVisible();
     await expect(activityPanel.findByText(/active task list is incomplete/i)).resolves.toBeVisible();
     await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
@@ -286,6 +294,8 @@ export const SpecialistTaskActivity: Story = {
     });
     await expect(activityPanel.getByText('Last observed partial activity counts: queued 1, preparing 1, running 1, awaiting consent 1; cancellation requested 1 of 4 active tasks shown. More active tasks may exist.')).toBeVisible();
     await expect(activityPanel.getByText(/Reported tokens so far: input 18446744073709551615/)).toBeVisible();
+    await expect(activityPanel.getByText(/Provider-reported cache-read tokens so far: 18446744073709551615/)).toBeVisible();
+    expect(useSpecialistActivityStore.getState().tasks[0].reported_cache_read_tokens).toBe('18446744073709551615');
     await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
     await expect(activityPanel.getAllByRole('button', { name: /Open investigation:/ })).toHaveLength(4);
     resolveRefresh({ items: tasks.filter((task) => task.summary.specialist_id !== 'domain-analyst@2'), next_cursor: null });
@@ -305,6 +315,8 @@ export const SpecialistTaskActivity: Story = {
     activityRefreshResponse = () => { throw new Error('refresh failed'); };
     await useSpecialistActivityStore.getState().refresh();
     await expect(activityPanel.findByText('Activity unknown')).resolves.toBeVisible();
+    expect(useSpecialistActivityStore.getState().tasks[0].reported_cache_read_tokens).toBe('18446744073709551615');
+    expect(activityPanel.queryByText(/Provider-reported cache-read tokens so far:/)).toBeNull();
     await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
     expect(activityElement.querySelector('.specialist-activity-counts')).toBeNull();
     expect(activityPanel.queryByRole('button', { name: /Open investigation:/ })).toBeNull();

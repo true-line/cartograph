@@ -15,6 +15,11 @@ export interface SpecialistActivityState {
   invalidate: () => void;
 }
 
+function validReportedCount(count: unknown): boolean {
+  return count === null || (typeof count === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(count) &&
+    (count.length < 20 || count <= '18446744073709551615'));
+}
+
 function validActivityItem(value: SpecialistActivityItem | null): value is SpecialistActivityItem {
   if (!value || !validSummary(value.summary) || !investigationIsInActiveHistory(value.summary) ||
       typeof value.summary.cancel_requested !== 'boolean') return false;
@@ -22,10 +27,9 @@ function validActivityItem(value: SpecialistActivityItem | null): value is Speci
     const usage = value.reported_usage;
     if (!usage || typeof usage !== 'object' || Array.isArray(usage) ||
         Object.keys(usage).sort().join(',') !== 'input_tokens,output_tokens' ||
-        ![usage.input_tokens, usage.output_tokens].every((count) => count === null ||
-          (typeof count === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(count) &&
-            (count.length < 20 || count <= '18446744073709551615')))) return false;
+        ![usage.input_tokens, usage.output_tokens].every(validReportedCount)) return false;
   }
+  if ('reported_cache_read_tokens' in value && !validReportedCount(value.reported_cache_read_tokens)) return false;
   const provider = value.saved_provider;
   if (!provider || typeof provider !== 'object' ||
       Object.keys(provider).sort().join(',') !== 'mode,model,provider_id' ||

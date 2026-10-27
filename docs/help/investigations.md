@@ -49,4 +49,4 @@ list; the notice is consumed only after the matching saved result and transcript
 are visible. This checks persisted task-bound result references only. It does
 not recover unread state after restart or create assistant messages.
 
-The app activity read also exposes provider-reported cache-read input tokens as optional backend metadata. Missing or uncertain reports remain unknown; reports are not a price or a complete lifetime bill. The activity screen does not yet display this counter. Existing byte limits apply, so optional projection metadata can be unavailable.
+Active task rows also show **Provider-reported cache-read tokens so far**, independently of input/output reports. Exact zero is shown as zero, **Unknown** means no known report, and **Unavailable** means the optional metadata was omitted. Reports may be incomplete and are not a price or a complete lifetime bill. Refresh keeps last-observed values; an error reports current activity unknown and hides retained rows.
