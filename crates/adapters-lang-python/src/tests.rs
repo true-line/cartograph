@@ -5911,3 +5911,529 @@ fn an_unproven_limiter_or_cors_decorator_stays_unknown() {
         );
     }
 }
+
+#[test]
+fn flask_admin_exposed_view_methods_become_flask_endpoints() {
+    // AC-0410 (#1193): Flask-Admin `@expose` methods of registered views are
+    // endpoints named `<endpoint>.<method>` under the view's URL; library
+    // routes and anything unreadable are Gaps.
+    let dir = tempfile::tempdir().unwrap();
+    let base = r#"
+from flask_admin import expose, AdminIndexView, BaseView
+from flask_admin.contrib import sqla
+from flask_login import current_user
+
+class BaseAdminView(BaseView):
+    def is_accessible(self):
+        return current_user.is_admin
+
+class SLModelView(sqla.ModelView, BaseAdminView):
+    page_size = 100
+
+class SLAdminIndexView(AdminIndexView):
+    @expose("/")
+    def index(self):
+        return "home"
+"#;
+    let search = r#"
+from flask import jsonify
+from flask_admin import BaseView, expose
+from app.admin.base import BaseAdminView
+
+class EmailSearchAdmin(BaseAdminView):
+    @expose("/", methods=["GET", "POST"])
+    def index(self):
+        return jsonify(ok=True)
+
+    @expose("/delete_user", methods=["POST"])
+    def delete_user(self):
+        return "deleted"
+
+    def helper(self):
+        return 1
+
+class ChildSearch(EmailSearchAdmin):
+    # Redefined without `@expose`, so no longer routed.
+    def delete_user(self):
+        return "nope"
+
+    @expose("extra")
+    def extra(self):
+        return "extra"
+
+class OpenView(BaseView):
+    @expose()
+    def index(self):
+        return "open"
+
+class Custom(BaseAdminView):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @expose("/")
+    def index(self):
+        return "custom"
+"#;
+    let complaint = r#"
+from flask_admin import expose
+from app.admin.base import SLModelView
+
+class ProviderComplaintAdmin(SLModelView):
+    @expose("/mark_ok", methods=["GET"])
+    def mark_ok(self):
+        return "ok"
+"#;
+    let index = r#"
+from flask import Flask
+from flask_admin import Admin
+from app.models import ProviderComplaint, User
+from app.admin.base import SLAdminIndexView, SLModelView
+from app.admin.search import EmailSearchAdmin, ChildSearch, OpenView, Custom
+from app.admin.complaint import ProviderComplaintAdmin
+
+class Menu:
+    def add_view(self, view):
+        pass
+
+def init_admin(app: Flask, endpoint):
+    admin = Admin(name="SimpleLogin", template_mode="bootstrap4")
+    admin.init_app(app, index_view=SLAdminIndexView())
+    admin.add_view(EmailSearchAdmin(name="Email Search", endpoint="admin.email_search"))
+    admin.add_view(ChildSearch(endpoint="child", url="/kids"))
+    admin.add_view(OpenView(url="open"))
+    admin.add_view(ProviderComplaintAdmin(ProviderComplaint, None))
+    admin.add_view(SLModelView(User, None))
+    admin.add_view(EmailSearchAdmin(endpoint=endpoint))
+    admin.add_view(Custom())
+    Menu().add_view(OpenView())
+"#;
+    let site = r#"
+from flask import Flask
+from flask_admin import Admin
+from app.admin.search import OpenView
+
+app = Flask(__name__)
+admin = Admin(app, url="/backoffice")
+admin.add_view(OpenView(endpoint="o2"))
+"#;
+    // A rebound `expose` is not Flask-Admin's.
+    let fake = r#"
+from flask_admin import Admin, BaseView, expose
+
+def expose(url="/"):
+    return lambda view: view
+
+class Lookalike(BaseView):
+    @expose("/look")
+    def index(self):
+        return "look"
+
+def setup(app):
+    admin = Admin(app)
+    admin.add_view(Lookalike())
+"#;
+    write(dir.path(), "app/admin/base.py", base);
+    write(dir.path(), "app/admin/search.py", search);
+    write(dir.path(), "app/admin/complaint.py", complaint);
+    write(dir.path(), "app/admin/index.py", index);
+    write(dir.path(), "app/site.py", site);
+    write(dir.path(), "app/fake.py", fake);
+    write(
+        dir.path(),
+        "app/models.py",
+        "class ProviderComplaint:\n    pass\n\nclass User:\n    pass\n",
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let mut endpoints = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| {
+            assert_eq!(node.props["mount"], "flask_admin");
+            assert_eq!(node.props["framework"], "flask");
+            (
+                node.props["method"].as_str().unwrap().to_string(),
+                node.props["path"].as_str().unwrap().to_string(),
+                node.props["endpoint_name"].as_str().unwrap().to_string(),
+                node.props["prov"]["confidence_tier"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                node.props["auth"]["reasons"][0]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                node.props["handler_sym"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    endpoints.sort();
+    let sym = |path: &str, name: &str| format!("sym:local/python-service@{path}#{name}");
+    let search_sym = |name: &str| sym("app/admin/search.py", name);
+    let checked = "flask_admin_access_check:BaseAdminView";
+    let open = "flask_admin_default_allows_all";
+    let row = |method: &str, path: &str, name: &str, tier: &str, auth: &str, handler: String| {
+        (
+            method.to_string(),
+            path.to_string(),
+            name.to_string(),
+            tier.to_string(),
+            auth.to_string(),
+            handler,
+        )
+    };
+    assert_eq!(
+        endpoints,
+        vec![
+            row(
+                "GET",
+                "/admin/",
+                "admin.index",
+                "InferredStrong",
+                open,
+                sym("app/admin/base.py", "SLAdminIndexView.index")
+            ),
+            row(
+                "GET",
+                "/admin/admin.email_search/",
+                "admin.email_search.index",
+                "InferredStrong",
+                checked,
+                search_sym("EmailSearchAdmin.index")
+            ),
+            row(
+                "GET",
+                "/admin/open/",
+                "openview.index",
+                "InferredStrong",
+                open,
+                search_sym("OpenView.index")
+            ),
+            row(
+                "GET",
+                "/admin/providercomplaint/mark_ok",
+                "providercomplaint.mark_ok",
+                "InferredStrong",
+                checked,
+                sym("app/admin/complaint.py", "ProviderComplaintAdmin.mark_ok")
+            ),
+            row(
+                "GET",
+                "/backoffice/o2/",
+                "o2.index",
+                "Confirmed",
+                open,
+                search_sym("OpenView.index")
+            ),
+            row(
+                "GET",
+                "/kids/",
+                "child.index",
+                "InferredStrong",
+                checked,
+                search_sym("EmailSearchAdmin.index")
+            ),
+            row(
+                "GET",
+                "/kids/extra",
+                "child.extra",
+                "InferredStrong",
+                checked,
+                search_sym("ChildSearch.extra")
+            ),
+            row(
+                "POST",
+                "/admin/admin.email_search/",
+                "admin.email_search.index",
+                "InferredStrong",
+                checked,
+                search_sym("EmailSearchAdmin.index")
+            ),
+            row(
+                "POST",
+                "/admin/admin.email_search/delete_user",
+                "admin.email_search.delete_user",
+                "InferredStrong",
+                checked,
+                search_sym("EmailSearchAdmin.delete_user")
+            ),
+            row(
+                "POST",
+                "/kids/",
+                "child.index",
+                "InferredStrong",
+                checked,
+                search_sym("EmailSearchAdmin.index")
+            ),
+        ]
+    );
+    // Exposed methods read as Flask handlers.
+    let delete = extraction
+        .nodes
+        .iter()
+        .find(|node| node.props["endpoint_name"] == "admin.email_search.delete_user")
+        .unwrap();
+    assert_eq!(
+        delete.props["responses"]["kinds"],
+        serde_json::json!(["text"])
+    );
+    let mut gaps = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.id.starts_with("gap:flask_admin:"))
+        .map(|node| {
+            (
+                node.props["reason"].as_str().unwrap().to_string(),
+                node.props["class"].as_str().unwrap().to_string(),
+                node.props["prov"]["evidence"][0]["path"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    gaps.sort();
+    let gap = |reason: &str, class: &str, path: &str| {
+        (reason.to_string(), class.to_string(), path.to_string())
+    };
+    assert_eq!(
+        gaps,
+        vec![
+            gap(
+                "flask_admin_admin_instance_not_proven",
+                "OpenView",
+                "app/admin/index.py"
+            ),
+            gap(
+                "flask_admin_library_index_route",
+                "AdminIndexView",
+                "app/fake.py"
+            ),
+            gap(
+                "flask_admin_library_index_route",
+                "AdminIndexView",
+                "app/site.py"
+            ),
+            gap(
+                "flask_admin_model_view_routes_in_library",
+                "ProviderComplaintAdmin",
+                "app/admin/index.py"
+            ),
+            gap(
+                "flask_admin_model_view_routes_in_library",
+                "SLModelView",
+                "app/admin/index.py"
+            ),
+            gap(
+                "flask_admin_view_endpoint_not_literal",
+                "EmailSearchAdmin",
+                "app/admin/index.py"
+            ),
+            gap(
+                "flask_admin_view_overrides:__init__:Custom",
+                "",
+                "app/admin/index.py"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn flask_admin_views_resolve_by_lexical_binding_and_c3_order() {
+    // AC-0410 (#1193 review): a view or base name is the class it names only
+    // where nothing shadows it, and a method's owner follows Python's C3
+    // MRO, as `AdminViewMeta`'s `dir`/`getattr` do.
+    let dir = tempfile::tempdir().unwrap();
+    let shadow = r#"
+from flask import Flask
+from flask_admin import Admin, BaseView, expose
+from app.views import Imp
+
+class V(BaseView):
+    @expose("/")
+    def index(self):
+        return "module view"
+
+class Root(BaseView):
+    @expose("/")
+    def index(self):
+        return "root"
+
+    @expose("/base")
+    def page(self):
+        return "base"
+
+class Left(Root):
+    pass
+
+class Right(Root):
+    @expose("/right")
+    def page(self):
+        return "right"
+
+class Quiet(Root):
+    def page(self):
+        return "quiet"
+
+class Diamond(Left, Right):
+    pass
+
+class QuietDiamond(Left, Quiet):
+    pass
+
+class Single(Left):
+    pass
+
+class Inconsistent(Root, Left):
+    pass
+
+class Twice(BaseView):
+    @expose("/")
+    def index(self):
+        return "twice"
+
+Twice = V
+Alias = V
+
+class Dup(Root, Root):
+    pass
+
+app = Flask(__name__)
+admin = Admin(app)
+admin.add_view(V(endpoint="v"))
+admin.add_view(Imp(endpoint="imp"))
+admin.add_view(Diamond(url="/d", endpoint="d"))
+admin.add_view(QuietDiamond(url="/q", endpoint="q"))
+admin.add_view(Single(url="/s", endpoint="s"))
+admin.add_view(Inconsistent(url="/i", endpoint="i"))
+admin.add_view(Twice(endpoint="twice"))
+admin.add_view(Alias(endpoint="alias"))
+admin.add_view(Dup(endpoint="dup"))
+
+def register(V):
+    admin.add_view(V(endpoint="param"))
+
+def register_local():
+    Imp = V
+    admin.add_view(Imp(endpoint="local"))
+
+def register_match(choice):
+    match choice:
+        case Imp:
+            admin.add_view(Imp(endpoint="captured"))
+
+def register_keyword(choice):
+    match choice:
+        case dict(key=Imp):
+            admin.add_view(Imp(endpoint="keyword"))
+
+# A class pattern and a value pattern only read `Imp`.
+def register_class(choice):
+    match choice:
+        case Imp():
+            admin.add_view(Imp(endpoint="classpat"))
+
+def register_value(choice):
+    match choice:
+        case Imp.X:
+            admin.add_view(Imp(endpoint="valuepat"))
+"#;
+    let views = r#"
+from flask_admin import BaseView, expose
+
+class Imp(BaseView):
+    @expose("/")
+    def index(self):
+        return "imported"
+"#;
+    // A rebound library base is no longer Flask-Admin's `BaseView`.
+    let rebase = r#"
+from flask import Flask
+from flask_admin import Admin, BaseView, expose
+
+BaseView = dict
+
+class Bad(BaseView):
+    @expose("/")
+    def index(self):
+        return "bad"
+
+app = Flask(__name__)
+admin = Admin(app)
+admin.add_view(Bad(endpoint="bad"))
+"#;
+    write(dir.path(), "app/shadow.py", shadow);
+    write(dir.path(), "app/views.py", views);
+    write(dir.path(), "app/rebase.py", rebase);
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let mut endpoints = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| {
+            format!(
+                "{} {} {} {} {}",
+                node.props["method"].as_str().unwrap(),
+                node.props["path"].as_str().unwrap(),
+                node.props["endpoint_name"].as_str().unwrap(),
+                node.props["prov"]["confidence_tier"].as_str().unwrap(),
+                node.props["handler_sym"].as_str().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    endpoints.sort();
+    let mut gaps = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.id.starts_with("gap:flask_admin:"))
+        .map(|node| {
+            format!(
+                "{} {} {}",
+                node.props["reason"].as_str().unwrap(),
+                node.props["class"].as_str().unwrap(),
+                node.props["prov"]["evidence"][0]["path"].as_str().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    gaps.sort();
+    let sym = |name: &str| format!("sym:local/python-service@app/shadow.py#{name}");
+    assert_eq!(
+        endpoints,
+        vec![
+            "GET /admin/classpat/ classpat.index Confirmed sym:local/python-service@app/views.py#Imp.index"
+                .to_string(),
+            "GET /admin/imp/ imp.index Confirmed sym:local/python-service@app/views.py#Imp.index"
+                .to_string(),
+            format!("GET /admin/v/ v.index Confirmed {}", sym("V.index")),
+            "GET /admin/valuepat/ valuepat.index Confirmed sym:local/python-service@app/views.py#Imp.index"
+                .to_string(),
+            format!("GET /d/ d.index Confirmed {}", sym("Root.index")),
+            // C3: Diamond, Left, Right, Root — Right's override wins.
+            format!("GET /d/right d.page Confirmed {}", sym("Right.page")),
+            // QuietDiamond, Left, Quiet, Root: Quiet's unexposed `page` owns it.
+            format!("GET /q/ q.index Confirmed {}", sym("Root.index")),
+            format!("GET /s/ s.index Confirmed {}", sym("Root.index")),
+            format!("GET /s/base s.page Confirmed {}", sym("Root.page")),
+        ]
+    );
+    assert_eq!(
+        gaps,
+        vec![
+            "flask_admin_library_index_route AdminIndexView app/rebase.py",
+            "flask_admin_library_index_route AdminIndexView app/shadow.py",
+            "flask_admin_view_base_not_modelled:BaseView  app/rebase.py",
+            // An assignment, not the class it names.
+            "flask_admin_view_class_not_modelled:Alias  app/shadow.py",
+            // `Imp = V` in `register_local`, and the captures `case Imp:` and
+            // `key=Imp`.
+            "flask_admin_view_class_not_modelled:Imp  app/shadow.py",
+            "flask_admin_view_class_not_modelled:Imp  app/shadow.py",
+            "flask_admin_view_class_not_modelled:Imp  app/shadow.py",
+            "flask_admin_view_class_not_modelled:Twice  app/shadow.py",
+            // The parameter `V` of `register`.
+            "flask_admin_view_class_not_modelled:V  app/shadow.py",
+            "flask_admin_view_mro_inconsistent:Dup  app/shadow.py",
+            "flask_admin_view_mro_inconsistent:Inconsistent  app/shadow.py",
+        ]
+    );
+}

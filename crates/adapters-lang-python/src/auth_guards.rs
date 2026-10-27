@@ -65,7 +65,8 @@ use crate::app_scope::{self, AppRef, Apps};
 use crate::request_inputs::{binding_sites, handler_bindings};
 use crate::responses::{self, FnKey, Resolver};
 use crate::{
-    Extraction, FileCx, ImportBinding, module_binding, prov_from, route_decorator, symbol_id,
+    Extraction, FileCx, ImportBinding, module_binding, prov_from, route_decorator, scope_binding,
+    symbol_id,
 };
 use core_prov::{ConfidenceTier, EvidenceRef};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -192,7 +193,7 @@ fn dotted_parts(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<Vec<String>> {
 
 /// The full dotted name an identifier / attribute chain names through
 /// the file's import bindings.
-fn import_dotted(
+pub(crate) fn import_dotted(
     cx: &FileCx<'_>,
     node: TsNode<'_>,
     bindings: &HashMap<String, ImportBinding>,
@@ -230,7 +231,12 @@ fn import_dotted(
 /// Whether the file rebinds `name` after its import, or any function or
 /// class enclosing `scope` (the handler itself included) binds it, so the
 /// name at `scope` may not be the imported one.
-fn rebound(cx: &FileCx<'_>, root: TsNode<'_>, name: &str, scope: Option<TsNode<'_>>) -> bool {
+pub(crate) fn rebound(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    name: &str,
+    scope: Option<TsNode<'_>>,
+) -> bool {
     if module_binding(cx, root, name).writes.len() > 1 {
         return true;
     }
@@ -239,7 +245,12 @@ fn rebound(cx: &FileCx<'_>, root: TsNode<'_>, name: &str, scope: Option<TsNode<'
             return false;
         };
         match node.kind() {
-            "function_definition" => handler_bindings(cx, node, body).contains(name),
+            // `scope_binding` also sees `match` captures and other forms
+            // `handler_bindings` does not name.
+            "function_definition" => {
+                handler_bindings(cx, node, body).contains(name)
+                    || !scope_binding(cx, node, name).writes.is_empty()
+            }
             "class_definition" => {
                 let mut bound = false;
                 binding_sites(cx, body, &mut |_, names| bound |= names.contains(name));
