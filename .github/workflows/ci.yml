@@ -219,6 +219,12 @@ jobs:
       - name: Placeholder frontend dist
         run: mkdir -p ui/dist
 
+      # The runners share one host's memory, and a backlog of Rust lanes and
+      # CodeQL Rust extractions starting together took every runner down
+      # (#1242). Compilation waits for one of the host's two heavy slots.
+      - name: Take a host heavy-build slot
+        run: bash .github/scripts/heavy-slot.sh 2400
+
       - name: Format
         run: cargo fmt --all --check
 
@@ -227,6 +233,11 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # A cancelled job frees its slot when the runner reaps its processes.
+      - name: Release the host heavy-build slot
+        if: ${{ !cancelled() }}
+        run: rm -f "$RUNNER_TEMP/cartograph-heavy-slot"
 
       - name: Setup Node.js for explicit local-provider acceptance
         if: github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance

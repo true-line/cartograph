@@ -103,6 +103,29 @@ test('queued PR lanes never cancel each other, and package installs serialize on
   assert.equal([...workflow.matchAll(/arguments-json: .*(?:"apt-get"|"--with-deps")/gu)].length, calls.length);
 });
 
+test('heavy Rust jobs hold one of two shared-host slots and release it (#1242)', () => {
+  // The Linux runners share one VM's memory; overlapping Rust lanes and
+  // CodeQL Rust extractions exhausted it and took every runner down.
+  const script = readFileSync(path.join(root, '.github/scripts/heavy-slot.sh'), 'utf8');
+  assert.match(script, /^slots=2$/mu);
+  assert.match(script, /flock -n "\/tmp\/cartograph-ci-heavy-\$slot\.lock"/u);
+  const take = /- name: Take a host heavy-build slot\n(?: +if: (.*)\n)? +run: bash \.github\/scripts\/heavy-slot\.sh (\d+)\n/u;
+  const release = /- name: Release the host heavy-build slot\n +if: \$\{\{ !cancelled\(\)(.*) \}\}\n +run: rm -f "\$RUNNER_TEMP\/cartograph-heavy-slot"\n/u;
+  const ci = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
+  const rust = ci.match(/^ {2}rust:\n(?: {4}.*\n| *\n)+/mu)?.[0] ?? '';
+  const [, , rustWait] = rust.match(take) ?? [];
+  assert.ok(Number(rustWait) < 59 * 60);
+  assert.ok(rust.indexOf('Take a host heavy-build slot') < rust.indexOf('cargo clippy'));
+  assert.ok(rust.indexOf('cargo test --workspace') < rust.search(release));
+  const codeql = readFileSync(path.join(root, '.github/workflows/codeql.yml'), 'utf8');
+  const [, when, codeqlWait] = codeql.match(take) ?? [];
+  assert.equal(when, "matrix.language == 'rust'");
+  assert.ok(Number(codeqlWait) < 45 * 60);
+  assert.ok(codeql.indexOf('Take a host heavy-build slot') < codeql.indexOf('codeql-action/init@'));
+  assert.equal(codeql.match(release)?.[1], " && matrix.language == 'rust'");
+  assert.ok(codeql.indexOf('codeql-action/analyze@') < codeql.search(release));
+});
+
 test('install-action never shares its download directory across runners (#674)', () => {
   // install-action rm -rfs $HOME/.install-action/tmp after every install and
   // the self-hosted runners share one HOME, so each step gets its own.
