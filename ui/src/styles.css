@@ -4462,9 +4462,10 @@ details.investigation-section { display: block; }
 .agent-chat-workspace { min-width: 0; }
 .agent-chat-docks { display: grid; gap: 1rem; min-width: 0; }
 .agent-chat-docks-2, .agent-chat-docks-3, .agent-chat-docks-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.agent-chat-docks-3 > :first-child { grid-column: 1 / -1; }
+.agent-chat-conversation-heading { grid-column: 1 / -1; min-width: 0; }
+.agent-chat-conversation-heading code { overflow-wrap: anywhere; }
 .agent-chat-pane header { display: grid; gap: .5rem; }
 .agent-chat-pane code { overflow-wrap: anywhere; }
-@media (max-width: 1100px) { .agent-chat-docks { grid-template-columns: 1fr; } .agent-chat-docks-3 > :first-child { grid-column: auto; } }
+@media (max-width: 1100px) { .agent-chat-docks { grid-template-columns: 1fr; } }
 
 .quick-dispatch-inline .quick-dispatch-dialog { width: 100%; max-height: none; box-shadow: none; }

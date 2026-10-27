@@ -366,6 +366,7 @@ function installFakeCore(options: {
   deferSavedNoticeChatRead?: boolean;
   deferSavedNoticeChatAfterReads?: number;
   additionalSavedParent?: InvestigationDetail;
+  additionalSavedExchanges?: InvestigationDetail[];
   savedNoticeChatFirstReadPartial?: boolean;
 } = {}) {
   let staged = [...(options.staged ?? [])];
@@ -429,11 +430,13 @@ function installFakeCore(options: {
     };
   };
   mockIPC(async (cmd, args) => {
+    const savedExchanges = [...(options.additionalSavedParent ? [options.additionalSavedParent] : []), ...(options.additionalSavedExchanges ?? [])];
+    const savedExchange = savedExchanges.find((item) => item.investigation_id === (args as { investigationId?: string } | undefined)?.investigationId);
     switch (cmd) {
       case 'investigation_specialists':
         return options.admissionSelection ? admissionCatalog : options.inspectionSelection ? inspectionCatalog : investigationCatalog;
       case 'list_investigations':
-        return { items: [...(investigation ? [investigation] : []), ...(options.additionalSavedParent ? [options.additionalSavedParent] : [])], next_cursor: null };
+        return { items: [...(investigation ? [investigation] : []), ...savedExchanges], next_cursor: null };
       case 'start_investigation': {
         if (!options.investigationFlow) throw new Error('Investigation fixture disabled');
         investigationRequests.push({ command: cmd, args });
@@ -456,7 +459,7 @@ function installFakeCore(options: {
         return investigation;
       }
       case 'get_investigation': {
-        if ((args as { investigationId: string }).investigationId === options.additionalSavedParent?.investigation_id) return options.additionalSavedParent;
+        if (savedExchange) return savedExchange;
         if (investigation?.status === 'queued') {
           appendInvestigationEvent('preparation_started', 'Preparing the frozen scoped graph.');
           appendInvestigationEvent('context_prepared', 'Admitted original graph identities.');
@@ -466,8 +469,8 @@ function installFakeCore(options: {
         return investigation;
       }
       case 'investigation_events': {
-        if ((args as { investigationId: string }).investigationId === options.additionalSavedParent?.investigation_id) {
-          const id = options.additionalSavedParent.investigation_id;
+        if (savedExchange) {
+          const id = savedExchange.investigation_id;
           return { investigation_id: id, items: investigationEvents(id).filter((event) => event.sequence > (args as { afterSequence: number }).afterSequence), next_sequence: 9, has_more: false };
         }
         const after = (args as { afterSequence: number }).afterSequence;
@@ -476,7 +479,7 @@ function installFakeCore(options: {
           next_sequence: items.at(-1)?.sequence ?? after, has_more: false };
       }
       case 'investigation_result':
-        if ((args as { investigationId: string }).investigationId === options.additionalSavedParent?.investigation_id) return investigationResult(options.additionalSavedParent.investigation_id);
+        if (savedExchange) return investigationResult(savedExchange.investigation_id);
         if (investigation?.has_result && straddleResult) {
           straddleResult = false;
           return null;
@@ -494,8 +497,8 @@ function installFakeCore(options: {
           if (options.deferSavedNoticeChatAfterReads !== undefined) await new Promise<void>((resolve) => { releaseSavedNoticeChatRead = resolve; });
           else await savedNoticeChatGate;
         }
-        if ((args as { investigationId: string }).investigationId === options.additionalSavedParent?.investigation_id) {
-          return savedNoticeChat(options.additionalSavedParent.investigation_id, options.additionalSavedParent.question);
+        if (savedExchange) {
+          return savedNoticeChat(savedExchange.investigation_id, savedExchange.question);
         }
         return options.savedNoticeChatFirstReadPartial !== false && savedNoticeChatReads === 1
           ? { ...options.savedNoticeChat, messages: options.savedNoticeChat.messages.slice(0, 1) }
@@ -2265,5 +2268,47 @@ export const InlineReplySupersededCaptureSurvivesOldClose: Story = {
     await expect(await b.findByRole('region', { name: 'Reply to inline-b' })).toBeVisible();
     await waitFor(() => expect(b.getByLabelText('Question')).toHaveFocus());
     await expect(investigationRequests.filter((request) => request.command === 'start_investigation')).toHaveLength(0);
+  },
+};
+
+// AC-0400: adding an unloaded ancestor regroups real docks without remounting the active reply portal.
+export const InlineReplySurvivesConversationGrouping: Story = {
+  beforeEach: () => {
+    const child = investigationDetail('branch-child', { question: 'Branch child to reply to',
+      conversation_id: 'saved-branch', parent_id: 'branch-root' });
+    const parent = investigationDetail('branch-root', { question: 'Unloaded branch root', conversation_id: 'saved-branch' });
+    const unrelated = investigationDetail('unrelated-branch', { question: 'Unrelated saved exchange' });
+    installFakeCore({ investigationFlow: true, existingInvestigation: child, existingInvestigationEvents: investigationEvents(child.investigation_id),
+      savedNoticeChat: savedNoticeChat(child.investigation_id, child.question), savedNoticeChatFirstReadPartial: false,
+      additionalSavedParent: parent, additionalSavedExchanges: [unrelated] });
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(canvas.getByText('core v0.0.1')).toBeInTheDocument());
+    await userEvent.click(canvas.getByRole('button', { name: 'Agent Chats' }));
+    await userEvent.click(await canvas.findByRole('button', { name: /Branch child to reply to/ }));
+    const pane = canvas.getByRole('region', { name: 'Saved chat branch-child' });
+    await userEvent.click(canvas.getByRole('button', { name: /Unrelated saved exchange/ }));
+    await canvas.findByRole('region', { name: 'Saved chat unrelated-branch' });
+    await userEvent.click(within(pane).getByRole('button', { name: 'Reply here' }));
+    const reply = within(await within(pane).findByRole('region', { name: 'Reply to branch-child' }));
+    const host = pane.querySelector('[data-reply-task="branch-child"]');
+    const question = reply.getByLabelText('Question');
+    await userEvent.type(question, 'Continue this exact saved branch.');
+    await userEvent.click(within(pane).getByRole('button', { name: 'Open unloaded parent branch-root' }));
+    await canvas.findByRole('region', { name: 'Saved chat branch-root' });
+    expect(canvas.getAllByRole('region', { name: /^Saved chat / }).map((node) => node.getAttribute('aria-label')))
+      .toEqual(['Saved chat branch-child', 'Saved chat branch-root', 'Saved chat unrelated-branch']);
+    expect(pane.querySelector('[data-reply-task="branch-child"]')).toBe(host);
+    expect(host?.isConnected).toBe(true);
+    expect(reply.getByLabelText('Question')).toBe(question);
+    await expect(question).toHaveValue('Continue this exact saved branch.');
+    await expect(canvas.getAllByRole('region', { name: 'Reply to branch-child' })).toHaveLength(1);
+    await userEvent.click(reply.getByRole('button', { name: 'Send reply task' }));
+    await canvas.findByRole('region', { name: 'Saved chat inv-app-follow-up' });
+    const requests = investigationRequests.filter((item) => item.command === 'start_investigation');
+    expect(requests).toHaveLength(1);
+    expect((requests[0].args as { request: StartInvestigationRequest }).request).toMatchObject({
+      parent_id: 'branch-child', conversation_id: 'saved-branch', question: 'Continue this exact saved branch.' });
   },
 };

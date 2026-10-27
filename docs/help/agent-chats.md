@@ -58,3 +58,14 @@ is supplied as bounded T3 history, not all earlier questions or answers. Closing
 before submission cancels this input; submitted or uncertain work retains its
 existing durable request and retry identity. The summon shortcut opens the
 standalone dialog instead.
+
+## Loaded conversation branches
+
+Loaded saved exchanges are grouped by their persisted conversation ID. Each
+exchange keeps its own question, producer, findings, citations and reply form.
+Parent links show saved ancestry; sibling tasks remain separate forks. An
+unloaded parent can be opened explicitly using the same four-slot reader,
+which may evict the oldest loaded exchange. No related details load automatically.
+These last-observed groups are not complete history: use **Conversation turns**
+for bounded saved-turn pages. Replies still receive only the selected parent
+result as context, not every visible exchange or full ancestral dialogue.
