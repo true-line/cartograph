@@ -1933,7 +1933,7 @@ pub(crate) fn matching_bindings(
         .iter()
         .map(|node| (&node.id, node))
         .collect();
-    let edges = crate::merge_edge_occurrences(&extraction.edges);
+    let edges = crate::merged_edge_view(&extraction.edges);
     receipts
         .iter()
         .filter(|receipt| match receipt.fact_key() {
