@@ -1698,6 +1698,37 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
     });
   }
 
+  // AC-0420: exact counts are validated before publication, never reconstructed from numeric usage.
+  it('validates independent exact saved detail reports without coercion', async () => {
+    for (const value of [undefined, null, {}, { input_tokens: '1', output_tokens: null },
+      ...['01', '-1', '18446744073709551616', 1].map((input_tokens) => ({ input_tokens, output_tokens: null, cache_read_tokens: '0' }))]) {
+      for (const completion of [false, true]) {
+        const detail = completion ? specWriterDetail('exact-usage') : investigationDetail('exact-usage');
+        detail.reported_usage_exact = value as never;
+        const result = completion ? specWriterResult(detail.investigation_id) : investigationResult(detail.investigation_id);
+        taskTransport(detail, result, savedChat(detail, result));
+        await useInvestigationStore.getState().open(detail.investigation_id);
+        expect(useInvestigationStore.getState().error).not.toBeNull();
+        expect(useInvestigationStore.getState().detail).toBeNull();
+      }
+    }
+    for (const usage of [undefined, { input_tokens: '18446744073709551615', output_tokens: '0', cache_read_tokens: null }]) {
+      const detail = investigationDetail('exact-usage', usage ? { reported_usage_exact: usage } : {});
+      const result = investigationResult(detail.investigation_id);
+      taskTransport(detail, result, savedChat(detail, result));
+      await useInvestigationStore.getState().open(detail.investigation_id);
+      expect(useInvestigationStore.getState().error).toBeNull();
+      expect(useInvestigationStore.getState().detail?.reported_usage_exact).toEqual(usage);
+    }
+    const current = specWriterDetail('exact-current');
+    current.reported_usage_exact = { input_tokens: '18446744073709551615', output_tokens: null, cache_read_tokens: '0' };
+    const currentResult = specWriterResult(current.investigation_id);
+    taskTransport(current, currentResult, savedChat(current, currentResult));
+    await useInvestigationStore.getState().open(current.investigation_id);
+    expect(useInvestigationStore.getState().error).toBeNull();
+    expect(useInvestigationStore.getState().detail?.reported_usage_exact).toEqual(current.reported_usage_exact);
+  });
+
   it('loads pending user-authored question and completed saved specialist reference', async () => {
     const pending = investigationDetail('pending-chat-ui', { status: 'running', has_result: false,
       actions: { can_cancel: true, can_follow_up: false } });

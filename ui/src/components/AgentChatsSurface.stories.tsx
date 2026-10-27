@@ -366,6 +366,7 @@ function savedAnswersFixture(gapTriager = false, palette = false, attribution = 
       investigationDetail('answer-b', { question: 'Question for answer-b' }),
     ];
     if (attribution) {
+      details[0].reported_usage_exact = { input_tokens: '18446744073709551615', output_tokens: '0', cache_read_tokens: null };
       details[0].specialist = { ...details[0].specialist, name: 'Saved writer ' + 'long name '.repeat(12) };
       details[1].provider_mode = 'cloud';
       details[1].provider = { ...investigationCatalog.providers[1], model: 'saved-request-' + 'long-model-'.repeat(12) };
@@ -442,6 +443,9 @@ export const SavedAnswersStayWithTheirPane: Story = {
     const attributionA = paneA.getByRole('group', { name: 'Saved pane attribution' });
     const attributionB = paneB.getByRole('group', { name: 'Saved pane attribution' });
     const savedAttribution = [attributionA.textContent, attributionB.textContent];
+    // AC-0420: exact reports stay with task snapshots, independently of other panes.
+    await expect(paneA.getByText(/Provider-reported tokens so far:/)).toHaveTextContent('input 18446744073709551615; output 0; cache-read Unknown.');
+    await expect(paneB.getByText(/Provider-reported tokens so far:/)).toHaveTextContent('input Unavailable; output Unavailable; cache-read Unavailable.');
     // AC-0414: reference union differs from the narrative subset and stays pane-bound.
     const referenceA = within(paneA.getByRole('listitem', { name: 'Specialist result reference' })).getByRole('group');
     const referenceB = within(paneB.getByRole('listitem', { name: 'Specialist result reference' })).getByRole('group');
@@ -490,6 +494,7 @@ export const SavedAnswersStayWithTheirPane: Story = {
     } finally { await page.viewport(viewport[0], viewport[1]); }
     await useInvestigationStore.getState().open('unrelated-selection');
     expect([attributionA.textContent, attributionB.textContent]).toEqual(savedAttribution);
+    await expect(paneA.getByText(/Provider-reported tokens so far:/)).toHaveTextContent('input 18446744073709551615; output 0; cache-read Unknown.');
     await expect(referenceA).toHaveTextContent('1 source citations · 1 graph citations');
     await expect(referenceB).toHaveTextContent('2 source citations · 1 graph citations');
     await expect(paneA.getByText('Saved finding only for answer-a')).toBeVisible();
@@ -623,17 +628,20 @@ export const LoadedConversationBranches: Story = {
 };
 
 let completeProgress = () => {};
+let failProgress = () => {};
 let releaseProgressChat = () => {};
 // AC-0401: real host events and committed typed findings, never simulated streaming.
 export const FocusedDurableProgress: Story = {
   beforeEach: () => {
-    let complete = false; const id = 'progress-task'; const calls: string[] = [];
+    let complete = false; let failed = false; const id = 'progress-task'; const calls: string[] = [];
     completeProgress = () => { complete = true; };
+    failProgress = () => { failed = true; };
     const detail = () => investigationDetail(id, { has_result: complete, status: complete ? 'completed' : 'running',
-      revision: complete ? 9 : 4, last_event_sequence: complete ? 9 : 4 });
+      revision: complete ? 9 : 4, last_event_sequence: complete ? 9 : 4,
+      reported_usage_exact: { input_tokens: complete ? '18446744073709551615' : '0', output_tokens: null, cache_read_tokens: '0' } });
     mockIPC((command, payload) => {
       calls.push(command);
-      if (command === 'get_investigation') return detail();
+      if (command === 'get_investigation') { if (failed) throw new Error('read failed'); return detail(); }
       if (command === 'investigation_result') return complete ? investigationResult(id) : null;
       if (command === 'investigation_events') return { investigation_id: id,
         items: investigationEvents(id).filter((event) => event.sequence > ((payload as { afterSequence: number }).afterSequence) &&
@@ -655,7 +663,7 @@ export const FocusedDurableProgress: Story = {
       return null;
     });
     useInvestigationStore.setState(state({ history: [detail()] }), true);
-    return () => { releaseProgressChat(); clearMocks(); expect(calls.filter((command) => command === 'get_investigation_chat')).toHaveLength(2); };
+    return () => { releaseProgressChat(); clearMocks(); expect(calls.filter((command) => command === 'get_investigation_chat')).toHaveLength(3); };
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
@@ -667,11 +675,16 @@ export const FocusedDurableProgress: Story = {
     await waitFor(() => expect(useInvestigationStore.getState().detail?.revision).toBe(9));
     await expect(pane.queryByRole('region', { name: 'Investigation activity' })).not.toBeInTheDocument();
     await expect(pane.getByText('Refreshing focused task; retained snapshot shown.')).toBeVisible();
+    await expect(pane.getByText(/Provider-reported tokens so far:/)).toHaveTextContent('input 0; output Unknown; cache-read 0.');
     await expect(pane.queryByText('A local stock guard is present')).not.toBeInTheDocument();
     releaseProgressChat();
     await expect(await pane.findByText('A local stock guard is present')).toBeVisible();
     await expect(pane.getByRole('region', { name: 'Investigation activity' })).toHaveTextContent('Findings saved');
     await expect(pane.getByRole('listitem', { name: 'Specialist result reference' })).toHaveTextContent('result:progress-task');
+    await expect(pane.getByText(/Provider-reported tokens so far:/)).toHaveTextContent('input 18446744073709551615; output Unknown; cache-read 0.');
+    failProgress(); await useInvestigationStore.getState().refreshSelected();
+    await expect(pane.getByText('Current task progress unavailable; retained snapshot shown.')).toBeVisible();
+    await expect(pane.getByText(/Provider-reported tokens so far:/)).toHaveTextContent('input 18446744073709551615; output Unknown; cache-read 0.');
   },
 };
 

@@ -122,3 +122,5 @@ Specialist result references and saved final messages show T3 / InferredWeak, ev
 ## Reading a pane
 
 Each open pane has its own **Saved messages** reading region. Focus it to scroll with the keyboard, or scroll it with the pointer; long output remains available without scrolling another pane. The pane header and reply stay outside the reading region. Your questions align right, specialist output left; citation inspection still uses the owning saved task. Layout and scrolling do not discard a reply or pending request.
+
+Saved panes show provider-reported input, output and cache-read tokens **so far** for that task snapshot. Exact zero is zero, **Unknown** means no known report, and **Unavailable** means the optional projection is absent. These reports may be incomplete and are not a price or a conversation-wide total. Failed refresh keeps the last-observed pane and reports current progress unavailable.

@@ -345,13 +345,14 @@ pub(crate) async fn list_specialist_task_activity(
 pub(crate) async fn get_investigation(
     investigation_id: String,
     app: tauri::AppHandle,
-) -> Result<InvestigationDetail, String> {
+) -> Result<crate::jobs::investigations::InvestigationDetailRead, String> {
     crate::off_ui_thread(move || {
         app.state::<AppState>()
             .jobs
             .lock()
             .map_err(|e| e.to_string())?
             .investigation(&investigation_id)
+            .and_then(crate::jobs::investigations::InvestigationDetailRead::from_detail)
             .map_err(|e| e.to_string())
     })
     .await

@@ -83,6 +83,14 @@ export function validSummary(value: InvestigationSummary | null, id?: string): v
       : value.inspection_status === (investigationIsActive(value) ? 'pending' : 'not_assessed'));
 }
 
+export function validReportedTaskUsage(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !== 'cache_read_tokens,input_tokens,output_tokens') return false;
+  return Object.values(value).every((count) => count === null ||
+    (typeof count === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(count) &&
+      (count.length < 20 || count <= '18446744073709551615')));
+}
+
 const HEX_HASH = /^[0-9a-f]{64}(?![\s\S])/;
 const CONTEXT_ID = /^context-v2:[0-9a-f]{64}(?![\s\S])/;
 const COVERAGE_ID = /^coverage-context-v1:[0-9a-f]{64}(?![\s\S])/;
@@ -1035,6 +1043,9 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         ]);
         if (!current()) return;
         if (!validSummary(detail, id)) throw new Error('Wrong detail.');
+        if ('reported_usage_exact' in detail && !validReportedTaskUsage(detail.reported_usage_exact)) {
+          throw new Error('Invalid exact usage projection.');
+        }
         if (get().conversationId && detail.conversation_id !== get().conversationId) {
           ++conversationRequest;
           conversationRefreshPending = null;

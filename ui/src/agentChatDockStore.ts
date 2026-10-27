@@ -1,11 +1,12 @@
 import { create } from 'zustand';
-import { useInvestigationStore, type InvestigationState } from './investigationStore';
-import type { InvestigationChat, InvestigationSummary, InvestigationResult, InvestigationCitation, InvestigationCitationRead, InvestigationScope } from './investigationTypes';
+import { useInvestigationStore, validReportedTaskUsage, type InvestigationState } from './investigationStore';
+import type { InvestigationChat, InvestigationSummary, InvestigationResult, InvestigationCitation, InvestigationCitationRead, InvestigationScope, ReportedTaskUsage } from './investigationTypes';
 
 export type ChatTurn = Pick<InvestigationSummary, 'investigation_id' | 'conversation_id' | 'parent_id' |
   'question' | 'specialist_id' | 'status' | 'updated_at' | 'revision'>;
 export interface ChatDock {
   chat: InvestigationChat; question: string; specialistName: string; turn: ChatTurn; scope: InvestigationScope;
+  reportedUsage?: ReportedTaskUsage;
   answer: { result: InvestigationResult; citations: InvestigationCitation[] } | null;
 }
 interface CitationInspection {
@@ -51,6 +52,10 @@ function captureDock(state: InvestigationState, taskId: string, previous?: ChatD
   const { detail, chat, result } = state;
   if (state.loading || state.error || state.chatError || state.chatStatus !== 'saved' ||
       state.selectedId !== taskId || detail?.investigation_id !== taskId || chat?.task_id !== taskId) return null;
+  if ('reported_usage_exact' in detail && !validReportedTaskUsage(detail.reported_usage_exact)) return null;
+  const exactUsage = detail.reported_usage_exact;
+  const reportedUsage = exactUsage ? { input_tokens: exactUsage.input_tokens,
+    output_tokens: exactUsage.output_tokens, cache_read_tokens: exactUsage.cache_read_tokens } : undefined;
   const scope = normalizedScope(detail.scope);
   if (!scope) return null;
   const reference = chat.messages.find((entry) => entry.message.kind === 'result_reference')?.message;
@@ -59,13 +64,16 @@ function captureDock(state: InvestigationState, taskId: string, previous?: ChatD
   const { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } = detail;
   const referenced = new Set(result?.findings.flatMap((finding) => finding.citation_ids));
   const answer = result ? { result, citations: detail.citations.filter((citation) => referenced.has(citation.citation_id)) } : null;
-  if (previous && (revision < previous.turn.revision || chat.chat_id !== previous.chat.chat_id ||
+  if (previous && ((revision === previous.turn.revision &&
+      JSON.stringify(reportedUsage) !== JSON.stringify(previous.reportedUsage)) ||
+      revision < previous.turn.revision || chat.chat_id !== previous.chat.chat_id ||
       question !== previous.question || detail.specialist.name !== previous.specialistName || conversation_id !== previous.turn.conversation_id || parent_id !== previous.turn.parent_id ||
       specialist_id !== previous.turn.specialist_id || !sameScope(scope, previous.scope) ||
       JSON.stringify(chat.producer) !== JSON.stringify(previous.chat.producer) ||
       (previous.answer && (JSON.stringify(answer) !== JSON.stringify(previous.answer) ||
         JSON.stringify(chat) !== JSON.stringify(previous.chat))))) return null;
   return { chat, question, specialistName: detail.specialist.name, answer, scope,
+    ...(reportedUsage ? { reportedUsage } : {}),
     turn: { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } };
 }
 

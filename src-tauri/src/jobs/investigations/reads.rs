@@ -14,6 +14,54 @@ struct HistoryCursor {
     before: i64,
 }
 
+/// App-only response extension: never serialized into StoredTask or MCP reads.
+#[derive(Serialize)]
+pub(crate) struct InvestigationDetailRead {
+    #[serde(flatten)]
+    pub(crate) detail: InvestigationDetail,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reported_usage_exact: Option<ReportedTaskUsage>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ReportedTaskUsage {
+    pub(crate) input_tokens: Option<String>,
+    pub(crate) output_tokens: Option<String>,
+    pub(crate) cache_read_tokens: Option<String>,
+}
+
+impl InvestigationDetailRead {
+    /// Takes the already validated detail without cloning its nested owners.
+    pub(crate) fn from_detail(
+        detail: InvestigationDetail,
+    ) -> Result<Self, InvestigationStoreError> {
+        let base_bytes =
+            context_hub::logical::count(&detail).ok_or(InvestigationStoreError::Invalid)?;
+        if base_bytes > MAX_RECORD_BYTES {
+            return Err(InvestigationStoreError::Capacity);
+        }
+        // Three nullable u64 strings add at most 60 payload bytes plus their
+        // fixed typed slots. Count serialization without a full JSON buffer.
+        let usage = &detail.usage;
+        let reported_usage_exact = Some(ReportedTaskUsage {
+            input_tokens: usage.reported_input_tokens.map(|value| value.to_string()),
+            output_tokens: usage.reported_output_tokens.map(|value| value.to_string()),
+            cache_read_tokens: usage
+                .reported_cache_read_tokens
+                .map(|value| value.to_string()),
+        });
+        let mut read = Self {
+            detail,
+            reported_usage_exact,
+        };
+        let bytes = context_hub::logical::count(&read).ok_or(InvestigationStoreError::Invalid)?;
+        if bytes > MAX_RECORD_BYTES {
+            read.reported_usage_exact = None;
+        }
+        Ok(read)
+    }
+}
+
 /// App-only activity attribution projected from the validated saved task.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SavedActivityProvider {
