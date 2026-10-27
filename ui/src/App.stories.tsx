@@ -3,9 +3,11 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, userEvent, waitFor, within } from 'storybook/test';
 import App from './App';
+import { useAgentChatDockStore } from './agentChatDockStore';
 import { useInvestigationStore } from './investigationStore';
-import { inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationCitations, investigationConsent, investigationDetail, investigationResult } from './investigationFixtures';
-import type { InvestigationDetail, InvestigationEvent, InvestigationInspectionTarget, StartInvestigationRequest } from './investigationTypes';
+import { inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult } from './investigationFixtures';
+import type { InvestigationChat, InvestigationDetail, InvestigationEvent, InvestigationInspectionTarget, StartInvestigationRequest } from './investigationTypes';
+import { useSavedResultNoticeStore } from './savedResultNoticeStore';
 import { usePrimarySourceStore, type CapturedDescription, type FactKey } from './primarySourceStore';
 import {
   useAppStore,
@@ -323,6 +325,20 @@ let capturedDescriptionRequests: Record<string, unknown>[] = [];
 let repoRootLookups = 0;
 let investigationRequests: { command: string; args: unknown }[] = [];
 
+function savedNoticeChat(id: string, question: string): InvestigationChat {
+  const specialist = investigationCatalog.specialists[0];
+  return { chat_id: `saved-chat:${id}`, task_id: id,
+    producer: { specialist_id: specialist.id, specialist_version: specialist.version,
+      prompt_fingerprint: specialist.prompt_fingerprint, tier: specialist.tier,
+      confidence_tier: specialist.confidence_tier, provider_mode: 'local', provider_id: 'ollama',
+      model: 'fixture-local-model', protocol_version: null },
+    messages: [
+      { id: `question:${id}`, ordinal: 0, author: 'user', message: { kind: 'user_question', question } },
+      { id: `result:${id}`, ordinal: 1, author: 'specialist', message: { kind: 'result_reference',
+        task_id: id, result_id: `result:${id}`, result_hash: 'c'.repeat(64) } },
+    ] };
+}
+
 function installFakeCore(options: {
   staged?: StagedProposal[];
   pageSize?: number;
@@ -337,11 +353,13 @@ function installFakeCore(options: {
   inspectionSelection?: boolean;
   admissionSelection?: boolean;
   existingInvestigation?: InvestigationDetail;
+  existingInvestigationEvents?: InvestigationEvent[];
   rejectJobActionOnce?: boolean;
   legacyRunningJob?: boolean;
   investigationFlow?: boolean;
   /** The first result read after completion races the commit and sees none. */
   straddleResultCommit?: boolean;
+  savedNoticeChat?: InvestigationChat;
 } = {}) {
   let staged = [...(options.staged ?? [])];
   let rejectJobAction = options.rejectJobActionOnce ?? false;
@@ -353,9 +371,11 @@ function installFakeCore(options: {
   investigationRequests = [];
   let investigation: InvestigationDetail | null = options.existingInvestigation ?? null;
   const investigationJournal: InvestigationEvent[] = [];
+  if (options.existingInvestigationEvents) investigationJournal.push(...options.existingInvestigationEvents);
   let investigationStep = 1;
   let latestInspectionTarget: InvestigationInspectionTarget | null = null;
   let straddleResult = options.straddleResultCommit ?? false;
+  let savedNoticeChatReads = 0;
   const appendInvestigationEvent = (kind: InvestigationEvent['kind'], summary: string,
     tool: InvestigationEvent['tool'] = null) => {
     if (!investigation) throw new Error('Fixture task missing');
@@ -444,6 +464,14 @@ function installFakeCore(options: {
           return null;
         }
         return investigation?.has_result ? investigationResult(investigation.investigation_id) : null;
+      case 'get_investigation_chat': {
+        investigationRequests.push({ command: cmd, args });
+        if (!options.savedNoticeChat) return null;
+        savedNoticeChatReads += 1;
+        return savedNoticeChatReads === 1
+          ? { ...options.savedNoticeChat, messages: options.savedNoticeChat.messages.slice(0, 1) }
+          : options.savedNoticeChat;
+      }
       case 'investigation_consent':
         return investigation?.status === 'awaiting_consent'
           ? investigationConsent(investigation.investigation_id, investigation.revision, `step-${investigationStep}`) : null;
@@ -937,6 +965,8 @@ const meta = {
     // story files see a clean window.
     installFakeCore();
     useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+    useSavedResultNoticeStore.setState(useSavedResultNoticeStore.getInitialState(), true);
+    useAgentChatDockStore.setState({ docks: [], focusedTask: null, pendingTask: null, error: null, fallbackTask: null });
     useAppStore.setState({
       view: 'workspace',
       backend: 'unknown',
@@ -1348,6 +1378,56 @@ export const AgentChatsDestinationPreservesInvestigationDraft: Story = {
     await expect(useInvestigationStore.getState().composer).toEqual(composer);
     await expect(useInvestigationStore.getState().pendingStart).toEqual(pendingStart);
     await expect(investigationRequests).toHaveLength(0);
+  },
+};
+
+const noticedTaskId = 'inv-notice-chat';
+const noticedQuestion = 'Open the saved specialist conversation for this task.';
+const noticedDetail = investigationDetail(noticedTaskId, { question: noticedQuestion, status: 'completed', has_result: true });
+
+export const SavedResultNoticeOpensExactChatWithoutChangingComposer: Story = {
+  // AC-0390: the notice carries only its task identity; Agent Chats obtains
+  // the validated persisted transcript through its existing coordinator.
+  beforeEach: () => installFakeCore({ existingInvestigation: noticedDetail,
+    existingInvestigationEvents: investigationEvents(noticedTaskId),
+    savedNoticeChat: savedNoticeChat(noticedTaskId, noticedQuestion) }),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const initial = useInvestigationStore.getState();
+    const composer = { ...initial.composer, question: 'Preserve this unrelated draft.' };
+    const pendingStart = { schema_version: 1 as const, request_nonce: 'notice-chat-preserved-nonce',
+      specialist_id: 'domain-analyst@3' as const, question: 'Preserve this retry exactly.',
+      scope: { type: 'all' as const }, provider_mode: 'local' as const, limit_profile: 'investigation-v1' };
+    useInvestigationStore.setState({ composer, pendingStart });
+    await waitFor(() => expect(canvas.getByText('core v0.0.1')).toBeInTheDocument());
+
+    const notices = useSavedResultNoticeStore.getState();
+    const event = { investigation_id: noticedTaskId, revision: 1, last_event_sequence: 9 };
+    notices.observe(event);
+    await waitFor(() => expect(investigationRequests.filter((request) =>
+      request.command === 'get_investigation_chat')).toHaveLength(1));
+    notices.observe({ ...event, revision: 2 });
+    const openChat = () => canvas.getByRole('button', { name: `Open chat for ${noticedTaskId}: ${noticedQuestion}` });
+    await waitFor(() => expect(openChat()).toBeInTheDocument());
+    expect(useSavedResultNoticeStore.getState().unread).toHaveLength(1);
+
+    await userEvent.click(openChat());
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Agent Chats' })).toBeVisible());
+    await waitFor(() => expect(useAgentChatDockStore.getState().docks.map((item) => item.chat.chat_id))
+      .toEqual([`saved-chat:${noticedTaskId}`]));
+    expect(investigationRequests.filter((request) => request.command === 'get_investigation_chat')
+      .every((request) => request.args && (request.args as { investigationId: string }).investigationId === noticedTaskId)).toBe(true);
+    expect(investigationRequests.some((request) => ['start_investigation', 'cancel_investigation', 'delete_investigation']
+      .includes(request.command))).toBe(false);
+    expect(useSavedResultNoticeStore.getState().unread).toHaveLength(1); // transcript open is not findings-read
+    expect(useInvestigationStore.getState().composer).toEqual(composer);
+    expect(useInvestigationStore.getState().pendingStart).toEqual(pendingStart);
+
+    await userEvent.click(canvas.getByRole('button', { name: `Open findings for ${noticedTaskId}: ${noticedQuestion}` }));
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Investigations' })).toBeVisible());
+    await waitFor(() => expect(useSavedResultNoticeStore.getState().unread).toEqual([]));
+    expect(useInvestigationStore.getState().composer).toEqual(composer);
+    expect(useInvestigationStore.getState().pendingStart).toEqual(pendingStart);
   },
 };
 
