@@ -133,38 +133,83 @@ fn lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
-/// `[[package]]` tables (`uv.lock`, `poetry.lock`, `pdm.lock`): the
-/// `version` of each table named `flask-admin`, with its line's span.
+/// `[[package]]` tables (`uv.lock`, `poetry.lock`, `pdm.lock`): for each
+/// table named `flask-admin`, in whatever key order, its `version` and that
+/// line's span. A table whose `name` or `version` is not a plain string
+/// (another syntax, a repeated key) yields `None`, refusing rather than
+/// skipping it.
 fn package_table_pins(text: &str) -> Vec<(Option<String>, usize, usize)> {
-    let mut found = Vec::new();
-    let (mut in_package, mut named) = (false, false);
-    for (start, line) in lines(text) {
-        if line.starts_with('[') {
-            in_package = line == "[[package]]";
-            named = false;
-            continue;
+    #[derive(Default)]
+    struct Table {
+        names: Vec<Option<String>>,
+        versions: Vec<(Option<String>, usize, usize)>,
+        start: usize,
+    }
+    fn close(table: Option<Table>, found: &mut Vec<(Option<String>, usize, usize)>) {
+        let Some(table) = table else { return };
+        let named = table
+            .names
+            .iter()
+            .any(|name| name.as_deref().is_none_or(is_flask_admin));
+        if !named {
+            return;
         }
-        if !in_package {
-            continue;
-        }
-        if let Some(value) = toml_string(line, "name") {
-            named = is_flask_admin(&value);
-        } else if named && let Some(version) = toml_string(line, "version") {
-            found.push((Some(version), start, start + line.len()));
-            named = false;
+        match (table.names.as_slice(), table.versions.as_slice()) {
+            ([Some(_)], [(Some(version), start, end)]) => {
+                found.push((Some(version.clone()), *start, *end));
+            }
+            (_, [(_, start, end), ..]) => found.push((None, *start, *end)),
+            _ => found.push((None, table.start, table.start)),
         }
     }
+    let mut found = Vec::new();
+    let mut table: Option<Table> = None;
+    for (start, line) in lines(text) {
+        let code = strip_comment(line).trim();
+        if code.starts_with('[') {
+            close(table.take(), &mut found);
+            if code.replace(' ', "") == "[[package]]" {
+                table = Some(Table {
+                    start,
+                    ..Table::default()
+                });
+            }
+            continue;
+        }
+        let Some(table) = table.as_mut() else {
+            continue;
+        };
+        let Some((key, value)) = code.split_once('=') else {
+            continue;
+        };
+        match key.trim().trim_matches('"') {
+            "name" => table.names.push(toml_string(value)),
+            "version" => table
+                .versions
+                .push((toml_string(value), start, start + line.len())),
+            _ => {}
+        }
+    }
+    close(table.take(), &mut found);
     found
 }
 
-/// `key = "value"` at the start of a line.
-fn toml_string(line: &str, key: &str) -> Option<String> {
-    let rest = line
-        .strip_prefix(key)?
-        .trim_start()
-        .strip_prefix('=')?
-        .trim();
-    let value = rest.strip_prefix('"')?.strip_suffix('"')?;
+/// A line without its `#` comment, outside a basic string.
+fn strip_comment(line: &str) -> &str {
+    let mut quoted = false;
+    for (index, c) in line.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '#' if !quoted => return &line[..index],
+            _ => {}
+        }
+    }
+    line
+}
+
+/// A plain `"value"`: no escapes, quotes or other TOML string forms.
+fn toml_string(value: &str) -> Option<String> {
+    let value = value.trim().strip_prefix('"')?.strip_suffix('"')?;
     (!value.contains(['"', '\\'])).then(|| value.to_string())
 }
 
@@ -222,6 +267,16 @@ mod tests {
             vec![(Some("1.5.7".into()), 77, 94)]
         );
         assert_eq!(&lock[77..94], "version = \"1.5.7\"");
+        let reordered = "[[package]]\nversion = \"1.5.8\" # x\n  name = \"Flask_Admin\"\n\n[[package]]\nname = \"flask-admin\"\nversion = '1'\n\n[[package]]\nname = \"flask-admin\"\n";
+        assert_eq!(
+            package_table_pins(reordered),
+            vec![
+                (Some("1.5.8".into()), 12, 33),
+                (None, 91, 104),
+                (None, 106, 106)
+            ]
+        );
+        assert_eq!(&reordered[12..33], "version = \"1.5.8\" # x");
         let requirements = "Flask_Admin[sqla]==1.5.8 ; python_version > '3'\nflask-admin>=1.5\nflask-adminx==1\n# flask-admin==0\n";
         assert_eq!(
             requirement_pins(requirements),

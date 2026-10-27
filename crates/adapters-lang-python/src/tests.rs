@@ -6546,30 +6546,46 @@ plain = Admin(app, url="/plain", endpoint="plain")
     assert!(gaps.is_empty(), "{gaps:?}");
     assert_eq!(library.as_deref(), Some("external"));
 
-    for (lock, reason) in [
+    // A checked pin in one lockfile never masks another's release, whatever
+    // the table's key order, indentation or comments; a table in another
+    // syntax is refused.
+    for (uv, requirements, reason) in [
         (
+            "[[package]]\nname = \"flask-admin\"\nversion = \"1.5.7\"\n",
             "flask-admin==1.6.0\n",
             "flask_admin_version_not_modelled:1.6.0",
         ),
         (
+            "[[package]]\nname = \"flask-admin\"\nversion = \"1.5.7\"\n",
             "flask-admin>=1.5\n",
             "flask_admin_version_not_exact:requirements.txt",
+        ),
+        (
+            "[[package]]\nversion = \"1.6.0\"\nname = \"flask-admin\"\n",
+            "flask-admin==1.5.8\n",
+            "flask_admin_version_not_modelled:1.6.0",
+        ),
+        (
+            "  [[package]]  # admin\n  name = \"flask-admin\" # pinned\n  version = \"1.6.0\"  # x\n",
+            "flask-admin==1.5.8\n",
+            "flask_admin_version_not_modelled:1.6.0",
+        ),
+        (
+            "[[package]]\nname = 'flask-admin'\nversion = \"1.6.0\"\n",
+            "flask-admin==1.5.8\n",
+            "flask_admin_version_not_exact:uv.lock",
         ),
     ] {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "app.py", app);
-        write(
-            dir.path(),
-            "uv.lock",
-            "[[package]]\nname = \"flask-admin\"\nversion = \"1.5.7\"\n",
-        );
-        write(dir.path(), "requirements.txt", lock);
+        write(dir.path(), "uv.lock", uv);
+        write(dir.path(), "requirements.txt", requirements);
         let (endpoints, gaps, _) = rows(dir.path());
         assert_eq!(
             endpoints,
             vec!["POST /back/user/edit/ user.edit_view Confirmed repository ".to_string()]
         );
-        assert_eq!(gaps, vec![reason.to_string(); 3], "{lock}");
+        assert_eq!(gaps, vec![reason.to_string(); 3], "{uv}");
     }
     let unpinned = tempfile::tempdir().unwrap();
     write(unpinned.path(), "app.py", app);
