@@ -376,6 +376,11 @@ function savedAnswersFixture(gapTriager = false, palette = false, attribution = 
       const result = index === 0 ? specWriterV2Result(detail.investigation_id) : investigationResult(detail.investigation_id);
       result.findings[0].statement = `Saved finding only for ${detail.investigation_id}`;
       if (attribution) result.observed_response_model = 'different-observed-response';
+      if (attribution && index === 0) {
+        result.findings[0].citation_ids = ['C1'];
+        result.findings.push({ ...result.findings[0], finding_id: 'F2', title: 'Other supported proposal', statement: 'A separate cited proposal.', citation_ids: ['C1', 'C2'] });
+        result.narrative!.finding_ids = [result.findings[0].finding_id];
+      }
       if (gapTriager && index === 0) result.narrative!.text = 'Proposed investigation: verify the unresolved boundary with focused evidence.';
       return result;
     });
@@ -435,6 +440,11 @@ export const SavedAnswersStayWithTheirPane: Story = {
     const attributionA = paneA.getByRole('group', { name: 'Saved pane attribution' });
     const attributionB = paneB.getByRole('group', { name: 'Saved pane attribution' });
     const savedAttribution = [attributionA.textContent, attributionB.textContent];
+    // AC-0414: reference union differs from the narrative subset and stays pane-bound.
+    const referenceA = within(paneA.getByRole('listitem', { name: 'Specialist result reference' })).getByRole('group');
+    const referenceB = within(paneB.getByRole('listitem', { name: 'Specialist result reference' })).getByRole('group');
+    await expect(referenceA).toHaveTextContent('1 source citations · 1 graph citations');
+    await expect(referenceB).toHaveTextContent('2 source citations · 1 graph citations');
     const commands = [...savedAnswerCommands];
     await expect(attributionA).toHaveTextContent('Saved writer long name');
     await expect(attributionA).toHaveTextContent('spec-writer@2 · version 2');
@@ -454,16 +464,19 @@ export const SavedAnswersStayWithTheirPane: Story = {
     } finally { await page.viewport(viewport[0], viewport[1]); }
     await useInvestigationStore.getState().open('unrelated-selection');
     expect([attributionA.textContent, attributionB.textContent]).toEqual(savedAttribution);
+    await expect(referenceA).toHaveTextContent('1 source citations · 1 graph citations');
+    await expect(referenceB).toHaveTextContent('2 source citations · 1 graph citations');
     await expect(paneA.getByText('Saved finding only for answer-a')).toBeVisible();
     await expect(paneA.queryByText('Saved finding only for answer-b')).not.toBeInTheDocument();
     await expect(paneB.getByText('Saved finding only for answer-b')).toBeVisible();
     const message = paneA.getByRole('article', { name: 'Specialist final message' });
     await expect(message).toHaveTextContent('Spec Writer final message · spec-writer@2');
+    await expect(within(message).getByRole('group')).toHaveTextContent('1 source citations · 0 graph citations');
     await expect(message).toHaveTextContent('Proposed design · T3 / InferredWeak');
     await expect(message).toHaveTextContent('Validate the caller limit before invoking processing; refuse an oversized request without starting the operation.');
     await expect(message).not.toHaveTextContent('Saved finding only for answer-a');
-    await expect(paneA.getByRole('button', { name: 'Inspect citation C1' })).toBeVisible();
-    await expect(paneA.getByText('Proposed design')).toBeVisible();
+    await expect(paneA.getAllByRole('button', { name: 'Inspect citation C1' })).toHaveLength(2);
+    await expect(paneA.getAllByText('Proposed design')).toHaveLength(2);
     await expect(paneB.getByText('Implemented behavior')).toBeVisible();
     await expect(paneA.queryByText(/Review state unavailable|Follow-up selection is a human opinion/)).not.toBeInTheDocument();
     await expect(canvasElement.querySelectorAll('[id^="saved-chat-findings-"]')).toHaveLength(2);
@@ -479,6 +492,8 @@ export const SavedAnswersStayWithTheirPane: Story = {
     await userEvent.click(canvas.getByRole('button', { name: /Question for answer-a/ }));
     await waitFor(() => expect(useAgentChatDockStore.getState().citation).toBeNull());
     expect([attributionA.textContent, attributionB.textContent]).toEqual(savedAttribution);
+    await expect(referenceA).toHaveTextContent('1 source citations · 1 graph citations');
+    await expect(referenceB).toHaveTextContent('2 source citations · 1 graph citations');
     releaseSavedAnswerCitation?.();
     await expect(paneA.queryByText('Retained source for answer-b')).not.toBeInTheDocument();
     await expect(paneB.queryByText('Reading historical citation…')).not.toBeInTheDocument();
@@ -641,7 +656,7 @@ export const SavedAnswerHistorySearch: Story = {
     await userEvent.click(canvas.getByRole('button', { name: /Question for answer-a/ }));
     const pane = within(await canvas.findByRole('region', { name: 'Saved chat answer-a' }));
     await expect(pane.getByText('Saved finding only for answer-a')).toBeVisible();
-    await expect(pane.getByRole('button', { name: 'Inspect citation C1' })).toBeVisible();
+    await expect(within(pane.getByRole('heading', { name: 'Reject limited inputs before guarded processing' }).closest('li')!).getByRole('button', { name: 'Inspect citation C1' })).toBeVisible();
   },
 };
 

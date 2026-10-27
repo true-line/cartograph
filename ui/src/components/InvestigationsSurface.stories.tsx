@@ -1258,3 +1258,13 @@ export const SavedSpecialistNameSearch: Story = {
     await expect(await canvas.findByText('The inspected callable has a guarded exit. Its broader inventory policy remains unresolved.')).toBeVisible();
   },
 };
+
+// AC-0414: missing narrative support is unavailable rather than a smaller count.
+export const NarrativeMetadataRejectsMissingSupport: Story = {
+  ...SpecWriterV2NarrativeUsesSharedFindingsRenderer,
+  args: { state: state({ catalog: completionCatalog, selectedId: 'inv-spec-writer-v2', detail: specWriterV2Detail(),
+    result: { ...specWriterV2Result(), narrative: { text: 'Saved message', finding_ids: ['missing-finding'] } } }) },
+  play: async ({ canvasElement }) => {
+    await expect(within(canvasElement).getByRole('group', { name: 'Specialist message evidence' })).toHaveTextContent('Citation metadata unavailable');
+  },
+};

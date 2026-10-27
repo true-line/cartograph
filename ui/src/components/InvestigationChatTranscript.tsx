@@ -1,8 +1,11 @@
-import type { InvestigationChat } from '../investigationTypes';
+import type { InvestigationChat, InvestigationResult, InvestigationCitation } from '../investigationTypes';
 import type { InvestigationChatStatus } from '../investigationStore';
+import { InvestigationMessageMeta } from './InvestigationMessageMeta';
 
 export interface InvestigationChatTranscriptProps {
   chat: InvestigationChat | null;
+  result?: InvestigationResult | null;
+  citations?: InvestigationCitation[];
   status: InvestigationChatStatus;
   error: string | null;
   onRefresh: () => void;
@@ -11,7 +14,10 @@ export interface InvestigationChatTranscriptProps {
 }
 
 /** Renders only the persisted user question and typed result reference. */
-export function InvestigationChatTranscript({ chat, status, error, onRefresh, onOpenResult, onOpenInvestigation }: InvestigationChatTranscriptProps) {
+export function InvestigationChatTranscript({ chat, result, citations, status, error, onRefresh, onOpenResult, onOpenInvestigation }: InvestigationChatTranscriptProps) {
+  const reference = chat?.messages.find((entry) => entry.message.kind === 'result_reference')?.message;
+  const matchingResult = chat && result && reference?.kind === 'result_reference' &&
+    reference.task_id === chat.task_id && result.investigation_id === chat.task_id && reference.result_id === result.result_id;
   return <section className="investigation-section" aria-label="Saved investigation chat">
     <h3>Conversation</h3>
     {status === 'loading' && <p role="status">Loading saved conversation…</p>}
@@ -36,6 +42,8 @@ export function InvestigationChatTranscript({ chat, status, error, onRefresh, on
           </li>
           : <li key={entry.id} aria-label="Specialist result reference">
             <strong>Specialist result</strong>
+            <InvestigationMessageMeta citationIds={matchingResult ? result.findings.flatMap((finding) => finding.citation_ids) : undefined}
+              citations={matchingResult ? citations : undefined} />
             <p>Saved result <code>{entry.message.result_id}</code></p>
             <a href="#investigation-findings" onClick={onOpenResult ? (event) => {
               event.preventDefault();

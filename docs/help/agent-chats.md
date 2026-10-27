@@ -114,3 +114,7 @@ The Agent Chats rail badge shows saved results the app has observed as unread in
 ## Saved pane attribution
 
 Each pane header shows its saved specialist name and version, with its saved requested provider/model and Local or Cloud mode. These labels belong to that pane’s validated snapshot, not the current catalog or another selected task. A requested model is not a separately observed response model, and Local mode alone does not guarantee zero egress. The existing last-observed caveat still applies.
+
+## Message evidence metadata
+
+Specialist result references and saved final messages show T3 / InferredWeak, even when they cite confirmed facts. Counts distinguish unique source citations from graph citations; they do not mean source snippets were loaded. Result references count their findings’ citations, while final messages count only their supporting findings. Unavailable metadata is not a zero count. User questions are not attributed to the specialist, and existing citation inspection still uses the exact saved task.

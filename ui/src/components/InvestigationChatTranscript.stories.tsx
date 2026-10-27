@@ -1,6 +1,7 @@
 import type { InvestigationChat } from '../investigationTypes';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, within } from 'storybook/test';
+import { investigationCitations, investigationResult } from '../investigationFixtures';
 import { InvestigationChatTranscript } from './InvestigationChatTranscript';
 
 const saved: InvestigationChat = {
@@ -21,16 +22,20 @@ const meta = { title: 'Surfaces/InvestigationChatTranscript', component: Investi
 export default meta;
 type Story = StoryObj<typeof meta>;
 
+// AC-0414: borrowed result metadata matches this exact persisted reference.
 export const SavedQuestionAndResultReference: Story = {
+  args: { result: investigationResult(), citations: investigationCitations },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const producer = canvas.getByText(/Saved producer:/);
     await expect(producer).toHaveTextContent(/domain-analyst@3 · version 3 · local · ollama\/fixture-model/);
     const userMessage = within(canvas.getByRole('listitem', { name: 'User question' }));
     await expect(userMessage.getByText('You')).toBeVisible();
+    await expect(userMessage.queryByRole('group', { name: 'Specialist message evidence' })).not.toBeInTheDocument();
     await expect(userMessage.getByText(savedQuestion)).toBeVisible();
     const resultMessage = within(canvas.getByRole('listitem', { name: 'Specialist result reference' }));
     await expect(resultMessage.getByText('result:inv-fixture')).toBeVisible();
+    await expect(resultMessage.getByRole('group')).toHaveTextContent('2 source citations · 1 graph citations');
     await expect(resultMessage.getByRole('link', { name: 'View admitted findings and citations' })).toHaveAttribute('href', '#investigation-findings');
   },
 };
@@ -68,5 +73,27 @@ export const TranscriptReadErrorCanRefresh: Story = {
     await expect(canvas.getByRole('alert')).toHaveTextContent(/did not match this task and result/);
     await userEvent.click(canvas.getByRole('button', { name: 'Refresh conversation' }));
     await expect(args.onRefresh).toHaveBeenCalledTimes(1);
+  },
+};
+
+// AC-0414: foreign task/result IDs cannot borrow a selected snapshot’s counts.
+export const MismatchedMetadataIsUnavailable: Story = {
+  render: () => <>{[
+    investigationResult('other-task'),
+    { ...investigationResult(), result_id: 'different-result' },
+    null,
+  ].map((result, index) => <InvestigationChatTranscript key={index} chat={saved} status="saved" error={null}
+    result={result} citations={investigationCitations} onRefresh={fn()} />)}</>,
+  play: async ({ canvasElement }) => {
+    for (const group of within(canvasElement).getAllByRole('group', { name: 'Specialist message evidence' })) {
+      await expect(group).toHaveTextContent('Citation metadata unavailable');
+    }
+  },
+};
+
+export const InsufficientResultHasZeroReferences: Story = {
+  args: { result: { ...investigationResult(), findings: [], knowledge_completeness: 'insufficient_evidence' }, citations: [] },
+  play: async ({ canvasElement }) => {
+    await expect(within(canvasElement).getByRole('group', { name: 'Specialist message evidence' })).toHaveTextContent('0 source citations · 0 graph citations');
   },
 };

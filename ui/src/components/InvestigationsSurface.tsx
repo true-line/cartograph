@@ -394,6 +394,8 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
             {state.detail.error && <p className="error-text" role="alert">{state.detail.error}</p>}
           </>}
           {state.detail && <InvestigationChatTranscript chat={state.chat} status={state.chatStatus}
+            result={state.result} citations={state.detail.investigation_id === state.chat?.task_id &&
+              state.result?.investigation_id === state.chat?.task_id ? state.detail.citations : undefined}
             error={state.chatError} onRefresh={() => void state.refreshSelected()} />}
           <InvestigationActivity events={state.events} />
           <InvestigationFindings reviews={state.findingReviews} reviewLoading={state.reviewLoading} reviewBusy={state.reviewBusy} reviewError={state.reviewError}

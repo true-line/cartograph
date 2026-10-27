@@ -3,6 +3,7 @@ import type {
   InvestigationCitation, InvestigationCitationRead, InvestigationFinding, InvestigationResult,
 } from '../investigationTypes';
 import { TierBadge } from './TierBadge';
+import { InvestigationMessageMeta } from './InvestigationMessageMeta';
 
 const CLAIMS: Record<InvestigationFinding['claim_kind'], string> = {
   implemented_behavior: 'Implemented behavior', documented_intent: 'Documented intent',
@@ -45,6 +46,10 @@ export function InvestigationFindings({ result, citations, citationId, read, loa
       {result.narrative && <article aria-label="Specialist final message">
         <h4>{producerId === 'gap-triager@2' ? 'Gap Triager' : producerId === 'spec-writer@2' ? 'Spec Writer' : 'Specialist'} final message · {producerId}</h4>
         <p className="muted">Proposed design · T3 / InferredWeak · saved final output</p>
+        <InvestigationMessageMeta citations={citations} citationIds={result.narrative.finding_ids.every((id) =>
+          result.findings.some((finding) => finding.finding_id === id))
+          ? result.findings.filter((finding) => result.narrative!.finding_ids.includes(finding.finding_id)).flatMap((finding) => finding.citation_ids)
+          : undefined} />
         <p className="investigation-statement">{result.narrative.text}</p>
         {result.findings.filter((finding) => result.narrative!.finding_ids.includes(finding.finding_id)).map((finding) =>
           <div key={finding.finding_id} aria-label={`Message support ${finding.finding_id}`}>

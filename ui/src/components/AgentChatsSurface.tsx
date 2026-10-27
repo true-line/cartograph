@@ -255,7 +255,7 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
                 onClick={() => onFollowUp(chat.task_id, true)}>Reply here</button>}
               <button type="button" className="secondary-button" onClick={() => { onCancelFollowUp(chat.task_id); dock.close(chat.task_id); if (conversation?.investigation_id === chat.task_id) closeTurns(); }}>Close {chat.task_id}</button>
             </header>
-            <InvestigationChatTranscript chat={chat} status="saved" error={null}
+            <InvestigationChatTranscript chat={chat} result={answer?.result} citations={answer?.citations} status="saved" error={null}
               onRefresh={() => dock.open(chat.task_id)} onOpenResult={onOpenResult} />
             {settled && <InvestigationActivity events={state.events} />}
             {onReplyHost && <ReplyHost taskId={chat.task_id} onHost={onReplyHost} />}
