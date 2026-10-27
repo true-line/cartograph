@@ -326,6 +326,25 @@ PR — per-PR verification is CI's job.
    declaring a build target. **Pass:** neither contributes Confirmed facts
    (AC-0054, ADR-0003, M10 language breadth).
 
+## MT-M10-04 — Local scale benchmark (AC-0423, T-0423)
+
+**Procedure: local only, never CI.** It reads pinned public repositories and
+never runs their code. Timing and memory are measurements, not gates.
+
+1. On macOS or Linux with `git`, `sqlite3` and the Rust toolchain, run
+   `node scripts/bench-ingest.mjs --work <new dir>` from a clean checkout.
+   It builds the release showcase binary once (or takes `--bin`), clones each
+   `bench/repos.toml` entry at its exact commit, recovers it through the
+   production ingest path and writes `bench-<time>.json`.
+2. Run it a second time on the same commit and compare with
+   `node scripts/bench-ingest.mjs --compare <first> <second>`. Every count
+   (files, nodes, edges, labels, endpoint auth states, receipts and receipt
+   omissions) must be identical; the command exits 1 otherwise.
+3. Record the Cartograph commit, machine and each repository's wall time, max
+   RSS and peak footprint. Compare a change against a run of its base commit;
+   report differences in counts as behaviour changes and timing as
+   measurements on that machine only.
+
 ## MT-SB-01 — Stories render on-brand
 
 1. `cd ui && npm run storybook`.

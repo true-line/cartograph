@@ -1,0 +1,19 @@
+# Pinned repositories for the local scale benchmark (#1228, AC-0423).
+# `node scripts/bench-ingest.mjs --work <dir>` clones each at its exact
+# commit and never runs their code. Add repositories; never move a pin
+# without saying so in the PR, since results are compared by pin.
+
+[[repo]]
+name = "simplelogin"
+url = "https://github.com/simple-login/app"
+commit = "4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798"
+
+[[repo]]
+name = "rea"
+url = "https://github.com/morluto/rea"
+commit = "258a1dd3b7d867264655e5a69e6364921e3d0c79"
+
+[[repo]]
+name = "vendure"
+url = "https://github.com/vendure-ecommerce/vendure"
+commit = "2cc309deb5394af176314552ac7320a7b26a0104"
