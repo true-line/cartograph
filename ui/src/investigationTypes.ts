@@ -231,8 +231,14 @@ export interface InvestigationUsage {
   active_milliseconds: number;
 }
 
+/** App-only exact reports; numeric durable usage is not an exact JS transport. */
+export interface ReportedTaskUsage {
+  input_tokens: string | null; output_tokens: string | null; cache_read_tokens: string | null;
+}
+
 /** Definition/provider are the saved identities, not the current catalog entries. */
 export interface InvestigationDetail extends InvestigationSummary {
+  reported_usage_exact?: ReportedTaskUsage;
   completion?: InvestigationCompletionDetail;
   coverage_context?: InvestigationCoverageContext;
   context_owner: string;

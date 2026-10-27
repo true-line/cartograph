@@ -1230,6 +1230,13 @@ fn completion_v2_durable_nonce_reopen_and_saved_policy_are_exact() {
     let before = fixture.store.investigation(&fixture.id).unwrap();
     assert_eq!(before.limits, INVESTIGATION_V2_POLICY.limits());
     assert_eq!(before.summary.specialist_id, SpecialistId::DomainAnalystV8);
+    // AC-0420: the current-family public reader also returns the stored detail subtree.
+    let mut projected = reads::InvestigationDetailRead::from_detail(before.clone()).unwrap();
+    projected.reported_usage_exact = None;
+    assert_eq!(
+        serde_json::to_vec(&projected).unwrap(),
+        encode(&before, MAX_RECORD_BYTES).unwrap()
+    );
     let repeated = fixture
         .store
         .start_completion_investigation(&fixture.request, None)

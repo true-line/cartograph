@@ -208,7 +208,7 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
               <h3>Conversation <code>{entry.id}</code></h3>
               <p className="muted">Loaded saved exchanges only · parent links show branches, not complete history.</p>
             </header>;
-            const { chat, question, specialistName, turn, answer } = entry;
+            const { chat, question, specialistName, turn, answer, reportedUsage } = entry;
             const focused = dock.focusedTask === chat.task_id;
             const settled = focused && dock.focusedGeneration === state.selectionGeneration &&
               state.selectedId === chat.task_id && state.detail?.investigation_id === chat.task_id &&
@@ -234,6 +234,9 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
               </div>
               <p className="muted">Conversation <code>{turn.conversation_id}</code></p>
               <p className="muted">{statusLabel(turn.status)} · Last observed snapshot · {chat.chat_id}</p>
+              <p className="muted">Provider-reported tokens so far: input {reportedUsage ? reportedUsage.input_tokens ?? 'Unknown' : 'Unavailable'};
+                {' '}output {reportedUsage ? reportedUsage.output_tokens ?? 'Unknown' : 'Unavailable'};
+                {' '}cache-read {reportedUsage ? reportedUsage.cache_read_tokens ?? 'Unknown' : 'Unavailable'}. May be incomplete; not a cost estimate.</p>
               {focused && !settled && <p role="status" className="muted">{state.loading || state.chatStatus === 'loading'
                 ? 'Refreshing focused task; retained snapshot shown.' : 'Current task progress unavailable; retained snapshot shown.'}</p>}
               {turn.parent_id === null ? <p className="muted">Root exchange (no saved parent)</p>

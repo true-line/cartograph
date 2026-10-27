@@ -676,3 +676,35 @@ describe('focused durable progress', () => {
     } finally { h.cleanup(); }
   });
 });
+
+// AC-0420: retained usage belongs only to an admitted task/revision snapshot.
+it('binds exact usage to settled revisions and retains it across refusal, focus and close', async () => {
+  const h = progressTransport();
+  const usage = { input_tokens: '18446744073709551615', output_tokens: '0', cache_read_tokens: null };
+  const detail = (revision: number) => investigationDetail('a', { has_result: false, status: 'running', revision,
+    last_event_sequence: revision, reported_usage_exact: usage });
+  try {
+    h.update({ detail: detail(4) }); h.dock.getState().open('a');
+    await vi.waitFor(() => expect(h.dock.getState().docks[0]?.reportedUsage).toEqual(usage));
+    const initial = h.dock.getState().docks[0];
+    for (const changed of [investigationDetail('a', { has_result: false, status: 'running', revision: 4, last_event_sequence: 4 }),
+      { ...detail(4), reported_usage_exact: { ...usage, input_tokens: '1' } }, detail(3)]) {
+      h.update({ detail: changed });
+      expect(await h.dock.getState().openForFollowUp('a')).toBeNull();
+      expect(useInvestigationStore.getState()).toMatchObject({ error: null, chatStatus: 'saved' });
+      expect(h.dock.getState().docks[0]).toBe(initial);
+    }
+    h.update({ detail: detail(5) }); h.hold();
+    // A refused reopen releases focused ownership; recover through an explicit open.
+    const recovering = h.dock.getState().openForFollowUp('a');
+    await vi.waitFor(() => expect(useInvestigationStore.getState().detail?.revision).toBe(5));
+    expect(h.dock.getState().docks[0]).toBe(initial);
+    h.release(); expect(await recovering).not.toBeNull();
+    await vi.waitFor(() => expect(h.dock.getState().docks[0].turn.revision).toBe(5));
+    h.dock.getState().open('b'); await vi.waitFor(() => expect(h.dock.getState().docks).toHaveLength(2));
+    expect(h.dock.getState().docks.find((pane) => pane.chat.task_id === 'a')?.reportedUsage).toEqual(usage);
+    expect(h.dock.getState().docks.find((pane) => pane.chat.task_id === 'b')?.reportedUsage).toBeUndefined();
+    h.dock.getState().close('a'); await useInvestigationStore.getState().refreshSelected();
+    expect(h.dock.getState().docks.map((pane) => pane.chat.task_id)).toEqual(['b']);
+  } finally { h.cleanup(); }
+});

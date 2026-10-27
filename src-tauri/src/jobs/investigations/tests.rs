@@ -3070,3 +3070,82 @@ fn investigation_start_diagnostics_are_opt_in_private_and_unwind_scoped() {
     let (_, fresh) = start_diagnostics::capture(|| {});
     assert_eq!(fresh, start_diagnostics::Snapshot::default());
 }
+
+// AC-0420: app-only counting does not alter canonical detail or its durable owner.
+#[test]
+fn investigation_detail_read_exact_reports_preserve_base_and_capacity() {
+    let mut fixture = Fixture::new();
+    let (id, _) = fixture.start("detail-usage", InvestigationProviderMode::Local);
+    let mut detail = fixture.store.investigation(&id).unwrap();
+    let before: Vec<u8> = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT record FROM investigation_tasks WHERE id=?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let base = encode(&detail, MAX_RECORD_BYTES).unwrap();
+    let mut read = reads::InvestigationDetailRead::from_detail(detail.clone()).unwrap();
+    assert_eq!(
+        context_hub::logical::count(&read.detail).unwrap(),
+        base.len()
+    );
+    assert!(
+        read.reported_usage_exact
+            .as_ref()
+            .unwrap()
+            .input_tokens
+            .is_none()
+    );
+    read.reported_usage_exact = None;
+    assert_eq!(serde_json::to_vec(&read).unwrap(), base);
+    let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&id).unwrap(), detail);
+    let after: Vec<u8> = reopened
+        .conn
+        .query_row(
+            "SELECT record FROM investigation_tasks WHERE id=?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(before, after);
+    detail.usage.reported_input_tokens = Some(u64::MAX);
+    detail.usage.reported_output_tokens = Some(u64::MAX);
+    detail.usage.reported_cache_read_tokens = Some(u64::MAX);
+    let widest = reads::InvestigationDetailRead::from_detail(detail.clone()).unwrap();
+    assert_eq!(
+        context_hub::logical::count(&widest).unwrap()
+            - context_hub::logical::count(&detail).unwrap(),
+        145
+    );
+    detail.usage.reported_output_tokens = Some(0);
+    let read = reads::InvestigationDetailRead::from_detail(detail.clone()).unwrap();
+    let json = serde_json::to_value(&read).unwrap();
+    assert_eq!(
+        json["reported_usage_exact"],
+        serde_json::json!({"input_tokens":"18446744073709551615","output_tokens":"0","cache_read_tokens":"18446744073709551615"})
+    );
+    assert_eq!(
+        context_hub::logical::count(&read).unwrap(),
+        serde_json::to_vec(&read).unwrap().len()
+    );
+    // Serializer-only defensive boundary, not a claim this enlarged question
+    // satisfies saved-task input validation. All real-family bytes above stay unchanged.
+    detail
+        .summary
+        .question
+        .push_str(&"q".repeat(MAX_RECORD_BYTES - context_hub::logical::count(&read).unwrap()));
+    let exact = reads::InvestigationDetailRead::from_detail(detail.clone()).unwrap();
+    assert_eq!(context_hub::logical::count(&exact), Some(MAX_RECORD_BYTES));
+    assert!(exact.reported_usage_exact.is_some());
+    detail.summary.question.push('q');
+    let fallback = reads::InvestigationDetailRead::from_detail(detail.clone()).unwrap();
+    assert!(fallback.reported_usage_exact.is_none());
+    assert_eq!(
+        serde_json::to_vec(&fallback).unwrap(),
+        serde_json::to_vec(&detail).unwrap()
+    );
+}
