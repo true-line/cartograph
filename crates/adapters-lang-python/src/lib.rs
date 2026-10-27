@@ -18,6 +18,7 @@ mod alembic;
 mod app_scope;
 mod auth_guards;
 mod flask_admin;
+mod flask_admin_library;
 pub mod observed_infra;
 mod request_inputs;
 mod responses;
@@ -2273,7 +2274,7 @@ pub fn extract_dir_incremental_with_progress(
         }
     }
     resolve_absolute_imports(&mut out, id.repo);
-    flask_admin::resolve(&mut out, id.repo);
+    flask_admin::resolve(&mut out, id.repo, root, id.commit);
     resolve_routes(&mut out, id.repo);
     let functions = responses::resolve(&mut out, id.repo);
     auth_guards::resolve(&mut out, id.repo, &functions);
@@ -2288,6 +2289,12 @@ pub fn extract_dir_incremental_with_progress(
         EXTRACTOR_ID,
         core_graph::placeholder::label_for_id,
         |endpoint, _| {
+            if endpoint.starts_with(flask_admin_library::LIBRARY_SYMBOLS) {
+                return Some(Boundary::External {
+                    reason: "Flask-Admin view method of a release the repository pins".into(),
+                    evidence: vec![],
+                });
+            }
             let module = endpoint.strip_prefix("mod:")?;
             Some(classify_import(module, &local_names))
         },
