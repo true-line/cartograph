@@ -1,13 +1,22 @@
 import { create } from 'zustand';
 import { useInvestigationStore, type InvestigationState } from './investigationStore';
-import type { InvestigationChat, InvestigationSummary } from './investigationTypes';
+import type { InvestigationChat, InvestigationSummary, InvestigationResult, InvestigationCitation, InvestigationCitationRead } from './investigationTypes';
 
 export type ChatTurn = Pick<InvestigationSummary, 'investigation_id' | 'conversation_id' | 'parent_id' |
   'question' | 'specialist_id' | 'status' | 'updated_at' | 'revision'>;
-interface ChatDock { chat: InvestigationChat; question: string; turn: ChatTurn }
+interface ChatDock {
+  chat: InvestigationChat; question: string; turn: ChatTurn;
+  answer: { result: InvestigationResult; citations: InvestigationCitation[] } | null;
+}
+interface CitationInspection {
+  taskId: string; citationId: string; read: InvestigationCitationRead | null; loading: boolean; error: string | null;
+}
 interface DockState {
   docks: ChatDock[];
   focusedTask: string | null;
+  citation: CitationInspection | null;
+  readCitation: (taskId: string, citationId: string) => Promise<void>;
+  clearCitation: () => void;
   pendingTask: string | null;
   error: string | null;
   fallbackTask: string | null;
@@ -22,6 +31,9 @@ interface DockState {
 /** Session snapshots only. The existing coordinator owns all validation and I/O. */
 export function createAgentChatDockStore(coordinator = useInvestigationStore) {
   let connected = false;
+  let citationRequest = 0;
+  let citationUnsubscribe: (() => void) | undefined;
+  let citationOwner: AbortController | undefined;
   let adoptedInitialSelection = false;
   let intent = 0;
   let unsubscribe: (() => void) | undefined;
@@ -29,10 +41,20 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
   let requestedGeneration = 0;
   let navigationIntent: string | null = null;
   let loadingOwner: AbortController | undefined;
-  let followUpWaiter: { intent: number; taskId: string; resolve: (state: InvestigationState | null) => void } | undefined;
+  type Consumer = 'followUp' | 'citation';
+  type Waiter = { intent: number; taskId: string; resolve: (state: InvestigationState | null) => void };
+  const waiters: Partial<Record<Consumer, Waiter>> = {};
+  const finishWaiters = (state: InvestigationState | null, request?: number, taskId?: string) => {
+    for (const consumer of ['followUp', 'citation'] as const) {
+      const waiter = waiters[consumer];
+      if (waiter && (request === undefined || waiter.intent === request) && (!taskId || waiter.taskId === taskId)) {
+        delete waiters[consumer]; waiter.resolve(state);
+      }
+    }
+  };
   const stop = (releaseLoading = false) => {
     ++intent; unsubscribe?.(); unsubscribe = undefined;
-    followUpWaiter?.resolve(null); followUpWaiter = undefined;
+    finishWaiters(null);
     // Release UI ownership only; the physical read still occupies its slot.
     if (releaseLoading) loadingOwner?.abort();
   };
@@ -60,7 +82,13 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
             state.detail?.investigation_id === taskId) {
           // Capture navigation identity only from this same validated task detail.
           const { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } = state.detail;
-          const dock = { chat: state.chat, question,
+          const result = state.result;
+          const reference = state.chat.messages.find((entry) => entry.message.kind === 'result_reference')?.message;
+          const referenced = new Set(result?.findings.flatMap((finding) => finding.citation_ids));
+          const answer = result?.investigation_id === taskId && reference?.kind === 'result_reference' &&
+            reference.task_id === taskId && reference.result_id === result.result_id
+            ? { result, citations: state.detail.citations.filter((citation) => referenced.has(citation.citation_id)) } : null;
+          const dock = { chat: state.chat, question, answer,
             turn: { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } };
           set(({ docks }) => {
             const existing = docks.findIndex((item) => item.chat.chat_id === dock.chat.chat_id);
@@ -70,11 +98,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         } else set({ pendingTask: null, fallbackTask: state.chatStatus === 'legacy' ? taskId : null,
           error: state.chatError ?? state.error ?? (state.chatStatus === 'legacy'
             ? 'No saved conversation is available for this older investigation.' : 'Saved chat unavailable. Try opening it again.') });
-        if (followUpWaiter?.intent === request && followUpWaiter.taskId === taskId && !state.loading) {
-          const waiter = followUpWaiter;
-          followUpWaiter = undefined;
-          waiter.resolve(state);
-        }
+        finishWaiters(state, request, taskId);
         unsubscribe?.(); unsubscribe = undefined;
       };
       unsubscribe = coordinator.subscribe(observe);
@@ -82,7 +106,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         if (connected && intent === request) {
           unsubscribe?.(); unsubscribe = undefined;
           set({ pendingTask: null, error: 'Saved chat unavailable. Try opening it again.' });
-          if (followUpWaiter?.intent === request) { const waiter = followUpWaiter; followUpWaiter = undefined; waiter.resolve(null); }
+          finishWaiters(null, request);
         }
       }).finally(() => {
         reading = false;
@@ -91,15 +115,60 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         if (intent !== request) run();
       });
     };
-    const beginOpen = (taskId: string, followUp?: (state: InvestigationState | null) => void) => {
+    const beginOpen = (taskId: string, resolve?: (state: InvestigationState | null) => void, consumer: Consumer = 'followUp') => {
+      get().clearCitation();
       stop();
       requestedGeneration = coordinator.getState().selectionGeneration;
-      if (followUp) followUpWaiter = { intent, taskId, resolve: followUp };
+      if (resolve) waiters[consumer] = { intent, taskId, resolve };
       set({ focusedTask: taskId, pendingTask: taskId, error: null, fallbackTask: null });
       run();
     };
+    const awaitOpen = (taskId: string, consumer: Consumer) => new Promise<InvestigationState | null>((resolve) => {
+      if (!connected) { resolve(null); return; }
+      if (get().pendingTask === taskId) {
+        waiters[consumer]?.resolve(null);
+        waiters[consumer] = { intent, taskId, resolve };
+        run(); return;
+      }
+      beginOpen(taskId, resolve, consumer);
+    });
     return {
-      docks: [], focusedTask: null, pendingTask: null, error: null, fallbackTask: null,
+      docks: [], focusedTask: null, citation: null, pendingTask: null, error: null, fallbackTask: null,
+      clearCitation: () => {
+        ++citationRequest; citationUnsubscribe?.(); citationUnsubscribe = undefined;
+        const owner = citationOwner; citationOwner = undefined;
+        owner?.abort();
+        set({ citation: null });
+      },
+      readCitation: async (taskId, citationId) => {
+        const answer = get().docks.find((dock) => dock.chat.task_id === taskId)?.answer;
+        const citation = answer?.citations.find((item) => item.citation_id === citationId);
+        if (!connected || !answer || !citation) return;
+        const opening = awaitOpen(taskId, 'citation');
+        const request = ++citationRequest;
+        const opened = await opening;
+        if (request !== citationRequest || !opened || opened.chatStatus !== 'saved' || opened.chat?.task_id !== taskId ||
+            opened.result?.investigation_id !== taskId || opened.selectedId !== taskId || opened.result?.result_id !== answer.result.result_id ||
+            JSON.stringify(opened.detail?.citations.find((item) => item.citation_id === citationId)) !== JSON.stringify(citation)) return;
+        const generation = opened.selectionGeneration;
+        const current = () => connected && request === citationRequest && coordinator.getState().selectedId === taskId &&
+          coordinator.getState().selectionGeneration === generation &&
+          get().docks.some((dock) => dock.chat.task_id === taskId && dock.answer?.result.result_id === answer.result.result_id);
+        if (!current()) return;
+        set({ citation: { taskId, citationId, read: null, loading: true, error: null } });
+        citationUnsubscribe = coordinator.subscribe(() => { if (!current()) get().clearCitation(); });
+        const owner = new AbortController();
+        citationOwner = owner;
+        await coordinator.getState().readCitation(citationId, { signal: owner.signal });
+        if (!current()) return;
+        citationUnsubscribe?.(); citationUnsubscribe = undefined;
+        const state = coordinator.getState();
+        const read = state.citationRead?.investigation_id === taskId && state.citationRead.citation_id === citationId
+          ? state.citationRead : null;
+        set({ citation: { taskId, citationId, loading: false,
+          read,
+          error: state.citationError ?? (read ? null : 'Historical evidence could not be inspected.') } });
+      },
       connect: () => {
         connected = true;
         const requested = navigationIntent;
@@ -107,28 +176,20 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         const selected = requested ?? get().focusedTask ?? (!adoptedInitialSelection ? coordinator.getState().selectedId : null);
         adoptedInitialSelection = true;
         if (selected) get().open(selected);
-        return () => { connected = false; navigationIntent = null; stop(true); set({ pendingTask: null }); };
+        return () => { connected = false; get().clearCitation(); navigationIntent = null; stop(true); set({ pendingTask: null }); };
       },
       open: (taskId) => {
         if (!connected || get().pendingTask === taskId) return;
         beginOpen(taskId);
       },
-      openForFollowUp: (taskId) => new Promise((resolve) => {
-        if (!connected) { resolve(null); return; }
-        if (get().pendingTask === taskId) {
-          followUpWaiter?.resolve(null);
-          followUpWaiter = { intent, taskId, resolve };
-          run();
-          return;
-        }
-        beginOpen(taskId, resolve);
-      }),
+      openForFollowUp: (taskId) => awaitOpen(taskId, 'followUp'),
       requestOpenFromNotice: (taskId) => {
         if (connected) get().open(taskId);
         else navigationIntent = taskId;
       },
       cancelNavigationIntent: () => { navigationIntent = null; },
       close: (taskId) => {
+        if (get().citation?.taskId === taskId) get().clearCitation();
         if (get().pendingTask === taskId || get().focusedTask === taskId) stop(true);
         set((state) => ({ docks: state.docks.filter((dock) => dock.chat.task_id !== taskId),
           pendingTask: state.pendingTask === taskId ? null : state.pendingTask,

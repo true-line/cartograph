@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useAgentChatDockStore, type ChatTurn } from '../agentChatDockStore';
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
+import { InvestigationFindings } from './InvestigationFindings';
 import { InvestigationChatTranscript } from './InvestigationChatTranscript';
 
 export interface AgentChatsSurfaceProps {
@@ -133,7 +134,7 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onCancelFol
               onClick={() => void state.loadConversation(true)}>Load older turns</button></>}
         </section>}
         <div className={`agent-chat-docks agent-chat-docks-${dock.docks.length}`}>
-          {dock.docks.map(({ chat, question, turn }) => <section className="agent-chat-pane" key={chat.chat_id}
+          {dock.docks.map(({ chat, question, turn, answer }) => <section className="agent-chat-pane" key={chat.chat_id}
             aria-label={`Saved chat ${chat.task_id}`}>
             <header><h3>{question}</h3><code>{chat.task_id}</code>
               <p className="muted">Last observed snapshot · {chat.chat_id}</p>
@@ -146,6 +147,13 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onCancelFol
             </header>
             <InvestigationChatTranscript chat={chat} status="saved" error={null}
               onRefresh={() => dock.open(chat.task_id)} onOpenResult={onOpenResult} />
+            {answer && <InvestigationFindings readOnly sectionId={`saved-chat-findings-${chat.chat_id}`}
+              result={answer.result} citations={answer.citations}
+              citationId={dock.citation?.taskId === chat.task_id ? dock.citation.citationId : null}
+              read={dock.citation?.taskId === chat.task_id ? dock.citation.read : null}
+              loading={dock.citation?.taskId === chat.task_id && dock.citation.loading}
+              error={dock.citation?.taskId === chat.task_id ? dock.citation.error : null}
+              onRead={(citationId) => void dock.readCitation(chat.task_id, citationId)} onClose={dock.clearCitation} />}
           </section>)}
         </div>
       </div>

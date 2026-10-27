@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
-import { investigationCatalog, investigationDetail, investigationEvents, investigationResult } from '../investigationFixtures';
+import { investigationCatalog, investigationCitations, investigationDetail, investigationEvents, investigationResult } from '../investigationFixtures';
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
 import type { InvestigationChat, InvestigationDetail } from '../investigationTypes';
 import { useAgentChatDockStore } from '../agentChatDockStore';
@@ -325,5 +325,84 @@ export const ConversationOwnershipAcrossVisits: Story = {
     releaseOldConversation?.();
     await waitFor(() => expect(useInvestigationStore.getState().conversationItems).toEqual([]));
     await expect(useInvestigationStore.getState().conversationId).toBeNull();
+  },
+};
+
+let savedAnswerCitationReads: string[];
+let releaseSavedAnswerCitation: (() => void) | undefined;
+
+// AC-0397: actual validated saved answers and nonselected-pane historical inspection.
+export const SavedAnswersStayWithTheirPane: Story = {
+  beforeEach: () => {
+    savedAnswerCitationReads = []; releaseSavedAnswerCitation = undefined;
+    const details = ['answer-a', 'answer-b'].map((id) => investigationDetail(id, { question: `Question for ${id}` }));
+    const results = details.map((detail) => {
+      const result = investigationResult(detail.investigation_id);
+      result.findings[0].statement = `Saved finding only for ${detail.investigation_id}`;
+      return result;
+    });
+    mockIPC((command, payload) => {
+      const args = (payload ?? {}) as { investigationId?: string; citationId?: string; afterSequence?: number };
+      const index = details.findIndex((detail) => detail.investigation_id === args.investigationId);
+      const detail = details[index]; const result = results[index];
+      if (command === 'get_investigation') return detail;
+      if (command === 'investigation_result') return result;
+      if (command === 'investigation_events') return { investigation_id: args.investigationId,
+        items: investigationEvents(args.investigationId!).filter((event) => event.sequence > (args.afterSequence ?? 0)), next_sequence: 9, has_more: false };
+      if (command === 'get_investigation_chat' && detail) return {
+        chat_id: `chat:${detail.investigation_id}`, task_id: detail.investigation_id,
+        producer: { specialist_id: detail.specialist.id, specialist_version: detail.specialist.version,
+          prompt_fingerprint: detail.specialist.prompt_fingerprint, tier: detail.specialist.tier,
+          confidence_tier: detail.specialist.confidence_tier, provider_mode: detail.provider.mode,
+          provider_id: detail.provider.provider_id, model: detail.provider.model, protocol_version: null },
+        messages: [{ id: `question:${detail.investigation_id}`, ordinal: 0, author: 'user', message: { kind: 'user_question', question: detail.question } },
+          { id: `answer:${detail.investigation_id}`, ordinal: 1, author: 'specialist', message: { kind: 'result_reference',
+            task_id: detail.investigation_id, result_id: result.result_id, result_hash: 'e'.repeat(64) } }],
+      };
+      if (command === 'read_investigation_citation') {
+        savedAnswerCitationReads.push(`${args.investigationId}:${args.citationId}`);
+        return new Promise((resolve) => { releaseSavedAnswerCitation = () => resolve({ investigation_id: args.investigationId,
+          citation_id: args.citationId, citation: investigationCitations[0], status: 'available', text: `Retained source for ${args.investigationId}` }); });
+      }
+      if (command === 'list_investigations') return { items: details, next_cursor: null };
+      if (/^(start|cancel|delete)_investigation$/.test(command)) throw new Error('Read-only saved answers must not dispatch');
+      return null;
+    });
+    const initial = useInvestigationStore.getInitialState();
+    useInvestigationStore.setState({ ...initial, history: details, catalog: investigationCatalog,
+      composer: { ...initial.composer, question: 'Keep composer draft' },
+      pendingStart: { schema_version: 1, request_nonce: 'd'.repeat(36), specialist_id: 'domain-analyst@3',
+        question: 'Keep pending request', scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1' } }, true);
+    return () => { releaseSavedAnswerCitation?.(); clearMocks(); };
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const pending = useInvestigationStore.getState().pendingStart;
+    for (const id of ['answer-a', 'answer-b']) await userEvent.click(canvas.getByRole('button', { name: new RegExp(`Question for ${id}`) }));
+    const paneA = within(await canvas.findByRole('region', { name: 'Saved chat answer-a' }));
+    const paneB = within(await canvas.findByRole('region', { name: 'Saved chat answer-b' }));
+    await expect(paneA.getByText('Saved finding only for answer-a')).toBeVisible();
+    await expect(paneA.queryByText('Saved finding only for answer-b')).not.toBeInTheDocument();
+    await expect(paneB.getByText('Saved finding only for answer-b')).toBeVisible();
+    await expect(paneA.getByText('Implemented behavior')).toBeVisible();
+    await expect(paneA.getByText('Proposed design')).toBeVisible();
+    await expect(paneA.queryByText(/Review state unavailable|Follow-up selection is a human opinion/)).not.toBeInTheDocument();
+    await expect(canvasElement.querySelectorAll('[id^="saved-chat-findings-"]')).toHaveLength(2);
+    await expect(canvasElement.querySelector('#investigation-findings')).toBeNull();
+    await userEvent.click(paneA.getByRole('button', { name: 'Inspect citation C1' }));
+    await waitFor(() => expect(savedAnswerCitationReads).toEqual(['answer-a:C1']));
+    await expect(paneA.getByText('Reading historical citation…')).toBeVisible();
+    await expect(paneB.queryByRole('complementary', { name: 'Historical citation' })).not.toBeInTheDocument();
+    releaseSavedAnswerCitation?.();
+    await expect(await paneA.findByText('Retained source for answer-a')).toBeVisible();
+    await userEvent.click(paneB.getByRole('button', { name: 'Inspect citation C1' }));
+    await waitFor(() => expect(savedAnswerCitationReads).toEqual(['answer-a:C1', 'answer-b:C1']));
+    await userEvent.click(canvas.getByRole('button', { name: /Question for answer-a/ }));
+    await waitFor(() => expect(useAgentChatDockStore.getState().citation).toBeNull());
+    releaseSavedAnswerCitation?.();
+    await expect(paneA.queryByText('Retained source for answer-b')).not.toBeInTheDocument();
+    await expect(paneB.queryByText('Reading historical citation…')).not.toBeInTheDocument();
+    await expect(useInvestigationStore.getState().composer.question).toBe('Keep composer draft');
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
   },
 };

@@ -3,7 +3,8 @@ import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { create } from 'zustand';
 import { createAgentChatDockStore } from './agentChatDockStore';
 import { useInvestigationStore, type InvestigationState } from './investigationStore';
-import { investigationCatalog, investigationConsent, investigationDetail, investigationEvents, investigationResult } from './investigationFixtures';
+import { investigationCatalog, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult } from './investigationFixtures';
+import { queryHistoryDetail, queryHistoryResult } from './completionFixtures';
 import type { InvestigationChat } from './investigationTypes';
 
 function chat(id: string): InvestigationChat {
@@ -15,6 +16,13 @@ function chat(id: string): InvestigationChat {
       provider_id: detail.provider.provider_id, model: detail.provider.model, protocol_version: null },
     messages: [{ id: `question:${id}`, ordinal: 0, author: 'user',
       message: { kind: 'user_question', question: detail.question } }] };
+}
+function completedState(id: string): Partial<InvestigationState> {
+  const result = investigationResult(id);
+  const saved = chat(id);
+  saved.messages.push({ id: `answer:${id}`, ordinal: 1, author: 'specialist',
+    message: { kind: 'result_reference', task_id: id, result_id: result.result_id, result_hash: 'e'.repeat(64) } });
+  return { detail: investigationDetail(id), result, chat: saved, chatStatus: 'saved' };
 }
 const tick = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
 function harness(selectedId: string | null = null, autoConnect = true) {
@@ -371,5 +379,175 @@ describe('saved task chat docks', () => {
     h.coordinator.setState({ chat: null, chatStatus: 'loading' });
     expect(h.dock.getState().docks[0].chat.chat_id).toBe('real-chat:a');
     leaveAgain();
+  });
+});
+
+// AC-0397: the adapter trusts existing schema validation, never imposes a new finding cap.
+describe('saved task chat answers and citation ownership', () => {
+  it('retains only the referenced citations and all already-admitted expanded findings', async () => {
+    const h = harness();
+    h.dock.getState().open('expanded'); await tick();
+    const result = queryHistoryResult('expanded');
+    result.findings = Array.from({ length: 56 }, (_, index) => ({ ...investigationResult().findings[0],
+      finding_id: `F${index}`, citation_ids: ['C1'] }));
+    const state = completedState('expanded');
+    state.result = result; state.detail = queryHistoryDetail('expanded');
+    state.chat!.messages[1].message = { kind: 'result_reference', task_id: 'expanded', result_id: result.result_id, result_hash: 'e'.repeat(64) };
+    h.coordinator.setState(state); await tick();
+    const answer = h.dock.getState().docks[0].answer!;
+    expect(Object.keys(answer)).toEqual(['result', 'citations']);
+    expect(answer.result).toBe(result);
+    expect(answer.result.findings).toHaveLength(56);
+    expect(answer.citations.map((item) => item.citation_id)).toEqual(['C1']);
+    h.leave();
+  });
+
+  it.each(['wrong-task', 'wrong-result', 'pending'] as const)('does not attach an answer for %s', async (failure) => {
+    const h = harness(); h.dock.getState().open('a'); await tick();
+    const state = completedState('a');
+    if (failure === 'pending') state.chat!.messages.pop();
+    else state.chat!.messages[1].message = { kind: 'result_reference', task_id: failure === 'wrong-task' ? 'b' : 'a',
+      result_id: failure === 'wrong-result' ? 'other-result' : state.result!.result_id, result_hash: 'e'.repeat(64) };
+    h.coordinator.setState(state); await tick();
+    expect(h.dock.getState().docks[0].answer).toBeNull(); h.leave();
+  });
+
+  it('does not resurrect a dismissed citation while its task refresh is pending', async () => {
+    const h = harness(); h.dock.getState().open('a'); await tick();
+    h.coordinator.setState(completedState('a')); await tick();
+    const read = vi.fn(); h.coordinator.setState({ readCitation: read }); h.hold();
+    const pending = h.dock.getState().readCitation('a', 'C1'); await tick();
+    h.dock.getState().clearCitation();
+    h.coordinator.setState(completedState('a')); h.release(); await pending;
+    expect(h.dock.getState().citation).toBeNull(); expect(read).not.toHaveBeenCalled(); h.leave();
+  });
+
+  it('reports an unavailable inspection for a nonnull foreign citation response', async () => {
+    const h = harness(); h.dock.getState().open('a'); await tick();
+    h.coordinator.setState(completedState('a')); await tick();
+    h.coordinator.setState({ readCitation: async () => { h.coordinator.setState({ citationRead: {
+      investigation_id: 'b', citation_id: 'C1', citation: investigationCitations[0], status: 'available', text: 'Foreign source' } }); } });
+    const pending = h.dock.getState().readCitation('a', 'C1'); await tick();
+    h.coordinator.setState(completedState('a')); await pending;
+    expect(h.dock.getState().citation).toMatchObject({ read: null, loading: false, error: 'Historical evidence could not be inspected.' });
+    h.leave();
+  });
+
+  it.each(['close', 'leave', 'selection'] as const)('clears a pending inspector on %s and ignores late evidence', async (action) => {
+    const h = harness(); h.dock.getState().open('a'); await tick();
+    h.coordinator.setState(completedState('a')); await tick();
+    let release!: () => void;
+    h.coordinator.setState({ readCitation: async () => { await new Promise<void>((resolve) => { release = resolve; });
+      h.coordinator.setState({ citationRead: { investigation_id: 'a', citation_id: 'C1', citation: investigationCitations[0],
+        status: 'available', text: 'Old retained source' } }); } });
+    const pending = h.dock.getState().readCitation('a', 'C1'); await tick();
+    h.coordinator.setState(completedState('a')); await tick();
+    expect(h.dock.getState().citation?.loading).toBe(true);
+    if (action === 'close') h.dock.getState().close('a');
+    else if (action === 'leave') h.leave();
+    else h.coordinator.setState((state) => ({ selectedId: 'b', selectionGeneration: state.selectionGeneration + 1 }));
+    expect(h.dock.getState().citation).toBeNull();
+    release(); await pending; expect(h.dock.getState().citation).toBeNull(); h.leave();
+  });
+});
+
+/** Real coordinator transport: only the task-chat and historical citation replies are deferred. */
+function ownedCitationTransport() {
+  vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+  useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  const pending: { resolve: (value: unknown) => void }[] = [];
+  const chatPending: (() => void)[] = [];
+  let holdChat = false; let chatReads = 0;
+  mockIPC((command, payload) => {
+    const args = (payload ?? {}) as { investigationId?: string; afterSequence?: number };
+    const state = completedState(args.investigationId ?? 'a');
+    if (command === 'get_investigation') return state.detail;
+    if (command === 'investigation_result') return state.result;
+    if (command === 'get_investigation_chat') {
+      ++chatReads;
+      if (holdChat) return new Promise((resolve) => chatPending.push(() => resolve(state.chat)));
+      return state.chat;
+    }
+    if (command === 'investigation_events') return { investigation_id: args.investigationId,
+      items: investigationEvents(args.investigationId).filter((event) => event.sequence > (args.afterSequence ?? 0)), next_sequence: 9, has_more: false };
+    if (command === 'read_investigation_citation') return new Promise((resolve) => pending.push({ resolve }));
+    return null;
+  });
+  const dock = createAgentChatDockStore(); const leave = dock.getState().connect();
+  const reply = (index: number) => pending[index].resolve({ investigation_id: 'a', citation_id: 'C1',
+    citation: investigationCitations[0], status: 'available', text: `Retained source ${index}` });
+  return { dock, pending, reply, leave, chatReads: () => chatReads,
+    holdChat: () => { holdChat = true; }, releaseChat: () => { holdChat = false; chatPending.splice(0).forEach((resolve) => resolve()); },
+    cleanup: () => { leave(); chatPending.splice(0).forEach((resolve) => resolve()); pending.forEach((_, index) => reply(index));
+      clearMocks(); vi.unstubAllGlobals(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); } };
+}
+
+// AC-0397: independent consumers share one physical read; dismissal owns its private historical read only.
+describe('real coordinator citation and follow-up ownership', () => {
+  it.each(['follow-up-first', 'citation-first'] as const)('joins both consumers without cancellation: %s', async (order) => {
+    const h = ownedCitationTransport();
+    try {
+      h.dock.getState().open('a'); await vi.waitFor(() => expect(h.dock.getState().docks[0]?.answer).toBeTruthy());
+      h.holdChat();
+      let followUp: Promise<InvestigationState | null>; let citation: Promise<void>;
+      if (order === 'follow-up-first') { followUp = h.dock.getState().openForFollowUp('a'); citation = h.dock.getState().readCitation('a', 'C1'); }
+      else { citation = h.dock.getState().readCitation('a', 'C1'); followUp = h.dock.getState().openForFollowUp('a'); }
+      await vi.waitFor(() => expect(h.chatReads()).toBe(2));
+      h.releaseChat();
+      expect((await followUp)?.detail?.investigation_id).toBe('a');
+      await vi.waitFor(() => expect(h.pending).toHaveLength(1));
+      h.reply(0); await citation;
+      expect(h.chatReads()).toBe(2);
+      expect(h.dock.getState().citation?.read?.investigation_id).toBe('a');
+    } finally { h.cleanup(); }
+  });
+
+  it('releases both waiting consumers when their pending task closes', async () => {
+    const h = ownedCitationTransport();
+    try {
+      h.dock.getState().open('a'); await vi.waitFor(() => expect(h.dock.getState().docks[0]?.answer).toBeTruthy());
+      h.holdChat(); const followUp = h.dock.getState().openForFollowUp('a');
+      const citation = h.dock.getState().readCitation('a', 'C1');
+      h.dock.getState().close('a');
+      expect(await followUp).toBeNull(); await citation;
+      expect(h.pending).toHaveLength(0); expect(h.dock.getState().citation).toBeNull(); h.releaseChat();
+    } finally { h.cleanup(); }
+  });
+
+  it.each(['dismiss', 'close', 'leave', 'completed'] as const)('clears its shared coordinator inspection on %s', async (action) => {
+    const h = ownedCitationTransport();
+    try {
+      h.dock.getState().open('a'); await vi.waitFor(() => expect(h.dock.getState().docks[0]?.answer).toBeTruthy());
+      const reading = h.dock.getState().readCitation('a', 'C1');
+      await vi.waitFor(() => expect(h.pending).toHaveLength(1));
+      if (action === 'completed') { h.reply(0); await reading; expect(useInvestigationStore.getState().citationRead).not.toBeNull(); }
+      if (action === 'close') h.dock.getState().close('a');
+      else if (action === 'leave') h.leave();
+      else h.dock.getState().clearCitation();
+      expect(useInvestigationStore.getState()).toMatchObject({ citationId: null, citationRead: null, citationLoading: false });
+      if (action !== 'completed') { h.reply(0); await reading; }
+      expect(useInvestigationStore.getState()).toMatchObject({ citationId: null, citationRead: null, citationLoading: false });
+    } finally { h.cleanup(); }
+  });
+
+  it('preserves a newer shared read of the same task and citation when the old dock owner aborts', async () => {
+    const h = ownedCitationTransport();
+    try {
+      h.dock.getState().open('a'); await vi.waitFor(() => expect(h.dock.getState().docks[0]?.answer).toBeTruthy());
+      const oldRead = h.dock.getState().readCitation('a', 'C1');
+      await vi.waitFor(() => expect(h.pending).toHaveLength(1));
+      const newRead = useInvestigationStore.getState().readCitation('C1');
+      await vi.waitFor(() => expect(h.pending).toHaveLength(2));
+      h.dock.getState().clearCitation();
+      expect(useInvestigationStore.getState()).toMatchObject({ citationId: 'C1', citationLoading: true });
+      h.reply(0); await oldRead;
+      expect(useInvestigationStore.getState()).toMatchObject({ citationRead: null, citationLoading: true });
+      h.reply(1); await newRead;
+      expect(useInvestigationStore.getState().citationRead?.text).toBe('Retained source 1');
+      const aborted = new AbortController(); aborted.abort();
+      await useInvestigationStore.getState().readCitation('C1', { signal: aborted.signal });
+      expect(h.pending).toHaveLength(2);
+      expect(useInvestigationStore.getState().citationRead?.text).toBe('Retained source 1');
+    } finally { h.cleanup(); }
   });
 });

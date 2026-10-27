@@ -99,3 +99,15 @@ export const SavedAcceptedDecision: Story = {
     await expect(canvas.getByText(/Review revision 2/)).toBeVisible();
   },
 };
+
+export const SavedAnswerWithoutReviewControls: Story = {
+  args: { readOnly: true, sectionId: 'saved-answer-fixture' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Implemented behavior')).toBeVisible();
+    await expect(canvas.queryByRole('button', { name: 'Use for follow-up' })).not.toBeInTheDocument();
+    await expect(canvas.queryByText(/Review state unavailable|Follow-up selection is a human opinion/)).not.toBeInTheDocument();
+    await expect(canvasElement.querySelector('#investigation-findings')).toBeNull();
+    await expect(canvasElement.querySelector('#saved-answer-fixture')).not.toBeNull();
+  },
+};

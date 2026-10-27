@@ -43,3 +43,10 @@ selected turn remains pinned. **Load older turns** continues the existing page;
 **Refresh conversation turns** discovers new saved children. Errors keep already
 loaded turns visible. These are linked task chats with separate findings and
 citations, not one appended transcript. Close the navigator to end that view.
+
+Completed saved chats show their validated typed findings, claim kinds,
+limitations and citation metadata directly in the pane. These retain T3 /
+InferredWeak attribution and do not change confirmed facts. **Inspect citation**
+refreshes that exact task before reading its retained historical evidence;
+switching or closing cancels presentation of late evidence. No current checkout
+source is substituted. Pending or unavailable chats have no admitted answer.

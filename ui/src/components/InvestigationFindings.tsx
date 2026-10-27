@@ -16,6 +16,8 @@ const READ_STATUS: Record<InvestigationCitationRead['status'], string> = {
 };
 
 export interface InvestigationFindingsProps {
+  readOnly?: boolean;
+  sectionId?: string;
   reviews?: FindingReview[];
   reviewLoading?: boolean;
   reviewBusy?: boolean;
@@ -32,9 +34,9 @@ export interface InvestigationFindingsProps {
   onClose: () => void;
 }
 
-export function InvestigationFindings({ result, citations, citationId, read, loading, error, onRead, onClose, reviews = [], reviewLoading = false, reviewBusy = false, reviewError, onRefreshReviews, onReview }: InvestigationFindingsProps) {
+export function InvestigationFindings({ result, citations, citationId, read, loading, error, onRead, onClose, reviews = [], reviewLoading = false, reviewBusy = false, reviewError, onRefreshReviews, onReview, readOnly = false, sectionId = 'investigation-findings' }: InvestigationFindingsProps) {
   const selected = citations.find((citation) => citation.citation_id === citationId);
-  return <section id="investigation-findings" className="investigation-section" aria-label="Investigation findings">
+  return <section id={sectionId} className="investigation-section" aria-label="Investigation findings">
     <h3>Findings <TierBadge tier="InferredWeak" /></h3>
     <p className="muted">Every specialist finding is T3 / InferredWeak, including statements about implemented behavior.
       Findings do not change confirmed facts, accepted proposals, context or exports.</p>
@@ -42,7 +44,7 @@ export function InvestigationFindings({ result, citations, citationId, read, loa
       <p>{result.knowledge_completeness === 'insufficient_evidence'
         ? 'Insufficient evidence to support an answer.' : 'Findings cover the inspected scope; knowledge remains partial.'}</p>
       <ul className="investigation-limitations">{result.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul>
-      {result.findings.length > 0 && <>
+      {!readOnly && result.findings.length > 0 && <>
         <p className="muted">Follow-up selection is a human opinion about this historical finding. It does not validate evidence, activate curated facts or authorize execution.</p>
         {onRefreshReviews && <button type="button" className="secondary-button" disabled={reviewLoading || reviewBusy} onClick={onRefreshReviews}>Refresh reviews</button>}
         {reviewLoading && <p role="status">Loading saved review decisions…</p>}
@@ -53,7 +55,7 @@ export function InvestigationFindings({ result, citations, citationId, read, loa
           <div className="investigation-heading"><h4>{finding.title}</h4><span className="investigation-claim">{CLAIMS[finding.claim_kind]}</span></div>
           <p className="investigation-statement">{finding.statement}</p>
           <p className="muted">T3 · InferredWeak · <code>{finding.finding_id}</code></p>
-          {(() => {
+          {!readOnly && (() => {
             const review = reviews.find((row) => row.subject.finding_id === finding.finding_id);
             return <div aria-label={`Follow-up review for ${finding.title}`}>
               <p role="status">{review ? review.decision === 'accepted_for_follow_up' ? 'Accepted for follow-up' : review.decision === 'rejected_for_follow_up' ? 'Rejected for follow-up' : 'Pending review' : 'Review state unavailable'}</p>
