@@ -14,8 +14,9 @@
 //! (`jsonify(**payload)`, a computed key) is `response_built_elsewhere`, any
 //! other body (a variable, another call) is `response_not_proven`, a
 //! non-literal status is `status_computed`. `abort(…)` and errors raised are
-//! not responses here, and each Flask name must be imported and not rebound
-//! in the handler. Every recorded kind, status and key cites its `return`.
+//! not responses here (a wrapper's literal `abort` statuses are recorded
+//! separately for `auth_guards`, #1166), and each Flask name must be imported
+//! and not rebound in the handler. Every recorded kind, status and key cites its `return`.
 //!
 //! Repository functions are followed after every file is read (#940), and
 //! each one followed is listed in `followed`:
@@ -56,6 +57,10 @@ pub(crate) struct Responses {
     /// Symbols of the repository functions followed.
     pub followed: BTreeSet<String>,
     pub evidence: Vec<EvidenceRef>,
+    /// Literal statuses of Flask `abort(…)` calls in a wrapper or a check it
+    /// delegates to, with each call. They are not responses and never reach
+    /// `to_props`; `auth_guards` reads them (#1166).
+    pub aborts: Vec<(u16, EvidenceRef)>,
 }
 
 impl Responses {
@@ -121,6 +126,11 @@ impl Responses {
         self.followed.extend(other.followed);
         for evidence in other.evidence {
             self.cite(evidence);
+        }
+        for abort in other.aborts {
+            if !self.aborts.contains(&abort) {
+                self.aborts.push(abort);
+            }
         }
     }
 }
@@ -223,12 +233,15 @@ pub(crate) enum Helper {
     Jsonify,
     RenderTemplate,
     Redirect,
+    /// `abort(status)`: ends the request with an error, not a response.
+    Abort,
 }
 
 const HELPERS: &[(&str, Helper)] = &[
     ("jsonify", Helper::Jsonify),
     ("render_template", Helper::RenderTemplate),
     ("redirect", Helper::Redirect),
+    ("abort", Helper::Abort),
 ];
 
 /// Local names (or `flask.x` prefixes) of Flask's response helpers, or `None`
@@ -323,8 +336,11 @@ pub(crate) fn function_facts(
     let (wrapper, returns) = match helpers {
         Some(helpers) => (
             wrapper_facts(cx, function, helpers, resolver),
-            Some(read_function(cx, function, helpers, resolver, Mode::Check))
-                .filter(|facts| !facts.responses.kinds.is_empty() || !facts.follows.is_empty()),
+            Some(read_function(cx, function, helpers, resolver, Mode::Check)).filter(|facts| {
+                !facts.responses.kinds.is_empty()
+                    || !facts.follows.is_empty()
+                    || !facts.responses.aborts.is_empty()
+            }),
         ),
         None => (None, None),
     };
@@ -405,10 +421,15 @@ fn read_function(
         body,
         mode,
     };
-    visit_scope(body, &mut |node| {
-        if node.kind() == "return_statement" {
-            reader.read_return(node, &mut facts);
+    let checks = !matches!(reader.mode, Mode::Handler);
+    visit_scope(body, &mut |node| match node.kind() {
+        "return_statement" => reader.read_return(node, &mut facts),
+        "call" if checks => {
+            if let Some(status) = reader.abort_status(node) {
+                facts.responses.aborts.push((status, cx.evidence(&node)));
+            }
         }
+        _ => {}
     });
     facts
 }
@@ -530,6 +551,25 @@ impl Reader<'_, '_, '_> {
             .target(self.cx, call.child_by_field_name("function")?, &bound)
     }
 
+    /// The literal status of a Flask `abort(<int>, …)` call.
+    fn abort_status(&self, call: TsNode<'_>) -> Option<u16> {
+        let cx = self.cx;
+        let function = call.child_by_field_name("function")?;
+        if !matches!(self.helpers.get(cx.text(&function)), Some(Helper::Abort)) {
+            return None;
+        }
+        // The import is the root name's only module-level binding.
+        let root_name = cx.text(&function).split('.').next()?;
+        let module = std::iter::successors(Some(call), |node| node.parent()).last()?;
+        if crate::module_binding(cx, module, root_name).writes.len() > 1 {
+            return None;
+        }
+        let first = named(call.child_by_field_name("arguments")?)
+            .into_iter()
+            .find(|argument| argument.kind() != "comment")?;
+        literal_status(cx, first)
+    }
+
     fn classify(&self, body: TsNode<'_>) -> Body {
         let cx = self.cx;
         match body.kind() {
@@ -549,7 +589,7 @@ impl Reader<'_, '_, '_> {
             Some(Helper::Jsonify) => self.jsonify_keys(body),
             Some(Helper::RenderTemplate) => Body::Html,
             Some(Helper::Redirect) => Body::Redirect(redirect_code(cx, body)),
-            None => Body::Unknown,
+            Some(Helper::Abort) | None => Body::Unknown,
         }
     }
 
@@ -859,6 +899,9 @@ pub(crate) fn retarget(extraction: &mut Extraction, commit: &str) {
     }
     for facts in facts {
         for evidence in &mut facts.responses.evidence {
+            evidence.commit_sha = commit.into();
+        }
+        for (_, evidence) in &mut facts.responses.aborts {
             evidence.commit_sha = commit.into();
         }
     }

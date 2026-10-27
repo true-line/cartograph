@@ -6,7 +6,9 @@
 //!   `flask_login` or `flask_login.utils`, used bare; or
 //!   `flask_jwt_extended.jwt_required` as a call with no arguments), or a
 //!   bare repository decorator whose followed wrapper responses (see
-//!   `responses`) contain status 401 or 403. The local name of a framework
+//!   `responses`) contain status 401 or 403, or whose wrapper (or a check
+//!   it returns the result of) calls Flask's `abort` with a literal 401 or
+//!   403 in its own scope (#1166). The local name of a framework
 //!   guard must not be rebound in the file or in the handler.
 //! - `none`: the handler has no non-route decorator, every
 //!   `before_request` / `before_app_request` hook in the repository is
@@ -1224,11 +1226,23 @@ pub(crate) fn resolve(
                         continue;
                     }
                     let merged = responses::decorator_responses(key, functions, repo);
-                    if merged.statuses.contains(&401) || merged.statuses.contains(&403) {
+                    let denied = |status: &u16| matches!(status, 401 | 403);
+                    let aborts = merged
+                        .aborts
+                        .iter()
+                        .filter(|(status, _)| denied(status))
+                        .map(|(_, span)| span.clone())
+                        .collect::<Vec<_>>();
+                    if merged.statuses.iter().any(denied) {
                         guards.insert(symbol_id(repo, &key.0, &key.1));
                         basis.insert("decorator_returns_401_or_403");
                         evidence.push(span.clone());
                         evidence.extend(merged.evidence.iter().cloned());
+                    } else if !aborts.is_empty() {
+                        guards.insert(symbol_id(repo, &key.0, &key.1));
+                        basis.insert("decorator_aborts_401_or_403");
+                        evidence.push(span.clone());
+                        evidence.extend(aborts);
                     } else {
                         reasons.insert(format!(
                             "decorator_not_classified:{}",

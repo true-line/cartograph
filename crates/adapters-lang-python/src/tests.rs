@@ -4147,6 +4147,108 @@ def me():
     assert_eq!(auth["prov"]["confidence_tier"], "InferredStrong");
 }
 
+/// A blueprint route `/api/me` decorated with the repository decorator
+/// `guard`, defined in `app/base.py` after `prelude`.
+fn guarded_by(prelude: &str, guard: &str) -> serde_json::Value {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/base.py",
+        &format!(
+            "from functools import wraps\nfrom flask import Blueprint\n{prelude}\n\napi_bp = Blueprint(\"api\", __name__, url_prefix=\"/api\")\n\n{guard}\n"
+        ),
+    );
+    write(
+        dir.path(),
+        "app/views.py",
+        "from flask import jsonify\nfrom app.base import api_bp, guard\n\n@api_bp.route(\"/me\")\n@guard\ndef me():\n    return jsonify(ok=True)\n",
+    );
+    write(
+        dir.path(),
+        "app/main.py",
+        "from flask import Flask\nfrom app.base import api_bp\napp = Flask(__name__)\napp.register_blueprint(api_bp)\n",
+    );
+    auth_at(&extract_dir(dir.path(), &id()).unwrap(), "/api/me")
+}
+
+#[test]
+fn repository_decorator_aborting_401_or_403_is_a_guard() {
+    // AC-0395 (T-0395): a wrapper, or a check it returns the result of,
+    // that calls Flask's `abort` with a literal 401 or 403 is a guard.
+    let cases = [
+        (
+            "from flask import abort",
+            "def guard(f):\n    @wraps(f)\n    def decorated(*args, **kwargs):\n        if valid():\n            return f(*args, **kwargs)\n        else:\n            return abort(403)\n    return decorated",
+        ),
+        (
+            "from flask import abort",
+            "def guard(f):\n    def decorated(*args, **kwargs):\n        if not allowed():\n            abort(401, description=\"login\")\n        return f(*args, **kwargs)\n    return decorated",
+        ),
+        (
+            "import flask",
+            "def guard(f):\n    def decorated(*args, **kwargs):\n        if not allowed():\n            flask.abort(403)\n        return f(*args, **kwargs)\n    return decorated",
+        ),
+        (
+            "from flask import abort",
+            "def check():\n    if missing():\n        abort(401)\n    return None\n\ndef guard(f):\n    def decorated(*args, **kwargs):\n        error = check()\n        if error:\n            return error\n        return f(*args, **kwargs)\n    return decorated",
+        ),
+    ];
+    for (prelude, guard) in cases {
+        let auth = guarded_by(prelude, guard);
+        assert_eq!(auth["state"], "required", "{guard}: {auth}");
+        assert_eq!(
+            auth["basis"],
+            serde_json::json!(["decorator_aborts_401_or_403"]),
+            "{guard}"
+        );
+        assert_eq!(
+            auth["guards"],
+            serde_json::json!(["sym:local/python-service@app/base.py#guard"])
+        );
+        assert_eq!(auth["prov"]["confidence_tier"], "InferredStrong");
+    }
+}
+
+#[test]
+fn an_unproven_abort_in_a_repository_decorator_is_not_a_guard() {
+    // AC-0395 (T-0395): every form short of a literal 401/403 Flask `abort`
+    // in the wrapper's own scope leaves the decorator not classified.
+    let wrap = |body: &str| {
+        format!(
+            "def guard(f):\n    def decorated(*args, **kwargs):\n{body}\n        return f(*args, **kwargs)\n    return decorated"
+        )
+    };
+    let cases = [
+        // A computed or a non-auth status.
+        ("from flask import abort", wrap("        abort(status())")),
+        ("from flask import abort", wrap("        abort(404)")),
+        // Not Flask's `abort`.
+        ("from mylib import abort", wrap("        abort(403)")),
+        // Rebound in the wrapper or at module level.
+        (
+            "from flask import abort",
+            wrap("        abort = lenient\n        abort(403)"),
+        ),
+        (
+            "from flask import abort\nabort = lenient",
+            wrap("        abort(403)"),
+        ),
+        // Only inside a nested function or lambda that may never run.
+        (
+            "from flask import abort",
+            wrap("        def deny():\n            abort(403)"),
+        ),
+        (
+            "from flask import abort",
+            wrap("        deny = lambda: abort(403)"),
+        ),
+    ];
+    for (prelude, guard) in cases {
+        let auth = guarded_by(prelude, &guard);
+        assert_eq!(auth["state"], "unknown", "{prelude} {guard}: {auth}");
+    }
+}
+
 #[test]
 fn undecorated_route_with_non_blocking_hooks_is_unauthenticated() {
     // AC-0380 (T-0380): a route with no guard decorator, a non-blocking
