@@ -4279,6 +4279,16 @@ fn an_unproven_abort_in_a_repository_decorator_is_not_a_guard() {
             "from flask import abort",
             "def guard(f):\n    abort = lambda status: None\n    def decorated(*args, **kwargs):\n        abort(403)\n        return f(*args, **kwargs)\n    return decorated".to_string(),
         ),
+        // A check the decorator rebinds is not the module's check, whether
+        // returned directly or through a local.
+        (
+            "from flask import abort",
+            "def check(fn):\n    abort(403)\n\ndef guard(f):\n    check = lambda fn: fn()\n    def decorated(*args, **kwargs):\n        return check(f)\n    return decorated".to_string(),
+        ),
+        (
+            "from flask import abort",
+            "def check():\n    abort(403)\n\ndef guard(f, check=lambda: None):\n    def decorated(*args, **kwargs):\n        error = check()\n        if error:\n            return error\n        return f(*args, **kwargs)\n    return decorated".to_string(),
+        ),
         // `flask.abort` replaced at module level or in the wrapper.
         (
             "import flask\nflask.abort = lambda status: None",

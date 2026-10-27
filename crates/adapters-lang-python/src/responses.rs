@@ -528,7 +528,7 @@ impl Reader<'_, '_, '_> {
         // `return check(…)`: the check's own responses and aborts.
         if value.kind() == "call" {
             let function = value.child_by_field_name("function")?;
-            if self.helpers.contains_key(self.cx.text(&function)) {
+            if self.helpers.contains_key(self.cx.text(&function)) || self.enclosed(function) {
                 return None;
             }
             return self.resolver.target(self.cx, function, &self.bound);
@@ -555,8 +555,29 @@ impl Reader<'_, '_, '_> {
             .filter(|right| right.kind() == "call")?;
         let mut bound = self.bound.clone();
         bound.remove(name);
-        self.resolver
-            .target(self.cx, call.child_by_field_name("function")?, &bound)
+        let function = call.child_by_field_name("function")?;
+        if self.enclosed(function) {
+            return None;
+        }
+        self.resolver.target(self.cx, function, &bound)
+    }
+
+    /// Whether a function enclosing the one read (the decorator around a
+    /// wrapper) binds the root name of `callee`, so it is not the module's.
+    fn enclosed(&self, callee: TsNode<'_>) -> bool {
+        let cx = self.cx;
+        let Some(root) = cx.text(&callee).split('.').next() else {
+            return true;
+        };
+        std::iter::successors(self.body.parent().and_then(|read| read.parent()), |node| {
+            node.parent()
+        })
+        .filter(|node| node.kind() == "function_definition")
+        .any(|function| {
+            function
+                .child_by_field_name("body")
+                .is_some_and(|body| handler_bindings(cx, function, body).contains(root))
+        })
     }
 
     /// The literal status of a Flask `abort(<int>, …)` call.
