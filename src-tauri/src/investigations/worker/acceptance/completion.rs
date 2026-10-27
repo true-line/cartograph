@@ -4,6 +4,6 @@ mod control;
 #[path = "completion/execution.rs"]
 mod execution;
 #[path = "completion/prepare.rs"]
-mod prepare;
+pub(super) mod prepare;
 #[path = "completion/records.rs"]
 mod records;
