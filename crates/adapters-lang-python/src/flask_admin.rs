@@ -332,11 +332,17 @@ pub(crate) fn collect(
         let mut hooks = BTreeMap::new();
         if let Some(body) = class.child_by_field_name("body") {
             class_names(cx, body, &mut defines);
-            for hook in ["is_accessible", "inaccessible_callback"] {
-                if defines.contains(hook) {
-                    let proof = access::hook(cx, root, body, cx.text(&name), hook, bindings);
-                    hooks.insert(hook.to_string(), proof);
-                }
+        }
+        // Every binding form counts for a hook, not only those `class_names` reads.
+        for hook in access::HOOKS {
+            if access::binds(cx, class, hook) {
+                defines.insert(hook.to_string());
+            }
+        }
+        for hook in ["is_accessible", "inaccessible_callback"] {
+            if defines.contains(hook) {
+                let proof = access::hook(cx, root, class, cx.text(&name), hook, bindings);
+                hooks.insert(hook.to_string(), proof);
             }
         }
         out.flask_admin.classes.push(ViewClass {
@@ -353,9 +359,8 @@ pub(crate) fn collect(
         let written = match node.kind() {
             "assignment" | "augmented_assignment" => node
                 .child_by_field_name("left")
-                .is_some_and(|left| access::writes_anonymous_user(cx, left)),
-            "call" => access::writes_anonymous_user(cx, node),
-            _ => false,
+                .is_some_and(|left| access::names_anonymous_user(cx, left, true)),
+            _ => access::names_anonymous_user(cx, node, false),
         };
         if written {
             out.flask_admin.anonymous_user.push(cx.evidence(&node));
@@ -438,7 +443,7 @@ pub(crate) fn collect(
 }
 
 /// Names a class body binds, outside nested function and class bodies.
-pub(crate) fn class_names(cx: &FileCx<'_>, node: TsNode<'_>, names: &mut BTreeSet<String>) {
+fn class_names(cx: &FileCx<'_>, node: TsNode<'_>, names: &mut BTreeSet<String>) {
     let mut walk = node.walk();
     for child in node.named_children(&mut walk) {
         match child.kind() {
@@ -1034,7 +1039,7 @@ impl Auth {
                 "authenticated": true,
                 "guards": [guard],
                 "basis": ["flask_admin_is_accessible_requires_login"],
-                "assumptions": ["anonymous_user_not_set_through_computed_setattr"],
+                "assumptions": ["anonymous_user_not_named_by_computed_or_escaped_string"],
                 "prov": prov_from(
                     bounded(evidence.clone()),
                     ConfidenceTier::InferredStrong,

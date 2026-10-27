@@ -6848,6 +6848,12 @@ admin.add_view(Reports(endpoint="reports"))
         ),
         (
             app.to_string(),
+            format!("import builtins\n{auth}builtins.setattr(login_manager, \"anonymous_user\", object)\n"),
+            Some(lock.to_string()),
+            "flask_login_anonymous_user_replaced",
+        ),
+        (
+            app.to_string(),
             "import flask_login\n\nflask_login.current_user = None\n".to_string(),
             Some(lock.to_string()),
             "flask_login_current_user_replaced",
@@ -6883,6 +6889,20 @@ admin.add_view(Reports(endpoint="reports"))
         vec![
             open.clone(),
             "GET /back/reports/ unknown flask_admin_access_check:Guarded,flask_admin_view_overrides:_handle_view:Reports".to_string(),
+            format!("GET /back/user/ required {guard}"),
+        ]
+    );
+    // A hook bound by a class-body loop (or any other binding form) is that
+    // class's, and not a plain method, so it is never proven.
+    let looped = app.replace(
+        "    @expose(\"/\")",
+        "    for is_accessible in [check]:\n        pass\n\n    @expose(\"/\")",
+    );
+    assert_eq!(
+        rows(&looped, auth, Some(lock)),
+        vec![
+            open.clone(),
+            "GET /back/reports/ unknown flask_admin_access_check:Reports,flask_admin_hook_not_a_plain_method:is_accessible:Reports".to_string(),
             format!("GET /back/user/ required {guard}"),
         ]
     );

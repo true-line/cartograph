@@ -28,8 +28,9 @@
 //!   always true);
 //! - no repository code writes an `anonymous_user` attribute, as in
 //!   `login_manager.anonymous_user = …`, which could authenticate anonymous
-//!   users. A `setattr` with a computed name is not seen; that assumption is
-//!   recorded.
+//!   users, or names `"anonymous_user"` in a string (`setattr` in any
+//!   spelling, `object.__setattr__`, a `__dict__` key). A computed or
+//!   escaped name is not seen; that assumption is recorded.
 
 use crate::auth_guards::{import_dotted, rebound, unparenthesize};
 use crate::{FileCx, ImportBinding};
@@ -71,49 +72,39 @@ pub(crate) enum Hook {
     Unproven(String),
 }
 
-/// The proof of the hook `name` in the class body `body`, when the class
-/// binds that name.
+/// Whether the class `class` binds `name` in its own scope, in any form a
+/// Python class body can: a definition, an assignment or loop target, an
+/// import, a `with … as`, a `match` capture, or `global name`.
+pub(crate) fn binds(cx: &FileCx<'_>, class: TsNode<'_>, name: &str) -> bool {
+    let binding = crate::scope_binding(cx, class, name);
+    !binding.writes.is_empty() || binding.global || binding.nonlocal
+}
+
+/// The proof of the hook `name` the class `class` (named `class_name`)
+/// binds: its only binding must be a plain method of the class body.
 pub(crate) fn hook(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
-    body: TsNode<'_>,
-    class: &str,
+    class: TsNode<'_>,
+    class_name: &str,
     name: &str,
     bindings: &HashMap<String, ImportBinding>,
 ) -> Hook {
-    let mut found = Vec::new();
-    for child in named(body) {
-        let mut names = std::collections::BTreeSet::new();
-        match child.kind() {
-            "function_definition" | "class_definition" => {
-                if let Some(own) = child.child_by_field_name("name") {
-                    names.insert(cx.text(&own).to_string());
-                }
-            }
-            "decorated_definition" => {
-                if let Some(own) = child
-                    .child_by_field_name("definition")
-                    .and_then(|definition| definition.child_by_field_name("name"))
-                {
-                    names.insert(cx.text(&own).to_string());
-                }
-            }
-            _ => crate::flask_admin::class_names(cx, child, &mut names),
-        }
-        if names.contains(name) {
-            found.push(child);
-        }
-    }
-    let function = match found.as_slice() {
+    let binding = crate::scope_binding(cx, class, name);
+    let body = class.child_by_field_name("body");
+    let function = match binding.writes.as_slice() {
         [function]
-            if function.kind() == "function_definition"
+            if !binding.global
+                && !binding.nonlocal
+                && function.kind() == "function_definition"
+                && function.parent() == body
                 && !cx.text(function).starts_with("async") =>
         {
             *function
         }
         _ => {
             return Hook::Unproven(format!(
-                "flask_admin_hook_not_a_plain_method:{name}:{class}"
+                "flask_admin_hook_not_a_plain_method:{name}:{class_name}"
             ));
         }
     };
@@ -124,8 +115,10 @@ pub(crate) fn hook(
     proof.map_or_else(
         || {
             Hook::Unproven(match name {
-                "is_accessible" => format!("flask_admin_is_accessible_not_login_check:{class}"),
-                _ => format!("flask_admin_inaccessible_callback_may_return_none:{class}"),
+                "is_accessible" => {
+                    format!("flask_admin_is_accessible_not_login_check:{class_name}")
+                }
+                _ => format!("flask_admin_inaccessible_callback_may_return_none:{class_name}"),
             })
         },
         Hook::Proven,
@@ -284,24 +277,19 @@ fn responds(
     }
 }
 
-/// Whether `target` writes an `anonymous_user` attribute, or the call
-/// `setattr(…, "anonymous_user", …)` does.
-pub(crate) fn writes_anonymous_user(cx: &FileCx<'_>, node: TsNode<'_>) -> bool {
+/// Whether `node` may replace a login manager's `anonymous_user`: an
+/// assignment target writing that attribute, or a string literal naming it,
+/// as `setattr`, `builtins.setattr`, `object.__setattr__` or a `__dict__`
+/// key would. A name computed or spelled with escapes is not seen.
+pub(crate) fn names_anonymous_user(cx: &FileCx<'_>, node: TsNode<'_>, target: bool) -> bool {
     match node.kind() {
-        "attribute" => node
+        "attribute" if target => node
             .child_by_field_name("attribute")
             .is_some_and(|attribute| cx.text(&attribute) == "anonymous_user"),
-        "call" => {
-            node.child_by_field_name("function").is_some_and(|callee| {
-                callee.kind() == "identifier" && cx.text(&callee) == "setattr"
-            }) && node
-                .child_by_field_name("arguments")
-                .and_then(|arguments| named(arguments).get(1).copied())
-                .and_then(|name| crate::literal_string(cx, unparenthesize(name)))
-                .is_some_and(|name| name == "anonymous_user")
-        }
-        _ => named(node)
+        "string" => crate::literal_string(cx, node).is_some_and(|text| text == "anonymous_user"),
+        _ if target => named(node)
             .into_iter()
-            .any(|child| writes_anonymous_user(cx, child)),
+            .any(|child| names_anonymous_user(cx, child, true)),
+        _ => false,
     }
 }
