@@ -1,5 +1,5 @@
 //! Scripted analyst only. No auditor or live-provider entrypoint is installed.
-use super::{PreparationBinding, PreparedState, reopen};
+use super::{CaptureFixture, PreparationBinding, PreparedState, reopen, reopen_control};
 use crate::{
     investigations::{runtime::descriptor, worker::run_completion},
     jobs::{ClaimMode, JobStore, investigations::PendingInvestigationStep},
@@ -84,7 +84,7 @@ fn collect(prepared: &PreparedState) -> Result<Value, String> {
     let jobs = JobStore::open(&database).map_err(|e| e.to_string())?;
     // This production reader authenticates task3 and historical @10 metadata.
     let (detail, result, ledger, events) =
-        super::super::completion::execution::read_state(&jobs, &prepared.analyst_id)?;
+        super::super::completion::execution::read_expanded_state(&jobs, &prepared.analyst_id)?;
     if !matches!(
         detail.summary.status,
         InvestigationStatus::Completed
@@ -147,7 +147,14 @@ fn collect(prepared: &PreparedState) -> Result<Value, String> {
     )
 }
 fn reopen_receipt(directory: &Path, expected: &PreparationBinding) -> Result<Value, String> {
-    let prepared = reopen(directory, expected)?;
+    reopen_control_receipt(directory, expected, CaptureFixture::Baseline)
+}
+fn reopen_control_receipt(
+    directory: &Path,
+    expected: &PreparationBinding,
+    fixture: CaptureFixture,
+) -> Result<Value, String> {
+    let prepared = reopen_control(directory, expected, fixture)?;
     let mut saved = Vec::new();
     File::open(directory.join("analyst-receipt.json"))
         .map_err(|e| e.to_string())?
@@ -165,7 +172,15 @@ fn run_analyst(
     expected: &PreparationBinding,
     provider: Arc<dyn LlmProvider>,
 ) -> Result<Value, String> {
-    let prepared = reopen(directory, expected)?;
+    run_control(directory, expected, provider, CaptureFixture::Baseline)
+}
+fn run_control(
+    directory: &Path,
+    expected: &PreparationBinding,
+    provider: Arc<dyn LlmProvider>,
+    fixture: CaptureFixture,
+) -> Result<Value, String> {
+    let prepared = reopen_control(directory, expected, fixture)?;
     if descriptor(provider.as_ref(), InvestigationProviderMode::Local).map_err(|e| e.to_string())?
         != prepared.manifest.provider
     {
@@ -214,7 +229,7 @@ fn run_analyst(
     );
     let receipt = collect(&prepared)?;
     exclusive(&directory.join("analyst-receipt.json"), &bytes(&receipt)?)?;
-    reopen_receipt(directory, expected)
+    reopen_control_receipt(directory, expected, fixture)
 }
 
 #[cfg(test)]
@@ -282,5 +297,191 @@ mod tests {
                 before
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::super::{Family, capture};
+    use super::*;
+    use crate::investigations::worker::tests::completion_tests::expanded_capacity_provider;
+    use agents::investigation::staged_refusal::CompletionCallMode;
+
+    // AC-0287: actual worker refusals and saved calls under the unchanged policy.
+    #[test]
+    fn expanded_analyst_capacity_refusals_reach_genuine_finish_only_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut binding = super::super::tests::binding();
+        binding.run_id = "expanded-capacity-control".into();
+        binding.protocol_hash = "d".repeat(64);
+        let provider = expanded_capacity_provider();
+        let descriptor = descriptor(provider.as_ref(), InvestigationProviderMode::Local).unwrap();
+        assert!(
+            capture::prepare_fixture(
+                directory.path(),
+                &descriptor,
+                binding.clone(),
+                Family::V7,
+                CaptureFixture::Capacity
+            )
+            .is_err()
+        );
+        let prepared = capture::prepare_fixture(
+            directory.path(),
+            &descriptor,
+            binding.clone(),
+            Family::Expanded,
+            CaptureFixture::Capacity,
+        )
+        .unwrap();
+        let targets = prepared
+            .analyst_request
+            .obligations
+            .sources_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap();
+        assert_eq!(targets.len(), 1);
+        assert!(targets[0].captured.byte_end - targets[0].captured.byte_start >= 7 * 1024);
+        drop(prepared);
+        assert!(reopen(directory.path(), &binding).is_err());
+        let receipt = run_control(
+            directory.path(),
+            &binding,
+            provider.clone(),
+            CaptureFixture::Capacity,
+        )
+        .unwrap();
+        assert_eq!(
+            reopen_control_receipt(directory.path(), &binding, CaptureFixture::Capacity).unwrap(),
+            receipt
+        );
+        eprintln!(
+            "actual boundary: calls={}, refusals={}, FinishOnly={}, events={}, receipt bytes={}, first refusal={}",
+            receipt["detail"]["usage"]["model_invocations"],
+            receipt["capacity_refusal_count"],
+            receipt["finish_only_calls"],
+            receipt["events"].as_array().unwrap().len(),
+            bytes(&receipt).unwrap().len(),
+            receipt["capacity_refusals"][0]
+        );
+        let count = receipt["capacity_refusal_count"].as_u64().unwrap();
+        assert!(count > 0);
+        assert_eq!(receipt["finish_refusal_count"], 0);
+        assert_eq!(receipt["finish_only_calls"], 1);
+        assert!(receipt["result"].is_null());
+        assert_eq!(
+            receipt["detail"]["status"],
+            json!(InvestigationStatus::Failed)
+        );
+        assert_eq!(
+            receipt["detail"]["error"],
+            crate::jobs::investigations::InvestigationStopReason::FinishOnlyToolProposal
+                .test_message()
+        );
+        let usage = &receipt["detail"]["usage"];
+        let first_refusal: Value =
+            serde_json::from_str(receipt["capacity_refusals"][0].as_str().unwrap()).unwrap();
+        let before_refusal = &first_refusal["call"]["admission"]["consumed_budgets"];
+        assert!(usage["evidence_items"].as_u64().unwrap() > 0);
+        for debit in [
+            "evidence_requests",
+            "evidence_items",
+            "evidence_bytes",
+            "captured_validation_bytes",
+            "tool_actions",
+        ] {
+            assert_eq!(usage[debit], before_refusal[debit], "{debit}");
+            for raw in receipt["capacity_refusals"].as_array().unwrap() {
+                let entry: Value = serde_json::from_str(raw.as_str().unwrap()).unwrap();
+                assert_eq!(
+                    entry["call"]["admission"]["consumed_budgets"][debit], before_refusal[debit],
+                    "{debit}"
+                );
+            }
+        }
+        assert_eq!(receipt["ledger"]["queries"].as_array().unwrap().len(), 1);
+        let ledger: InvestigationInputLedger =
+            serde_json::from_value(receipt["ledger"].clone()).unwrap();
+        assert_eq!(ledger.queries.len(), 1);
+        let source_citations = ledger
+            .citations
+            .iter()
+            .filter(|citation| {
+                matches!(
+                    citation.origin,
+                    InvestigationEvidenceOrigin::CapturedPrimarySource { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            source_citations as u64,
+            usage["evidence_items"].as_u64().unwrap()
+        );
+        let calls = receipt["invocations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|raw| {
+                serde_json::from_str::<PendingInvestigationStep>(raw.as_str().unwrap()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls.len() as u64,
+            count + usage["evidence_items"].as_u64().unwrap() + 2
+        ); // Query, acquired/refused reads, final stop.
+        assert_eq!(usage["model_invocations"], calls.len() as u64);
+        assert_eq!(
+            usage["generated_token_reservations"],
+            calls.len() as u64
+                * u64::from(
+                    INVESTIGATION_V2_POLICY
+                        .limits()
+                        .generated_tokens_per_invocation
+                )
+        );
+        assert!(calls.len() <= INVESTIGATION_V2_POLICY.limits().model_invocations as usize);
+        for (ordinal, call) in calls.iter().enumerate() {
+            assert!(
+                call.input_bytes > 0
+                    && call.input_bytes
+                        <= llm::bounded::CompletionLimitValues::default().input_bytes as usize
+            );
+            let admission = call
+                .disclosure
+                .as_ref()
+                .unwrap()
+                .admission
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                admission.consumed_budgets.model_invocations as usize,
+                ordinal
+            );
+            assert_eq!(
+                admission.mode,
+                if ordinal + 1 == calls.len() {
+                    CompletionCallMode::FinishOnly
+                } else {
+                    CompletionCallMode::Choice
+                }
+            );
+        }
+        let events = receipt["events"].as_array().unwrap();
+        assert!(
+            events.len() > 96 && events.len() <= INVESTIGATION_V2_POLICY.journal_events() as usize
+        );
+        assert!(bytes(&receipt).unwrap().len() <= MAX_RECEIPT);
+        assert!(
+            run_control(
+                directory.path(),
+                &binding,
+                provider,
+                CaptureFixture::Capacity
+            )
+            .is_err()
+        );
+        assert_eq!(
+            reopen_control_receipt(directory.path(), &binding, CaptureFixture::Capacity).unwrap(),
+            receipt
+        );
     }
 }

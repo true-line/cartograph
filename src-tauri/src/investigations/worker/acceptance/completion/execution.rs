@@ -262,7 +262,7 @@ fn rows<T: DeserializeOwned + Serialize>(
         })
         .collect()
 }
-fn events(jobs: &JobStore, id: &str) -> Result<Vec<InvestigationEvent>, String> {
+fn events(jobs: &JobStore, id: &str, maximum: usize) -> Result<Vec<InvestigationEvent>, String> {
     let mut result = Vec::new();
     let mut after = 0;
     loop {
@@ -270,7 +270,7 @@ fn events(jobs: &JobStore, id: &str) -> Result<Vec<InvestigationEvent>, String> 
             .investigation_events(id, after)
             .map_err(|error| error.to_string())?;
         result.extend(page.items);
-        if result.len() > 96 {
+        if result.len() > maximum {
             return Err("Event journal exceeds its bound.".into());
         }
         if !page.has_more {
@@ -296,7 +296,24 @@ pub(in super::super) fn read_state(jobs: &JobStore, id: &str) -> Result<SavedSta
             .map_err(|error| error.to_string())?,
         jobs.investigation_ledger(id)
             .map_err(|error| error.to_string())?,
-        events(jobs, id)?,
+        events(jobs, id, 96)?,
+    ))
+}
+pub(in super::super) fn read_expanded_state(
+    jobs: &JobStore,
+    id: &str,
+) -> Result<SavedState, String> {
+    let detail = jobs.investigation(id).map_err(|error| error.to_string())?;
+    if detail.limits != INVESTIGATION_V2_POLICY.limits() {
+        return Err("Expanded receipt requires the registered V2 policy.".into());
+    }
+    Ok((
+        detail,
+        jobs.investigation_result(id)
+            .map_err(|error| error.to_string())?,
+        jobs.investigation_ledger(id)
+            .map_err(|error| error.to_string())?,
+        events(jobs, id, INVESTIGATION_V2_POLICY.journal_events() as usize)?,
     ))
 }
 fn revalidate(prepared: &PreparedState, request: &StagedObligationRequest) -> Result<(), String> {

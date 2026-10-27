@@ -99,6 +99,7 @@ enum SourceScenario {
 }
 
 struct NextProvider {
+    capacity_control: bool,
     observed: Scripted,
     malformed: bool,
     metadata_order: Option<[bool; 2]>,
@@ -111,6 +112,7 @@ struct NextProvider {
 impl NextProvider {
     fn new(malformed: bool) -> Self {
         Self {
+            capacity_control: false,
             observed: Scripted::new(Mode::CompletionNoAttempt),
             malformed,
             metadata_order: None,
@@ -154,7 +156,25 @@ impl LlmProvider for NextProvider {
         if call == 0 && self.lose_metadata_ack {
             crate::jobs::investigations::metadata_host_fixture::lose_next_ack();
         }
-        let text = if let Some(scenario) = self.source_scenario {
+        let text = if self.capacity_control {
+            let prompts = self.observed.prompts.lock().unwrap();
+            let prompt = prompts.last().unwrap();
+            if call == 0 {
+                json!({"type":"query_context","context_id":prompt["context_id"],"query":{
+                    "scope":{"type":"all"},"kind":"node","labels":["BusinessRule"],
+                    "max_facts":1,"max_bytes":32768,"cursor":null}})
+                .to_string()
+            } else {
+                let option = &prompts[1]["compact_context"]["evidence_options"][0];
+                let range = option["ranges"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|range| range["role"] == "definition_initializer")
+                    .unwrap();
+                json!({"type":"read_evidence","fact":option["fact"],"role":range["role"],"index":range["index"]}).to_string()
+            }
+        } else if let Some(scenario) = self.source_scenario {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
             if call == 0 {
@@ -943,5 +963,11 @@ pub(in crate::investigations) fn expanded_scripted_provider(partial: bool) -> Ar
         provider.source_scenario = Some(SourceScenario::Acquired);
         provider.extra_inventory = true;
     }
+    Arc::new(provider)
+}
+
+pub(in crate::investigations) fn expanded_capacity_provider() -> Arc<dyn LlmProvider> {
+    let mut provider = NextProvider::new(false);
+    provider.capacity_control = true;
     Arc::new(provider)
 }

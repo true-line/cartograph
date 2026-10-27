@@ -92,6 +92,29 @@ impl Family {
         }
     }
 }
+// Independently selected synthetic fixture; never inferred from a saved manifest.
+#[derive(Clone, Copy)]
+pub(in super::super) enum CaptureFixture {
+    Baseline,
+    Capacity,
+}
+impl CaptureFixture {
+    fn validate(self, family: Family) -> Result<(), String> {
+        if matches!((family, self), (Family::V7, Self::Capacity)) {
+            return Err("Capacity fixture requires the expanded family.".into());
+        }
+        Ok(())
+    }
+    fn source(self) -> String {
+        match self {
+            Self::Baseline => super::super::super::ORIGINAL.into(),
+            Self::Capacity => format!(
+                "export function enabled(ok: boolean) {{ const limited = ok /*{}*/ === false; if (limited) return false; }}\n",
+                "\u{1}".repeat(7 * 1024)
+            ),
+        }
+    }
+}
 fn json(value: &impl Serialize) -> Result<Vec<u8>, String> {
     crate::investigations::context::bounded_json(value, MAX_PREPARATION_BYTES)
         .map_err(|error| error.to_string())
@@ -239,6 +262,7 @@ fn publish_inventory(
 }
 fn resolve_source(
     state: &AppState,
+    fixture: CaptureFixture,
 ) -> Result<(Obligation, crate::primary_source::RetentionGuard), String> {
     let nodes = state
         .graph
@@ -271,7 +295,7 @@ fn resolve_source(
         return Err("Initializer target must be unique.".into());
     }
     let (target, guard) = targets.pop().ok_or("Initializer target is missing.")?;
-    let original = super::super::super::ORIGINAL;
+    let original = fixture.source();
     if target.captured.file.digest != content_hash(original.as_bytes())
         || target.captured.file.byte_len != original.len() as u64
         || target.captured.file.path != "rule.ts"
@@ -294,6 +318,7 @@ fn resolve_request(
     nonce: &str,
     question: &str,
     family: Family,
+    fixture: CaptureFixture,
 ) -> Result<
     (
         StagedObligationRequest,
@@ -304,7 +329,7 @@ fn resolve_request(
     let state = app.state::<AppState>();
     // Each role calls both production resolvers independently; never clone the
     // analyst selection as an assumed auditor authority.
-    let (source, guard) = resolve_source(&state)?;
+    let (source, guard) = resolve_source(&state, fixture)?;
     let inventory = crate::investigations::completion_choices::control_inventory(
         app.handle(),
         &state,
@@ -360,6 +385,16 @@ pub(in super::super) fn prepare_family(
     binding: PreparationBinding,
     family: Family,
 ) -> Result<PreparedState, String> {
+    prepare_fixture(run_dir, provider, binding, family, CaptureFixture::Baseline)
+}
+pub(in super::super) fn prepare_fixture(
+    run_dir: &Path,
+    provider: &InvestigationProvider,
+    binding: PreparationBinding,
+    family: Family,
+    fixture: CaptureFixture,
+) -> Result<PreparedState, String> {
+    fixture.validate(family)?;
     validate_binding(&binding)?;
     if provider.mode != InvestigationProviderMode::Local || !provider.available {
         return Err("Control requires its declared available local descriptor.".into());
@@ -367,12 +402,8 @@ pub(in super::super) fn prepare_family(
     let run_dir = run_dir.canonicalize().map_err(|error| error.to_string())?;
     let fixture_dir = run_dir.join("fixture");
     std::fs::create_dir(&fixture_dir).map_err(|error| error.to_string())?;
-    let (state, app_data, graph_before) = super::super::super::captured_fixture_state(
-        &fixture_dir,
-        super::super::super::ORIGINAL,
-        false,
-        None,
-    );
+    let (state, app_data, graph_before) =
+        super::super::super::captured_fixture_state(&fixture_dir, &fixture.source(), false, None);
     let graph_before_hash = content_hash(graph_before.as_bytes());
     let app = app(state)?;
     let (inventory, config_hash, registered_source_id) = publish_inventory(&app, family)?;
@@ -382,6 +413,7 @@ pub(in super::super) fn prepare_family(
         &format!("{}-analyst", binding.run_id),
         ANALYST_QUESTION,
         family,
+        fixture,
     )?;
     let (mut auditor_request, auditor_guard) = resolve_request(
         &app,
@@ -389,6 +421,7 @@ pub(in super::super) fn prepare_family(
         &format!("{}-auditor", binding.run_id),
         AUDITOR_QUESTION,
         family,
+        fixture,
     )?;
     let state = app.state::<AppState>();
     let mut jobs = state.jobs.lock().map_err(|_| "Job store unavailable.")?;
@@ -414,7 +447,7 @@ pub(in super::super) fn prepare_family(
         schema_version: family.manifest_schema(),
         binding,
         provider: provider.clone(),
-        source_hash: content_hash(super::super::super::ORIGINAL.as_bytes()),
+        source_hash: content_hash(fixture.source().as_bytes()),
         inventory_hash: content_hash(inventory.as_bytes()),
         graph_before_hash: graph_before_hash.clone(),
         context_id: analyst_request.expected_context_id.clone(),
@@ -434,10 +467,7 @@ pub(in super::super) fn prepare_family(
     let bytes = json(&manifest)?;
     let manifest_hash = content_hash(&bytes);
     for (name, bytes) in [
-        (
-            "source-control.ts",
-            super::super::super::ORIGINAL.as_bytes().to_vec(),
-        ),
+        ("source-control.ts", fixture.source().into_bytes()),
         ("inventory.json", inventory.into_bytes()),
         ("analyst-request.json", analyst_wire),
         ("auditor-request.json", auditor_wire),
@@ -470,6 +500,15 @@ pub(in super::super) fn reopen_family(
     family: Family,
     expected_binding: Option<&PreparationBinding>,
 ) -> Result<PreparedState, String> {
+    reopen_fixture(run_dir, family, expected_binding, CaptureFixture::Baseline)
+}
+pub(in super::super) fn reopen_fixture(
+    run_dir: &Path,
+    family: Family,
+    expected_binding: Option<&PreparationBinding>,
+    fixture: CaptureFixture,
+) -> Result<PreparedState, String> {
+    fixture.validate(family)?;
     let run_dir = run_dir.canonicalize().map_err(|error| error.to_string())?;
     let manifest_bytes = read(&run_dir.join("capture-manifest.json"))?;
     let manifest_hash = content_hash(&manifest_bytes);
@@ -489,7 +528,7 @@ pub(in super::super) fn reopen_family(
     }
     let source = read(&run_dir.join("source-control.ts"))?;
     let inventory = read(&run_dir.join("inventory.json"))?;
-    if source != super::super::super::ORIGINAL.as_bytes()
+    if source != fixture.source().as_bytes()
         || content_hash(&source) != manifest.source_hash
         || content_hash(&inventory) != manifest.inventory_hash
     {
@@ -558,6 +597,7 @@ pub(in super::super) fn reopen_family(
         &analyst_request.request_nonce,
         ANALYST_QUESTION,
         family,
+        fixture,
     )?;
     let (mut resolved_auditor, auditor_guard) = resolve_request(
         &app,
@@ -565,6 +605,7 @@ pub(in super::super) fn reopen_family(
         &auditor_request.request_nonce,
         AUDITOR_QUESTION,
         family,
+        fixture,
     )?;
     resolved_auditor.parent_id = auditor_request.parent_id.clone();
     resolved_auditor.conversation_id = auditor_request.conversation_id.clone();
