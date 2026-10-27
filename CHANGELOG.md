@@ -1,5 +1,15 @@
 # cartograph
 
+## 0.40.0
+
+### Minor Changes
+
+- b7a98c2: Flask endpoints now follow a returned repository helper's responses when it cannot return `None`, and read `str(…)` as a text response.
+- 9c6188d: Flask endpoints now record string responses as `text` and read `make_response(…)` bodies and statuses.
+- 9e1e696: Gap Triager @2 saves and displays an admitted cited final next-step message while preserving historical roles and existing limits.
+- 41d5360: Find saved specialist answers by their admitted final narrative text and open the exact cited chat.
+- 6f7caf2: Add an immutable Spec Writer version with an admitted, persisted cited final message.
+
 ## 0.39.0
 
 ### Minor Changes
