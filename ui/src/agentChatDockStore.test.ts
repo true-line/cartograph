@@ -617,14 +617,20 @@ describe('focused durable progress', () => {
     } finally { h.cleanup(); }
   });
 
-  it.each(['revision', 'parent', 'conversation', 'producer', 'chat', 'result', 'reference', 'legacy'] as const)('refuses changed cached %s on explicit reopen and supplies no fresh follow-up parent', async (change) => {
+  it.each(['revision', 'parent', 'conversation', 'scope-anchor', 'scope-hops', 'producer', 'chat', 'result', 'reference', 'legacy'] as const)('refuses changed cached %s on explicit reopen and supplies no fresh follow-up parent', async (change) => {
     const h = progressTransport();
     try {
-      h.complete(); h.dock.getState().open('a'); await vi.waitFor(() => expect(h.dock.getState().docks[0]?.answer).toBeTruthy());
+      h.complete();
+      if (change === 'scope-anchor' || change === 'scope-hops') {
+        h.update({ detail: investigationDetail('a', { scope: { type: 'neighborhood', anchor: 'fact:stable', hops: 2 } }) });
+      }
+      h.dock.getState().open('a'); await vi.waitFor(() => expect(h.dock.getState().docks[0]?.answer).toBeTruthy());
       const previous = h.dock.getState().docks[0];
       if (change === 'revision') h.update({ detail: investigationDetail('a', { revision: 8, last_event_sequence: 8 }) });
       if (change === 'parent') h.update({ detail: investigationDetail('a', { parent_id: 'other-parent' }) });
       if (change === 'conversation') h.update({ detail: investigationDetail('a', { conversation_id: 'other-conversation' }) });
+      if (change === 'scope-anchor') h.update({ detail: investigationDetail('a', { scope: { type: 'neighborhood', anchor: 'fact:other', hops: 2 } }) });
+      if (change === 'scope-hops') h.update({ detail: investigationDetail('a', { scope: { type: 'neighborhood', anchor: 'fact:stable', hops: 3 } }) });
       if (change === 'producer') h.update({ detail: investigationDetail('a', { provider: { ...investigationCatalog.providers[0], model: 'other-model' } }),
         chat: { ...previous.chat, producer: { ...previous.chat.producer, model: 'other-model' } } });
       if (change === 'chat') h.update({ chat: { ...previous.chat, chat_id: 'changed-chat' } });
@@ -637,6 +643,23 @@ describe('focused durable progress', () => {
       expect(h.dock.getState().docks[0]).toBe(previous);
       expect(h.dock.getState().focusedGeneration).toBeNull();
       expect(h.dock.getState().error).toBeTruthy();
+    } finally { h.cleanup(); }
+  });
+
+  it('accepts the same canonical scope when the host object has a different key order', async () => {
+    const h = progressTransport();
+    try {
+      h.complete();
+      h.update({ detail: investigationDetail('a', { scope: { type: 'neighborhood', anchor: 'fact:stable', hops: 2 } }) });
+      h.dock.getState().open('a');
+      await vi.waitFor(() => expect(h.dock.getState().docks[0]?.answer).toBeTruthy());
+      const previous = h.dock.getState().docks[0];
+      h.update({ detail: investigationDetail('a', { revision: previous.turn.revision + 1,
+        scope: { hops: 2, anchor: 'fact:stable', type: 'neighborhood' } }) });
+
+      const captured = await h.dock.getState().openForFollowUp('a');
+      expect(captured?.detail?.scope).toEqual({ type: 'neighborhood', anchor: 'fact:stable', hops: 2 });
+      expect(h.dock.getState().docks[0]).not.toBe(previous);
     } finally { h.cleanup(); }
   });
 });

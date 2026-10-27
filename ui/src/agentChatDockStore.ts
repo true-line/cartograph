@@ -1,11 +1,11 @@
 import { create } from 'zustand';
 import { useInvestigationStore, type InvestigationState } from './investigationStore';
-import type { InvestigationChat, InvestigationSummary, InvestigationResult, InvestigationCitation, InvestigationCitationRead } from './investigationTypes';
+import type { InvestigationChat, InvestigationSummary, InvestigationResult, InvestigationCitation, InvestigationCitationRead, InvestigationScope } from './investigationTypes';
 
 export type ChatTurn = Pick<InvestigationSummary, 'investigation_id' | 'conversation_id' | 'parent_id' |
   'question' | 'specialist_id' | 'status' | 'updated_at' | 'revision'>;
 interface ChatDock {
-  chat: InvestigationChat; question: string; turn: ChatTurn;
+  chat: InvestigationChat; question: string; turn: ChatTurn; scope: InvestigationScope;
   answer: { result: InvestigationResult; citations: InvestigationCitation[] } | null;
 }
 interface CitationInspection {
@@ -29,11 +29,30 @@ interface DockState {
   close: (taskId: string) => void;
 }
 
+/** Normalize the closed host scope shapes without changing exact neighborhood identity. */
+function normalizedScope(scope: InvestigationScope): InvestigationScope | null {
+  if (!scope || typeof scope !== 'object') return null;
+  if (scope.type === 'all') return { type: 'all' };
+  // Matches the existing UI validation and context_hub::MAX_NEIGHBORHOOD_HOPS.
+  if (scope.type === 'neighborhood' && typeof scope.anchor === 'string' && scope.anchor.trim().length > 0 &&
+      Number.isSafeInteger(scope.hops) && scope.hops >= 1 && scope.hops <= 3) {
+    return { type: 'neighborhood', anchor: scope.anchor, hops: scope.hops };
+  }
+  return null;
+}
+
+function sameScope(left: InvestigationScope, right: InvestigationScope): boolean {
+  return left.type === right.type && (left.type === 'all' ||
+    (right.type === 'neighborhood' && left.anchor === right.anchor && left.hops === right.hops));
+}
+
 /** Capture only a settled coordinator observation; cached immutable identity survives reopen. */
 function captureDock(state: InvestigationState, taskId: string, previous?: ChatDock): ChatDock | null {
   const { detail, chat, result } = state;
   if (state.loading || state.error || state.chatError || state.chatStatus !== 'saved' ||
       state.selectedId !== taskId || detail?.investigation_id !== taskId || chat?.task_id !== taskId) return null;
+  const scope = normalizedScope(detail.scope);
+  if (!scope) return null;
   const reference = chat.messages.find((entry) => entry.message.kind === 'result_reference')?.message;
   if (result ? result.investigation_id !== taskId || reference?.kind !== 'result_reference' ||
       reference.task_id !== taskId || reference.result_id !== result.result_id : reference !== undefined) return null;
@@ -42,10 +61,11 @@ function captureDock(state: InvestigationState, taskId: string, previous?: ChatD
   const answer = result ? { result, citations: detail.citations.filter((citation) => referenced.has(citation.citation_id)) } : null;
   if (previous && (revision < previous.turn.revision || chat.chat_id !== previous.chat.chat_id ||
       question !== previous.question || conversation_id !== previous.turn.conversation_id || parent_id !== previous.turn.parent_id ||
-      specialist_id !== previous.turn.specialist_id || JSON.stringify(chat.producer) !== JSON.stringify(previous.chat.producer) ||
+      specialist_id !== previous.turn.specialist_id || !sameScope(scope, previous.scope) ||
+      JSON.stringify(chat.producer) !== JSON.stringify(previous.chat.producer) ||
       (previous.answer && (JSON.stringify(answer) !== JSON.stringify(previous.answer) ||
         JSON.stringify(chat) !== JSON.stringify(previous.chat))))) return null;
-  return { chat, question, answer,
+  return { chat, question, answer, scope,
     turn: { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } };
 }
 
