@@ -353,6 +353,7 @@ export const ConversationOwnershipAcrossVisits: Story = {
   },
 };
 
+let localHealthReply: (() => unknown) | undefined;
 let savedAnswerCitationReads: string[];
 let savedAnswerSearches: unknown[];
 let savedAnswerCommands: string[];
@@ -389,6 +390,7 @@ function savedAnswersFixture(gapTriager = false, palette = false, attribution = 
     });
     mockIPC((command, payload) => {
       savedAnswerCommands.push(command);
+      if (command === 'check_local_ollama') return localHealthReply?.() ?? 'unverified';
       const args = (payload ?? {}) as { investigationId?: string; citationId?: string; afterSequence?: number; search?: string; cursor?: string };
       const index = details.findIndex((detail) => detail.investigation_id === args.investigationId);
       const detail = details[index]; const result = results[index];
@@ -862,5 +864,48 @@ export const PaneLayoutGeometry: Story = {
       expect(getComputedStyle(four).backgroundColor).not.toBe(getComputedStyle(one).backgroundColor);
       for (const count of [1, 2, 3]) await expect(canvas.getByRole('button', { name: `${count} pane ${count === 1 ? 'slot' : 'slots'}` })).toBeDisabled();
     } finally { await page.viewport(viewport[0], viewport[1]); }
+  },
+};
+
+// AC-0422: explicit local observation does not alter cloud attribution or saved task state.
+export const LocalMetadataCheck: Story = {
+  beforeEach: () => { const cleanup = savedAnswersFixture(false, false, true); return () => { localHealthReply = undefined; cleanup(); }; },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: /Question for answer-b/ }));
+    const pane = within(await canvas.findByRole('region', { name: 'Saved chat answer-b' }));
+    const attribution = pane.getByRole('group', { name: 'Saved pane attribution' }).textContent;
+    const before = useInvestigationStore.getState(); const commands = [...savedAnswerCommands];
+    const check = within(canvas.getByRole('region', { name: 'Local Ollama API check' }));
+    let finish!: (value: unknown) => void;
+    localHealthReply = () => new Promise((resolve) => { finish = resolve; });
+    await userEvent.click(check.getByRole('button')); await expect(check.getByRole('button')).toBeDisabled();
+    await expect(check.getByText('Checking local metadata API…')).toBeVisible();
+    finish('metadata_received'); await expect(await check.findByText('Last local check: successful metadata response.')).toBeVisible();
+    for (const [reply, text] of [['busy', 'A local check is already running. Try again after it finishes.'],
+      ['unverified', 'Could not verify local Ollama.'], [{ private: 'PRIVATE RESPONSE' }, 'Could not verify local Ollama.']] as const) {
+      localHealthReply = () => reply; await userEvent.click(check.getByRole('button'));
+      await expect(await check.findByText(text)).toBeVisible();
+    }
+    localHealthReply = () => { throw new Error('PRIVATE IPC FAILURE'); };
+    await userEvent.click(check.getByRole('button'));
+    await expect(await check.findByText('Could not verify local Ollama.')).toBeVisible();
+    expect(check.queryByText(/PRIVATE RESPONSE|PRIVATE IPC FAILURE/)).toBeNull();
+    expect(savedAnswerCommands.slice(commands.length)).toEqual(Array(5).fill('check_local_ollama'));
+    expect(pane.getByRole('group', { name: 'Saved pane attribution' }).textContent).toBe(attribution);
+    expect(useInvestigationStore.getState()).toMatchObject({ selectedId: before.selectedId, composer: before.composer, pendingStart: before.pendingStart });
+  },
+};
+
+export const LocalMetadataPreview: Story = {
+  beforeEach: () => {
+    const target = window as Window & { __TAURI_INTERNALS__?: unknown }; const previous = target.__TAURI_INTERNALS__;
+    const existed = '__TAURI_INTERNALS__' in target;
+    delete target.__TAURI_INTERNALS__; return () => { if (existed) target.__TAURI_INTERNALS__ = previous; };
+  },
+  play: async ({ canvasElement }) => {
+    const check = within(within(canvasElement).getByRole('region', { name: 'Local Ollama API check' }));
+    await expect(check.getByRole('button')).toBeDisabled();
+    await expect(check.getByText('Local API check is unavailable in browser preview.')).toBeVisible();
   },
 };

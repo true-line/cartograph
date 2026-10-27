@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { inTauri, invokeOr } from '../tauri';
 import { useAgentChatDockStore, type ChatTurn } from '../agentChatDockStore';
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
 import { AgentChatSearchPalette } from './AgentChatSearchPalette';
@@ -31,6 +32,19 @@ function statusLabel(status: string) {
 /** A saved task-chat destination; all history and transcript reads use the
  * existing investigation coordinator and its task/result binding checks. */
 export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost, onCancelFollowUp, preparingFollowUpTask, followUpError, noticeCorner, onNoticeCornerChange }: AgentChatsSurfaceProps) {
+  const [localHealth, setLocalHealth] = useState<'unchecked' | 'checking' | 'metadata_received' | 'unverified' | 'busy' | 'preview'>(() => inTauri() ? 'unchecked' : 'preview');
+  const healthRequest = useRef(0);
+  useEffect(() => () => { ++healthRequest.current; }, []);
+  const checkLocal = async () => {
+    if (!inTauri()) { setLocalHealth('preview'); return; }
+    const request = ++healthRequest.current;
+    setLocalHealth('checking');
+    try {
+      const result = await invokeOr<unknown>('check_local_ollama', null);
+      if (request === healthRequest.current) setLocalHealth(
+        result === 'metadata_received' || result === 'busy' ? result : 'unverified');
+    } catch { if (request === healthRequest.current) setLocalHealth('unverified'); }
+  };
   const [searchText, setSearchText] = useState(state.historySearch);
   const [searchOpen, setSearchOpen] = useState(false);
   const openSearch = useCallback(() => {
@@ -112,6 +126,17 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
       <button type="button" className="secondary-button" disabled={state.historyLoading}
         onClick={() => { void state.loadHistory(); if (dock.focusedTask) dock.open(dock.focusedTask); }}>Refresh saved chats</button>
     </header>
+    <section aria-label="Local Ollama API check">
+      <button type="button" className="secondary-button" disabled={localHealth === 'checking' || !inTauri()}
+        onClick={() => void checkLocal()}>Check local Ollama</button>
+      <p role="status">{localHealth === 'unchecked' ? 'Local API not checked.'
+        : localHealth === 'checking' ? 'Checking local metadata API…'
+          : localHealth === 'metadata_received' ? 'Last local check: successful metadata response.'
+            : localHealth === 'busy' ? 'A local check is already running. Try again after it finishes.'
+              : localHealth === 'preview' ? 'Local API check is unavailable in browser preview.'
+                : 'Could not verify local Ollama.'}</p>
+      <p className="muted"><code>http://127.0.0.1:11434/</code> · Explicit local API observation only; model readiness and cloud health are not checked.</p>
+    </section>
     <div className="agent-chat-layout-controls">
       <fieldset><legend>Pane layout</legend>
         {[1, 2, 3, 4].map((count) => <button key={count} type="button" className="secondary-button"

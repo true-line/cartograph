@@ -477,6 +477,13 @@ impl OllamaProvider {
             .join("api/tags")
             .map_err(|error| ProviderError::InvalidUrl(error.to_string()))?;
         let mut response = self.client.get(url).send()?.error_for_status()?;
+        // Redirects are not followed; even valid JSON in a 3xx response does
+        // not establish a successful local metadata API observation.
+        if !response.status().is_success() {
+            return Err(ProviderError::InvalidEmbeddings(
+                "local metadata status".into(),
+            ));
+        }
         let mut bytes = Vec::new();
         use std::io::Read;
         response
@@ -1117,6 +1124,75 @@ mod tests {
         let oversized = serde_json::json!({"embeddings":vec![vec![1.];129]}).to_string();
         assert!(serde_json::from_str::<EmbedResponse>(&oversized).is_err());
     }
+    // AC-0422: tags require bounded 2xx JSON; redirects never authorize another request.
+    #[test]
+    fn local_metadata_probe_requires_successful_bounded_response() {
+        for (status, body, valid) in [
+            ("200 OK", r#"{"models":[]}"#.to_owned(), true),
+            (
+                "200 OK",
+                r#"{"models":[{"name":"synthetic","digest":"abc"}]}"#.to_owned(),
+                true,
+            ),
+            ("302 Found", r#"{"models":[]}"#.to_owned(), false),
+            ("503 Unavailable", r#"{"models":[]}"#.to_owned(), false),
+            ("200 OK", "PRIVATE malformed body".to_owned(), false),
+            ("200 OK", serde_json::json!({"models":[{"name":"x".repeat(1024 * 1024),"digest":"synthetic"}]}).to_string(), false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let redirect = TcpListener::bind("127.0.0.1:0").unwrap();
+            let redirect_address = redirect.local_addr().unwrap();
+            redirect.set_nonblocking(true).unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..n]);
+                assert!(request.starts_with("GET /api/tags HTTP/1.1\r\n"));
+                assert!(!request.to_ascii_lowercase().contains("content-length:"));
+                assert!(!request.contains("question") && !request.contains("task"));
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nLocation: http://{redirect_address}/never-follow\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+            let provider = OllamaProvider::new(
+                &format!("http://{address}"),
+                "synthetic",
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            assert_eq!(provider.list_local_models().is_ok(), valid);
+            server.join().unwrap();
+            assert!(
+                matches!(redirect.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            thread::sleep(Duration::from_millis(200));
+        });
+        assert!(
+            OllamaProvider::new(&endpoint, "synthetic", Duration::from_millis(30))
+                .unwrap()
+                .list_local_models()
+                .is_err()
+        );
+        server.join().unwrap();
+        assert!(
+            OllamaProvider::new(&endpoint, "synthetic", Duration::from_millis(30))
+                .unwrap()
+                .list_local_models()
+                .is_err()
+        );
+    }
+
     #[test]
     fn unavailable_local_provider_fails_without_fallback() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
