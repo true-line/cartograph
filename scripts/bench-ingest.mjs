@@ -6,7 +6,8 @@
 // deterministic facts. Local only: never run in CI. It reports and never
 // fails on a threshold; a counts difference between two runs this script built
 // from one clean commit, for the same url, commit and path, is the only finding
-// `--compare` treats as a determinism failure.
+// `--compare` treats as a determinism failure; it also fails when the two
+// results do not cover the same repositories.
 //
 //   node scripts/bench-ingest.mjs --work <dir> [--manifest bench/repos.toml] [--bin <app test binary>] [--only <name>]
 //   node scripts/bench-ingest.mjs --compare <before.json> <after.json>
@@ -124,12 +125,13 @@ export function compare(before, after) {
   const lines = [];
   let countsDiffer = false;
   let nondeterministic = false;
+  let membershipDiffers = false;
   const build = sameBuild(before, after);
   const byName = new Map(before.repos.map((repo) => [repo.name, repo]));
   for (const repo of after.repos) {
     const old = byName.get(repo.name);
     byName.delete(repo.name);
-    if (!old) { lines.push(`${repo.name}: new`); continue; }
+    if (!old) { lines.push(`${repo.name}: new`); membershipDiffers = true; continue; }
     for (const key of SOURCE) {
       if (old[key] !== repo[key]) lines.push(`${repo.name}: ${key} moved ${old[key] ?? '(none)'} -> ${repo[key] ?? '(none)'}`);
     }
@@ -143,11 +145,11 @@ export function compare(before, after) {
       lines.push(`${repo.name}: counts differ ${JSON.stringify(old.counts)} -> ${JSON.stringify(repo.counts)}`);
     }
   }
-  for (const name of byName.keys()) lines.push(`${name}: removed`);
+  for (const name of byName.keys()) { lines.push(`${name}: removed`); membershipDiffers = true; }
   if (nondeterministic) {
     lines.push('determinism: counts differ between two runs of the same build and source');
   }
-  return { lines, countsDiffer, nondeterministic };
+  return { lines, countsDiffer, nondeterministic, membershipDiffers };
 }
 
 function run(command, args, options = {}) {
@@ -193,14 +195,18 @@ function main() {
   const options = parseArguments(process.argv.slice(2));
   if (options.compare) {
     const [before, after] = options.compare.map((file) => JSON.parse(readFileSync(file, 'utf8')));
-    const { lines, nondeterministic } = compare(before, after);
+    const { lines, nondeterministic, membershipDiffers } = compare(before, after);
     console.log(lines.join('\n'));
-    process.exitCode = nondeterministic ? 1 : 0;
+    // A comparison that does not cover the same repositories proves nothing.
+    process.exitCode = nondeterministic || membershipDiffers ? 1 : 0;
     return;
   }
   if (!['darwin', 'linux'].includes(process.platform)) throw new Error('the benchmark supports macOS and Linux only');
   const repos = parseManifest(readFileSync(options.manifest, 'utf8')).filter((repo) => !options.only || repo.name === options.only);
   const work = path.resolve(options.work);
+  // Output inside the checkout would make the next run's tree uncommitted.
+  const inside = path.relative(ROOT, work);
+  if (!inside.startsWith('..') && !path.isAbsolute(inside)) throw new Error('--work must be outside the Cartograph checkout');
   // Results from an uncommitted tree, or one that changed during the build,
   // are not comparable by commit.
   const tree = () => [run('git', ['rev-parse', 'HEAD'], { cwd: ROOT }).stdout.trim(),

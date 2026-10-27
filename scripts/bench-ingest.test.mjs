@@ -78,7 +78,7 @@ test('comparison reports measurement deltas and flags counts that differ for one
     counts: { nodes }, ...fields });
   const run = (commit, ...repos) => ({ cartograph_commit: commit, build: 'cargo', repos });
   assert.deepEqual(compare(run('c1', repo(100, 5)), run('c1', repo(90, 5))),
-    { lines: ['one: wall_seconds 100 -> 90 (-10.0%)', 'one: peak_footprint_bytes 100 -> 100 (0.0%)'], countsDiffer: false, nondeterministic: false });
+    { lines: ['one: wall_seconds 100 -> 90 (-10.0%)', 'one: peak_footprint_bytes 100 -> 100 (0.0%)'], countsDiffer: false, nondeterministic: false, membershipDiffers: false });
   const same = compare(run('c1', repo(100, 5)), run('c1', repo(100, 6)));
   assert.equal(same.nondeterministic, true);
   assert.equal(same.lines.at(-1), 'determinism: counts differ between two runs of the same build and source');
@@ -94,9 +94,12 @@ test('comparison reports measurement deltas and flags counts that differ for one
     assert.ok(moved.lines.includes(line), line);
     assert.ok(!moved.lines.some((entry) => entry.startsWith('determinism')));
   }
-  // Membership changes are reported both ways.
-  assert.deepEqual(compare(run('c1'), run('c1', repo(1, 1))).lines, ['one: new']);
-  assert.deepEqual(compare(run('c1', repo(1, 1)), run('c1')).lines, ['one: removed']);
+  // Membership changes are reported both ways and fail the comparison.
+  for (const [before, after, line] of [[run('c1'), run('c1', repo(1, 1)), 'one: new'], [run('c1', repo(1, 1)), run('c1'), 'one: removed']]) {
+    const changed = compare(before, after);
+    assert.deepEqual(changed.lines, [line]);
+    assert.equal(changed.membershipDiffers, true);
+  }
   // An uncommitted tree, another commit or a supplied binary is not the same build.
   for (const after of [
     { ...run('c1', repo(100, 6)), cartograph_dirty: true },

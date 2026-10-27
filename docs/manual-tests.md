@@ -343,8 +343,9 @@ never runs their code. Timing and memory are measurements, not gates.
    omissions) must be identical; the command exits 1 otherwise. Only runs the
    script built itself from one clean commit, for the same repository url,
    commit and path, are held to this: a `--bin` binary, a dirty tree or a
-   moved pin is reported, never treated as nondeterminism. Added and removed
-   repositories are listed.
+   moved pin is reported, never treated as nondeterminism. Added or removed
+   repositories are listed and also fail the comparison. `--work` must be
+   outside the Cartograph checkout.
 3. Record the Cartograph commit, machine and each repository's wall time, max
    RSS and peak footprint. Compare a change against a run of its base commit;
    report differences in counts as behaviour changes and timing as
