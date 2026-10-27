@@ -364,6 +364,7 @@ function installFakeCore(options: {
   straddleResultCommit?: boolean;
   savedNoticeChat?: InvestigationChat;
   deferSavedNoticeChatRead?: boolean;
+  savedNoticeChatFirstReadPartial?: boolean;
 } = {}) {
   let staged = [...(options.staged ?? [])];
   let rejectJobAction = options.rejectJobActionOnce ?? false;
@@ -476,9 +477,13 @@ function installFakeCore(options: {
       case 'get_investigation_chat': {
         investigationRequests.push({ command: cmd, args });
         if (!options.savedNoticeChat) return null;
+        if (investigation?.parent_id === options.savedNoticeChat.task_id &&
+            investigation.investigation_id !== options.savedNoticeChat.task_id) {
+          return savedNoticeChat(investigation.investigation_id, investigation.question, false);
+        }
         savedNoticeChatReads += 1;
         if (savedNoticeChatGate) await savedNoticeChatGate;
-        return savedNoticeChatReads === 1
+        return options.savedNoticeChatFirstReadPartial !== false && savedNoticeChatReads === 1
           ? { ...options.savedNoticeChat, messages: options.savedNoticeChat.messages.slice(0, 1) }
           : options.savedNoticeChat;
       }
@@ -1460,6 +1465,97 @@ export const ConfirmedQuickDispatchOpensChatWhileDestinationIsConnected: Story =
     expect(investigationRequests.some((request) => request.command === 'start_investigation')).toBe(true);
     expect(investigationRequests.filter((request) => request.command === 'get_investigation_chat')
       .every((request) => (request.args as { investigationId: string }).investigationId === 'inv-app-script')).toBe(true);
+  },
+};
+
+export const SavedChatFollowUpUsesItsValidatedParent: Story = {
+  // AC-0392..0394: the clicked pane supplies the frozen parent identity;
+  // dispatch preserves unrelated composer state and uses the existing task flow.
+  beforeEach: () => {
+    const parentId = 'inv-follow-up-parent';
+    const parent = investigationDetail(parentId, { question: 'Inspect this saved parent task.', status: 'completed',
+      has_result: true, actions: { can_cancel: false, can_follow_up: true } });
+    installFakeCore({ investigationFlow: true, existingInvestigation: parent,
+      existingInvestigationEvents: investigationEvents(parentId), savedNoticeChat: savedNoticeChat(parentId, parent.question),
+      savedNoticeChatFirstReadPartial: false });
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const before = useInvestigationStore.getState();
+    const composer = { ...before.composer, question: 'Leave the full composer draft unchanged.', parent: {
+      conversation_id: 'unrelated-conversation', parent_id: 'unrelated-parent' } };
+    useInvestigationStore.setState({ composer });
+    await waitFor(() => expect(canvas.getByText('core v0.0.1')).toBeInTheDocument());
+    await userEvent.click(canvas.getByRole('button', { name: 'Agent Chats' }));
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Agent Chats' })).toBeVisible());
+    await userEvent.click(await canvas.findByRole('button', { name: /Inspect this saved parent task/ }));
+    const pane = within(await canvas.findByRole('region', { name: 'Saved chat inv-follow-up-parent' }));
+    await userEvent.click(pane.getByRole('button', { name: 'Follow-up task' }));
+    const dialog = await canvas.findByRole('dialog', { name: 'Quick investigation dispatch' });
+    await expect(dialog).toHaveTextContent('Following inv-follow-up-parent in conversation conversation-inv-follow-up-parent');
+    await useInvestigationStore.getState().open('unrelated-global-selection');
+    await expect(useInvestigationStore.getState().selectedId).toBe('unrelated-global-selection');
+    await userEvent.type(canvas.getByLabelText('Question'), 'Check the saved parent result against current context.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up task' }));
+    await waitFor(() => expect(investigationRequests.filter((item) => item.command === 'start_investigation')).toHaveLength(1));
+    await waitFor(() => expect(useAgentChatDockStore.getState().docks.map((item) => item.chat.task_id)).toContain('inv-app-follow-up'));
+    const request = (investigationRequests.find((item) => item.command === 'start_investigation')!.args as { request: StartInvestigationRequest }).request;
+    expect(request).toMatchObject({ parent_id: 'inv-follow-up-parent', conversation_id: 'conversation-inv-follow-up-parent',
+      specialist_id: 'domain-analyst@3', scope: { type: 'neighborhood', anchor: 'rule:stock', hops: 1 },
+      question: 'Check the saved parent result against current context.' });
+    await expect(useInvestigationStore.getState().composer).toEqual(composer);
+    const childPane = within(await canvas.findByRole('region', { name: 'Saved chat inv-app-follow-up' }));
+    await expect(childPane.getByRole('listitem', { name: 'User question' })).toHaveTextContent('Check the saved parent result against current context.');
+  },
+};
+
+export const CancelledParentFollowUpOpensStandaloneQuickDispatch: Story = {
+  beforeEach: () => {
+    const parentId = 'inv-follow-up-parent';
+    const parent = investigationDetail(parentId, { question: 'Inspect this saved parent task.', status: 'completed',
+      has_result: true, actions: { can_cancel: false, can_follow_up: true } });
+    installFakeCore({ investigationFlow: true, existingInvestigation: parent,
+      existingInvestigationEvents: investigationEvents(parentId), savedNoticeChat: savedNoticeChat(parentId, parent.question),
+      savedNoticeChatFirstReadPartial: false });
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(canvas.getByText('core v0.0.1')).toBeInTheDocument());
+    await userEvent.click(canvas.getByRole('button', { name: 'Agent Chats' }));
+    await userEvent.click(await canvas.findByRole('button', { name: /Inspect this saved parent task/ }));
+    const pane = within(await canvas.findByRole('region', { name: 'Saved chat inv-follow-up-parent' }));
+    await userEvent.click(pane.getByRole('button', { name: 'Follow-up task' }));
+    await canvas.findByRole('dialog', { name: 'Quick investigation dispatch' });
+    await userEvent.type(canvas.getByLabelText('Question'), 'Check the captured parent.');
+    await expect(canvas.getByRole('button', { name: 'Start follow-up task' })).toBeEnabled();
+    fireEvent.click(pane.getByRole('button', { name: 'Close inv-follow-up-parent' }));
+    fireEvent.click(canvas.getByRole('button', { name: 'Start follow-up task' }));
+    await expect(investigationRequests.filter((request) => request.command === 'start_investigation')).toHaveLength(0);
+    await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Quick investigation dispatch' })).not.toBeInTheDocument());
+    await userEvent.click(canvas.getByRole('button', { name: 'Settings' }));
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Settings' })).toBeVisible());
+    await userEvent.click(canvas.getByRole('button', { name: 'Open quick investigation' }));
+    const standalone = await canvas.findByRole('dialog', { name: 'Quick investigation dispatch' });
+    await expect(standalone).toHaveTextContent('Quick investigation');
+    await expect(standalone).not.toHaveTextContent('Following inv-follow-up-parent');
+    await expect(canvas.getByLabelText('Question')).toHaveValue('');
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Close quick investigation' }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Agent Chats' }));
+    await userEvent.click(await canvas.findByRole('button', { name: /Inspect this saved parent task/ }));
+    const retryPane = within(await canvas.findByRole('region', { name: 'Saved chat inv-follow-up-parent' }));
+    await userEvent.click(retryPane.getByRole('button', { name: 'Follow-up task' }));
+    await canvas.findByRole('dialog', { name: 'Quick investigation dispatch' });
+    const retainedRetry = { schema_version: 1 as const, request_nonce: 'b'.repeat(36), specialist_id: 'domain-analyst@3' as const,
+      question: 'Keep this parent-bound retry.', scope: { type: 'neighborhood' as const, anchor: 'rule:stock', hops: 1 as const },
+      provider_mode: 'local' as const, limit_profile: 'investigation-v1' as const,
+      conversation_id: 'conversation-inv-follow-up-parent', parent_id: 'inv-follow-up-parent' };
+    useInvestigationStore.setState({ pendingStart: retainedRetry });
+    await waitFor(() => expect(canvas.getByRole('button', { name: 'Retry same request' })).toBeEnabled());
+    fireEvent.click(retryPane.getByRole('button', { name: 'Close inv-follow-up-parent' }));
+    fireEvent.click(canvas.getByRole('button', { name: 'Retry same request' }));
+    await expect(investigationRequests.filter((request) => request.command === 'start_investigation')).toHaveLength(0);
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(retainedRetry);
   },
 };
 

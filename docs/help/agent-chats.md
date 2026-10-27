@@ -20,6 +20,17 @@ existing chat focuses and refreshes it without changing its docking age. A fifth
 successfully loaded chat replaces the oldest dock; failed and legacy reads do
 not replace a pane. Close removes only the pane, so history can reopen it.
 
+For a supported saved task with a validated result, choose **Follow-up task**
+to prepare a new child investigation from that exact task. The dialog shows its
+saved scope, specialist version, provider mode and producer attribution; the
+current configured provider for that mode is used. Completion roles require
+fresh recorded inventory choices. The follow-up is a separate task and saved
+chat linked to the parent, not a message appended to the parent transcript.
+Only a confirmed child opens in Agent Chats; an uncertain start retains the
+same request and nonce for retry. Preparation or admission failures never
+substitute another parent or specialist. This increment does not provide
+free-form replies or streaming.
+
 Panes retain last-observed snapshots, including pending chats; they do not imply
 live updates. Use **Focus / refresh** to reread a pane. Layout adjusts to one
 through four panes and is session-only. These are individual task chats, not

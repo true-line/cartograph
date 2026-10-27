@@ -6,6 +6,10 @@ import { InvestigationChatTranscript } from './InvestigationChatTranscript';
 export interface AgentChatsSurfaceProps {
   state: InvestigationState;
   onOpenResult: (investigationId: string) => void;
+  onFollowUp: (taskId: string) => void;
+  onCancelFollowUp: (taskId: string) => void;
+  preparingFollowUpTask: string | null;
+  followUpError: string | null;
 }
 
 function statusLabel(status: string) {
@@ -14,7 +18,7 @@ function statusLabel(status: string) {
 
 /** A saved task-chat destination; all history and transcript reads use the
  * existing investigation coordinator and its task/result binding checks. */
-export function AgentChatsSurface({ state, onOpenResult }: AgentChatsSurfaceProps) {
+export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onCancelFollowUp, preparingFollowUpTask, followUpError }: AgentChatsSurfaceProps) {
   const [searchText, setSearchText] = useState(state.historySearch);
   const dock = useAgentChatDockStore();
   const connect = dock.connect;
@@ -31,6 +35,9 @@ export function AgentChatsSurface({ state, onOpenResult }: AgentChatsSurfaceProp
       <button type="button" className="secondary-button" disabled={state.historyLoading}
         onClick={() => { void state.loadHistory(); if (dock.focusedTask) dock.open(dock.focusedTask); }}>Refresh saved chats</button>
     </header>
+    {preparingFollowUpTask && <p role="status">Refreshing parent task {preparingFollowUpTask}…
+      <button type="button" className="secondary-button" onClick={() => onCancelFollowUp(preparingFollowUpTask)}>Cancel follow-up</button></p>}
+    {followUpError && <p role="alert" className="error-text">{followUpError}</p>}
     <div className="agent-chats-layout">
       <aside className="agent-chats-history" aria-label="Saved task history">
         <h3>Saved tasks</h3>
@@ -82,7 +89,9 @@ export function AgentChatsSurface({ state, onOpenResult }: AgentChatsSurfaceProp
               <p className="muted">Last observed snapshot · {chat.chat_id}</p>
               <button type="button" className="secondary-button" aria-pressed={dock.focusedTask === chat.task_id}
                 onClick={() => dock.open(chat.task_id)}>Focus / refresh {chat.task_id}</button>
-              <button type="button" className="secondary-button" onClick={() => dock.close(chat.task_id)}>Close {chat.task_id}</button>
+              <button type="button" className="secondary-button" disabled={preparingFollowUpTask !== null}
+                onClick={() => onFollowUp(chat.task_id)}>Follow-up task</button>
+              <button type="button" className="secondary-button" onClick={() => { onCancelFollowUp(chat.task_id); dock.close(chat.task_id); }}>Close {chat.task_id}</button>
             </header>
             <InvestigationChatTranscript chat={chat} status="saved" error={null}
               onRefresh={() => dock.open(chat.task_id)} onOpenResult={onOpenResult} />

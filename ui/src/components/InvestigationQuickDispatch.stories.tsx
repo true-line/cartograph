@@ -4,6 +4,7 @@ import { expect, fireEvent, fn, userEvent, waitFor, within } from 'storybook/tes
 import { investigationCatalog, investigationDetail, investigationEvents } from '../investigationFixtures';
 import { completionCatalog, completionChoices, inventoryObligation, gapTriagerDetail, gapTriagerResult } from '../completionFixtures';
 import { useInvestigationStore } from '../investigationStore';
+import { investigationPolicy, obligationEnvelope } from '../investigationObligations';
 import { InvestigationQuickDispatch } from './InvestigationQuickDispatch';
 
 let retriedNonce: string | undefined;
@@ -298,6 +299,170 @@ export const CompletionDispatchUsesOnlyLocalRecordedChoices: Story = {
     await expect(state.draftObligations[0].obligation_id).toBe('full-composer-obligation');
     await expect(args.onAcceptedTask).toHaveBeenCalledWith('quick-completion-confirmed');
     await expect(args.onNavigate).not.toHaveBeenCalled();
+  },
+};
+
+export const ParentBoundFollowUpUsesFreshChoices: Story = {
+  args: { openRequest: 1, followUpContext: { parent_id: 'saved-parent', conversation_id: 'saved-conversation',
+    specialist_id: 'gap-triager@1', scope: { type: 'all' }, provider_mode: 'local',
+    saved_provider_id: 'ollama', saved_model: 'fixture-parent-model' } },
+  beforeEach: () => {
+    const initial = useInvestigationStore.getInitialState();
+    const accepted = { ...gapTriagerDetail('follow-up-child'), parent_id: 'saved-parent', conversation_id: 'saved-conversation' };
+    completionRequests = [];
+    completionChoiceReads = 0;
+    mockIPC((command, payload) => {
+      if (command === 'investigation_obligation_choices') { completionChoiceReads += 1; return structuredClone(completionChoices); }
+      if (command === 'start_investigation') {
+        completionRequests.push(structuredClone((payload as { request: Record<string, unknown> }).request));
+        if (completionRequests.length === 1) throw { code: 'refresh_required', definitive: true };
+        if (completionRequests.length === 2) throw new Error('Fixture start acknowledgement was lost');
+        return accepted;
+      }
+      return null;
+    });
+    useInvestigationStore.setState({ ...initial, catalog: completionCatalog, pendingStart: null, starting: false,
+      composer: { ...initial.composer, question: 'Preserve the full composer question.',
+        parent: { conversation_id: 'must-not-copy', parent_id: 'must-not-copy' } },
+      draftObligations: [{ obligation_id: 'must-not-copy' } as never],
+      draftInspectionRequirements: [{ target_id: 'must-not-copy' } as never] }, true);
+    return () => { clearMocks(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); };
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const dialog = await canvas.findByRole('dialog', { name: 'Quick investigation dispatch' });
+    await expect(dialog).toHaveTextContent('Following saved-parent in conversation saved-conversation');
+    await expect(canvas.getByLabelText('Specialist')).toHaveValue('gap-triager@1');
+    await expect(canvas.getByLabelText('Specialist')).toBeDisabled();
+    await expect(canvas.getByText(/Scope: Recovered system · captured from the saved parent/)).toBeVisible();
+    await expect(dialog).toHaveTextContent(/Saved producer: gap-triager@1 · ollama · fixture-parent-model/);
+    await expect(dialog).toHaveTextContent(/Current configured provider for local: ollama · fixture-local-model/);
+    await canvas.findByText('acme/api');
+    await userEvent.click(canvas.getByRole('button', { name: 'Require inventory acme/api' }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Check the parent finding against the recorded inventory.');
+    await expect(canvas.getByRole('button', { name: 'Start follow-up task' })).toBeEnabled();
+    await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up task' }));
+    await waitFor(() => expect(completionRequests).toHaveLength(1));
+    await expect(canvas.getByRole('alert')).toHaveTextContent(/completion context changed/);
+    await waitFor(() => expect(canvas.getByRole('button', { name: 'Require inventory acme/api' })).toBeEnabled());
+    await userEvent.click(canvas.getByRole('button', { name: 'Require inventory acme/api' }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up task' }));
+    await waitFor(() => expect(completionRequests).toHaveLength(2));
+    await expect(canvas.getByText(/outcome could not be confirmed/)).toBeVisible();
+    await expect(canvas.getByRole('button', { name: 'Retry same request' })).toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: 'Retry same request' }));
+    await waitFor(() => expect(completionRequests).toHaveLength(3));
+    expect(completionChoiceReads).toBe(2);
+    expect(completionRequests[0]).toMatchObject({ specialist_id: 'gap-triager@1', provider_mode: 'local',
+      conversation_id: 'saved-conversation', parent_id: 'saved-parent', scope: { type: 'all' },
+      obligations: { obligations: [{ kind: 'inventory', obligation_id: inventoryObligation.obligation_id }] } });
+    expect(completionRequests[1]).toMatchObject({ conversation_id: 'saved-conversation', parent_id: 'saved-parent' });
+    expect(completionRequests[2]).toEqual(completionRequests[1]);
+    expect(completionRequests[0]).not.toHaveProperty('inspection_requirements');
+    expect(useInvestigationStore.getState().composer.parent).toEqual({ conversation_id: 'must-not-copy', parent_id: 'must-not-copy' });
+    await expect(args.onAcceptedTask).toHaveBeenCalledWith('follow-up-child');
+  },
+};
+
+export const ParentFollowUpDoesNotClaimAnUnrelatedPendingRequest: Story = {
+  args: { openRequest: 1, followUpContext: { parent_id: 'saved-parent', conversation_id: 'saved-conversation',
+    specialist_id: 'domain-analyst@3', scope: { type: 'all' }, provider_mode: 'local',
+    saved_provider_id: 'ollama', saved_model: 'fixture-parent-model' } },
+  beforeEach: () => {
+    const initial = useInvestigationStore.getInitialState();
+    useInvestigationStore.setState({ ...initial, catalog: investigationCatalog, pendingStart: {
+      schema_version: 1, request_nonce: 'b'.repeat(36), specialist_id: 'domain-analyst@3', question: 'Unrelated pending request',
+      scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1',
+      conversation_id: 'another-conversation', parent_id: 'another-parent' } }, true);
+    return () => useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(await canvas.findByRole('dialog', { name: 'Quick investigation dispatch' })).toHaveTextContent('A different investigation request is pending');
+    await expect(canvas.queryByRole('button', { name: 'Retry same request' })).not.toBeInTheDocument();
+    await userEvent.click(canvas.getByRole('button', { name: 'Open Investigations' }));
+    await expect(args.onNavigate).toHaveBeenCalledWith('investigations');
+  },
+};
+
+export const SavedParentWithUnsupportedRoleDoesNotFallback: Story = {
+  args: { openRequest: 1, followUpContext: { parent_id: 'saved-parent', conversation_id: 'saved-conversation',
+    specialist_id: 'domain-analyst@2', scope: { type: 'all' }, provider_mode: 'local',
+    saved_provider_id: 'ollama', saved_model: 'fixture-local-model' } },
+  beforeEach: () => {
+    const start = fn(async () => null);
+    useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: investigationCatalog, start }, true);
+    return () => useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const dialog = await canvas.findByRole('dialog', { name: 'Quick investigation dispatch' });
+    await expect(dialog).toHaveTextContent('not supported for Quick Dispatch');
+    await expect(canvas.getByLabelText('Specialist')).toHaveValue('domain-analyst@2');
+    await expect(canvas.getByLabelText('Provider')).toHaveValue('local');
+    await expect(canvas.getByRole('button', { name: 'Start follow-up task' })).toBeDisabled();
+    await expect(useInvestigationStore.getState().start).not.toHaveBeenCalled();
+  },
+};
+
+export const UnavailableSavedParentProviderDoesNotFallback: Story = {
+  args: { openRequest: 1, followUpContext: { parent_id: 'saved-parent', conversation_id: 'saved-conversation',
+    specialist_id: 'gap-triager@1', scope: { type: 'all' }, provider_mode: 'local',
+    saved_provider_id: 'ollama', saved_model: 'retired-model' } },
+  beforeEach: () => {
+    const catalog = structuredClone(completionCatalog);
+    catalog.providers[0] = { ...catalog.providers[0], available: false, unavailable_reason: 'Fixture provider retired' };
+    const start = fn(async () => null);
+    useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog, start }, true);
+    return () => useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const dialog = await canvas.findByRole('dialog', { name: 'Quick investigation dispatch' });
+    await expect(dialog).toHaveTextContent('Fixture provider retired');
+    await expect(canvas.getByLabelText('Specialist')).toHaveValue('gap-triager@1');
+    await expect(canvas.getByLabelText('Provider')).toHaveValue('local');
+    await expect(canvas.getByRole('button', { name: 'Start follow-up task' })).toBeDisabled();
+    await expect(useInvestigationStore.getState().start).not.toHaveBeenCalled();
+  },
+};
+
+export const CapturedParentIdsCountTowardRequestLimit: Story = {
+  args: { openRequest: 1, followUpContext: { parent_id: 'parent-1234567890abcdef', conversation_id: 'conversation-1234567890abcdef',
+    specialist_id: 'gap-triager@1', scope: { type: 'all' }, provider_mode: 'local',
+    saved_provider_id: 'ollama', saved_model: 'fixture-parent-model' } },
+  beforeEach: () => {
+    const initial = useInvestigationStore.getInitialState();
+    const policy = investigationPolicy(completionCatalog, 'investigation-v1', 'gap-triager@1');
+    if (!policy) throw new Error('Fixture completion policy is unavailable');
+    const parent = { parent_id: 'parent-1234567890abcdef', conversation_id: 'conversation-1234567890abcdef' };
+    const request = (withParent: boolean) => ({ schema_version: policy.request_schema_version, request_nonce: '0'.repeat(36),
+      specialist_id: 'gap-triager@1', obligations: obligationEnvelope([inventoryObligation], policy),
+      question: 'Check the saved parent.', scope: { type: 'all' as const }, provider_mode: 'local', limit_profile: 'investigation-v1',
+      expected_graph_revision: completionChoices.graph_snapshot_id, expected_context_id: completionChoices.context_id,
+      conversation_id: withParent ? parent.conversation_id : null, parent_id: withParent ? parent.parent_id : null });
+    const parentBytes = new TextEncoder().encode(JSON.stringify(request(true))).length;
+    const withoutParentBytes = new TextEncoder().encode(JSON.stringify(request(false))).length;
+    const requestBytes = parentBytes - 1;
+    if (withoutParentBytes > requestBytes) throw new Error('Fixture parent IDs do not isolate the admission boundary');
+    const catalog = structuredClone(completionCatalog);
+    catalog.policies = [{ limits: completionCatalog.limits, ...policy, request_bytes: requestBytes,
+      specialist_ids: ['gap-triager@1'] }];
+    mockIPC((command) => command === 'investigation_obligation_choices' ? structuredClone(completionChoices) : null);
+    const start = fn(async () => null);
+    useInvestigationStore.setState({ ...initial, catalog, pendingStart: null, starting: false, start }, true);
+    return () => useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const dialog = await canvas.findByRole('dialog', { name: 'Quick investigation dispatch' });
+    await canvas.findByText('acme/api');
+    await userEvent.click(canvas.getByRole('button', { name: 'Require inventory acme/api' }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Check the saved parent.');
+    await expect(canvas.getByRole('alert')).toHaveTextContent('complete request exceeds the existing');
+    await expect(canvas.getByRole('button', { name: 'Start follow-up task' })).toBeDisabled();
+    await expect(dialog).toHaveTextContent('Following');
+    await expect(useInvestigationStore.getState().start).not.toHaveBeenCalled();
   },
 };
 

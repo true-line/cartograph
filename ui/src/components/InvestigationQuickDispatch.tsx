@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useInvestigationStore, type InvestigationDraft } from '../investigationStore';
 import { investigationPolicy, obligationEnvelope, validObligationChoices, validObligationEnvelope } from '../investigationObligations';
 import { invokeOr } from '../tauri';
-import type { InvestigationObligation, InvestigationObligationChoices, InvestigationProviderMode, InvestigationScope, SpecialistId } from '../investigationTypes';
+import type { InvestigationFollowUpContext, InvestigationObligation, InvestigationObligationChoices, InvestigationProviderMode, InvestigationScope, SpecialistId } from '../investigationTypes';
 
 const QUICK_IDS: SpecialistId[] = ['domain-analyst@3', 'evidence-auditor@3', 'domain-analyst@4', 'evidence-auditor@4',
   'domain-analyst@7', 'evidence-auditor@7', 'spec-writer@1', 'gap-triager@1'];
@@ -11,13 +11,16 @@ const QUICK_COMPLETION_IDS = new Set<SpecialistId>(['domain-analyst@7', 'evidenc
 export interface InvestigationQuickDispatchProps {
   fallbackEnabled: boolean;
   openRequest: number;
+  followUpCancelRequest?: number;
+  followUpContext?: InvestigationFollowUpContext | null;
   onNavigate: (view: 'investigations') => void;
   onAcceptedTask: (taskId: string) => void;
 }
 
-export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNavigate, onAcceptedTask }: InvestigationQuickDispatchProps) {
+export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, followUpCancelRequest = 0, followUpContext = null, onNavigate, onAcceptedTask }: InvestigationQuickDispatchProps) {
   const state = useInvestigationStore();
   const [open, setOpen] = useState(false);
+  const [dialogParent, setDialogParent] = useState<InvestigationFollowUpContext | null>(null);
   const [question, setQuestion] = useState('');
   const [specialistId, setSpecialistId] = useState<SpecialistId>('domain-analyst@3');
   const [providerMode, setProviderMode] = useState<InvestigationProviderMode>('local');
@@ -30,6 +33,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
   const [choicesRefresh, setChoicesRefresh] = useState(0);
   const previousFocus = useRef<HTMLElement | null>(null);
   const handledOpenRequest = useRef(0);
+  const handledFollowUpCancel = useRef(0);
   const catalogRequested = useRef(false);
   const dialogRef = useRef<HTMLElement>(null);
   const questionRef = useRef<HTMLTextAreaElement>(null);
@@ -41,12 +45,13 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
   const provider = providers.find((item) => item.mode === providerMode);
   const supported = specialists.some((item) => item.id === specialistId);
   const composer = state.composer;
-  const scope: InvestigationScope = useMemo(() => composer.scopeType === 'all' ? { type: 'all' } :
+  const composerScope: InvestigationScope = useMemo(() => composer.scopeType === 'all' ? { type: 'all' } :
     { type: 'neighborhood', anchor: composer.anchor, hops: composer.hops }, [composer.anchor, composer.hops, composer.scopeType]);
+  const scope = dialogParent?.scope ?? composerScope;
   const scopeKey = JSON.stringify(scope);
   const choicesRequestIdentity = useMemo(() => ({ choicesRefresh, open, scopeKey, specialistId }),
     [choicesRefresh, open, scopeKey, specialistId]);
-  const scopeValid = composer.scopeType === 'all' || (composer.anchor.trim().length > 0 && Number.isInteger(composer.hops) && composer.hops >= 1 && composer.hops <= 3);
+  const scopeValid = scope.type === 'all' || (scope.anchor.trim().length > 0 && Number.isInteger(scope.hops) && scope.hops >= 1 && scope.hops <= 3);
   const questionBytes = new TextEncoder().encode(question).length;
   const hasPendingStart = state.pendingStart !== null;
   const inFlight = busy || state.starting;
@@ -68,29 +73,44 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
     request_nonce: '0'.repeat(36), specialist_id: specialistId, obligations: completionObligations,
     question, scope, provider_mode: providerMode, limit_profile: 'investigation-v1',
     expected_graph_revision: currentChoices?.graph_snapshot_id ?? null, expected_context_id: currentChoices?.context_id ?? '',
-    conversation_id: null, parent_id: null })).length : 0;
+    conversation_id: dialogParent?.conversation_id ?? null, parent_id: dialogParent?.parent_id ?? null })).length : 0;
   const valid = supported && Boolean(provider?.available) && question.trim().length > 0 && questionBytes <= 2048 && scopeValid &&
     (!completionRole || (validCompletionSelection && requestBytes <= (policy?.request_bytes ?? 0)));
 
-  const openDialog = useCallback(() => {
-    if (open) return;
+  const openDialog = useCallback((parent: InvestigationFollowUpContext | null = null) => {
+    if (open && (!dialogParent || parent)) return;
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setDialogParent(parent);
+    if (parent) { setSpecialistId(parent.specialist_id); setProviderMode(parent.provider_mode); }
+    else if (dialogParent) setQuestion('');
     setChoices(null); setChoicesIdentity(null); setSelectedInventoryIds([]); setChoicesError(null); setChoicesErrorIdentity(null);
     setOpen(true);
-  }, [open]);
+  }, [dialogParent, open]);
   const close = useCallback((accepted = false) => {
     if (inFlight && !accepted) return;
     ++choicesGeneration.current;
     setOpen(false);
+    if (dialogParent) setQuestion('');
+    setDialogParent(null);
     catalogRequested.current = false;
     setChoices(null); setChoicesIdentity(null); setSelectedInventoryIds([]); setChoicesError(null); setChoicesErrorIdentity(null);
     if (previousFocus.current?.isConnected) previousFocus.current.focus();
-  }, [inFlight]);
+  }, [dialogParent, inFlight]);
   useEffect(() => {
     if (openRequest === handledOpenRequest.current) return;
     handledOpenRequest.current = openRequest;
-    openDialog();
-  }, [openDialog, openRequest]);
+    openDialog(followUpContext);
+  }, [followUpContext, openDialog, openRequest]);
+  useEffect(() => {
+    if (followUpCancelRequest === handledFollowUpCancel.current) return;
+    if (!dialogParent) { handledFollowUpCancel.current = followUpCancelRequest; return; }
+    if (inFlight) return;
+    const timer = window.setTimeout(() => {
+      handledFollowUpCancel.current = followUpCancelRequest;
+      close();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [close, dialogParent, followUpCancelRequest, inFlight]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && open) { event.preventDefault(); close(); return; }
@@ -149,7 +169,8 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
     setChoicesRefresh((generation) => generation + 1);
   };
   const start = async () => {
-    if (!valid || locked || state.pendingStart) return;
+    if (!valid || locked || state.pendingStart ||
+        (dialogParent && followUpCancelRequest !== handledFollowUpCancel.current)) return;
     // Construct the quick request only from overlay-owned inputs. Full-composer
     // obligations, parent links, and inspection requirements never leak here.
     const draft: InvestigationDraft = {
@@ -158,6 +179,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
       scope,
       provider_mode: providerMode,
       limit_profile: 'investigation-v1',
+      ...(dialogParent ? { conversation_id: dialogParent.conversation_id, parent_id: dialogParent.parent_id } : {}),
       ...(completionRole ? { obligations: completionObligations } : {}),
     };
     setBusy(true);
@@ -169,7 +191,8 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
     } finally { setBusy(false); }
   };
   const retry = async () => {
-    if (busy || !state.pendingStart) return;
+    if (busy || !state.pendingStart ||
+        (dialogParent && followUpCancelRequest !== handledFollowUpCancel.current)) return;
     const requestedSpecialist = state.pendingStart.specialist_id;
     setBusy(true);
     try {
@@ -180,7 +203,9 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
   };
 
   if (!open) return null;
-  const pendingIsQuick = state.pendingStart && QUICK_IDS.includes(state.pendingStart.specialist_id);
+  const pendingMatchesParent = !dialogParent || Boolean(state.pendingStart &&
+    state.pendingStart.conversation_id === dialogParent.conversation_id && state.pendingStart.parent_id === dialogParent.parent_id);
+  const pendingIsQuick = state.pendingStart && QUICK_IDS.includes(state.pendingStart.specialist_id) && pendingMatchesParent;
   return <div className="quick-dispatch-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !inFlight) close(); }}>
     <section ref={dialogRef} className="quick-dispatch-dialog" role="dialog" aria-modal="true" aria-label="Quick investigation dispatch" onKeyDown={(event) => {
       if (event.key !== 'Tab') return;
@@ -190,7 +215,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }}>
-      <header><div><h2>Quick investigation</h2><p className="muted">Start a saved investigation with a supported specialist. Findings remain T3 / InferredWeak.</p></div>
+      <header><div><h2>{dialogParent ? 'Follow-up task' : 'Quick investigation'}</h2><p className="muted">Start a saved investigation with a supported specialist. Findings remain T3 / InferredWeak.</p></div>
         <button type="button" className="secondary-button" onClick={() => close()} disabled={inFlight} aria-label="Close quick investigation">Close</button></header>
       {state.catalogError && <p className="error-text" role="alert">Specialist catalog unavailable. Refresh in Investigations before starting.</p>}
       {state.startError && <p className="error-text" role="alert">{state.startError}</p>}
@@ -200,14 +225,22 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
         {pendingIsQuick && <button type="button" onClick={() => void retry()} disabled={busy || state.starting}>Retry same request</button>}
         {!pendingIsQuick && <button type="button" onClick={() => { onNavigate('investigations'); close(); }}>Open Investigations</button>}
       </div> : <form onSubmit={(event) => { event.preventDefault(); void start(); }}>
-        <label>Specialist<select value={specialistId} disabled={locked || !specialists.length} onChange={(event) => setSpecialistId(event.target.value as SpecialistId)}>
+        {dialogParent && <p className="muted">Following <code>{dialogParent.parent_id}</code> in conversation <code>{dialogParent.conversation_id}</code>.
+          Saved producer: {dialogParent.specialist_id} · {dialogParent.saved_provider_id} · {dialogParent.saved_model}.</p>}
+        {!supported && dialogParent && <p className="error-text" role="alert">This saved specialist version is not supported for Quick Dispatch. Continue in Investigations.</p>}
+        <label>Specialist<select value={specialistId} disabled={locked || Boolean(dialogParent) || !specialists.length} onChange={(event) => setSpecialistId(event.target.value as SpecialistId)}>
+          {dialogParent && !specialists.some((item) => item.id === dialogParent.specialist_id) &&
+            <option value={dialogParent.specialist_id}>{dialogParent.specialist_id} · unsupported version</option>}
           {specialists.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.id}</option>)}
         </select></label>
         <p className="muted">{specialist?.purpose} T3 · InferredWeak. Advanced evidence and completion work stays in the full composer.</p>
-        <p className="muted">Scope: {composer.scopeType === 'all' ? 'Recovered system' : `Fact neighborhood · ${composer.anchor || 'anchor required'} · ${composer.hops} hop${composer.hops === 1 ? '' : 's'}`}. Change scope in the full Investigations composer.</p>
-        <label>Provider<select value={providerMode} disabled={locked || !providers.length} onChange={(event) => setProviderMode(event.target.value as InvestigationProviderMode)}>
+        <p className="muted">Scope: {scope.type === 'all' ? 'Recovered system' : `Fact neighborhood · ${scope.anchor} · ${scope.hops} hop${scope.hops === 1 ? '' : 's'}`}{dialogParent ? ' · captured from the saved parent' : '. Change scope in the full Investigations composer.'}</p>
+        <label>Provider<select value={providerMode} disabled={locked || Boolean(dialogParent) || !providers.length} onChange={(event) => setProviderMode(event.target.value as InvestigationProviderMode)}>
+          {dialogParent && !providers.some((item) => item.mode === dialogParent.provider_mode) &&
+            <option value={dialogParent.provider_mode}>{dialogParent.provider_mode} · unavailable</option>}
           {providers.map((item) => <option key={item.mode} value={item.mode} disabled={!item.available}>{item.mode} · {item.provider_id} · {item.model}{item.available ? '' : ` · unavailable: ${item.unavailable_reason ?? 'not available'}`}</option>)}
         </select></label>
+        {dialogParent && provider && <p className="muted">Current configured provider for {providerMode}: {provider.provider_id} · {provider.model}.</p>}
         {!provider?.available && provider && <p className="muted">{provider.unavailable_reason ?? 'This configured provider is unavailable.'} Choose an available provider or use the full composer.</p>}
         <label>Question<textarea ref={questionRef} value={question} maxLength={2048} disabled={locked} onChange={(event) => setQuestion(event.target.value)} /></label>
         {questionBytes > 2048 && <p className="error-text">Question exceeds the existing 2,048-byte limit.</p>}
@@ -231,9 +264,9 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, onNav
           {completionRole && policy && requestBytes > policy.request_bytes && <p role="alert" className="error-text">The complete request exceeds the existing {policy.request_bytes.toLocaleString()}-byte limit. Remove an inventory or shorten the question.</p>}
         </fieldset>}
         {state.catalog && specialists.length === 0 && <p className="muted">No supported quick-dispatch specialists are available. Use the full Investigations composer.</p>}
-        {composer.scopeType === 'neighborhood' && !scopeValid && <p role="alert" className="error-text">Choose a valid fact anchor and one to three hops in the full Investigations composer.</p>}
+        {scope.type === 'neighborhood' && !scopeValid && <p role="alert" className="error-text">Choose a valid fact anchor and one to three hops in the full Investigations composer.</p>}
         <footer><button type="button" className="secondary-button" onClick={() => close()} disabled={inFlight}>Cancel</button>
-          <button type="submit" disabled={!valid || locked || state.catalogLoading}>Start investigation</button></footer>
+          <button type="submit" disabled={!valid || locked || state.catalogLoading}>{dialogParent ? 'Start follow-up task' : 'Start investigation'}</button></footer>
       </form>}
     </section>
   </div>;

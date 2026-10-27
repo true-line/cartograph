@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { useInvestigationStore } from './investigationStore';
+import { useInvestigationStore, type InvestigationState } from './investigationStore';
 import type { InvestigationChat } from './investigationTypes';
 
 interface ChatDock { chat: InvestigationChat; question: string }
@@ -11,6 +11,7 @@ interface DockState {
   fallbackTask: string | null;
   connect: () => () => void;
   open: (taskId: string) => void;
+  openForFollowUp: (taskId: string) => Promise<InvestigationState | null>;
   requestOpenFromNotice: (taskId: string) => void;
   cancelNavigationIntent: () => void;
   close: (taskId: string) => void;
@@ -26,8 +27,10 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
   let requestedGeneration = 0;
   let navigationIntent: string | null = null;
   let loadingOwner: AbortController | undefined;
+  let followUpWaiter: { intent: number; taskId: string; resolve: (state: InvestigationState | null) => void } | undefined;
   const stop = (releaseLoading = false) => {
     ++intent; unsubscribe?.(); unsubscribe = undefined;
+    followUpWaiter?.resolve(null); followUpWaiter = undefined;
     // Release UI ownership only; the physical read still occupies its slot.
     if (releaseLoading) loadingOwner?.abort();
   };
@@ -50,7 +53,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
           if (state.selectionGeneration >= generation) { stop(); set({ pendingTask: null }); }
           return;
         }
-        if (state.chatStatus === 'loading' || state.chatStatus === 'idle') return;
+        if (state.loading || state.chatStatus === 'loading' || state.chatStatus === 'idle') return;
         if (state.chatStatus === 'saved' && state.chat?.task_id === taskId &&
             state.detail?.investigation_id === taskId) {
           const dock = { chat: state.chat, question: state.detail.question };
@@ -62,6 +65,11 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         } else set({ pendingTask: null, fallbackTask: state.chatStatus === 'legacy' ? taskId : null,
           error: state.chatError ?? state.error ?? (state.chatStatus === 'legacy'
             ? 'No saved conversation is available for this older investigation.' : 'Saved chat unavailable. Try opening it again.') });
+        if (followUpWaiter?.intent === request && followUpWaiter.taskId === taskId && !state.loading) {
+          const waiter = followUpWaiter;
+          followUpWaiter = undefined;
+          waiter.resolve(state);
+        }
         unsubscribe?.(); unsubscribe = undefined;
       };
       unsubscribe = coordinator.subscribe(observe);
@@ -69,6 +77,7 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         if (connected && intent === request) {
           unsubscribe?.(); unsubscribe = undefined;
           set({ pendingTask: null, error: 'Saved chat unavailable. Try opening it again.' });
+          if (followUpWaiter?.intent === request) { const waiter = followUpWaiter; followUpWaiter = undefined; waiter.resolve(null); }
         }
       }).finally(() => {
         reading = false;
@@ -76,6 +85,13 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
         // A single replaceable intent, rather than a promise chain per click.
         if (intent !== request) run();
       });
+    };
+    const beginOpen = (taskId: string, followUp?: (state: InvestigationState | null) => void) => {
+      stop();
+      requestedGeneration = coordinator.getState().selectionGeneration;
+      if (followUp) followUpWaiter = { intent, taskId, resolve: followUp };
+      set({ focusedTask: taskId, pendingTask: taskId, error: null, fallbackTask: null });
+      run();
     };
     return {
       docks: [], focusedTask: null, pendingTask: null, error: null, fallbackTask: null,
@@ -90,11 +106,18 @@ export function createAgentChatDockStore(coordinator = useInvestigationStore) {
       },
       open: (taskId) => {
         if (!connected || get().pendingTask === taskId) return;
-        stop();
-        requestedGeneration = coordinator.getState().selectionGeneration;
-        set({ focusedTask: taskId, pendingTask: taskId, error: null, fallbackTask: null });
-        run();
+        beginOpen(taskId);
       },
+      openForFollowUp: (taskId) => new Promise((resolve) => {
+        if (!connected) { resolve(null); return; }
+        if (get().pendingTask === taskId) {
+          followUpWaiter?.resolve(null);
+          followUpWaiter = { intent, taskId, resolve };
+          run();
+          return;
+        }
+        beginOpen(taskId, resolve);
+      }),
       requestOpenFromNotice: (taskId) => {
         if (connected) get().open(taskId);
         else navigationIntent = taskId;

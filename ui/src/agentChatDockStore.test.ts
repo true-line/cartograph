@@ -3,7 +3,7 @@ import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { create } from 'zustand';
 import { createAgentChatDockStore } from './agentChatDockStore';
 import { useInvestigationStore, type InvestigationState } from './investigationStore';
-import { investigationCatalog, investigationConsent, investigationDetail, investigationEvents } from './investigationFixtures';
+import { investigationCatalog, investigationConsent, investigationDetail, investigationEvents, investigationResult } from './investigationFixtures';
 import type { InvestigationChat } from './investigationTypes';
 
 function chat(id: string): InvestigationChat {
@@ -220,6 +220,86 @@ describe('saved task chat docks', () => {
       clearMocks(); vi.unstubAllGlobals();
       useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
     }
+  });
+
+  it('captures a follow-up only from the settled physical coordinator read, not a stale saved selection', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+    const id = 'follow-up-parent';
+    const detail = investigationDetail(id);
+    const result = investigationResult(id);
+    const saved: InvestigationChat = { chat_id: `chat:${id}`, task_id: id,
+      producer: { specialist_id: detail.specialist.id, specialist_version: detail.specialist.version,
+        prompt_fingerprint: detail.specialist.prompt_fingerprint, tier: detail.specialist.tier,
+        confidence_tier: detail.specialist.confidence_tier, provider_mode: detail.provider.mode,
+        provider_id: detail.provider.provider_id, model: detail.provider.model, protocol_version: null },
+      messages: [
+        { id: `question:${id}`, ordinal: 0, author: 'user', message: { kind: 'user_question', question: detail.question } },
+        { id: `result:${id}`, ordinal: 1, author: 'specialist', message: { kind: 'result_reference',
+          task_id: id, result_id: result.result_id, result_hash: 'c'.repeat(64) } },
+      ] };
+    let finishChat: ((value: InvestigationChat) => void) | undefined;
+    let chatReads = 0;
+    mockIPC((command, payload) => {
+      const args = payload as { investigationId?: string; afterSequence?: number } | undefined;
+      if (command === 'get_investigation') return detail;
+      if (command === 'investigation_result') return result;
+      if (command === 'investigation_consent') return null;
+      if (command === 'investigation_events') return { investigation_id: id,
+        items: investigationEvents(id).filter((event) => event.sequence > (args?.afterSequence ?? 0)),
+        next_sequence: detail.last_event_sequence, has_more: false };
+      if (command === 'get_investigation_chat') {
+        chatReads += 1;
+        return new Promise<InvestigationChat>((resolve) => { finishChat = resolve; });
+      }
+      return null;
+    });
+    const dock = createAgentChatDockStore();
+    const leave = dock.getState().connect();
+    // A previously validated saved selection must not satisfy the new intent.
+    useInvestigationStore.setState({ selectedId: id, selectionGeneration: 8, detail, result,
+      chat: saved, chatStatus: 'saved', loading: false });
+    try {
+      dock.getState().open(id);
+      const capture = dock.getState().openForFollowUp(id);
+      let resolved = false;
+      void capture.then(() => { resolved = true; });
+      await vi.waitFor(() => expect(chatReads).toBe(1));
+      expect(useInvestigationStore.getState().loading).toBe(true);
+      expect(resolved).toBe(false);
+      finishChat?.(saved);
+      const captured = await capture;
+      expect(captured?.selectedId).toBe(id);
+      expect(captured?.chatStatus).toBe('saved');
+      expect(captured?.loading).toBe(false);
+      expect(captured?.chat?.messages[1]).toMatchObject({ message: { kind: 'result_reference', result_id: result.result_id } });
+      expect(chatReads).toBe(1);
+    } finally {
+      leave(); finishChat?.(saved); clearMocks(); vi.unstubAllGlobals();
+      useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+    }
+  });
+
+  it('cancels parent capture when its read is closed or superseded', async () => {
+    const closed = harness(); closed.hold();
+    closed.dock.getState().open('parent'); await tick();
+    const closedCapture = closed.dock.getState().openForFollowUp('parent');
+    closed.dock.getState().close('parent');
+    expect(await closedCapture).toBeNull();
+    closed.finish('parent'); closed.release(); await tick(); await tick();
+    expect(closed.dock.getState().docks).toEqual([]);
+    closed.leave();
+
+    const superseded = harness(); superseded.hold();
+    superseded.dock.getState().open('parent'); await tick();
+    const staleCapture = superseded.dock.getState().openForFollowUp('parent');
+    superseded.dock.getState().open('other');
+    expect(await staleCapture).toBeNull();
+    superseded.finish('parent'); superseded.release(); await tick(); await tick();
+    expect(superseded.calls).toEqual(['parent', 'other']);
+    superseded.finish('other'); await tick();
+    expect(superseded.dock.getState().docks.map((item) => item.chat.task_id)).toEqual(['other']);
+    superseded.leave();
   });
 
   it.each(['close', 'leave'] as const)('releases UI loading on %s while retaining the physical docking read slot', async (action) => {
