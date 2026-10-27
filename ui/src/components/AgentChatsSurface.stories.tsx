@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
-import { page } from '@vitest/browser/context';
+import { page, userEvent as browserUserEvent } from '@vitest/browser/context';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { investigationCatalog, investigationCitations, investigationDetail, investigationEvents, investigationResult } from '../investigationFixtures';
@@ -376,6 +376,8 @@ function savedAnswersFixture(gapTriager = false, palette = false, attribution = 
       const result = index === 0 ? specWriterV2Result(detail.investigation_id) : investigationResult(detail.investigation_id);
       result.findings[0].statement = `Saved finding only for ${detail.investigation_id}`;
       if (attribution) result.observed_response_model = 'different-observed-response';
+      if (attribution) result.limitations.push(...Array.from({ length: 3 }, (_, part) =>
+        `Saved limitation ${part}: ` + 'Only recorded evidence supports this scoped proposal; broader behavior remains unverified. '.repeat(10)));
       if (attribution && index === 0) {
         result.findings[0].citation_ids = ['C1'];
         result.findings.push({ ...result.findings[0], finding_id: 'F2', title: 'Other supported proposal', statement: 'A separate cited proposal.', citation_ids: ['C1', 'C2'] });
@@ -406,7 +408,7 @@ function savedAnswersFixture(gapTriager = false, palette = false, attribution = 
       if (command === 'read_investigation_citation') {
         savedAnswerCitationReads.push(`${args.investigationId}:${args.citationId}`);
         return new Promise((resolve) => { releaseSavedAnswerCitation = () => resolve({ investigation_id: args.investigationId,
-          citation_id: args.citationId, citation: investigationCitations[0], status: 'available', text: `Retained source for ${args.investigationId}` }); });
+          citation_id: args.citationId, citation: investigationCitations[0], status: 'available', text: `Retained source for ${args.investigationId}` + (attribution ? '\n' + 'Recorded historical source line.\n'.repeat(45) : '') }); });
       }
       if (command === 'list_investigations') savedAnswerSearches.push(payload);
       if (command === 'list_investigations' && palette && args.cursor) return { items: [], next_cursor: null };
@@ -445,6 +447,26 @@ export const SavedAnswersStayWithTheirPane: Story = {
     const referenceB = within(paneB.getByRole('listitem', { name: 'Specialist result reference' })).getByRole('group');
     await expect(referenceA).toHaveTextContent('1 source citations · 1 graph citations');
     await expect(referenceB).toHaveTextContent('2 source citations · 1 graph citations');
+    // AC-0416: real native keyboard scroll and independent retained reading areas.
+    const readingA = paneA.getByRole('region', { name: 'Saved messages answer-a' });
+    const readingB = paneB.getByRole('region', { name: 'Saved messages answer-b' });
+    const header = readingA.parentElement!.querySelector(':scope > header')!;
+    expect(readingA.contains(header)).toBe(false);
+    expect(readingA.scrollHeight).toBeGreaterThan(readingA.clientHeight);
+    expect(readingB.scrollHeight).toBeGreaterThan(readingB.clientHeight);
+    const beforeScroll = [...savedAnswerCommands];
+    readingA.focus(); await expect(readingA).toHaveFocus();
+    const headerTop = header.getBoundingClientRect().top;
+    await browserUserEvent.keyboard('{PageDown}');
+    await waitFor(() => expect(readingA.scrollTop).toBeGreaterThan(0));
+    readingA.scrollTop = 80; readingB.scrollTop = 60;
+    expect(readingA.scrollTop).toBe(80); expect(readingB.scrollTop).toBe(60);
+    expect(Math.abs(header.getBoundingClientRect().top - headerTop)).toBeLessThan(1);
+    const userBubble = paneA.getByRole('listitem', { name: 'User question' });
+    const agentBubble = paneA.getByRole('listitem', { name: 'Specialist result reference' });
+    expect(userBubble.getBoundingClientRect().left).toBeGreaterThan(agentBubble.getBoundingClientRect().left);
+    expect(getComputedStyle(userBubble).backgroundColor).not.toBe(getComputedStyle(agentBubble).backgroundColor);
+    expect(savedAnswerCommands).toEqual(beforeScroll);
     const commands = [...savedAnswerCommands];
     await expect(attributionA).toHaveTextContent('Saved writer long name');
     await expect(attributionA).toHaveTextContent('spec-writer@2 · version 2');
@@ -456,6 +478,10 @@ export const SavedAnswersStayWithTheirPane: Story = {
     const viewport = [window.innerWidth, window.innerHeight];
     try {
       await page.viewport(640, 900);
+      await waitFor(() => { for (const region of [readingA, readingB]) {
+        expect(region.scrollWidth).toBeLessThanOrEqual(region.clientWidth + 1);
+        expect(region.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth);
+      } });
       await waitFor(() => { for (const group of [attributionA, attributionB]) {
         const box = group.getBoundingClientRect();
         expect(box.width).toBeGreaterThan(0); expect(box.right).toBeLessThanOrEqual(window.innerWidth);
@@ -486,7 +512,11 @@ export const SavedAnswersStayWithTheirPane: Story = {
     await expect(paneA.getByText('Reading historical citation…')).toBeVisible();
     await expect(paneB.queryByRole('complementary', { name: 'Historical citation' })).not.toBeInTheDocument();
     releaseSavedAnswerCitation?.();
-    await expect(await paneA.findByText('Retained source for answer-a')).toBeVisible();
+    const retained = await paneA.findByText(/^Retained source for answer-a/);
+    await expect(retained).toBeVisible();
+    expect(readingA.contains(retained)).toBe(true);
+    expect(retained.scrollHeight).toBeGreaterThan(retained.clientHeight);
+    retained.scrollTop = 40; expect(retained.scrollTop).toBe(40);
     await userEvent.click(paneB.getByRole('button', { name: 'Inspect citation C1' }));
     await waitFor(() => expect(savedAnswerCitationReads).toEqual(['answer-a:C1', 'answer-b:C1']));
     await userEvent.click(canvas.getByRole('button', { name: /Question for answer-a/ }));
@@ -678,7 +708,7 @@ export const SavedNarrativeHistorySearch: Story = {
     await userEvent.click(message.getByRole('button', { name: 'Inspect message citation C1' }));
     await waitFor(() => expect(savedAnswerCitationReads).toEqual(['answer-a:C1']));
     releaseSavedAnswerCitation?.();
-    await expect(await pane.findByText('Retained source for answer-a')).toBeVisible();
+    await expect(await pane.findByText(/^Retained source for answer-a/)).toBeVisible();
     await expect(useInvestigationStore.getState().composer.question).toBe('Keep composer draft');
     await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
   },

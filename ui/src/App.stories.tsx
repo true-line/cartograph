@@ -2405,6 +2405,13 @@ export const PaneLayoutPreservesInlineReply: Story = {
     const reply = within(await within(pane).findByRole('region', { name: 'Reply to inv-inline-parent' }));
     const question = reply.getByLabelText('Question');
     const host = pane.querySelector('[data-reply-task="inv-inline-parent"]');
+    // AC-0416: the existing direct-pane reply host is outside the independent scroller.
+    const reading = within(pane).getByRole('region', { name: 'Saved messages inv-inline-parent' });
+    expect(host?.parentElement).toBe(pane); expect(reading.contains(host)).toBe(false);
+    const requestsBeforeScroll = [...investigationRequests];
+    expect(reading.scrollHeight).toBeGreaterThan(reading.clientHeight);
+    reading.scrollTop = 75; expect(reading.scrollTop).toBe(75);
+    expect(investigationRequests).toEqual(requestsBeforeScroll);
     await userEvent.type(question, 'Preserve this parent across pane layouts.');
     await waitFor(() => expect(reply.getByRole('button', { name: 'Send reply task' })).toBeEnabled());
     const requestsBefore = [...investigationRequests];
@@ -2413,6 +2420,8 @@ export const PaneLayoutPreservesInlineReply: Story = {
       if (count === 3) for (const position of ['Top', 'Bottom']) await userEvent.click(canvas.getByRole('button', { name: position }));
       expect(pane.querySelector('[data-reply-task="inv-inline-parent"]')).toBe(host);
       expect(host?.isConnected).toBe(true); expect(reply.getByLabelText('Question')).toBe(question);
+      expect(within(pane).getByRole('region', { name: 'Saved messages inv-inline-parent' })).toBe(reading);
+      reading.scrollTop = 50; expect(reading.scrollTop).toBe(50);
       await expect(question).toHaveValue('Preserve this parent across pane layouts.');
     }
     expect(investigationRequests).toEqual(requestsBefore);
@@ -2422,6 +2431,8 @@ export const PaneLayoutPreservesInlineReply: Story = {
     expect(pending).toMatchObject({ parent_id: 'inv-inline-parent', conversation_id: 'conversation-inv-inline-parent',
       question: 'Preserve this parent across pane layouts.' });
     const afterSubmit = [...investigationRequests];
+    reading.scrollTop = 25; expect(reading.scrollTop).toBe(25);
+    expect(host?.parentElement).toBe(pane);
     await userEvent.click(canvas.getByRole('button', { name: '3 pane slots' }));
     await userEvent.click(canvas.getByRole('button', { name: 'Top' }));
     await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
