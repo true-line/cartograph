@@ -6316,6 +6316,11 @@ def register(V):
 def register_local():
     Imp = V
     admin.add_view(Imp(endpoint="local"))
+
+def register_match(choice):
+    match choice:
+        case Imp:
+            admin.add_view(Imp(endpoint="captured"))
 "#;
     let views = r#"
 from flask_admin import BaseView, expose
@@ -6399,7 +6404,8 @@ admin.add_view(Bad(endpoint="bad"))
             "flask_admin_view_base_not_modelled:BaseView  app/rebase.py",
             // An assignment, not the class it names.
             "flask_admin_view_class_not_modelled:Alias  app/shadow.py",
-            // `Imp = V` in `register_local`.
+            // `Imp = V` in `register_local`, and `case Imp:` in `register_match`.
+            "flask_admin_view_class_not_modelled:Imp  app/shadow.py",
             "flask_admin_view_class_not_modelled:Imp  app/shadow.py",
             "flask_admin_view_class_not_modelled:Twice  app/shadow.py",
             // The parameter `V` of `register`.

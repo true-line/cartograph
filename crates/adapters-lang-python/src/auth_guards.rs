@@ -65,7 +65,8 @@ use crate::app_scope::{self, AppRef, Apps};
 use crate::request_inputs::{binding_sites, handler_bindings};
 use crate::responses::{self, FnKey, Resolver};
 use crate::{
-    Extraction, FileCx, ImportBinding, module_binding, prov_from, route_decorator, symbol_id,
+    Extraction, FileCx, ImportBinding, module_binding, prov_from, route_decorator, scope_binding,
+    symbol_id,
 };
 use core_prov::{ConfidenceTier, EvidenceRef};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -244,7 +245,12 @@ pub(crate) fn rebound(
             return false;
         };
         match node.kind() {
-            "function_definition" => handler_bindings(cx, node, body).contains(name),
+            // `scope_binding` also sees `match` captures and other forms
+            // `handler_bindings` does not name.
+            "function_definition" => {
+                handler_bindings(cx, node, body).contains(name)
+                    || !scope_binding(cx, node, name).writes.is_empty()
+            }
             "class_definition" => {
                 let mut bound = false;
                 binding_sites(cx, body, &mut |_, names| bound |= names.contains(name));
