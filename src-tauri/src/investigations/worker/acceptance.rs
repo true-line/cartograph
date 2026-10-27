@@ -4,6 +4,8 @@
 use super::*;
 #[path = "acceptance/completion.rs"]
 mod completion;
+#[path = "acceptance/expanded.rs"]
+mod expanded;
 #[path = "acceptance/inspection.rs"]
 mod inspection;
 #[path = "acceptance/vendure.rs"]

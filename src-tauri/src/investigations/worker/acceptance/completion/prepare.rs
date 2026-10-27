@@ -22,7 +22,7 @@ const MAX_PREPARATION_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PreparationBinding {
+pub(in super::super) struct PreparationBinding {
     pub run_id: String,
     pub protocol_hash: String,
     pub source_commit: String,
@@ -30,7 +30,7 @@ pub(super) struct PreparationBinding {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct CaptureManifest {
+pub(in super::super) struct CaptureManifest {
     pub schema_version: u32,
     pub binding: PreparationBinding,
     pub provider: InvestigationProvider,
@@ -47,7 +47,7 @@ pub(super) struct CaptureManifest {
     pub analyst_wire_hash: String,
     pub auditor_wire_hash: String,
 }
-pub(super) struct PreparedState {
+pub(in super::super) struct PreparedState {
     pub app: tauri::App<tauri::test::MockRuntime>,
     pub app_data: PathBuf,
     pub analyst_request: StagedObligationRequest,
@@ -59,6 +59,38 @@ pub(super) struct PreparedState {
     pub manifest: CaptureManifest,
     pub manifest_hash: String,
     _guards: Vec<crate::primary_source::RetentionGuard>,
+}
+// Closed family selection: V7 keeps its original manifest and request bytes.
+#[derive(Clone, Copy)]
+pub(in super::super) enum Family {
+    V7,
+    Expanded,
+}
+impl Family {
+    fn policy(self) -> &'static InvestigationPolicy {
+        match self {
+            Self::V7 => &INVESTIGATION_V1_POLICY,
+            Self::Expanded => &INVESTIGATION_V2_POLICY,
+        }
+    }
+    fn manifest_schema(self) -> u32 {
+        match self {
+            Self::V7 => 1,
+            Self::Expanded => 2,
+        }
+    }
+    fn envelope(self) -> (u32, &'static str) {
+        match self {
+            Self::V7 => (1, "investigation-completion-obligations@1"),
+            Self::Expanded => (2, "investigation-completion-obligations@2"),
+        }
+    }
+    fn roles(self) -> [&'static str; 2] {
+        match self {
+            Self::V7 => ["domain-analyst@7", "evidence-auditor@7"],
+            Self::Expanded => ["domain-analyst@10", "evidence-auditor@10"],
+        }
+    }
 }
 fn json(value: &impl Serialize) -> Result<Vec<u8>, String> {
     crate::investigations::context::bounded_json(value, MAX_PREPARATION_BYTES)
@@ -135,6 +167,7 @@ fn app(state: AppState) -> Result<tauri::App<tauri::test::MockRuntime>, String> 
 }
 fn publish_inventory(
     app: &tauri::App<tauri::test::MockRuntime>,
+    family: Family,
 ) -> Result<(String, String, String), String> {
     let state = app.state::<AppState>();
     let scope = crate::context::coverage_scope(app.handle(), &state)?;
@@ -180,7 +213,11 @@ fn publish_inventory(
     let record = core_graph::coverage::CoverageRecord {
         repo_key: repo.repo_key.clone(),
         registered_source_id: Some(registered.clone()),
-        ingest_id: "v7-synthetic-control-preparation@1".into(),
+        ingest_id: match family {
+            Family::V7 => "v7-synthetic-control-preparation@1",
+            Family::Expanded => "expanded-synthetic-control-preparation@1",
+        }
+        .into(),
         config_hash: repo.config_hash.clone(),
         inventory_json: inventory.clone(),
     };
@@ -256,6 +293,7 @@ fn resolve_request(
     specialist: &str,
     nonce: &str,
     question: &str,
+    family: Family,
 ) -> Result<
     (
         StagedObligationRequest,
@@ -281,25 +319,28 @@ fn resolve_request(
         _ => return Err("Inventory resolver returned the wrong kind.".into()),
     };
     let request = StagedObligationRequest {
-        schema_version: 4,
+        schema_version: match family {
+            Family::V7 => 4,
+            Family::Expanded => 7,
+        },
         request_nonce: nonce.into(),
         specialist_id: specialist.into(),
         obligations: ObligationEnvelope {
-            schema_version: 1,
-            contract: "investigation-completion-obligations@1".into(),
+            schema_version: family.envelope().0,
+            contract: family.envelope().1.into(),
             obligations: vec![source, inventory],
         },
         inspection_requirements: None,
         question: question.into(),
         scope: InvestigationScope::All,
         provider_mode: InvestigationProviderMode::Local,
-        limit_profile: "investigation-v1".into(),
+        limit_profile: family.policy().profile().into(),
         expected_graph_revision: Some(graph),
         expected_context_id: context,
         conversation_id: None,
         parent_id: None,
     }
-    .normalized()
+    .normalized_with_policy(family.policy())
     .map_err(|error| error.to_string())?;
     crate::investigations::completion_choices::validate_request(app.handle(), &state, &request)?;
     Ok((request, guard))
@@ -309,6 +350,15 @@ pub(super) fn prepare(
     run_dir: &Path,
     provider: &InvestigationProvider,
     binding: PreparationBinding,
+) -> Result<PreparedState, String> {
+    prepare_family(run_dir, provider, binding, Family::V7)
+}
+
+pub(in super::super) fn prepare_family(
+    run_dir: &Path,
+    provider: &InvestigationProvider,
+    binding: PreparationBinding,
+    family: Family,
 ) -> Result<PreparedState, String> {
     validate_binding(&binding)?;
     if provider.mode != InvestigationProviderMode::Local || !provider.available {
@@ -325,26 +375,29 @@ pub(super) fn prepare(
     );
     let graph_before_hash = content_hash(graph_before.as_bytes());
     let app = app(state)?;
-    let (inventory, config_hash, registered_source_id) = publish_inventory(&app)?;
+    let (inventory, config_hash, registered_source_id) = publish_inventory(&app, family)?;
     let (analyst_request, analyst_guard) = resolve_request(
         &app,
-        "domain-analyst@7",
+        family.roles()[0],
         &format!("{}-analyst", binding.run_id),
         ANALYST_QUESTION,
+        family,
     )?;
     let (mut auditor_request, auditor_guard) = resolve_request(
         &app,
-        "evidence-auditor@7",
+        family.roles()[1],
         &format!("{}-auditor", binding.run_id),
         AUDITOR_QUESTION,
+        family,
     )?;
-    let started = app
-        .state::<AppState>()
-        .jobs
-        .lock()
-        .map_err(|_| "Job store unavailable.")?
-        .start_completion_investigation(&analyst_request, Some(provider))
-        .map_err(|error| error.to_string())?;
+    let state = app.state::<AppState>();
+    let mut jobs = state.jobs.lock().map_err(|_| "Job store unavailable.")?;
+    let started = match family {
+        Family::V7 => jobs.start_completion_investigation(&analyst_request, Some(provider)),
+        Family::Expanded => jobs.start_next_prompt_investigation(&analyst_request, Some(provider)),
+    }
+    .map_err(|error| error.to_string())?;
+    drop(jobs);
     if !started.created || started.detail.summary.status != InvestigationStatus::Queued {
         return Err("Preparation must create one new queued analyst.".into());
     }
@@ -353,12 +406,12 @@ pub(super) fn prepare(
     auditor_request.conversation_id = Some(conversation_id.clone());
     auditor_request.parent_id = Some(analyst_id.clone());
     auditor_request
-        .normalized()
+        .normalized_with_policy(family.policy())
         .map_err(|error| error.to_string())?;
     let analyst_wire = json(&analyst_request)?;
     let auditor_wire = json(&auditor_request)?;
     let manifest = CaptureManifest {
-        schema_version: 1,
+        schema_version: family.manifest_schema(),
         binding,
         provider: provider.clone(),
         source_hash: content_hash(super::super::super::ORIGINAL.as_bytes()),
@@ -370,10 +423,10 @@ pub(super) fn prepare(
         analyst_id: analyst_id.clone(),
         conversation_id: conversation_id.clone(),
         analyst_request_hash: analyst_request
-            .intent_hash()
+            .intent_hash_with_policy(family.policy())
             .map_err(|error| error.to_string())?,
         auditor_request_hash: auditor_request
-            .intent_hash()
+            .intent_hash_with_policy(family.policy())
             .map_err(|error| error.to_string())?,
         analyst_wire_hash: content_hash(&analyst_wire),
         auditor_wire_hash: content_hash(&auditor_wire),
@@ -409,6 +462,14 @@ pub(super) fn prepare(
 }
 
 pub(super) fn reopen(run_dir: &Path) -> Result<PreparedState, String> {
+    reopen_family(run_dir, Family::V7, None)
+}
+
+pub(in super::super) fn reopen_family(
+    run_dir: &Path,
+    family: Family,
+    expected_binding: Option<&PreparationBinding>,
+) -> Result<PreparedState, String> {
     let run_dir = run_dir.canonicalize().map_err(|error| error.to_string())?;
     let manifest_bytes = read(&run_dir.join("capture-manifest.json"))?;
     let manifest_hash = content_hash(&manifest_bytes);
@@ -418,7 +479,12 @@ pub(super) fn reopen(run_dir: &Path) -> Result<PreparedState, String> {
     let manifest: CaptureManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|error| error.to_string())?;
     validate_binding(&manifest.binding)?;
-    if manifest.schema_version != 1 || json(&manifest)? != manifest_bytes {
+    // Expanded authority comes from the caller's independently frozen definition,
+    // never from a self-consistent manifest and its adjacent checksum.
+    if matches!(family, Family::Expanded) && expected_binding != Some(&manifest.binding) {
+        return Err("Frozen preparation differs from the expected binding.".into());
+    }
+    if manifest.schema_version != family.manifest_schema() || json(&manifest)? != manifest_bytes {
         return Err("Frozen capture manifest is not canonical.".into());
     }
     let source = read(&run_dir.join("source-control.ts"))?;
@@ -434,8 +500,9 @@ pub(super) fn reopen(run_dir: &Path) -> Result<PreparedState, String> {
         if content_hash(&bytes) != expected {
             return Err("Frozen request bytes changed.".into());
         }
-        let request = StagedObligationRequest::decode(
+        let request = StagedObligationRequest::decode_with_policy(
             std::str::from_utf8(&bytes).map_err(|error| error.to_string())?,
+            family.policy(),
         )
         .map_err(|error| error.to_string())?;
         if json(&request)? != bytes {
@@ -445,14 +512,14 @@ pub(super) fn reopen(run_dir: &Path) -> Result<PreparedState, String> {
     };
     let analyst_request = decode("analyst-request.json", &manifest.analyst_wire_hash)?;
     let auditor_request = decode("auditor-request.json", &manifest.auditor_wire_hash)?;
-    if analyst_request.specialist_id != "domain-analyst@7"
-        || auditor_request.specialist_id != "evidence-auditor@7"
+    if analyst_request.specialist_id != family.roles()[0]
+        || auditor_request.specialist_id != family.roles()[1]
         || analyst_request
-            .intent_hash()
+            .intent_hash_with_policy(family.policy())
             .map_err(|error| error.to_string())?
             != manifest.analyst_request_hash
         || auditor_request
-            .intent_hash()
+            .intent_hash_with_policy(family.policy())
             .map_err(|error| error.to_string())?
             != manifest.auditor_request_hash
         || auditor_request.parent_id.as_deref() != Some(manifest.analyst_id.as_str())
@@ -487,15 +554,17 @@ pub(super) fn reopen(run_dir: &Path) -> Result<PreparedState, String> {
     }
     let (resolved_analyst, analyst_guard) = resolve_request(
         &app,
-        "domain-analyst@7",
+        family.roles()[0],
         &analyst_request.request_nonce,
         ANALYST_QUESTION,
+        family,
     )?;
     let (mut resolved_auditor, auditor_guard) = resolve_request(
         &app,
-        "evidence-auditor@7",
+        family.roles()[1],
         &auditor_request.request_nonce,
         AUDITOR_QUESTION,
+        family,
     )?;
     resolved_auditor.parent_id = auditor_request.parent_id.clone();
     resolved_auditor.conversation_id = auditor_request.conversation_id.clone();

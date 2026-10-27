@@ -45,6 +45,12 @@ fn completion_prepare_freezes_independent_mixed_requests_without_provider_or_leg
     );
     for request in [&prepared.analyst_request, &prepared.auditor_request] {
         assert_eq!(request.schema_version, 4);
+        assert_eq!(request.limit_profile, "investigation-v1");
+        assert_eq!(request.obligations.schema_version, 1);
+        assert_eq!(
+            request.obligations.contract,
+            "investigation-completion-obligations@1"
+        );
         assert!(request.inspection_requirements.is_none());
         assert_eq!(request.obligations.obligations.len(), 2);
         assert_eq!(request.obligations.sources().unwrap().len(), 1);
