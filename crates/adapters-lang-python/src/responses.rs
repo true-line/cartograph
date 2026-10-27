@@ -8,7 +8,8 @@
 //!   serializes; its literal string keys are recorded. A call of Flask's
 //!   `render_template` is `html`, and of `redirect` is `redirect`. A `str`
 //!   (literal, f-string or implicit concatenation) is `text` (#1182), as is
-//!   a call of the builtin `str` (#1187).
+//!   a call of the builtin `str` that neither the handler nor its module
+//!   rebinds (#1187).
 //! - `make_response(body[, status[, headers]])` is read as `(body, status)`,
 //!   returned directly or through a local bound once to it and otherwise only
 //!   returned or given cookies or headers; a tuple's own status wins.
@@ -32,10 +33,12 @@
 //!   `x = check(…); … return x` adds `check`'s responses. A decorator outside
 //!   the repository, or a call such as `@limiter.limit("2/minute")`, is not
 //!   followed.
-//! - A handler's `return helper(…)` adds the repository `helper`'s responses
-//!   when it cannot return `None`: no `return None` or bare `return`, a body
-//!   that cannot end without returning, and no followed check that can
-//!   (#1187). Otherwise it is `response_not_proven`.
+//! - A handler's `return helper(…)` adds the repository `helper`'s responses,
+//!   read whether or not its module imports Flask, when it is an ordinary
+//!   function that cannot return `None`: not `async`, no `yield`, no
+//!   `return None` or bare `return`, a body that cannot end without
+//!   returning, and no check it follows, however deep, that can (#1187).
+//!   Otherwise none of its responses are taken: `response_not_proven`.
 //! - A dict is built by a local bound once to a dict literal and extended
 //!   only with literal-key subscript assignments (`ret["k"] = …`). Its keys
 //!   are read from `jsonify(ret)` / `return ret`, and from
@@ -351,17 +354,33 @@ pub(crate) fn function_facts(
 ) -> Option<FunctionFacts> {
     let name = cx.text(&function.child_by_field_name("name")?).to_string();
     let built = built_keys(cx, function);
-    let (wrapper, returns) = match helpers {
-        Some(helpers) => (
-            wrapper_facts(cx, function, helpers, resolver),
-            Some(read_function(cx, function, helpers, resolver, Mode::Check)).filter(|facts| {
-                !facts.responses.kinds.is_empty()
-                    || !facts.follows.is_empty()
-                    || !facts.responses.aborts.is_empty()
-            }),
-        ),
-        None => (None, None),
-    };
+    // A helper's own returns are read even where Flask is not imported: a
+    // `str` or dict it returns is still a body Flask serves. Calling an
+    // `async def` or a generator returns a coroutine or an iterator, not
+    // what it returns.
+    let none = BTreeMap::new();
+    let ordinary = !(0..function.child_count())
+        .filter_map(|index| function.child(index))
+        .any(|child| child.kind() == "async")
+        && function.child_by_field_name("body").is_some_and(|body| {
+            let mut yields = false;
+            visit_scope(body, &mut |node| yields |= node.kind() == "yield");
+            !yields
+        });
+    let returns = Some(read_function(
+        cx,
+        function,
+        helpers.unwrap_or(&none),
+        resolver,
+        Mode::Check,
+    ))
+    .filter(|facts| {
+        ordinary
+            && (!facts.responses.kinds.is_empty()
+                || !facts.follows.is_empty()
+                || !facts.responses.aborts.is_empty())
+    });
+    let wrapper = helpers.and_then(|helpers| wrapper_facts(cx, function, helpers, resolver));
     (wrapper.is_some() || returns.is_some() || built.is_some()).then(|| FunctionFacts {
         key: (cx.path.to_string(), name),
         wrapper,
@@ -775,12 +794,12 @@ impl<'t> Reader<'_, '_, 't> {
             .then(|| body.child_by_field_name("function"))
             .flatten()
             .filter(|function| !self.enclosed(*function));
-        // The builtin `str(…)` is a `str`, unless the name is the module's.
+        // The builtin `str(…)` is a `str`, unless the handler or its module
+        // binds the name (an import, assignment, `def` or `class`).
         if function.is_some_and(|function| {
             cx.text(&function) == "str"
                 && !self.bound.contains("str")
-                && !self.resolver.locals.contains_key("str")
-                && !self.resolver.bindings.contains_key("str")
+                && !module_binds(cx, function, "str")
         }) {
             return Body::Text;
         }
@@ -1057,7 +1076,8 @@ fn merge(
                 lookup(functions, key)
                     .and_then(|f| f.returns.as_ref())
                     .filter(|found| {
-                        !found.may_return_none || !(strict || matches!(follow, Follow::Returned(_)))
+                        !(strict || matches!(follow, Follow::Returned(_)))
+                            || !nullable(found, functions, depth)
                     }),
                 "response_not_proven",
             ),
@@ -1089,6 +1109,28 @@ fn merge(
         }
     }
     responses
+}
+
+/// Whether a check, or any check it follows, can return `None`; one
+/// followed past `MAX_DEPTH` is taken to.
+fn nullable(facts: &Facts, functions: &HashMap<FnKey, FunctionFacts>, depth: usize) -> bool {
+    facts.may_return_none
+        || facts.follows.iter().any(|follow| match follow {
+            Follow::Delegate(key) | Follow::Returned(key) => lookup(functions, key)
+                .and_then(|f| f.returns.as_ref())
+                .is_some_and(|found| depth >= MAX_DEPTH || nullable(found, functions, depth + 1)),
+            Follow::Decorator(_) | Follow::Built(_) => false,
+        })
+}
+
+/// Whether `node`'s module scope binds `name`.
+fn module_binds(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+    let root = std::iter::successors(Some(node), |node| node.parent())
+        .last()
+        .unwrap_or(node);
+    let mut found = false;
+    binding_sites(cx, root, &mut |_, bound| found |= bound.contains(name));
+    found
 }
 
 /// Retarget the evidence a cached file's follows carry to `commit`.

@@ -2758,6 +2758,18 @@ def chained(user):
 def chained_ok(user):
     return after_login(user, None)
 
+def streamed(user):
+    yield "chunk"
+    return {"done": True}
+
+async def later(user):
+    return redirect("/")
+
+def mixed(user):
+    if user:
+        return redirect("/")
+    return falls(user)
+
 def export(user):
     output = make_response("csv")
     output.headers["Content-Disposition"] = "attachment"
@@ -2765,7 +2777,8 @@ def export(user):
 "#;
     let views = r#"
 from flask import Blueprint, render_template
-from app.utils import after_login, bare, chained, chained_ok, export, falls, maybe
+from app.plain import message
+from app.utils import after_login, bare, chained, chained_ok, export, falls, later, maybe, mixed, streamed
 
 bp = Blueprint("auth", __name__)
 
@@ -2804,19 +2817,67 @@ def bare_view():
 def chained_view():
     return chained(user)
 
+@bp.route("/plain")
+def plain():
+    return message()
+
+@bp.route("/mixed")
+def mixed_view():
+    return mixed(user)
+
+@bp.route("/streamed")
+def streamed_view():
+    return streamed(user)
+
+@bp.route("/later")
+def later_view():
+    return later(user)
+
 @bp.route("/shadow")
 def shadow():
     str = lambda value: value
     return str(1)
 "#;
+    // Neither module's `str` is the builtin.
+    let assigned = r#"
+from flask import Blueprint
+
+shadow_bp = Blueprint("assigned", __name__)
+str = lambda value: {"actual": value}
+
+@shadow_bp.route("/assigned")
+def assigned():
+    return str(1)
+"#;
+    let classed = r#"
+from flask import Blueprint
+
+class_bp = Blueprint("classed", __name__)
+
+class str:
+    pass
+
+@class_bp.route("/classed")
+def classed():
+    return str(1)
+"#;
+    write(dir.path(), "app/assigned.py", assigned);
+    write(dir.path(), "app/classed.py", classed);
+    // A helper need not import Flask for its body to be read.
+    let plain = "def message():\n    return \"ok\"\n";
+    write(dir.path(), "app/plain.py", plain);
     write(dir.path(), "app/utils.py", utils);
     write(dir.path(), "app/views.py", views);
     write(
         dir.path(),
         "app/main.py",
-        "from flask import Flask\nfrom app.views import bp\napp = Flask(__name__)\napp.register_blueprint(bp)\n",
+        "from flask import Flask\nfrom app.assigned import shadow_bp\nfrom app.classed import class_bp\nfrom app.views import bp\napp = Flask(__name__)\napp.register_blueprint(bp)\napp.register_blueprint(shadow_bp)\napp.register_blueprint(class_bp)\n",
     );
-    let sources = [("app/utils.py", utils), ("app/views.py", views)];
+    let sources = [
+        ("app/utils.py", utils),
+        ("app/views.py", views),
+        ("app/plain.py", plain),
+    ];
     let mut cache = IncrementalCache::default();
     let (extraction, _) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
     let responses = |path: &str| {
@@ -2885,9 +2946,31 @@ def shadow():
         serde_json::json!({ "kinds": ["text"], "statuses": [200], "scope": "handler_body" })
     );
     assert_eq!(cited, ["return str(resp)"]);
+    let (plain, _) = responses("/plain");
+    assert_eq!(
+        plain,
+        serde_json::json!({
+            "kinds": ["text"],
+            "statuses": [200],
+            "followed": ["sym:local/python-service@app/plain.py#message"],
+            "scope": "handler_body_and_followed",
+        })
+    );
     // A helper that can return `None` (explicitly, bare, by falling off its
-    // end, or through a check that can) is not proven; nor is a rebound `str`.
-    for path in ["/maybe", "/falls", "/bare", "/chained", "/shadow"] {
+    // end, or through any check it follows, however deep) is not proven, and
+    // none of its responses are taken; nor is a rebound `str`.
+    for path in [
+        "/maybe",
+        "/falls",
+        "/bare",
+        "/chained",
+        "/mixed",
+        "/streamed",
+        "/later",
+        "/shadow",
+        "/assigned",
+        "/classed",
+    ] {
         let (responses, _) = responses(path);
         assert_eq!(
             responses["partial"],
