@@ -11,8 +11,10 @@ fn prepare(
 ) -> Result<PreparedState, String> {
     capture::prepare_family(directory, descriptor, binding, Family::Expanded)
 }
-fn reopen(directory: &Path) -> Result<PreparedState, String> {
-    capture::reopen_family(directory, Family::Expanded)
+// The caller must supply its independently frozen run definition, not read
+// expected authority back from this directory's capture manifest.
+fn reopen(directory: &Path, expected: &PreparationBinding) -> Result<PreparedState, String> {
+    capture::reopen_family(directory, Family::Expanded, Some(expected))
 }
 
 #[cfg(test)]
@@ -125,8 +127,8 @@ mod tests {
         let request_bytes = serde_json::to_vec(&prepared.auditor_request).unwrap();
         drop(db);
         drop(prepared);
-        assert!(capture::reopen_family(directory.path(), Family::V7).is_err());
-        let reopened = reopen(directory.path()).unwrap();
+        assert!(capture::reopen_family(directory.path(), Family::V7, None).is_err());
+        let reopened = reopen(directory.path(), &binding()).unwrap();
         assert_eq!(reopened.manifest, manifest);
         assert_eq!(
             serde_json::to_vec(&reopened.auditor_request).unwrap(),
@@ -146,7 +148,10 @@ mod tests {
             "parent_id",
             "source",
             "graph",
-            "binding",
+            "run_id",
+            "protocol_hash",
+            "source_commit",
+            "source_tree",
         ] {
             let directory = tempfile::tempdir().unwrap();
             let prepared = prepare(directory.path(), &descriptor(), binding()).unwrap();
@@ -158,9 +163,14 @@ mod tests {
                 graph.put_node(&node).unwrap();
             } else if field == "source" {
                 std::fs::write(directory.path().join("source-control.ts"), b"replacement").unwrap();
-            } else if field == "binding" {
+            } else if ["run_id", "protocol_hash", "source_commit", "source_tree"].contains(&field) {
                 let mut manifest = prepared.manifest.clone();
-                manifest.binding.source_tree = "invalid".into();
+                match field {
+                    "run_id" => manifest.binding.run_id = "substituted-run".into(),
+                    "protocol_hash" => manifest.binding.protocol_hash = "d".repeat(64),
+                    "source_commit" => manifest.binding.source_commit = "e".repeat(40),
+                    _ => manifest.binding.source_tree = "f".repeat(40),
+                }
                 seal_manifest(directory.path(), &manifest);
             } else {
                 let mut value = serde_json::to_value(&prepared.auditor_request).unwrap();
@@ -190,7 +200,13 @@ mod tests {
                 seal_manifest(directory.path(), &manifest);
             }
             drop(prepared);
-            assert!(reopen(directory.path()).is_err(), "{field}");
+            let error = reopen(directory.path(), &binding()).err().expect(field);
+            if ["run_id", "protocol_hash", "source_commit", "source_tree"].contains(&field) {
+                assert_eq!(
+                    error, "Frozen preparation differs from the expected binding.",
+                    "{field}"
+                );
+            }
         }
     }
 }

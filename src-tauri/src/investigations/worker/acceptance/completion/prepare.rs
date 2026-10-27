@@ -462,12 +462,13 @@ pub(in super::super) fn prepare_family(
 }
 
 pub(super) fn reopen(run_dir: &Path) -> Result<PreparedState, String> {
-    reopen_family(run_dir, Family::V7)
+    reopen_family(run_dir, Family::V7, None)
 }
 
 pub(in super::super) fn reopen_family(
     run_dir: &Path,
     family: Family,
+    expected_binding: Option<&PreparationBinding>,
 ) -> Result<PreparedState, String> {
     let run_dir = run_dir.canonicalize().map_err(|error| error.to_string())?;
     let manifest_bytes = read(&run_dir.join("capture-manifest.json"))?;
@@ -478,6 +479,11 @@ pub(in super::super) fn reopen_family(
     let manifest: CaptureManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|error| error.to_string())?;
     validate_binding(&manifest.binding)?;
+    // Expanded authority comes from the caller's independently frozen definition,
+    // never from a self-consistent manifest and its adjacent checksum.
+    if matches!(family, Family::Expanded) && expected_binding != Some(&manifest.binding) {
+        return Err("Frozen preparation differs from the expected binding.".into());
+    }
     if manifest.schema_version != family.manifest_schema() || json(&manifest)? != manifest_bytes {
         return Err("Frozen capture manifest is not canonical.".into());
     }
