@@ -341,6 +341,70 @@ pub(crate) async fn list_specialist_task_activity(
     .await
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LocalOllamaHealth {
+    MetadataReceived,
+    Unverified,
+    Busy,
+}
+
+static LOCAL_OLLAMA_CHECK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+struct LocalOllamaCheck;
+impl LocalOllamaCheck {
+    fn acquire() -> Option<Self> {
+        LOCAL_OLLAMA_CHECK
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .ok()
+            .map(|_| Self)
+    }
+}
+impl Drop for LocalOllamaCheck {
+    fn drop(&mut self) {
+        LOCAL_OLLAMA_CHECK.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+async fn run_local_ollama_check(
+    probe: impl FnOnce() -> bool + Send + 'static,
+) -> LocalOllamaHealth {
+    let Some(permit) = LocalOllamaCheck::acquire() else {
+        return LocalOllamaHealth::Busy;
+    };
+    crate::off_ui_thread(move || {
+        // The physical worker owns the slot, independently of its async waiter.
+        let _permit = permit;
+        Ok(if probe() {
+            LocalOllamaHealth::MetadataReceived
+        } else {
+            LocalOllamaHealth::Unverified
+        })
+    })
+    .await
+    .unwrap_or(LocalOllamaHealth::Unverified)
+}
+
+#[tauri::command]
+pub(crate) async fn check_local_ollama() -> LocalOllamaHealth {
+    run_local_ollama_check(|| {
+        llm::OllamaProvider::with_models(
+            llm::OllamaProvider::DEFAULT_URL,
+            llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL,
+            llm::OllamaProvider::DEFAULT_COMPLETION_MODEL,
+            llm::bounded::CONNECT_TIMEOUT,
+        )
+        .and_then(|provider| provider.list_local_models())
+        .is_ok()
+    })
+    .await
+}
+
 #[tauri::command]
 pub(crate) async fn get_investigation(
     investigation_id: String,
@@ -829,3 +893,75 @@ mod policy_catalog_tests {
 #[cfg(test)]
 #[path = "commands/activation_tests.rs"]
 mod activation_tests;
+
+// AC-0422: aborting a waiter cannot refund the slot held by a real blocked HTTP probe.
+#[cfg(test)]
+#[test]
+fn local_ollama_check_slot_survives_waiter_cancellation_and_releases_on_all_exits() {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::mpsc,
+        time::Duration,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (started, observed) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let n = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..n]);
+        assert!(request.starts_with("GET /api/tags HTTP/1.1\r\n"));
+        assert!(!request.to_ascii_lowercase().contains("content-length:"));
+        assert!(!request.contains("question") && !request.contains("task"));
+        started.send(()).unwrap();
+        released.recv_timeout(Duration::from_secs(5)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{{\"models\":[]}}"
+        )
+        .unwrap();
+    });
+    tauri::async_runtime::block_on(async move {
+        let waiter = tauri::async_runtime::spawn(run_local_ollama_check(move || {
+            llm::OllamaProvider::new(&endpoint, "synthetic", Duration::from_secs(5))
+                .unwrap()
+                .list_local_models()
+                .is_ok()
+        }));
+        observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        waiter.abort();
+        let _ = waiter.await;
+        assert_eq!(
+            run_local_ollama_check(|| panic!("duplicate probe started")).await,
+            LocalOllamaHealth::Busy
+        );
+        release.send(()).unwrap();
+        server.join().unwrap();
+        for _ in 0..200 {
+            if !LOCAL_OLLAMA_CHECK.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!LOCAL_OLLAMA_CHECK.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            run_local_ollama_check(|| false).await,
+            LocalOllamaHealth::Unverified
+        );
+        assert_eq!(
+            run_local_ollama_check(|| panic!("synthetic worker failure")).await,
+            LocalOllamaHealth::Unverified
+        );
+        assert_eq!(
+            run_local_ollama_check(|| true).await,
+            LocalOllamaHealth::MetadataReceived
+        );
+    });
+}

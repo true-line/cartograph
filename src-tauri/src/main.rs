@@ -5948,6 +5948,7 @@ fn main() {
             investigations::commands::start_investigation,
             investigations::commands::list_investigations,
             investigations::commands::list_specialist_task_activity,
+            investigations::commands::check_local_ollama,
             investigations::commands::list_investigation_conversation,
             investigations::commands::get_investigation,
             investigations::commands::investigation_events,

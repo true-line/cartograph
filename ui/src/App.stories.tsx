@@ -341,6 +341,7 @@ function savedNoticeChat(id: string, question: string, includeResult = true): In
     messages };
 }
 
+let localHealthResponse: (() => unknown) | undefined;
 function installFakeCore(options: {
   staged?: StagedProposal[];
   pageSize?: number;
@@ -377,6 +378,7 @@ function installFakeCore(options: {
   capturedDescriptionRequests = [];
   repoRootLookups = 0;
   investigationRequests = [];
+  localHealthResponse = undefined;
   let investigation: InvestigationDetail | null = options.existingInvestigation ?? null;
   let startUncertainOnce = options.startUncertainOnce ?? false;
   const investigationJournal: InvestigationEvent[] = [];
@@ -433,6 +435,8 @@ function installFakeCore(options: {
     const savedExchanges = [...(options.additionalSavedParent ? [options.additionalSavedParent] : []), ...(options.additionalSavedExchanges ?? [])];
     const savedExchange = savedExchanges.find((item) => item.investigation_id === (args as { investigationId?: string } | undefined)?.investigationId);
     switch (cmd) {
+      case 'check_local_ollama':
+        investigationRequests.push({ command: cmd, args }); return localHealthResponse?.() ?? 'unverified';
       case 'investigation_specialists':
         return options.admissionSelection ? admissionCatalog : options.inspectionSelection ? inspectionCatalog : investigationCatalog;
       case 'list_investigations':
@@ -2440,5 +2444,35 @@ export const PaneLayoutPreservesInlineReply: Story = {
     expect(pane.querySelector('[data-reply-task="inv-inline-parent"]')).toBe(host);
     expect(host?.isConnected).toBe(true);
     await expect(reply.getByRole('button', { name: 'Retry same request' })).toBeEnabled();
+  },
+};
+
+// AC-0422: the real shell preserves inline state and ignores a departed view's reply.
+export const LocalCheckPreservesInlineReply: Story = {
+  ...InlineReplyUsesItsValidatedPane,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(canvas.getByText('core v0.0.1')).toBeInTheDocument());
+    await userEvent.click(canvas.getByRole('button', { name: 'Agent Chats' }));
+    await userEvent.click(await canvas.findByRole('button', { name: /Parent for inline reply/ }));
+    const pane = within(await canvas.findByRole('region', { name: 'Saved chat inv-inline-parent' }));
+    await userEvent.click(pane.getByRole('button', { name: 'Reply here' }));
+    const reply = within(await pane.findByRole('region', { name: 'Reply to inv-inline-parent' }));
+    await userEvent.type(reply.getByLabelText('Question'), 'Retain this parent and draft.');
+    const host = canvasElement.querySelector('[data-reply-task="inv-inline-parent"]');
+    const pending = useInvestigationStore.getState().pendingStart;
+    let finish!: (value: unknown) => void;
+    localHealthResponse = () => new Promise((resolve) => { finish = resolve; });
+    await userEvent.click(canvas.getByRole('button', { name: 'Check local Ollama' }));
+    await expect(reply.getByLabelText('Question')).toHaveValue('Retain this parent and draft.');
+    expect(canvasElement.querySelector('[data-reply-task="inv-inline-parent"]')).toBe(host);
+    expect(useInvestigationStore.getState().pendingStart).toBe(pending);
+    await userEvent.click(canvas.getByRole('button', { name: 'Workspace' }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Agent Chats' }));
+    finish('metadata_received');
+    await expect(canvas.getByText('Local API not checked.')).toBeVisible();
+    expect(canvas.queryByText('Last local check: successful metadata response.')).toBeNull();
+    expect(investigationRequests.filter((item) => item.command === 'start_investigation')).toHaveLength(0);
+    expect(investigationRequests.filter((item) => item.command === 'check_local_ollama')).toHaveLength(1);
   },
 };
