@@ -334,8 +334,9 @@ never runs their code. Timing and memory are measurements, not gates.
 1. On macOS or Linux with `git`, `sqlite3` and the Rust toolchain, run
    `node scripts/bench-ingest.mjs --work <new dir>` from a clean checkout.
    It builds the release showcase binary once (or takes `--bin`), clones each
-   `bench/repos.toml` entry at its exact commit, recovers it through the
-   production ingest path and writes `bench-<time>.json`.
+   `bench/repos.toml` entry at its exact commit, recovers it (or its optional
+   `path` subdirectory) through the production ingest path and writes
+   `bench-<time>.json`.
 2. Run it a second time on the same commit and compare with
    `node scripts/bench-ingest.mjs --compare <first> <second>`. Every count
    (files, nodes, edges, labels, endpoint auth states, receipts and receipt

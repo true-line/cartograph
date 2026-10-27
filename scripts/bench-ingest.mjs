@@ -17,14 +17,14 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TEST = 'showcase_tests::showcase_recover_and_export';
 
-/** The `[[repo]]` tables of a manifest: `name`, `url` and an exact commit. */
+/** The `[[repo]]` tables of a manifest: `name`, `url`, an exact commit and an optional `path` inside it. */
 export function parseManifest(text) {
   const repos = [];
   for (const raw of text.split('\n')) {
     const line = raw.replace(/#.*$/, '').trim();
     if (!line) continue;
     if (line === '[[repo]]') { repos.push({}); continue; }
-    const field = /^(name|url|commit)\s*=\s*"([^"\\]*)"$/.exec(line);
+    const field = /^(name|url|commit|path)\s*=\s*"([^"\\]*)"$/.exec(line);
     if (!field || !repos.length) throw new Error(`unsupported manifest line: ${raw}`);
     repos.at(-1)[field[1]] = field[2];
   }
@@ -33,6 +33,8 @@ export function parseManifest(text) {
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(repo.name ?? '')) throw new Error(`invalid repo name: ${repo.name}`);
     if (!/^https:\/\/[^\s@]+$/.test(repo.url ?? '')) throw new Error(`${repo.name}: url must be https without credentials`);
     if (!/^[0-9a-f]{40}$/.test(repo.commit ?? '')) throw new Error(`${repo.name}: commit must be a full sha`);
+    if (repo.path !== undefined && !/^[\w.-]+(\/[\w.-]+)*$/.test(repo.path)) throw new Error(`${repo.name}: path must be relative`);
+    if (repo.path?.split('/').some((part) => part === '.' || part === '..')) throw new Error(`${repo.name}: path must be relative`);
     if (names.has(repo.name)) throw new Error(`duplicate repo name: ${repo.name}`);
     names.add(repo.name);
   }
@@ -132,7 +134,7 @@ export function compare(before, after) {
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', maxBuffer: 1 << 30, ...options });
-  if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed:\n${result.stderr}`);
+  if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed:\n${result.stderr}`.trimEnd());
   return result;
 }
 
@@ -144,7 +146,7 @@ function build() {
   return executable;
 }
 
-/** A clean checkout of `repo` at its exact commit; existing checkouts are verified, not reset. */
+/** A clean checkout of `repo` at its exact commit, and the selected root in it; existing checkouts are verified, not reset. */
 function checkout(repo, work) {
   const dir = path.join(work, 'sources', repo.name);
   if (!existsSync(dir)) {
@@ -154,7 +156,7 @@ function checkout(repo, work) {
   const head = run('git', ['-C', dir, 'rev-parse', 'HEAD']).stdout.trim();
   const dirty = run('git', ['-C', dir, 'status', '--porcelain']).stdout.trim();
   if (head !== repo.commit || dirty) throw new Error(`${dir} is not a clean checkout of ${repo.commit}`);
-  return dir;
+  return repo.path ? path.join(dir, repo.path) : dir;
 }
 
 function parseArguments(argv) {
@@ -195,7 +197,7 @@ function main() {
       cwd: path.join(ROOT, 'src-tauri'), encoding: 'utf8', maxBuffer: 1 << 30,
       env: { ...process.env, CARTOGRAPH_SHOWCASE_SOURCES: source, CARTOGRAPH_SHOWCASE_OUTPUT: output },
     });
-    if (timed.status !== 0) throw new Error(`${repo.name}: showcase failed\n${timed.stdout}\n${timed.stderr}`);
+    if (timed.status !== 0) throw new Error(`${repo.name}: showcase failed\n${timed.stdout}\n${timed.stderr}`.trimEnd());
     result.repos.push({ ...repo, measurements: parseTime(timed.stderr, process.platform), counts: summarize(output) });
     console.log(`${repo.name}: ${JSON.stringify(result.repos.at(-1).measurements)}`);
   }

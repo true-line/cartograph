@@ -16,6 +16,8 @@ test('the shipped manifest pins every repository to a full commit', async () => 
 test('manifest entries need a name, credential-free https url and exact commit', () => {
   assert.deepEqual(parseManifest(`# pins\n[[repo]]\nname = "one"\nurl = "https://example.com/one"\ncommit = "${sha}" # exact\n`),
     [{ name: 'one', url: 'https://example.com/one', commit: sha }]);
+  assert.deepEqual(parseManifest(`[[repo]]\nname = "one"\nurl = "https://example.com/one"\ncommit = "${sha}"\npath = "packages/core"\n`)[0].path,
+    'packages/core');
   for (const bad of [
     `[[repo]]\nname = "one"\nurl = "https://example.com/one"\ncommit = "main"\n`,
     `[[repo]]\nname = "one"\nurl = "https://user:token@example.com/one"\ncommit = "${sha}"\n`,
@@ -23,6 +25,8 @@ test('manifest entries need a name, credential-free https url and exact commit',
     `[[repo]]\nname = "One"\nurl = "https://example.com/one"\ncommit = "${sha}"\n`,
     `[[repo]]\nname = "one"\nurl = "https://example.com/one"\ncommit = "${sha}"\nbranch = "main"\n`,
     `name = "one"\n`,
+    ...['/abs', '../up', 'a/../b', 'a/./b', 'a//b', 'a/', ''].map((bad) =>
+      `[[repo]]\nname = "one"\nurl = "https://example.com/one"\ncommit = "${sha}"\npath = "${bad}"\n`),
     `[[repo]]\nname = "one"\nurl = "https://example.com/one"\ncommit = "${sha}"\n[[repo]]\nname = "one"\nurl = "https://example.com/two"\ncommit = "${sha}"\n`,
   ]) assert.throws(() => parseManifest(bad), undefined, bad);
 });

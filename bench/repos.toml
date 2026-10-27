@@ -1,7 +1,8 @@
 # Pinned repositories for the local scale benchmark (#1228, AC-0423).
 # `node scripts/bench-ingest.mjs --work <dir>` clones each at its exact
 # commit and never runs their code. Add repositories; never move a pin
-# without saying so in the PR, since results are compared by pin.
+# without saying so in the PR, since results are compared by pin. An
+# optional `path` selects a subdirectory as the recovered source root.
 
 [[repo]]
 name = "simplelogin"
@@ -17,3 +18,5 @@ commit = "258a1dd3b7d867264655e5a69e6364921e3d0c79"
 name = "vendure"
 url = "https://github.com/vendure-ecommerce/vendure"
 commit = "2cc309deb5394af176314552ac7320a7b26a0104"
+# The repository root holds a CLAUDE.md symlink, which TS/JS capture refuses (#1229).
+path = "packages/core"
