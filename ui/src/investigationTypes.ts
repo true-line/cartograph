@@ -265,6 +265,7 @@ export interface SpecialistActivityItem {
   saved_provider: SavedActivityProvider;
   /** Exact provider reports; absent projection and null counts remain unknown. */
   reported_usage?: { input_tokens: string | null; output_tokens: string | null };
+  reported_cache_read_tokens?: string | null;
 }
 
 export interface SpecialistActivityPage {
