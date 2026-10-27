@@ -391,6 +391,8 @@ export const SavedAnswersStayWithTheirPane: Story = {
         return new Promise((resolve) => { releaseSavedAnswerCitation = () => resolve({ investigation_id: args.investigationId,
           citation_id: args.citationId, citation: investigationCitations[0], status: 'available', text: `Retained source for ${args.investigationId}` }); });
       }
+      if (command === 'list_investigations' && args.search === 'caller limit') return {
+        items: [details[0]], next_cursor: null, answer_match_ids: [details[0].investigation_id] };
       if (command === 'list_investigations') return { items: details, next_cursor: null,
         ...(args.search ? { answer_match_ids: details.map((item) => item.investigation_id) } : {}) };
       if (/^(start|cancel|delete)_investigation$/.test(command)) throw new Error('Read-only saved answers must not dispatch');
@@ -592,5 +594,29 @@ export const SavedAnswerHistorySearch: Story = {
     const pane = within(await canvas.findByRole('region', { name: 'Saved chat answer-a' }));
     await expect(pane.getByText('Saved finding only for answer-a')).toBeVisible();
     await expect(pane.getByRole('button', { name: 'Inspect citation C1' })).toBeVisible();
+  },
+};
+
+// AC-0405: narrative-only evidence uses the existing marker and exact dock reader.
+export const SavedNarrativeHistorySearch: Story = {
+  ...SavedAnswersStayWithTheirPane,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const pending = useInvestigationStore.getState().pendingStart;
+    await userEvent.type(canvas.getByRole('searchbox'), 'caller limit');
+    await userEvent.click(canvas.getByRole('button', { name: 'Search history' }));
+    await expect(canvas.getAllByText('Answer match')).toHaveLength(1);
+    await expect(canvas.queryByRole('button', { name: /Question for answer-b/ })).not.toBeInTheDocument();
+    await userEvent.click(canvas.getByRole('button', { name: /Question for answer-a/ }));
+    const pane = within(await canvas.findByRole('region', { name: 'Saved chat answer-a' }));
+    const message = within(pane.getByRole('article', { name: 'Specialist final message' }));
+    await expect(message.getByText(/Validate the caller limit/)).toBeVisible();
+    await expect(pane.getByText(/Spec Writer final message · spec-writer@2/)).toBeVisible();
+    await userEvent.click(message.getByRole('button', { name: 'Inspect message citation C1' }));
+    await waitFor(() => expect(savedAnswerCitationReads).toEqual(['answer-a:C1']));
+    releaseSavedAnswerCitation?.();
+    await expect(await pane.findByText('Retained source for answer-a')).toBeVisible();
+    await expect(useInvestigationStore.getState().composer.question).toBe('Keep composer draft');
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
   },
 };

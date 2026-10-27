@@ -81,10 +81,11 @@ or a streaming assistant reply.
 
 ## Saved answer search
 
-Saved history search includes accepted finding titles and statements alongside
-questions and specialist IDs. **Answer match** marks an answer-only hit. No
+Saved history search includes accepted final narrative text, finding titles and
+statements alongside questions and specialist IDs. **Answer match** marks an answer-only hit. No
 answer or source excerpt is returned in history; open the task for its validated
-findings and citations. This does not search arbitrary multi-message chat prose.
+final message, findings and citations. Rejected responses and raw source are not searched.
+Historical tasks without a narrative still match their existing saved fields.
 
 ## Saved result notice position
 
