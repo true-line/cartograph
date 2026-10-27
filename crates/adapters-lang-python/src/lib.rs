@@ -17,6 +17,7 @@ use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 mod alembic;
 mod app_scope;
 mod auth_guards;
+mod flask_admin;
 pub mod observed_infra;
 mod request_inputs;
 mod responses;
@@ -82,6 +83,8 @@ pub struct Extraction {
     limiter_defs: Vec<(String, String)>,
     /// Names an attribute write or `setattr` / `delattr` goes through.
     attribute_write_objects: BTreeSet<String>,
+    /// Flask-Admin views, classes and registrations (#1193).
+    flask_admin: flask_admin::Facts,
 }
 
 /// A module-level framework receiver: an application instance, or a Flask
@@ -320,6 +323,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     responses::retarget(extraction, commit);
     auth_guards::retarget(extraction, commit);
     target_tests::retarget(extraction, commit);
+    flask_admin::retarget(extraction, commit);
 }
 
 fn normalize_path(path: PathBuf) -> Option<String> {
@@ -1787,6 +1791,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     app_scope::collect(&cx, root, &bindings, &mut out);
     sqlalchemy::extract(&cx, root, &language, &bindings, &mut out);
     target_tests::extract(&cx, root, &bindings, &mut out);
+    flask_admin::collect(&cx, root, &bindings, &mut out);
     let function_query = Query::new(
         &language,
         "(function_definition name: (identifier) @name) @function",
@@ -1874,9 +1879,14 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             .named_children(&mut walk)
             .filter(|child| child.kind() == "decorator")
         {
-            let Some(route) = route_decorator(&cx, decorator) else {
-                continue;
+            let exposed = flask_admin::expose(&cx, root, decorator, *function, &bindings);
+            let route = match exposed {
+                Some(_) => None,
+                None => route_decorator(&cx, decorator),
             };
+            if exposed.is_none() && route.is_none() {
+                continue;
+            }
             let inputs = inputs
                 .get_or_insert_with(|| {
                     request_inputs::handler_inputs(&cx, *function, &request).to_props(handler)
@@ -1906,6 +1916,19 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                 }
             }
             .clone();
+            if let Some(exposed) = exposed {
+                exposed.record(
+                    &mut out,
+                    handler,
+                    cx.evidence(&decorator),
+                    inputs,
+                    responses,
+                );
+                continue;
+            }
+            let Some(route) = route else {
+                continue;
+            };
             let own_endpoint = match &route.endpoint {
                 Prefix::Absent => function
                     .child_by_field_name("name")
@@ -2205,6 +2228,7 @@ pub fn extract_dir_incremental_with_progress(
             out.limiter_defs.extend(extraction.limiter_defs);
             out.attribute_write_objects
                 .extend(extraction.attribute_write_objects);
+            out.flask_admin.extend(extraction.flask_admin);
             Ok(())
         },
     );
@@ -2224,6 +2248,7 @@ pub fn extract_dir_incremental_with_progress(
         }
     }
     resolve_absolute_imports(&mut out, id.repo);
+    flask_admin::resolve(&mut out, id.repo);
     resolve_routes(&mut out, id.repo);
     let functions = responses::resolve(&mut out, id.repo);
     auth_guards::resolve(&mut out, id.repo, &functions);

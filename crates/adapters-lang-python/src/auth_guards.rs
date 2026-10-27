@@ -192,7 +192,7 @@ fn dotted_parts(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<Vec<String>> {
 
 /// The full dotted name an identifier / attribute chain names through
 /// the file's import bindings.
-fn import_dotted(
+pub(crate) fn import_dotted(
     cx: &FileCx<'_>,
     node: TsNode<'_>,
     bindings: &HashMap<String, ImportBinding>,
@@ -230,7 +230,12 @@ fn import_dotted(
 /// Whether the file rebinds `name` after its import, or any function or
 /// class enclosing `scope` (the handler itself included) binds it, so the
 /// name at `scope` may not be the imported one.
-fn rebound(cx: &FileCx<'_>, root: TsNode<'_>, name: &str, scope: Option<TsNode<'_>>) -> bool {
+pub(crate) fn rebound(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    name: &str,
+    scope: Option<TsNode<'_>>,
+) -> bool {
     if module_binding(cx, root, name).writes.len() > 1 {
         return true;
     }
