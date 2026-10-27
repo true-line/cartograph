@@ -972,6 +972,8 @@ def literals():
     requests.get("/users'")
     requests.get("/a\n")
     h.request("GET'", "/x")
+    requests.get(os.environ["URL'"])
+    requests.get(os.getenv("BASE"))
 
 class Sync:
     def run(self):
@@ -1001,6 +1003,8 @@ requests.options("/api/ping")
             format!("app/client.py GET lit:/users' {}", owner("literals")),
             format!("app/client.py GET computed:\"/a\\n\" {}", owner("literals")),
             format!("app/client.py ? lit:/x {}", owner("literals")),
+            format!("app/client.py GET env:URL' {}", owner("literals")),
+            format!("app/client.py GET env:BASE {}", owner("literals")),
             format!("app/client.py HEAD lit:/health {}", owner("Sync.run")),
             "app/client.py OPTIONS lit:/api/ping -".to_string(),
         ]
@@ -1050,5 +1054,56 @@ requests = None
         sites.is_empty(),
         "{:?}",
         sites.iter().map(shown).collect::<Vec<_>>()
+    );
+}
+
+// AC-0424 (#1239 review): a repository module or package named like the
+// client may be what the import resolves to, and a file that patches the
+// call mocks it: neither yields fetch sites. (T-0424)
+#[test]
+fn shadowed_or_patched_http_clients_are_not_fetch_sites() {
+    let shown_sites =
+        |files: &[(&str, &str)]| -> Vec<String> { fetches(files).iter().map(shown).collect() };
+    let calls = r#"
+import requests
+import httpx
+
+def f():
+    requests.get("/r")
+    httpx.get("/h")
+"#;
+    // A local `httpx` package refuses httpx only; `requests` stays proven.
+    assert_eq!(
+        shown_sites(&[("app/calls.py", calls), ("vendor/httpx/__init__.py", "")]),
+        vec![format!("app/calls.py GET lit:/r sym:{REPO}@app/calls.py#f")]
+    );
+    assert!(
+        shown_sites(&[
+            ("app/calls.py", calls),
+            ("requests.py", ""),
+            ("lib/httpx.py", "")
+        ])
+        .is_empty()
+    );
+    // Patching in a test file mocks its own calls, not production code.
+    let test = r#"
+from unittest.mock import patch
+import requests
+import httpx
+
+@patch("requests.get")
+def test_r(_):
+    requests.get("/r")
+
+def test_h(monkeypatch):
+    monkeypatch.setattr("app.calls.httpx", None)
+    httpx.get("/h")
+"#;
+    assert_eq!(
+        shown_sites(&[("app/calls.py", calls), ("tests/test_calls.py", test)]),
+        vec![
+            format!("app/calls.py GET lit:/r sym:{REPO}@app/calls.py#f"),
+            format!("app/calls.py GET lit:/h sym:{REPO}@app/calls.py#f"),
+        ]
     );
 }

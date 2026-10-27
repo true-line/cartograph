@@ -43,6 +43,49 @@ const EXTRACTOR_ID: &str = "t0.observed-infra-python";
 
 /// HTTP client modules whose module functions are fetch sites (AC-0424).
 const HTTP_MODULES: &[&str] = &["requests", "httpx"];
+
+/// The client modules no repository module or package of the same name
+/// may shadow: any `requests.py` or `requests/` anywhere refuses `requests`.
+fn unshadowed_clients(files: &[String]) -> Vec<&'static str> {
+    HTTP_MODULES
+        .iter()
+        .copied()
+        .filter(|module| {
+            let file_name = format!("{module}.py");
+            !files.iter().any(|file| {
+                let parts: Vec<&str> = file.split('/').collect();
+                let (name, dirs) = parts.split_last().expect("split yields one part");
+                *name == file_name || dirs.contains(module)
+            })
+        })
+        .collect()
+}
+
+/// The fetch sites of a pass and the client modules it may read.
+struct Fetches {
+    clients: Vec<&'static str>,
+    sites: Vec<FetchSite>,
+}
+
+/// Whether a file's `patch("…")`/`monkeypatch.setattr("…")` targets may
+/// mock `module.export`: a target overlapping the call path, or one ending
+/// in the module or the call path (`app.client.requests.get`).
+fn patched(scope: &Scope, module: &str, export: &str) -> bool {
+    let call: Vec<Option<String>> = module
+        .split('.')
+        .chain([export])
+        .map(|segment| Some(segment.to_string()))
+        .collect();
+    let module_len = call.len() - 1;
+    scope.patches.iter().any(|patch| {
+        patch
+            .iter()
+            .zip(&call)
+            .all(|(segment, read)| segment.is_none() || segment == read)
+            || patch.ends_with(&call)
+            || patch.ends_with(&call[..module_len])
+    })
+}
 /// Module functions named for the verb they send.
 const HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
 
@@ -51,11 +94,12 @@ const HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "
 /// not a string literal.
 fn http_call<'t>(
     cx: &FileCx,
+    clients: &[&str],
     module: &str,
     export: &str,
     args: TsNode<'t>,
 ) -> Option<(String, Option<TsNode<'t>>)> {
-    if !HTTP_MODULES.contains(&module) {
+    if !clients.contains(&module) {
         return None;
     }
     let positional = positional(args);
@@ -748,7 +792,13 @@ fn keyword<'t>(cx: &FileCx, args: TsNode<'t>, key: &str) -> Option<TsNode<'t>> {
 
 /// The env variable an `os.environ[...]`, `os.environ.get(...)` or
 /// `os.getenv(...)` read names, through a proven `os` import.
-fn env_key(cx: &FileCx, node: TsNode, scope: &Scope) -> Option<String> {
+/// The name is read with `literal`.
+fn env_key(
+    cx: &FileCx,
+    node: TsNode,
+    scope: &Scope,
+    literal: fn(&FileCx, TsNode) -> Option<String>,
+) -> Option<String> {
     let names = |target: TsNode, attribute: &str| {
         callee_export(cx, target, scope).is_some_and(|(m, a)| m == "os" && a == attribute)
     };
@@ -760,7 +810,7 @@ fn env_key(cx: &FileCx, node: TsNode, scope: &Scope) -> Option<String> {
                 .children_by_field_name("subscript", &mut walk)
                 .collect();
             match index.as_slice() {
-                [key] if names(value, "environ") => literal_string(cx, *key),
+                [key] if names(value, "environ") => literal(cx, *key),
                 _ => None,
             }
         }
@@ -777,7 +827,7 @@ fn env_key(cx: &FileCx, node: TsNode, scope: &Scope) -> Option<String> {
             let reads_env = environ_get || names(callee, "getenv");
             let args = node.child_by_field_name("arguments")?;
             match (reads_env, positional(args).first()) {
-                (true, Some(key)) => literal_string(cx, *key),
+                (true, Some(key)) => literal(cx, *key),
                 _ => None,
             }
         }
@@ -803,7 +853,7 @@ fn classify_with(
     if let Some(value) = literal(cx, node) {
         return IdentityExpr::Literal(value);
     }
-    if let Some(key) = env_key(cx, node, scope) {
+    if let Some(key) = env_key(cx, node, scope, literal) {
         return IdentityExpr::EnvRef(key);
     }
     let text = cx.text(&node);
@@ -977,7 +1027,7 @@ fn extract_file(
     registries: &Registries,
     sites: &mut Vec<ObservedSite>,
     follows: &mut Follows,
-    fetches: &mut Vec<FetchSite>,
+    fetches: &mut Fetches,
 ) -> Result<(), ExtractError> {
     let language: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
@@ -1057,8 +1107,11 @@ fn extract_file(
         let Some((module, export)) = callee_export(&cx, callee, &scope) else {
             continue;
         };
-        if let Some((method, url)) = http_call(&cx, &module, &export, args) {
-            fetches.push(FetchSite {
+        if let Some((method, url)) = http_call(&cx, &fetches.clients, &module, &export, args) {
+            if patched(&scope, &module, &export) {
+                continue;
+            }
+            fetches.sites.push(FetchSite {
                 method,
                 url: url.map_or_else(
                     || IdentityExpr::Computed(cx.text(&node).to_string()),
@@ -1430,10 +1483,13 @@ pub fn extract_dir_with_fetches(
     files.sort(); // deterministic order (US-0014)
     let mut sites = Vec::new();
     let mut follows = Follows::default();
-    let mut fetches = Vec::new();
+    let mut fetches = Fetches {
+        clients: unshadowed_clients(&files),
+        sites: Vec::new(),
+    };
     for rel in &files {
         let source = std::fs::read(root.join(rel))?;
-        let first = fetches.len();
+        let first = fetches.sites.len();
         extract_file(
             &source,
             rel,
@@ -1443,7 +1499,7 @@ pub fn extract_dir_with_fetches(
             &mut follows,
             &mut fetches,
         )?;
-        fetches[first..].sort_by_key(|site: &FetchSite| site.byte_start);
+        fetches.sites[first..].sort_by_key(|site: &FetchSite| site.byte_start);
     }
     let known: HashSet<&str> = files.iter().map(String::as_str).collect();
     let mut modules: HashMap<String, Option<ModuleFile>> = HashMap::new();
@@ -1484,7 +1540,7 @@ pub fn extract_dir_with_fetches(
         },
         &sites,
     );
-    Ok((nodes, edges, fetches))
+    Ok((nodes, edges, fetches.sites))
 }
 
 #[cfg(test)]
