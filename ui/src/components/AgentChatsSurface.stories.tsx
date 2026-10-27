@@ -19,7 +19,8 @@ const meta = {
       useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); };
   },
   render: function AgentChatsStory(args) { return <AgentChatsSurface {...args} state={useInvestigationStore()} />; },
-  args: { state: state(), onOpenResult: fn() },
+  args: { state: state(), onOpenResult: fn(), onFollowUp: fn(), onCancelFollowUp: fn(),
+    preparingFollowUpTask: null, followUpError: null },
 } satisfies Meta<typeof AgentChatsSurface>;
 export default meta;
 type Story = StoryObj<typeof meta>;
@@ -123,6 +124,8 @@ export const SelectTaskAndOpenExactResult: Story = {
     await userEvent.click(transcript.getByRole('link', { name: 'Open this task’s findings and citations' }));
     await expect(args.onOpenResult).toHaveBeenCalledTimes(1);
     await expect(args.onOpenResult).toHaveBeenCalledWith('chat-older');
+    await userEvent.click(transcript.getByRole('button', { name: 'Follow-up task' }));
+    await expect(args.onFollowUp).toHaveBeenCalledWith('chat-older');
     await expect(taskReads).toEqual(['chat-older', 'chat-first', 'chat-third', 'chat-fourth', 'chat-older']);
     const finalState = useInvestigationStore.getState();
     await expect(finalState.composer.question).toBe('Leave this composer draft untouched');

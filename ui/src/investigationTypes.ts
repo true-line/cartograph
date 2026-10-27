@@ -11,6 +11,16 @@ export type InvestigationProviderMode = 'local' | 'cloud';
 /** The existing context-hub QueryScope wire shape, not a filesystem scope. */
 export type InvestigationScope = { type: 'all' } |
   { type: 'neighborhood'; anchor: string; hops: number };
+/** Immutable UI context captured from one validated saved parent before follow-up dispatch. */
+export interface InvestigationFollowUpContext {
+  parent_id: string;
+  conversation_id: string;
+  specialist_id: SpecialistId;
+  scope: InvestigationScope;
+  provider_mode: InvestigationProviderMode;
+  saved_provider_id: string;
+  saved_model: string;
+}
 export type InvestigationTool = 'query_context' | 'read_evidence' | 'read_coverage_inventory';
 
 export interface InvestigationSpecialist {

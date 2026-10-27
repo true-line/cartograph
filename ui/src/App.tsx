@@ -1,5 +1,5 @@
 import { isCompletionSpecialist } from './investigationFamilies';
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { tierDistribution, useAppStore } from './store';
 import { railSurface, SURFACES, surfaceLabel, type SurfaceView } from './views';
 import { NavRail } from './components/NavRail';
@@ -41,7 +41,7 @@ import { useSavedResultNoticeStore } from './savedResultNoticeStore';
 import { AgentChatsSurface } from './components/AgentChatsSurface';
 import { useAgentChatDockStore } from './agentChatDockStore';
 import { readQuickDispatchFallback, writeQuickDispatchFallback } from './quickDispatchPreference';
-import type { InvestigationChanged } from './investigationTypes';
+import type { InvestigationChanged, InvestigationFollowUpContext } from './investigationTypes';
 import type { Job, PreflightProgress, SpecArtifact, SpecAssertion, SpecBundle } from './store';
 import {
   isSameArtifact,
@@ -210,12 +210,89 @@ export default function App() {
   const [dropActive, setDropActive] = useState(false);
   const [quickDispatchFallbackEnabled, setQuickDispatchFallbackEnabled] = useState(readQuickDispatchFallback);
   const [quickDispatchOpenRequest, setQuickDispatchOpenRequest] = useState(0);
+  const [followUpCancelRequest, setFollowUpCancelRequest] = useState(0);
+  const [followUpContext, setFollowUpContext] = useState<InvestigationFollowUpContext | null>(null);
+  const [preparingFollowUpTask, setPreparingFollowUpTask] = useState<string | null>(null);
+  const [followUpError, setFollowUpError] = useState<string | null>(null);
+  const followUpCaptureGeneration = useRef(0);
+  const preparingFollowUpTaskRef = useRef<string | null>(null);
+  const activeFollowUpParentRef = useRef<string | null>(null);
+
+  const cancelFollowUpCapture = useCallback((taskId?: string) => {
+    if (taskId && preparingFollowUpTaskRef.current !== taskId && activeFollowUpParentRef.current !== taskId) return;
+    ++followUpCaptureGeneration.current;
+    preparingFollowUpTaskRef.current = null;
+    activeFollowUpParentRef.current = null;
+    setPreparingFollowUpTask(null);
+    setFollowUpContext(null);
+    setFollowUpCancelRequest((request) => request + 1);
+  }, []);
+
+  const openStandaloneQuickDispatch = useCallback(() => {
+    ++followUpCaptureGeneration.current;
+    preparingFollowUpTaskRef.current = null;
+    activeFollowUpParentRef.current = null;
+    setPreparingFollowUpTask(null);
+    setFollowUpContext(null);
+    setFollowUpError(null);
+    setQuickDispatchOpenRequest((request) => request + 1);
+  }, []);
+
+  const prepareParentFollowUp = useCallback((taskId: string) => {
+    const currentStore = useInvestigationStore.getState();
+    if (currentStore.pendingStart) {
+      setFollowUpError('Recover the pending investigation request before starting a follow-up.');
+      return;
+    }
+    const dockStore = useAgentChatDockStore.getState();
+    if (!dockStore.docks.some((item) => item.chat.task_id === taskId)) {
+      setFollowUpError('Reopen this saved chat before preparing a follow-up.');
+      return;
+    }
+    const generation = ++followUpCaptureGeneration.current;
+    setFollowUpError(null);
+    activeFollowUpParentRef.current = null;
+    setFollowUpContext(null);
+    preparingFollowUpTaskRef.current = taskId;
+    setPreparingFollowUpTask(taskId);
+    void dockStore.openForFollowUp(taskId).then((state) => {
+      if (generation !== followUpCaptureGeneration.current) return;
+      preparingFollowUpTaskRef.current = null;
+      setPreparingFollowUpTask(null);
+      const detail = state?.detail;
+      const chat = state?.chat;
+      const result = state?.result;
+      const reference = chat?.messages[1]?.message;
+      if (!state || state.selectedId !== taskId || state.chatStatus !== 'saved' || state.loading ||
+          !detail || !detail.actions.can_follow_up || detail.investigation_id !== taskId || !detail.has_result ||
+          !result || result.investigation_id !== taskId || !chat || chat.task_id !== taskId ||
+          !detail.conversation_id || chat.messages.length !== 2 || reference?.kind !== 'result_reference' ||
+          reference.task_id !== taskId || reference.result_id !== result.result_id || chat.messages[0]?.message.kind !== 'user_question') {
+        setFollowUpError(state?.error ?? state?.chatError ?? 'Refresh this completed saved task before starting a follow-up.');
+        return;
+      }
+      setFollowUpContext({
+        parent_id: detail.investigation_id, conversation_id: detail.conversation_id,
+        specialist_id: detail.specialist.id,
+        scope: detail.scope.type === 'all' ? { type: 'all' } : { type: 'neighborhood', anchor: detail.scope.anchor, hops: detail.scope.hops },
+        provider_mode: detail.provider.mode, saved_provider_id: chat.producer.provider_id, saved_model: chat.producer.model,
+      });
+      activeFollowUpParentRef.current = taskId;
+      setQuickDispatchOpenRequest((request) => request + 1);
+    }).catch(() => {
+      if (generation !== followUpCaptureGeneration.current) return;
+      preparingFollowUpTaskRef.current = null;
+      setPreparingFollowUpTask(null);
+      setFollowUpError('The saved parent task could not be refreshed. Try again before starting a follow-up.');
+    });
+  }, []);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
   useEffect(() => {
+    if (view !== 'agent-chats') cancelFollowUpCapture();
     if (view !== 'agent-chats') useAgentChatDockStore.getState().cancelNavigationIntent();
     if (view === 'investigations' || view === 'agent-chats') {
       if (view === 'investigations') {
@@ -225,7 +302,7 @@ export default function App() {
       void useInvestigationStore.getState().loadHistory();
     }
     return () => useSpecialistActivityStore.getState().setVisible(false);
-  }, [view]);
+  }, [cancelFollowUpCapture, view]);
 
   // Folder drop intake (#587): the webview reports dropped paths only while
   // Connect is open; elsewhere a drop does nothing.
@@ -569,7 +646,8 @@ export default function App() {
         return <AgentChatsSurface state={investigations} onOpenResult={(id) => {
           navigate('investigations');
           void useInvestigationStore.getState().open(id);
-        }} />;
+        }} onFollowUp={prepareParentFollowUp} onCancelFollowUp={cancelFollowUpCapture}
+        preparingFollowUpTask={preparingFollowUpTask} followUpError={followUpError} />;
       case 'atlas':
         return (
           <Suspense fallback={<section className="atlas-card">Loading Atlas graph…</section>}>
@@ -785,7 +863,7 @@ export default function App() {
             onParallelismChange={(setting) => void setIngestParallelism(setting)}
             quickDispatchFallbackEnabled={quickDispatchFallbackEnabled}
             onQuickDispatchFallbackChange={(enabled) => { setQuickDispatchFallbackEnabled(enabled); writeQuickDispatchFallback(enabled); }}
-            onOpenQuickDispatch={() => setQuickDispatchOpenRequest((request) => request + 1)}
+            onOpenQuickDispatch={openStandaloneQuickDispatch}
           />
           <McpSettings available={backend === 'up'} />
           <SourceRetention sources={primarySource.sources} preview={primarySource.preview}
@@ -836,7 +914,11 @@ export default function App() {
         onNavigate={navigate}
       />
       <InvestigationQuickDispatch fallbackEnabled={quickDispatchFallbackEnabled} openRequest={quickDispatchOpenRequest}
+        followUpContext={followUpContext}
+        followUpCancelRequest={followUpCancelRequest}
         onNavigate={navigate} onAcceptedTask={(taskId) => {
+          activeFollowUpParentRef.current = null;
+          setFollowUpContext(null);
           useAgentChatDockStore.getState().requestOpenFromNotice(taskId);
           navigate('agent-chats');
         }} />
