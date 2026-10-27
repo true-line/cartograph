@@ -2050,29 +2050,92 @@ const MAX_MERGED_EDGE_EVIDENCE: usize = 32;
 /// occurrence is unioned, the edge's hash is derived from their sorted
 /// distinct hashes and the canonical span list (spans beyond the bound and
 /// their count included), so adding, removing or moving any site changes it.
-fn merge_edge_occurrences(edges: &[Edge]) -> std::collections::BTreeMap<EdgeKey, Edge> {
-    let mut groups = std::collections::BTreeMap::<EdgeKey, Vec<&Edge>>::new();
-    for edge in edges {
-        groups.entry(edge_key(edge)).or_default().push(edge);
-    }
+fn merge_edge_occurrences(edges: Vec<Edge>) -> std::collections::BTreeMap<EdgeKey, Edge> {
+    let groups = edge_groups(&edges);
+    let mut slots = edges.into_iter().map(Some).collect::<Vec<_>>();
     groups
         .into_iter()
-        .map(|(key, occurrences)| (key, merge_edge_group(&occurrences)))
+        .map(|(key, indices)| {
+            let replacement = {
+                let occurrences = indices
+                    .iter()
+                    .map(|&index| slots[index].as_ref().expect("each index is grouped once"))
+                    .collect::<Vec<_>>();
+                merged_prov(&occurrences)
+            };
+            // The last occurrence moves; only a union rewrites its props.
+            let last = *indices.last().expect("groups are non-empty");
+            let mut merged = slots[last].take().expect("each index is grouped once");
+            if let Some(replacement) = replacement {
+                replacement.apply(&mut merged);
+            }
+            (key, merged)
+        })
         .collect()
 }
 
-fn merge_edge_group(occurrences: &[&Edge]) -> Edge {
+/// [`merge_edge_occurrences`] without taking ownership (#1235): a group that
+/// merges to its last occurrence unchanged stays borrowed, so only a
+/// synthesized union is copied.
+fn merged_edge_view(
+    edges: &[Edge],
+) -> std::collections::BTreeMap<EdgeKey, std::borrow::Cow<'_, Edge>> {
+    edge_groups(edges)
+        .into_iter()
+        .map(|(key, indices)| {
+            let occurrences = indices
+                .iter()
+                .map(|&index| &edges[index])
+                .collect::<Vec<_>>();
+            let last = *occurrences.last().expect("groups are non-empty");
+            let merged = match merged_prov(&occurrences) {
+                None => std::borrow::Cow::Borrowed(last),
+                Some(replacement) => {
+                    let mut merged = last.clone();
+                    replacement.apply(&mut merged);
+                    std::borrow::Cow::Owned(merged)
+                }
+            };
+            (key, merged)
+        })
+        .collect()
+}
+
+/// Occurrence indices per key, in extraction order.
+fn edge_groups(edges: &[Edge]) -> std::collections::BTreeMap<EdgeKey, Vec<usize>> {
+    let mut groups = std::collections::BTreeMap::<EdgeKey, Vec<usize>>::new();
+    for (index, edge) in edges.iter().enumerate() {
+        groups.entry(edge_key(edge)).or_default().push(index);
+    }
+    groups
+}
+
+/// The props a collapsed relation replaces on its last occurrence.
+struct MergedProv {
+    prov: serde_json::Value,
+    omitted: usize,
+}
+
+impl MergedProv {
+    fn apply(self, edge: &mut Edge) {
+        edge.props["prov"] = self.prov;
+        if self.omitted > 0 {
+            edge.props["evidence_omitted"] = serde_json::json!(self.omitted);
+        }
+    }
+}
+
+/// `None` when the group merges to its last occurrence unchanged: a single
+/// occurrence, or a last occurrence without readable provenance.
+fn merged_prov(occurrences: &[&Edge]) -> Option<MergedProv> {
     let last = *occurrences.last().expect("groups are non-empty");
-    let mut merged = last.clone();
     if occurrences.len() == 1 {
-        return merged;
+        return None;
     }
     let parse = |edge: &Edge| {
         serde_json::from_value::<core_prov::Provenance>(edge.props.get("prov")?.clone()).ok()
     };
-    let Some(mut prov) = parse(last) else {
-        return merged;
-    };
+    let mut prov = parse(last)?;
     let mut evidence = Vec::new();
     let mut hashes = std::collections::BTreeSet::new();
     let mut unioned = 0usize;
@@ -2110,11 +2173,10 @@ fn merge_edge_group(occurrences: &[&Edge]) -> Edge {
     }
     evidence.truncate(MAX_MERGED_EDGE_EVIDENCE);
     prov.evidence = evidence;
-    merged.props["prov"] = serde_json::to_value(prov).expect("provenance serializes");
-    if omitted > 0 {
-        merged.props["evidence_omitted"] = serde_json::json!(omitted);
-    }
-    merged
+    Some(MergedProv {
+        prov: serde_json::to_value(prov).expect("provenance serializes"),
+        omitted,
+    })
 }
 
 #[cfg(test)]
@@ -2143,7 +2205,7 @@ fn load_into_graph_with_bindings(
 ) -> Result<ReconcileStats, String> {
     load_into_graph_with_bindings_and_omissions(
         graph,
-        extraction,
+        extraction.clone(),
         repo,
         root,
         commit,
@@ -2181,7 +2243,7 @@ fn reclaim_superseded_receipts(
 #[allow(clippy::too_many_arguments)]
 fn load_into_graph_with_bindings_and_omissions(
     graph: &mut SqliteGraphStore,
-    extraction: &adapters_lang_ts::Extraction,
+    extraction: adapters_lang_ts::Extraction,
     repo: &str,
     _root: &std::path::Path,
     commit: &str,
@@ -2206,22 +2268,26 @@ fn load_into_graph_with_bindings_and_omissions(
         }),
     };
     // Last occurrence wins, in deterministic extraction order (SPEC-00 §4.4).
-    let mut current_nodes = std::collections::BTreeMap::new();
+    // Facts move out of the extraction; none is copied (#1235).
+    let adapters_lang_ts::Extraction { nodes, edges, .. } = extraction;
+    let extracted_nodes = nodes.len();
+    let mut current_nodes = std::collections::BTreeMap::<String, Node>::new();
     let mut colliding_ids = std::collections::BTreeSet::new();
-    for node in &extraction.nodes {
-        if let Some(previous) = current_nodes.insert(node.id.as_str(), node)
-            && previous != node
+    for node in nodes {
+        let id = node.id.clone();
+        if let Some(previous) = current_nodes.insert(id.clone(), node)
+            && previous != current_nodes[&id]
         {
-            colliding_ids.insert(node.id.clone());
+            colliding_ids.insert(id);
         }
     }
     let merged = MergedFacts {
-        nodes: (extraction.nodes.len() - current_nodes.len()) as u64,
-        edges: extraction.edges.len() as u64 - distinct_edge_count(&extraction.edges),
+        nodes: (extracted_nodes - current_nodes.len()) as u64,
+        edges: edges.len() as u64 - distinct_edge_count(&edges),
         node_collisions: colliding_ids.len() as u64,
     };
-    current_nodes.insert(repo_node.id.as_str(), &repo_node);
-    let current_edges = merge_edge_occurrences(&extraction.edges);
+    current_nodes.insert(repo_node.id.clone(), repo_node);
+    let current_edges = merge_edge_occurrences(edges);
     let expected = graph.read_snapshot().map_err(|error| error.to_string())?;
     // Borrowed, never cloned: the snapshot is the whole graph across every
     // repo, so a second copy would double the publish peak (#725).
@@ -2238,7 +2304,7 @@ fn load_into_graph_with_bindings_and_omissions(
     let mut patch = core_graph::GraphPatch::default();
     let mut stats = ReconcileStats {
         published: PublishedFacts {
-            nodes: current_nodes.keys().map(|id| (*id).to_owned()).collect(),
+            nodes: current_nodes.keys().cloned().collect(),
             edges: current_edges.keys().cloned().collect(),
             merged,
         },
@@ -2276,12 +2342,12 @@ fn load_into_graph_with_bindings_and_omissions(
             stats.deleted += 1;
         }
     }
-    // Only changed facts are copied into the patch; merged edges move.
-    for node in current_nodes.values() {
-        if existing_nodes.get(node.id.as_str()) == Some(node) {
+    // Only changed facts enter the patch, and they move there.
+    for node in current_nodes.into_values() {
+        if existing_nodes.get(node.id.as_str()) == Some(&&node) {
             stats.unchanged += 1;
         } else {
-            patch.upsert_nodes.push((*node).clone());
+            patch.upsert_nodes.push(node);
             stats.inserted_or_updated += 1;
         }
     }
@@ -2518,7 +2584,7 @@ fn stitch_http_bindings(
         .into_iter()
         .chain(outcome.joined.iter().map(|joined| joined.edge.clone()))
         .collect();
-    for (key, mut edge) in merge_edge_occurrences(&occurrences) {
+    for (key, mut edge) in merge_edge_occurrences(occurrences) {
         if let Some(extractors) = also_extracted_by.remove(&key) {
             edge.props["also_extracted_by"] = extractors.into();
         }
@@ -4262,7 +4328,7 @@ fn run_ingest<R: tauri::Runtime>(
         published.record_load(
             load_into_graph_with_bindings_and_omissions(
                 &mut graph,
-                &extraction,
+                extraction,
                 &repo,
                 root,
                 commit,
@@ -4697,7 +4763,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         published.record_load(
             load_into_graph_with_bindings_and_omissions(
                 &mut graph,
-                &extraction,
+                extraction,
                 &source.repo_key,
                 root,
                 &cloned.commit_sha,
@@ -5011,7 +5077,7 @@ fn add_system_blocking<R: tauri::Runtime>(
             published.record_load(
                 load_into_graph_with_bindings_and_omissions(
                     &mut graph,
-                    &extraction,
+                    extraction,
                     &repo,
                     root,
                     &commit,
@@ -7233,7 +7299,7 @@ resource "aws_sqs_queue" "orders" {
         edges.push(site(0, confirmed)); // exact duplicate span
         edges.push(site(1_000, core_prov::ConfidenceTier::Gap));
         edges.push(site(5, confirmed)); // last occurrence supplies the props
-        let merged = crate::merge_edge_occurrences(&edges);
+        let merged = crate::merge_edge_occurrences(edges.clone());
         assert_eq!(merged.len(), 1);
         let edge = merged.values().next().unwrap();
         let prov =
@@ -7251,7 +7317,7 @@ resource "aws_sqs_queue" "orders" {
         edges.rotate_left(4);
         edges.push(site(5, confirmed));
         assert_eq!(
-            crate::merge_edge_occurrences(&edges).values().next(),
+            crate::merge_edge_occurrences(edges).values().next(),
             Some(edge)
         );
     }
@@ -7284,7 +7350,7 @@ resource "aws_sqs_queue" "orders" {
         };
         let hash = |starts: &[u64]| {
             let edges = starts.iter().map(|start| site(*start)).collect::<Vec<_>>();
-            let merged = crate::merge_edge_occurrences(&edges);
+            let merged = crate::merge_edge_occurrences(edges);
             let edge = merged.values().next().unwrap();
             edge.props["prov"]["content_hash"]
                 .as_str()
@@ -7305,6 +7371,88 @@ resource "aws_sqs_queue" "orders" {
         let mut over = full.clone();
         over.push(bound * 20);
         assert_ne!(hash(&over), hash(&full));
+    }
+
+    #[test]
+    fn collapsed_relation_borrowed_view_matches_the_owned_merge() {
+        // AC-0203 (#1235): receipt matching reads a borrowed view of the
+        // merge that graph load performs by move. Both must yield the same
+        // fact for every group shape, and an unchanged group stays borrowed.
+        let edge = |dst: &str, start: u64, confidence, extractor: &str| Edge {
+            src: "fn:r@a.ts#run".into(),
+            dst: dst.into(),
+            label: "CALLS".into(),
+            props: serde_json::json!({
+                "site": start,
+                "prov": core_prov::Provenance::new(
+                    core_prov::Tier::Deterministic,
+                    confidence,
+                    vec![core_prov::EvidenceRef {
+                        repo: "r".into(),
+                        path: "a.ts".into(),
+                        byte_start: start,
+                        byte_end: start + 4,
+                        commit_sha: "c".into(),
+                    }],
+                    extractor,
+                    format!("CALLS {dst}").as_bytes(),
+                )
+                .unwrap(),
+            }),
+        };
+        let confirmed = core_prov::ConfidenceTier::Confirmed;
+        let mut malformed = edge("fn:r@a.ts#bad", 9, confirmed, "t0.test");
+        malformed.props["prov"] = serde_json::json!("not provenance");
+        let edges = vec![
+            edge("fn:r@a.ts#single", 0, confirmed, "t0.test"),
+            edge("fn:r@a.ts#dup", 2, confirmed, "t0.test"),
+            edge(
+                "fn:r@a.ts#mixed",
+                3,
+                core_prov::ConfidenceTier::Gap,
+                "t0.test",
+            ),
+            edge("fn:r@a.ts#bad", 8, confirmed, "t0.test"),
+            edge("fn:r@a.ts#dup", 1, confirmed, "t0.test"),
+            edge("fn:r@a.ts#mixed", 4, confirmed, "t0.other"),
+            malformed,
+        ];
+        let view = crate::merged_edge_view(&edges);
+        let owned = crate::merge_edge_occurrences(edges.clone());
+        assert_eq!(
+            view.iter()
+                .map(|(key, edge)| (key.clone(), edge.as_ref().clone()))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            owned
+        );
+        let borrowed = |dst: &str| {
+            matches!(
+                view[&("fn:r@a.ts#run".into(), dst.into(), "CALLS".into())],
+                std::borrow::Cow::Borrowed(_)
+            )
+        };
+        assert!(borrowed("fn:r@a.ts#single"));
+        assert!(
+            borrowed("fn:r@a.ts#bad"),
+            "malformed last provenance keeps the edge"
+        );
+        assert!(!borrowed("fn:r@a.ts#dup"));
+        assert!(!borrowed("fn:r@a.ts#mixed"));
+        // The last occurrence still supplies the props of each fact.
+        let dup = &owned[&(
+            "fn:r@a.ts#run".into(),
+            "fn:r@a.ts#dup".into(),
+            "CALLS".into(),
+        )];
+        assert_eq!(dup.props["site"], 1);
+        assert_eq!(dup.props["prov"]["evidence"].as_array().unwrap().len(), 2);
+        let mixed = &owned[&(
+            "fn:r@a.ts#run".into(),
+            "fn:r@a.ts#mixed".into(),
+            "CALLS".into(),
+        )];
+        assert_eq!(mixed.props["prov"]["extractor_id"], "t0.other");
+        assert_eq!(mixed.props["prov"]["evidence"].as_array().unwrap().len(), 1);
     }
 
     #[test]
