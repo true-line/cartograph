@@ -12,7 +12,8 @@
 //!
 //! - the first class defining `is_accessible` is a repository class whose
 //!   method is one `return` of `current_user.is_authenticated`
-//!   (import-proven `flask_login.current_user`, not rebound or replaced), or
+//!   (import-proven `flask_login.current_user`, its file's only binding of
+//!   that name a single module-level import, not rebound or replaced), or
 //!   of an `and` chain with it as an operand;
 //! - the first class defining `inaccessible_callback`, if any, never
 //!   returns `None`: no statement before its last returns or yields, and the
@@ -28,9 +29,11 @@
 //!   always true);
 //! - no repository code writes an `anonymous_user` attribute, as in
 //!   `login_manager.anonymous_user = …`, which could authenticate anonymous
-//!   users, or names `"anonymous_user"` in a string (`setattr` in any
-//!   spelling, `object.__setattr__`, a `__dict__` key). A computed or
-//!   escaped name is not seen; that assumption is recorded.
+//!   users, or a hook attribute (`View.is_accessible = …`, `del …`), which
+//!   replaces the proven method, by any binding target (assignment, `for`,
+//!   comprehension, `with … as`, `del`), or names either in a string
+//!   (`setattr` in any spelling, `object.__setattr__`, a `__dict__` key). A
+//!   computed or escaped name is not seen; that assumption is recorded.
 
 use crate::auth_guards::{import_dotted, rebound, unparenthesize};
 use crate::{FileCx, ImportBinding};
@@ -186,12 +189,39 @@ fn requires_login<'t>(
         }
         "attribute" => {
             let dotted = import_dotted(cx, expr, bindings)?;
+            let name = root_name(cx, expr)?;
             (LOGIN_CHECKS.contains(&dotted.as_str())
-                && !rebound(cx, root, root_name(cx, expr)?, Some(function)))
+                && !rebound(cx, root, name, Some(function))
+                && sole_module_import(cx, root, name))
             .then_some(expr)
         }
         _ => None,
     }
+}
+
+/// Whether the file's only binding of `name` is one module-level import,
+/// so the file-wide import map names what a module-level use sees: an
+/// import of it in a function or class elsewhere may be the one the map
+/// recorded.
+fn sole_module_import(cx: &FileCx<'_>, root: TsNode<'_>, name: &str) -> bool {
+    let module = crate::module_binding(cx, root, name);
+    let [import] = module.writes[..] else {
+        return false;
+    };
+    if module.global || !matches!(import.kind(), "import_statement" | "import_from_statement") {
+        return false;
+    }
+    let mut imports = 0;
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "import_statement" | "import_from_statement") {
+            imports += usize::from(crate::import_binds(cx, node, name));
+            continue;
+        }
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+    }
+    imports == 1
 }
 
 fn operator<'s>(cx: &'s FileCx<'_>, expr: TsNode<'_>) -> Option<&'s str> {
@@ -266,8 +296,9 @@ fn responds(
             };
             let proven = import_dotted(cx, callee, bindings)
                 .is_some_and(|dotted| RESPONSES.contains(&dotted.as_str()))
-                && root_name(cx, callee)
-                    .is_some_and(|name| !rebound(cx, root, name, Some(function)));
+                && root_name(cx, callee).is_some_and(|name| {
+                    !rebound(cx, root, name, Some(function)) && sole_module_import(cx, root, name)
+                });
             if proven {
                 evidence.push(cx.evidence(&expr));
             }
@@ -277,19 +308,41 @@ fn responds(
     }
 }
 
-/// Whether `node` may replace a login manager's `anonymous_user`: an
-/// assignment target writing that attribute, or a string literal naming it,
-/// as `setattr`, `builtins.setattr`, `object.__setattr__` or a `__dict__`
-/// key would. A name computed or spelled with escapes is not seen.
-pub(crate) fn names_anonymous_user(cx: &FileCx<'_>, node: TsNode<'_>, target: bool) -> bool {
+/// The target a binding statement writes: an assignment's or `for`
+/// loop's left side, a comprehension's `for` target, a `with … as` or
+/// `except … as` alias, or a `del` statement's operands.
+pub(crate) fn binding_target(node: TsNode<'_>) -> Option<TsNode<'_>> {
+    match node.kind() {
+        "assignment" | "augmented_assignment" | "for_statement" | "for_in_clause" => {
+            node.child_by_field_name("left")
+        }
+        "as_pattern" | "except_clause" => node.child_by_field_name("alias"),
+        "delete_statement" => Some(node),
+        _ => None,
+    }
+}
+
+/// Whether `node` may write an attribute named one of `names`: as a
+/// binding target (`target`), an attribute of that name anywhere in it, or
+/// otherwise a string literal naming it, as `setattr`, `builtins.setattr`,
+/// `object.__setattr__` or a `__dict__` key would. A name computed or
+/// spelled with escapes is not seen.
+pub(crate) fn names_attribute(
+    cx: &FileCx<'_>,
+    node: TsNode<'_>,
+    names: &[&str],
+    target: bool,
+) -> bool {
     match node.kind() {
         "attribute" if target => node
             .child_by_field_name("attribute")
-            .is_some_and(|attribute| cx.text(&attribute) == "anonymous_user"),
-        "string" => crate::literal_string(cx, node).is_some_and(|text| text == "anonymous_user"),
+            .is_some_and(|attribute| names.contains(&cx.text(&attribute))),
+        "string" => {
+            crate::literal_string(cx, node).is_some_and(|text| names.contains(&text.as_str()))
+        }
         _ if target => named(node)
             .into_iter()
-            .any(|child| names_anonymous_user(cx, child, true)),
+            .any(|child| names_attribute(cx, child, names, true)),
         _ => false,
     }
 }

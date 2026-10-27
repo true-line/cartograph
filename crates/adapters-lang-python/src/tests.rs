@@ -6854,6 +6854,54 @@ admin.add_view(Reports(endpoint="reports"))
         ),
         (
             app.to_string(),
+            format!("{auth}for login_manager.anonymous_user in [object]:\n    pass\n"),
+            Some(lock.to_string()),
+            "flask_login_anonymous_user_replaced",
+        ),
+        (
+            app.to_string(),
+            format!("{auth}with open(\"x\") as login_manager.anonymous_user:\n    pass\n"),
+            Some(lock.to_string()),
+            "flask_login_anonymous_user_replaced",
+        ),
+        (
+            app.replace(
+                "from flask_login import current_user",
+                "from custom import current_user\n\ndef other():\n    from flask_login import current_user\n    return current_user",
+            ),
+            auth.to_string(),
+            Some(lock.to_string()),
+            "flask_admin_is_accessible_not_login_check:Guarded",
+        ),
+        (
+            app.replace(
+                "from flask import Flask, redirect, url_for",
+                "from flask import Flask, url_for\nfrom custom import redirect\n\ndef other():\n    from flask import redirect\n    return redirect",
+            ),
+            auth.to_string(),
+            Some(lock.to_string()),
+            "flask_admin_inaccessible_callback_may_return_none:Guarded",
+        ),
+        (
+            app.to_string(),
+            "from app import Guarded\n\nGuarded.is_accessible = lambda self: True\n".to_string(),
+            Some(lock.to_string()),
+            "flask_admin_view_hook_replaced",
+        ),
+        (
+            app.to_string(),
+            "from app import Guarded\n\nsetattr(Guarded, \"is_accessible\", None)\n".to_string(),
+            Some(lock.to_string()),
+            "flask_admin_view_hook_replaced",
+        ),
+        (
+            app.to_string(),
+            "from app import Guarded\n\ndel Guarded.inaccessible_callback\n".to_string(),
+            Some(lock.to_string()),
+            "flask_admin_view_hook_replaced",
+        ),
+        (
+            app.to_string(),
             "import flask_login\n\nflask_login.current_user = None\n".to_string(),
             Some(lock.to_string()),
             "flask_login_current_user_replaced",

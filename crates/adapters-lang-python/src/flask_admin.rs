@@ -81,6 +81,8 @@ pub(crate) struct Facts {
     views: Vec<Registration>,
     /// Writes of an `anonymous_user` attribute.
     anonymous_user: Vec<EvidenceRef>,
+    /// Writes of a view hook attribute outside a class body's definitions.
+    hook_writes: Vec<EvidenceRef>,
 }
 
 impl Facts {
@@ -90,6 +92,7 @@ impl Facts {
         self.sites.extend(other.sites);
         self.views.extend(other.views);
         self.anonymous_user.extend(other.anonymous_user);
+        self.hook_writes.extend(other.hook_writes);
     }
 }
 
@@ -356,14 +359,16 @@ pub(crate) fn collect(
     while let Some(node) = stack.pop() {
         let mut walk = node.walk();
         stack.extend(node.named_children(&mut walk));
-        let written = match node.kind() {
-            "assignment" | "augmented_assignment" => node
-                .child_by_field_name("left")
-                .is_some_and(|left| access::names_anonymous_user(cx, left, true)),
-            _ => access::names_anonymous_user(cx, node, false),
+        let writes = |names: &[&str]| {
+            access::binding_target(node)
+                .is_some_and(|target| access::names_attribute(cx, target, names, true))
+                || access::names_attribute(cx, node, names, false)
         };
-        if written {
+        if writes(&["anonymous_user"]) {
             out.flask_admin.anonymous_user.push(cx.evidence(&node));
+        }
+        if writes(access::HOOKS) {
+            out.flask_admin.hook_writes.push(cx.evidence(&node));
         }
         match node.kind() {
             "assignment" => {
@@ -1150,6 +1155,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, root: &Path, commit: &st
             Err("flask_response_helper_replaced".into())
         }
         _ if !facts.anonymous_user.is_empty() => Err("flask_login_anonymous_user_replaced".into()),
+        _ if !facts.hook_writes.is_empty() => Err("flask_admin_view_hook_replaced".into()),
         (Pins::Checked(admin), Pins::Checked(login)) => {
             Ok(admin.iter().chain(login).cloned().collect::<Vec<_>>())
         }
@@ -1564,7 +1570,11 @@ pub(crate) fn retarget(extraction: &mut Extraction, commit: &str) {
             }
         }
     }
-    for span in &mut facts.anonymous_user {
+    for span in facts
+        .anonymous_user
+        .iter_mut()
+        .chain(&mut facts.hook_writes)
+    {
         span.commit_sha = commit.into();
     }
     for registration in &mut facts.views {
