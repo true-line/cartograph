@@ -4496,3 +4496,7 @@ details.investigation-section { display: block; }
 .chat-search-palette { max-height: 80vh; overflow-y: auto; }
 .chat-search-palette form, .chat-search-palette label { display: grid; gap: .5rem; }
 .chat-search-results { display: grid; gap: .5rem; list-style: none; padding: 0; }
+
+.agent-chat-attribution { display: grid; gap: .25rem; min-width: 0; overflow-wrap: anywhere; }
+.agent-chat-model { display: inline-flex; align-items: center; gap: .35rem; color: var(--text-muted); font-size: .75rem; }
+.agent-chat-model .material-symbols-outlined { flex: none; font-size: 1rem; }

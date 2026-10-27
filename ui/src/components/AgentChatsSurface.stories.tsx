@@ -355,24 +355,32 @@ export const ConversationOwnershipAcrossVisits: Story = {
 
 let savedAnswerCitationReads: string[];
 let savedAnswerSearches: unknown[];
+let savedAnswerCommands: string[];
 let releaseSavedAnswerCitation: (() => void) | undefined;
 
 // AC-0397/0404: validated saved answers stay with their task and cited proposal.
-function savedAnswersFixture(gapTriager = false, palette = false) {
-    savedAnswerCitationReads = []; savedAnswerSearches = []; releaseSavedAnswerCitation = undefined;
+function savedAnswersFixture(gapTriager = false, palette = false, attribution = false) {
+    savedAnswerCitationReads = []; savedAnswerSearches = []; savedAnswerCommands = []; releaseSavedAnswerCitation = undefined;
     const details = [
       { ...specWriterV2Detail('answer-a'), question: 'Question for answer-a' },
       investigationDetail('answer-b', { question: 'Question for answer-b' }),
     ];
+    if (attribution) {
+      details[0].specialist = { ...details[0].specialist, name: 'Saved writer ' + 'long name '.repeat(12) };
+      details[1].provider_mode = 'cloud';
+      details[1].provider = { ...investigationCatalog.providers[1], model: 'saved-request-' + 'long-model-'.repeat(12) };
+    }
     if (gapTriager) Object.assign(details[0], { specialist_id: 'gap-triager@2',
       specialist: completionCatalog.specialists.find((role) => role.id === 'gap-triager@2')! });
     const results = details.map((detail, index) => {
       const result = index === 0 ? specWriterV2Result(detail.investigation_id) : investigationResult(detail.investigation_id);
       result.findings[0].statement = `Saved finding only for ${detail.investigation_id}`;
+      if (attribution) result.observed_response_model = 'different-observed-response';
       if (gapTriager && index === 0) result.narrative!.text = 'Proposed investigation: verify the unresolved boundary with focused evidence.';
       return result;
     });
     mockIPC((command, payload) => {
+      savedAnswerCommands.push(command);
       const args = (payload ?? {}) as { investigationId?: string; citationId?: string; afterSequence?: number; search?: string; cursor?: string };
       const index = details.findIndex((detail) => detail.investigation_id === args.investigationId);
       const detail = details[index]; const result = results[index];
@@ -415,14 +423,37 @@ function savedAnswersFixture(gapTriager = false, palette = false) {
     return () => { releaseSavedAnswerCitation?.(); clearMocks(); };
 }
 
+// AC-0413: captured attribution survives unrelated selection, refresh and narrow layout.
 export const SavedAnswersStayWithTheirPane: Story = {
-  beforeEach: () => savedAnswersFixture(),
+  beforeEach: () => savedAnswersFixture(false, false, true),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const pending = useInvestigationStore.getState().pendingStart;
     for (const id of ['answer-a', 'answer-b']) await userEvent.click(canvas.getByRole('button', { name: new RegExp(`Question for ${id}`) }));
     const paneA = within(await canvas.findByRole('region', { name: 'Saved chat answer-a' }));
     const paneB = within(await canvas.findByRole('region', { name: 'Saved chat answer-b' }));
+    const attributionA = paneA.getByRole('group', { name: 'Saved pane attribution' });
+    const attributionB = paneB.getByRole('group', { name: 'Saved pane attribution' });
+    const savedAttribution = [attributionA.textContent, attributionB.textContent];
+    const commands = [...savedAnswerCommands];
+    await expect(attributionA).toHaveTextContent('Saved writer long name');
+    await expect(attributionA).toHaveTextContent('spec-writer@2 · version 2');
+    await expect(attributionA).toHaveTextContent('Saved request · Local');
+    await expect(attributionB).toHaveTextContent('domain-analyst@3 · version 3');
+    await expect(attributionB).toHaveTextContent('Saved request · Cloud · azure-openai/saved-request-long-model-');
+    await expect(attributionA).not.toHaveTextContent('different-observed-response');
+    expect(savedAnswerCommands).toEqual(commands);
+    const viewport = [window.innerWidth, window.innerHeight];
+    try {
+      await page.viewport(640, 900);
+      await waitFor(() => { for (const group of [attributionA, attributionB]) {
+        const box = group.getBoundingClientRect();
+        expect(box.width).toBeGreaterThan(0); expect(box.right).toBeLessThanOrEqual(window.innerWidth);
+        expect(group.scrollWidth).toBeLessThanOrEqual(group.clientWidth + 1);
+      } });
+    } finally { await page.viewport(viewport[0], viewport[1]); }
+    await useInvestigationStore.getState().open('unrelated-selection');
+    expect([attributionA.textContent, attributionB.textContent]).toEqual(savedAttribution);
     await expect(paneA.getByText('Saved finding only for answer-a')).toBeVisible();
     await expect(paneA.queryByText('Saved finding only for answer-b')).not.toBeInTheDocument();
     await expect(paneB.getByText('Saved finding only for answer-b')).toBeVisible();
@@ -447,6 +478,7 @@ export const SavedAnswersStayWithTheirPane: Story = {
     await waitFor(() => expect(savedAnswerCitationReads).toEqual(['answer-a:C1', 'answer-b:C1']));
     await userEvent.click(canvas.getByRole('button', { name: /Question for answer-a/ }));
     await waitFor(() => expect(useAgentChatDockStore.getState().citation).toBeNull());
+    expect([attributionA.textContent, attributionB.textContent]).toEqual(savedAttribution);
     releaseSavedAnswerCitation?.();
     await expect(paneA.queryByText('Retained source for answer-b')).not.toBeInTheDocument();
     await expect(paneB.queryByText('Reading historical citation…')).not.toBeInTheDocument();
@@ -514,7 +546,7 @@ export const LoadedConversationBranches: Story = {
       const pane = within(canvas.getByRole('region', { name: `Saved chat ${id}` }));
       await expect(pane.getByRole('listitem', { name: 'User question' })).toHaveTextContent(`Saved question ${id}`);
       await expect(pane.getByText(`Exact finding ${id}`)).toBeVisible();
-      await expect(pane.getByText(/domain-analyst@3/)).toBeVisible();
+      await expect(pane.getByText(/Saved producer:/)).toHaveTextContent('domain-analyst@3');
     }
     await expect(left.getByText(/2 loaded sibling forks/)).toBeVisible();
     await expect(within(canvas.getByRole('region', { name: 'Saved chat leaf' })).getByText(/Follow-up to left/)).toBeVisible();
