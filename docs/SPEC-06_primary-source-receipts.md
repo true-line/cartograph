@@ -77,8 +77,9 @@ to be Git blobs. Git-object production ingestion remains outside this slice.
 
 Enumerate supported extensions with exact UTF-8 paths, bounded visited entries,
 file count and depth, without following symlinks. Preserve intentional vendor,
-hidden-directory, declaration-file and generated-output exclusions. Reject selected
-symlinks/unsupported paths explicitly; do not silently widen the selection. The
+hidden-directory, declaration-file and generated-output exclusions. Skip symlinks
+unread and name them in coverage (#1229); reject unsupported paths explicitly; do
+not silently widen or narrow the selection. The
 rooted capture reader independently confines acquisition. A changing external
 filesystem can change the acquired byte set; the parser consumes exactly the set
 retained, not a claimed atomic filesystem snapshot.

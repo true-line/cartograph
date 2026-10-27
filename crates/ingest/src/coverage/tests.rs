@@ -321,6 +321,41 @@ fn receipt_omissions_are_a_named_limitation() {
     assert!(store.contains("cannot yet reclaim space") && !store.contains("forget"));
 }
 
+// AC-0148 (#1229): symlinks the captured selection skipped are one named,
+// bounded limitation (count and first path), never silent coverage.
+#[test]
+fn unfollowed_links_are_a_named_limitation() {
+    let facts = CoverageFacts {
+        repo: "local/app",
+        commit: "workdir",
+        commit_note: None,
+        layer_hints: &[],
+        deterministic: vec![("t0.adapter-ts", count(3))],
+        plugins: Vec::new(),
+        observations: Vec::new(),
+    };
+    let full = RepoCoverage::from_facts(&facts).with_unsupported(&PreflightReport::default());
+    assert!(!full.limited);
+    assert_eq!(full.clone().with_unfollowed_links(&[]), full);
+    let links = ["CLAUDE.md".to_string(), "src/lib".to_string()];
+    let limited = full.with_unfollowed_links(&links);
+    assert!(limited.limited);
+    let entry = &limited.unsupported[0];
+    assert_eq!(
+        (
+            entry.capability.as_str(),
+            entry.occurrences,
+            entry.first_site.as_str()
+        ),
+        (UNFOLLOWED_LINK_CAPABILITY, 2, "CLAUDE.md")
+    );
+    assert!(
+        entry
+            .reason
+            .starts_with("2 symlink(s) in the selected tree were not followed")
+    );
+}
+
 // AC-0310: old serialized coverage without `commit_note` deserializes with
 // `commit_note: None`, new coverage with `commit_note: None` serializes
 // byte-identically to the pre-existing shape, and `commit_note` is bounded at
