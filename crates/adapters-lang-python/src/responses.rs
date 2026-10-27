@@ -607,7 +607,8 @@ impl<'t> Reader<'_, '_, 't> {
         if !matches!(
             self.helpers.get(self.cx.text(&function)),
             Some(Helper::MakeResponse)
-        ) {
+        ) || self.enclosed(function)
+        {
             return None;
         }
         let arguments = named(call.child_by_field_name("arguments")?)
@@ -656,6 +657,14 @@ impl<'t> Reader<'_, '_, 't> {
             let Some(parent) = node.parent() else {
                 return;
             };
+            // A keyword or member name spelled like the local is not a read.
+            if (parent.kind() == "keyword_argument"
+                && parent.child_by_field_name("name") == Some(node))
+                || (parent.kind() == "attribute"
+                    && parent.child_by_field_name("attribute") == Some(node))
+            {
+                return;
+            }
             proven = match parent.kind() {
                 "return_statement" => true,
                 // `return x, 200`: the tuple's first element.
@@ -729,8 +738,8 @@ impl<'t> Reader<'_, '_, 't> {
         match body.kind() {
             "dictionary" => return dict_keys(cx, body),
             // Flask serves a returned `str` (literal, f-string or implicit
-            // concatenation) as the response text.
-            "string" | "concatenated_string" => return Body::Text,
+            // concatenation) as the response text; `bytes` is not proven.
+            "string" | "concatenated_string" if str_literal(cx, body) => return Body::Text,
             "identifier" => {
                 if let Some((keys, evidence)) = built_dict(cx, self.body, body) {
                     return Body::Json(keys, evidence);
@@ -741,6 +750,7 @@ impl<'t> Reader<'_, '_, 't> {
         let helper = (body.kind() == "call")
             .then(|| body.child_by_field_name("function"))
             .flatten()
+            .filter(|function| !self.enclosed(*function))
             .and_then(|function| self.helpers.get(cx.text(&function)));
         match helper {
             Some(Helper::Jsonify) => self.jsonify_keys(body),
@@ -1125,4 +1135,20 @@ fn unparenthesize(mut node: TsNode<'_>) -> TsNode<'_> {
         node = inner;
     }
     node
+}
+
+/// Whether a string literal (or each part of an implicit concatenation) is a
+/// `str`: its prefix has no `b`.
+fn str_literal(cx: &FileCx<'_>, literal: TsNode<'_>) -> bool {
+    let parts = if literal.kind() == "concatenated_string" {
+        named(literal)
+    } else {
+        vec![literal]
+    };
+    parts.iter().all(|part| {
+        part.kind() == "string"
+            && part.child(0).is_some_and(|start| {
+                start.kind() == "string_start" && !cx.text(&start).contains(['b', 'B'])
+            })
+    })
 }

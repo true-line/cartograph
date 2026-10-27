@@ -2621,6 +2621,36 @@ def keyword():
 def rebound():
     make_response = lambda body: body
     return make_response(jsonify(ok=True))
+
+@app.route("/named")
+def named():
+    response = make_response("x")
+    audit(response=meta.response)
+    return response
+
+@app.route("/bytes")
+def raw():
+    return b"payload"
+
+def install(make_response):
+    @app.route("/closure")
+    def closure():
+        return make_response("claimed", 201)
+
+    @app.route("/closure-local")
+    def closure_local():
+        response = make_response("claimed", 201)
+        return response
+
+def install_page(render_template):
+    @app.route("/closure-page")
+    def closure_page():
+        return render_template("page.html")
+
+def unrelated(other):
+    @app.route("/outer")
+    def outer():
+        return make_response("ok", 201)
 "#;
     let extraction = extract_source(source.as_bytes(), "app.py", &id()).unwrap();
     let (responses, cited) = responses_cited(&extraction, source, "GET", "/text");
@@ -2655,7 +2685,30 @@ def rebound():
         responses,
         serde_json::json!({ "kinds": ["text"], "statuses": [202], "scope": "handler_body" })
     );
-    for path in ["/status", "/passed", "/twice", "/keyword", "/rebound"] {
+    // A keyword or member name spelled like the local is not a read of it.
+    let (responses, _) = responses_cited(&extraction, source, "GET", "/named");
+    assert_eq!(
+        responses,
+        serde_json::json!({ "kinds": ["text"], "statuses": [200], "scope": "handler_body" })
+    );
+    // An enclosing parameter named `make_response` is not Flask's; an
+    // unrelated one leaves the import in force.
+    let (responses, _) = responses_cited(&extraction, source, "GET", "/outer");
+    assert_eq!(
+        responses,
+        serde_json::json!({ "kinds": ["text"], "statuses": [201], "scope": "handler_body" })
+    );
+    for path in [
+        "/status",
+        "/passed",
+        "/twice",
+        "/keyword",
+        "/rebound",
+        "/bytes",
+        "/closure",
+        "/closure-local",
+        "/closure-page",
+    ] {
         let (responses, _) = responses_cited(&extraction, source, "GET", path);
         assert_eq!(
             responses,
