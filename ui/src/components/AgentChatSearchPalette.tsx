@@ -22,7 +22,8 @@ export function AgentChatSearchPalette({ state, docks, query, onQuery, onClose, 
     normalizedHistorySearch(state.historySearch) === normalizedHistorySearch(submitted);
   const currentHistory = sameQuery && !state.historyLoading && !state.historyError;
   const rows = new Map<string, { id: string; title: string; specialist: string; open: boolean; match: string | null }>();
-  if (currentHistory) for (const item of state.history) {
+  // The coordinator retains validated rows on refresh/continuation failure, but clears them for a new query.
+  if (sameQuery) for (const item of state.history) {
     const cached = docks.find((dock) => dock.chat.task_id === item.investigation_id);
     rows.set(item.investigation_id, { id: item.investigation_id, title: item.question,
       specialist: cached?.specialistName ?? item.specialist_id, open: Boolean(cached),
@@ -87,7 +88,7 @@ export function AgentChatSearchPalette({ state, docks, query, onQuery, onClose, 
         </button>
       </li>)}</ul>
       {currentHistory && !rows.size && <p>No open or saved chats match this search.</p>}
-      {currentHistory && state.nextCursor && <button type="button" className="secondary-button"
+      {sameQuery && state.nextCursor && <button type="button" className="secondary-button" disabled={state.historyLoading}
         onClick={() => void state.loadHistory(true)}>Load older saved matches</button>}
     </div>
   </div>;
