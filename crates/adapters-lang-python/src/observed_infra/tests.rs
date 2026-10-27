@@ -968,6 +968,11 @@ def create(body):
     requests.delete(url=os.environ["USERS_URL"])
     requests.put(f"/api/users/{body.id}")
 
+def literals():
+    requests.get("/users'")
+    requests.get("/a\n")
+    h.request("GET'", "/x")
+
 class Sync:
     def run(self):
         h.head("/health")
@@ -993,6 +998,9 @@ requests.options("/api/ping")
                 "app/client.py PUT computed:f\"/api/users/{{body.id}}\" {}",
                 owner("create")
             ),
+            format!("app/client.py GET lit:/users' {}", owner("literals")),
+            format!("app/client.py GET computed:\"/a\\n\" {}", owner("literals")),
+            format!("app/client.py ? lit:/x {}", owner("literals")),
             format!("app/client.py HEAD lit:/health {}", owner("Sync.run")),
             "app/client.py OPTIONS lit:/api/ping -".to_string(),
         ]

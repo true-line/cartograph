@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tree_sitter::{Node as TsNode, Parser};
 
+use crate::alembic::exact_string;
 use crate::{
     ExtractError, FileCx, SourceId, collect_python_files, enclosing_function_node, literal_string,
     qualified_function_name, symbol_id,
@@ -65,8 +66,8 @@ fn http_call<'t>(
             .first()
             .copied()
             .or_else(|| keyword(cx, args, "method"))
-            .and_then(|method| literal_string(cx, method))
-            .filter(|method| !method.is_empty())
+            .and_then(|method| exact_string(cx, method))
+            .filter(|method| !method.is_empty() && method.bytes().all(|b| b.is_ascii_alphabetic()))
             .map_or_else(|| "?".to_string(), |method| method.to_ascii_uppercase());
         (method, positional.get(1).copied())
     } else {
@@ -786,7 +787,20 @@ fn env_key(cx: &FileCx, node: TsNode, scope: &Scope) -> Option<String> {
 }
 
 fn classify(cx: &FileCx, root: TsNode, node: TsNode, scope: &Scope, follow: bool) -> IdentityExpr {
-    if let Some(value) = literal_string(cx, node) {
+    classify_with(cx, root, node, scope, follow, literal_string)
+}
+
+/// [`classify`] reading string literals with `literal`: a string it refuses
+/// is computed, never another reading.
+fn classify_with(
+    cx: &FileCx,
+    root: TsNode,
+    node: TsNode,
+    scope: &Scope,
+    follow: bool,
+    literal: fn(&FileCx, TsNode) -> Option<String>,
+) -> IdentityExpr {
+    if let Some(value) = literal(cx, node) {
         return IdentityExpr::Literal(value);
     }
     if let Some(key) = env_key(cx, node, scope) {
@@ -801,7 +815,7 @@ fn classify(cx: &FileCx, root: TsNode, node: TsNode, scope: &Scope, follow: bool
         && let Some(&(start, end)) = scope.assigned.get(text)
         && let Some(right) = root.descendant_for_byte_range(start, end)
     {
-        return match classify(cx, root, right, scope, false) {
+        return match classify_with(cx, root, right, scope, false, literal) {
             IdentityExpr::Computed(_) => IdentityExpr::Computed(text.to_string()),
             known => known,
         };
@@ -1048,7 +1062,8 @@ fn extract_file(
                 method,
                 url: url.map_or_else(
                     || IdentityExpr::Computed(cx.text(&node).to_string()),
-                    |url| classify(&cx, root, url, &scope, true),
+                    // Exact text only: a URL is matched to routes (AC-0424).
+                    |url| classify_with(&cx, root, url, &scope, true, exact_string),
                 ),
                 symbol: enclosing_function_node(node)
                     .and_then(|function| qualified_function_name(&cx, function))
