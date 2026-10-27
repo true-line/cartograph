@@ -118,3 +118,7 @@ Each pane header shows its saved specialist name and version, with its saved req
 ## Message evidence metadata
 
 Specialist result references and saved final messages show T3 / InferredWeak, even when they cite confirmed facts. Counts distinguish unique source citations from graph citations; they do not mean source snippets were loaded. Result references count their findings’ citations, while final messages count only their supporting findings. Unavailable metadata is not a zero count. User questions are not attributed to the specialist, and existing citation inspection still uses the exact saved task.
+
+## Reading a pane
+
+Each open pane has its own **Saved messages** reading region. Focus it to scroll with the keyboard, or scroll it with the pointer; long output remains available without scrolling another pane. The pane header and reply stay outside the reading region. Your questions align right, specialist output left; citation inspection still uses the owning saved task. Layout and scrolling do not discard a reply or pending request.

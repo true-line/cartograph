@@ -255,10 +255,10 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
                 onClick={() => onFollowUp(chat.task_id, true)}>Reply here</button>}
               <button type="button" className="secondary-button" onClick={() => { onCancelFollowUp(chat.task_id); dock.close(chat.task_id); if (conversation?.investigation_id === chat.task_id) closeTurns(); }}>Close {chat.task_id}</button>
             </header>
+            <div className="agent-chat-message-body" role="region" aria-label={`Saved messages ${chat.task_id}`} tabIndex={0}>
             <InvestigationChatTranscript chat={chat} result={answer?.result} citations={answer?.citations} status="saved" error={null}
               onRefresh={() => dock.open(chat.task_id)} onOpenResult={onOpenResult} />
             {settled && <InvestigationActivity events={state.events} />}
-            {onReplyHost && <ReplyHost taskId={chat.task_id} onHost={onReplyHost} />}
             {answer && <InvestigationFindings readOnly sectionId={`saved-chat-findings-${chat.chat_id}`}
               result={answer.result} producerId={chat.producer.specialist_id} citations={answer.citations}
               citationId={dock.citation?.taskId === chat.task_id ? dock.citation.citationId : null}
@@ -266,6 +266,8 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
               loading={dock.citation?.taskId === chat.task_id && dock.citation.loading}
               error={dock.citation?.taskId === chat.task_id ? dock.citation.error : null}
               onRead={(citationId) => void dock.readCitation(chat.task_id, citationId)} onClose={dock.clearCitation} />}
+            </div>
+            {onReplyHost && <ReplyHost taskId={chat.task_id} onHost={onReplyHost} />}
           </section>;
           })}
         </div>
