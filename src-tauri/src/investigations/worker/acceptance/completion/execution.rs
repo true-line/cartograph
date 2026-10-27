@@ -283,13 +283,13 @@ fn events(jobs: &JobStore, id: &str) -> Result<Vec<InvestigationEvent>, String> 
     }
     Ok(result)
 }
-type SavedState = (
+pub(in super::super) type SavedState = (
     InvestigationDetail,
     Option<InvestigationResult>,
     Option<InvestigationInputLedger>,
     Vec<InvestigationEvent>,
 );
-fn read_state(jobs: &JobStore, id: &str) -> Result<SavedState, String> {
+pub(in super::super) fn read_state(jobs: &JobStore, id: &str) -> Result<SavedState, String> {
     Ok((
         jobs.investigation(id).map_err(|error| error.to_string())?,
         jobs.investigation_result(id)

@@ -2,7 +2,7 @@
 #[path = "completion/control.rs"]
 mod control;
 #[path = "completion/execution.rs"]
-mod execution;
+pub(super) mod execution;
 #[path = "completion/prepare.rs"]
 pub(super) mod prepare;
 #[path = "completion/records.rs"]
