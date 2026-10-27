@@ -286,6 +286,7 @@ fn finish(insufficient: bool) -> StagedFinish {
         action()
     };
     StagedFinish {
+        narrative: None,
         schema_version: 1,
         outcome: if insufficient {
             CompletionOutcome::InsufficientEvidence
@@ -1198,4 +1199,123 @@ fn attempt_binding_workspace_covers_real_policy_validation() {
         assert!(attempt_binding_validation_workspace(policy, MAX_RECORD_BYTES + 1).is_none());
         assert!(attempt_binding_validation_workspace(policy, usize::MAX).is_none());
     }
+}
+
+// AC-0404: new role only; old wire, joined privacy and result content identity.
+#[test]
+fn spec_writer_message_admission_is_cited_private_and_version_bound() {
+    let fixture = fixture_policy(
+        true,
+        true,
+        false,
+        Some(&INVESTIGATION_V1_POLICY),
+        Some(SpecialistId::SpecWriterV2),
+    );
+    let mut finish = spec_writer_finish();
+    finish.schema_version = 2;
+    finish.narrative = Some(InvestigationNarrative {
+        text:
+            "Proposed next step: specify a bounded decision and test its unresolved alternatives."
+                .into(),
+        finding_ids: vec!["finding-1".into()],
+    });
+    let wire = serde_json::to_string(&finish).unwrap();
+    assert!(StagedFinish::decode(&wire).is_err());
+    assert!(StagedFinish::decode_message(&wire).is_ok());
+    let admit = |value: &StagedFinish| {
+        fixture.input.admit_completion_finish(
+            &fixture.request,
+            "task:finish",
+            "step:finish",
+            &fixture.disclosure,
+            value,
+            &[],
+            None,
+            "now".into(),
+        )
+    };
+    let result = admit(&finish)
+        .unwrap()
+        .unwrap_or_else(|_| panic!("supported"));
+    assert_eq!(result.schema_version, 8);
+    result
+        .validate_specialist(SpecialistId::SpecWriterV2)
+        .unwrap();
+    assert!(
+        result
+            .validate_specialist(SpecialistId::SpecWriterV1)
+            .is_err()
+    );
+    let encoded = serde_json::to_string(&result).unwrap();
+    assert_eq!(
+        decode_record::<InvestigationResult>(&encoded).unwrap(),
+        result
+    );
+    let mut tampered = result.clone();
+    tampered.narrative.as_mut().unwrap().text.push('!');
+    assert!(
+        tampered
+            .validate_with_disclosure(fixture.input.ledger(), "step:finish", &fixture.disclosure)
+            .is_err()
+    );
+    for ids in [vec!["foreign".into()], vec!["finding-1".into(); 2], vec![]] {
+        let mut invalid = finish.clone();
+        invalid.narrative.as_mut().unwrap().finding_ids = ids;
+        assert!(admit(&invalid).is_err());
+    }
+    for text in ["password=syntheticsecret123".to_string(), "x".repeat(2049)] {
+        let mut invalid = finish.clone();
+        invalid.narrative.as_mut().unwrap().text = text;
+        assert!(admit(&invalid).is_err());
+    }
+    let mut null = serde_json::to_value(&result).unwrap();
+    null["narrative"] = serde_json::Value::Null;
+    assert!(decode_record::<InvestigationResult>(&null.to_string()).is_err());
+    let old = serde_json::to_value(spec_writer_finish()).unwrap();
+    assert!(old.get("narrative").is_none());
+    let mut null = old.clone();
+    null["narrative"] = serde_json::Value::Null;
+    assert!(StagedFinish::decode(&null.to_string()).is_err());
+    assert!(StagedFinish::decode_message(&old.to_string()).is_err());
+    let mut unsupported = fixture.request.clone();
+    unsupported.specialist_id = "spec-writer@1".into();
+    assert!(
+        admit_finish(
+            &unsupported,
+            "task",
+            "step",
+            &fixture.input,
+            &fixture.disclosure,
+            &finish,
+            &[],
+            None,
+            "now".into()
+        )
+        .is_err()
+    );
+    // The aggregate copy check includes boundaries between authored fields.
+    let mut split = finish.clone();
+    if let InvestigationAction::Finish { limitations, .. } = &mut split.action {
+        *limitations = vec!["private ".into()];
+    }
+    split.narrative.as_mut().unwrap().text = "text".into();
+    assert!(matches!(
+        admit(&split),
+        Err(InvestigationError::SourceReplay)
+    ));
+    let mut insufficient = finish.clone();
+    insufficient.outcome = CompletionOutcome::InsufficientEvidence;
+    insufficient.action = spec_writer_finish().action;
+    if let InvestigationAction::Finish {
+        findings,
+        knowledge_completeness,
+        ..
+    } = &mut insufficient.action
+    {
+        findings.clear();
+        *knowledge_completeness = KnowledgeCompleteness::InsufficientEvidence;
+    }
+    assert!(admit(&insufficient).is_err());
+    insufficient.narrative = None;
+    assert!(StagedFinish::decode_message(&serde_json::to_string(&insufficient).unwrap()).is_ok());
 }

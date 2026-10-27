@@ -14,6 +14,8 @@ pub enum CompletionOutcome {
 pub struct StagedFinish {
     pub schema_version: u32,
     pub outcome: CompletionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrative: Option<InvestigationNarrative>,
     pub action: InvestigationAction,
 }
 impl StagedFinish {
@@ -21,11 +23,34 @@ impl StagedFinish {
         strict::preflight(raw, MAX_ACTION_BYTES, 32, 4096, 32)?;
         let finish: Self =
             serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidAction)?;
-        finish.validate()?;
+        finish.validate_for_role(false)?;
+        if serde_json::to_value(&finish).map_err(|_| InvestigationError::InvalidAction)?
+            != serde_json::from_str::<serde_json::Value>(raw)
+                .map_err(|_| InvestigationError::InvalidAction)?
+        {
+            return Err(InvestigationError::InvalidAction);
+        }
         Ok(finish)
     }
-    fn validate(&self) -> Result<(), InvestigationError> {
-        if self.schema_version != 1 {
+    pub fn decode_message(raw: &str) -> Result<Self, InvestigationError> {
+        strict::preflight(raw, MAX_ACTION_BYTES, 32, 4096, 32)?;
+        let finish: Self =
+            serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidAction)?;
+        finish.validate_for_role(true)?;
+        let original: serde_json::Value =
+            serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidAction)?;
+        if serde_json::to_value(&finish).map_err(|_| InvestigationError::InvalidAction)? != original
+        {
+            return Err(InvestigationError::InvalidAction);
+        }
+        Ok(finish)
+    }
+    fn validate_for_role(&self, message: bool) -> Result<(), InvestigationError> {
+        if self.schema_version != if message { 2 } else { 1 }
+            || (!message && self.narrative.is_some())
+            || (message
+                && (self.outcome == CompletionOutcome::Supported) != self.narrative.is_some())
+        {
             return Err(InvestigationError::InvalidAction);
         }
         let action = InvestigationAction::decode(
@@ -61,9 +86,13 @@ impl StagedFinish {
         }
     }
     pub fn fingerprint(&self) -> Result<String, InvestigationError> {
-        self.validate()?;
+        self.validate_for_role(self.schema_version == 2)?;
         Ok(crate::source_basis::domain_hash(
-            b"cartograph:obligation-finish:v1\0",
+            if self.schema_version == 2 {
+                b"cartograph:obligation-finish:v2\0"
+            } else {
+                b"cartograph:obligation-finish:v1\0"
+            },
             &bounded_bytes(self, MAX_ACTION_BYTES)?,
         ))
     }
@@ -271,14 +300,14 @@ pub fn admit_finish_with_policy(
     timestamp: String,
     policy: &InvestigationPolicy,
 ) -> Result<FinishDecision, InvestigationError> {
-    finish.validate()?;
+    finish.validate_for_role(request.specialist_id == "spec-writer@2")?;
     let request = request.normalized_with_policy(policy)?;
     if request.limit_profile != policy.profile() {
         return Err(InvestigationError::InvalidInput);
     }
     if matches!(
         request.specialist_id.as_str(),
-        "spec-writer@1" | "gap-triager@1"
+        "spec-writer@1" | "spec-writer@2" | "gap-triager@1"
     ) && matches!(
         &finish.action,
         InvestigationAction::Finish { findings, .. }
@@ -379,6 +408,7 @@ pub fn admit_finish_with_policy(
         completion,
         policy,
     )?;
+    let admitted = input.admit_narrative(admitted, finish)?;
     let unmet = assessment
         .iter()
         .filter_map(|observation| {

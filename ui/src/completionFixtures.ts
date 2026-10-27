@@ -10,6 +10,10 @@ export const completionCatalog: InvestigationCatalog = { ...qualifiedCatalog, sp
     purpose: 'Draft a cited proposed specification from the scoped recovered context.',
     operations: ['query_context', 'read_evidence', 'read_coverage_inventory', 'finish'] as InvestigationSpecialist['operations'],
     prompt_fingerprint: 'fixture-spec-writer@1' },
+  { ...qualifiedCatalog.specialists[0], id: 'spec-writer@2', version: 2, name: 'Spec Writer',
+    purpose: 'Write a cited proposed specification from the scoped recovered context.',
+    operations: ['query_context', 'read_evidence', 'read_coverage_inventory', 'finish'] as InvestigationSpecialist['operations'],
+    prompt_fingerprint: 'fixture-spec-writer@2' },
   { ...qualifiedCatalog.specialists[0], id: 'gap-triager@1', version: 1, name: 'Gap Triager',
     purpose: 'Recommend a cited next investigation step for a recorded gap.',
     operations: ['query_context', 'read_evidence', 'read_coverage_inventory', 'finish'] as InvestigationSpecialist['operations'],
@@ -51,6 +55,19 @@ export function specWriterResult(id = 'inv-spec-writer'): InvestigationResult {
     title: 'Reject limited inputs before guarded processing',
     statement: 'Reject limited inputs before guarded processing. Acceptance criterion: when limited is true, the operation returns false. Runtime policy and broader behavior remain unresolved.' }));
   return result;
+}
+
+/** New immutable UI fixture; the original @1 definition/result above stay unchanged. */
+export function specWriterV2Detail(id = 'inv-spec-writer-v2'): InvestigationDetail {
+  return completionDetail(id, { specialist_id: 'spec-writer@2',
+    specialist: completionCatalog.specialists.find((item) => item.id === 'spec-writer@2')! });
+}
+
+export function specWriterV2Result(id = 'inv-spec-writer-v2'): InvestigationResult {
+  const result = specWriterResult(id);
+  return { ...result, schema_version: 8, result_id: `investigation-result-v8:${'8'.repeat(64)}`,
+    narrative: { text: 'Validate the caller limit before invoking processing; refuse an oversized request without starting the operation.',
+      finding_ids: result.findings.map((finding) => finding.finding_id) } };
 }
 
 /** Advertised opt-in example; production keeps this unavailable until registered. */

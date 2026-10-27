@@ -1,7 +1,8 @@
 import actualAdmission from '../fixtures/completion-v10-supported.json';
 import { admissionCatalog, admissionDetail, admissionResult, queryHistoryCatalog, queryHistoryDetail, queryHistoryResult,
   expandedCompletionCatalog, completionCatalog, completionChoices, completionDetail, completionResult,
-  gapTriagerDetail, gapTriagerResult, inventoryObligation, sourceObligation, specWriterDetail, specWriterResult } from '../completionFixtures';
+  gapTriagerDetail, gapTriagerResult, inventoryObligation, sourceObligation, specWriterDetail, specWriterResult,
+  specWriterV2Detail, specWriterV2Result } from '../completionFixtures';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
@@ -838,6 +839,22 @@ export const SpecWriterSavedCompletion: Story = {
     const citation = args.state.result!.findings[0].citation_ids[0];
     await userEvent.click(within(finding).getByRole('button', { name: new RegExp(`Inspect citation ${citation}`) }));
     await expect(args.state.readCitation).toHaveBeenCalledWith(citation);
+  },
+};
+
+// AC-0404: the saved narrative uses the same task-bound findings and citation renderer.
+export const SpecWriterV2NarrativeUsesSharedFindingsRenderer: Story = {
+  args: { state: state({ catalog: completionCatalog, detail: specWriterV2Detail(), result: specWriterV2Result(),
+    selectedId: 'inv-spec-writer-v2', history: [specWriterV2Detail()] }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const message = canvas.getByRole('article', { name: 'Specialist final message' });
+    await expect(message).toHaveTextContent('Spec Writer final message · spec-writer@2');
+    await expect(message).toHaveTextContent('Proposed design · T3 / InferredWeak');
+    await expect(message).toHaveTextContent('Validate the caller limit before invoking processing; refuse an oversized request without starting the operation.');
+    await expect(canvas.getByText('Reject limited inputs before guarded processing')).toBeVisible();
+    await userEvent.click(within(message).getByRole('button', { name: 'Inspect message citation C1' }));
+    await expect(args.state.readCitation).toHaveBeenCalledWith('C1');
   },
 };
 

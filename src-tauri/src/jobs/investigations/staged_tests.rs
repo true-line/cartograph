@@ -206,6 +206,7 @@ impl Fixture {
             )
             .unwrap();
         let finish = StagedFinish {
+            narrative: None,
             schema_version: 1,
             outcome: CompletionOutcome::InsufficientEvidence,
             action: InvestigationAction::Finish {

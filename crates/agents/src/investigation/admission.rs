@@ -584,6 +584,7 @@ impl InvestigationResult {
             disclosure_hash: binding
                 .map(|(_, disclosure)| disclosure.fingerprint_with_policy(ledger, policy))
                 .transpose()?,
+            narrative: None,
             findings,
             knowledge_completeness: *knowledge_completeness,
             limitations: limitations.clone(),
@@ -619,6 +620,76 @@ impl InvestigationResult {
         Ok(result)
     }
 
+    pub(super) fn with_narrative(
+        mut self,
+        narrative: Option<InvestigationNarrative>,
+    ) -> Result<Self, InvestigationError> {
+        self.schema_version = 8;
+        self.narrative = narrative;
+        self.validate_narrative()?;
+        self.result_id = self.content_id()?;
+        Ok(self)
+    }
+
+    pub(super) fn authored_prose(&self) -> impl Iterator<Item = &str> {
+        self.findings
+            .iter()
+            .flat_map(|finding| {
+                std::iter::once(finding.title.as_str())
+                    .chain(std::iter::once(finding.statement.as_str()))
+                    .chain(finding.limitations.iter().map(String::as_str))
+            })
+            .chain(self.limitations.iter().map(String::as_str))
+            .chain(self.observed_response_model.as_deref())
+            .chain(self.narrative.as_ref().map(|message| message.text.as_str()))
+    }
+
+    pub fn validate_specialist(&self, specialist: SpecialistId) -> Result<(), InvestigationError> {
+        if (self.schema_version == 8) != (specialist == SpecialistId::SpecWriterV2) {
+            return Err(InvestigationError::InvalidInput);
+        }
+        self.validate_narrative()
+    }
+
+    fn validate_narrative(&self) -> Result<(), InvestigationError> {
+        if self.schema_version != 8 {
+            return if self.narrative.is_none() {
+                Ok(())
+            } else {
+                Err(InvestigationError::InvalidInput)
+            };
+        }
+        let outcome = self
+            .completion
+            .as_ref()
+            .ok_or(InvestigationError::InvalidInput)?
+            .outcome;
+        if (outcome == staged_finish::CompletionOutcome::Supported) != self.narrative.is_some()
+            || self
+                .findings
+                .iter()
+                .any(|finding| finding.claim_kind != InvestigationClaimKind::ProposedDesign)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        if let Some(message) = &self.narrative {
+            let mut ids = BTreeSet::new();
+            if !text(&message.text, 2048)
+                || message.finding_ids.is_empty()
+                || message.finding_ids.len() > 12
+                || message.finding_ids.iter().any(|id| {
+                    !ids.insert(id)
+                        || !self.findings.iter().any(|finding| {
+                            &finding.finding_id == id && !finding.citation_ids.is_empty()
+                        })
+                })
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+        }
+        Ok(())
+    }
+
     fn content_id(&self) -> Result<String, InvestigationError> {
         let mut content = self.clone();
         content.result_id.clear();
@@ -650,6 +721,10 @@ impl InvestigationResult {
             7 => (
                 "investigation-result-v7",
                 b"cartograph:investigation-result:v7\0",
+            ),
+            8 => (
+                "investigation-result-v8",
+                b"cartograph:investigation-result:v8\0",
             ),
             _ => return Err(InvestigationError::InvalidInput),
         };
@@ -715,7 +790,7 @@ impl InvestigationResult {
             } else if disclosure.schema_version == 5 {
                 6
             } else if disclosure.schema_version == 4 {
-                5
+                if self.schema_version == 8 { 8 } else { 5 }
             } else if ledger.schema_version == 2 {
                 4
             } else if self.inspection_assessment.is_some() {
@@ -723,7 +798,7 @@ impl InvestigationResult {
             } else {
                 2
             }
-            || matches!(self.schema_version, 5..=7) != self.completion.is_some()
+            || matches!(self.schema_version, 5..=8) != self.completion.is_some()
             || self.coverage != disclosure.coverage
             || self.inspection_assessment.is_some()
                 != disclosure.inspection_requirements_hash.is_some()
@@ -804,6 +879,10 @@ impl InvestigationResult {
             limitations: self.limitations.clone(),
         };
         action.admit_finish(citations, std::iter::empty())?;
+        self.validate_narrative()?;
+        if self.schema_version == 8 {
+            super::privacy::reject_prose_replay(self.authored_prose(), std::iter::empty())?;
+        }
         bounded_bytes(self, MAX_RESULT_BYTES)?;
         Ok(())
     }

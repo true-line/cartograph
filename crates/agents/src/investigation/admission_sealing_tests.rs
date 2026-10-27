@@ -351,6 +351,7 @@ fn admission_sealing_result_seven_has_exact_disclosure_family_and_content_domain
     let input = build_source(&fixture, &raw, &evidence, role, CompletionCallMode::Choice);
     let disclosure = seal(&input);
     let finish = StagedFinish {
+        narrative: None,
         schema_version: 1,
         outcome: CompletionOutcome::Supported,
         action: InvestigationAction::Finish {

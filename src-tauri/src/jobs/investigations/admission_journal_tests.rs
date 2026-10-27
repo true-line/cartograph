@@ -629,6 +629,7 @@ fn admission_journal_keeps_absent_namespace_and_existing_task_bytes_unchanged() 
 fn admission_journal_capacity_class_never_accepts_finish_or_finish_only_tool() {
     let f = internal_next_prompt_fixture();
     let finish = StagedFinish {
+        narrative: None,
         schema_version: 1,
         outcome: CompletionOutcome::InsufficientEvidence,
         action: InvestigationAction::Finish {

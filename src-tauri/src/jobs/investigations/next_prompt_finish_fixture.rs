@@ -18,6 +18,7 @@ impl Fixture {
         }
         let (input, prepared) = Self::prepare(&base);
         let original = serde_json::to_value(StagedFinish {
+            narrative: None,
             schema_version: 1,
             outcome: CompletionOutcome::InsufficientEvidence,
             action: InvestigationAction::Finish {

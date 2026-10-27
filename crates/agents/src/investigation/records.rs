@@ -424,6 +424,21 @@ pub struct InvestigationEventPage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct InvestigationNarrative {
+    /// Reuses the existing finding-statement prose bound, not a new policy family.
+    pub text: String,
+    pub finding_ids: Vec<String>,
+}
+
+impl InvestigationNarrative {
+    // An omitted historical field stays absent; an explicit null is not a message.
+    fn present<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<Option<Self>, D::Error> {
+        Self::deserialize(decoder).map(Some)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InvestigationResult {
     pub schema_version: u32,
     /// Exact mandatory qualification representation of the finishing invocation.
@@ -441,6 +456,12 @@ pub struct InvestigationResult {
     pub inspection_assessment: Option<InvestigationInspectionAssessment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<InvestigationCompletionResult>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "InvestigationNarrative::present"
+    )]
+    pub narrative: Option<InvestigationNarrative>,
     pub findings: Vec<InvestigationFinding>,
     pub knowledge_completeness: KnowledgeCompleteness,
     pub limitations: Vec<String>,

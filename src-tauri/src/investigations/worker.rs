@@ -622,7 +622,14 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                         policy,
                     )
                 } else {
-                    CompletionInvestigationAction::decode(&completion.text, &proof.context_id)
+                    if request.specialist_id == SpecialistId::SpecWriterV2 {
+                        CompletionInvestigationAction::decode_message(
+                            &completion.text,
+                            &proof.context_id,
+                        )
+                    } else {
+                        CompletionInvestigationAction::decode(&completion.text, &proof.context_id)
+                    }
                 }
                 .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
                 let value: serde_json::Value = serde_json::from_str(&completion.text)

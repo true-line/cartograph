@@ -31,7 +31,10 @@ fn definition_workspace(role: SpecialistId) -> Option<usize> {
     }
     // Original/policy common, original/policy discovery, two finishing common
     // replacements and final formatted prompt. Each is shorter than the final
-    // prompt. Account all seven even though some lifetimes do not overlap.
+    // prompt. Spec Writer @2's extra replacement/append consumes its temporary;
+    // retained pre-message common, message common, discovery and final prompt
+    // stay within these seven owners. No resource ceiling is increased.
+    // Account all seven even though some lifetimes do not overlap.
     sum(&[
         prompt.len().checked_mul(7)?,
         slots::<String>(7)?,
@@ -120,6 +123,7 @@ mod tests {
             SpecialistId::DomainAnalystV10,
             SpecialistId::EvidenceAuditorV10,
             SpecialistId::SpecWriterV1,
+            SpecialistId::SpecWriterV2,
             SpecialistId::GapTriagerV1,
         ] {
             assert!(definition_workspace(role).unwrap() <= admitted, "{role:?}");
