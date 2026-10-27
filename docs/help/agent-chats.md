@@ -35,3 +35,11 @@ Panes retain last-observed snapshots, including pending chats; they do not imply
 live updates. Use **Focus / refresh** to reread a pane. Layout adjusts to one
 through four panes and is session-only. These are individual task chats, not
 merged multi-task conversation threads.
+
+Choose **Conversation turns** on a pane to browse saved tasks in its validated
+conversation, newest first. Each row keeps its specialist version, status and
+explicit parent link; opening one uses the same bounded dock reader. An off-page
+selected turn remains pinned. **Load older turns** continues the existing page;
+**Refresh conversation turns** discovers new saved children. Errors keep already
+loaded turns visible. These are linked task chats with separate findings and
+citations, not one appended transcript. Close the navigator to end that view.

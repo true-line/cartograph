@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
@@ -158,5 +159,171 @@ export const LegacyTaskRoutesToFindings: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Open this investigation to inspect its findings' }));
     await expect(args.onOpenResult).toHaveBeenCalledTimes(1);
     await expect(args.onOpenResult).toHaveBeenCalledWith('legacy-chat-task');
+  },
+};
+
+let conversationReads: string[];
+let conversationChatReads: string[];
+let refreshConversationChild = false;
+let conversationPages: { conversationId?: string; cursor?: string }[];
+let releaseOldConversation: (() => void) | undefined;
+let failConversation = false;
+let showNewChild = false;
+
+// AC-0396: real paged coordinator plus exact serialized dock handoff; no sibling reads.
+export const ConversationTurnsFromCapturedPane: Story = {
+  beforeEach: () => {
+    conversationReads = []; conversationChatReads = []; refreshConversationChild = false;
+    conversationPages = []; releaseOldConversation = undefined;
+    failConversation = false; showNewChild = false;
+    const turn = (id: string, parent_id: string | null = null, conversation_id = 'family-a') => investigationDetail(id, {
+      question: `Saved question ${id}`, conversation_id, parent_id, has_result: false,
+      status: 'running', revision: 4, last_event_sequence: 4, invocation_pending: true });
+    const details = [turn('parent'), turn('child', 'parent'), turn('sibling', 'parent'),
+      turn('new-child', 'child'), turn('other', null, 'family-b')];
+    let holdFirstA = true;
+    mockIPC((command, payload) => {
+      const args = (payload ?? {}) as { investigationId?: string; conversationId?: string; cursor?: string; afterSequence?: number };
+      if (command === 'list_investigation_conversation') {
+        conversationPages.push({ conversationId: args.conversationId, cursor: args.cursor });
+        if (args.conversationId === 'family-b') return { items: [], next_cursor: null };
+        if (holdFirstA) {
+          holdFirstA = false;
+          return new Promise((resolve) => { releaseOldConversation = () => resolve({ items: [details[0]], next_cursor: null }); });
+        }
+        if (failConversation) throw new Error('Saved turns unavailable');
+        return args.cursor ? { items: [details[2]], next_cursor: null }
+          : { items: showNewChild ? [details[3], details[0]] : [details[0]], next_cursor: 'older-turns' };
+      }
+      const saved = details.find((item) => item.investigation_id === args.investigationId);
+      const detail = saved?.investigation_id === 'child' && refreshConversationChild ? { ...saved,
+        status: 'failed' as const, revision: 5, last_event_sequence: 5, invocation_pending: false,
+        actions: { can_cancel: false, can_follow_up: false }, updated_at: '2026-09-10T10:01:00Z' } : saved;
+      if (command === 'get_investigation') { conversationReads.push(args.investigationId!); return detail; }
+      if (command === 'investigation_events') return { investigation_id: args.investigationId,
+        items: [...investigationEvents(args.investigationId!).slice(0, 4), ...(detail?.revision === 5 ? [{
+          investigation_id: detail.investigation_id, sequence: 5, revision: 5, kind: 'failed', tool: null,
+          summary: 'Invocation failed.', step_id: 'step-1', created_at: detail.updated_at }] : [])]
+          .filter((event) => event.sequence > (args.afterSequence ?? 0)),
+        next_sequence: detail?.last_event_sequence ?? 4, has_more: false };
+      if (command === 'get_investigation_chat' && detail) {
+        conversationChatReads.push(detail.investigation_id);
+        return {
+        chat_id: `chat:${detail.investigation_id}`, task_id: detail.investigation_id,
+        producer: { specialist_id: detail.specialist.id, specialist_version: detail.specialist.version,
+          prompt_fingerprint: detail.specialist.prompt_fingerprint, tier: detail.specialist.tier,
+          confidence_tier: detail.specialist.confidence_tier, provider_mode: detail.provider.mode,
+          provider_id: detail.provider.provider_id, model: detail.provider.model, protocol_version: null },
+        messages: [{ id: `question:${detail.investigation_id}`, ordinal: 0, author: 'user',
+          message: { kind: 'user_question', question: detail.question } }],
+        };
+      }
+      if (command === 'list_investigations') return { items: [details[1], details[4]], next_cursor: null };
+      if (/^(start|cancel|delete)_investigation$/.test(command)) throw new Error('Read-only navigation must not dispatch');
+      return null;
+    });
+    const initial = useInvestigationStore.getInitialState();
+    useInvestigationStore.setState({ ...initial, history: [details[1], details[4]], catalog: investigationCatalog,
+      composer: { ...initial.composer, question: 'Retain composer question' },
+      pendingStart: { schema_version: 1, request_nonce: 'c'.repeat(36), specialist_id: 'domain-analyst@3',
+        question: 'Retain same request', scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1' } }, true);
+    return () => { releaseOldConversation?.(); clearMocks(); };
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const originalPending = useInvestigationStore.getState().pendingStart;
+    await userEvent.click(canvas.getByRole('button', { name: /Saved question child/ }));
+    const childPane = within(await canvas.findByRole('region', { name: 'Saved chat child' }));
+    await userEvent.click(childPane.getByRole('button', { name: 'Conversation turns' }));
+    await expect(canvas.getByText('Loading conversation turns…')).toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: /Saved question other/ }));
+    const otherPane = within(await canvas.findByRole('region', { name: 'Saved chat other' }));
+    await expect(canvas.getByText('Conversation detail is no longer active. Refresh to reload this captured conversation.')).toBeVisible();
+    await userEvent.click(otherPane.getByRole('button', { name: 'Conversation turns' }));
+    const turns = within(canvas.getByRole('region', { name: 'Conversation turns' }));
+    await expect(turns.getByText('family-b')).toBeVisible();
+    await expect(turns.getByText('No saved turns in this conversation page.')).toBeVisible();
+    releaseOldConversation?.();
+    await waitFor(() => expect(useInvestigationStore.getState().conversationItems).toEqual([]));
+    await expect(turns.queryByText('Saved question parent')).not.toBeInTheDocument();
+    await userEvent.click(childPane.getByRole('button', { name: 'Conversation turns' }));
+    await expect(turns.getByText('family-a')).toBeVisible();
+    const pinned = within(turns.getByLabelText('Selected conversation turn'));
+    await expect(pinned.getByRole('button', { name: /Saved question child/ })).toHaveTextContent('domain-analyst@3 · Running');
+    await expect(pinned.getByText('Follow-up to parent')).toBeVisible();
+    await expect(conversationReads).toEqual(['child', 'other']);
+    await userEvent.click(pinned.getByRole('button', { name: /Saved question child/ }));
+    await waitFor(() => expect(useInvestigationStore.getState().loading).toBe(false));
+    refreshConversationChild = true;
+    useInvestigationStore.getState().invalidate({ investigation_id: 'child', revision: 5, last_event_sequence: 5 });
+    await waitFor(() => expect(useInvestigationStore.getState().chatStatus).toBe('saved'));
+    await expect(pinned.getByRole('button', { name: /Saved question child/ })).toHaveTextContent('Failed');
+    await expect(pinned.getByText('2026-09-10T10:01:00Z')).toBeVisible();
+    const freshPin = useInvestigationStore.getState().conversationPinned!;
+    for (const foreign of [{ ...freshPin, investigation_id: 'other' }, { ...freshPin, conversation_id: 'family-b' },
+      { ...freshPin, revision: 3 }]) {
+      useInvestigationStore.setState({ conversationPinned: foreign });
+      await waitFor(() => expect(pinned.getByRole('button', { name: /Saved question child/ })).toHaveTextContent('Running'));
+      await expect(useInvestigationStore.getState().conversationPinned).toEqual(foreign);
+    }
+    useInvestigationStore.setState({ conversationPinned: freshPin });
+    await waitFor(() => expect(pinned.getByRole('button', { name: /Saved question child/ })).toHaveTextContent('Failed'));
+    await expect(conversationChatReads).toEqual(['child', 'other', 'child', 'child']);
+    await userEvent.click(turns.getByRole('button', { name: 'Load older turns' }));
+    await expect(turns.getByRole('button', { name: /Saved question sibling/ })).toBeVisible();
+    await expect(conversationPages.at(-1)).toEqual({ conversationId: 'family-a', cursor: 'older-turns' });
+    await userEvent.click(turns.getByRole('button', { name: /Saved question sibling/ }));
+    await expect(await canvas.findByRole('region', { name: 'Saved chat sibling' })).toBeVisible();
+    await expect(conversationReads).toEqual(['child', 'other', 'child', 'child', 'sibling']);
+    await userEvent.click(turns.getByRole('button', { name: 'Open parent parent' }));
+    await expect(await canvas.findByRole('region', { name: 'Saved chat parent' })).toBeVisible();
+    await expect(conversationReads).toEqual(['child', 'other', 'child', 'child', 'sibling', 'parent']);
+    showNewChild = true;
+    await userEvent.click(turns.getByRole('button', { name: 'Refresh conversation turns' }));
+    await expect(turns.getByRole('button', { name: /Saved question new-child/ })).toBeVisible();
+    failConversation = true;
+    await userEvent.click(turns.getByRole('button', { name: 'Refresh conversation turns' }));
+    await expect(turns.getByRole('alert')).toHaveTextContent('Conversation turns could not be loaded');
+    await expect(turns.getByRole('button', { name: /Saved question sibling/ })).toBeVisible();
+    await userEvent.click(turns.getByRole('button', { name: 'Close conversation turns' }));
+    await expect(canvas.queryByRole('region', { name: 'Conversation turns' })).not.toBeInTheDocument();
+    await expect(useInvestigationStore.getState().conversationId).toBeNull();
+    await expect(useInvestigationStore.getState().composer.question).toBe('Retain composer question');
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(originalPending);
+  },
+};
+
+// AC-0396: leaving a destination only releases its own conversation navigator.
+export const ConversationOwnershipAcrossVisits: Story = {
+  ...ConversationTurnsFromCapturedPane,
+  render: function ConversationVisit(args) {
+    const [shown, setShown] = useState(true);
+    const liveState = useInvestigationStore();
+    return <><button type="button" onClick={() => setShown(!shown)}>Toggle Agent Chats visit</button>
+      {shown && <AgentChatsSurface {...args} state={liveState} />}</>;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await useInvestigationStore.getState().openConversation('family-b');
+    const other = useInvestigationStore.getState().history.find((item) => item.investigation_id === 'other')!;
+    useInvestigationStore.setState({ conversationItems: [other], conversationPinned: other, conversationCursor: 'saved-page',
+      conversationPageBookmarks: [{ cursor: 'saved-bookmark', ids: ['other'] }] });
+    const existing = useInvestigationStore.getState();
+    await userEvent.click(canvas.getByRole('button', { name: 'Toggle Agent Chats visit' }));
+    await expect(useInvestigationStore.getState().conversationId).toBe('family-b');
+    await expect(useInvestigationStore.getState().conversationItems).toBe(existing.conversationItems);
+    await expect(useInvestigationStore.getState().conversationCursor).toBe(existing.conversationCursor);
+    await expect(useInvestigationStore.getState().conversationPinned).toBe(existing.conversationPinned);
+    await expect(useInvestigationStore.getState().conversationPageBookmarks).toBe(existing.conversationPageBookmarks);
+    await userEvent.click(canvas.getByRole('button', { name: 'Toggle Agent Chats visit' }));
+    await userEvent.click(canvas.getByRole('button', { name: /Saved question child/ }));
+    const pane = within(await canvas.findByRole('region', { name: 'Saved chat child' }));
+    await userEvent.click(pane.getByRole('button', { name: 'Conversation turns' }));
+    await expect(canvas.getByText('Loading conversation turns…')).toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: 'Toggle Agent Chats visit' }));
+    await expect(useInvestigationStore.getState().conversationId).toBeNull();
+    releaseOldConversation?.();
+    await waitFor(() => expect(useInvestigationStore.getState().conversationItems).toEqual([]));
+    await expect(useInvestigationStore.getState().conversationId).toBeNull();
   },
 };

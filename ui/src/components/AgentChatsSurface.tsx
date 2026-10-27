@@ -1,6 +1,6 @@
-import { useEffect, useState, type FormEvent } from 'react';
-import { useAgentChatDockStore } from '../agentChatDockStore';
-import type { InvestigationState } from '../investigationStore';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useAgentChatDockStore, type ChatTurn } from '../agentChatDockStore';
+import { useInvestigationStore, type InvestigationState } from '../investigationStore';
 import { InvestigationChatTranscript } from './InvestigationChatTranscript';
 
 export interface AgentChatsSurfaceProps {
@@ -21,6 +21,40 @@ function statusLabel(status: string) {
 export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onCancelFollowUp, preparingFollowUpTask, followUpError }: AgentChatsSurfaceProps) {
   const [searchText, setSearchText] = useState(state.historySearch);
   const dock = useAgentChatDockStore();
+  const [conversation, setConversation] = useState<ChatTurn | null>(null);
+  const closeConversation = state.closeConversation;
+  const ownedConversation = useRef<string | null>(null);
+  const releaseConversation = useCallback(() => {
+    const owned = ownedConversation.current;
+    ownedConversation.current = null;
+    if (owned && useInvestigationStore.getState().conversationId === owned) closeConversation();
+  }, [closeConversation]);
+  useEffect(() => releaseConversation, [releaseConversation]);
+  const showConversation = (turn: ChatTurn) => {
+    setConversation(turn);
+    ownedConversation.current = turn.conversation_id;
+    void state.openConversation(turn.conversation_id);
+  };
+  const closeTurns = () => { setConversation(null); releaseConversation(); };
+  const matchingConversation = conversation?.conversation_id === state.conversationId;
+  const turns = matchingConversation ? state.conversationItems : [];
+  const focusedTurn = dock.docks.find((item) => item.chat.task_id === dock.focusedTask &&
+    item.turn.conversation_id === conversation?.conversation_id)?.turn;
+  const selectedTurn = focusedTurn ?? conversation;
+  const coordinatorPin = state.conversationPinned;
+  const currentTurn = selectedTurn && coordinatorPin?.investigation_id === selectedTurn.investigation_id &&
+    coordinatorPin.conversation_id === selectedTurn.conversation_id && coordinatorPin.revision >= selectedTurn.revision
+    ? coordinatorPin : selectedTurn;
+  const pinnedTurn = currentTurn && !turns.some((item) => item.investigation_id === currentTurn.investigation_id) ? currentTurn : null;
+  const turnButton = (turn: ChatTurn) => <>
+    <button type="button" className="agent-chat-history-item" aria-current={turn.investigation_id === dock.focusedTask ? 'true' : undefined}
+      onClick={() => dock.open(turn.investigation_id)}>
+      <strong>{turn.question}</strong><span>{turn.specialist_id} · {statusLabel(turn.status)}</span><time>{turn.updated_at}</time>
+      {turn.parent_id && <span>Follow-up to {turn.parent_id}</span>}
+    </button>
+    {turn.parent_id && <button type="button" className="secondary-button"
+      onClick={() => dock.open(turn.parent_id!)}>Open parent {turn.parent_id}</button>}
+  </>;
   const connect = dock.connect;
   useEffect(() => connect(), [connect]);
   const submitSearch = (event: FormEvent) => {
@@ -82,16 +116,33 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onCancelFol
             onClick={() => onOpenResult(dock.fallbackTask!)}>Open this investigation to inspect its findings</button>}
         </div>}
         {!dock.docks.length && !dock.pendingTask && <p className="muted">Select a saved task to dock its persisted conversation.</p>}
+        {conversation && <section aria-label="Conversation turns">
+          <h3>Conversation turns</h3><code>{conversation.conversation_id}</code>
+          <p className="muted">Saved task chats, newest first. Parent links show forks; every task keeps separate findings and citations.</p>
+          <button type="button" className="secondary-button" onClick={closeTurns}>Close conversation turns</button>
+          <button type="button" className="secondary-button" disabled={matchingConversation && state.conversationLoading}
+            onClick={() => matchingConversation ? void state.loadConversation() : showConversation(conversation)}>Refresh conversation turns</button>
+          {!matchingConversation && <p role="status">Conversation detail is no longer active. Refresh to reload this captured conversation.</p>}
+          {matchingConversation && state.conversationLoading && <p role="status">Loading conversation turns…</p>}
+          {matchingConversation && state.conversationError && <p role="alert" className="error-text">{state.conversationError}</p>}
+          {pinnedTurn && <div aria-label="Selected conversation turn"><p>Selected turn (pinned; last observed)</p>{turnButton(pinnedTurn)}</div>}
+          {matchingConversation && !state.conversationLoading && !turns.length && <p className="muted">No saved turns in this conversation page.</p>}
+          <ol>{turns.map((turn) => <li key={turn.investigation_id}>{turnButton(turn)}</li>)}</ol>
+          {matchingConversation && state.conversationCursor && <><p className="muted">More saved turns are available.</p>
+            <button type="button" className="secondary-button" disabled={state.conversationLoading}
+              onClick={() => void state.loadConversation(true)}>Load older turns</button></>}
+        </section>}
         <div className={`agent-chat-docks agent-chat-docks-${dock.docks.length}`}>
-          {dock.docks.map(({ chat, question }) => <section className="agent-chat-pane" key={chat.chat_id}
+          {dock.docks.map(({ chat, question, turn }) => <section className="agent-chat-pane" key={chat.chat_id}
             aria-label={`Saved chat ${chat.task_id}`}>
             <header><h3>{question}</h3><code>{chat.task_id}</code>
               <p className="muted">Last observed snapshot · {chat.chat_id}</p>
               <button type="button" className="secondary-button" aria-pressed={dock.focusedTask === chat.task_id}
                 onClick={() => dock.open(chat.task_id)}>Focus / refresh {chat.task_id}</button>
+              <button type="button" className="secondary-button" onClick={() => showConversation(turn)}>Conversation turns</button>
               <button type="button" className="secondary-button" disabled={preparingFollowUpTask !== null}
                 onClick={() => onFollowUp(chat.task_id)}>Follow-up task</button>
-              <button type="button" className="secondary-button" onClick={() => { onCancelFollowUp(chat.task_id); dock.close(chat.task_id); }}>Close {chat.task_id}</button>
+              <button type="button" className="secondary-button" onClick={() => { onCancelFollowUp(chat.task_id); dock.close(chat.task_id); if (conversation?.investigation_id === chat.task_id) closeTurns(); }}>Close {chat.task_id}</button>
             </header>
             <InvestigationChatTranscript chat={chat} status="saved" error={null}
               onRefresh={() => dock.open(chat.task_id)} onOpenResult={onOpenResult} />

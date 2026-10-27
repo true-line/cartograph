@@ -65,6 +65,19 @@ function delayedCloudChats() {
 
 // AC-0389: snapshots are admitted only after the coordinator validates the chat.
 describe('saved task chat docks', () => {
+  // AC-0396: navigation metadata belongs to the validated snapshot, not global selection.
+  it('captures the matching conversation and parent without following unrelated detail', async () => {
+    const h = harness();
+    h.dock.getState().open('child'); await tick();
+    const detail = investigationDetail('child', { conversation_id: 'family-a', parent_id: 'parent-a' });
+    h.coordinator.setState({ detail, chat: chat('child'), chatStatus: 'saved' }); await tick();
+    const captured = h.dock.getState().docks[0].turn;
+    expect(captured).toMatchObject({ investigation_id: 'child', conversation_id: 'family-a', parent_id: 'parent-a' });
+    h.coordinator.setState({ selectedId: 'unrelated', detail: investigationDetail('unrelated') });
+    expect(h.dock.getState().docks[0].turn).toEqual(captured);
+    h.leave();
+  });
+
   it('hands one replaceable notice intent to the next connection and cancels an abandoned handoff', async () => {
     const h = harness('already-selected', false);
     h.dock.getState().requestOpenFromNotice('first');
