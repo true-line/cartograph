@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
+import { page } from '@vitest/browser/context';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { investigationCatalog, investigationCitations, investigationDetail, investigationEvents, investigationResult } from '../investigationFixtures';
@@ -454,10 +455,13 @@ export const SavedAnswersStayWithTheirPane: Story = {
   },
 };
 
+let branchCommands: string[] = [];
+
 // AC-0400: actual coordinator reads, exact answers, persisted edges and unchanged four-slot admission.
 export const LoadedConversationBranches: Story = {
   args: { onReplyHost: fn() },
   beforeEach: () => {
+    branchCommands = [];
     const links = [ ['root', null, 'branch'], ['left', 'root', 'branch'], ['right', 'root', 'branch'],
       ['leaf', 'left', 'branch'], ['other', null, 'other-conversation'],
       ['cross', 'root', 'cross-conversation'], ['self', 'self', 'malformed'],
@@ -466,6 +470,7 @@ export const LoadedConversationBranches: Story = {
       question: `Saved question ${id}`, parent_id, conversation_id,
     }));
     mockIPC((command, payload) => {
+      branchCommands.push(command);
       const args = (payload ?? {}) as { investigationId?: string; citationId?: string; afterSequence?: number };
       const detail = details.find((item) => item.investigation_id === args.investigationId);
       if (command === 'get_investigation') return detail;
@@ -705,5 +710,67 @@ export const OpenAndSavedSearchPalette: Story = {
     await userEvent.click(dialog.getByRole('button', { name: 'Close chat search' }));
     await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
     await expect(useInvestigationStore.getState().composer.question).toBe('Keep composer draft');
+  },
+};
+
+// AC-0411: geometry, not class names, establishes the requested pane arrangements.
+export const PaneLayoutGeometry: Story = {
+  ...LoadedConversationBranches,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement); const viewport = [window.innerWidth, window.innerHeight];
+    const slots = () => [...canvasElement.querySelectorAll<HTMLElement>('.agent-chat-docks > .agent-chat-pane')];
+    const box = (index: number) => slots()[index].getBoundingClientRect();
+    const near = (a: number, b: number) => expect(Math.abs(a - b)).toBeLessThan(2);
+    const grid = () => canvasElement.querySelector('.agent-chat-docks')!.getBoundingClientRect();
+    const layout = async (count: number) => {
+      const reads = [...branchCommands];
+      const button = canvas.getByRole('button', { name: `${count} pane ${count === 1 ? 'slot' : 'slots'}` });
+      await userEvent.click(button); await waitFor(() => expect(button).toHaveAttribute('aria-pressed', 'true'));
+      expect(branchCommands).toEqual(reads);
+    };
+    const open = async (id: string) => {
+      await userEvent.click(canvas.getByRole('button', { name: new RegExp(`^Saved question ${id}`) }));
+      await canvas.findByRole('region', { name: `Saved chat ${id}` });
+    };
+    try {
+      await page.viewport(1600, 1000);
+      near(box(0).width, grid().width); expect(box(0).width).toBeGreaterThan(100);
+      const reads = [...branchCommands];
+      await userEvent.click(canvas.getByRole('button', { name: 'Choose saved chat' }));
+      await canvas.findByRole('dialog', { name: 'Search open and saved chats' });
+      await userEvent.click(canvas.getByRole('button', { name: 'Close chat search' }));
+      expect(branchCommands).toEqual(reads);
+      await open('root'); await layout(1); near(box(0).width, grid().width);
+      await open('other');
+      await expect(canvas.getByRole('button', { name: '2 pane slots' })).toHaveAttribute('aria-pressed', 'true');
+      await layout(2);
+      near(box(0).top, box(1).top); expect(box(1).left).toBeGreaterThan(box(0).right);
+      const one = canvas.getByRole('button', { name: '1 pane slot' });
+      await expect(one).toBeDisabled(); await expect(canvas.getByText(/Close panes first to select fewer/)).toBeVisible();
+      await expect(canvas.getAllByRole('region', { name: /^Saved chat / })).toHaveLength(2);
+      await layout(3); await open('cross');
+      near(box(0).top, box(1).top); near(box(2).width, grid().width); expect(box(2).top).toBeGreaterThan(box(0).bottom);
+      const beforeTop = [...branchCommands];
+      await userEvent.click(canvas.getByRole('button', { name: 'Top' }));
+      await waitFor(() => near(box(0).width, grid().width));
+      near(box(1).top, box(2).top); expect(box(1).top).toBeGreaterThan(box(0).bottom);
+      const top = canvas.getByRole('button', { name: 'Top' });
+      const bottom = canvas.getByRole('button', { name: 'Bottom' });
+      expect(getComputedStyle(top).backgroundColor).not.toBe(getComputedStyle(bottom).backgroundColor);
+      await userEvent.click(bottom); await waitFor(() => near(box(2).width, grid().width));
+      expect(branchCommands).toEqual(beforeTop);
+      await page.viewport(800, 900);
+      await waitFor(() => { for (const pane of slots()) near(pane.getBoundingClientRect().width, grid().width); });
+      for (const pane of slots()) { expect(pane.getBoundingClientRect().left).toBeGreaterThanOrEqual(0); expect(pane.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth); }
+      await page.viewport(1600, 1000);
+      await waitFor(() => near(box(2).width, grid().width)); near(box(0).top, box(1).top);
+      expect(branchCommands).toEqual(beforeTop);
+      await layout(4); await open('cycle-a');
+      near(box(0).top, box(1).top); near(box(2).top, box(3).top);
+      near(box(0).left, box(2).left); expect(box(1).left).toBeGreaterThan(box(0).right);
+      const four = canvas.getByRole('button', { name: '4 pane slots' });
+      expect(getComputedStyle(four).backgroundColor).not.toBe(getComputedStyle(one).backgroundColor);
+      for (const count of [1, 2, 3]) await expect(canvas.getByRole('button', { name: `${count} pane ${count === 1 ? 'slot' : 'slots'}` })).toBeDisabled();
+    } finally { await page.viewport(viewport[0], viewport[1]); }
   },
 };

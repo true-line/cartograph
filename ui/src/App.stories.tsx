@@ -2361,3 +2361,43 @@ export const ChatSearchPreservesInlineReply: Story = {
     await expect(canvas.queryByRole('dialog', { name: 'Search open and saved chats' })).not.toBeInTheDocument();
   },
 };
+
+// AC-0411: presentation changes never reparent or clear the one real reply composer.
+export const PaneLayoutPreservesInlineReply: Story = {
+  ...InlineReplyUsesItsValidatedPane,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(canvas.getByText('core v0.0.1')).toBeInTheDocument());
+    await userEvent.click(canvas.getByRole('button', { name: 'Agent Chats' }));
+    await userEvent.click(await canvas.findByRole('button', { name: /Parent for inline reply/ }));
+    const pane = canvas.getByRole('region', { name: 'Saved chat inv-inline-parent' });
+    await userEvent.click(within(pane).getByRole('button', { name: 'Reply here' }));
+    const reply = within(await within(pane).findByRole('region', { name: 'Reply to inv-inline-parent' }));
+    const question = reply.getByLabelText('Question');
+    const host = pane.querySelector('[data-reply-task="inv-inline-parent"]');
+    await userEvent.type(question, 'Preserve this parent across pane layouts.');
+    await waitFor(() => expect(reply.getByRole('button', { name: 'Send reply task' })).toBeEnabled());
+    const requestsBefore = [...investigationRequests];
+    for (const count of [2, 3, 4, 1]) {
+      await userEvent.click(canvas.getByRole('button', { name: `${count} pane ${count === 1 ? 'slot' : 'slots'}` }));
+      if (count === 3) for (const position of ['Top', 'Bottom']) await userEvent.click(canvas.getByRole('button', { name: position }));
+      expect(pane.querySelector('[data-reply-task="inv-inline-parent"]')).toBe(host);
+      expect(host?.isConnected).toBe(true); expect(reply.getByLabelText('Question')).toBe(question);
+      await expect(question).toHaveValue('Preserve this parent across pane layouts.');
+    }
+    expect(investigationRequests).toEqual(requestsBefore);
+    await userEvent.click(reply.getByRole('button', { name: 'Send reply task' }));
+    await waitFor(() => expect(useInvestigationStore.getState().pendingStart).not.toBeNull());
+    const pending = structuredClone(useInvestigationStore.getState().pendingStart);
+    expect(pending).toMatchObject({ parent_id: 'inv-inline-parent', conversation_id: 'conversation-inv-inline-parent',
+      question: 'Preserve this parent across pane layouts.' });
+    const afterSubmit = [...investigationRequests];
+    await userEvent.click(canvas.getByRole('button', { name: '3 pane slots' }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Top' }));
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
+    expect(investigationRequests).toEqual(afterSubmit);
+    expect(pane.querySelector('[data-reply-task="inv-inline-parent"]')).toBe(host);
+    expect(host?.isConnected).toBe(true);
+    await expect(reply.getByRole('button', { name: 'Retry same request' })).toBeEnabled();
+  },
+};

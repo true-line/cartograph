@@ -4471,13 +4471,22 @@ details.investigation-section { display: block; }
 }
 
 .agent-chat-workspace { min-width: 0; }
-.agent-chat-docks { display: grid; gap: 1rem; min-width: 0; }
+.agent-chat-docks { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; min-width: 0; align-items: start; }
 .agent-chat-docks-2, .agent-chat-docks-3, .agent-chat-docks-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.agent-chat-conversation-heading { grid-column: 1 / -1; min-width: 0; }
+/* Retain conversation headings for assistive navigation without splitting grid rows. */
+.agent-chat-conversation-heading { position: absolute; inset: 0 auto auto 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.agent-chat-slot-wide { grid-column: 1 / -1; }
+.agent-chat-layout-controls { display: flex; flex-wrap: wrap; gap: 1rem; }
+.agent-chat-layout-controls button { margin: .25rem; }
+.agent-chat-layout-controls button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--control)); }
+.agent-chat-empty { min-height: 9rem; }
 .agent-chat-conversation-heading code { overflow-wrap: anywhere; }
 .agent-chat-pane header { display: grid; gap: .5rem; }
 .agent-chat-pane code { overflow-wrap: anywhere; }
-@media (max-width: 1100px) { .agent-chat-docks { grid-template-columns: 1fr; } }
+@media (max-width: 1100px) {
+  .agent-chat-docks { grid-template-columns: minmax(0, 1fr); }
+  .agent-chat-slot-wide { grid-column: auto; }
+}
 
 .quick-dispatch-inline .quick-dispatch-dialog { width: 100%; max-height: none; box-shadow: none; }
 
