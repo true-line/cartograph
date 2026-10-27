@@ -701,6 +701,17 @@ fn trusted_member(dotted: &str) -> Option<String> {
         | "flask_cors.decorator.cross_origin" => Some(CORS.into()),
         "flask_limiter.extension" => Some(LIMITER.into()),
         "flask.abort" | "flask.helpers" | "flask.helpers.abort" => Some(ABORT.into()),
+        "flask_login.current_user"
+        | "flask_login.utils"
+        | "flask_login.utils.current_user"
+        | "flask_login.utils._get_user" => Some(CURRENT_USER.into()),
+        "flask.redirect"
+        | "flask.helpers.redirect"
+        | "flask.make_response"
+        | "flask.helpers.make_response"
+        | "flask.render_template"
+        | "flask.templating"
+        | "flask.templating.render_template" => Some(RESPONSE.into()),
         _ => ["flask_limiter.Limiter", "flask_limiter.extension.Limiter"]
             .into_iter()
             .any(|class| {
@@ -716,7 +727,11 @@ fn trusted_member(dotted: &str) -> Option<String> {
 /// Canonical trusted names a write may replace.
 const CORS: &str = "flask_cors.cross_origin";
 const LIMITER: &str = "flask_limiter.Limiter";
-const ABORT: &str = "flask.abort";
+pub(crate) const ABORT: &str = "flask.abort";
+/// `flask_login.current_user`, or what it reads, replaced.
+pub(crate) const CURRENT_USER: &str = "flask_login.current_user";
+/// A Flask response helper other than `abort` replaced.
+pub(crate) const RESPONSE: &str = "flask.redirect";
 
 /// Record what binding target `target` writes: every trusted module member
 /// it reassigns, as in `flask_login.login_required = passthrough` (also in
@@ -805,6 +820,13 @@ fn setattr_guards(
             "shared_limit",
             "abort",
             "helpers",
+            "current_user",
+            "utils",
+            "_get_user",
+            "redirect",
+            "make_response",
+            "render_template",
+            "templating",
         ]
         .into_iter()
         .filter_map(|member| trusted_member(&format!("{module}.{member}")))
@@ -1045,7 +1067,7 @@ fn non_blocking(
 }
 
 /// Evidence sorted and deduplicated by span, truncated to the bound.
-fn bounded(mut evidence: Vec<EvidenceRef>) -> Vec<EvidenceRef> {
+pub(crate) fn bounded(mut evidence: Vec<EvidenceRef>) -> Vec<EvidenceRef> {
     evidence.sort_by(|a, b| {
         (&a.path, a.byte_start, a.byte_end).cmp(&(&b.path, b.byte_start, b.byte_end))
     });

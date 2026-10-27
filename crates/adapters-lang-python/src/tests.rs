@@ -6678,3 +6678,285 @@ admin.add_view(EarlyAdmin(User, None, endpoint="early"))
         ]
     );
 }
+
+#[test]
+fn flask_admin_login_check_proves_auth_required() {
+    // AC-0421 (#1216): a view whose `is_accessible` requires
+    // `flask_login.current_user.is_authenticated`, whose callback never
+    // returns `None`, on checked Flask-Admin and flask-login releases, is
+    // `required`; any unproven condition keeps `unknown`, naming it.
+    let app = r#"
+from flask import Flask, redirect, url_for
+from flask_admin import Admin, BaseView, expose
+from flask_admin.contrib.sqla import ModelView
+from flask_login import current_user
+
+def check():
+    return True
+
+class User:
+    pass
+
+class Guarded(BaseView):
+    def is_accessible(self):
+        """Logged-in admins only."""
+        return (current_user.is_authenticated and current_user.is_admin) and check()
+
+    def inaccessible_callback(self, name, **kwargs):
+        target = self.target()
+        return target or redirect(url_for("login"))
+
+class UserAdmin(ModelView, Guarded):
+    pass
+
+class Reports(Guarded):
+    @expose("/")
+    def index(self):
+        return "ok"
+
+app = Flask(__name__)
+admin = Admin(app, url="/back")
+admin.add_view(UserAdmin(User, None))
+admin.add_view(Reports(endpoint="reports"))
+"#;
+    let auth = "from flask_login import LoginManager\n\nlogin_manager = LoginManager()\n";
+    let lock = "[[package]]\nname = \"flask-admin\"\nversion = \"1.5.7\"\n\n[[package]]\nname = \"flask-login\"\nversion = \"0.5.0\"\n";
+    let rows = |app: &str, auth: &str, lock: Option<&str>| {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app.py", app);
+        write(dir.path(), "auth.py", auth);
+        if let Some(lock) = lock {
+            write(dir.path(), "uv.lock", lock);
+        }
+        let extraction = extract_dir(dir.path(), &id()).unwrap();
+        let mut rows = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Endpoint")
+            .map(|node| {
+                let auth = &node.props["auth"];
+                let detail = match auth["state"].as_str().unwrap() {
+                    "required" => {
+                        assert_eq!(auth["authenticated"], true);
+                        assert_eq!(
+                            auth["basis"],
+                            serde_json::json!(["flask_admin_is_accessible_requires_login"])
+                        );
+                        assert_eq!(auth["prov"]["confidence_tier"], "InferredStrong");
+                        let paths = auth["prov"]["evidence"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|evidence| evidence["path"].as_str().unwrap())
+                            .collect::<BTreeSet<_>>();
+                        assert_eq!(paths, BTreeSet::from(["app.py", "uv.lock"]));
+                        auth["guards"][0].as_str().unwrap().to_string()
+                    }
+                    _ => auth["reasons"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|reason| reason.as_str().unwrap())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                };
+                format!(
+                    "{} {} {} {detail}",
+                    node.props["method"].as_str().unwrap(),
+                    node.props["path"].as_str().unwrap(),
+                    auth["state"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows.dedup_by(|a, b| a.split(' ').skip(2).eq(b.split(' ').skip(2)));
+        rows
+    };
+    // One row per distinct auth outcome: the default index, then the views.
+    let guard = "sym:local/python-service@app.py#Guarded.is_accessible";
+    let open = "GET /back/ unknown flask_admin_default_allows_all".to_string();
+    assert_eq!(
+        rows(app, auth, Some(lock)),
+        vec![open.clone(), format!("GET /back/reports/ required {guard}")]
+    );
+    let unknown = |reason: &str| {
+        vec![
+            open.clone(),
+            format!("GET /back/reports/ unknown flask_admin_access_check:Guarded,{reason}"),
+        ]
+    };
+    let login = "return (current_user.is_authenticated and current_user.is_admin) and check()";
+    let callback = "return target or redirect(url_for(\"login\"))";
+    for (app, auth, lock, reason) in [
+        (
+            app.replace(login, "return current_user.is_authenticated or check()"),
+            auth.to_string(),
+            Some(lock.to_string()),
+            "flask_admin_is_accessible_not_login_check:Guarded",
+        ),
+        (
+            app.replace(
+                "def check():",
+                "current_user = None\n\ndef check():",
+            ),
+            auth.to_string(),
+            Some(lock.to_string()),
+            "flask_admin_is_accessible_not_login_check:Guarded",
+        ),
+        (
+            app.replace(
+                callback,
+                "if target:\n            return target\n        return redirect(url_for(\"login\"))",
+            ),
+            auth.to_string(),
+            Some(lock.to_string()),
+            "flask_admin_inaccessible_callback_may_return_none:Guarded",
+        ),
+        (
+            app.replace(callback, "return target and redirect(url_for(\"login\"))"),
+            auth.to_string(),
+            Some(lock.to_string()),
+            "flask_admin_inaccessible_callback_may_return_none:Guarded",
+        ),
+        (
+            app.replace(
+                "class UserAdmin",
+                "    is_accessible = check\n\nclass UserAdmin",
+            ),
+            auth.to_string(),
+            Some(lock.to_string()),
+            "flask_admin_hook_not_a_plain_method:is_accessible:Guarded",
+        ),
+        (
+            app.replace("class Guarded(BaseView):", "class Guarded:")
+                .replace("class Reports(Guarded):", "class Reports(BaseView, Guarded):"),
+            auth.to_string(),
+            Some(lock.to_string()),
+            "flask_admin_hook_outside_view_class:Guarded",
+        ),
+        (
+            app.to_string(),
+            format!("{auth}login_manager.anonymous_user = User\n"),
+            Some(lock.to_string()),
+            "flask_login_anonymous_user_replaced",
+        ),
+        (
+            app.to_string(),
+            format!("{auth}setattr(login_manager, \"anonymous_user\", object)\n"),
+            Some(lock.to_string()),
+            "flask_login_anonymous_user_replaced",
+        ),
+        (
+            app.to_string(),
+            format!("import builtins\n{auth}builtins.setattr(login_manager, \"anonymous_user\", object)\n"),
+            Some(lock.to_string()),
+            "flask_login_anonymous_user_replaced",
+        ),
+        (
+            app.to_string(),
+            format!("{auth}for login_manager.anonymous_user in [object]:\n    pass\n"),
+            Some(lock.to_string()),
+            "flask_login_anonymous_user_replaced",
+        ),
+        (
+            app.to_string(),
+            format!("{auth}with open(\"x\") as login_manager.anonymous_user:\n    pass\n"),
+            Some(lock.to_string()),
+            "flask_login_anonymous_user_replaced",
+        ),
+        (
+            app.replace(
+                "from flask_login import current_user",
+                "from custom import current_user\n\ndef other():\n    from flask_login import current_user\n    return current_user",
+            ),
+            auth.to_string(),
+            Some(lock.to_string()),
+            "flask_admin_is_accessible_not_login_check:Guarded",
+        ),
+        (
+            app.replace(
+                "from flask import Flask, redirect, url_for",
+                "from flask import Flask, url_for\nfrom custom import redirect\n\ndef other():\n    from flask import redirect\n    return redirect",
+            ),
+            auth.to_string(),
+            Some(lock.to_string()),
+            "flask_admin_inaccessible_callback_may_return_none:Guarded",
+        ),
+        (
+            app.to_string(),
+            "from app import Guarded\n\nGuarded.is_accessible = lambda self: True\n".to_string(),
+            Some(lock.to_string()),
+            "flask_admin_view_hook_replaced",
+        ),
+        (
+            app.to_string(),
+            "from app import Guarded\n\nsetattr(Guarded, \"is_accessible\", None)\n".to_string(),
+            Some(lock.to_string()),
+            "flask_admin_view_hook_replaced",
+        ),
+        (
+            app.to_string(),
+            "from app import Guarded\n\ndel Guarded.inaccessible_callback\n".to_string(),
+            Some(lock.to_string()),
+            "flask_admin_view_hook_replaced",
+        ),
+        (
+            app.to_string(),
+            "import flask_login\n\nflask_login.current_user = None\n".to_string(),
+            Some(lock.to_string()),
+            "flask_login_current_user_replaced",
+        ),
+        (
+            app.to_string(),
+            "import flask\n\nflask.redirect = print\n".to_string(),
+            Some(lock.to_string()),
+            "flask_response_helper_replaced",
+        ),
+        (
+            app.to_string(),
+            auth.to_string(),
+            Some(lock.replace("0.5.0", "0.2.11")),
+            "flask_login_version_not_modelled:0.2.11",
+        ),
+        (
+            app.to_string(),
+            auth.to_string(),
+            Some(lock.replace("flask-login", "flask-wtf")),
+            "flask_login_version_not_pinned",
+        ),
+    ] {
+        assert_eq!(rows(&app, &auth, lock.as_deref()), unknown(reason), "{reason}");
+    }
+    // A `_handle_view` on one view leaves the others proven.
+    let overriding = app.replace(
+        "    @expose(\"/\")",
+        "    def _handle_view(self, name, **kwargs):\n        return None\n\n    @expose(\"/\")",
+    );
+    assert_eq!(
+        rows(&overriding, auth, Some(lock)),
+        vec![
+            open.clone(),
+            "GET /back/reports/ unknown flask_admin_access_check:Guarded,flask_admin_view_overrides:_handle_view:Reports".to_string(),
+            format!("GET /back/user/ required {guard}"),
+        ]
+    );
+    // A hook bound by a class-body loop (or any other binding form) is that
+    // class's, and not a plain method, so it is never proven.
+    let looped = app.replace(
+        "    @expose(\"/\")",
+        "    for is_accessible in [check]:\n        pass\n\n    @expose(\"/\")",
+    );
+    assert_eq!(
+        rows(&looped, auth, Some(lock)),
+        vec![
+            open.clone(),
+            "GET /back/reports/ unknown flask_admin_access_check:Reports,flask_admin_hook_not_a_plain_method:is_accessible:Reports".to_string(),
+            format!("GET /back/user/ required {guard}"),
+        ]
+    );
+    // No pins: no library routes and no proof.
+    assert_eq!(
+        rows(app, auth, None),
+        vec!["GET /back/reports/ unknown flask_admin_access_check:Guarded,flask_admin_version_not_pinned".to_string()]
+    );
+}

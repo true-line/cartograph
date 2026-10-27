@@ -29,9 +29,11 @@
 //!
 //! Endpoints carry `mount: "flask_admin"`; they are Confirmed when the app is
 //! a recovered Flask application and InferredStrong when it is only an
-//! annotated parameter or another expression. Their `auth` is `unknown`: the
-//! view's `is_accessible` runs on every request, named by the class defining
-//! it, or `flask_admin_default_allows_all` when no repository class does.
+//! annotated parameter or another expression. Their `auth` is `required`
+//! when [`crate::flask_admin_access`] proves the view's `is_accessible`
+//! requires login, else `unknown`: the view's `is_accessible` runs on every
+//! request, named by the class defining it (with why it is not proven), or
+//! `flask_admin_default_allows_all` when no repository class does.
 //! Routes a library class generates (a model view's list/create/edit views,
 //! the default index page) are not in source and are one Gap per view. A
 //! non-literal argument, an unrecovered or unmodelled base, a repository
@@ -39,12 +41,13 @@
 //! `create_blueprint`, an index view passed other than as a constructor call,
 //! or an `Admin` never given an application is a named Gap, never a guess.
 
-use crate::auth_guards::{import_dotted, rebound, unparenthesize};
+use crate::auth_guards::{self, bounded, import_dotted, rebound, unparenthesize};
+use crate::flask_admin_access::{self as access, Hook};
 use crate::flask_admin_library::{self as library, Pins};
 use crate::{
     Extraction, FileCx, Framework, ImportBinding, MountParent, ReceiverDef,
     enclosing_function_node, literal_string, module_binding, module_file, mount_parent,
-    named_arguments, parameter_annotation, prov_from, push_endpoint, scope_binding,
+    named_arguments, parameter_annotation, prov_from, push_endpoint, scope_binding, symbol_id,
 };
 use core_graph::Node;
 use core_prov::{ConfidenceTier, EvidenceRef};
@@ -76,6 +79,10 @@ pub(crate) struct Facts {
     exposed: Vec<Exposed>,
     sites: Vec<SiteCall>,
     views: Vec<Registration>,
+    /// Writes of an `anonymous_user` attribute.
+    anonymous_user: Vec<EvidenceRef>,
+    /// Writes of a view hook attribute outside a class body's definitions.
+    hook_writes: Vec<EvidenceRef>,
 }
 
 impl Facts {
@@ -84,6 +91,8 @@ impl Facts {
         self.exposed.extend(other.exposed);
         self.sites.extend(other.sites);
         self.views.extend(other.views);
+        self.anonymous_user.extend(other.anonymous_user);
+        self.hook_writes.extend(other.hook_writes);
     }
 }
 
@@ -93,6 +102,8 @@ struct ViewClass {
     bases: Vec<Base>,
     /// Every name the class body binds: methods, nested classes, attributes.
     defines: BTreeSet<String>,
+    /// The proofs of the `is_accessible` and `inaccessible_callback` it binds.
+    hooks: BTreeMap<String, Hook>,
 }
 
 #[derive(Debug, Clone)]
@@ -321,19 +332,44 @@ pub(crate) fn collect(
             }
         }
         let mut defines = BTreeSet::new();
+        let mut hooks = BTreeMap::new();
         if let Some(body) = class.child_by_field_name("body") {
             class_names(cx, body, &mut defines);
+        }
+        // Every binding form counts for a hook, not only those `class_names` reads.
+        for hook in access::HOOKS {
+            if access::binds(cx, class, hook) {
+                defines.insert(hook.to_string());
+            }
+        }
+        for hook in ["is_accessible", "inaccessible_callback"] {
+            if defines.contains(hook) {
+                let proof = access::hook(cx, root, class, cx.text(&name), hook, bindings);
+                hooks.insert(hook.to_string(), proof);
+            }
         }
         out.flask_admin.classes.push(ViewClass {
             key: (cx.path.to_string(), cx.text(&name).to_string()),
             bases,
             defines,
+            hooks,
         });
     }
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut walk = node.walk();
         stack.extend(node.named_children(&mut walk));
+        let writes = |names: &[&str]| {
+            access::binding_target(node)
+                .is_some_and(|target| access::names_attribute(cx, target, names, true))
+                || access::names_attribute(cx, node, names, false)
+        };
+        if writes(&["anonymous_user"]) {
+            out.flask_admin.anonymous_user.push(cx.evidence(&node));
+        }
+        if writes(access::HOOKS) {
+            out.flask_admin.hook_writes.push(cx.evidence(&node));
+        }
         match node.kind() {
             "assignment" => {
                 if let (Some(left), Some(right)) = (
@@ -757,6 +793,9 @@ struct Chain<'f> {
     exposed: Vec<&'f Exposed>,
     /// The first class in the chain defining `is_accessible`.
     access: Option<String>,
+    /// The chain's login proof: its spans and `is_accessible`'s symbol, or
+    /// why there is none.
+    login: Result<(Vec<EvidenceRef>, Key), String>,
     /// A repository class owns `index`: it defines it before any library base
     /// that does.
     defines_index: bool,
@@ -863,13 +902,15 @@ fn chain<'f>(
                 kind: *kind,
                 exposed: Vec::new(),
                 access: None,
+                login: Err("flask_admin_default_allows_all".into()),
                 defines_index: false,
                 defined: BTreeSet::new(),
             });
         }
         Base::Opaque(text) => return Err(format!("flask_admin_view_class_not_modelled:{text}")),
     };
-    let mro = linearize(key, text, 0, classes, &mut HashMap::new())?;
+    let mut memo = HashMap::new();
+    let mro = linearize(key, text, 0, classes, &mut memo)?;
     let (mut order, mut libraries) = (Vec::new(), Vec::new());
     for entry in mro.iter().copied() {
         match entry {
@@ -918,10 +959,12 @@ fn chain<'f>(
             }
         }
     }
+    let login = login(&order, &memo);
     Ok(Chain {
         name: order[0].key.1.clone(),
         kind,
         exposed: found,
+        login,
         access: order
             .iter()
             .find(|class| class.defines.contains("is_accessible"))
@@ -929,6 +972,88 @@ fn chain<'f>(
         defines_index: defined.contains("index"),
         defined,
     })
+}
+
+/// The repository side of [`access`]'s proof over a view's repository
+/// classes in C3 order, `memo` holding each one's own linearization.
+fn login(
+    order: &[&ViewClass],
+    memo: &HashMap<Key, Vec<Mro<'_>>>,
+) -> Result<(Vec<EvidenceRef>, Key), String> {
+    for class in order {
+        if let Some(name) = ["_handle_view", "_run_view"]
+            .iter()
+            .find(|name| class.defines.contains(**name))
+        {
+            return Err(format!("flask_admin_view_overrides:{name}:{}", class.key.1));
+        }
+        // A class that is not a view may follow `BaseView`, whose hooks win.
+        let view = memo
+            .get(&class.key)
+            .is_some_and(|line| line.iter().any(|entry| matches!(entry, Mro::Library(_))));
+        if !view
+            && access::HOOKS
+                .iter()
+                .any(|name| class.defines.contains(*name))
+        {
+            return Err(format!(
+                "flask_admin_hook_outside_view_class:{}",
+                class.key.1
+            ));
+        }
+    }
+    let mut evidence = Vec::new();
+    let mut guard = None;
+    for hook in ["is_accessible", "inaccessible_callback"] {
+        let Some(class) = order.iter().find(|class| class.defines.contains(hook)) else {
+            if hook == "is_accessible" {
+                return Err("flask_admin_default_allows_all".into());
+            }
+            continue;
+        };
+        match class.hooks.get(hook) {
+            Some(Hook::Proven(spans)) => evidence.extend(spans.iter().cloned()),
+            Some(Hook::Unproven(reason)) => return Err(reason.clone()),
+            None => {
+                return Err(format!(
+                    "flask_admin_hook_not_a_plain_method:{hook}:{}",
+                    class.key.1
+                ));
+            }
+        }
+        guard.get_or_insert_with(|| (class.key.0.clone(), format!("{}.{hook}", class.key.1)));
+    }
+    let guard = guard.ok_or_else(|| "flask_admin_default_allows_all".to_string())?;
+    Ok((evidence, guard))
+}
+
+/// A view's `auth`: proven `required`, or `unknown` with its reasons.
+enum Auth {
+    Required {
+        guard: String,
+        evidence: Vec<EvidenceRef>,
+    },
+    Unknown(Vec<String>),
+}
+
+impl Auth {
+    fn props(&self, handler: &str) -> serde_json::Value {
+        match self {
+            Auth::Required { guard, evidence } => serde_json::json!({
+                "state": "required",
+                "authenticated": true,
+                "guards": [guard],
+                "basis": ["flask_admin_is_accessible_requires_login"],
+                "assumptions": ["anonymous_user_not_named_by_computed_or_escaped_string"],
+                "prov": prov_from(
+                    bounded(evidence.clone()),
+                    ConfidenceTier::InferredStrong,
+                    &format!("Auth of {handler}"),
+                ),
+            }),
+            Auth::Unknown(reasons) => serde_json::json!({ "state": "unknown", "reasons": reasons }),
+        }
+    }
 }
 
 /// A literal endpoint, or the default when Flask-Admin's `if endpoint:` is false.
@@ -1022,6 +1147,22 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, root: &Path, commit: &st
         return;
     }
     let pins = library::pins(root, repo, commit);
+    // Conditions of the login proof that do not depend on the view.
+    let patched = |name: &str| out.patched_guards.iter().any(|patched| patched == name);
+    let global = match (&pins, &library::login_pins(root, repo, commit)) {
+        _ if patched(auth_guards::CURRENT_USER) => Err("flask_login_current_user_replaced".into()),
+        _ if patched(auth_guards::ABORT) || patched(auth_guards::RESPONSE) => {
+            Err("flask_response_helper_replaced".into())
+        }
+        _ if !facts.anonymous_user.is_empty() => Err("flask_login_anonymous_user_replaced".into()),
+        _ if !facts.hook_writes.is_empty() => Err("flask_admin_view_hook_replaced".into()),
+        (Pins::Checked(admin), Pins::Checked(login)) => {
+            Ok(admin.iter().chain(login).cloned().collect::<Vec<_>>())
+        }
+        (Pins::Absent, _) => Err("flask_admin_version_not_pinned".to_string()),
+        (Pins::Unchecked(reason), _) | (_, Pins::Unchecked(reason)) => Err(reason.clone()),
+        (_, Pins::Absent) => Err("flask_login_version_not_pinned".to_string()),
+    };
     let classes: HashMap<Key, &ViewClass> = facts
         .classes
         .iter()
@@ -1166,7 +1307,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, root: &Path, commit: &st
                                 &endpoint,
                                 &evidence,
                                 confidence,
-                                "flask_admin_default_allows_all",
+                                &Auth::Unknown(vec!["flask_admin_default_allows_all".into()]),
                             );
                         }
                         (Pins::Checked(_), Err(reason)) => {
@@ -1267,10 +1408,25 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, root: &Path, commit: &st
                 }
             };
             let prefix = view_url(&admin_url, url, &endpoint, is_index);
-            let reason = chain.access.as_ref().map_or_else(
-                || "flask_admin_default_allows_all".to_string(),
-                |class| format!("flask_admin_access_check:{class}"),
-            );
+            let auth = match (&chain.access, &chain.login, &global) {
+                (Some(_), Ok((spans, guard)), Ok(pinned)) => {
+                    let mut evidence = spans.clone();
+                    evidence.extend(pinned.iter().cloned());
+                    Auth::Required {
+                        guard: symbol_id(repo, &guard.0, &guard.1),
+                        evidence,
+                    }
+                }
+                (None, _, _) => Auth::Unknown(vec!["flask_admin_default_allows_all".into()]),
+                (Some(class), login, global) => {
+                    let mut reasons = vec![format!("flask_admin_access_check:{class}")];
+                    if let Err(reason) = login.as_ref().map(|_| ()).and(global.as_ref().map(|_| ()))
+                    {
+                        reasons.push(reason.clone());
+                    }
+                    Auth::Unknown(reasons)
+                }
+            };
             for exposed in &chain.exposed {
                 let (Some(rule), Some(methods)) = (&exposed.url, &exposed.methods) else {
                     emit.gap(
@@ -1310,8 +1466,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, root: &Path, commit: &st
                         Some(&name),
                     );
                     if let Some(node) = emit.out.nodes.last_mut() {
-                        node.props["auth"] =
-                            serde_json::json!({ "state": "unknown", "reasons": [reason] });
+                        node.props["auth"] = auth.props(&exposed.handler);
                     }
                 }
             }
@@ -1327,7 +1482,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, root: &Path, commit: &st
                     &endpoint,
                     &evidence,
                     confidence,
-                    &reason,
+                    &auth,
                 );
             }
         }
@@ -1348,7 +1503,7 @@ impl Emit<'_> {
         endpoint: &str,
         evidence: &[EvidenceRef],
         confidence: ConfidenceTier,
-        auth: &str,
+        auth: &Auth,
     ) {
         let confidence = match confidence {
             ConfidenceTier::Confirmed => ConfidenceTier::InferredStrong,
@@ -1380,8 +1535,7 @@ impl Emit<'_> {
                     Some(&name),
                 );
                 if let Some(node) = self.out.nodes.last_mut() {
-                    node.props["auth"] =
-                        serde_json::json!({ "state": "unknown", "reasons": [auth] });
+                    node.props["auth"] = auth.props(&handler);
                     node.props["handler_origin"] = "library".into();
                 }
             }
@@ -1406,6 +1560,22 @@ pub(crate) fn retarget(extraction: &mut Extraction, commit: &str) {
         if let Index::View(view) = &mut call.index {
             view.evidence.commit_sha = commit.into();
         }
+    }
+    for class in &mut facts.classes {
+        for hook in class.hooks.values_mut() {
+            if let Hook::Proven(spans) = hook {
+                for span in spans {
+                    span.commit_sha = commit.into();
+                }
+            }
+        }
+    }
+    for span in facts
+        .anonymous_user
+        .iter_mut()
+        .chain(&mut facts.hook_writes)
+    {
+        span.commit_sha = commit.into();
     }
     for registration in &mut facts.views {
         registration.evidence.commit_sha = commit.into();
