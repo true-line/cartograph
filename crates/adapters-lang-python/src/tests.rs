@@ -6571,6 +6571,11 @@ plain = Admin(app, url="/plain", endpoint="plain")
             "flask_admin_version_not_modelled:1.6.0",
         ),
         (
+            "[[ \"package\" ]]\n'name' = \"flask-admin\"\n\"version\" = \"1.6.0\"\n",
+            "flask-admin==1.5.8\n",
+            "flask_admin_version_not_modelled:1.6.0",
+        ),
+        (
             "[[package]]\nname = 'flask-admin'\nversion = \"1.6.0\"\n",
             "flask-admin==1.5.8\n",
             "flask_admin_version_not_exact:uv.lock",

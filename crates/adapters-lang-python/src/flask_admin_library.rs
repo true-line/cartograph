@@ -168,7 +168,7 @@ fn package_table_pins(text: &str) -> Vec<(Option<String>, usize, usize)> {
         let code = strip_comment(line).trim();
         if code.starts_with('[') {
             close(table.take(), &mut found);
-            if code.replace(' ', "") == "[[package]]" {
+            if code.replace([' ', '\t', '"', '\''], "") == "[[package]]" {
                 table = Some(Table {
                     start,
                     ..Table::default()
@@ -182,7 +182,7 @@ fn package_table_pins(text: &str) -> Vec<(Option<String>, usize, usize)> {
         let Some((key, value)) = code.split_once('=') else {
             continue;
         };
-        match key.trim().trim_matches('"') {
+        match toml_key(key) {
             "name" => table.names.push(toml_string(value)),
             "version" => table
                 .versions
@@ -194,13 +194,28 @@ fn package_table_pins(text: &str) -> Vec<(Option<String>, usize, usize)> {
     found
 }
 
-/// A line without its `#` comment, outside a basic string.
+/// A bare, `"basic"` or `'literal'` key, unquoted.
+fn toml_key(key: &str) -> &str {
+    let key = key.trim();
+    for quote in ['"', '\''] {
+        if let Some(inner) = key
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    key
+}
+
+/// A line without its `#` comment, outside a basic or literal string.
 fn strip_comment(line: &str) -> &str {
-    let mut quoted = false;
+    let mut quote = None;
     for (index, c) in line.char_indices() {
-        match c {
-            '"' => quoted = !quoted,
-            '#' if !quoted => return &line[..index],
+        match (c, quote) {
+            ('"' | '\'', None) => quote = Some(c),
+            (c, Some(open)) if c == open => quote = None,
+            ('#', None) => return &line[..index],
             _ => {}
         }
     }
