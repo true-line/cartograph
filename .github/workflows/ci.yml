@@ -115,7 +115,7 @@ jobs:
     name: Docs & traceability
     needs: [policy, merge-evidence, preflight-evidence]
     if: >-
-      always() && needs.policy.result == 'success' &&
+      !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || vars.LINUX_RUNNER || '["self-hosted", "Linux", "X64"]') }}
@@ -152,7 +152,7 @@ jobs:
     name: Rust
     needs: [policy, merge-evidence, preflight-evidence]
     if: >-
-      always() && needs.policy.result == 'success' &&
+      !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     # The organisation's Linux runner has passwordless sudo, so this lane
@@ -269,7 +269,7 @@ jobs:
     name: Windows job ownership
     needs: [policy, merge-evidence, preflight-evidence]
     if: >-
-      always() && needs.policy.result == 'success' &&
+      !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["windows-2022"]' || vars.WINDOWS_RUNNER || '["self-hosted", "Windows", "X64"]') }}
@@ -339,7 +339,7 @@ jobs:
     name: License & supply-chain
     needs: [policy, merge-evidence, preflight-evidence]
     if: >-
-      always() && needs.policy.result == 'success' &&
+      !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || vars.LINUX_RUNNER || '["self-hosted", "Linux", "X64"]') }}
@@ -424,7 +424,7 @@ jobs:
     name: Workflow security audit
     needs: [policy, merge-evidence, preflight-evidence]
     if: >-
-      always() && needs.policy.result == 'success' &&
+      !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || vars.LINUX_RUNNER || '["self-hosted", "Linux", "X64"]') }}
@@ -461,7 +461,7 @@ jobs:
     name: Frontend
     needs: [policy, merge-evidence, preflight-evidence]
     if: >-
-      always() && needs.policy.result == 'success' &&
+      !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || vars.LINUX_RUNNER || '["self-hosted", "Linux", "X64"]') }}
@@ -527,7 +527,7 @@ jobs:
     name: Advanced CodeQL
     needs: [policy, merge-evidence, preflight-evidence]
     if: >-
-      always() && needs.policy.result == 'success' &&
+      !cancelled() && needs.policy.result == 'success' &&
       (needs.policy.outputs.run_post_merge == 'true' || needs.policy.outputs.run_full == 'true')
     permissions:
       actions: read
@@ -540,7 +540,7 @@ jobs:
     name: Workflow runtime policy
     needs: [policy, merge-evidence, preflight-evidence]
     if: >-
-      always() && needs.policy.result == 'success' &&
+      !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || vars.LINUX_RUNNER || '["self-hosted", "Linux", "X64"]') }}
@@ -575,7 +575,7 @@ jobs:
     name: Complete suite
     needs: [policy, merge-evidence, preflight-evidence, docs, rust, windows-job-ownership, compliance, zizmor, frontend, codeql, workflow-runtime]
     if: >-
-      always() && needs.policy.result == 'success' &&
+      !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || vars.LINUX_RUNNER || '["self-hosted", "Linux", "X64"]') }}
@@ -624,7 +624,9 @@ jobs:
   gate:
     name: CI
     needs: [policy, merge-evidence, preflight-evidence, complete, codeql, post-merge]
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    # A superseded run must release its per-PR
+    # concurrency slot instead of waiting for a runner (#1230).
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || vars.LINUX_RUNNER || '["self-hosted", "Linux", "X64"]') }}
     timeout-minutes: 10
     steps:

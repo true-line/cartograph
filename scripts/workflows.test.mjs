@@ -195,6 +195,15 @@ test('complete suite retains every existing Cartograph gate', () => {
   }
 });
 
+test('superseded runs cancel every job, so the current head never queues behind them (#1230)', () => {
+  const workflow = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
+  // always() keeps a job of a cancelled run waiting for a runner, holding the
+  // per-PR group; only the evidence step of a manual dispatch may use it.
+  const uses = [...workflow.matchAll(/always\(\)/gu)].map(({ index }) => workflow.slice(workflow.lastIndexOf('\n', index) + 1, workflow.indexOf('\n', index)));
+  assert.deepEqual(uses, ["        if: always() && github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance"]);
+  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 10);
+});
+
 test('Windows ownership tests are required by the same exact-SHA complete-suite policy', () => {
   // AC-0157 / AC-0159: native lock and process-exit coverage must not become
   // optional, silently skipped, or detached from the governed validation SHA.
