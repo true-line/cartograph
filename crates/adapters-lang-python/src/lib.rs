@@ -652,6 +652,30 @@ fn target_binds(cx: &FileCx<'_>, target: TsNode<'_>, name: &str) -> bool {
     }
 }
 
+/// Whether a `match` pattern node captures `name` itself: a bare name
+/// (`case V:`, `C(key=V)`, `[V, *V]`), not a class (`case V():`), a dotted
+/// value (`case V.X:`) or a keyword. Nested patterns are separate nodes, and
+/// `as` aliases are matched as `as_pattern`.
+fn captures(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+    if name == "_" {
+        return false;
+    }
+    let mut walk = node.walk();
+    node.named_children(&mut walk)
+        .any(|child| match child.kind() {
+            "dotted_name" if matches!(node.kind(), "case_pattern" | "keyword_pattern") => {
+                child.named_child_count() == 1 && cx.text(&child) == name
+            }
+            "identifier" => {
+                matches!(
+                    node.kind(),
+                    "splat_pattern" | "list_pattern" | "tuple_pattern"
+                ) && cx.text(&child) == name
+            }
+            _ => false,
+        })
+}
+
 /// Whether any identifier in `node` is spelled `name`.
 fn mentions(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
     if node.kind() == "identifier" {
@@ -753,7 +777,8 @@ fn collect_binding<'t>(
                     .any(|target| target_binds(cx, target, name))
             }
             "import_statement" | "import_from_statement" => import_binds(cx, node, name),
-            "case_pattern" => mentions(cx, node, name),
+            "case_pattern" | "keyword_pattern" | "splat_pattern" | "list_pattern"
+            | "tuple_pattern" => captures(cx, node, name),
             _ => false,
         };
         if binds {

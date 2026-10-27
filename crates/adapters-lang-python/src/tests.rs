@@ -6321,6 +6321,22 @@ def register_match(choice):
     match choice:
         case Imp:
             admin.add_view(Imp(endpoint="captured"))
+
+def register_keyword(choice):
+    match choice:
+        case dict(key=Imp):
+            admin.add_view(Imp(endpoint="keyword"))
+
+# A class pattern and a value pattern only read `Imp`.
+def register_class(choice):
+    match choice:
+        case Imp():
+            admin.add_view(Imp(endpoint="classpat"))
+
+def register_value(choice):
+    match choice:
+        case Imp.X:
+            admin.add_view(Imp(endpoint="valuepat"))
 "#;
     let views = r#"
 from flask_admin import BaseView, expose
@@ -6384,9 +6400,13 @@ admin.add_view(Bad(endpoint="bad"))
     assert_eq!(
         endpoints,
         vec![
+            "GET /admin/classpat/ classpat.index Confirmed sym:local/python-service@app/views.py#Imp.index"
+                .to_string(),
             "GET /admin/imp/ imp.index Confirmed sym:local/python-service@app/views.py#Imp.index"
                 .to_string(),
             format!("GET /admin/v/ v.index Confirmed {}", sym("V.index")),
+            "GET /admin/valuepat/ valuepat.index Confirmed sym:local/python-service@app/views.py#Imp.index"
+                .to_string(),
             format!("GET /d/ d.index Confirmed {}", sym("Root.index")),
             // C3: Diamond, Left, Right, Root — Right's override wins.
             format!("GET /d/right d.page Confirmed {}", sym("Right.page")),
@@ -6404,7 +6424,9 @@ admin.add_view(Bad(endpoint="bad"))
             "flask_admin_view_base_not_modelled:BaseView  app/rebase.py",
             // An assignment, not the class it names.
             "flask_admin_view_class_not_modelled:Alias  app/shadow.py",
-            // `Imp = V` in `register_local`, and `case Imp:` in `register_match`.
+            // `Imp = V` in `register_local`, and the captures `case Imp:` and
+            // `key=Imp`.
+            "flask_admin_view_class_not_modelled:Imp  app/shadow.py",
             "flask_admin_view_class_not_modelled:Imp  app/shadow.py",
             "flask_admin_view_class_not_modelled:Imp  app/shadow.py",
             "flask_admin_view_class_not_modelled:Twice  app/shadow.py",
