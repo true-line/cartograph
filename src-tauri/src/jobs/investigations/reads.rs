@@ -114,6 +114,8 @@ struct HistoryProjectionPage<T> {
     next_cursor: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     answer_match_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    name_match_ids: Vec<String>,
 }
 
 impl JobStore {
@@ -207,6 +209,7 @@ impl JobStore {
             items: page.items,
             next_cursor: page.next_cursor,
             answer_match_ids: page.answer_match_ids,
+            name_match_ids: page.name_match_ids,
         })
     }
 
@@ -282,6 +285,7 @@ impl JobStore {
         }
         let mut items = Vec::new();
         let mut answer_match_ids = Vec::new();
+        let mut name_match_ids = Vec::new();
         let mut remaining = 256 * 1024 - 4096;
         let mut before = selection.before;
         let mut more = false;
@@ -301,9 +305,14 @@ impl JobStore {
             // Additional answer matching is only needed for actual search metadata misses.
             // Existing task validation (including its saved-result reads) is unchanged.
             // Each result and its validation owners are released before the next task.
-            let answer_match = if let Some(query) = query {
+            let (answer_match, name_match) = if let Some(query) = query {
                 if history_summary_matches(summary, query)? {
-                    false
+                    (false, false)
+                } else if ascii_case_insensitive_contains(
+                    task.detail.specialist.name.as_bytes(),
+                    query,
+                ) {
+                    (false, true)
                 } else {
                     let matches = load_result(&tx, &task)?.is_some_and(|result| {
                         result.narrative.as_ref().is_some_and(|message| {
@@ -322,10 +331,10 @@ impl JobStore {
                         }
                         continue;
                     }
-                    true
+                    (true, false)
                 }
             } else {
-                false
+                (false, false)
             };
             if query.is_some() && items.len() == 50 {
                 more = true;
@@ -334,7 +343,7 @@ impl JobStore {
             let item = project(task)?;
             let size = encode(&item, 4096)?.len()
                 + 1
-                + if answer_match {
+                + if answer_match || name_match {
                     encode(&id, 4096)?.len() + 1
                 } else {
                     0
@@ -348,6 +357,8 @@ impl JobStore {
             items.push(item);
             if answer_match {
                 answer_match_ids.push(id);
+            } else if name_match {
+                name_match_ids.push(id);
             }
         }
         let next_cursor = if more {
@@ -368,6 +379,7 @@ impl JobStore {
             items,
             next_cursor,
             answer_match_ids,
+            name_match_ids,
         };
         encode(&page, 256 * 1024)?;
         tx.commit()?;

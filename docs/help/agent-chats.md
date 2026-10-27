@@ -82,7 +82,7 @@ or a streaming assistant reply.
 ## Saved answer search
 
 Saved history search includes accepted final narrative text, finding titles and
-statements alongside questions and specialist IDs. **Answer match** marks an answer-only hit. No
+statements alongside questions, saved specialist display names and specialist IDs. **Answer match** marks an answer-only hit. No
 answer or source excerpt is returned in history; open the task for its validated
 final message, findings and citations. Rejected responses and raw source are not searched.
 Historical tasks without a narrative still match their existing saved fields.
@@ -96,3 +96,5 @@ notices use the default top-right position.
 Spec Writer @2 can return a saved, cited final message with its proposed design. Its text is provider-authored and admitted with the result, labeled T3 / InferredWeak. Insufficient evidence has no invented message. This is final output, not token streaming; follow-ups still receive only the bounded selected-parent result.
 
 Gap Triager @2 can return a cited final next-step message grounded in recorded gaps and admitted evidence. Its saved proposed-design message is T3 / InferredWeak; insufficient evidence supplies no invented narrative. Gap Triager @1 history remains readable. Follow-ups retain the existing bounded selected-parent result, not the whole conversation.
+
+**Name match** identifies a task found by its validated saved specialist display name, including a pending task without an answer. Names are not inferred from the current catalog or guessed aliases. Search remains literal and ASCII case-insensitive.

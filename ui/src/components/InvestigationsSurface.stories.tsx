@@ -147,7 +147,8 @@ export const SearchesPersistedHistory: Story = {
     mockIPC((command, args) => {
       const search = (args as { search?: unknown } | undefined)?.search;
       if (command === 'list_investigations') return { items: search ? [matching] : [matching, nonmatching], next_cursor: null,
-        ...(search === 'guarded exit' ? { answer_match_ids: [matching.investigation_id] } : {}) };
+        ...(search === 'guarded exit' ? { answer_match_ids: [matching.investigation_id] } : {}),
+        ...(search === 'Domain analyst' ? { name_match_ids: [matching.investigation_id] } : {}) };
       if (command === 'get_investigation') return matching;
       if (command === 'investigation_result') return investigationResult(matching.investigation_id);
       if (command === 'investigation_events') return { investigation_id: matching.investigation_id,
@@ -1239,6 +1240,20 @@ export const SavedAnswerHistorySearch: Story = {
     await userEvent.type(canvas.getByRole('searchbox'), 'guarded exit');
     await userEvent.click(canvas.getByRole('button', { name: 'Search history' }));
     await expect(canvas.getByText('Answer match')).toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: /Legacy needle in a saved question/ }));
+    await expect(await canvas.findByText('The inspected callable has a guarded exit. Its broader inventory policy remains unresolved.')).toBeVisible();
+  },
+};
+
+// AC-0408: both history consumers label saved-name evidence honestly.
+export const SavedSpecialistNameSearch: Story = {
+  ...SearchesPersistedHistory,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.type(canvas.getByRole('searchbox'), 'Domain analyst');
+    await userEvent.click(canvas.getByRole('button', { name: 'Search history' }));
+    await expect(canvas.getByText('Name match')).toBeVisible();
+    await expect(canvas.queryByText('Answer match')).not.toBeInTheDocument();
     await userEvent.click(canvas.getByRole('button', { name: /Legacy needle in a saved question/ }));
     await expect(await canvas.findByText('The inspected callable has a guarded exit. Its broader inventory policy remains unresolved.')).toBeVisible();
   },

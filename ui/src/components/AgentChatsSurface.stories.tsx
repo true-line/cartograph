@@ -393,6 +393,8 @@ function savedAnswersFixture(gapTriager = false) {
         return new Promise((resolve) => { releaseSavedAnswerCitation = () => resolve({ investigation_id: args.investigationId,
           citation_id: args.citationId, citation: investigationCitations[0], status: 'available', text: `Retained source for ${args.investigationId}` }); });
       }
+      if (command === 'list_investigations' && args.search === 'Domain analyst') return {
+        items: [details[1]], next_cursor: null, name_match_ids: [details[1].investigation_id] };
       if (command === 'list_investigations' && args.search === 'caller limit') return {
         items: [details[0]], next_cursor: null, answer_match_ids: [details[0].investigation_id] };
       if (command === 'list_investigations') return { items: details, next_cursor: null,
@@ -642,6 +644,23 @@ export const GapTriagerCitedFinalMessage: Story = {
     await waitFor(() => expect(savedAnswerCitationReads).toEqual(['answer-a:C1']));
     releaseSavedAnswerCitation?.();
     await expect(await pane.findByText('Retained source for answer-a')).toBeVisible();
+    await expect(useInvestigationStore.getState().composer.question).toBe('Keep composer draft');
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
+  },
+};
+
+// AC-0408: name-only matches use the real coordinator and exact serialized dock read.
+export const SavedSpecialistNameSearch: Story = {
+  ...SavedAnswersStayWithTheirPane,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const pending = useInvestigationStore.getState().pendingStart;
+    await userEvent.type(canvas.getByRole('searchbox'), 'Domain analyst');
+    await userEvent.click(canvas.getByRole('button', { name: 'Search history' }));
+    await expect(canvas.getByText('Name match')).toBeVisible();
+    await expect(canvas.queryByText('Answer match')).not.toBeInTheDocument();
+    await userEvent.click(canvas.getByRole('button', { name: /Question for answer-b/ }));
+    await expect(await within(await canvas.findByRole('region', { name: 'Saved chat answer-b' })).findByText('Saved finding only for answer-b')).toBeVisible();
     await expect(useInvestigationStore.getState().composer.question).toBe('Keep composer draft');
     await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
   },
