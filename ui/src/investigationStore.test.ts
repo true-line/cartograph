@@ -1994,3 +1994,16 @@ it('retains pending name hits across status and active-filter refresh, rejecting
   expect(useInvestigationStore.getState().historyError).toBeTruthy();
   expect(useInvestigationStore.getState().historyNameMatchIds).toEqual([]);
 });
+
+// AC-0409: the palette changes shared scope and query atomically, without a second read.
+it('searches all saved history in one request while ordinary searches preserve active scope', async () => {
+  const calls: unknown[] = [];
+  mockIPC((command, args) => { expect(command).toBe('list_investigations'); calls.push(args); return { items: [], next_cursor: null }; });
+  useInvestigationStore.setState({ historyActiveOnly: true, historyNameMatchIds: ['old'], historyAnswerMatchIds: ['old'], nextCursor: 'old' });
+  await useInvestigationStore.getState().searchHistory('saved name', { activeOnly: false });
+  expect(calls).toEqual([{ search: 'saved name' }]);
+  expect(useInvestigationStore.getState()).toMatchObject({ historyActiveOnly: false, historyNameMatchIds: [], historyAnswerMatchIds: [], nextCursor: null });
+  useInvestigationStore.setState({ historyActiveOnly: true });
+  await useInvestigationStore.getState().searchHistory('ordinary');
+  expect(calls[1]).toEqual({ search: 'ordinary', activeOnly: true });
+});

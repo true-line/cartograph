@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useAgentChatDockStore, type ChatTurn } from '../agentChatDockStore';
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
+import { AgentChatSearchPalette } from './AgentChatSearchPalette';
 import { InvestigationFindings } from './InvestigationFindings';
 import { InvestigationActivity } from './InvestigationActivity';
 import { InvestigationChatTranscript } from './InvestigationChatTranscript';
@@ -31,6 +32,20 @@ function statusLabel(status: string) {
  * existing investigation coordinator and its task/result binding checks. */
 export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost, onCancelFollowUp, preparingFollowUpTask, followUpError, noticeCorner, onNoticeCornerChange }: AgentChatsSurfaceProps) {
   const [searchText, setSearchText] = useState(state.historySearch);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const openSearch = useCallback(() => {
+    if (!document.querySelector('[role="dialog"][aria-modal="true"], dialog[open]')) setSearchOpen(true);
+  }, []);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'f' &&
+          !document.querySelector('[role="dialog"][aria-modal="true"], dialog[open]')) {
+        event.preventDefault(); openSearch();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [openSearch]);
   const dock = useAgentChatDockStore();
   const [conversation, setConversation] = useState<ChatTurn | null>(null);
   const closeConversation = state.closeConversation;
@@ -81,9 +96,12 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
   };
 
   return <section className="agent-chats-surface" aria-label="Agent Chats">
+    {searchOpen && <AgentChatSearchPalette state={state} docks={dock.docks} query={searchText} onQuery={setSearchText}
+      onClose={() => setSearchOpen(false)} onOpen={dock.open} />}
     <header className="agent-chats-heading">
       <div><h2>Agent Chats</h2>
         <p className="muted">Dock up to four saved task chats and open their findings.</p></div>
+      <button type="button" className="secondary-button" onClick={openSearch}>Search open + saved chats</button>
       <button type="button" className="secondary-button" disabled={state.historyLoading}
         onClick={() => { void state.loadHistory(); if (dock.focusedTask) dock.open(dock.focusedTask); }}>Refresh saved chats</button>
     </header>

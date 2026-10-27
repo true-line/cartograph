@@ -4,8 +4,8 @@ import type { InvestigationChat, InvestigationSummary, InvestigationResult, Inve
 
 export type ChatTurn = Pick<InvestigationSummary, 'investigation_id' | 'conversation_id' | 'parent_id' |
   'question' | 'specialist_id' | 'status' | 'updated_at' | 'revision'>;
-interface ChatDock {
-  chat: InvestigationChat; question: string; turn: ChatTurn; scope: InvestigationScope;
+export interface ChatDock {
+  chat: InvestigationChat; question: string; specialistName: string; turn: ChatTurn; scope: InvestigationScope;
   answer: { result: InvestigationResult; citations: InvestigationCitation[] } | null;
 }
 interface CitationInspection {
@@ -60,12 +60,12 @@ function captureDock(state: InvestigationState, taskId: string, previous?: ChatD
   const referenced = new Set(result?.findings.flatMap((finding) => finding.citation_ids));
   const answer = result ? { result, citations: detail.citations.filter((citation) => referenced.has(citation.citation_id)) } : null;
   if (previous && (revision < previous.turn.revision || chat.chat_id !== previous.chat.chat_id ||
-      question !== previous.question || conversation_id !== previous.turn.conversation_id || parent_id !== previous.turn.parent_id ||
+      question !== previous.question || detail.specialist.name !== previous.specialistName || conversation_id !== previous.turn.conversation_id || parent_id !== previous.turn.parent_id ||
       specialist_id !== previous.turn.specialist_id || !sameScope(scope, previous.scope) ||
       JSON.stringify(chat.producer) !== JSON.stringify(previous.chat.producer) ||
       (previous.answer && (JSON.stringify(answer) !== JSON.stringify(previous.answer) ||
         JSON.stringify(chat) !== JSON.stringify(previous.chat))))) return null;
-  return { chat, question, answer, scope,
+  return { chat, question, specialistName: detail.specialist.name, answer, scope,
     turn: { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } };
 }
 
