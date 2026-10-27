@@ -92,7 +92,10 @@ pub(crate) fn pins(root: &Path, repo: &str, commit: &str) -> Pins {
             continue;
         };
         let found = if name.ends_with(".lock") && !name.starts_with("requirements") {
-            package_table_pins(&text)
+            let Some(found) = package_table_pins(&text) else {
+                return Pins::Unchecked(format!("flask_admin_lockfile_syntax_not_modelled:{name}"));
+            };
+            found
         } else {
             requirement_pins(&text)
         };
@@ -137,8 +140,10 @@ fn lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
 /// table named `flask-admin`, in whatever key order, its `version` and that
 /// line's span. A table whose `name` or `version` is not a plain string
 /// (another syntax, a repeated key) yields `None`, refusing rather than
-/// skipping it.
-fn package_table_pins(text: &str) -> Vec<(Option<String>, usize, usize)> {
+/// skipping it. An escaped key or header, or an inline `package` array,
+/// could name a table this reader cannot see, so the whole file is refused
+/// (`None`).
+fn package_table_pins(text: &str) -> Option<Vec<(Option<String>, usize, usize)>> {
     #[derive(Default)]
     struct Table {
         names: Vec<Option<String>>,
@@ -166,6 +171,9 @@ fn package_table_pins(text: &str) -> Vec<(Option<String>, usize, usize)> {
     let mut table: Option<Table> = None;
     for (start, line) in lines(text) {
         let code = strip_comment(line).trim();
+        if code.starts_with('[') && code.contains('\\') {
+            return None;
+        }
         if code.starts_with('[') {
             close(table.take(), &mut found);
             if code.replace([' ', '\t', '"', '\''], "") == "[[package]]" {
@@ -176,10 +184,16 @@ fn package_table_pins(text: &str) -> Vec<(Option<String>, usize, usize)> {
             }
             continue;
         }
-        let Some(table) = table.as_mut() else {
+        let Some((key, value)) = code.split_once('=') else {
             continue;
         };
-        let Some((key, value)) = code.split_once('=') else {
+        if key.contains('\\') {
+            return None;
+        }
+        let Some(table) = table.as_mut() else {
+            if toml_key(key) == "package" {
+                return None;
+            }
             continue;
         };
         match toml_key(key) {
@@ -191,7 +205,7 @@ fn package_table_pins(text: &str) -> Vec<(Option<String>, usize, usize)> {
         }
     }
     close(table.take(), &mut found);
-    found
+    Some(found)
 }
 
 /// A bare, `"basic"` or `'literal'` key, unquoted.
@@ -279,19 +293,26 @@ mod tests {
         let lock = "[[package]]\nname = \"flask\"\nversion = \"2.0\"\n\n[[package]]\nname = \"flask-admin\"\nversion = \"1.5.7\"\ndependencies = [\n    { name = \"flask-admin\" },\n]\n\n[package.optional-dependencies]\nname = \"flask-admin\"\nversion = \"9\"\n";
         assert_eq!(
             package_table_pins(lock),
-            vec![(Some("1.5.7".into()), 77, 94)]
+            Some(vec![(Some("1.5.7".into()), 77, 94)])
         );
         assert_eq!(&lock[77..94], "version = \"1.5.7\"");
         let reordered = "[[package]]\nversion = \"1.5.8\" # x\n  name = \"Flask_Admin\"\n\n[[package]]\nname = \"flask-admin\"\nversion = '1'\n\n[[package]]\nname = \"flask-admin\"\n";
         assert_eq!(
             package_table_pins(reordered),
-            vec![
+            Some(vec![
                 (Some("1.5.8".into()), 12, 33),
                 (None, 91, 104),
                 (None, 106, 106)
-            ]
+            ])
         );
         assert_eq!(&reordered[12..33], "version = \"1.5.8\" # x");
+        for escaped in [
+            "[[package]]\n\"n\\u0061me\" = \"flask-admin\"\nversion = \"1.6.0\"\n",
+            "[[\"p\\u0061ckage\"]]\nname = \"flask-admin\"\nversion = \"1.6.0\"\n",
+            "package = [{ name = \"flask-admin\", version = \"1.6.0\" }]\n",
+        ] {
+            assert_eq!(package_table_pins(escaped), None, "{escaped}");
+        }
         let requirements = "Flask_Admin[sqla]==1.5.8 ; python_version > '3'\nflask-admin>=1.5\nflask-adminx==1\n# flask-admin==0\n";
         assert_eq!(
             requirement_pins(requirements),
