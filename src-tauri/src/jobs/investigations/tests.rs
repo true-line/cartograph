@@ -253,21 +253,23 @@ fn investigation_start_deduplicates_concurrently_before_availability_and_capacit
     let thread = std::thread::spawn(move || {
         let mut other = other;
         second.wait();
-        other
-            .start_investigation(
+        let (result, diagnostic) = start_diagnostics::capture(|| {
+            other.start_investigation(
                 &request("same", InvestigationProviderMode::Local),
                 Some(&provider(InvestigationProviderMode::Local)),
             )
-            .unwrap()
+        });
+        result.unwrap_or_else(|error| panic!("concurrent start: {error:?}; {diagnostic:?}"))
     });
     barrier.wait();
-    let first = fixture
-        .store
-        .start_investigation(
+    let (result, diagnostic) = start_diagnostics::capture(|| {
+        fixture.store.start_investigation(
             &request("same", InvestigationProviderMode::Local),
             Some(&provider(InvestigationProviderMode::Local)),
         )
-        .unwrap();
+    });
+    let first =
+        result.unwrap_or_else(|error| panic!("concurrent start: {error:?}; {diagnostic:?}"));
     let second = thread.join().unwrap();
     assert_eq!(
         first.detail.summary.investigation_id,
@@ -2876,4 +2878,80 @@ fn investigation_history_search_answers_and_corruption() {
             .investigation_history(None, ordinary.next_cursor.as_deref())
             .is_err()
     );
+}
+
+#[test]
+fn investigation_start_diagnostics_identify_contention_without_partial_rows() {
+    // AC-0181/0188: actual SQLite failure, with the unchanged one-second timeout.
+    let mut fixture = Fixture::new();
+    let mut blocker = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    let held = blocker
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let (result, diagnostic) = start_diagnostics::capture(|| {
+        fixture.store.start_investigation(
+            &request("held-writer", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+    });
+    assert_eq!(result.unwrap_err(), InvestigationStoreError::Storage);
+    assert_eq!(diagnostic.stage, "begin_immediate");
+    assert_eq!(diagnostic.sqlite_codes, Some((5, 5)));
+    for table in [
+        "jobs",
+        "investigation_tasks",
+        "investigation_conversations",
+        "investigation_chats",
+        "investigation_chat_messages",
+    ] {
+        let count: i64 = fixture
+            .store
+            .conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+    held.rollback().unwrap();
+    assert!(
+        fixture
+            .store
+            .start_investigation(
+                &request("held-writer", InvestigationProviderMode::Local),
+                Some(&provider(InvestigationProviderMode::Local))
+            )
+            .unwrap()
+            .created
+    );
+}
+
+#[test]
+fn investigation_start_diagnostics_are_opt_in_private_and_unwind_scoped() {
+    // AC-0188: neither raw SQLite text nor thread state escapes the opt-in scope.
+    let private = rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(5),
+        Some("PRIVATE path/payload".into()),
+    );
+    let (_, private_snapshot) = start_diagnostics::capture(|| {
+        start_diagnostics::stage("conversion");
+        let _ = InvestigationStoreError::from(private);
+    });
+    assert_eq!(private_snapshot.sqlite_codes, Some((5, 5)));
+    assert!(!format!("{private_snapshot:?}").contains("PRIVATE"));
+    let _ = InvestigationStoreError::from(rusqlite::Error::InvalidQuery);
+    let (_, outer) = start_diagnostics::capture(|| {
+        start_diagnostics::stage("outer");
+        let _ = std::panic::catch_unwind(|| {
+            start_diagnostics::capture(|| {
+                start_diagnostics::stage("inner");
+                panic!("synthetic unwind");
+            })
+        });
+    });
+    assert_eq!(outer.stage, "outer");
+    assert_eq!(outer.sqlite_codes, None);
+    let (_, fresh) = start_diagnostics::capture(|| {});
+    assert_eq!(fresh, start_diagnostics::Snapshot::default());
 }
