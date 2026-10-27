@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { inTauri, invokeOr } from './tauri';
 import type { InvestigationChanged, InvestigationChat } from './investigationTypes';
+import { readSavedResultNoticeCorner, writeSavedResultNoticeCorner, type SavedResultNoticeCorner } from './savedResultNoticePreference';
 
 export const SAVED_RESULT_NOTICE_LIMIT = 128;
 export const SAVED_RESULT_TOAST_LIMIT = 3;
@@ -13,12 +14,14 @@ export interface SavedResultNotice {
 }
 
 export interface SavedResultNoticeState {
+  corner: SavedResultNoticeCorner;
   unread: SavedResultNotice[];
   toasts: string[];
   incomplete: boolean;
   observe: (event: InvestigationChanged) => void;
   dismissToast: (key: string) => void;
   markVisible: (taskId: string, resultId: string) => void;
+  setCorner: (corner: SavedResultNoticeCorner) => void;
 }
 
 const identity = (value: unknown): value is string => typeof value === 'string' && value.length > 0 &&
@@ -110,7 +113,11 @@ export function createSavedResultNoticeStore() {
     };
 
     return {
-      unread: [], toasts: [], incomplete: false,
+      corner: readSavedResultNoticeCorner(), unread: [], toasts: [], incomplete: false,
+      setCorner: (corner) => {
+        writeSavedResultNoticeCorner(corner);
+        set({ corner });
+      },
       observe: (event) => {
         if (!identity(event?.investigation_id) || !Number.isSafeInteger(event.revision) || event.revision < 0 ||
             !Number.isSafeInteger(event.last_event_sequence) || event.last_event_sequence < 0) return;

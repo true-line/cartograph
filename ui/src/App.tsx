@@ -111,6 +111,7 @@ export default function App() {
   const primarySource = usePrimarySourceStore();
   const investigations = useInvestigationStore();
   const specialistActivity = useSpecialistActivityStore();
+  const noticeCorner = useSavedResultNoticeStore((state) => state.corner);
   const {
     view,
     recoverJobId,
@@ -661,7 +662,8 @@ export default function App() {
           navigate('investigations');
           void useInvestigationStore.getState().open(id);
         }} onFollowUp={prepareParentFollowUp} onReplyHost={registerReplyHost} onCancelFollowUp={cancelFollowUpCapture}
-        preparingFollowUpTask={preparingFollowUpTask} followUpError={followUpError} />;
+        preparingFollowUpTask={preparingFollowUpTask} followUpError={followUpError} noticeCorner={noticeCorner}
+        onNoticeCornerChange={(corner) => useSavedResultNoticeStore.getState().setCorner(corner)} />;
       case 'atlas':
         return (
           <Suspense fallback={<section className="atlas-card">Loading Atlas graph…</section>}>

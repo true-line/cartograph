@@ -1,6 +1,7 @@
 import { StrictMode, useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
+import { page } from '@vitest/browser/context';
 import { expect, userEvent, waitFor, within } from 'storybook/test';
 import type { SurfaceView } from '../views';
 import { investigationDetail, investigationResult } from '../investigationFixtures';
@@ -131,8 +132,47 @@ export const ToastsKeepTheirOwnDeadlines: Story = {
     await waitFor(() => expect(taskBReads).toBe(1));
     store.getState().observe({ investigation_id: 'task-b', revision: 2, last_event_sequence: 2 });
     await waitFor(() => expect(openButton('task-b')).toBeTruthy());
+    store.getState().setCorner('bottom-left');
     await new Promise((resolve) => setTimeout(resolve, 2_600));
     await waitFor(() => expect(canvas.queryByRole('button', { name: /Open findings for task-a/ })).toBeNull());
     expect(openButton('task-b')).toBeTruthy();
+  },
+};
+
+export const CornerChangesKeepNoticeIdentity: Story = {
+  args: { view: 'workspace', onOpenChat: () => {}, onOpenFindings: () => {} },
+  render: () => {
+    const store = createSavedResultNoticeStore();
+    const notice = { task_id: taskId, result_id: result.result_id, question: detail.question };
+    store.setState({ unread: [notice], toasts: [savedResultNoticeKey(notice)] });
+    activeStoryStore = store;
+    return <SavedResultNotices view="workspace" onOpenChat={() => {}} onOpenFindings={() => {}} store={store} />;
+  },
+  play: async ({ canvasElement }) => {
+    const store = activeStoryStore!;
+    const canvas = within(canvasElement);
+    const stack = canvas.getByLabelText('Saved result notifications');
+    const key = savedResultNoticeKey(store.getState().unread[0]);
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    try {
+      await page.viewport(360, 640);
+      for (const corner of ['top-left', 'bottom-right', 'bottom-left', 'top-right'] as const) {
+        store.getState().setCorner(corner);
+        await waitFor(() => expect(stack).toHaveClass(`saved-result-notices-${corner}`));
+        const bounds = stack.getBoundingClientRect();
+        const styles = getComputedStyle(stack);
+        const side = corner.endsWith('left') ? 'left' : 'right';
+        await expect(Number.parseFloat(styles.getPropertyValue(side))).toBe(16);
+        await expect(bounds.left).toBeGreaterThanOrEqual(0);
+        await expect(bounds.right).toBeLessThanOrEqual(window.innerWidth);
+        await expect(bounds.top).toBeGreaterThanOrEqual(50);
+        await expect(bounds.bottom).toBeLessThanOrEqual(window.innerHeight - 30);
+        await expect(store.getState().toasts).toEqual([key]);
+        await expect(store.getState().unread).toHaveLength(1);
+      }
+    } finally {
+      await page.viewport(width, height);
+    }
   },
 };
