@@ -1099,6 +1099,28 @@ def test_h(monkeypatch):
     monkeypatch.setattr("app.calls.httpx", None)
     httpx.get("/h")
 "#;
+    // Local aliases are patched by their own names; another client is not.
+    let aliased = r#"
+from unittest.mock import patch
+import requests as r
+import httpx
+from requests import get as fetch
+
+@patch("app.client.r.get")
+def test_alias(_):
+    r.get("/a")
+
+@patch("app.client.fetch")
+def test_fetch(_):
+    fetch("/b")
+    httpx.get("/c")
+"#;
+    assert_eq!(
+        shown_sites(&[("app/client.py", aliased)]),
+        vec![format!(
+            "app/client.py GET lit:/c sym:{REPO}@app/client.py#test_fetch"
+        )]
+    );
     assert_eq!(
         shown_sites(&[("app/calls.py", calls), ("tests/test_calls.py", test)]),
         vec![

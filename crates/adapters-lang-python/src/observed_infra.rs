@@ -68,22 +68,26 @@ struct Fetches {
 }
 
 /// Whether a file's `patch("…")`/`monkeypatch.setattr("…")` targets may
-/// mock `module.export`: a target overlapping the call path, or one ending
-/// in the module or the call path (`app.client.requests.get`).
-fn patched(scope: &Scope, module: &str, export: &str) -> bool {
-    let call: Vec<Option<String>> = module
-        .split('.')
-        .chain([export])
-        .map(|segment| Some(segment.to_string()))
-        .collect();
-    let module_len = call.len() - 1;
+/// mock a call of `module.export` spelled `local` in this file (`r.get`
+/// after `import requests as r`, `fetch` after `from requests import get as
+/// fetch`): a target overlapping the canonical path, or one ending in the
+/// canonical module or path, or in the local spelling or any prefix of it
+/// (`app.client.requests.get`, `app.client.r`, `app.client.fetch`).
+fn patched(scope: &Scope, module: &str, export: &str, local: &str) -> bool {
+    let segments = |path: &str| -> MemberPath {
+        path.split('.')
+            .map(|segment| Some(segment.to_string()))
+            .collect()
+    };
+    let call = segments(&format!("{module}.{export}"));
+    let local = segments(local);
     scope.patches.iter().any(|patch| {
         patch
             .iter()
             .zip(&call)
             .all(|(segment, read)| segment.is_none() || segment == read)
-            || patch.ends_with(&call)
-            || patch.ends_with(&call[..module_len])
+            || (1..=call.len()).any(|len| patch.ends_with(&call[..len]))
+            || (1..=local.len()).any(|len| patch.ends_with(&local[..len]))
     })
 }
 /// Module functions named for the verb they send.
@@ -1108,7 +1112,7 @@ fn extract_file(
             continue;
         };
         if let Some((method, url)) = http_call(&cx, &fetches.clients, &module, &export, args) {
-            if patched(&scope, &module, &export) {
+            if patched(&scope, &module, &export, cx.text(&callee)) {
                 continue;
             }
             fetches.sites.push(FetchSite {
