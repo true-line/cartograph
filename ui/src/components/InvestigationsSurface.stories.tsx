@@ -882,6 +882,22 @@ export const GapTriagerStandardFamily: Story = {
   },
 };
 
+// AC-0406: exact @2 selection, ordinary Standard dispatch and Expanded refusal.
+export const GapTriagerV2StandardFamily: Story = {
+  ...GapTriagerStandardFamily,
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('radio', { name: /gap-triager@2/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
+    await expect(canvas.queryByRole('radio', { name: /gap-triager@2/ })).not.toBeInTheDocument();
+    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v1');
+    await expect(canvas.getByRole('radio', { name: /gap-triager@2/ })).toBeChecked();
+    await userEvent.type(canvas.getByLabelText('Question'), 'Which evidence should reduce this gap?');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'gap-triager@2', limit_profile: 'investigation-v1' }));
+  },
+};
+
 export const GapTriagerSavedCompletion: Story = {
   // AC-0384: saved recommendation preserves the proposed design and citation.
   args: { state: state({ catalog: completionCatalog, detail: gapTriagerDetail(), result: gapTriagerResult(),

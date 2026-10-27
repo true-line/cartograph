@@ -246,7 +246,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
       </p>}
       <label className="investigation-question">{parent ? 'Follow-up question' : 'Question'}
         <textarea ref={questionRef} value={question} disabled={locked} maxLength={2048} rows={3}
-          placeholder={specialistId.startsWith('spec-writer@') ? 'What specification should the cited evidence support, and what remains unresolved?' : specialistId === 'gap-triager@1' ? 'Which recorded gap should be investigated next, and what evidence would reduce it?' : specialistId.startsWith('domain-analyst@') ? 'What business behavior is evidenced in this scope, and what remains unknown?' : 'Which claims have supporting evidence, and where is that evidence incomplete?'}
+          placeholder={specialistId.startsWith('spec-writer@') ? 'What specification should the cited evidence support, and what remains unresolved?' : specialistId.startsWith('gap-triager@') ? 'Which recorded gap should be investigated next, and what evidence would reduce it?' : specialistId.startsWith('domain-analyst@') ? 'What business behavior is evidenced in this scope, and what remains unknown?' : 'Which claims have supporting evidence, and where is that evidence incomplete?'}
           onChange={(event) => setQuestion(event.target.value)} />
       </label>
       <p className={questionBytes > 2048 ? 'error-text' : 'muted'}>{questionBytes} / 2,048 UTF-8 bytes. Scope uses the recovered graph at preparation time.</p>

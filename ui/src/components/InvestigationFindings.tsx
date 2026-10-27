@@ -43,7 +43,7 @@ export function InvestigationFindings({ result, citations, citationId, read, loa
       Findings do not change confirmed facts, accepted proposals, context or exports.</p>
     {!result ? <p className="muted">No admitted result is available yet.</p> : <>
       {result.narrative && <article aria-label="Specialist final message">
-        <h4>Spec Writer final message · {producerId}</h4>
+        <h4>{producerId === 'gap-triager@2' ? 'Gap Triager' : producerId === 'spec-writer@2' ? 'Spec Writer' : 'Specialist'} final message · {producerId}</h4>
         <p className="muted">Proposed design · T3 / InferredWeak · saved final output</p>
         <p className="investigation-statement">{result.narrative.text}</p>
         {result.findings.filter((finding) => result.narrative!.finding_ids.includes(finding.finding_id)).map((finding) =>

@@ -276,9 +276,19 @@ fn spec_writer_v1_is_admitted_only_in_the_exact_standard_schema_four_family() {
 
 #[test]
 fn gap_triager_v1_is_admitted_only_in_the_exact_standard_schema_four_family() {
+    gap_triager_standard_family("gap-triager@1");
+}
+
+// AC-0406: new role keeps the exact Standard tuple; Expanded and unknown remain closed.
+#[test]
+fn gap_triager_v2_is_admitted_only_in_the_exact_standard_schema_four_family() {
+    gap_triager_standard_family("gap-triager@2");
+}
+
+fn gap_triager_standard_family(role: &str) {
     // AC-0384: the new role preserves the v4 intent domain and does not enroll elsewhere.
     let policy = &INVESTIGATION_V1_POLICY;
-    let mut request = request("gap-triager@1");
+    let mut request = request(role);
     request.schema_version = 4;
     request.obligations.schema_version = 1;
     request.obligations.contract = CONTRACT.into();

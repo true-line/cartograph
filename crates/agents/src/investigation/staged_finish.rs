@@ -300,14 +300,17 @@ pub fn admit_finish_with_policy(
     timestamp: String,
     policy: &InvestigationPolicy,
 ) -> Result<FinishDecision, InvestigationError> {
-    finish.validate_for_role(request.specialist_id == "spec-writer@2")?;
+    finish.validate_for_role(matches!(
+        request.specialist_id.as_str(),
+        "spec-writer@2" | "gap-triager@2"
+    ))?;
     let request = request.normalized_with_policy(policy)?;
     if request.limit_profile != policy.profile() {
         return Err(InvestigationError::InvalidInput);
     }
     if matches!(
         request.specialist_id.as_str(),
-        "spec-writer@1" | "spec-writer@2" | "gap-triager@1"
+        "spec-writer@1" | "spec-writer@2" | "gap-triager@1" | "gap-triager@2"
     ) && matches!(
         &finish.action,
         InvestigationAction::Finish { findings, .. }

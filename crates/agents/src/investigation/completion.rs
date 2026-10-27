@@ -461,7 +461,13 @@ impl InvestigationResult {
         let request = request.normalized_with_policy(policy)?;
         request.validate_ledger_with_policy(ledger, policy)?;
         let (disclosure_schema, result_schema) = match request.schema_version {
-            4 if request.specialist_id == "spec-writer@2" => (4, 8),
+            4 if matches!(
+                request.specialist_id.as_str(),
+                "spec-writer@2" | "gap-triager@2"
+            ) =>
+            {
+                (4, 8)
+            }
             7 => (6, 7),
             6 => (5, 6),
             _ => (4, 5),

@@ -645,7 +645,7 @@ impl InvestigationResult {
     }
 
     pub fn validate_specialist(&self, specialist: SpecialistId) -> Result<(), InvestigationError> {
-        if (self.schema_version == 8) != (specialist == SpecialistId::SpecWriterV2) {
+        if (self.schema_version == 8) != specialist.uses_cited_narrative() {
             return Err(InvestigationError::InvalidInput);
         }
         self.validate_narrative()

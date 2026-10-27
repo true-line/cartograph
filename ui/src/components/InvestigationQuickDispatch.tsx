@@ -6,8 +6,8 @@ import { invokeOr } from '../tauri';
 import type { InvestigationFollowUpContext, InvestigationObligation, InvestigationObligationChoices, InvestigationProviderMode, InvestigationScope, SpecialistId } from '../investigationTypes';
 
 const QUICK_IDS: SpecialistId[] = ['domain-analyst@3', 'evidence-auditor@3', 'domain-analyst@4', 'evidence-auditor@4',
-  'domain-analyst@7', 'evidence-auditor@7', 'spec-writer@1', 'spec-writer@2', 'gap-triager@1'];
-const QUICK_COMPLETION_IDS = new Set<SpecialistId>(['domain-analyst@7', 'evidence-auditor@7', 'spec-writer@1', 'spec-writer@2', 'gap-triager@1']);
+  'domain-analyst@7', 'evidence-auditor@7', 'spec-writer@1', 'spec-writer@2', 'gap-triager@1', 'gap-triager@2'];
+const QUICK_COMPLETION_IDS = new Set<SpecialistId>(['domain-analyst@7', 'evidence-auditor@7', 'spec-writer@1', 'spec-writer@2', 'gap-triager@1', 'gap-triager@2']);
 
 export interface InvestigationQuickDispatchProps {
   fallbackEnabled: boolean;

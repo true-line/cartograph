@@ -125,6 +125,7 @@ mod tests {
             SpecialistId::SpecWriterV1,
             SpecialistId::SpecWriterV2,
             SpecialistId::GapTriagerV1,
+            SpecialistId::GapTriagerV2,
         ] {
             assert!(definition_workspace(role).unwrap() <= admitted, "{role:?}");
         }

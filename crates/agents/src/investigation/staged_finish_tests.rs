@@ -1204,12 +1204,41 @@ fn attempt_binding_workspace_covers_real_policy_validation() {
 // AC-0404: new role only; old wire, joined privacy and result content identity.
 #[test]
 fn spec_writer_message_admission_is_cited_private_and_version_bound() {
+    cited_message_admission(SpecialistId::SpecWriterV2);
+}
+
+// AC-0406: exact new role reuses the full cited-message admission contract.
+#[test]
+fn gap_triager_v2_uses_the_existing_cited_message_contract() {
+    let role = SpecialistId::GapTriagerV2;
+    let definition = role.definition().unwrap();
+    assert_eq!(definition.version, 2);
+    assert_ne!(
+        definition.prompt_fingerprint,
+        SpecialistId::GapTriagerV1
+            .definition()
+            .unwrap()
+            .prompt_fingerprint
+    );
+    assert!(role.prompt().contains("Query Gap nodes first"));
+    assert!(
+        role.prompt()
+            .contains("The only valid claim kind is proposed_design.")
+    );
+    assert!(
+        role.prompt()
+            .contains(r#""schema_version":2,"outcome":"supported""#)
+    );
+    cited_message_admission(role);
+}
+
+fn cited_message_admission(role: SpecialistId) {
     let fixture = fixture_policy(
         true,
         true,
         false,
         Some(&INVESTIGATION_V1_POLICY),
-        Some(SpecialistId::SpecWriterV2),
+        Some(role),
     );
     let mut finish = spec_writer_finish();
     finish.schema_version = 2;
@@ -1238,9 +1267,7 @@ fn spec_writer_message_admission_is_cited_private_and_version_bound() {
         .unwrap()
         .unwrap_or_else(|_| panic!("supported"));
     assert_eq!(result.schema_version, 8);
-    result
-        .validate_specialist(SpecialistId::SpecWriterV2)
-        .unwrap();
+    result.validate_specialist(role).unwrap();
     assert!(
         result
             .validate_specialist(SpecialistId::SpecWriterV1)
@@ -1268,6 +1295,11 @@ fn spec_writer_message_admission_is_cited_private_and_version_bound() {
         invalid.narrative.as_mut().unwrap().text = text;
         assert!(admit(&invalid).is_err());
     }
+    let mut wrong_claim = finish.clone();
+    if let InvestigationAction::Finish { findings, .. } = &mut wrong_claim.action {
+        findings[0].claim_kind = InvestigationClaimKind::InferredInterpretation;
+    }
+    assert!(admit(&wrong_claim).is_err());
     let mut null = serde_json::to_value(&result).unwrap();
     null["narrative"] = serde_json::Value::Null;
     assert!(decode_record::<InvestigationResult>(&null.to_string()).is_err());
@@ -1277,22 +1309,24 @@ fn spec_writer_message_admission_is_cited_private_and_version_bound() {
     null["narrative"] = serde_json::Value::Null;
     assert!(StagedFinish::decode(&null.to_string()).is_err());
     assert!(StagedFinish::decode_message(&old.to_string()).is_err());
-    let mut unsupported = fixture.request.clone();
-    unsupported.specialist_id = "spec-writer@1".into();
-    assert!(
-        admit_finish(
-            &unsupported,
-            "task",
-            "step",
-            &fixture.input,
-            &fixture.disclosure,
-            &finish,
-            &[],
-            None,
-            "now".into()
-        )
-        .is_err()
-    );
+    for legacy in ["spec-writer@1", "gap-triager@1"] {
+        let mut unsupported = fixture.request.clone();
+        unsupported.specialist_id = legacy.into();
+        assert!(
+            admit_finish(
+                &unsupported,
+                "task",
+                "step",
+                &fixture.input,
+                &fixture.disclosure,
+                &finish,
+                &[],
+                None,
+                "now".into()
+            )
+            .is_err()
+        );
+    }
     // The aggregate copy check includes boundaries between authored fields.
     let mut split = finish.clone();
     if let InvestigationAction::Finish { limitations, .. } = &mut split.action {
@@ -1318,4 +1352,8 @@ fn spec_writer_message_admission_is_cited_private_and_version_bound() {
     assert!(admit(&insufficient).is_err());
     insufficient.narrative = None;
     assert!(StagedFinish::decode_message(&serde_json::to_string(&insufficient).unwrap()).is_ok());
+    assert!(matches!(
+        admit(&insufficient),
+        Ok(Err(FinishDecision::Refused { .. }))
+    ));
 }

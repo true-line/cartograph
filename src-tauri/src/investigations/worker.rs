@@ -622,7 +622,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                         policy,
                     )
                 } else {
-                    if request.specialist_id == SpecialistId::SpecWriterV2 {
+                    if request.specialist_id.uses_cited_narrative() {
                         CompletionInvestigationAction::decode_message(
                             &completion.text,
                             &proof.context_id,

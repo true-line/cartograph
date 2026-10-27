@@ -40,6 +40,7 @@ enum Mode {
     SpecWriterMessage,
     SpecWriterMessageInsufficient,
     GapTriagerSupported,
+    GapTriagerMessage,
     CompletionRepair,
     CompletionCap,
     CompletionInventoryUnavailable,

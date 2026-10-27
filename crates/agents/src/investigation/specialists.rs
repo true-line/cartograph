@@ -53,6 +53,8 @@ pub enum SpecialistId {
     SpecWriterV2,
     #[serde(rename = "gap-triager@1")]
     GapTriagerV1,
+    #[serde(rename = "gap-triager@2")]
+    GapTriagerV2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +106,14 @@ fn gap_triager_definition_data() -> &'static GapTriagerDefinitionData {
     static DATA: OnceLock<GapTriagerDefinitionData> = OnceLock::new();
     DATA.get_or_init(|| {
         serde_json::from_str(include_str!("data/gap-triager-v1.json"))
+            .expect("compiled Gap Triager definition is valid")
+    })
+}
+
+fn gap_triager_v2_definition_data() -> &'static GapTriagerDefinitionData {
+    static DATA: OnceLock<GapTriagerDefinitionData> = OnceLock::new();
+    DATA.get_or_init(|| {
+        serde_json::from_str(include_str!("data/gap-triager-v2.json"))
             .expect("compiled Gap Triager definition is valid")
     })
 }
@@ -168,6 +178,7 @@ impl SpecialistId {
             Self::SpecWriterV1
                 | Self::SpecWriterV2
                 | Self::GapTriagerV1
+                | Self::GapTriagerV2
                 | Self::DomainAnalystV3
                 | Self::EvidenceAuditorV3
                 | Self::DomainAnalystV4
@@ -193,6 +204,7 @@ impl SpecialistId {
             Self::SpecWriterV1
                 | Self::SpecWriterV2
                 | Self::GapTriagerV1
+                | Self::GapTriagerV2
                 | Self::DomainAnalystV4
                 | Self::EvidenceAuditorV4
                 | Self::DomainAnalystV5
@@ -221,6 +233,7 @@ impl SpecialistId {
             Self::SpecWriterV1
                 | Self::SpecWriterV2
                 | Self::GapTriagerV1
+                | Self::GapTriagerV2
                 | Self::DomainAnalystV6
                 | Self::EvidenceAuditorV6
                 | Self::DomainAnalystV7
@@ -240,6 +253,7 @@ impl SpecialistId {
             Self::SpecWriterV1
                 | Self::SpecWriterV2
                 | Self::GapTriagerV1
+                | Self::GapTriagerV2
                 | Self::DomainAnalystV7
                 | Self::EvidenceAuditorV7
                 | Self::DomainAnalystV8
@@ -280,13 +294,21 @@ impl SpecialistId {
         matches!(self, Self::DomainAnalystV10 | Self::EvidenceAuditorV10)
     }
 
+    /// Exact immutable roles using the schema-2 finish/schema-8 cited narrative.
+    pub fn uses_cited_narrative(self) -> bool {
+        matches!(self, Self::SpecWriterV2 | Self::GapTriagerV2)
+    }
+
     fn version(self) -> u32 {
         match self {
             Self::DomainAnalystV1
             | Self::EvidenceAuditorV1
             | Self::SpecWriterV1
             | Self::GapTriagerV1 => 1,
-            Self::DomainAnalyst | Self::EvidenceAuditor | Self::SpecWriterV2 => 2,
+            Self::DomainAnalyst
+            | Self::EvidenceAuditor
+            | Self::SpecWriterV2
+            | Self::GapTriagerV2 => 2,
             Self::DomainAnalystV3 | Self::EvidenceAuditorV3 => 3,
             Self::DomainAnalystV4 | Self::EvidenceAuditorV4 => 4,
             Self::DomainAnalystV5 | Self::EvidenceAuditorV5 => 5,
@@ -303,7 +325,7 @@ impl SpecialistId {
     fn prompt_generation(self) -> u32 {
         if matches!(
             self,
-            Self::SpecWriterV1 | Self::SpecWriterV2 | Self::GapTriagerV1
+            Self::SpecWriterV1 | Self::SpecWriterV2 | Self::GapTriagerV1 | Self::GapTriagerV2
         ) {
             7
         } else {
@@ -316,6 +338,7 @@ impl SpecialistId {
             Self::SpecWriterV2 => spec_writer_v2_definition_data().role_prompt.as_str(),
             Self::SpecWriterV1 => spec_writer_definition_data().role_prompt.as_str(),
             Self::GapTriagerV1 => gap_triager_definition_data().role_prompt.as_str(),
+            Self::GapTriagerV2 => gap_triager_v2_definition_data().role_prompt.as_str(),
             Self::DomainAnalyst
             | Self::DomainAnalystV1
             | Self::DomainAnalystV3
@@ -382,9 +405,12 @@ impl SpecialistId {
                 // Keep COMMON immutable for every historical role generation.
                 let common = if matches!(
                     self,
-                    Self::SpecWriterV1 | Self::SpecWriterV2 | Self::GapTriagerV1
+                    Self::SpecWriterV1
+                        | Self::SpecWriterV2
+                        | Self::GapTriagerV1
+                        | Self::GapTriagerV2
                 ) {
-                    let common = if self == Self::GapTriagerV1 {
+                    let common = if matches!(self, Self::GapTriagerV1 | Self::GapTriagerV2) {
                         common.replace(
                             "All your findings are Agentic/InferredWeak, including claims about implemented behavior and documented intent.",
                             "All your findings are Agentic/InferredWeak proposed_design proposals; never report implemented_behavior, documented_intent or inferred_interpretation.",
@@ -404,7 +430,7 @@ impl SpecialistId {
                     common
                 };
                 let common = common.replace(r#"{"type":"finish","findings"# , r#"{"schema_version":1,"outcome":"supported","action":{"type":"finish","findings"#).replace(r#"["Remaining coverage limitations."]}"#, r#"["Remaining coverage limitations."]}}"#);
-                let common = if self == Self::SpecWriterV2 {
+                let common = if self.uses_cited_narrative() {
                     common.replace(r#"{"schema_version":1,"outcome":"supported","action"#,
                         r#"{"schema_version":2,"outcome":"supported","narrative":{"text":"A distinct concise proposed answer in your own words.","finding_ids":["finding-1"]},"action"#)
                         + "\nFor supported finishes, narrative is mandatory: text (at most 2048 UTF-8 bytes) is your final answer, with 1..12 unique finding_ids naming your findings in order as finding-1, finding-2, etc. Cite only proposed-design findings and their admitted citations. Paraphrase all input; narrative participates in the same joined source-replay and sensitive-output checks as findings and limitations. For insufficient_evidence use schema_version 2 with no narrative field and no findings. The complete response shares the existing capacity; never emit private reasoning."
@@ -436,6 +462,10 @@ impl SpecialistId {
             }
             Self::SpecWriterV1 => {
                 let data = spec_writer_definition_data();
+                (data.name.as_str(), data.purpose.as_str())
+            }
+            Self::GapTriagerV2 => {
+                let data = gap_triager_v2_definition_data();
                 (data.name.as_str(), data.purpose.as_str())
             }
             Self::GapTriagerV1 => {

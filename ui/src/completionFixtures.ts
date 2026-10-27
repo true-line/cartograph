@@ -17,7 +17,11 @@ export const completionCatalog: InvestigationCatalog = { ...qualifiedCatalog, sp
   { ...qualifiedCatalog.specialists[0], id: 'gap-triager@1', version: 1, name: 'Gap Triager',
     purpose: 'Recommend a cited next investigation step for a recorded gap.',
     operations: ['query_context', 'read_evidence', 'read_coverage_inventory', 'finish'] as InvestigationSpecialist['operations'],
-    prompt_fingerprint: 'fixture-gap-triager@1' }] };
+    prompt_fingerprint: 'fixture-gap-triager@1' },
+  { ...qualifiedCatalog.specialists[0], id: 'gap-triager@2', version: 2, name: 'Gap Triager',
+    purpose: 'Recommend a cited next step with an admitted final message.',
+    operations: ['query_context', 'read_evidence', 'read_coverage_inventory', 'finish'] as InvestigationSpecialist['operations'],
+    prompt_fingerprint: 'fixture-gap-triager@2' }] };
 export const sourceObligation: Extract<InvestigationObligation, { kind: 'source' }> = { kind: 'source', obligation_id: '1'.repeat(64), target: { ...inspectionTarget, graph_snapshot_id: `context-v1:${'8'.repeat(64)}` } };
 export const inventoryObligation: Extract<InvestigationObligation, { kind: 'inventory' }> = { kind: 'inventory', obligation_id: '2'.repeat(64), target: {
   context_id: qualifiedCoverageContext.context_id, repo: 'acme/api', inventory_hash: '3'.repeat(64) } };
