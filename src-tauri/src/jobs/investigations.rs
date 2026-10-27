@@ -354,6 +354,10 @@ pub(crate) enum InvestigationStopReason {
 }
 
 impl InvestigationStopReason {
+    #[cfg(test)]
+    pub(crate) fn test_message(self) -> &'static str {
+        self.message()
+    }
     fn message(self) -> &'static str {
         match self {
             Self::Cancelled => "Cancellation requested; no further work was started.",

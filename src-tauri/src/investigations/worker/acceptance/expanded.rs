@@ -1,6 +1,8 @@
 //! Separate request7/@10 capture authority; accepts identity data, never a
 //! provider implementation, dispatch lease or execution callback.
-use super::completion::prepare::{self as capture, Family, PreparationBinding, PreparedState};
+use super::completion::prepare::{
+    self as capture, CaptureFixture, Family, PreparationBinding, PreparedState,
+};
 use agents::investigation::InvestigationProvider;
 use std::path::Path;
 #[path = "expanded/analyst.rs"]
@@ -17,6 +19,14 @@ fn prepare(
 // expected authority back from this directory's capture manifest.
 fn reopen(directory: &Path, expected: &PreparationBinding) -> Result<PreparedState, String> {
     capture::reopen_family(directory, Family::Expanded, Some(expected))
+}
+
+fn reopen_control(
+    directory: &Path,
+    expected: &PreparationBinding,
+    fixture: CaptureFixture,
+) -> Result<PreparedState, String> {
+    capture::reopen_fixture(directory, Family::Expanded, Some(expected), fixture)
 }
 
 #[cfg(test)]
