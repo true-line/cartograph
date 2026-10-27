@@ -1238,6 +1238,13 @@ fn spec_writer_message_worker_reopens_and_accepts_a_valid_late_cancel() {
         let jobs = state.jobs.lock().unwrap();
         let detail = jobs.investigation(&fixture.id).unwrap();
         if capacity {
+            // AC-0405: an uncommitted narrative is never search evidence.
+            assert!(
+                jobs.search_investigation_history("PROPOSED SPECIFICATION:", None)
+                    .unwrap()
+                    .items
+                    .is_empty()
+            );
             jobs.assert_test_finish_padding_rolled_back(&fixture.id);
             assert_eq!(detail.summary.status, InvestigationStatus::OutcomeUnknown);
             assert!(jobs.investigation_result(&fixture.id).unwrap().is_none());
@@ -1279,6 +1286,30 @@ fn spec_writer_message_worker_reopens_and_accepts_a_valid_late_cancel() {
         assert_eq!(detail.summary.cancel_requested, cancel);
         let result = jobs.investigation_result(&fixture.id).unwrap().unwrap();
         assert_eq!(result.schema_version, 8);
+        // AC-0405: this phrase is in the actual admitted narrative only.
+        let found = jobs
+            .search_investigation_history("  PROPOSED SPECIFICATION:  ", None)
+            .unwrap();
+        assert_eq!(found.items.len(), usize::from(!insufficient));
+        assert_eq!(
+            found.answer_match_ids,
+            if insufficient {
+                vec![]
+            } else {
+                vec![fixture.id.clone()]
+            }
+        );
+        assert!(
+            !serde_json::to_string(&found)
+                .unwrap()
+                .contains("gate the bounded operation")
+        );
+        assert!(
+            jobs.search_investigation_history("specification:%", None)
+                .unwrap()
+                .items
+                .is_empty()
+        );
         if !cancel && !insufficient {
             capacity_headroom = serde_json::to_vec(&result).unwrap().len() / 4;
         }
@@ -1314,6 +1345,10 @@ fn spec_writer_message_worker_reopens_and_accepts_a_valid_late_cancel() {
             .investigation_next_parent_history(&fixture.id, &detail.summary.conversation_id)
             .unwrap()
             .into_history();
+        let reopened_hits = reopened
+            .search_investigation_history("proposed specification:", None)
+            .unwrap();
+        assert_eq!(reopened_hits.answer_match_ids, found.answer_match_ids);
         let parent: Value = serde_json::from_str(&history[0]).unwrap();
         assert_eq!(
             parent["saved_result"],

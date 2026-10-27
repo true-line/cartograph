@@ -306,7 +306,9 @@ impl JobStore {
                     false
                 } else {
                     let matches = load_result(&tx, &task)?.is_some_and(|result| {
-                        result.findings.iter().any(|finding| {
+                        result.narrative.as_ref().is_some_and(|message| {
+                            ascii_case_insensitive_contains(message.text.as_bytes(), query)
+                        }) || result.findings.iter().any(|finding| {
                             ascii_case_insensitive_contains(finding.title.as_bytes(), query)
                                 || ascii_case_insensitive_contains(
                                     finding.statement.as_bytes(),
