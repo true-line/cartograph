@@ -1,5 +1,17 @@
 # cartograph
 
+## 0.41.0
+
+### Minor Changes
+
+- dc3d031: Show known unread saved results and incomplete-check uncertainty on the Agent Chats rail.
+- 1d47e05: Show truthful tier and source/graph citation metadata on saved specialist messages.
+- 0bcac5c: Add a keyboard search palette over open and saved task chats, including saved specialist names and admitted answers.
+- e75a18c: Add accessible Agent Chats pane-layout controls with three-up wide-row placement and honest empty chat slots.
+- 0f88f7a: Show each saved chat pane’s specialist name, version and requested provider/model attribution.
+- d0162c6: Flask-Admin views now appear as Flask endpoints: each `@expose` method of a registered view gets its composed path, its `<endpoint>.<method>` name and an access-check note, and library-generated admin routes are recorded as Gaps.
+- 4770c95: Search saved specialist display names in Agent Chats and Investigations with bounded name-match metadata.
+
 ## 0.40.0
 
 ### Minor Changes
