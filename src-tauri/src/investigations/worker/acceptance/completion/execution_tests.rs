@@ -74,6 +74,7 @@ fn completion_execution_supported_categories_use_actual_worker_and_never_auto_au
 }
 struct InsufficientAfterReads {
     inner: Scripted,
+    malformed: bool,
 }
 impl LlmProvider for InsufficientAfterReads {
     fn id(&self) -> &str {
@@ -98,7 +99,9 @@ impl LlmProvider for InsufficientAfterReads {
     ) -> Result<BoundedCompletion, BoundedCallError> {
         let mut response = self.inner.complete_bounded(request, control)?;
         let action: Value = serde_json::from_str(&response.text).unwrap();
-        if action["outcome"] == "supported" {
+        if action["outcome"] == "supported" && self.malformed {
+            response.text = "not an admissible action".into();
+        } else if action["outcome"] == "supported" {
             response.text=serde_json::json!({"schema_version":1,"outcome":"insufficient_evidence","action":{"type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence","limitations":["The completed bounded inspections do not establish the requested behavior."]}}).to_string();
         }
         Ok(response)
@@ -111,6 +114,7 @@ fn completion_execution_honest_insufficient_is_recorded_without_control_pass() {
     let directory = tempfile::tempdir().unwrap();
     let provider = Arc::new(InsufficientAfterReads {
         inner: Scripted::new(Mode::CompletionSupported),
+        malformed: false,
     });
     let prepared = prepared(directory.path(), provider.as_ref());
     let evidence = run_role(&prepared, Role::Analyst, provider.clone()).unwrap();
@@ -430,4 +434,124 @@ fn completion_execution_recording_error_preserves_actual_observation_hashes() {
     assert_eq!(provider.inner.calls.load(Ordering::SeqCst), 4);
     assert!(run_role(&prepared, Role::Analyst, provider.clone()).is_err());
     assert_eq!(provider.inner.calls.load(Ordering::SeqCst), 4);
+}
+
+// AC-0267: a final unadmitted call has unknown totals, never a passing failed run.
+#[test]
+fn completion_execution_trailing_unadmitted_usage_is_unknown_not_success() {
+    let directory = tempfile::tempdir().unwrap();
+    let provider = Arc::new(InsufficientAfterReads {
+        inner: Scripted::new(Mode::CompletionSupported),
+        malformed: true,
+    });
+    let prepared = prepared(directory.path(), provider.as_ref());
+    let evidence = run_role(&prepared, Role::Analyst, provider.clone()).unwrap();
+    assert_eq!(
+        evidence.receipt.classification,
+        ControlClassification::Failed
+    );
+    assert!(evidence.result.is_none());
+    assert_eq!(provider.inner.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(evidence.detail.usage.reported_input_tokens, None);
+    assert_eq!(evidence.detail.usage.reported_output_tokens, None);
+    assert_eq!(
+        evidence
+            .mechanical_checks
+            .iter()
+            .find(|check| check.name == "known_response_usage_charged_once")
+            .unwrap()
+            .status,
+        CheckStatus::Unknown
+    );
+    assert!(
+        !evaluate(&evidence.receipt, SemanticGate::Passed)
+            .unwrap()
+            .control_pass
+    );
+    assert!(run_role(&prepared, Role::Auditor, provider.clone()).is_err());
+    assert_eq!(provider.inner.calls.load(Ordering::SeqCst), 4);
+    let database = prepared.app_data.join("state.db");
+    let steps = rows::<PendingInvestigationStep>(
+        &database,
+        &prepared.analyst_id,
+        "investigation_invocations",
+        8,
+        256 * 1024,
+    )
+    .unwrap();
+    let responses = rows::<InvestigationResponseMeta>(
+        &database,
+        &prepared.analyst_id,
+        "investigation_responses",
+        8,
+        4096,
+    )
+    .unwrap();
+    assert_eq!(responses.len(), 3);
+    assert_eq!(evidence.detail.usage.reported_cache_read_tokens, None);
+    let mut detail = evidence.detail.clone();
+    detail.usage.reported_cache_read_tokens = Some(0);
+    assert_eq!(
+        response_usage_status(&steps, &responses, &detail, &evidence.events),
+        CheckStatus::Failed
+    );
+    let mut complete = responses.clone();
+    let mut tail = complete[0].clone();
+    tail.step_id = steps.last().unwrap().step_id.clone();
+    complete.push(tail);
+    for response in &mut complete {
+        response.reported_input_tokens = Some(2);
+        response.reported_output_tokens = Some(3);
+        response.reported_cache_read_tokens = Some(5);
+    }
+    detail.usage.reported_input_tokens = Some(8);
+    detail.usage.reported_output_tokens = Some(12);
+    detail.usage.reported_cache_read_tokens = Some(20);
+    assert_eq!(
+        response_usage_status(&steps, &complete, &detail, &evidence.events),
+        CheckStatus::Passed
+    );
+    detail.usage.reported_cache_read_tokens = Some(19);
+    assert_eq!(
+        response_usage_status(&steps, &complete, &detail, &evidence.events),
+        CheckStatus::Failed
+    );
+    complete[0].reported_cache_read_tokens = Some(u64::MAX);
+    assert_eq!(
+        response_usage_status(&steps, &complete, &detail, &evidence.events),
+        CheckStatus::Failed
+    );
+    for kind in 0..8 {
+        let mut changed = responses.clone();
+        let mut events = evidence.events.clone();
+        match kind {
+            0 => {
+                changed.remove(0);
+            }
+            1 => changed.push(changed[0].clone()),
+            2 => changed[0].step_id = "foreign".into(),
+            3 => {
+                changed[0].reported_input_tokens = Some(u64::MAX);
+                changed[1].reported_input_tokens = Some(1);
+            }
+            4 => {
+                events.pop();
+            }
+            5 => events.last_mut().unwrap().investigation_id = "foreign".into(),
+            6 => events.last_mut().unwrap().kind = InvestigationEventKind::Completed,
+            _ => {
+                events
+                    .iter_mut()
+                    .rev()
+                    .find(|event| event.kind == InvestigationEventKind::ModelStarted)
+                    .unwrap()
+                    .step_id = Some("foreign".into())
+            }
+        }
+        assert_eq!(
+            response_usage_status(&steps, &changed, &evidence.detail, &events),
+            CheckStatus::Failed,
+            "case {kind}"
+        );
+    }
 }
