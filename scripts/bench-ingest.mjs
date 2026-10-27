@@ -12,7 +12,7 @@
 //   node scripts/bench-ingest.mjs --work <dir> [--manifest bench/repos.toml] [--bin <app test binary>] [--only <name>]
 //   node scripts/bench-ingest.mjs --compare <before.json> <after.json>
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -166,6 +166,32 @@ function build() {
   return executable;
 }
 
+/** Whether `child` is `parent` or inside it, compared as given. */
+export function contained(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+/** The real path of `target`, resolving its nearest existing ancestor. */
+export function realPath(target) {
+  const missing = [];
+  let existing = path.resolve(target);
+  while (!existsSync(existing)) {
+    missing.unshift(path.basename(existing));
+    existing = path.dirname(existing);
+  }
+  return path.join(realpathSync(existing), ...missing);
+}
+
+/** The real directory `relative` selects in `checkout`; a symlink may not leave it. */
+export function selectRoot(checkout, relative) {
+  const root = realpathSync(relative ? path.join(checkout, relative) : checkout);
+  if (!contained(realpathSync(checkout), root) || !statSync(root).isDirectory()) {
+    throw new Error(`${relative} does not select a directory inside ${checkout}`);
+  }
+  return root;
+}
+
 /** A clean checkout of `repo` at its exact commit, and the selected root in it; existing checkouts are verified, not reset. */
 function checkout(repo, work) {
   const dir = path.join(work, 'sources', repo.name);
@@ -176,7 +202,7 @@ function checkout(repo, work) {
   const head = run('git', ['-C', dir, 'rev-parse', 'HEAD']).stdout.trim();
   const dirty = run('git', ['-C', dir, 'status', '--porcelain']).stdout.trim();
   if (head !== repo.commit || dirty) throw new Error(`${dir} is not a clean checkout of ${repo.commit}`);
-  return repo.path ? path.join(dir, repo.path) : dir;
+  return selectRoot(dir, repo.path);
 }
 
 function parseArguments(argv) {
@@ -205,8 +231,10 @@ function main() {
   const repos = parseManifest(readFileSync(options.manifest, 'utf8')).filter((repo) => !options.only || repo.name === options.only);
   const work = path.resolve(options.work);
   // Output inside the checkout would make the next run's tree uncommitted.
-  const inside = path.relative(ROOT, work);
-  if (!inside.startsWith('..') && !path.isAbsolute(inside)) throw new Error('--work must be outside the Cartograph checkout');
+  // The real path is checked before anything is created, so a symlink into
+  // the checkout is refused too.
+  if (contained(realpathSync(ROOT), realPath(work))) throw new Error('--work must be outside the Cartograph checkout');
+  mkdirSync(work, { recursive: true });
   // Results from an uncommitted tree, or one that changed during the build,
   // are not comparable by commit.
   const tree = () => [run('git', ['rev-parse', 'HEAD'], { cwd: ROOT }).stdout.trim(),

@@ -1,10 +1,11 @@
 // AC-0423: manifest, timing, summary and comparison are pure; no Cargo, git or showcase runs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile, readFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { compare, parseManifest, parseTime, summarize } from './bench-ingest.mjs';
+import { compare, contained, parseManifest, parseTime, realPath, selectRoot, summarize } from './bench-ingest.mjs';
 
 const sha = 'a'.repeat(40);
 
@@ -110,4 +111,32 @@ test('comparison reports measurement deltas and flags counts that differ for one
     assert.equal(other.countsDiffer, true);
     assert.equal(other.nondeterministic, false);
   }
+});
+
+test('a selected root never leaves its checkout, even through a symlink', async (t) => {
+  const base = await mkdtemp(path.join(os.tmpdir(), 'cartograph-1228-root-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const checkout = path.join(base, 'checkout');
+  await mkdir(path.join(checkout, 'packages', 'core'), { recursive: true });
+  await mkdir(path.join(base, 'outside'));
+  await writeFile(path.join(checkout, 'file'), '');
+  await symlink(path.join(base, 'outside'), path.join(checkout, 'escape'));
+  await symlink(path.join(checkout, 'packages'), path.join(checkout, 'alias'));
+  const real = (...parts) => path.join(realpathSync(checkout), ...parts);
+  assert.equal(selectRoot(checkout), real());
+  assert.equal(selectRoot(checkout, 'packages/core'), real('packages', 'core'));
+  assert.equal(selectRoot(checkout, 'alias/core'), real('packages', 'core'));
+  for (const bad of ['escape', 'file', 'missing']) assert.throws(() => selectRoot(checkout, bad), undefined, bad);
+  // A path that does not exist yet resolves through its existing ancestors.
+  assert.equal(realPath(path.join(checkout, 'escape', 'new', 'dir')), path.join(realpathSync(base), 'outside', 'new', 'dir'));
+  assert.ok(contained(real(), realPath(path.join(checkout, 'alias', 'new'))));
+});
+
+test('containment compares whole path components', () => {
+  assert.ok(contained('/a/b', '/a/b'));
+  assert.ok(contained('/a/b', '/a/b/c'));
+  assert.ok(contained('/a/b', '/a/b/..c'));
+  assert.ok(!contained('/a/b', '/a/bc'));
+  assert.ok(!contained('/a/b', '/a'));
+  assert.ok(!contained('/a/b', '/x'));
 });

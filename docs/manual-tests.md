@@ -345,7 +345,8 @@ never runs their code. Timing and memory are measurements, not gates.
    commit and path, are held to this: a `--bin` binary, a dirty tree or a
    moved pin is reported, never treated as nondeterminism. Added or removed
    repositories are listed and also fail the comparison. `--work` must be
-   outside the Cartograph checkout.
+   outside the Cartograph checkout and a manifest `path` inside its pinned
+   checkout, both compared by real path, so a symlink cannot escape either.
 3. Record the Cartograph commit, machine and each repository's wall time, max
    RSS and peak footprint. Compare a change against a run of its base commit;
    report differences in counts as behaviour changes and timing as
