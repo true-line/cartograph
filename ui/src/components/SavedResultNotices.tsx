@@ -52,7 +52,7 @@ export function SavedResultNotices({ view, onOpenChat, onOpenFindings, store = u
   const toastNotices = notices.toasts.map((key) => notices.unread.find((notice) => savedResultNoticeKey(notice) === key))
     .filter((notice): notice is NonNullable<typeof notice> => notice !== undefined);
   return (
-    <aside className="saved-result-notices" aria-label="Saved result notifications">
+    <aside className={`saved-result-notices saved-result-notices-${notices.corner}`} aria-label="Saved result notifications">
       {toastNotices.map((notice) => (
         <section className="saved-result-toast" role="status" key={savedResultNoticeKey(notice)}>
           <strong>Saved result ready</strong>

@@ -6,6 +6,7 @@ import { investigationCatalog, investigationCitations, investigationDetail, inve
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
 import type { InvestigationChat, InvestigationDetail } from '../investigationTypes';
 import { useAgentChatDockStore } from '../agentChatDockStore';
+import type { SavedResultNoticeCorner } from '../savedResultNoticePreference';
 import { AgentChatsSurface } from './AgentChatsSurface';
 
 const state = (overrides: Partial<InvestigationState> = {}): InvestigationState => ({
@@ -21,10 +22,29 @@ const meta = {
   },
   render: function AgentChatsStory(args) { return <AgentChatsSurface {...args} state={useInvestigationStore()} />; },
   args: { state: state(), onOpenResult: fn(), onFollowUp: fn(), onCancelFollowUp: fn(),
-    preparingFollowUpTask: null, followUpError: null },
+    preparingFollowUpTask: null, followUpError: null, noticeCorner: 'top-right' as SavedResultNoticeCorner,
+    onNoticeCornerChange: fn() },
 } satisfies Meta<typeof AgentChatsSurface>;
 export default meta;
 type Story = StoryObj<typeof meta>;
+
+export const SavedResultNoticeCornerPreference: Story = {
+  render: function CornerPreferenceStory(args) {
+    const [noticeCorner, setNoticeCorner] = useState(args.noticeCorner);
+    return <AgentChatsSurface {...args} state={useInvestigationStore()} noticeCorner={noticeCorner}
+      onNoticeCornerChange={setNoticeCorner} />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const group = canvas.getByRole('group', { name: 'Saved result notice position' });
+    for (const [selected, other] of [['Top Left', 'Top Right'], ['Bottom Right', 'Top Left'],
+      ['Bottom Left', 'Bottom Right'], ['Top Right', 'Bottom Left']]) {
+      await userEvent.click(within(group).getByRole('button', { name: selected }));
+      await expect(within(group).getByRole('button', { name: selected })).toHaveAttribute('aria-pressed', 'true');
+      await expect(within(group).getByRole('button', { name: other })).toHaveAttribute('aria-pressed', 'false');
+    }
+  },
+};
 
 let taskReads: string[] = [];
 let starts = 0;

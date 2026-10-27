@@ -85,3 +85,9 @@ Saved history search includes accepted finding titles and statements alongside
 questions and specialist IDs. **Answer match** marks an answer-only hit. No
 answer or source excerpt is returned in history; open the task for its validated
 findings and citations. This does not search arbitrary multi-message chat prose.
+
+## Saved result notice position
+
+Choose **Saved result notice position** to place existing saved-result notices
+in any corner. The choice is stored locally; when local storage is unavailable,
+notices use the default top-right position.

@@ -4,6 +4,7 @@ import { useInvestigationStore, type InvestigationState } from '../investigation
 import { InvestigationFindings } from './InvestigationFindings';
 import { InvestigationActivity } from './InvestigationActivity';
 import { InvestigationChatTranscript } from './InvestigationChatTranscript';
+import { SAVED_RESULT_NOTICE_CORNERS, type SavedResultNoticeCorner } from '../savedResultNoticePreference';
 
 export interface AgentChatsSurfaceProps {
   state: InvestigationState;
@@ -13,6 +14,8 @@ export interface AgentChatsSurfaceProps {
   onCancelFollowUp: (taskId: string) => void;
   preparingFollowUpTask: string | null;
   followUpError: string | null;
+  noticeCorner: SavedResultNoticeCorner;
+  onNoticeCornerChange: (corner: SavedResultNoticeCorner) => void;
 }
 
 function ReplyHost({ taskId, onHost }: { taskId: string; onHost: NonNullable<AgentChatsSurfaceProps['onReplyHost']> }) {
@@ -26,7 +29,7 @@ function statusLabel(status: string) {
 
 /** A saved task-chat destination; all history and transcript reads use the
  * existing investigation coordinator and its task/result binding checks. */
-export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost, onCancelFollowUp, preparingFollowUpTask, followUpError }: AgentChatsSurfaceProps) {
+export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost, onCancelFollowUp, preparingFollowUpTask, followUpError, noticeCorner, onNoticeCornerChange }: AgentChatsSurfaceProps) {
   const [searchText, setSearchText] = useState(state.historySearch);
   const dock = useAgentChatDockStore();
   const [conversation, setConversation] = useState<ChatTurn | null>(null);
@@ -84,6 +87,13 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
       <button type="button" className="secondary-button" disabled={state.historyLoading}
         onClick={() => { void state.loadHistory(); if (dock.focusedTask) dock.open(dock.focusedTask); }}>Refresh saved chats</button>
     </header>
+    <fieldset className="agent-chat-notice-preference">
+      <legend>Saved result notice position</legend>
+      {SAVED_RESULT_NOTICE_CORNERS.map((corner) => <button key={corner} type="button" className="secondary-button"
+        aria-pressed={noticeCorner === corner} onClick={() => onNoticeCornerChange(corner)}>
+        {corner.split('-').map((part) => part[0].toUpperCase() + part.slice(1)).join(' ')}
+      </button>)}
+    </fieldset>
     {preparingFollowUpTask && <p role="status">Refreshing parent task {preparingFollowUpTask}…
       <button type="button" className="secondary-button" onClick={() => onCancelFollowUp(preparingFollowUpTask)}>Cancel follow-up</button></p>}
     {followUpError && <p role="alert" className="error-text">{followUpError}</p>}
