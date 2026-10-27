@@ -220,16 +220,19 @@ function mergeConversationPage(existing: InvestigationSummary[], incoming: Inves
 
 type ConversationPageBookmark = { cursor: string; ids: string[] };
 
-function normalizedHistorySearch(query: string) {
+export function normalizedHistorySearch(query: string) {
   return query.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, '')
     .replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+}
+
+export function historyTextMatches(text: string, query: string) {
+  return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase()).includes(normalizedHistorySearch(query));
 }
 
 function summaryMatchesHistorySearch(summary: InvestigationSummary, query: string, answerMatchIds: readonly string[] = [], nameMatchIds: readonly string[] = []) {
   const needle = normalizedHistorySearch(query);
   if (!needle) return true;
-  const normalizeAscii = (value: string) => value.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
-  return normalizeAscii(summary.question).includes(needle) || normalizeAscii(summary.specialist_id).includes(needle) ||
+  return historyTextMatches(summary.question, needle) || historyTextMatches(summary.specialist_id, needle) ||
     (summary.has_result && answerMatchIds.includes(summary.investigation_id)) || nameMatchIds.includes(summary.investigation_id);
 }
 
@@ -324,7 +327,7 @@ export interface InvestigationState {
   loadCatalog: () => Promise<void>;
   loadHistory: (more?: boolean) => Promise<void>;
   selectHistoryActive: (activeOnly: boolean) => Promise<void>;
-  searchHistory: (query: string) => Promise<void>;
+  searchHistory: (query: string, options?: { activeOnly: boolean }) => Promise<void>;
   start: (draft: InvestigationDraft, options?: InvestigationStartOptions) => Promise<string | null>;
   retryStart: (options?: { deferOpen?: boolean }) => Promise<string | null>;
   openConversation: (conversationId: string) => Promise<void>;
@@ -830,9 +833,10 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       await get().loadHistory();
     },
 
-    searchHistory: async (query) => {
+    searchHistory: async (query, options) => {
       ++historyRequest;
-      set({ historySearch: query, history: [], historyAnswerMatchIds: [], historyNameMatchIds: [], nextCursor: null, historyError: null });
+      set({ historySearch: query, historyActiveOnly: options?.activeOnly ?? get().historyActiveOnly,
+        history: [], historyAnswerMatchIds: [], historyNameMatchIds: [], nextCursor: null, historyError: null });
       await get().loadHistory();
     },
 

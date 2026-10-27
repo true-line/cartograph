@@ -2312,3 +2312,52 @@ export const InlineReplySurvivesConversationGrouping: Story = {
       parent_id: 'branch-child', conversation_id: 'saved-branch', question: 'Continue this exact saved branch.' });
   },
 };
+
+// AC-0409: the real shell keeps one inline composer across search and modal handoff.
+export const ChatSearchPreservesInlineReply: Story = {
+  ...InlineReplyUsesItsValidatedPane,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(canvas.getByText('core v0.0.1')).toBeInTheDocument());
+    await userEvent.click(canvas.getByRole('button', { name: 'Agent Chats' }));
+    await userEvent.click(await canvas.findByRole('button', { name: /Parent for inline reply/ }));
+    const pane = within(await canvas.findByRole('region', { name: 'Saved chat inv-inline-parent' }));
+    await userEvent.click(pane.getByRole('button', { name: 'Reply here' }));
+    const reply = within(await pane.findByRole('region', { name: 'Reply to inv-inline-parent' }));
+    const question = reply.getByLabelText('Question');
+    const host = canvasElement.querySelector('[data-reply-task="inv-inline-parent"]');
+    await userEvent.type(question, 'Keep this exact inline parent and draft.');
+    const openSearch = async (target = question) => {
+      target.focus(); fireEvent.keyDown(target, { key: 'f', ctrlKey: true, bubbles: true });
+      return within(await canvas.findByRole('dialog', { name: 'Search open and saved chats' }));
+    };
+    let search = await openSearch();
+    await waitFor(() => expect(search.getByRole('searchbox')).toHaveFocus());
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(question).toHaveFocus());
+    await expect(canvasElement.querySelector('[data-reply-task="inv-inline-parent"]')).toBe(host);
+    await expect(question).toHaveValue('Keep this exact inline parent and draft.');
+    search = await openSearch();
+    fireEvent.keyDown(search.getByRole('searchbox'), { key: 'k', ctrlKey: true, bubbles: true });
+    const command = within(await canvas.findByRole('dialog', { name: 'Command palette' }));
+    await waitFor(() => expect(command.getByRole('listbox')).toHaveFocus());
+    await expect(canvas.getAllByRole('dialog')).toHaveLength(1);
+    fireEvent.keyDown(command.getByRole('listbox'), { key: 'f', ctrlKey: true, bubbles: true });
+    await expect(canvas.queryByRole('dialog', { name: 'Search open and saved chats' })).not.toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    await expect(question).toHaveValue('Keep this exact inline parent and draft.');
+    await expect(investigationRequests.filter((item) => item.command === 'start_investigation')).toHaveLength(0);
+    await userEvent.click(reply.getByRole('button', { name: 'Send reply task' }));
+    await waitFor(() => expect(useInvestigationStore.getState().pendingStart).not.toBeNull());
+    const pending = structuredClone(useInvestigationStore.getState().pendingStart);
+    await expect(pending).toMatchObject({ parent_id: 'inv-inline-parent', question: 'Keep this exact inline parent and draft.' });
+    await openSearch(reply.getByRole('button', { name: 'Retry same request' }));
+    await userEvent.keyboard('{Escape}');
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
+    await expect(canvasElement.querySelector('[data-reply-task="inv-inline-parent"]')).toBe(host);
+    await expect(investigationRequests.filter((item) => item.command === 'start_investigation')).toHaveLength(1);
+    await userEvent.click(canvas.getByRole('button', { name: 'Workspace' }));
+    fireEvent.keyDown(canvasElement, { key: 'f', ctrlKey: true, bubbles: true });
+    await expect(canvas.queryByRole('dialog', { name: 'Search open and saved chats' })).not.toBeInTheDocument();
+  },
+};

@@ -86,6 +86,19 @@ describe('saved task chat docks', () => {
     h.leave();
   });
 
+  // AC-0409: open-row search uses the saved name, never a refreshed catalog alias.
+  it('retains the saved specialist name and rejects a same-identity rename', async () => {
+    const h = harness(); await h.open('named');
+    const saved = h.dock.getState().docks[0];
+    expect(saved.specialistName).toBe(investigationDetail('named').specialist.name);
+    h.dock.getState().open('named'); await tick();
+    const detail = investigationDetail('named');
+    h.coordinator.setState({ detail: { ...detail, specialist: { ...detail.specialist, name: 'Unproven renamed specialist' } },
+      chat: chat('named'), chatStatus: 'saved' }); await tick();
+    expect(h.dock.getState().docks[0]).toBe(saved);
+    expect(h.dock.getState().error).toBeTruthy(); h.leave();
+  });
+
   it('hands one replaceable notice intent to the next connection and cancels an abandoned handoff', async () => {
     const h = harness('already-selected', false);
     h.dock.getState().requestOpenFromNotice('first');

@@ -98,3 +98,7 @@ Spec Writer @2 can return a saved, cited final message with its proposed design.
 Gap Triager @2 can return a cited final next-step message grounded in recorded gaps and admitted evidence. Its saved proposed-design message is T3 / InferredWeak; insufficient evidence supplies no invented narrative. Gap Triager @1 history remains readable. Follow-ups retain the existing bounded selected-parent result, not the whole conversation.
 
 **Name match** identifies a task found by its validated saved specialist display name, including a pending task without an answer. Names are not inferred from the current catalog or guessed aliases. Search remains literal and ASCII case-insensitive.
+
+## Search open and saved chats
+
+Use **Search open + saved chats** or **Cmd/Ctrl+F** in Agent Chats. Submit a literal search over saved specialist names or IDs, question titles and admitted answer text; this selects **all saved tasks**, even after an active-only filter. Editing alone makes no request. OPEN marks a currently docked task, HISTORY an undocked task. Open snapshots are last observed; older history uses the existing bounded pages. Picking a result docks it, evicting the oldest only after a fifth chat successfully loads. Escape closes the palette and returns focus without discarding an inline reply or pending request.

@@ -353,11 +353,12 @@ export const ConversationOwnershipAcrossVisits: Story = {
 };
 
 let savedAnswerCitationReads: string[];
+let savedAnswerSearches: unknown[];
 let releaseSavedAnswerCitation: (() => void) | undefined;
 
 // AC-0397/0404: validated saved answers stay with their task and cited proposal.
-function savedAnswersFixture(gapTriager = false) {
-    savedAnswerCitationReads = []; releaseSavedAnswerCitation = undefined;
+function savedAnswersFixture(gapTriager = false, palette = false) {
+    savedAnswerCitationReads = []; savedAnswerSearches = []; releaseSavedAnswerCitation = undefined;
     const details = [
       { ...specWriterV2Detail('answer-a'), question: 'Question for answer-a' },
       investigationDetail('answer-b', { question: 'Question for answer-b' }),
@@ -371,7 +372,7 @@ function savedAnswersFixture(gapTriager = false) {
       return result;
     });
     mockIPC((command, payload) => {
-      const args = (payload ?? {}) as { investigationId?: string; citationId?: string; afterSequence?: number; search?: string };
+      const args = (payload ?? {}) as { investigationId?: string; citationId?: string; afterSequence?: number; search?: string; cursor?: string };
       const index = details.findIndex((detail) => detail.investigation_id === args.investigationId);
       const detail = details[index]; const result = results[index];
       if (command === 'get_investigation') return detail;
@@ -393,8 +394,11 @@ function savedAnswersFixture(gapTriager = false) {
         return new Promise((resolve) => { releaseSavedAnswerCitation = () => resolve({ investigation_id: args.investigationId,
           citation_id: args.citationId, citation: investigationCitations[0], status: 'available', text: `Retained source for ${args.investigationId}` }); });
       }
+      if (command === 'list_investigations') savedAnswerSearches.push(payload);
+      if (command === 'list_investigations' && palette && args.cursor) return { items: [], next_cursor: null };
+      if (command === 'list_investigations' && palette && args.search === 'Spec Writer') return { items: [], next_cursor: null };
       if (command === 'list_investigations' && args.search === 'Domain analyst') return {
-        items: [details[1]], next_cursor: null, name_match_ids: [details[1].investigation_id] };
+        items: [details[1]], next_cursor: palette ? 'older-name-page' : null, name_match_ids: [details[1].investigation_id] };
       if (command === 'list_investigations' && args.search === 'caller limit') return {
         items: [details[0]], next_cursor: null, answer_match_ids: [details[0].investigation_id] };
       if (command === 'list_investigations') return { items: details, next_cursor: null,
@@ -663,5 +667,43 @@ export const SavedSpecialistNameSearch: Story = {
     await expect(await within(await canvas.findByRole('region', { name: 'Saved chat answer-b' })).findByText('Saved finding only for answer-b')).toBeVisible();
     await expect(useInvestigationStore.getState().composer.question).toBe('Keep composer draft');
     await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
+  },
+};
+
+// AC-0409: real shared search, name-only history and off-page validated open snapshots.
+export const OpenAndSavedSearchPalette: Story = {
+  ...SavedAnswersStayWithTheirPane, beforeEach: () => savedAnswersFixture(false, true),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement); const pending = useInvestigationStore.getState().pendingStart;
+    await userEvent.click(canvas.getByRole('button', { name: /Question for answer-a/ }));
+    await canvas.findByRole('region', { name: 'Saved chat answer-a' });
+    useInvestigationStore.setState({ historyActiveOnly: true });
+    await userEvent.click(canvas.getByRole('button', { name: 'Search open + saved chats' }));
+    let dialog = within(await canvas.findByRole('dialog', { name: 'Search open and saved chats' }));
+    await userEvent.type(dialog.getByRole('searchbox'), 'Domain analyst');
+    await userEvent.click(dialog.getByRole('button', { name: 'Search all saved chats' }));
+    await expect(savedAnswerSearches).toEqual([{ search: 'Domain analyst' }]);
+    const hit = await dialog.findByRole('button', { name: /Question for answer-b/ });
+    await expect(hit).toHaveTextContent('HISTORY'); await expect(hit).toHaveTextContent('Name match');
+    await userEvent.click(dialog.getByRole('button', { name: 'Load older saved matches' }));
+    await waitFor(() => expect(savedAnswerSearches).toHaveLength(2));
+    await expect(savedAnswerSearches[1]).toEqual({ search: 'Domain analyst', cursor: 'older-name-page' });
+    await userEvent.click(dialog.getByRole('button', { name: /Question for answer-b/ }));
+    await canvas.findByRole('region', { name: 'Saved chat answer-b' });
+    await userEvent.click(canvas.getByRole('button', { name: 'Search open + saved chats' }));
+    dialog = within(await canvas.findByRole('dialog', { name: 'Search open and saved chats' }));
+    const openB = dialog.getByRole('button', { name: /Question for answer-b/ });
+    await expect(openB).toHaveTextContent('OPEN'); await expect(openB).toHaveTextContent('Last observed open snapshot');
+    await expect(within(openB).queryByText('Name match')).not.toBeInTheDocument();
+    await userEvent.clear(dialog.getByRole('searchbox')); await userEvent.type(dialog.getByRole('searchbox'), 'Spec Writer');
+    await userEvent.click(dialog.getByRole('button', { name: 'Search all saved chats' }));
+    await waitFor(() => expect(useInvestigationStore.getState().history).toEqual([]));
+    await expect(dialog.getByRole('button', { name: /Question for answer-a/ })).toHaveTextContent('OPEN');
+    await userEvent.clear(dialog.getByRole('searchbox')); await userEvent.type(dialog.getByRole('searchbox'), 'caller limit');
+    await userEvent.click(dialog.getByRole('button', { name: 'Search all saved chats' }));
+    await expect(dialog.getByRole('button', { name: /Question for answer-a/ })).toHaveTextContent('Last observed open snapshot');
+    await userEvent.click(dialog.getByRole('button', { name: 'Close chat search' }));
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
+    await expect(useInvestigationStore.getState().composer.question).toBe('Keep composer draft');
   },
 };
