@@ -1,5 +1,31 @@
 # cartograph
 
+## 0.39.0
+
+### Minor Changes
+
+- 12ace4f: Treat a repository Flask decorator that aborts with 401 or 403 as an authentication guard.
+- a46d391: Add an Agent Chats destination for browsing saved specialist conversations and opening their exact findings.
+- 8e5cd90: An endpoint whose authentication is unknown because a request hook may block now names each such hook and cites where it is registered. A function a hook calls no longer counts as blocking just because it returns a value.
+- bea0a23: Allow one fixed-feedback, finish-only correction after an ordinary source-replay refusal, within existing investigation limits.
+- 1dc080c: Add parent-bound follow-up task dispatch from validated Agent Chats panes.
+- 19dc304: Route confirmed Quick Dispatch tasks to their exact validated chat in Agent Chats.
+- 03a26f4: Recover Flask authentication guards onto endpoints: each endpoint is required, none or unknown with reasons, and security findings cite the guard evidence.
+- 981a7ff: A Flask request hook that may block no longer makes the endpoints of a separate Flask application `unknown`. It applies only where the hook and the endpoint may share an application, and anything that can't be proven apart still keeps the hook.
+- 5f25aa2: Reconcile focused saved chats with durable task progress and committed findings.
+- 0c7a118: Send supported parent-bound reply tasks directly from saved Agent Chats panes.
+- 262e24e: Browse persisted conversation turns from saved Agent Chats panes.
+- 45b3709: Group loaded saved chat exchanges by conversation with explicit parent and fork links.
+- 801c52d: Flask routes that carry only flask-limiter rate limits or flask-cors `cross_origin` decorators now report no authentication instead of unknown, when those decorators are proven to come from those libraries. The result lists the decorators and records the assumption.
+- ff51214: Show bounded active-task status counts with explicit partial, last-observed, and unknown states.
+- ff51214: Open a saved investigation directly from its exact-version active specialist task row, with one shared empty or uncertainty state for the activity list.
+- 08f0b95: Let saved-result notices open the matching validated conversation in Agent Chats or its findings in Investigations.
+- 094a3d5: Let Agent Chats place saved-result notices in any screen corner with a safe local default.
+- f62306a: Find saved investigations by accepted finding titles and statements in both history views.
+- d5b83d5: Dock up to four saved task chats with close/reopen, oldest-pane replacement, and explicit last-observed snapshots.
+- 951267e: Show validated saved findings and exact-task historical citations in Agent Chats panes.
+- 49f57c9: Show bounded app-shell notices only for results observed after a valid pending transcript baseline, and keep dismissed notices in the session unread list until the matching saved transcript is visibly opened.
+
 ## 0.38.0
 
 ### Minor Changes
