@@ -47,6 +47,10 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
     return () => window.removeEventListener('keydown', onKey);
   }, [openSearch]);
   const dock = useAgentChatDockStore();
+  const [layoutSlots, setLayoutSlots] = useState(1);
+  const [wideRow, setWideRow] = useState<'top' | 'bottom'>('bottom');
+  const slotCount = Math.max(layoutSlots, dock.docks.length);
+  const wideSlot = slotCount === 3 ? (wideRow === 'top' ? 0 : 2) : -1;
   const [conversation, setConversation] = useState<ChatTurn | null>(null);
   const closeConversation = state.closeConversation;
   const ownedConversation = useRef<string | null>(null);
@@ -88,6 +92,9 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
     ...dock.docks.filter((item) => item.turn.conversation_id === id)
       .map((item) => ({ kind: 'exchange' as const, ...item })),
   ]);
+  const paneIds = exchanges.filter((entry) => entry.kind === 'exchange').map((entry) => entry.chat.task_id);
+  const slots = [...exchanges, ...Array.from({ length: slotCount - dock.docks.length }, (_, index) =>
+    ({ kind: 'empty' as const, slot: dock.docks.length + index }))];
   const connect = dock.connect;
   useEffect(() => connect(), [connect]);
   const submitSearch = (event: FormEvent) => {
@@ -105,6 +112,20 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
       <button type="button" className="secondary-button" disabled={state.historyLoading}
         onClick={() => { void state.loadHistory(); if (dock.focusedTask) dock.open(dock.focusedTask); }}>Refresh saved chats</button>
     </header>
+    <div className="agent-chat-layout-controls">
+      <fieldset><legend>Pane layout</legend>
+        {[1, 2, 3, 4].map((count) => <button key={count} type="button" className="secondary-button"
+          aria-label={`${count} pane ${count === 1 ? 'slot' : 'slots'}`} aria-pressed={slotCount === count}
+          disabled={count < dock.docks.length} title={count < dock.docks.length ? 'Close panes first to select fewer slots.' : undefined}
+          onClick={() => setLayoutSlots(count)}>{count}</button>)}
+        {dock.docks.length > 1 && <p className="muted">Close panes first to select fewer than {dock.docks.length} loaded chats.</p>}
+      </fieldset>
+      {slotCount === 3 && <fieldset><legend>Wide row</legend>
+        {(['top', 'bottom'] as const).map((position) => <button key={position} type="button" className="secondary-button"
+          aria-pressed={wideRow === position} onClick={() => setWideRow(position)}>
+          {position === 'top' ? 'Top' : 'Bottom'}</button>)}
+      </fieldset>}
+    </div>
     <fieldset className="agent-chat-notice-preference">
       <legend>Saved result notice position</legend>
       {SAVED_RESULT_NOTICE_CORNERS.map((corner) => <button key={corner} type="button" className="secondary-button"
@@ -175,8 +196,14 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
             <button type="button" className="secondary-button" disabled={state.conversationLoading}
               onClick={() => void state.loadConversation(true)}>Load older turns</button></>}
         </section>}
-        <div className={`agent-chat-docks agent-chat-docks-${dock.docks.length}`}>
-          {exchanges.map((entry) => {
+        <div className={`agent-chat-docks agent-chat-docks-${slotCount}`}>
+          {slots.map((entry) => {
+            if (entry.kind === 'empty') return <section key={`empty:${entry.slot}`}
+              className={`agent-chat-pane agent-chat-empty${entry.slot === wideSlot ? ' agent-chat-slot-wide' : ''}`}
+              aria-label={`Empty chat slot ${entry.slot + 1}`}>
+              <h3>Empty chat slot</h3><p className="muted">Open a saved chat to fill an available slot.</p>
+              <button type="button" className="secondary-button" onClick={openSearch}>Choose saved chat</button>
+            </section>;
             if (entry.kind === 'heading') return <header className="agent-chat-conversation-heading" key={`conversation:${entry.id}`}>
               <h3>Conversation <code>{entry.id}</code></h3>
               <p className="muted">Loaded saved exchanges only · parent links show branches, not complete history.</p>
@@ -194,9 +221,10 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
             const parentInAnotherConversation = parent ? null : dock.docks.find((item) => item.chat.task_id === turn.parent_id);
             const siblings = turn.parent_id === null ? [] : dock.docks.filter((item) =>
               item.turn.conversation_id === turn.conversation_id && item.turn.parent_id === turn.parent_id);
-            return <section className="agent-chat-pane" key={`chat:${chat.chat_id}`}
+            return <section className={`agent-chat-pane${paneIds.indexOf(chat.task_id) === wideSlot ? ' agent-chat-slot-wide' : ''}`} key={`chat:${chat.chat_id}`}
             aria-label={`Saved chat ${chat.task_id}`}>
             <header><h3>{question}</h3><code>{chat.task_id}</code>
+              <p className="muted">Conversation <code>{turn.conversation_id}</code></p>
               <p className="muted">{statusLabel(turn.status)} · Last observed snapshot · {chat.chat_id}</p>
               {focused && !settled && <p role="status" className="muted">{state.loading || state.chatStatus === 'loading'
                 ? 'Refreshing focused task; retained snapshot shown.' : 'Current task progress unavailable; retained snapshot shown.'}</p>}

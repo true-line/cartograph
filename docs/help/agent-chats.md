@@ -102,3 +102,7 @@ Gap Triager @2 can return a cited final next-step message grounded in recorded g
 ## Search open and saved chats
 
 Use **Search open + saved chats** or **Cmd/Ctrl+F** in Agent Chats. Submit a literal search over saved specialist names or IDs, question titles and admitted answer text; this selects **all saved tasks**, even after an active-only filter. Editing alone makes no request. OPEN marks a currently docked task, HISTORY an undocked task. Open snapshots are last observed; older history uses the existing bounded pages. Picking a result docks it, evicting the oldest only after a fifth chat successfully loads. Escape closes the palette and returns focus without discarding an inline reply or pending request.
+
+## Pane layout
+
+Choose **Pane layout** 1, 2, 3 or 4 to arrange that many slots. Three slots offer a **Wide row** at the Top or Bottom; narrow windows stack slots in one column. Empty slots use **Choose saved chat** to open the existing search palette. Close panes first to select fewer slots than loaded chats: layout never silently closes or hides a chat. Opening more chats expands the arrangement up to the existing four-pane bound. These choices change presentation only and preserve replies and pending requests.
