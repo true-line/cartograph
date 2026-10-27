@@ -78,6 +78,10 @@ pub struct Extraction {
     app_defs: HashSet<(String, String)>,
     /// Names assigned as attributes of an imported module (`m.app = …`).
     module_attr_writes: BTreeSet<String>,
+    /// Module-level flask-limiter `Limiter` instances (#1157).
+    limiter_defs: Vec<(String, String)>,
+    /// Names an attribute write or `setattr` / `delattr` goes through.
+    attribute_write_objects: BTreeSet<String>,
 }
 
 /// A module-level framework receiver: an application instance, or a Flask
@@ -2198,6 +2202,9 @@ pub fn extract_dir_incremental_with_progress(
             out.endpoint_apps.extend(extraction.endpoint_apps);
             out.wild_mounts.extend(extraction.wild_mounts);
             out.module_attr_writes.extend(extraction.module_attr_writes);
+            out.limiter_defs.extend(extraction.limiter_defs);
+            out.attribute_write_objects
+                .extend(extraction.attribute_write_objects);
             Ok(())
         },
     );
