@@ -689,6 +689,7 @@ fn trusted_member(dotted: &str) -> Option<String> {
         | "flask_cors.decorator"
         | "flask_cors.decorator.cross_origin" => Some(CORS.into()),
         "flask_limiter.extension" => Some(LIMITER.into()),
+        "flask.abort" | "flask.helpers" | "flask.helpers.abort" => Some(ABORT.into()),
         _ => ["flask_limiter.Limiter", "flask_limiter.extension.Limiter"]
             .into_iter()
             .any(|class| {
@@ -704,6 +705,7 @@ fn trusted_member(dotted: &str) -> Option<String> {
 /// Canonical trusted names a write may replace.
 const CORS: &str = "flask_cors.cross_origin";
 const LIMITER: &str = "flask_limiter.Limiter";
+const ABORT: &str = "flask.abort";
 
 /// Record what binding target `target` writes: every trusted module member
 /// it reassigns, as in `flask_login.login_required = passthrough` (also in
@@ -790,6 +792,8 @@ fn setattr_guards(
             "Limiter",
             "limit",
             "shared_limit",
+            "abort",
+            "helpers",
         ]
         .into_iter()
         .filter_map(|member| trusted_member(&format!("{module}.{member}")))
@@ -1233,17 +1237,26 @@ pub(crate) fn resolve(
                         .filter(|(status, _)| denied(status))
                         .map(|(_, span)| span.clone())
                         .collect::<Vec<_>>();
-                    if merged.statuses.iter().any(denied) {
-                        guards.insert(symbol_id(repo, &key.0, &key.1));
-                        basis.insert("decorator_returns_401_or_403");
-                        evidence.push(span.clone());
-                        evidence.extend(merged.evidence.iter().cloned());
-                    } else if !aborts.is_empty() {
-                        guards.insert(symbol_id(repo, &key.0, &key.1));
-                        basis.insert("decorator_aborts_401_or_403");
-                        evidence.push(span.clone());
-                        evidence.extend(aborts);
+                    // `flask.abort` replaced anywhere may be anything.
+                    let aborts = if patched.contains(ABORT) {
+                        Vec::new()
                     } else {
+                        aborts
+                    };
+                    let returns = merged.statuses.iter().any(denied);
+                    if returns || !aborts.is_empty() {
+                        guards.insert(symbol_id(repo, &key.0, &key.1));
+                        evidence.push(span.clone());
+                    }
+                    if returns {
+                        basis.insert("decorator_returns_401_or_403");
+                        evidence.extend(merged.evidence.iter().cloned());
+                    }
+                    if !aborts.is_empty() {
+                        basis.insert("decorator_aborts_401_or_403");
+                        evidence.extend(aborts.iter().cloned());
+                    }
+                    if !returns && aborts.is_empty() {
                         reasons.insert(format!(
                             "decorator_not_classified:{}",
                             symbol_id(repo, &key.0, &key.1)

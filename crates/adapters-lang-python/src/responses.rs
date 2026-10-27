@@ -525,6 +525,14 @@ impl Reader<'_, '_, '_> {
 
     /// `x` bound once in the function, to a call of a repository function.
     fn delegate(&self, value: TsNode<'_>) -> Option<FnKey> {
+        // `return check(…)`: the check's own responses and aborts.
+        if value.kind() == "call" {
+            let function = value.child_by_field_name("function")?;
+            if self.helpers.contains_key(self.cx.text(&function)) {
+                return None;
+            }
+            return self.resolver.target(self.cx, function, &self.bound);
+        }
         if value.kind() != "identifier" {
             return None;
         }
@@ -558,10 +566,21 @@ impl Reader<'_, '_, '_> {
         if !matches!(self.helpers.get(cx.text(&function)), Some(Helper::Abort)) {
             return None;
         }
-        // The import is the root name's only module-level binding.
+        // The import is the root name's only module-level binding, and no
+        // enclosing function (the decorator around a wrapper) binds it.
         let root_name = cx.text(&function).split('.').next()?;
         let module = std::iter::successors(Some(call), |node| node.parent()).last()?;
         if crate::module_binding(cx, module, root_name).writes.len() > 1 {
+            return None;
+        }
+        let shadowed = std::iter::successors(call.parent(), |node| node.parent())
+            .filter(|node| node.kind() == "function_definition")
+            .any(|function| {
+                function
+                    .child_by_field_name("body")
+                    .is_some_and(|body| handler_bindings(cx, function, body).contains(root_name))
+            });
+        if shadowed {
             return None;
         }
         let first = named(call.child_by_field_name("arguments")?)
