@@ -188,7 +188,11 @@ impl std::fmt::Display for InvestigationStoreError {
 
 impl std::error::Error for InvestigationStoreError {}
 impl From<rusqlite::Error> for InvestigationStoreError {
-    fn from(_: rusqlite::Error) -> Self {
+    fn from(error: rusqlite::Error) -> Self {
+        #[cfg(test)]
+        start_diagnostics::record(&error);
+        #[cfg(not(test))]
+        let _ = error;
         Self::Storage
     }
 }
@@ -200,6 +204,50 @@ impl From<InvestigationError> for InvestigationStoreError {
 impl From<JobTransitionError> for InvestigationStoreError {
     fn from(_: JobTransitionError) -> Self {
         Self::Ownership
+    }
+}
+
+#[cfg(test)]
+mod start_diagnostics {
+    use std::cell::Cell;
+
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub(super) struct Snapshot {
+        pub stage: &'static str,
+        pub sqlite_codes: Option<(i32, i32)>,
+    }
+    thread_local! {
+        static ACTIVE: Cell<Option<Snapshot>> = const { Cell::new(None) };
+    }
+    pub(super) fn capture<T>(call: impl FnOnce() -> T) -> (T, Snapshot) {
+        struct Restore(Option<Snapshot>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ACTIVE.set(self.0);
+            }
+        }
+        let restore = Restore(ACTIVE.replace(Some(Snapshot::default())));
+        let result = call();
+        let snapshot = ACTIVE.get().expect("diagnostic scope is active");
+        drop(restore);
+        (result, snapshot)
+    }
+    pub(super) fn stage(stage: &'static str) {
+        if let Some(mut snapshot) = ACTIVE.get() {
+            snapshot.stage = stage;
+            ACTIVE.set(Some(snapshot));
+        }
+    }
+    pub(super) fn record(error: &rusqlite::Error) {
+        if let Some(mut snapshot) = ACTIVE.get() {
+            snapshot.sqlite_codes = match error {
+                rusqlite::Error::SqliteFailure(error, _) => {
+                    Some((error.extended_code & 0xff, error.extended_code))
+                }
+                _ => None,
+            };
+            ACTIVE.set(Some(snapshot));
+        }
     }
 }
 
@@ -504,9 +552,13 @@ impl JobStore {
             }
         });
         let request_namespace = origin.request_namespace();
+        #[cfg(test)]
+        start_diagnostics::stage("begin_immediate");
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        #[cfg(test)]
+        start_diagnostics::stage("schema_validate");
         validate(&tx, &self.namespace)?;
         if let Some(identity) = mcp {
             let registered: bool = tx.query_row(
@@ -518,11 +570,15 @@ impl JobStore {
                 return Err(InvestigationStoreError::Missing);
             }
         }
+        #[cfg(test)]
+        start_diagnostics::stage("nonce_lookup");
         let prior: Option<Option<String>> = tx.query_row(
             "SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE request_namespace=?2 AND nonce = ?1", params![request.request_nonce,request_namespace], |row| row.get(0),
         ).optional()?;
         if let Some(id) = prior {
             let id = id.ok_or(InvestigationStoreError::Invalid)?;
+            #[cfg(test)]
+            start_diagnostics::stage("nonce_replay");
             let record = if next_prompt {
                 load_next_prompt_task(&tx, &id)?
             } else {
@@ -543,6 +599,8 @@ impl JobStore {
             if !same {
                 return Err(InvestigationStoreError::Conflict);
             }
+            #[cfg(test)]
+            start_diagnostics::stage("replay_commit");
             tx.commit()?;
             return Ok(InvestigationStart {
                 detail: record.detail,
@@ -572,6 +630,8 @@ impl JobStore {
             .filter(|p| p.available && p.mode == request.provider_mode)
             .ok_or(InvestigationStoreError::Unavailable)?;
         validate_provider(provider)?;
+        #[cfg(test)]
+        start_diagnostics::stage("admission_capacity");
         check_start_capacity(&tx, request.conversation_id.is_none())?;
         let conversation_id = match &request.conversation_id {
             Some(id) => {
@@ -603,6 +663,8 @@ impl JobStore {
                 }
             }
         }
+        #[cfg(test)]
+        start_diagnostics::stage("create_records");
         let id = new_id(&tx, "investigation")?;
         let now = timestamp(&tx)?;
         if request.conversation_id.is_none() {
@@ -707,6 +769,8 @@ impl JobStore {
             action_tool: None,
         };
         reads::validate_specialist_activity_admission(&record)?;
+        #[cfg(test)]
+        start_diagnostics::stage("persist_task");
         if next_prompt {
             insert_next_prompt_task(&tx, &record)?;
         } else {
@@ -739,8 +803,14 @@ impl JobStore {
         } else {
             save_task(&tx, &record, 0, true)?;
         }
+        #[cfg(test)]
+        start_diagnostics::stage("dispatch_chat");
         chat::insert_dispatch_chat(&tx, &record)?;
+        #[cfg(test)]
+        start_diagnostics::stage("final_capacity");
         check_task_capacity(&tx, &id, false)?;
+        #[cfg(test)]
+        start_diagnostics::stage("commit");
         tx.commit()?;
         Ok(InvestigationStart {
             detail: record.detail,
