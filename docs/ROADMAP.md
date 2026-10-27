@@ -217,10 +217,12 @@ no recovered test arrangements or journeys. The order changes as follows.
    deterministic artifacts, the recovered contract is scored against
    `docs/api.md`, every gap is named, and the result is published under
    `docs/showcases/`. Its findings set the next priorities.
-4. **Acceptance harness work is parked.** #716 keeps its agreed scope and
-   its foundation checkpoint, and resumes when the owner schedules a
-   real-provider run. #598 stays open. Accepting procedure revision 3 remains
-   an owner decision.
+4. **Acceptance harness verification can proceed.** The owner authorized
+   #716's conditional-safety revision on 2026-10-27: each admitted prompt and
+   its finish/refusal path must fit existing limits. Full-budget fit is no
+   longer a prerequisite. Refused evidence or partial completion does not
+   satisfy #598, which stays open. Real-provider execution still requires a
+   separately authorized run definition; historical controls remain frozen.
 5. **Recorded business flows and journeys follow the showcase.** Enterprise
    estates typically have outdated or missing documentation, no recorded
    journeys, and no recorded business flows to test against. Those are the
