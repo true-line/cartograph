@@ -2559,6 +2559,113 @@ def nothing():
 }
 
 #[test]
+fn flask_text_bodies_and_made_responses_are_proven() {
+    // AC-0399 (#1182): a returned `str` is a `text` response, and
+    // `make_response(body[, status])` is read as `(body, status)`, directly
+    // or through a local that is only returned or given cookies or headers.
+    let source = r#"
+from flask import Flask, jsonify, make_response, render_template
+
+app = Flask(__name__)
+
+@app.route("/text")
+def text():
+    if bad():
+        return "redirect_uri must be set", 400
+    if odd():
+        return f"only {FLOWS} are supported", 400
+    return ("plain " "text")
+
+@app.route("/made")
+def made():
+    if created():
+        return make_response(jsonify(ok=True), 201)
+    return make_response(render_template("page.html"))
+
+@app.route("/local", methods=["POST"])
+def local():
+    response = make_response(jsonify(msg="User is logged out"), 200)
+    response.delete_cookie("session")
+    response.set_cookie("seen", "1")
+    response.headers["X-Frame-Options"] = "DENY"
+    return response
+
+@app.route("/override")
+def override():
+    made = make_response("accepted", 201)
+    return made, 202
+
+@app.route("/status")
+def status():
+    response = make_response("x")
+    response.status_code = 500
+    return response
+
+@app.route("/passed")
+def passed():
+    response = make_response("x")
+    log(response)
+    return response
+
+@app.route("/twice")
+def twice():
+    response = make_response("a")
+    response = make_response("b")
+    return response
+
+@app.route("/keyword")
+def keyword():
+    return make_response(response="x")
+
+@app.route("/rebound")
+def rebound():
+    make_response = lambda body: body
+    return make_response(jsonify(ok=True))
+"#;
+    let extraction = extract_source(source.as_bytes(), "app.py", &id()).unwrap();
+    let (responses, cited) = responses_cited(&extraction, source, "GET", "/text");
+    assert_eq!(
+        responses,
+        serde_json::json!({ "kinds": ["text"], "statuses": [200, 400], "scope": "handler_body" })
+    );
+    assert_eq!(cited.len(), 3);
+    let (responses, _) = responses_cited(&extraction, source, "GET", "/made");
+    assert_eq!(
+        responses,
+        serde_json::json!({
+            "kinds": ["html", "json"],
+            "statuses": [200, 201],
+            "keys": ["ok"],
+            "scope": "handler_body",
+        })
+    );
+    let (responses, cited) = responses_cited(&extraction, source, "POST", "/local");
+    assert_eq!(
+        responses,
+        serde_json::json!({
+            "kinds": ["json"],
+            "statuses": [200],
+            "keys": ["msg"],
+            "scope": "handler_body",
+        })
+    );
+    assert_eq!(cited, ["return response"]);
+    let (responses, _) = responses_cited(&extraction, source, "GET", "/override");
+    assert_eq!(
+        responses,
+        serde_json::json!({ "kinds": ["text"], "statuses": [202], "scope": "handler_body" })
+    );
+    for path in ["/status", "/passed", "/twice", "/keyword", "/rebound"] {
+        let (responses, _) = responses_cited(&extraction, source, "GET", path);
+        assert_eq!(
+            responses,
+            serde_json::json!({ "partial": ["response_not_proven"], "scope": "handler_body" }),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn responses_need_flask_and_an_unshadowed_jsonify() {
     let fastapi = br#"
 from fastapi import FastAPI

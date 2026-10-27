@@ -6,8 +6,12 @@
 //! - `body` is `json` when it is a call of Flask's `jsonify` (keyword names,
 //!   or the literal keys of one dict argument) or a dict literal, which Flask
 //!   serializes; its literal string keys are recorded. A call of Flask's
-//!   `render_template` is `html`, and of `redirect` is `redirect`.
-//! - `status` is a literal integer. Without one, `json` and `html` are 200,
+//!   `render_template` is `html`, and of `redirect` is `redirect`. A `str`
+//!   (literal, f-string or implicit concatenation) is `text` (#1182).
+//! - `make_response(body[, status[, headers]])` is read as `(body, status)`,
+//!   returned directly or through a local bound once to it and otherwise only
+//!   returned or given cookies or headers; a tuple's own status wins.
+//! - `status` is a literal integer. Without one, `json`, `html` and `text` are 200,
 //!   and `redirect` is its literal `code` (302 when absent).
 //!
 //! Anything else adds a reason to `partial`: a JSON body built elsewhere
@@ -233,6 +237,8 @@ pub(crate) enum Helper {
     Jsonify,
     RenderTemplate,
     Redirect,
+    /// `make_response(body[, status[, headers]])`: read as its arguments.
+    MakeResponse,
     /// `abort(status)`: ends the request with an error, not a response.
     Abort,
 }
@@ -241,6 +247,7 @@ const HELPERS: &[(&str, Helper)] = &[
     ("jsonify", Helper::Jsonify),
     ("render_template", Helper::RenderTemplate),
     ("redirect", Helper::Redirect),
+    ("make_response", Helper::MakeResponse),
     ("abort", Helper::Abort),
 ];
 
@@ -434,7 +441,7 @@ fn read_function(
     facts
 }
 
-impl Reader<'_, '_, '_> {
+impl<'t> Reader<'_, '_, 't> {
     fn read_return(&self, statement: TsNode<'_>, facts: &mut Facts) {
         let cx = self.cx;
         let Some(value) = statement.named_child(0) else {
@@ -469,6 +476,11 @@ impl Reader<'_, '_, '_> {
         let Some(body) = body.map(unparenthesize) else {
             return;
         };
+        // A tuple's own status overrides the one given to `make_response`.
+        let (body, status) = match self.made(body) {
+            Some((inner, made)) => (inner, status.or(made)),
+            None => (body, status),
+        };
         let mut recorded = false;
         let default = match self.classify(body) {
             Body::Json(keys, evidence) => {
@@ -487,6 +499,7 @@ impl Reader<'_, '_, '_> {
                 Some(("json", Some(200)))
             }
             Body::Html => Some(("html", Some(200))),
+            Body::Text => Some(("text", Some(200))),
             Body::Redirect(code) => {
                 if code.is_none() {
                     responses.partial.insert("status_computed");
@@ -580,6 +593,107 @@ impl Reader<'_, '_, '_> {
         })
     }
 
+    /// The body and status a Flask `make_response(body[, status[, headers]])`
+    /// gives, returned directly or through a local bound once to it.
+    fn made(&self, value: TsNode<'t>) -> Option<(TsNode<'t>, Option<TsNode<'t>>)> {
+        let call = if value.kind() == "identifier" {
+            self.response_local(value)?
+        } else {
+            value
+        };
+        let function = (call.kind() == "call")
+            .then(|| call.child_by_field_name("function"))
+            .flatten()?;
+        if !matches!(
+            self.helpers.get(self.cx.text(&function)),
+            Some(Helper::MakeResponse)
+        ) {
+            return None;
+        }
+        let arguments = named(call.child_by_field_name("arguments")?)
+            .into_iter()
+            .filter(|argument| argument.kind() != "comment")
+            .collect::<Vec<_>>();
+        if !(1..=3).contains(&arguments.len())
+            || arguments.iter().any(|argument| {
+                matches!(
+                    argument.kind(),
+                    "keyword_argument" | "list_splat" | "dictionary_splat"
+                )
+            })
+        {
+            return None;
+        }
+        Some((unparenthesize(arguments[0]), arguments.get(1).copied()))
+    }
+
+    /// The call a local is bound to when it is bound once, by a plain
+    /// assignment, and otherwise only returned or given cookies or headers
+    /// (`x.set_cookie(…)`, `x.delete_cookie(…)`, `x.headers[…] = …`), which
+    /// leave its body and status as made.
+    fn response_local(&self, used: TsNode<'t>) -> Option<TsNode<'t>> {
+        let cx = self.cx;
+        let name = cx.text(&used);
+        let mut sites = Vec::new();
+        binding_sites(cx, self.body, &mut |node, bound| {
+            if bound.contains(name) {
+                sites.push(node);
+            }
+        });
+        let [init] = sites.as_slice() else {
+            return None;
+        };
+        let left = init.child_by_field_name("left")?;
+        if init.kind() != "assignment" || left.kind() != "identifier" {
+            return None;
+        }
+        let right = init.child_by_field_name("right").map(unparenthesize)?;
+        let mut proven = true;
+        every_descendant(self.body, &mut |node| {
+            if !proven || node.kind() != "identifier" || cx.text(&node) != name || node == left {
+                return;
+            }
+            let Some(parent) = node.parent() else {
+                return;
+            };
+            proven = match parent.kind() {
+                "return_statement" => true,
+                // `return x, 200`: the tuple's first element.
+                "expression_list" | "tuple" => {
+                    parent.named_child(0) == Some(node)
+                        && parent
+                            .parent()
+                            .is_some_and(|statement| statement.kind() == "return_statement")
+                }
+                "attribute" if parent.child_by_field_name("object") == Some(node) => {
+                    let member = parent
+                        .child_by_field_name("attribute")
+                        .map(|member| cx.text(&member));
+                    let grand = parent.parent();
+                    match member {
+                        Some("set_cookie" | "delete_cookie") => grand.is_some_and(|call| {
+                            call.kind() == "call"
+                                && call.child_by_field_name("function") == Some(parent)
+                        }),
+                        Some("headers") => grand
+                            .filter(|subscript| {
+                                subscript.kind() == "subscript"
+                                    && subscript.child_by_field_name("value") == Some(parent)
+                            })
+                            .and_then(|subscript| subscript.parent().map(|s| (subscript, s)))
+                            .is_some_and(|(subscript, statement)| {
+                                statement.kind() == "assignment"
+                                    && statement.child_by_field_name("left") == Some(subscript)
+                            }),
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+        });
+        proven.then_some(right)
+    }
+
     /// The literal status of a Flask `abort(<int>, …)` call.
     fn abort_status(&self, call: TsNode<'_>) -> Option<u16> {
         let cx = self.cx;
@@ -614,6 +728,9 @@ impl Reader<'_, '_, '_> {
         let cx = self.cx;
         match body.kind() {
             "dictionary" => return dict_keys(cx, body),
+            // Flask serves a returned `str` (literal, f-string or implicit
+            // concatenation) as the response text.
+            "string" | "concatenated_string" => return Body::Text,
             "identifier" => {
                 if let Some((keys, evidence)) = built_dict(cx, self.body, body) {
                     return Body::Json(keys, evidence);
@@ -629,7 +746,7 @@ impl Reader<'_, '_, '_> {
             Some(Helper::Jsonify) => self.jsonify_keys(body),
             Some(Helper::RenderTemplate) => Body::Html,
             Some(Helper::Redirect) => Body::Redirect(redirect_code(cx, body)),
-            Some(Helper::Abort) | None => Body::Unknown,
+            Some(Helper::MakeResponse | Helper::Abort) | None => Body::Unknown,
         }
     }
 
@@ -688,6 +805,8 @@ enum Body {
     /// JSON a repository helper builds.
     Built(FnKey),
     Html,
+    /// A returned `str`.
+    Text,
     /// A redirect with its literal status, `None` when computed.
     Redirect(Option<u16>),
     Unknown,
