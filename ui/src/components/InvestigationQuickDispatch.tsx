@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useInvestigationStore, type InvestigationDraft } from '../investigationStore';
 import { investigationPolicy, obligationEnvelope, validObligationChoices, validObligationEnvelope } from '../investigationObligations';
@@ -13,14 +14,19 @@ export interface InvestigationQuickDispatchProps {
   openRequest: number;
   followUpCancelRequest?: number;
   followUpContext?: InvestigationFollowUpContext | null;
+  inlineReply?: { taskId: string; host: HTMLElement } | null;
+  onStandalone?: () => void;
+  onCloseParent?: (taskId: string) => void;
   onNavigate: (view: 'investigations') => void;
   onAcceptedTask: (taskId: string) => void;
 }
 
-export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, followUpCancelRequest = 0, followUpContext = null, onNavigate, onAcceptedTask }: InvestigationQuickDispatchProps) {
+export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, followUpCancelRequest = 0, followUpContext = null, inlineReply = null, onStandalone, onCloseParent, onNavigate, onAcceptedTask }: InvestigationQuickDispatchProps) {
   const state = useInvestigationStore();
   const [open, setOpen] = useState(false);
   const [dialogParent, setDialogParent] = useState<InvestigationFollowUpContext | null>(null);
+  const [inline, setInline] = useState(false);
+  const blockedParent = useRef(false);
   const [question, setQuestion] = useState('');
   const [specialistId, setSpecialistId] = useState<SpecialistId>('domain-analyst@3');
   const [providerMode, setProviderMode] = useState<InvestigationProviderMode>('local');
@@ -49,8 +55,8 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
     { type: 'neighborhood', anchor: composer.anchor, hops: composer.hops }, [composer.anchor, composer.hops, composer.scopeType]);
   const scope = dialogParent?.scope ?? composerScope;
   const scopeKey = JSON.stringify(scope);
-  const choicesRequestIdentity = useMemo(() => ({ choicesRefresh, open, scopeKey, specialistId }),
-    [choicesRefresh, open, scopeKey, specialistId]);
+  const choicesRequestIdentity = useMemo(() => ({ choicesRefresh, dialogParent, open, scopeKey, specialistId }),
+    [choicesRefresh, dialogParent, open, scopeKey, specialistId]);
   const scopeValid = scope.type === 'all' || (scope.anchor.trim().length > 0 && Number.isInteger(scope.hops) && scope.hops >= 1 && scope.hops <= 3);
   const questionBytes = new TextEncoder().encode(question).length;
   const hasPendingStart = state.pendingStart !== null;
@@ -78,16 +84,26 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
     (!completionRole || (validCompletionSelection && requestBytes <= (policy?.request_bytes ?? 0)));
 
   const openDialog = useCallback((parent: InvestigationFollowUpContext | null = null) => {
-    if (open && (!dialogParent || parent)) return;
+    if (open && ((!dialogParent && !parent) || inFlight)) return;
+    blockedParent.current = false;
+    handledFollowUpCancel.current = followUpCancelRequest;
+    setInline(Boolean(parent && inlineReply?.taskId === parent.parent_id));
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setDialogParent(parent);
-    if (parent) { setSpecialistId(parent.specialist_id); setProviderMode(parent.provider_mode); }
+    if (parent) { setSpecialistId(parent.specialist_id); setProviderMode(parent.provider_mode); if (dialogParent) setQuestion(''); }
     else if (dialogParent) setQuestion('');
     setChoices(null); setChoicesIdentity(null); setSelectedInventoryIds([]); setChoicesError(null); setChoicesErrorIdentity(null);
     setOpen(true);
-  }, [dialogParent, open]);
-  const close = useCallback((accepted = false) => {
+  }, [dialogParent, followUpCancelRequest, inFlight, inlineReply, open]);
+  const close = useCallback((accepted = false, externalCancel = false) => {
     if (inFlight && !accepted) return;
+    if (dialogParent && !accepted) {
+      blockedParent.current = true;
+      if (!externalCancel && followUpCancelRequest === handledFollowUpCancel.current &&
+          followUpContext?.parent_id === dialogParent.parent_id && followUpContext.conversation_id === dialogParent.conversation_id) {
+        onCloseParent?.(dialogParent.parent_id);
+      }
+    }
     ++choicesGeneration.current;
     setOpen(false);
     if (dialogParent) setQuestion('');
@@ -95,19 +111,19 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
     catalogRequested.current = false;
     setChoices(null); setChoicesIdentity(null); setSelectedInventoryIds([]); setChoicesError(null); setChoicesErrorIdentity(null);
     if (previousFocus.current?.isConnected) previousFocus.current.focus();
-  }, [dialogParent, inFlight]);
+  }, [dialogParent, followUpCancelRequest, followUpContext, inFlight, onCloseParent]);
   useEffect(() => {
-    if (openRequest === handledOpenRequest.current) return;
+    if (openRequest === handledOpenRequest.current || inFlight) return;
     handledOpenRequest.current = openRequest;
     openDialog(followUpContext);
-  }, [followUpContext, openDialog, openRequest]);
+  }, [followUpContext, inFlight, openDialog, openRequest]);
   useEffect(() => {
     if (followUpCancelRequest === handledFollowUpCancel.current) return;
     if (!dialogParent) { handledFollowUpCancel.current = followUpCancelRequest; return; }
     if (inFlight) return;
     const timer = window.setTimeout(() => {
       handledFollowUpCancel.current = followUpCancelRequest;
-      close();
+      close(false, true);
     }, 0);
     return () => window.clearTimeout(timer);
   }, [close, dialogParent, followUpCancelRequest, inFlight]);
@@ -117,12 +133,13 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
       if (event.altKey || event.ctrlKey || event.shiftKey || !event.metaKey) return;
       if (event.code === 'Space' || (event.key.toLowerCase() === 'j' && fallbackEnabled)) {
         event.preventDefault();
-        openDialog();
+        blockedParent.current = true;
+        if (onStandalone) onStandalone(); else openDialog();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [close, fallbackEnabled, open, openDialog]);
+  }, [close, fallbackEnabled, onStandalone, open, openDialog]);
   useEffect(() => {
     if (!open) return;
     if (questionRef.current) questionRef.current.focus();
@@ -132,7 +149,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
       catalogRequested.current = true;
       void current.loadCatalog();
     }
-  }, [open, hasPendingStart]);
+  }, [dialogParent, inlineReply, open, hasPendingStart]);
   useEffect(() => {
     const request = ++choicesGeneration.current;
     if (!open || !completionRole || !scopeValid) {
@@ -168,8 +185,11 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
     setChoices(null); setChoicesIdentity(null); setSelectedInventoryIds([]); setChoicesError(null); setChoicesErrorIdentity(null);
     setChoicesRefresh((generation) => generation + 1);
   };
+  const validParentPlacement = () => !dialogParent || (!blockedParent.current &&
+    followUpContext?.parent_id === dialogParent.parent_id && followUpContext.conversation_id === dialogParent.conversation_id &&
+    (!inline || (inlineReply?.taskId === dialogParent.parent_id && inlineReply.host.isConnected)));
   const start = async () => {
-    if (!valid || locked || state.pendingStart ||
+    if (!valid || locked || state.pendingStart || !validParentPlacement() ||
         (dialogParent && followUpCancelRequest !== handledFollowUpCancel.current)) return;
     // Construct the quick request only from overlay-owned inputs. Full-composer
     // obligations, parent links, and inspection requirements never leak here.
@@ -191,7 +211,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
     } finally { setBusy(false); }
   };
   const retry = async () => {
-    if (busy || !state.pendingStart ||
+    if (busy || !state.pendingStart || !validParentPlacement() ||
         (dialogParent && followUpCancelRequest !== handledFollowUpCancel.current)) return;
     const requestedSpecialist = state.pendingStart.specialist_id;
     setBusy(true);
@@ -206,17 +226,19 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
   const pendingMatchesParent = !dialogParent || Boolean(state.pendingStart &&
     state.pendingStart.conversation_id === dialogParent.conversation_id && state.pendingStart.parent_id === dialogParent.parent_id);
   const pendingIsQuick = state.pendingStart && QUICK_IDS.includes(state.pendingStart.specialist_id) && pendingMatchesParent;
-  return <div className="quick-dispatch-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !inFlight) close(); }}>
-    <section ref={dialogRef} className="quick-dispatch-dialog" role="dialog" aria-modal="true" aria-label="Quick investigation dispatch" onKeyDown={(event) => {
-      if (event.key !== 'Tab') return;
+  const content = <div className={inline ? 'quick-dispatch-inline' : 'quick-dispatch-backdrop'} onMouseDown={(event) => { if (!inline && event.target === event.currentTarget && !inFlight) close(); }}>
+    <section ref={dialogRef} className="quick-dispatch-dialog" role={inline ? 'region' : 'dialog'} aria-modal={inline ? undefined : true}
+      aria-label={inline ? `Reply to ${dialogParent?.parent_id}` : 'Quick investigation dispatch'} onKeyDown={(event) => {
+      if (inline && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void start(); return; }
+      if (inline || event.key !== 'Tab') return;
       const items = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')];
       if (!items.length) { event.preventDefault(); return; }
       const first = items[0]; const last = items[items.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }}>
-      <header><div><h2>{dialogParent ? 'Follow-up task' : 'Quick investigation'}</h2><p className="muted">Start a saved investigation with a supported specialist. Findings remain T3 / InferredWeak.</p></div>
-        <button type="button" className="secondary-button" onClick={() => close()} disabled={inFlight} aria-label="Close quick investigation">Close</button></header>
+      <header><div><h2>{inline ? 'Reply task' : dialogParent ? 'Follow-up task' : 'Quick investigation'}</h2><p className="muted">Start a saved investigation with a supported specialist. Findings remain T3 / InferredWeak.</p></div>
+        <button type="button" className="secondary-button" onClick={() => close()} disabled={inFlight} aria-label={inline ? 'Close inline reply' : 'Close quick investigation'}>Close</button></header>
       {state.catalogError && <p className="error-text" role="alert">Specialist catalog unavailable. Refresh in Investigations before starting.</p>}
       {state.startError && <p className="error-text" role="alert">{state.startError}</p>}
       {state.pendingStart ? <div>
@@ -227,6 +249,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
       </div> : <form onSubmit={(event) => { event.preventDefault(); void start(); }}>
         {dialogParent && <p className="muted">Following <code>{dialogParent.parent_id}</code> in conversation <code>{dialogParent.conversation_id}</code>.
           Saved producer: {dialogParent.specialist_id} · {dialogParent.saved_provider_id} · {dialogParent.saved_model}.</p>}
+        {inline && <p className="muted">Context is the selected saved parent result as bounded T3 history, not all earlier questions or answers. Sending creates a separate child task.</p>}
         {!supported && dialogParent && <p className="error-text" role="alert">This saved specialist version is not supported for Quick Dispatch. Continue in Investigations.</p>}
         <label>Specialist<select value={specialistId} disabled={locked || Boolean(dialogParent) || !specialists.length} onChange={(event) => setSpecialistId(event.target.value as SpecialistId)}>
           {dialogParent && !specialists.some((item) => item.id === dialogParent.specialist_id) &&
@@ -266,8 +289,11 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
         {state.catalog && specialists.length === 0 && <p className="muted">No supported quick-dispatch specialists are available. Use the full Investigations composer.</p>}
         {scope.type === 'neighborhood' && !scopeValid && <p role="alert" className="error-text">Choose a valid fact anchor and one to three hops in the full Investigations composer.</p>}
         <footer><button type="button" className="secondary-button" onClick={() => close()} disabled={inFlight}>Cancel</button>
-          <button type="submit" disabled={!valid || locked || state.catalogLoading}>{dialogParent ? 'Start follow-up task' : 'Start investigation'}</button></footer>
+          <button type="submit" disabled={!valid || locked || state.catalogLoading}>{inline ? 'Send reply task' : dialogParent ? 'Start follow-up task' : 'Start investigation'}</button></footer>
       </form>}
     </section>
   </div>;
+  if (!inline) return content;
+  return inlineReply && dialogParent && inlineReply.taskId === dialogParent.parent_id && inlineReply.host.isConnected
+    ? createPortal(content, inlineReply.host) : null;
 }
