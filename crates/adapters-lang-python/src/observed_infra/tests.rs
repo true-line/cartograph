@@ -907,3 +907,140 @@ fn parameters_are_followed_to_their_one_caller() {
     )]);
     assert!(!uses(&edges, "services.py").contains(&res("smtp:mail.internal").as_str()));
 }
+
+fn fetches(files: &[(&str, &str)]) -> Vec<FetchSite> {
+    let dir = tempfile::tempdir().unwrap();
+    for (path, body) in files {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+    extract_dir_with_fetches(
+        dir.path(),
+        &SourceId {
+            repo: REPO,
+            commit: "workdir",
+        },
+        Registries::builtin(),
+    )
+    .unwrap()
+    .2
+}
+
+fn shown(site: &FetchSite) -> String {
+    let url = match &site.url {
+        IdentityExpr::Literal(url) => format!("lit:{url}"),
+        IdentityExpr::EnvRef(key) => format!("env:{key}"),
+        IdentityExpr::Computed(text) => format!("computed:{text}"),
+    };
+    format!(
+        "{} {} {} {}",
+        site.path,
+        site.method,
+        url,
+        site.symbol.as_deref().unwrap_or("-")
+    )
+}
+
+// AC-0424: module functions of an import-proven `requests` or `httpx` are
+// fetch sites with their verb, a classified URL and the enclosing function
+// as owner. (T-0424)
+#[test]
+fn proven_requests_and_httpx_calls_become_fetch_sites() {
+    let sites = fetches(&[(
+        "app/client.py",
+        r#"
+import os
+import requests
+import httpx as h
+from requests import post as send
+
+USERS = "https://users.internal/api/users"
+
+def list_users():
+    return requests.get(USERS, timeout=5)
+
+def create(body):
+    send("/api/users", json=body)
+    h.request("patch", url="/api/users/1")
+    h.request(verb(), "/api/users/2")
+    h.request(method="put", url="/api/users/3")
+    requests.delete(url=os.environ["USERS_URL"])
+    requests.put(f"/api/users/{body.id}")
+
+class Sync:
+    def run(self):
+        h.head("/health")
+
+requests.options("/api/ping")
+"#,
+    )]);
+    let shown: Vec<String> = sites.iter().map(shown).collect();
+    let owner = |name: &str| format!("sym:{REPO}@app/client.py#{name}");
+    assert_eq!(
+        shown,
+        vec![
+            format!(
+                "app/client.py GET lit:https://users.internal/api/users {}",
+                owner("list_users")
+            ),
+            format!("app/client.py POST lit:/api/users {}", owner("create")),
+            format!("app/client.py PATCH lit:/api/users/1 {}", owner("create")),
+            format!("app/client.py ? lit:/api/users/2 {}", owner("create")),
+            format!("app/client.py PUT lit:/api/users/3 {}", owner("create")),
+            format!("app/client.py DELETE env:USERS_URL {}", owner("create")),
+            format!(
+                "app/client.py PUT computed:f\"/api/users/{{body.id}}\" {}",
+                owner("create")
+            ),
+            format!("app/client.py HEAD lit:/health {}", owner("Sync.run")),
+            "app/client.py OPTIONS lit:/api/ping -".to_string(),
+        ]
+    );
+    assert!(
+        sites
+            .windows(2)
+            .all(|pair| pair[0].byte_start < pair[1].byte_start)
+    );
+}
+
+// AC-0424: only a never-rebound module-level import proves the client;
+// lookalikes, rebound names, unproven receivers and other functions of the
+// module yield nothing. (T-0424)
+#[test]
+fn unproven_http_clients_are_not_fetch_sites() {
+    let sites = fetches(&[
+        (
+            "app/lookalike.py",
+            r#"
+import requestsx
+from . import requests
+import httpx
+
+def f(session, client):
+    requestsx.get("/a")
+    requests.get("/b")
+    session.get("/c")
+    client.post("/d")
+    httpx.Client().get("/e")
+    httpx.stream("GET", "/f")
+"#,
+        ),
+        (
+            "app/rebound.py",
+            r#"
+import requests
+
+def g():
+    requests.get("/g")
+
+requests = None
+"#,
+        ),
+    ]);
+    assert!(
+        sites.is_empty(),
+        "{:?}",
+        sites.iter().map(shown).collect::<Vec<_>>()
+    );
+}

@@ -201,3 +201,61 @@ fn a_client_only_rust_repository_still_yields_its_reqwest_calls() {
     let methods: Vec<&str> = x.fetch_sites.iter().map(|s| s.method.as_str()).collect();
     assert_eq!(methods, ["GET", "DELETE", "POST"]);
 }
+
+#[test]
+fn python_requests_calls_stitch_to_same_repo_flask_endpoints() {
+    // AC-0424: a `requests` call is a fetch site the ordinary stitch binds
+    // to the same repository's endpoint, or names as a Gap when computed.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("app.py"),
+        r#"
+import requests
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.route("/users", methods=["GET"])
+def users():
+    return []
+
+def sync(base):
+    requests.get("/users")
+    requests.post(base + "/users")
+"#,
+    )
+    .unwrap();
+    let (x, _) = crate::extract_tree_with_summary(
+        dir.path(),
+        REPO,
+        "workdir",
+        &[],
+        &BTreeMap::new(),
+        None,
+        None,
+        &[],
+    )
+    .unwrap();
+    let sync = format!("sym:{REPO}@app.py#sync");
+    let fetches: Vec<(&str, &str)> = x
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "FETCHES")
+        .map(|edge| (edge.src.as_str(), edge.dst.as_str()))
+        .collect();
+    // The computed POST is a Gap the caller fetches, named at its call.
+    let gap = format!("gap:fetch:{REPO}@app.py@178");
+    assert_eq!(
+        fetches,
+        [
+            (sync.as_str(), "ep:local/p@GET:/users"),
+            (sync.as_str(), gap.as_str())
+        ]
+    );
+    assert_eq!(x.fetch_sites.len(), 2);
+    assert!(
+        x.nodes
+            .iter()
+            .any(|node| node.id == gap && node.label == "Gap")
+    );
+}

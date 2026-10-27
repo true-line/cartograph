@@ -19,7 +19,13 @@
 //! is followed to the argument of that function's one caller under the
 //! rules `follow_parameter` documents; anything else is a Gap naming the
 //! site.
+//!
+//! The same proof admits HTTP client calls (#1238, AC-0424): a module
+//! function of `requests` or `httpx` (`get`, `post`, … or `request(method,
+//! url)`) becomes a [`FetchSite`] with its URL classified as above, but
+//! followed only within the file.
 
+use adapters_fw::client::FetchSite;
 use adapters_fw::events::{ClientForm, Ecosystem, IdentityArg, IdentityExpr, Registries};
 use adapters_fw::observed::{ObservedSite, ObservedSource, assemble};
 use core_graph::{Edge, Node};
@@ -33,6 +39,41 @@ use crate::{
 };
 
 const EXTRACTOR_ID: &str = "t0.observed-infra-python";
+
+/// HTTP client modules whose module functions are fetch sites (AC-0424).
+const HTTP_MODULES: &[&str] = &["requests", "httpx"];
+/// Module functions named for the verb they send.
+const HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
+
+/// The method and URL argument of a proven `requests`/`httpx` module call:
+/// a verb function, or `request(method, url)` with `?` for a method that is
+/// not a string literal.
+fn http_call<'t>(
+    cx: &FileCx,
+    module: &str,
+    export: &str,
+    args: TsNode<'t>,
+) -> Option<(String, Option<TsNode<'t>>)> {
+    if !HTTP_MODULES.contains(&module) {
+        return None;
+    }
+    let positional = positional(args);
+    let (method, url) = if HTTP_VERBS.contains(&export) {
+        (export.to_ascii_uppercase(), positional.first().copied())
+    } else if export == "request" {
+        let method = positional
+            .first()
+            .copied()
+            .or_else(|| keyword(cx, args, "method"))
+            .and_then(|method| literal_string(cx, method))
+            .filter(|method| !method.is_empty())
+            .map_or_else(|| "?".to_string(), |method| method.to_ascii_uppercase());
+        (method, positional.get(1).copied())
+    } else {
+        return None;
+    };
+    Some((method, url.or_else(|| keyword(cx, args, "url"))))
+}
 
 /// What a module-level import binds a name to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -922,6 +963,7 @@ fn extract_file(
     registries: &Registries,
     sites: &mut Vec<ObservedSite>,
     follows: &mut Follows,
+    fetches: &mut Vec<FetchSite>,
 ) -> Result<(), ExtractError> {
     let language: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
@@ -1001,6 +1043,24 @@ fn extract_file(
         let Some((module, export)) = callee_export(&cx, callee, &scope) else {
             continue;
         };
+        if let Some((method, url)) = http_call(&cx, &module, &export, args) {
+            fetches.push(FetchSite {
+                method,
+                url: url.map_or_else(
+                    || IdentityExpr::Computed(cx.text(&node).to_string()),
+                    |url| classify(&cx, root, url, &scope, true),
+                ),
+                symbol: enclosing_function_node(node)
+                    .and_then(|function| qualified_function_name(&cx, function))
+                    .map(|name| symbol_id(id.repo, path, &name)),
+                path: path.to_string(),
+                byte_start: node.start_byte() as u64,
+                byte_end: node.end_byte() as u64,
+                base: None,
+                entry: None,
+            });
+            continue;
+        }
         let first = positional(args).first().copied();
         let Some(client) = registries.clients.iter().find(|c| {
             c.ecosystem == Ecosystem::Pypi
@@ -1337,14 +1397,38 @@ pub fn extract_dir(
     id: &SourceId,
     registries: &Registries,
 ) -> Result<(Vec<Node>, Vec<Edge>), ExtractError> {
+    extract_dir_with_fetches(root, id, registries).map(|(nodes, edges, _)| (nodes, edges))
+}
+
+/// Observed nodes and edges, and the fetch sites of the same pass.
+pub type ObservedWithFetches = (Vec<Node>, Vec<Edge>, Vec<FetchSite>);
+
+/// [`extract_dir`] plus the `requests`/`httpx` fetch sites the same import
+/// proofs admit (AC-0424), in file then call order.
+pub fn extract_dir_with_fetches(
+    root: &Path,
+    id: &SourceId,
+    registries: &Registries,
+) -> Result<ObservedWithFetches, ExtractError> {
     let mut files = Vec::new();
     collect_python_files(root, &mut files)?;
     files.sort(); // deterministic order (US-0014)
     let mut sites = Vec::new();
     let mut follows = Follows::default();
+    let mut fetches = Vec::new();
     for rel in &files {
         let source = std::fs::read(root.join(rel))?;
-        extract_file(&source, rel, id, registries, &mut sites, &mut follows)?;
+        let first = fetches.len();
+        extract_file(
+            &source,
+            rel,
+            id,
+            registries,
+            &mut sites,
+            &mut follows,
+            &mut fetches,
+        )?;
+        fetches[first..].sort_by_key(|site: &FetchSite| site.byte_start);
     }
     let known: HashSet<&str> = files.iter().map(String::as_str).collect();
     let mut modules: HashMap<String, Option<ModuleFile>> = HashMap::new();
@@ -1377,14 +1461,15 @@ pub fn extract_dir(
             .concat();
         }
     }
-    Ok(assemble(
+    let (nodes, edges) = assemble(
         &ObservedSource {
             repo: id.repo,
             commit: id.commit,
             extractor: EXTRACTOR_ID,
         },
         &sites,
-    ))
+    );
+    Ok((nodes, edges, fetches))
 }
 
 #[cfg(test)]
