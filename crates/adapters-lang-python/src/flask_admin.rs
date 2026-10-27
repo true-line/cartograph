@@ -6,11 +6,14 @@
 //! named `view.endpoint` and prefixed by the view's URL, so the endpoint is
 //! `<endpoint>.<method>`. `AdminViewMeta` collects the exposed methods through
 //! `dir(cls)`, so a base class's exposed method counts unless the class (or a
-//! base before it) redefines the name. This tier reads:
+//! base before it in the C3 method resolution order) redefines the name.
+//! This tier reads:
 //!
 //! - repository classes at module level whose bases reach an import-proven
 //!   `BaseView`, `AdminIndexView` or `ModelView` (`flask_admin.contrib.*`,
-//!   `flask_admin.model.BaseModelView`), walking bases depth-first;
+//!   `flask_admin.model.BaseModelView`) in C3 order, each base and view
+//!   constructor named by an import or module class bound once and not
+//!   shadowed where it is used;
 //! - an `Admin(…)` assigned once to a name, with that name's
 //!   `init_app(app, index_view=…, url=…)` and `add_view(V(…))` /
 //!   `add_views(V(…), …)` calls on an inline view constructor.
@@ -309,7 +312,7 @@ pub(crate) fn collect(
                         bases.push(Base::Opaque(cx.text(&base).to_string()));
                     }
                     _ if cx.text(&base) == "object" && !bindings.contains_key("object") => {}
-                    _ => bases.push(base_of(cx, base, bindings)),
+                    _ => bases.push(base_of(cx, root, base, None, bindings)),
                 }
             }
         }
@@ -466,10 +469,21 @@ fn root_name<'s>(cx: &'s FileCx<'_>, mut node: TsNode<'_>) -> Option<&'s str> {
     (node.kind() == "identifier").then(|| cx.text(&node))
 }
 
-/// A base class expression, or a view constructor's callee.
-fn base_of(cx: &FileCx<'_>, node: TsNode<'_>, bindings: &HashMap<String, ImportBinding>) -> Base {
+/// A base class expression, or a view constructor's callee, evaluated in
+/// `scope` (`None` for the module): its name must be bound once, by the
+/// import or module-level class it names, and not shadowed around the use.
+fn base_of(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    node: TsNode<'_>,
+    scope: Option<TsNode<'_>>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> Base {
     let node = unparenthesize(node);
     let text = cx.text(&node).to_string();
+    if root_name(cx, node).is_none_or(|name| rebound(cx, root, name, scope)) {
+        return Base::Opaque(text);
+    }
     if let Some(dotted) = import_dotted(cx, node, bindings) {
         if dotted.starts_with("flask_admin.") {
             return library(&dotted).map_or(Base::Opaque(dotted), Base::Library);
@@ -482,7 +496,12 @@ fn base_of(cx: &FileCx<'_>, node: TsNode<'_>, bindings: &HashMap<String, ImportB
             None => Base::Opaque(text),
         };
     }
-    if node.kind() == "identifier" {
+    if node.kind() == "identifier"
+        && module_binding(cx, root, &text)
+            .writes
+            .first()
+            .is_some_and(|write| write.kind() == "class_definition")
+    {
         return Base::Repo((cx.path.to_string(), text.clone()), text);
     }
     Base::Opaque(text)
@@ -690,7 +709,7 @@ fn view_call(
 ) -> ViewCall {
     let class = call.child_by_field_name("function").map_or_else(
         || Base::Opaque(String::new()),
-        |callee| base_of(cx, callee, bindings),
+        |callee| base_of(cx, root, callee, Some(call), bindings),
     );
     let (mut positional, mut keywords, mut starred, mut expanded) =
         (Vec::new(), Vec::new(), false, false);
@@ -743,37 +762,83 @@ fn find<'f>(classes: &HashMap<Key, &'f ViewClass>, key: &Key) -> Option<&'f View
     })
 }
 
-fn visit<'f>(
+/// One entry of a view class's method resolution order: a recovered
+/// repository class, or a modelled Flask-Admin base (whose own methods are
+/// not modelled, so its place only matters relative to the others).
+#[derive(Clone, Copy)]
+enum Mro<'f> {
+    Class(&'f ViewClass),
+    Library(Library),
+}
+
+impl PartialEq for Mro<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Mro::Class(a), Mro::Class(b)) => a.key == b.key,
+            (Mro::Library(a), Mro::Library(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Python's C3 linearization of `key`, as `type()` computes `__mro__`, so
+/// `dir`/`getattr` in `AdminViewMeta` see the same owner of each name. A
+/// hierarchy Python would refuse (repeated or inconsistent bases) or one
+/// deeper than `MAX_CHAIN` is a Gap reason, as is any unmodelled base.
+fn linearize<'f>(
     key: &Key,
     text: &str,
     depth: usize,
     classes: &HashMap<Key, &'f ViewClass>,
-    order: &mut Vec<&'f ViewClass>,
-    libraries: &mut Vec<Library>,
-) -> Result<(), String> {
+    memo: &mut HashMap<Key, Vec<Mro<'f>>>,
+) -> Result<Vec<Mro<'f>>, String> {
     if depth > MAX_CHAIN {
         return Err("flask_admin_view_class_chain_too_deep".into());
     }
     let class =
         find(classes, key).ok_or_else(|| format!("flask_admin_view_class_not_recovered:{text}"))?;
-    if order.iter().any(|seen| seen.key == class.key) {
-        return Ok(());
+    if let Some(line) = memo.get(&class.key) {
+        return Ok(line.clone());
     }
-    order.push(class);
+    let mut sequences = Vec::new();
     for base in &class.bases {
-        match base {
-            Base::Repo(key, text) => visit(key, text, depth + 1, classes, order, libraries)?,
-            Base::Library(library) => libraries.push(*library),
+        sequences.push(match base {
+            Base::Repo(key, text) => linearize(key, text, depth + 1, classes, memo)?,
+            Base::Library(library) => vec![Mro::Library(*library)],
             Base::Opaque(text) => {
                 return Err(format!("flask_admin_view_base_not_modelled:{text}"));
             }
+        });
+    }
+    // A repeated base fails the merge below, as Python refuses it.
+    let heads = sequences.iter().map(|line| line[0]).collect();
+    sequences.push(heads);
+    let mut line = vec![Mro::Class(class)];
+    loop {
+        sequences.retain(|sequence| !sequence.is_empty());
+        let Some(next) = sequences.iter().map(|sequence| sequence[0]).find(|head| {
+            !sequences
+                .iter()
+                .any(|sequence| sequence[1..].contains(head))
+        }) else {
+            if sequences.is_empty() {
+                break;
+            }
+            return Err(format!("flask_admin_view_mro_inconsistent:{}", class.key.1));
+        };
+        line.push(next);
+        for sequence in &mut sequences {
+            if sequence[0] == next {
+                sequence.remove(0);
+            }
         }
     }
-    Ok(())
+    memo.insert(class.key.clone(), line.clone());
+    Ok(line)
 }
 
-/// The registered class's bases, depth-first: a name the first class to
-/// define it owns, so its `@expose` (or the lack of one) wins.
+/// The registered class's method resolution order: a name the first class
+/// in it to define it owns, so its `@expose` (or the lack of one) wins.
 fn chain<'f>(
     base: &Base,
     classes: &HashMap<Key, &'f ViewClass>,
@@ -792,8 +857,14 @@ fn chain<'f>(
         }
         Base::Opaque(text) => return Err(format!("flask_admin_view_class_not_modelled:{text}")),
     };
+    let mro = linearize(key, text, 0, classes, &mut HashMap::new())?;
     let (mut order, mut libraries) = (Vec::new(), Vec::new());
-    visit(key, text, 0, classes, &mut order, &mut libraries)?;
+    for entry in mro {
+        match entry {
+            Mro::Class(class) => order.push(class),
+            Mro::Library(library) => libraries.push(library),
+        }
+    }
     let kind = libraries
         .iter()
         .find(|library| matches!(library, Library::Model(_)))

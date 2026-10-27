@@ -6237,3 +6237,175 @@ def setup(app):
         ]
     );
 }
+
+#[test]
+fn flask_admin_views_resolve_by_lexical_binding_and_c3_order() {
+    // AC-0410 (#1193 review): a view or base name is the class it names only
+    // where nothing shadows it, and a method's owner follows Python's C3
+    // MRO, as `AdminViewMeta`'s `dir`/`getattr` do.
+    let dir = tempfile::tempdir().unwrap();
+    let shadow = r#"
+from flask import Flask
+from flask_admin import Admin, BaseView, expose
+from app.views import Imp
+
+class V(BaseView):
+    @expose("/")
+    def index(self):
+        return "module view"
+
+class Root(BaseView):
+    @expose("/")
+    def index(self):
+        return "root"
+
+    @expose("/base")
+    def page(self):
+        return "base"
+
+class Left(Root):
+    pass
+
+class Right(Root):
+    @expose("/right")
+    def page(self):
+        return "right"
+
+class Quiet(Root):
+    def page(self):
+        return "quiet"
+
+class Diamond(Left, Right):
+    pass
+
+class QuietDiamond(Left, Quiet):
+    pass
+
+class Single(Left):
+    pass
+
+class Inconsistent(Root, Left):
+    pass
+
+class Twice(BaseView):
+    @expose("/")
+    def index(self):
+        return "twice"
+
+Twice = V
+Alias = V
+
+class Dup(Root, Root):
+    pass
+
+app = Flask(__name__)
+admin = Admin(app)
+admin.add_view(V(endpoint="v"))
+admin.add_view(Imp(endpoint="imp"))
+admin.add_view(Diamond(url="/d", endpoint="d"))
+admin.add_view(QuietDiamond(url="/q", endpoint="q"))
+admin.add_view(Single(url="/s", endpoint="s"))
+admin.add_view(Inconsistent(url="/i", endpoint="i"))
+admin.add_view(Twice(endpoint="twice"))
+admin.add_view(Alias(endpoint="alias"))
+admin.add_view(Dup(endpoint="dup"))
+
+def register(V):
+    admin.add_view(V(endpoint="param"))
+
+def register_local():
+    Imp = V
+    admin.add_view(Imp(endpoint="local"))
+"#;
+    let views = r#"
+from flask_admin import BaseView, expose
+
+class Imp(BaseView):
+    @expose("/")
+    def index(self):
+        return "imported"
+"#;
+    // A rebound library base is no longer Flask-Admin's `BaseView`.
+    let rebase = r#"
+from flask import Flask
+from flask_admin import Admin, BaseView, expose
+
+BaseView = dict
+
+class Bad(BaseView):
+    @expose("/")
+    def index(self):
+        return "bad"
+
+app = Flask(__name__)
+admin = Admin(app)
+admin.add_view(Bad(endpoint="bad"))
+"#;
+    write(dir.path(), "app/shadow.py", shadow);
+    write(dir.path(), "app/views.py", views);
+    write(dir.path(), "app/rebase.py", rebase);
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let mut endpoints = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| {
+            format!(
+                "{} {} {} {} {}",
+                node.props["method"].as_str().unwrap(),
+                node.props["path"].as_str().unwrap(),
+                node.props["endpoint_name"].as_str().unwrap(),
+                node.props["prov"]["confidence_tier"].as_str().unwrap(),
+                node.props["handler_sym"].as_str().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    endpoints.sort();
+    let mut gaps = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.id.starts_with("gap:flask_admin:"))
+        .map(|node| {
+            format!(
+                "{} {} {}",
+                node.props["reason"].as_str().unwrap(),
+                node.props["class"].as_str().unwrap(),
+                node.props["prov"]["evidence"][0]["path"].as_str().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    gaps.sort();
+    let sym = |name: &str| format!("sym:local/python-service@app/shadow.py#{name}");
+    assert_eq!(
+        endpoints,
+        vec![
+            "GET /admin/imp/ imp.index Confirmed sym:local/python-service@app/views.py#Imp.index"
+                .to_string(),
+            format!("GET /admin/v/ v.index Confirmed {}", sym("V.index")),
+            format!("GET /d/ d.index Confirmed {}", sym("Root.index")),
+            // C3: Diamond, Left, Right, Root — Right's override wins.
+            format!("GET /d/right d.page Confirmed {}", sym("Right.page")),
+            // QuietDiamond, Left, Quiet, Root: Quiet's unexposed `page` owns it.
+            format!("GET /q/ q.index Confirmed {}", sym("Root.index")),
+            format!("GET /s/ s.index Confirmed {}", sym("Root.index")),
+            format!("GET /s/base s.page Confirmed {}", sym("Root.page")),
+        ]
+    );
+    assert_eq!(
+        gaps,
+        vec![
+            "flask_admin_library_index_route AdminIndexView app/rebase.py",
+            "flask_admin_library_index_route AdminIndexView app/shadow.py",
+            "flask_admin_view_base_not_modelled:BaseView  app/rebase.py",
+            // An assignment, not the class it names.
+            "flask_admin_view_class_not_modelled:Alias  app/shadow.py",
+            // `Imp = V` in `register_local`.
+            "flask_admin_view_class_not_modelled:Imp  app/shadow.py",
+            "flask_admin_view_class_not_modelled:Twice  app/shadow.py",
+            // The parameter `V` of `register`.
+            "flask_admin_view_class_not_modelled:V  app/shadow.py",
+            "flask_admin_view_mro_inconsistent:Dup  app/shadow.py",
+            "flask_admin_view_mro_inconsistent:Inconsistent  app/shadow.py",
+        ]
+    );
+}
