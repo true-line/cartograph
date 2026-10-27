@@ -5,7 +5,7 @@ import { createAgentChatDockStore } from './agentChatDockStore';
 import { useInvestigationStore, type InvestigationState } from './investigationStore';
 import { investigationCatalog, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult } from './investigationFixtures';
 import { queryHistoryDetail, queryHistoryResult } from './completionFixtures';
-import type { InvestigationChat } from './investigationTypes';
+import type { InvestigationChat, InvestigationResult } from './investigationTypes';
 
 function chat(id: string): InvestigationChat {
   const detail = investigationDetail(id);
@@ -402,14 +402,15 @@ describe('saved task chat answers and citation ownership', () => {
     h.leave();
   });
 
-  it.each(['wrong-task', 'wrong-result', 'pending'] as const)('does not attach an answer for %s', async (failure) => {
+  it.each(['wrong-task', 'wrong-result', 'pending'] as const)('does not admit an inconsistent transcript for %s', async (failure) => {
     const h = harness(); h.dock.getState().open('a'); await tick();
     const state = completedState('a');
     if (failure === 'pending') state.chat!.messages.pop();
     else state.chat!.messages[1].message = { kind: 'result_reference', task_id: failure === 'wrong-task' ? 'b' : 'a',
       result_id: failure === 'wrong-result' ? 'other-result' : state.result!.result_id, result_hash: 'e'.repeat(64) };
     h.coordinator.setState(state); await tick();
-    expect(h.dock.getState().docks[0].answer).toBeNull(); h.leave();
+    expect(h.dock.getState().docks).toEqual([]);
+    expect(h.dock.getState().error).toBeTruthy(); h.leave();
   });
 
   it('does not resurrect a dismissed citation while its task refresh is pending', async () => {
@@ -548,6 +549,94 @@ describe('real coordinator citation and follow-up ownership', () => {
       await useInvestigationStore.getState().readCitation('C1', { signal: aborted.signal });
       expect(h.pending).toHaveLength(2);
       expect(useInvestigationStore.getState().citationRead?.text).toBe('Retained source 1');
+    } finally { h.cleanup(); }
+  });
+});
+
+/** AC-0401: real coordinator refreshes; docking observes but never initiates these reads. */
+function progressTransport() {
+  vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+  useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+  let value = { detail: investigationDetail('a', { has_result: false, status: 'running', revision: 4, last_event_sequence: 4 }),
+    result: null as InvestigationResult | null, chat: chat('a') as InvestigationChat | null };
+  const calls: string[] = []; const pending: (() => void)[] = []; let hold = false;
+  mockIPC((command, payload) => {
+    const { investigationId: id = '', afterSequence = 0 } = (payload ?? {}) as { investigationId?: string; afterSequence?: number };
+    calls.push(`${command}:${id}`);
+    const saved = id === 'a' ? value : completedState(id);
+    if (command === 'get_investigation') return saved.detail;
+    if (command === 'investigation_result') return saved.result;
+    if (command === 'get_investigation_chat') return hold
+      ? new Promise((resolve) => pending.push(() => resolve(saved.chat))) : saved.chat;
+    if (command === 'investigation_events') return { investigation_id: id,
+      items: investigationEvents(id).slice(0, saved.detail!.last_event_sequence).filter((event) => event.sequence > afterSequence),
+      next_sequence: saved.detail!.last_event_sequence, has_more: false };
+    return null;
+  });
+  const dock = createAgentChatDockStore(); const leave = dock.getState().connect();
+  const release = () => { hold = false; pending.splice(0).forEach((resolve) => resolve()); };
+  return { dock, leave, calls, hold: () => { hold = true; }, release,
+    update: (next: Partial<typeof value>) => { value = { ...value, ...next }; },
+    complete: () => { const saved = completedState('a'); value = { detail: saved.detail!, result: saved.result!, chat: saved.chat! }; },
+    cleanup: () => { leave(); release(); clearMocks(); vi.unstubAllGlobals(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); } };
+}
+
+describe('focused durable progress', () => {
+  it('reconciles committed findings only after the same refresh transcript settles, without sibling reads', async () => {
+    const h = progressTransport();
+    try {
+      h.dock.getState().open('a'); await vi.waitFor(() => expect(h.dock.getState().docks).toHaveLength(1));
+      const initial = h.dock.getState().docks[0];
+      h.complete(); h.hold(); await useInvestigationStore.getState().refreshSelected();
+      expect(useInvestigationStore.getState()).toMatchObject({ loading: false, chatStatus: 'loading', detail: { revision: 9 } });
+      expect(h.dock.getState().docks[0]).toBe(initial);
+      h.release(); await vi.waitFor(() => expect(h.dock.getState().docks[0].answer).not.toBeNull());
+      expect(h.dock.getState().docks[0]).toMatchObject({ turn: { revision: 9, status: 'completed' },
+        answer: { result: investigationResult('a'), citations: investigationCitations } });
+      expect(useInvestigationStore.getState().events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      expect(h.calls.filter((call) => call.startsWith('get_investigation_chat:'))).toEqual(['get_investigation_chat:a', 'get_investigation_chat:a']);
+      expect(h.calls.filter((call) => call.startsWith('get_investigation:'))).toEqual(['get_investigation:a', 'get_investigation:a']);
+    } finally { h.cleanup(); }
+  });
+
+  it.each(['switch', 'close', 'disconnect'] as const)('does not resurrect delayed A after %s', async (action) => {
+    const h = progressTransport();
+    try {
+      h.dock.getState().open('a'); await vi.waitFor(() => expect(h.dock.getState().docks).toHaveLength(1));
+      const initial = h.dock.getState().docks[0];
+      h.complete(); h.hold(); await useInvestigationStore.getState().refreshSelected();
+      if (action === 'switch') h.dock.getState().open('b');
+      else if (action === 'close') h.dock.getState().close('a');
+      else h.leave();
+      h.release();
+      if (action === 'switch') await vi.waitFor(() => expect(h.dock.getState().docks).toHaveLength(2));
+      await tick();
+      expect(h.dock.getState().docks.find((item) => item.chat.task_id === 'a')).toBe(action === 'close' ? undefined : initial);
+      expect(h.calls.filter((call) => call.startsWith('get_investigation_chat:')))
+        .toEqual(['get_investigation_chat:a', 'get_investigation_chat:a', ...(action === 'switch' ? ['get_investigation_chat:b'] : [])]);
+    } finally { h.cleanup(); }
+  });
+
+  it.each(['revision', 'parent', 'conversation', 'producer', 'chat', 'result', 'reference', 'legacy'] as const)('refuses changed cached %s on explicit reopen and supplies no fresh follow-up parent', async (change) => {
+    const h = progressTransport();
+    try {
+      h.complete(); h.dock.getState().open('a'); await vi.waitFor(() => expect(h.dock.getState().docks[0]?.answer).toBeTruthy());
+      const previous = h.dock.getState().docks[0];
+      if (change === 'revision') h.update({ detail: investigationDetail('a', { revision: 8, last_event_sequence: 8 }) });
+      if (change === 'parent') h.update({ detail: investigationDetail('a', { parent_id: 'other-parent' }) });
+      if (change === 'conversation') h.update({ detail: investigationDetail('a', { conversation_id: 'other-conversation' }) });
+      if (change === 'producer') h.update({ detail: investigationDetail('a', { provider: { ...investigationCatalog.providers[0], model: 'other-model' } }),
+        chat: { ...previous.chat, producer: { ...previous.chat.producer, model: 'other-model' } } });
+      if (change === 'chat') h.update({ chat: { ...previous.chat, chat_id: 'changed-chat' } });
+      if (change === 'result') { const result = investigationResult('a'); result.findings[0].statement = 'Changed immutable saved finding'; h.update({ result }); }
+      if (change === 'reference') h.update({ chat: { ...previous.chat, messages: previous.chat.messages.map((entry) => entry.message.kind === 'result_reference'
+        ? { ...entry, message: { ...entry.message, result_hash: 'f'.repeat(64) } } : entry) } });
+      if (change === 'legacy') h.update({ chat: null });
+      expect(await h.dock.getState().openForFollowUp('a')).toBeNull();
+      expect(useInvestigationStore.getState()).toMatchObject({ chatStatus: change === 'legacy' ? 'legacy' : 'saved', error: null, chatError: null });
+      expect(h.dock.getState().docks[0]).toBe(previous);
+      expect(h.dock.getState().focusedGeneration).toBeNull();
+      expect(h.dock.getState().error).toBeTruthy();
     } finally { h.cleanup(); }
   });
 });
