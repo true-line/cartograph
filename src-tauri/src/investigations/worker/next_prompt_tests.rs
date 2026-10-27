@@ -935,3 +935,13 @@ fn next_prompt_worker_preserves_source_file_and_span_caps() {
         }
     }
 }
+
+// Reuse the production-worker scripted fixture for the staged analyst harness.
+pub(in crate::investigations) fn expanded_scripted_provider(partial: bool) -> Arc<dyn LlmProvider> {
+    let mut provider = NextProvider::new(false);
+    if partial {
+        provider.source_scenario = Some(SourceScenario::Acquired);
+        provider.extra_inventory = true;
+    }
+    Arc::new(provider)
+}

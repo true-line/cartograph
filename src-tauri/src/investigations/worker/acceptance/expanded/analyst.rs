@@ -1,0 +1,283 @@
+//! Scripted analyst only. No auditor or live-provider entrypoint is installed.
+use super::{PreparationBinding, PreparedState, reopen};
+use crate::{
+    investigations::{runtime::descriptor, worker::run_completion},
+    jobs::{ClaimMode, JobStore, investigations::PendingInvestigationStep},
+};
+use agents::investigation::*;
+use core_prov::content_hash;
+use llm::LlmProvider;
+use serde_json::{Value, json};
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Write},
+    path::Path,
+    sync::Arc,
+    time::Instant,
+};
+use tauri::Manager;
+
+const MAX_RECEIPT: usize = 2 * 1024 * 1024;
+fn bytes(value: &Value) -> Result<Vec<u8>, String> {
+    crate::investigations::context::bounded_json(value, MAX_RECEIPT).map_err(|e| e.to_string())
+}
+fn exclusive(path: &Path, body: &[u8]) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|e| e.to_string())?;
+    file.write_all(body)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| e.to_string())
+}
+// Preserve exact bounded journal bodies, including their independently validated
+// historical admission cutoffs. Never reconstruct modes from terminal usage.
+fn rows(db: &rusqlite::Connection, id: &str, table: &str) -> Result<Vec<String>, String> {
+    let exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?1)",
+            [table],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !exists {
+        return Ok(vec![]);
+    }
+    let (count, size): (i64, i64) = db
+        .query_row(
+            &format!("SELECT count(*),coalesce(sum(length(body)),0) FROM {table} WHERE task_id=?1"),
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    if !(0..=112).contains(&count) || !(0..=MAX_RECEIPT as i64).contains(&size) {
+        return Err("Journal exceeds receipt bound.".into());
+    }
+    let mut statement = db
+        .prepare(&format!(
+            "SELECT body,body_hash FROM {table} WHERE task_id=?1 ORDER BY rowid"
+        ))
+        .map_err(|e| e.to_string())?;
+    statement
+        .query_map([id], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?
+        .map(|row| {
+            let (body, hash) = row.map_err(|e| e.to_string())?;
+            if content_hash(&body) != hash {
+                return Err("Journal hash changed.".into());
+            }
+            String::from_utf8(body).map_err(|e| e.to_string())
+        })
+        .collect()
+}
+fn collect(prepared: &PreparedState) -> Result<Value, String> {
+    let database = prepared.app_data.join("state.db");
+    let jobs = JobStore::open(&database).map_err(|e| e.to_string())?;
+    // This production reader authenticates task3 and historical @10 metadata.
+    let (detail, result, ledger, events) =
+        super::super::completion::execution::read_state(&jobs, &prepared.analyst_id)?;
+    if !matches!(
+        detail.summary.status,
+        InvestigationStatus::Completed
+            | InvestigationStatus::Failed
+            | InvestigationStatus::Cancelled
+            | InvestigationStatus::Interrupted
+            | InvestigationStatus::OutcomeUnknown
+    ) {
+        return Err("Analyst is not terminal.".into());
+    }
+    let db =
+        rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+    let invocations = rows(&db, &prepared.analyst_id, "investigation_invocations")?;
+    let calls = invocations
+        .iter()
+        .map(|body| {
+            serde_json::from_str::<PendingInvestigationStep>(body).map_err(|e| e.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let capacity = rows(
+        &db,
+        &prepared.analyst_id,
+        "investigation_admission_refusals",
+    )?;
+    let finish = rows(&db, &prepared.analyst_id, "staged_completion_refusals")?;
+    if calls.len() as u32 != detail.usage.model_invocations {
+        return Err("Invocation denominator changed.".into());
+    }
+    let modes = calls
+        .iter()
+        .map(|call| {
+            call.disclosure
+                .as_ref()
+                .filter(|d| d.schema_version == 6)
+                .and_then(|d| d.admission.as_ref())
+                .map(|a| a.mode)
+                .ok_or("Invocation lacks saved disclosure6 admission.")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let finish_only_calls = modes
+        .iter()
+        .filter(|mode| {
+            **mode == agents::investigation::staged_refusal::CompletionCallMode::FinishOnly
+        })
+        .count();
+    Ok(
+        json!({"schema_version":1,"family":"request7-specialist10-prompt9-disclosure6-result7","role":"analyst",
+        "binding":prepared.manifest.binding,"manifest_hash":prepared.manifest_hash,
+        "request_hash":prepared.manifest.analyst_request_hash,
+        "obligations_hash":prepared.analyst_request.obligations.fingerprint_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e|e.to_string())?,
+        "initial_prompt_measurement_basis":"first_saved_invocation_only_not_pre_dispatch_preparation",
+        "initial_prompt_bytes":calls.first().map(|call| call.input_bytes),
+        "finish_only_calls":finish_only_calls,"choice_calls":calls.len()-finish_only_calls,
+        "capacity_refusal_count":capacity.len(),"finish_refusal_count":finish.len(),
+        "detail":detail,"result":result,"ledger":ledger,"events":events,
+        "invocations":invocations,"capacity_refusals":capacity,"finish_refusals":finish,
+        "tokenizer_context_capacity":"unknown","full_obligation_acceptance":"not_established",
+        "auditor":"requires_separate_independent_review_and_execution"}),
+    )
+}
+fn reopen_receipt(directory: &Path, expected: &PreparationBinding) -> Result<Value, String> {
+    let prepared = reopen(directory, expected)?;
+    let mut saved = Vec::new();
+    File::open(directory.join("analyst-receipt.json"))
+        .map_err(|e| e.to_string())?
+        .take(MAX_RECEIPT as u64 + 1)
+        .read_to_end(&mut saved)
+        .map_err(|e| e.to_string())?;
+    let fresh = collect(&prepared)?;
+    if saved != bytes(&fresh)? {
+        return Err("Analyst receipt differs from fresh durable authority.".into());
+    }
+    Ok(fresh)
+}
+fn run_analyst(
+    directory: &Path,
+    expected: &PreparationBinding,
+    provider: Arc<dyn LlmProvider>,
+) -> Result<Value, String> {
+    let prepared = reopen(directory, expected)?;
+    if descriptor(provider.as_ref(), InvestigationProviderMode::Local).map_err(|e| e.to_string())?
+        != prepared.manifest.provider
+    {
+        return Err("Provider differs from frozen identity.".into());
+    }
+    // Durable exclusive marker precedes every dispatch capability. Any later
+    // error, unknown acknowledgement or receipt failure keeps it consumed.
+    exclusive(
+        &directory.join("analyst-attempt.json"),
+        &bytes(&json!({"binding":expected,"manifest_hash":prepared.manifest_hash}))?,
+    )?;
+    let state = prepared.app.state::<crate::AppState>();
+    let mut jobs = state.jobs.lock().map_err(|_| "Job store unavailable.")?;
+    let detail = jobs
+        .investigation(&prepared.analyst_id)
+        .map_err(|e| e.to_string())?;
+    if detail.summary.status != InvestigationStatus::Queued
+        || detail.usage.model_invocations != 0
+        || prepared.auditor_id.is_some()
+    {
+        return Err("Analyst is not fresh.".into());
+    }
+    let plan = jobs
+        .claim_plan(detail.summary.job_id, ClaimMode::StartQueued)
+        .map_err(|e| e.to_string())?;
+    let reservation = state
+        .job_execution_locks
+        .try_reserve(plan.lock_target())
+        .map_err(|e| e.to_string())?;
+    let (_, execution) = jobs
+        .claim_execution(&plan, reservation)
+        .map_err(|e| e.to_string())?;
+    drop(jobs);
+    let live = state
+        .investigations
+        .insert(&prepared.analyst_id)
+        .map_err(|e| e.to_string())?;
+    run_completion(
+        prepared.app.handle().clone(),
+        prepared.analyst_id.clone(),
+        prepared.analyst_request.clone(),
+        execution,
+        provider,
+        live,
+        Instant::now(),
+    );
+    let receipt = collect(&prepared)?;
+    exclusive(&directory.join("analyst-receipt.json"), &bytes(&receipt)?)?;
+    reopen_receipt(directory, expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::binding;
+    use super::*;
+    use crate::investigations::worker::tests::{
+        Mode, Scripted, completion_tests::expanded_scripted_provider,
+    };
+
+    // AC-0287: this scripted analyst evidence leaves semantic review and #598 open.
+    #[test]
+    fn expanded_analyst_terminal_receipt_reopens_partial_refusal_and_unknown_without_replay() {
+        for scenario in ["partial", "refused", "unknown", "receipt_error"] {
+            let directory = tempfile::tempdir().unwrap();
+            let provider: Arc<dyn LlmProvider> = match scenario {
+                "unknown" => Arc::new(Scripted::new(Mode::Unknown)),
+                "refused" => expanded_scripted_provider(false),
+                _ => expanded_scripted_provider(true),
+            };
+            let descriptor =
+                descriptor(provider.as_ref(), InvestigationProviderMode::Local).unwrap();
+            let prepared = super::super::prepare(directory.path(), &descriptor, binding()).unwrap();
+            drop(prepared);
+            if scenario == "receipt_error" {
+                std::fs::create_dir(directory.path().join("analyst-receipt.json")).unwrap();
+            }
+            let receipt = run_analyst(directory.path(), &binding(), provider.clone());
+            assert!(directory.path().join("analyst-attempt.json").is_file());
+            let prepared = reopen(directory.path(), &binding()).unwrap();
+            assert!(prepared.auditor_id.is_none());
+            let before = collect(&prepared).unwrap();
+            if scenario == "receipt_error" {
+                assert!(receipt.is_err());
+                assert!(reopen_receipt(directory.path(), &binding()).is_err());
+            } else {
+                let receipt = receipt.unwrap();
+                assert_eq!(receipt, before);
+                assert_eq!(
+                    reopen_receipt(directory.path(), &binding()).unwrap(),
+                    receipt
+                );
+                assert!(receipt["initial_prompt_bytes"].as_u64().unwrap() > 0);
+                assert_eq!(receipt["capacity_refusal_count"], 0);
+                match scenario {
+                    "partial" => {
+                        assert_eq!(receipt["result"]["knowledge_completeness"], "partial");
+                        assert_eq!(receipt["result"]["schema_version"], 7);
+                    }
+                    "refused" => {
+                        assert_eq!(receipt["finish_refusal_count"], 2);
+                        assert!(receipt["result"].is_null());
+                    }
+                    _ => assert_eq!(
+                        receipt["detail"]["status"],
+                        json!(InvestigationStatus::OutcomeUnknown)
+                    ),
+                }
+                std::fs::write(directory.path().join("analyst-receipt.json"), b"{}").unwrap();
+                assert!(reopen_receipt(directory.path(), &binding()).is_err());
+            }
+            assert!(run_analyst(directory.path(), &binding(), provider).is_err());
+            assert_eq!(
+                collect(&reopen(directory.path(), &binding()).unwrap()).unwrap(),
+                before
+            );
+        }
+    }
+}

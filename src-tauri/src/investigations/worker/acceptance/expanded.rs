@@ -3,6 +3,8 @@
 use super::completion::prepare::{self as capture, Family, PreparationBinding, PreparedState};
 use agents::investigation::InvestigationProvider;
 use std::path::Path;
+#[path = "expanded/analyst.rs"]
+mod analyst;
 
 fn prepare(
     directory: &Path,
@@ -24,7 +26,7 @@ mod tests {
     use core_graph::GraphStore;
     use tauri::Manager;
 
-    fn binding() -> PreparationBinding {
+    pub(super) fn binding() -> PreparationBinding {
         PreparationBinding {
             run_id: "expanded-preparation-test".into(),
             protocol_hash: "a".repeat(64),
