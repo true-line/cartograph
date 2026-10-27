@@ -259,3 +259,49 @@ def sync(base):
             .any(|node| node.id == gap && node.label == "Gap")
     );
 }
+
+#[test]
+fn httpx_client_base_url_joins_stitch_to_same_repo_endpoints() {
+    // AC-0425: a call on a proven `httpx.Client(base_url=…)` joins under
+    // the base path before the ordinary stitch binds it.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("app.py"),
+        r#"
+import httpx
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.route("/api/users", methods=["GET"])
+def users():
+    return []
+
+def sync():
+    with httpx.Client(base_url="http://localhost:5000/api") as client:
+        client.get("/users")
+"#,
+    )
+    .unwrap();
+    let (x, _) = crate::extract_tree_with_summary(
+        dir.path(),
+        REPO,
+        "workdir",
+        &[],
+        &BTreeMap::new(),
+        None,
+        None,
+        &[],
+    )
+    .unwrap();
+    let fetches: Vec<(&str, &str)> = x
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "FETCHES")
+        .map(|edge| (edge.src.as_str(), edge.dst.as_str()))
+        .collect();
+    assert_eq!(
+        fetches,
+        [("sym:local/p@app.py#sync", "ep:local/p@GET:/api/users")]
+    );
+}

@@ -1129,3 +1129,182 @@ def test_fetch(_):
         ]
     );
 }
+
+fn shown_base(site: &FetchSite) -> String {
+    match &site.base {
+        None => shown(site),
+        Some(base) => {
+            let url = match &base.url {
+                IdentityExpr::Literal(url) => format!("lit:{url}"),
+                IdentityExpr::EnvRef(key) => format!("env:{key}"),
+                IdentityExpr::Computed(text) => format!("computed:{text}"),
+            };
+            format!("{} base={url} {:?}", shown(site), base.join)
+        }
+    }
+}
+
+// AC-0425: a name bound once to a proven `requests.Session()` or
+// `httpx.Client()`/`AsyncClient()` makes its verb methods fetch sites where
+// the binding is in scope; an httpx `base_url` is joined under. (T-0425)
+#[test]
+fn proven_client_receivers_become_fetch_sites() {
+    let sites = fetches(&[(
+        "app/svc.py",
+        r#"
+import os
+import requests
+import httpx
+from requests import Session as S
+
+API = os.getenv("API_URL")
+shared = requests.Session()
+shared.headers["X-Token"] = "t"
+
+def pull():
+    shared.get("/a")
+
+def push(body):
+    s = requests.Session()
+    s.post("/b", json=body)
+    s.request("delete", "/c")
+
+async def fetch():
+    async with httpx.AsyncClient(base_url="https://h.io/api") as c:
+        await c.get("/d")
+
+def env_base():
+    with httpx.Client(base_url=API) as client:
+        client.put("e")
+
+def aliased_constructor():
+    plain = S()
+    plain.get("/f")
+"#,
+    )]);
+    let owner = |name: &str| format!("sym:{REPO}@app/svc.py#{name}");
+    assert_eq!(
+        sites.iter().map(shown_base).collect::<Vec<_>>(),
+        vec![
+            format!("app/svc.py GET lit:/a {}", owner("pull")),
+            format!("app/svc.py POST lit:/b {}", owner("push")),
+            format!("app/svc.py DELETE lit:/c {}", owner("push")),
+            format!(
+                "app/svc.py GET lit:/d {} base=lit:https://h.io/api Merge",
+                owner("fetch")
+            ),
+            format!(
+                "app/svc.py PUT lit:e {} base=env:API_URL Merge",
+                owner("env_base")
+            ),
+            format!("app/svc.py GET lit:/f {}", owner("aliased_constructor")),
+        ]
+    );
+}
+
+// AC-0425: receivers that are rebound, parameters, attributes, factory
+// results, used outside their binding's function, bound in a class body,
+// shadowed by a local module or mocked by a patch (also of a locally aliased
+// constructor), built from a splat, read other than through a member (an
+// alias may rewrite them), or whose base, verbs or transport the file
+// rewrites yield nothing. (T-0425)
+#[test]
+fn unproven_client_receivers_are_not_fetch_sites() {
+    let sites = fetches(&[
+        (
+            "app/alias.py",
+            r#"
+import httpx
+from requests import Session as S
+from unittest.mock import patch
+
+c = httpx.Client(base_url="https://h/api")
+alias = c
+alias.base_url = "https://h/v2"
+c.get("/aliased")
+
+passed = httpx.Client()
+passed.get("/passed")
+print(passed)
+
+@patch("app.alias.S")
+def test_aliased_constructor(_):
+    mocked = S()
+    mocked.get("/mocked-alias")
+"#,
+        ),
+        (
+            "app/bad.py",
+            r#"
+import requests
+import httpx
+from unittest.mock import patch
+
+twice = requests.Session()
+twice = requests.Session()
+
+def make():
+    return httpx.Client()
+
+class Holder:
+    session = requests.Session()
+
+    def run(self):
+        self.session.get("/self")
+        session.get("/class")
+
+def f(param):
+    param.get("/param")
+    twice.get("/twice")
+    made = make()
+    made.get("/factory")
+    local = requests.Session()
+    def inner():
+        local.get("/nested")
+
+def g():
+    local.get("/elsewhere")
+
+@patch("requests.Session")
+def test_mocked(_):
+    mocked = requests.Session()
+    mocked.get("/mocked")
+
+configured = httpx.Client(**{"base_url": "https://elsewhere/api"})
+configured.get("/kwargs")
+positional = requests.Session(*())
+positional.get("/args")
+
+rebased = httpx.Client()
+rebased.base_url = "https://elsewhere/api"
+rebased.get("/rebased")
+
+replaced = requests.Session()
+replaced.get = lambda *a, **k: None
+replaced.get("/replaced")
+
+objected = requests.Session()
+
+def test_object():
+    with patch.object(objected, "get"):
+        objected.get("/objected")
+
+module_level = requests.Session()
+
+def shadowing():
+    module_level = object()
+    module_level.get("/shadowed")
+
+captured = requests.Session()
+
+def parameter(captured):
+    captured.get("/parameter")
+"#,
+        ),
+    ]);
+    assert!(
+        sites.is_empty(),
+        "{:?}",
+        sites.iter().map(shown_base).collect::<Vec<_>>()
+    );
+}

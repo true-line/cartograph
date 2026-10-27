@@ -151,7 +151,7 @@ use Support::*;
 
 const NO_CLIENT: &str = "no Go HTTP client library is recognized";
 /// What the Python HTTP client cells read (AC-0424).
-const PY_CLIENT: &str = "module functions only (`get`, `post`, … `request`); `Session`/`Client` receivers are not read and a URL is followed only within its file";
+const PY_CLIENT: &str = "module functions and once-bound `Session`/`Client` receivers in their own scope; instance attributes and passed-in clients are not read, and a URL is followed only within its file";
 const NO_JVM_CLIENT: &str =
     "outbound HTTP client calls are recognized only through Retrofit interfaces";
 const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript";

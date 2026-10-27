@@ -60,6 +60,13 @@ pub enum BaseJoin {
     /// path with a leading `/` replaces the base path, a relative one
     /// replaces its last segment.
     Resolve,
+    /// httpx `base_url` merging (#1240), as `Client._merge_url`: a URL with
+    /// a scheme and a host stands alone; any other URL's raw path (query
+    /// included, leading `/`s removed) is appended to the base's raw path,
+    /// which httpx first ends with `/` — after the base's query, if it has
+    /// one. A network-path URL (`//host/x`) is relative there and adds only
+    /// its path. Fragments never reach the server and are dropped.
+    Merge,
 }
 
 /// The base-URL half of a joined request, with the site that declares the
@@ -76,11 +83,54 @@ pub struct FetchBase {
     pub byte_start: u64,
 }
 
-/// Join a literal request path to a resolved base URL. Under `Resolve` an
-/// absolute `path` stands alone; `Concat` never inspects either side.
+/// Join a literal request path to a resolved base URL. Under `Resolve` and
+/// `Merge` an absolute `path` stands alone; `Concat` never inspects either
+/// side.
 pub fn join_base(base: &str, path: &str, join: BaseJoin) -> String {
     match join {
         BaseJoin::Concat => format!("{base}{path}"),
+        BaseJoin::Merge => {
+            let path = path.split('#').next().unwrap_or(path);
+            let (scheme, rest) = match path.split_once(':') {
+                Some((scheme, rest)) if is_scheme(scheme) => (Some(scheme), rest),
+                _ => (None, path),
+            };
+            let (host, reference) = match rest.strip_prefix("//") {
+                Some(network) => {
+                    network.split_at(network.find(['/', '?']).unwrap_or(network.len()))
+                }
+                None => ("", rest),
+            };
+            if scheme.is_some() && !host.is_empty() {
+                return without_dot_segments(path);
+            }
+            // httpx parses a URL with a scheme or host, normalising its path,
+            // before merging: `//o/../users` merges as `/users`.
+            let reference = if scheme.is_some() || !host.is_empty() {
+                let (path, query) =
+                    reference.split_at(reference.find('?').unwrap_or(reference.len()));
+                format!("{}{query}", httpx_normalize_path(path))
+            } else {
+                reference.to_string()
+            };
+            let base = base.split('#').next().unwrap_or(base);
+            let start = base.find("://").map_or(0, |i| i + 3);
+            let end = base[start..]
+                .find(['/', '?'])
+                .map_or(base.len(), |i| start + i);
+            let (origin, base_raw) = base.split_at(end);
+            // httpx normalises an empty base path to `/`.
+            let base_raw = if base_raw.starts_with('/') {
+                base_raw.to_string()
+            } else {
+                format!("/{base_raw}")
+            };
+            let slash = if base_raw.ends_with('/') { "" } else { "/" };
+            without_dot_segments(&format!(
+                "{origin}{base_raw}{slash}{}",
+                reference.trim_start_matches('/')
+            ))
+        }
         BaseJoin::Resolve => {
             if path.starts_with("http://") || path.starts_with("https://") {
                 return path.to_string();
@@ -108,6 +158,55 @@ pub fn join_base(base: &str, path: &str, join: BaseJoin) -> String {
             format!("{origin}{}{suffix}", remove_dot_segments(&merged))
         }
     }
+}
+
+/// httpx's `normalize_path`: `.` and `..` segments are dropped, a `..`
+/// never climbing above the root (`/a/.` → `/a`, unlike RFC 3986).
+fn httpx_normalize_path(path: &str) -> String {
+    let segments: Vec<&str> = path.split('/').collect();
+    if !segments
+        .iter()
+        .any(|segment| matches!(*segment, "." | ".."))
+    {
+        return path.to_string();
+    }
+    let mut out: Vec<&str> = Vec::new();
+    for segment in segments {
+        match segment {
+            "." => {}
+            ".." => {
+                if !out.is_empty() && out != [""] {
+                    out.pop();
+                }
+            }
+            _ => out.push(segment),
+        }
+    }
+    out.join("/")
+}
+
+/// [`httpx_normalize_path`] on the path of an absolute URL, before any `?`;
+/// an emptied path is the root.
+fn without_dot_segments(url: &str) -> String {
+    let start = url.find("://").map_or(0, |i| i + 3);
+    let end = url[start..]
+        .find(['/', '?'])
+        .map_or(url.len(), |i| start + i);
+    let (origin, rest) = url.split_at(end);
+    let (path, query) = rest.split_at(rest.find('?').unwrap_or(rest.len()));
+    match httpx_normalize_path(path) {
+        path if path.is_empty() => format!("{origin}/{query}"),
+        path => format!("{origin}{path}{query}"),
+    }
+}
+
+/// Whether `scheme` is an RFC 3986 scheme: a letter, then letters, digits,
+/// `+`, `-` or `.`.
+fn is_scheme(scheme: &str) -> bool {
+    scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 /// RFC 3986 §5.2.4 for an absolute path: `.` segments vanish and `..`
@@ -196,6 +295,69 @@ mod tests {
         );
         let c = BaseJoin::Concat;
         assert_eq!(join_base("https://h.io", "/api/x", c), "https://h.io/api/x");
+    }
+
+    #[test]
+    fn httpx_merge_appends_under_the_base_path() {
+        // AC-0425: httpx joins under the base path, whatever the slashes.
+        let m = BaseJoin::Merge;
+        assert_eq!(join_base("https://h.io", "/users", m), "https://h.io/users");
+        assert_eq!(
+            join_base("https://h.io/api", "/users", m),
+            "https://h.io/api/users"
+        );
+        assert_eq!(
+            join_base("https://h.io/api/", "users", m),
+            "https://h.io/api/users"
+        );
+        assert_eq!(join_base("https://h.io", "", m), "https://h.io/");
+        assert_eq!(join_base("https://h.io/", "//x", m), "https://h.io/");
+        // httpx drops dot segments of the merged path, never above the root.
+        assert_eq!(
+            join_base("https://h/api/", "../users", m),
+            "https://h/users"
+        );
+        assert_eq!(join_base("https://h/api", "./a/../b", m), "https://h/api/b");
+        assert_eq!(join_base("https://h/api", "../../x", m), "https://h/x");
+        assert_eq!(join_base("https://h/a/./b", "c/..", m), "https://h/a/b");
+        assert_eq!(join_base("https://h/a", "..", m), "https://h/");
+        assert_eq!(
+            join_base("https://h/api", "../u?next=../x", m),
+            "https://h/u?next=../x"
+        );
+        assert_eq!(
+            join_base("https://h/api", "https://o.io/a/../b", m),
+            "https://o.io/b"
+        );
+        // A network-path URL is normalised before the merge, a relative one
+        // after it.
+        assert_eq!(
+            join_base("https://h/api", "//o.io/../users", m),
+            "https://h/api/users"
+        );
+        assert_eq!(join_base("https://h/api", "../users", m), "https://h/users");
+        // httpx appends to the raw path, so a base query swallows the path.
+        assert_eq!(
+            join_base("https://h.io/api?k=1", "users?a=2", m),
+            "https://h.io/api?k=1/users?a=2"
+        );
+        assert_eq!(
+            join_base("https://h.io/api#top", "users#x", m),
+            "https://h.io/api/users"
+        );
+        // A network-path URL has no scheme, so httpx merges only its path.
+        assert_eq!(
+            join_base("https://h.io/api", "//o.io/y?q=1", m),
+            "https://h.io/api/y?q=1"
+        );
+        assert_eq!(
+            join_base("https://h.io/api", "https://o.io/y", m),
+            "https://o.io/y"
+        );
+        assert_eq!(
+            join_base("https://h.io/api", "HTTP://o.io/y#f", m),
+            "HTTP://o.io/y"
+        );
     }
 
     // #757 review: resolution removes dot segments (RFC 3986 §5.2.4); the
