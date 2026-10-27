@@ -436,21 +436,47 @@ fn inert(cx: &FileCx<'_>, root: TsNode<'_>, value: TsNode<'_>) -> bool {
             .filter(|child| child.kind() != "comment")
             .all(|child| inert(cx, root, child)),
         "lambda" => {
+            let local = lambda_bindings(cx, value);
             let mut calls_only_builtins = true;
             every_descendant(value, &mut |node| {
                 if node.kind() != "call" {
                     return;
                 }
                 calls_only_builtins &= node.child_by_field_name("function").is_some_and(|callee| {
+                    let name = cx.text(&callee);
                     callee.kind() == "identifier"
-                        && INERT_BUILTINS.contains(&cx.text(&callee))
-                        && module_binding(cx, root, cx.text(&callee)).writes.is_empty()
+                        && INERT_BUILTINS.contains(&name)
+                        && !local.contains(name)
+                        && module_binding(cx, root, name).writes.is_empty()
+                        && !rebound(cx, root, name, Some(value))
                 });
             });
             calls_only_builtins
         }
         _ => false,
     }
+}
+
+/// Every name `lambda` binds anywhere inside it: its own and nested
+/// lambdas' parameters (defaults included, conservatively), comprehension
+/// targets and `:=` names.
+fn lambda_bindings(cx: &FileCx<'_>, lambda: TsNode<'_>) -> HashSet<String> {
+    let mut targets = Vec::new();
+    every_descendant(lambda, &mut |node| match node.kind() {
+        "lambda" => targets.extend(node.child_by_field_name("parameters")),
+        "for_in_clause" => targets.extend(node.child_by_field_name("left")),
+        "named_expression" => targets.extend(node.child_by_field_name("name")),
+        _ => {}
+    });
+    let mut names = HashSet::new();
+    for target in targets {
+        every_descendant(target, &mut |node| {
+            if node.kind() == "identifier" {
+                names.insert(cx.text(&node).to_string());
+            }
+        });
+    }
+    names
 }
 
 /// Whether `decorator` is a route decorator: `route_decorator` also
@@ -652,19 +678,78 @@ fn framework_guard(dotted: &str) -> Option<String> {
         .or_else(|| (dotted == "flask_jwt_extended.jwt_required").then(|| dotted.to_string()))
 }
 
-/// A framework guard reassigned on its module, as in
-/// `flask_login.login_required = passthrough`.
-fn patched_guard(
-    cx: &FileCx<'_>,
-    left: TsNode<'_>,
-    bindings: &HashMap<String, ImportBinding>,
-) -> Option<String> {
-    framework_guard(&import_dotted(cx, left, bindings)?)
+/// The canonical name of a dotted module member this module trusts: a
+/// framework guard, flask-cors's `cross_origin`, or flask-limiter's
+/// `Limiter` and its decorator methods.
+fn trusted_member(dotted: &str) -> Option<String> {
+    framework_guard(dotted).or_else(|| match dotted {
+        "flask_cors.cross_origin"
+        | "flask_cors.decorator"
+        | "flask_cors.decorator.cross_origin" => Some(CORS.into()),
+        "flask_limiter.extension" => Some(LIMITER.into()),
+        _ => ["flask_limiter.Limiter", "flask_limiter.extension.Limiter"]
+            .into_iter()
+            .any(|class| {
+                dotted == class
+                    || dotted
+                        .strip_prefix(class)
+                        .is_some_and(|rest| matches!(rest, ".limit" | ".shared_limit"))
+            })
+            .then(|| LIMITER.into()),
+    })
 }
 
-/// Framework guards a `setattr(<module>, <name>, …)` may replace: the named
-/// one for a literal name, and every guard of that module when the name is
-/// not a literal.
+/// Canonical trusted names a write may replace.
+const CORS: &str = "flask_cors.cross_origin";
+const LIMITER: &str = "flask_limiter.Limiter";
+
+/// Record what binding target `target` writes: every trusted module member
+/// it reassigns, as in `flask_login.login_required = passthrough` (also in
+/// a tuple, a loop, `with … as` or `del`), and every name an attribute write
+/// goes through, as in `limiter.limit = wrapper`.
+fn target_writes(
+    cx: &FileCx<'_>,
+    target: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+    out: &mut Extraction,
+) {
+    let written = |object: TsNode<'_>, out: &mut Extraction| {
+        every_descendant(object, &mut |part| {
+            if part.kind() == "identifier" {
+                out.attribute_write_objects
+                    .insert(cx.text(&part).to_string());
+            }
+        });
+    };
+    match target.kind() {
+        // Only the member written is replaced: `flask_limiter.extension.C.X`
+        // read inside a subscript index replaces nothing.
+        "attribute" => {
+            if let Some(member) =
+                import_dotted(cx, target, bindings).and_then(|dotted| trusted_member(&dotted))
+            {
+                out.patched_guards.push(member);
+            }
+            if let Some(object) = target.child_by_field_name("object") {
+                written(object, out);
+            }
+        }
+        "subscript" => {
+            if let Some(object) = target.child_by_field_name("value") {
+                written(object, out);
+            }
+        }
+        _ => {
+            for child in named(target) {
+                target_writes(cx, child, bindings, out);
+            }
+        }
+    }
+}
+
+/// Trusted members a `setattr(<module>, <name>, …)` may replace: the named
+/// one for a literal name, and every trusted member of that module when the
+/// name is not a literal.
 fn setattr_guards(
     cx: &FileCx<'_>,
     call: TsNode<'_>,
@@ -690,13 +775,23 @@ fn setattr_guards(
     };
     // An escape is not decoded here, so it may spell any member name.
     match crate::literal_string(cx, *name).filter(|member| !member.contains('\\')) {
-        Some(member) => framework_guard(&format!("{module}.{member}"))
+        Some(member) => trusted_member(&format!("{module}.{member}"))
             .into_iter()
             .collect(),
-        None => ["login_required", "fresh_login_required", "jwt_required"]
-            .into_iter()
-            .filter_map(|member| framework_guard(&format!("{module}.{member}")))
-            .collect(),
+        None => [
+            "login_required",
+            "fresh_login_required",
+            "jwt_required",
+            "cross_origin",
+            "decorator",
+            "extension",
+            "Limiter",
+            "limit",
+            "shared_limit",
+        ]
+        .into_iter()
+        .filter_map(|member| trusted_member(&format!("{module}.{member}")))
+        .collect(),
     }
 }
 
@@ -767,6 +862,21 @@ pub(crate) fn collect(
             let Some(callee) = node.child_by_field_name("function") else {
                 return;
             };
+            if callee.kind() == "identifier"
+                && matches!(cx.text(&callee), "setattr" | "delattr")
+                && let Some(object) = node.child_by_field_name("arguments").and_then(|arguments| {
+                    named(arguments)
+                        .into_iter()
+                        .find(|argument| argument.kind() != "comment")
+                })
+            {
+                every_descendant(object, &mut |part| {
+                    if part.kind() == "identifier" {
+                        out.attribute_write_objects
+                            .insert(cx.text(&part).to_string());
+                    }
+                });
+            }
             let patched = setattr_guards(cx, node, callee, bindings);
             if !patched.is_empty() {
                 out.patched_guards.extend(patched);
@@ -814,12 +924,20 @@ pub(crate) fn collect(
                     proxy_fix: is_proxy_fix(cx, root, left, right, bindings),
                     evidence: cx.evidence(&node),
                 });
-            } else if left.kind() == "attribute"
-                && let Some(guard) = patched_guard(cx, left, bindings)
-            {
-                out.patched_guards.push(guard);
+            }
+            target_writes(cx, left, bindings, out);
+        }
+        "augmented_assignment" | "for_statement" | "for_in_clause" => {
+            if let Some(target) = node.child_by_field_name("left") {
+                target_writes(cx, target, bindings, out);
             }
         }
+        "as_pattern" => {
+            if let Some(target) = node.child_by_field_name("alias") {
+                target_writes(cx, target, bindings, out);
+            }
+        }
+        "delete_statement" => target_writes(cx, node, bindings, out),
         _ => {}
     });
 }
@@ -841,11 +959,14 @@ fn limiter_def(
     if !at_module || left.kind() != "identifier" || right.kind() != "call" {
         return None;
     }
-    let dotted = import_dotted(cx, right.child_by_field_name("function")?, bindings)?;
+    let constructor = right.child_by_field_name("function")?;
+    let dotted = import_dotted(cx, constructor, bindings)?;
+    let constructor_root = dotted_parts(cx, constructor)?.into_iter().next()?;
     if !matches!(
         dotted.as_str(),
         "flask_limiter.Limiter" | "flask_limiter.extension.Limiter"
-    ) {
+    ) || rebound(cx, root, &constructor_root, Some(right))
+    {
         return None;
     }
     let name = cx.text(&left);
@@ -935,10 +1056,20 @@ pub(crate) fn resolve(
         &out.module_attr_writes,
     ));
     let scope = app_scope::Scope::new(&calls, &used, &app_defs);
-    // A limiter assigned through an imported module may be anything.
+    let wsgi = std::mem::take(&mut out.wsgi_facts);
+    let patched = std::mem::take(&mut out.patched_guards)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    // A limiter assigned through an imported module, or with an attribute
+    // written anywhere, may be anything; so may every limiter once
+    // flask-limiter's own `Limiter` is replaced.
     let limiters = std::mem::take(&mut out.limiter_defs)
         .into_iter()
-        .filter(|(_, name)| !out.module_attr_writes.contains(name))
+        .filter(|(_, name)| {
+            !patched.contains(LIMITER)
+                && !out.module_attr_writes.contains(name)
+                && !out.attribute_write_objects.contains(name)
+        })
         .collect::<HashSet<_>>();
     let mut handler_apps: HashMap<String, Apps> = HashMap::new();
     for (handler, app) in std::mem::take(&mut out.endpoint_apps) {
@@ -949,10 +1080,6 @@ pub(crate) fn resolve(
         };
         handler_apps.insert(handler, merged);
     }
-    let wsgi = std::mem::take(&mut out.wsgi_facts);
-    let patched = std::mem::take(&mut out.patched_guards)
-        .into_iter()
-        .collect::<BTreeSet<_>>();
     let mut effects: HashMap<FnKey, FnEffects> = HashMap::new();
     for found in std::mem::take(&mut out.fn_effects) {
         // Two functions sharing a key (a nested hook and a top-level
@@ -1048,6 +1175,9 @@ pub(crate) fn resolve(
         let mut non_auth_evidence = Vec::new();
         for decorator in &facts.decorators {
             match decorator {
+                DecoratorFact::NonAuth { text, .. } if patched.contains(CORS) => {
+                    reasons.insert(format!("unclassified_decorator:{text}"));
+                }
                 DecoratorFact::NonAuth {
                     text,
                     evidence: span,

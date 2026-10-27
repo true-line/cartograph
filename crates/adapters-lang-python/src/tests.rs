@@ -5145,7 +5145,16 @@ fn rate_limit_and_cors_decorators_do_not_authenticate() {
         assert!(!auth["non_auth_decorators"].as_array().unwrap().is_empty());
         // A guard beside a limiter still requires authentication.
         assert_eq!(auth_at(&extraction, "/me")["state"], "required");
-    }
+    } // Writes to other members leave the proof standing.
+    let extraction = decorated_route(
+        "@cross_origin()\n@limiter.limit(\"1/s\")",
+        None,
+        &[(
+            "patch.py",
+            "import flask_cors\nimport flask_limiter\nfrom extensions import limiter as other\n\nflask_cors.VERSION = \"x\"\nflask_limiter.RateLimitExceeded = Exception\nsettings.limit = 3\nconfig = {}\nconfig[flask_limiter.extension.C.STORAGE_URL] = \"memory://\"\n",
+        )],
+    );
+    assert_eq!(auth_at(&extraction, "/x")["state"], "none");
 }
 
 /// A route decorator, an `extensions.py` override and extra files.
@@ -5159,7 +5168,7 @@ type DecoratedCase = (
 fn an_unproven_limiter_or_cors_decorator_stays_unknown() {
     // AC-0387 (T-0387): every form short of the proof stays
     // `unclassified_decorator`.
-    let cases: [DecoratedCase; 9] = [
+    let cases: [DecoratedCase; 20] = [
         // A call argument may do anything when the decorator is built.
         ("@limiter.limit(get_limit())", None, &[]),
         ("@limiter.limit(f\"{N}/minute\")", None, &[]),
@@ -5204,6 +5213,90 @@ fn an_unproven_limiter_or_cors_decorator_stays_unknown() {
         ("@cors.cross_origin()", None, &[]),
         // A spread argument.
         ("@cross_origin(**OPTIONS)", None, &[]),
+        // A builtin name a lambda binds itself may be anything.
+        (
+            "@limiter.limit(\"1/s\", exempt_when=lambda getattr=abort: getattr(401))",
+            None,
+            &[],
+        ),
+        (
+            "@limiter.limit(\"1/s\", exempt_when=lambda: [getattr(1) for getattr in [abort]])",
+            None,
+            &[],
+        ),
+        (
+            "@limiter.limit(\"1/s\", exempt_when=lambda: (getattr := abort) and getattr(401))",
+            None,
+            &[],
+        ),
+        // A rebound `Limiter` constructor.
+        (
+            "@limiter.limit(\"1/s\")",
+            Some(
+                "from flask_limiter import Limiter\n\nclass AuthLimiter:\n    pass\n\nLimiter = AuthLimiter\nlimiter = Limiter()\n",
+            ),
+            &[],
+        ),
+        // flask-limiter's `Limiter` or its decorator replaced on its module.
+        (
+            "@limiter.limit(\"1/s\")",
+            None,
+            &[(
+                "patch.py",
+                "import flask_limiter\n\nflask_limiter.Limiter = AuthLimiter\n",
+            )],
+        ),
+        (
+            "@limiter.limit(\"1/s\")",
+            None,
+            &[(
+                "patch.py",
+                "from flask_limiter import Limiter\n\nLimiter.limit = wrapper\n",
+            )],
+        ),
+        // A method written on the limiter instance itself.
+        (
+            "@limiter.limit(\"1/s\")",
+            None,
+            &[(
+                "patch.py",
+                "from extensions import limiter\n\nlimiter.limit = wrapper\n",
+            )],
+        ),
+        (
+            "@limiter.limit(\"1/s\")",
+            None,
+            &[(
+                "patch.py",
+                "from extensions import limiter\n\nsetattr(limiter, \"limit\", wrapper)\n",
+            )],
+        ),
+        // flask-cors's `cross_origin` replaced on its module, directly,
+        // through a tuple target or through `setattr`.
+        (
+            "@cross_origin()",
+            None,
+            &[(
+                "patch.py",
+                "import flask_cors\n\nflask_cors.cross_origin = auth_factory\n",
+            )],
+        ),
+        (
+            "@cross_origin()",
+            None,
+            &[(
+                "patch.py",
+                "import flask_cors\n\nflask_cors.cross_origin, x = auth_factory, 1\n",
+            )],
+        ),
+        (
+            "@cross_origin()",
+            None,
+            &[(
+                "patch.py",
+                "import flask_cors\n\nsetattr(flask_cors, \"cross_origin\", auth_factory)\n",
+            )],
+        ),
     ];
     for (decorator, extensions, extra) in cases {
         let extraction = decorated_route(decorator, extensions, extra);
