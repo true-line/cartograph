@@ -40,6 +40,7 @@
 //! or an `Admin` never given an application is a named Gap, never a guess.
 
 use crate::auth_guards::{import_dotted, rebound, unparenthesize};
+use crate::flask_admin_library::{self as library, Pins};
 use crate::{
     Extraction, FileCx, Framework, ImportBinding, MountParent, ReceiverDef,
     enclosing_function_node, literal_string, module_binding, module_file, mount_parent,
@@ -48,6 +49,7 @@ use crate::{
 use core_graph::Node;
 use core_prov::{ConfidenceTier, EvidenceRef};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
 use tree_sitter::Node as TsNode;
 
 /// A module-level class: `(path, name)`.
@@ -133,6 +135,8 @@ struct SiteCall {
     init: bool,
     app: Option<MountParent>,
     url: Value,
+    /// The `endpoint` its default `AdminIndexView` takes (constructor only).
+    endpoint: Value,
     index: Index,
     evidence: EvidenceRef,
 }
@@ -343,6 +347,7 @@ pub(crate) fn collect(
                         init: false,
                         app: app_argument(cx, right, 0, bindings),
                         url: argument(cx, right, "url", 2),
+                        endpoint: argument(cx, right, "endpoint", 6),
                         index: index_argument(cx, root, right, 4, bindings),
                         evidence: cx.evidence(&right),
                     });
@@ -372,6 +377,7 @@ pub(crate) fn collect(
                                 init: true,
                                 app: app_argument(cx, node, 0, bindings),
                                 url: argument(cx, node, "url", 3),
+                                endpoint: argument(cx, node, "endpoint", 2),
                                 index: index_argument(cx, root, node, 1, bindings),
                                 evidence: cx.evidence(&node),
                             });
@@ -753,6 +759,9 @@ struct Chain<'f> {
     access: Option<String>,
     /// Some repository class in the chain defines `index`.
     defines_index: bool,
+    /// Every name a repository class in the chain defines: a library
+    /// method of that name is no longer Flask-Admin's.
+    defined: BTreeSet<String>,
 }
 
 fn find<'f>(classes: &HashMap<Key, &'f ViewClass>, key: &Key) -> Option<&'f ViewClass> {
@@ -853,6 +862,7 @@ fn chain<'f>(
                 exposed: Vec::new(),
                 access: None,
                 defines_index: false,
+                defined: BTreeSet::new(),
             });
         }
         Base::Opaque(text) => return Err(format!("flask_admin_view_class_not_modelled:{text}")),
@@ -897,6 +907,10 @@ fn chain<'f>(
             .find(|class| class.defines.contains("is_accessible"))
             .map(|class| class.key.1.clone()),
         defines_index: order.iter().any(|class| class.defines.contains("index")),
+        defined: order
+            .iter()
+            .flat_map(|class| class.defines.iter().cloned())
+            .collect(),
     })
 }
 
@@ -985,11 +999,12 @@ impl Emit<'_> {
 
 /// Join every file's Flask-Admin facts into endpoints and Gaps. Runs before
 /// the router join consumes the receiver definitions.
-pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
+pub(crate) fn resolve(out: &mut Extraction, repo: &str, root: &Path, commit: &str) {
     let facts = std::mem::take(&mut out.flask_admin);
     if facts.sites.is_empty() && facts.views.is_empty() {
         return;
     }
+    let pins = library::pins(root, repo, commit);
     let classes: HashMap<Key, &ViewClass> = facts
         .classes
         .iter()
@@ -1117,11 +1132,38 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
             Some((call, chain)) => entries.push((call, true, Ok(chain))),
             None => {
                 if let Some(ctor) = ctor {
-                    emit.gap(
-                        "flask_admin_library_index_route",
-                        "AdminIndexView",
-                        vec![ctor.evidence.clone()],
-                    );
+                    match (
+                        &pins,
+                        endpoint_of(ctor.endpoint.clone(), || Some("admin".into())),
+                    ) {
+                        (Pins::Checked(pinned), Ok(endpoint)) => {
+                            let prefix =
+                                view_url(&admin_url, Some(admin_url.clone()), &endpoint, true);
+                            let mut evidence = site_evidence.clone();
+                            evidence.extend(pinned.iter().cloned());
+                            emit.library(
+                                false,
+                                library::INDEX_ROUTES,
+                                &BTreeSet::new(),
+                                &prefix,
+                                &endpoint,
+                                &evidence,
+                                confidence,
+                                "flask_admin_default_allows_all",
+                            );
+                        }
+                        (Pins::Checked(_), Err(reason)) => {
+                            emit.gap(reason, "AdminIndexView", vec![ctor.evidence.clone()]);
+                        }
+                        (Pins::Absent, _) => emit.gap(
+                            "flask_admin_library_index_route",
+                            "AdminIndexView",
+                            vec![ctor.evidence.clone()],
+                        ),
+                        (Pins::Unchecked(reason), _) => {
+                            emit.gap(reason, "AdminIndexView", vec![ctor.evidence.clone()]);
+                        }
+                    }
                 }
             }
         }
@@ -1143,20 +1185,31 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
                     continue;
                 }
             };
-            match chain.kind {
-                Library::Model(_) => emit.gap(
+            let library = match chain.kind {
+                Library::Model(_) => Some((
+                    true,
+                    library::MODEL_ROUTES,
                     "flask_admin_model_view_routes_in_library",
-                    &chain.name,
-                    vec![view.evidence.clone()],
-                ),
-                Library::Index if !chain.defines_index => emit.gap(
+                )),
+                Library::Index if !chain.defines_index => Some((
+                    false,
+                    library::INDEX_ROUTES,
                     "flask_admin_library_index_route",
-                    &chain.name,
-                    vec![view.evidence.clone()],
-                ),
-                _ => {}
-            }
-            if chain.exposed.is_empty() {
+                )),
+                _ => None,
+            };
+            let library = library.and_then(|(model, routes, unpinned)| match &pins {
+                Pins::Checked(pinned) => Some((model, routes, pinned)),
+                Pins::Absent | Pins::Unchecked(_) => {
+                    let reason = match &pins {
+                        Pins::Unchecked(reason) => reason.as_str(),
+                        _ => unpinned,
+                    };
+                    emit.gap(reason, &chain.name, vec![view.evidence.clone()]);
+                    None
+                }
+            });
+            if chain.exposed.is_empty() && library.is_none() {
                 continue;
             }
             let (endpoint, url) = match chain.kind {
@@ -1243,6 +1296,76 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str) {
                         node.props["auth"] =
                             serde_json::json!({ "state": "unknown", "reasons": [reason] });
                     }
+                }
+            }
+            if let Some((model, routes, pinned)) = library {
+                let mut evidence = vec![view.evidence.clone()];
+                evidence.extend(site_evidence.iter().cloned());
+                evidence.extend(pinned.iter().cloned());
+                emit.library(
+                    model,
+                    routes,
+                    &chain.defined,
+                    &prefix,
+                    &endpoint,
+                    &evidence,
+                    confidence,
+                    &reason,
+                );
+            }
+        }
+    }
+}
+
+impl Emit<'_> {
+    /// Flask-Admin's own routes for one view, except a method a repository
+    /// class in its chain redefines (its `@expose`, or lack of one, wins).
+    /// Release knowledge, not source, so never above InferredStrong.
+    #[allow(clippy::too_many_arguments)]
+    fn library(
+        &mut self,
+        model: bool,
+        routes: &[(&str, &str, &[&str])],
+        defined: &BTreeSet<String>,
+        prefix: &str,
+        endpoint: &str,
+        evidence: &[EvidenceRef],
+        confidence: ConfidenceTier,
+        auth: &str,
+    ) {
+        let confidence = match confidence {
+            ConfidenceTier::Confirmed => ConfidenceTier::InferredStrong,
+            other => other,
+        };
+        for (method_name, rule, methods) in routes {
+            if defined.contains(*method_name) {
+                continue;
+            }
+            let path = rule_path(prefix, rule);
+            let name = format!("{endpoint}.{method_name}");
+            let handler = library::handler(model, method_name);
+            for method in *methods {
+                if !self.emitted.insert(format!("{method} {path} {handler}")) {
+                    continue;
+                }
+                push_endpoint(
+                    self.out,
+                    self.repo,
+                    method,
+                    &path,
+                    &handler,
+                    Framework::Flask,
+                    evidence,
+                    confidence,
+                    Some("flask_admin"),
+                    None,
+                    None,
+                    Some(&name),
+                );
+                if let Some(node) = self.out.nodes.last_mut() {
+                    node.props["auth"] =
+                        serde_json::json!({ "state": "unknown", "reasons": [auth] });
+                    node.props["handler_origin"] = "library".into();
                 }
             }
         }

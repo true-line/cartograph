@@ -6437,3 +6437,149 @@ admin.add_view(Bad(endpoint="bad"))
         ]
     );
 }
+
+#[test]
+fn flask_admin_library_routes_follow_the_pinned_release() {
+    // AC-0415 (#1203): with every root pin on a checked Flask-Admin release,
+    // model views and a non-overriding index view gain the library's own
+    // routes (InferredStrong, library handler); a repository redefinition
+    // keeps its own `@expose` or removes the route. Otherwise, a Gap.
+    let app = r#"
+from flask import Flask
+from flask_admin import Admin, AdminIndexView, expose
+from flask_admin.contrib.sqla import ModelView
+
+class User:
+    pass
+
+class UserAdmin(ModelView):
+    def create_view(self):
+        return "disabled"
+
+    @expose("/edit/", methods=["POST"])
+    def edit_view(self):
+        return "edited"
+
+class Home(AdminIndexView):
+    pass
+
+app = Flask(__name__)
+admin = Admin(app, url="/back", index_view=Home(endpoint="home"))
+admin.add_view(UserAdmin(User, None))
+plain = Admin(app, url="/plain", endpoint="plain")
+"#;
+    let rows = |dir: &Path| {
+        let extraction = extract_dir(dir, &id()).unwrap();
+        let mut endpoints = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Endpoint")
+            .map(|node| {
+                format!(
+                    "{} {} {} {} {} {}",
+                    node.props["method"].as_str().unwrap(),
+                    node.props["path"].as_str().unwrap(),
+                    node.props["endpoint_name"].as_str().unwrap(),
+                    node.props["prov"]["confidence_tier"].as_str().unwrap(),
+                    node.props["handler_origin"]
+                        .as_str()
+                        .unwrap_or("repository"),
+                    node.props["prov"]["evidence"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|evidence| evidence["path"] != "app.py")
+                        .map(|evidence| evidence["path"].as_str().unwrap())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+            })
+            .collect::<Vec<_>>();
+        endpoints.sort();
+        let mut gaps = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Gap" && node.id.starts_with("gap:flask_admin:"))
+            .map(|node| node.props["reason"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        gaps.sort();
+        let library = extraction
+            .nodes
+            .iter()
+            .find(|node| {
+                node.id == "sym:pypi/flask-admin@flask_admin/model/base.py#BaseModelView.index_view"
+            })
+            .map(|node| node.props["boundary"].as_str().unwrap_or("").to_string());
+        (endpoints, gaps, library)
+    };
+    let pinned = tempfile::tempdir().unwrap();
+    write(pinned.path(), "app.py", app);
+    write(
+        pinned.path(),
+        "uv.lock",
+        "[[package]]\nname = \"flask-admin\"\nversion = \"1.5.7\"\n",
+    );
+    write(
+        pinned.path(),
+        "requirements-dev.lock",
+        "flask-admin==1.5.8\n",
+    );
+    let (endpoints, gaps, library) = rows(pinned.path());
+    let lib = |rest: &str| format!("{rest} InferredStrong library requirements-dev.lock,uv.lock");
+    assert_eq!(
+        endpoints,
+        vec![
+            // A given index view keeps its own URL (`/admin` by default).
+            lib("GET /admin/ home.index"),
+            lib("GET /back/user/ user.index_view"),
+            lib("GET /back/user/ajax/lookup/ user.ajax_lookup"),
+            lib("GET /back/user/details/ user.details_view"),
+            lib("GET /back/user/export/<export_type>/ user.export"),
+            lib("GET /plain/ plain.index"),
+            lib("POST /back/user/action/ user.action_view"),
+            lib("POST /back/user/ajax/update/ user.ajax_update"),
+            lib("POST /back/user/delete/ user.delete_view"),
+            // The repository's own `edit_view` replaces the library's.
+            "POST /back/user/edit/ user.edit_view Confirmed repository ".to_string(),
+        ]
+    );
+    assert!(gaps.is_empty(), "{gaps:?}");
+    assert_eq!(library.as_deref(), Some("external"));
+
+    for (lock, reason) in [
+        (
+            "flask-admin==1.6.0\n",
+            "flask_admin_version_not_modelled:1.6.0",
+        ),
+        (
+            "flask-admin>=1.5\n",
+            "flask_admin_version_not_exact:requirements.txt",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app.py", app);
+        write(
+            dir.path(),
+            "uv.lock",
+            "[[package]]\nname = \"flask-admin\"\nversion = \"1.5.7\"\n",
+        );
+        write(dir.path(), "requirements.txt", lock);
+        let (endpoints, gaps, _) = rows(dir.path());
+        assert_eq!(
+            endpoints,
+            vec!["POST /back/user/edit/ user.edit_view Confirmed repository ".to_string()]
+        );
+        assert_eq!(gaps, vec![reason.to_string(); 3], "{lock}");
+    }
+    let unpinned = tempfile::tempdir().unwrap();
+    write(unpinned.path(), "app.py", app);
+    let (_, gaps, _) = rows(unpinned.path());
+    assert_eq!(
+        gaps,
+        vec![
+            "flask_admin_library_index_route",
+            "flask_admin_library_index_route",
+            "flask_admin_model_view_routes_in_library",
+        ]
+    );
+}
