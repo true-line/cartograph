@@ -227,7 +227,9 @@ export const SpecialistTaskActivity: Story = {
     mockIPC((command, args) => {
       if (command === 'list_specialist_task_activity') {
         expect(args).toEqual({ cursor: null });
-        const page = { items: active.map((summary) => ({ summary, saved_provider: {
+        const page = { items: active.map((summary, index) => ({ summary,
+          ...(index === 0 ? { reported_usage: { input_tokens: '18446744073709551615', output_tokens: null } }
+            : index === 3 ? { reported_usage: { input_tokens: null, output_tokens: '42' } } : {}), saved_provider: {
           mode: summary.provider.mode, provider_id: summary.provider.provider_id, model: summary.provider.model,
         } })), next_cursor: 'older-active-page' };
         return activityReads++ === 0 ? page : activityRefreshResponse?.() ?? page;
@@ -260,6 +262,11 @@ export const SpecialistTaskActivity: Story = {
     await expect(auditor).toHaveTextContent('Awaiting cloud consent');
     await expect(auditor).toHaveTextContent('Cancellation requested');
     await expect(auditor).toHaveTextContent('Saved provider: cloud / saved-cloud-provider · saved-cloud-model');
+    // AC-0417: saved reports stay with their distinct model rows, including unknown/absent values.
+    await expect(domain).toHaveTextContent('Reported tokens so far: input 18446744073709551615; output Unknown.');
+    await expect(auditor).toHaveTextContent('Reported tokens so far: input Unknown; output 42.');
+    await expect(activityPanel.getAllByText(/Reported tokens unavailable/)).toHaveLength(2);
+    await expect(domain).toHaveTextContent('May be incomplete; not a cost estimate.');
     await expect(activityPanel.getByText('Partial activity counts: queued 1, preparing 1, running 1, awaiting consent 1; cancellation requested 1 of 4 active tasks shown. More active tasks may exist.')).toBeVisible();
     await expect(activityPanel.findByText(/active task list is incomplete/i)).resolves.toBeVisible();
     await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
@@ -278,6 +285,7 @@ export const SpecialistTaskActivity: Story = {
       expect(refreshedDomain).not.toHaveTextContent(/refreshing/i);
     });
     await expect(activityPanel.getByText('Last observed partial activity counts: queued 1, preparing 1, running 1, awaiting consent 1; cancellation requested 1 of 4 active tasks shown. More active tasks may exist.')).toBeVisible();
+    await expect(activityPanel.getByText(/Reported tokens so far: input 18446744073709551615/)).toBeVisible();
     await expect(activityPanel.getAllByRole('status')).toHaveLength(1);
     await expect(activityPanel.getAllByRole('button', { name: /Open investigation:/ })).toHaveLength(4);
     resolveRefresh({ items: tasks.filter((task) => task.summary.specialist_id !== 'domain-analyst@2'), next_cursor: null });

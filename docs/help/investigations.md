@@ -36,6 +36,8 @@ version is labeled as a partial lower bound; it does not claim the full runtime
 queue. During refresh the summary is last observed, and an error hides counts
 along with stale task rows.
 
+Active task rows also show **Reported tokens so far** when the saved telemetry fits the existing activity projection. Input and output can independently be **Unknown**; omitted metadata is **Unavailable**. These provider reports may be incomplete while newer work is in flight. They are not token reservations, a response-model identity, monetary cost or a global/history bill. The existing partial and last-observed labels still apply.
+
 The app shows a **Saved result ready** notice only after it has first observed a
 valid saved question without a result, then later observes that task's saved
 result reference. A result already present on the first valid observation is

@@ -22,10 +22,19 @@ pub(crate) struct SavedActivityProvider {
     pub(crate) model: String,
 }
 
+/// Exact display values, not a price or complete lifetime accounting claim.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ReportedActivityUsage {
+    pub(crate) input_tokens: Option<String>,
+    pub(crate) output_tokens: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SpecialistActivityItem {
     pub(crate) summary: InvestigationSummary,
     pub(crate) saved_provider: SavedActivityProvider,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reported_usage: Option<ReportedActivityUsage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -171,19 +180,37 @@ impl JobStore {
         cursor: Option<&str>,
     ) -> Result<SpecialistActivityPage, InvestigationStoreError> {
         let page = self.investigation_history_projected(None, None, true, cursor, |task| {
+            // Preserve base validation/admission and legacy serialization before
+            // attempting optional telemetry; only its capacity may be omitted.
+            encode_specialist_activity_item(&task.detail.summary, &task.detail.provider)?;
+            let reported_usage = ReportedActivityUsage {
+                input_tokens: task
+                    .detail
+                    .usage
+                    .reported_input_tokens
+                    .map(|value| value.to_string()),
+                output_tokens: task
+                    .detail
+                    .usage
+                    .reported_output_tokens
+                    .map(|value| value.to_string()),
+            };
             let provider = task.detail.provider;
-            let summary = task.detail.summary;
-            if provider.mode != summary.provider_mode {
-                return Err(InvestigationStoreError::Invalid);
-            }
-            Ok(SpecialistActivityItem {
-                summary,
+            let mut item = SpecialistActivityItem {
+                summary: task.detail.summary,
                 saved_provider: SavedActivityProvider {
                     mode: provider.mode,
                     provider_id: provider.provider_id,
                     model: provider.model,
                 },
-            })
+                reported_usage: Some(reported_usage),
+            };
+            match encode(&item, 4096) {
+                Ok(_) => {}
+                Err(InvestigationStoreError::Capacity) => item.reported_usage = None,
+                Err(error) => return Err(error),
+            }
+            Ok(item)
         })?;
         Ok(SpecialistActivityPage {
             items: page.items,

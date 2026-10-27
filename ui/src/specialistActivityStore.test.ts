@@ -155,4 +155,28 @@ describe('separate specialist task activity projection (AC-0379, AC-0381)', () =
     expect(calls).toBe(2);
     expect(store.getState()).toMatchObject({ status: 'ready', tasks: [activityItem(fresh)] });
   });
+  // AC-0417: exact strings are displayed unchanged; legacy absence differs from malformed presence.
+  it('validates optional exact reported usage without number coercion', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    const item = activityItem(investigationDetail('usage', { status: 'running', has_result: false }));
+    let row: unknown = item;
+    mockIPC(() => ({ items: [row], next_cursor: null }));
+    const store = createSpecialistActivityStore(); store.getState().setVisible(true);
+    await vi.waitFor(() => expect(store.getState().status).toBe('ready'));
+    for (const usage of [
+      { input_tokens: '18446744073709551615', output_tokens: null },
+      { input_tokens: null, output_tokens: '0' },
+    ]) {
+      row = { ...item, reported_usage: usage }; await store.getState().refresh();
+      expect(store.getState().status).toBe('ready');
+      expect(store.getState().tasks[0].reported_usage).toEqual(usage);
+    }
+    for (const usage of [null, {}, { input_tokens: null, output_tokens: null, extra: true },
+      ...['01', '-1', '1.5', '1e3', '18446744073709551616', '9'.repeat(21), 1].map((input_tokens) => ({ input_tokens, output_tokens: null }))]) {
+      row = { ...item, reported_usage: usage }; await store.getState().refresh();
+      expect(store.getState().status).toBe('error');
+    }
+    row = item; await store.getState().refresh(); expect(store.getState().status).toBe('ready');
+  });
+
 });
