@@ -32,6 +32,9 @@ fn exclusive(path: &Path, body: &[u8]) -> Result<(), String> {
     let mut file = options.open(path).map_err(|e| e.to_string())?;
     file.write_all(body)
         .and_then(|_| file.sync_all())
+        .map_err(|e| e.to_string())?;
+    File::open(path.parent().ok_or("Missing artifact parent.")?)
+        .and_then(|parent| parent.sync_all())
         .map_err(|e| e.to_string())
 }
 // Preserve exact bounded journal bodies, including their independently validated
