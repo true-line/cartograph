@@ -145,8 +145,13 @@ export const SearchesPersistedHistory: Story = {
     const nonmatching = investigationDetail('unrelated', { question: 'Unrelated saved question' });
     mockIPC((command, args) => {
       const search = (args as { search?: unknown } | undefined)?.search;
-      return command === 'list_investigations'
-        ? { items: search ? [matching] : [matching, nonmatching], next_cursor: null } : null;
+      if (command === 'list_investigations') return { items: search ? [matching] : [matching, nonmatching], next_cursor: null,
+        ...(search === 'guarded exit' ? { answer_match_ids: [matching.investigation_id] } : {}) };
+      if (command === 'get_investigation') return matching;
+      if (command === 'investigation_result') return investigationResult(matching.investigation_id);
+      if (command === 'investigation_events') return { investigation_id: matching.investigation_id,
+        items: investigationEvents(matching.investigation_id), next_sequence: 9, has_more: false };
+      return null;
     });
     useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: investigationCatalog,
       history: [], selectedId: null, detail: null }, true);
@@ -1190,5 +1195,18 @@ export const ConversationTurnsNavigation: Story = {
     await waitFor(() => expect(useInvestigationStore.getState().selectedId).toBe('parent-turn'));
     await expect(useInvestigationStore.getState().detail?.investigation_id).toBe('parent-turn');
     await expect(conversationDetailReads).toEqual(['parent-turn']);
+  },
+};
+
+// AC-0402: the second history consumer accepts and opens the same answer-only evidence.
+export const SavedAnswerHistorySearch: Story = {
+  ...SearchesPersistedHistory,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.type(canvas.getByRole('searchbox'), 'guarded exit');
+    await userEvent.click(canvas.getByRole('button', { name: 'Search history' }));
+    await expect(canvas.getByText('Answer match')).toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: /Legacy needle in a saved question/ }));
+    await expect(await canvas.findByText('The inspected callable has a guarded exit. Its broader inventory policy remains unresolved.')).toBeVisible();
   },
 };

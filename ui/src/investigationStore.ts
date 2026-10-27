@@ -224,11 +224,12 @@ function normalizedHistorySearch(query: string) {
     .replace(/[A-Z]/g, (letter) => letter.toLowerCase());
 }
 
-function summaryMatchesHistorySearch(summary: InvestigationSummary, query: string) {
+function summaryMatchesHistorySearch(summary: InvestigationSummary, query: string, answerMatchIds: readonly string[] = []) {
   const needle = normalizedHistorySearch(query);
   if (!needle) return true;
   const normalizeAscii = (value: string) => value.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
-  return normalizeAscii(summary.question).includes(needle) || normalizeAscii(summary.specialist_id).includes(needle);
+  return normalizeAscii(summary.question).includes(needle) || normalizeAscii(summary.specialist_id).includes(needle) ||
+    (summary.has_result && answerMatchIds.includes(summary.investigation_id));
 }
 
 /** A duplicate must agree exactly; a hole is not silently compressed into a log. */
@@ -261,6 +262,7 @@ export interface InvestigationState {
   catalogError: string | null;
   history: InvestigationSummary[];
   historySearch: string;
+  historyAnswerMatchIds: string[];
   historyActiveOnly: boolean;
   nextCursor: string | null;
   historyLoading: boolean;
@@ -441,13 +443,15 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
   const updateSummary = (summary: InvestigationSummary) => {
     if (get().historyActiveOnly) ++historyRequest;
     set((state) => {
-      const matches = (!state.historyActiveOnly || investigationIsInActiveHistory(summary)) && summaryMatchesHistorySearch(summary, state.historySearch);
+      const matches = (!state.historyActiveOnly || investigationIsInActiveHistory(summary)) && summaryMatchesHistorySearch(summary, state.historySearch, state.historyAnswerMatchIds);
       const history = !matches
         ? state.history.filter((item) => item.investigation_id !== summary.investigation_id)
         : state.history.some((item) => item.investigation_id === summary.investigation_id)
           ? mergeHistory(state.history, [summary]) : [summary, ...state.history];
       return {
         history,
+        historyAnswerMatchIds: normalizedHistorySearch(state.historySearch)
+          ? state.historyAnswerMatchIds.filter((id) => history.some((item) => item.investigation_id === id && item.has_result)) : [],
         conversationPinned: state.conversationPinned?.investigation_id === summary.investigation_id &&
           state.conversationPinned.conversation_id === summary.conversation_id && summary.revision >= state.conversationPinned.revision
           ? summary : state.conversationPinned,
@@ -586,7 +590,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       if (!known || message.review_revision > known.revision) void get().refreshReviews();
     },
     catalog: null, catalogLoading: false, catalogError: null,
-    history: [], historySearch: '', historyActiveOnly: false, nextCursor: null, historyLoading: false, historyError: null,
+    history: [], historySearch: '', historyAnswerMatchIds: [], historyActiveOnly: false, nextCursor: null, historyLoading: false, historyError: null,
     conversationId: null, conversationItems: [], conversationPagePrefixCount: 0, conversationPageBookmarks: [], conversationDirtyPages: [], conversationPinned: null, conversationCursor: null, conversationLoading: false, conversationError: null,
     selectedId: null, selectionGeneration: 0, detail: null, result: null, chat: null,
     chatStatus: 'idle', chatError: null, events: [],
@@ -751,34 +755,45 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       try {
         const page = await invokeOr<InvestigationPage | null>('list_investigations', null,
           { ...(cursor ? { cursor } : {}), ...(search ? { search } : {}), ...(activeOnly ? { activeOnly: true } : {}) });
+        const answerMatches = page?.answer_match_ids === undefined ? [] : page.answer_match_ids;
         if (!page || !Array.isArray(page.items) || page.items.length > INVESTIGATION_PAGE_LIMIT ||
             page.items.some((item) => !validSummary(item)) ||
+            new Set(page.items.map((item) => item.investigation_id)).size !== page.items.length ||
+            !Array.isArray(answerMatches) || answerMatches.length > page.items.length ||
+            new Set(answerMatches).size !== answerMatches.length ||
+            (!normalizedSearch && answerMatches.length !== 0) ||
+            answerMatches.some((id) => typeof id !== 'string' || !page.items.some((item) => item.investigation_id === id && item.has_result)) ||
             (activeOnly && page.items.some((item) => !investigationIsInActiveHistory(item))) ||
-            (normalizedSearch && page.items.some((item) => !summaryMatchesHistorySearch(item, normalizedSearch)))) {
+            (normalizedSearch && page.items.some((item) => !summaryMatchesHistorySearch(item, normalizedSearch, answerMatches)))) {
           throw new Error('Invalid history.');
         }
         const incoming = page.items;
-        if (request !== historyRequest) return;
+        if (request !== historyRequest || normalizedHistorySearch(get().historySearch) !== normalizedSearch || get().historyActiveOnly !== activeOnly) return;
         set((state) => {
-          const exactIncoming = incoming.map((item) => {
+          const reconciled = incoming.map((item) => {
             const saved = state.history.find((previous) => previous.investigation_id === item.investigation_id);
             const selectedDetail = state.detail?.investigation_id === item.investigation_id ? state.detail : null;
             const known = [saved, selectedDetail].filter((value): value is InvestigationSummary => value != null)
               .reduce<InvestigationSummary | null>((latest, value) => !latest || value.revision > latest.revision ? value : latest, null);
-            return known && known.revision > item.revision ? known : item;
+            return known && known.revision > item.revision
+              ? { item: known, answerMatch: known === saved && state.historyAnswerMatchIds.includes(item.investigation_id) }
+              : { item, answerMatch: answerMatches.includes(item.investigation_id) };
           });
-          const refreshed = activeOnly
-            ? exactIncoming.filter((item) => investigationIsInActiveHistory(item) &&
-              summaryMatchesHistorySearch(item, state.historySearch))
-            : exactIncoming;
+          // Match evidence follows the row that won revision reconciliation.
+          const matches = normalizedSearch ? [...state.historyAnswerMatchIds.filter((id) =>
+            !incoming.some((item) => item.investigation_id === id)),
+            ...reconciled.filter((entry) => entry.answerMatch).map((entry) => entry.item.investigation_id)] : [];
+          const refreshed = reconciled.map((entry) => entry.item).filter((item) =>
+            (!activeOnly || investigationIsInActiveHistory(item)) && summaryMatchesHistorySearch(item, state.historySearch, matches));
           const history = more
             ? mergeHistory(state.history, refreshed).filter((item) =>
-              (!activeOnly || investigationIsInActiveHistory(item)) && summaryMatchesHistorySearch(item, state.historySearch))
+              (!activeOnly || investigationIsInActiveHistory(item)) && summaryMatchesHistorySearch(item, state.historySearch, matches))
             : activeOnly ? refreshed : [
               ...refreshed,
               ...state.history.filter((item) => !incoming.some((fresh) => fresh.investigation_id === item.investigation_id)),
             ];
           return ({ history,
+        historyAnswerMatchIds: matches.filter((id) => history.some((item) => item.investigation_id === id && item.has_result)),
         // Background first-page refresh must not discard older explicit pages
         // or move their continuation backwards while another task is active.
         nextCursor: activeOnly || more || state.history.length <= page.items.length ? page.next_cursor : state.nextCursor,
@@ -794,13 +809,13 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     selectHistoryActive: async (activeOnly) => {
       if (get().historyActiveOnly === activeOnly) return;
       ++historyRequest;
-      set({ historyActiveOnly: activeOnly, history: [], nextCursor: null, historyError: null });
+      set({ historyActiveOnly: activeOnly, history: [], historyAnswerMatchIds: [], nextCursor: null, historyError: null });
       await get().loadHistory();
     },
 
     searchHistory: async (query) => {
       ++historyRequest;
-      set({ historySearch: query, history: [], nextCursor: null, historyError: null });
+      set({ historySearch: query, history: [], historyAnswerMatchIds: [], nextCursor: null, historyError: null });
       await get().loadHistory();
     },
 

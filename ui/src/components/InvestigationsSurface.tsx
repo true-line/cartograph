@@ -274,7 +274,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
           event.preventDefault();
           void state.searchHistory(historySearchText);
         }}>
-          <label>Search saved questions or specialist IDs
+          <label>Search saved questions, specialists, and answers
             <input type="search" value={historySearchText} onChange={(event) => setHistorySearchText(event.target.value)} />
           </label>
           <button type="submit" className="secondary-button">Search history</button>
@@ -295,7 +295,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
         <ul>{state.history.map((item) => <li key={item.investigation_id}>
           <button type="button" className={`investigation-history-item${item.investigation_id === state.selectedId ? ' selected' : ''}`}
             aria-pressed={item.investigation_id === state.selectedId} onClick={() => void state.open(item.investigation_id)}>
-            <strong>{item.question}</strong><span>{item.specialist_id}</span><span>{INVESTIGATION_STATUS[item.status]}</span>
+            <strong>{item.question}</strong>{state.historyAnswerMatchIds.includes(item.investigation_id) && <span>Answer match</span>}<span>{item.specialist_id}</span><span>{INVESTIGATION_STATUS[item.status]}</span>
             {state.historyActiveOnly && <><span>Provider: {item.provider_mode}</span><time>Updated {item.updated_at}</time></>}
             {item.schema_version === 3 && <span>Coverage-qualified · saved basis shown on open</span>}
             <span>Source inspections: {item.inspection_status === 'pending' ? 'Awaiting assessment' : item.inspection_status === 'supplied'

@@ -1913,3 +1913,51 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
     expect(useInvestigationStore.getState().chat?.chat_id).toBe(aChat.chat_id);
   });
 });
+
+// AC-0402: match metadata is bounded and owned by the exact selected query and winning row.
+describe('saved answer history search', () => {
+  it.each([null, ['a', 'a'], ['foreign'], ['a'], 42])('rejects invalid answer markers %j', async (markers) => {
+    const detail = investigationDetail('a', { has_result: false, question: 'Needle metadata' });
+    mockIPC(() => ({ items: [detail], next_cursor: null, answer_match_ids: markers }));
+    await useInvestigationStore.getState().searchHistory('needle');
+    expect(useInvestigationStore.getState().historyError).toBeTruthy();
+    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual([]);
+  });
+  it('rejects nonquery markers including ASCII-whitespace-only queries', async () => {
+    mockIPC(() => ({ items: [investigationDetail('a')], next_cursor: null, answer_match_ids: ['a'] }));
+    for (const query of ['', ' \t']) {
+      await useInvestigationStore.getState().searchHistory(query);
+      expect(useInvestigationStore.getState().historyError).toBeTruthy();
+    }
+  });
+  it('keeps established markers with newer retained rows but never imports evidence into unrelated newer detail', async () => {
+    const saved = investigationDetail('a', { question: 'Unrelated saved question', revision: 9 });
+    let page = { items: [saved], next_cursor: 'next', answer_match_ids: ['a'] };
+    mockIPC(() => page);
+    await useInvestigationStore.getState().searchHistory('needle');
+    page = { items: [investigationDetail('a', { question: 'Needle stale metadata', revision: 8, has_result: false })], next_cursor: 'next', answer_match_ids: [] };
+    await useInvestigationStore.getState().loadHistory();
+    expect(useInvestigationStore.getState().history[0].revision).toBe(9);
+    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual(['a']);
+    await useInvestigationStore.getState().loadHistory(true);
+    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual(['a']);
+    useInvestigationStore.setState({ history: [], historyAnswerMatchIds: [], detail: saved });
+    page = { items: [investigationDetail('a', { revision: 8 })], next_cursor: 'next', answer_match_ids: ['a'] };
+    await useInvestigationStore.getState().loadHistory();
+    expect(useInvestigationStore.getState().history).toEqual([]);
+    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual([]);
+  });
+  it('ignores stale query markers and clears them on search/active selection', async () => {
+    const old = deferred<{ items: InvestigationDetail[]; next_cursor: null; answer_match_ids: string[] }>();
+    mockIPC((_command, args) => args?.search === 'old' ? old.promise
+      : { items: [investigationDetail('a')], next_cursor: null, answer_match_ids: ['a'] });
+    const pending = useInvestigationStore.getState().searchHistory('old');
+    await useInvestigationStore.getState().searchHistory('new');
+    old.resolve({ items: [investigationDetail('old')], next_cursor: null, answer_match_ids: ['old'] }); await pending;
+    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual(['a']);
+    await useInvestigationStore.getState().selectHistoryActive(true);
+    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual([]);
+    await useInvestigationStore.getState().searchHistory('');
+    expect(useInvestigationStore.getState().historyAnswerMatchIds).toEqual([]);
+  });
+});

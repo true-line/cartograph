@@ -368,6 +368,8 @@ impl InvestigationOrigin {
 pub struct InvestigationPage {
     pub items: Vec<InvestigationSummary>,
     pub next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answer_match_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

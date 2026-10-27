@@ -621,3 +621,16 @@ fn durable_record_round_trip_bounds_expansion_before_comparison_values() {
         serde_json::from_str::<serde_json::Value>(raw).unwrap()
     );
 }
+
+#[test]
+fn history_answer_search_markers_keep_legacy_empty_page_bytes() {
+    // AC-0402: optional match metadata does not alter unfiltered/legacy page encoding.
+    let raw = r#"{"items":[],"next_cursor":null}"#;
+    let mut page: InvestigationPage = serde_json::from_str(raw).unwrap();
+    assert_eq!(serde_json::to_string(&page).unwrap(), raw);
+    page.answer_match_ids.push("saved-task".into());
+    assert_eq!(
+        serde_json::to_value(page).unwrap()["answer_match_ids"],
+        json!(["saved-task"])
+    );
+}

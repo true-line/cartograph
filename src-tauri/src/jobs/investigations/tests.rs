@@ -2667,3 +2667,140 @@ fn investigation_finish_diagnostic_classes_fit_the_existing_message_bound() {
 
 #[path = "source_replay_tests.rs"]
 mod source_replay_tests;
+
+// AC-0402: validated answer-only hits participate in the same bounded high-water pages.
+#[test]
+fn investigation_history_search_answers_and_corruption() {
+    let mut f = Fixture::new();
+    let (id, execution) = f.start("answer-search", InvestigationProviderMode::Local);
+    let ledger = f.prepare(&id, &execution, false);
+    let started = begin(&mut f, &id, &execution, step(&ledger, 1));
+    f.store
+        .advance_investigation(
+            &execution,
+            started.summary.revision,
+            InvestigationTransition::ActionAdmitted {
+                response: response("step:1", 1),
+                tool: None,
+                result: Some(Box::new(finish(&id, &ledger))),
+            },
+        )
+        .unwrap();
+    for index in 0..51 {
+        let mut requested = request(
+            &format!("answer-search:{index}"),
+            InvestigationProviderMode::Local,
+        );
+        requested.question = format!("Bounded support metadata {index}");
+        let detail = f
+            .store
+            .start_investigation(
+                &requested,
+                Some(&provider(InvestigationProviderMode::Local)),
+            )
+            .unwrap()
+            .detail;
+        f.store
+            .cancel_investigation(&detail.summary.investigation_id)
+            .unwrap();
+    }
+    let ordinary = f.store.investigation_history(None, None).unwrap();
+    assert!(!ordinary.items.iter().any(|row| row.investigation_id == id));
+    let wire = serde_json::to_value(&ordinary).unwrap();
+    assert_eq!(wire.as_object().unwrap().len(), 2);
+    assert!(wire.get("answer_match_ids").is_none());
+    let first = f
+        .store
+        .search_investigation_history("  BOUNDED SUPPORT  ", None)
+        .unwrap();
+    assert_eq!(first.items.len(), 50);
+    assert!(first.answer_match_ids.is_empty());
+    let cursor = first.next_cursor.unwrap();
+    let mut newer = request("answer-search-new", InvestigationProviderMode::Local);
+    newer.question = "Bounded support newer than high water".into();
+    let newer_id = f
+        .store
+        .start_investigation(&newer, Some(&provider(InvestigationProviderMode::Local)))
+        .unwrap()
+        .detail
+        .summary
+        .investigation_id;
+    f.store.cancel_investigation(&newer_id).unwrap();
+    let second = f
+        .store
+        .search_investigation_history("bounded support", Some(&cursor))
+        .unwrap();
+    assert_eq!(second.items.len(), 2);
+    assert_eq!(second.answer_match_ids, vec![id.clone()]);
+    assert!(
+        !second
+            .items
+            .iter()
+            .any(|row| row.investigation_id == newer_id)
+    );
+    let statement = f
+        .store
+        .search_investigation_history("RESPONSIBILITY WORTH", None)
+        .unwrap();
+    assert_eq!(statement.answer_match_ids, vec![id.clone()]);
+    assert!(
+        !serde_json::to_string(&statement)
+            .unwrap()
+            .contains("worth examining")
+    );
+    assert!(
+        f.store
+            .search_investigation_history("responsibility%", None)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let continuation = f
+        .store
+        .investigation_history(None, ordinary.next_cursor.as_deref())
+        .unwrap();
+    assert!(
+        continuation
+            .items
+            .iter()
+            .any(|item| item.investigation_id == id)
+    );
+    assert!(continuation.answer_match_ids.is_empty());
+    let trigger: String = f
+        .store
+        .conn
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='investigation_results_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    f.store
+        .conn
+        .execute_batch("DROP TRIGGER investigation_results_no_update")
+        .unwrap();
+    f.store
+        .conn
+        .execute(
+            "UPDATE investigation_results SET body_hash='invalid' WHERE task_id=?1",
+            [&id],
+        )
+        .unwrap();
+    f.store.conn.execute_batch(&trigger).unwrap();
+    assert!(
+        f.store
+            .search_investigation_history("responsibility", None)
+            .is_err()
+    );
+    // Existing task validation already rejects corrupt saved results, even without answer matching.
+    assert!(
+        f.store
+            .search_investigation_history("What evidence supports", None)
+            .is_err()
+    );
+    assert!(
+        f.store
+            .investigation_history(None, ordinary.next_cursor.as_deref())
+            .is_err()
+    );
+}
